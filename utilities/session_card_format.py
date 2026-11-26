@@ -51,7 +51,26 @@ def writing_guide(*, role: str = "", capability: str = "", cwd: str = "") -> str
             "if unknown, core only. No question or classification call. "
             f"{hint}Modules ({modules}). Preserve dated quotes and PRD verbatim after the module. "
             "Keep unique restrictions and unresolved obligations; replace completed chronology "
-            "with result/history references. Read the exact history source when a field refers to it. ")
+            "with result/history references. Read the exact history source when a field refers to it. "
+            + _catalog_guide(cwd))
+
+
+CATALOG_GUIDE_BYTES = 600
+
+
+def _catalog_guide(cwd: str) -> str:
+    """The folder's experiment catalog (at most 600 bytes): its results-table command, names, metric line and
+    words, or how to start one when runs exist without it; "" when there is neither or it cannot be read."""
+    try:
+        import experiment_catalog
+        brief, named = experiment_catalog.folder_brief(cwd, CATALOG_GUIDE_BYTES)
+        if not brief:
+            return ""
+        lead = ("Experiment catalog (write each condition by this catalog name, never by run id or folder name; "
+                "write results as its table): " if named else "Experiment catalog: ")
+        return lead + brief.replace("\n", " | ") + " "
+    except Exception:  # noqa: BLE001 -- the guide is the same without it
+        return ""
 
 
 def complete_lines(text: str, limit: int) -> str:

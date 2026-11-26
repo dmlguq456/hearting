@@ -1,4 +1,6 @@
 #!/usr/bin/env sh
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/../run-tests.py" --direct-run bash "$0" "$@"
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -62,5 +64,11 @@ count=$(find "$ROOT/tools/memory" -maxdepth 1 -name '*.test.sh' -type f \
 total=$(find "$ROOT/tools/memory" -maxdepth 1 -name '*.test.sh' -type f \
   ! -name 'test-isolation-contract.test.sh' | wc -l | tr -d ' ')
 [ "$count" -eq "$total" ]
+
+# Without a usable TMPDIR the suite stops instead of running on the caller's roots.
+stopped_rc=0
+stopped_out=$( (TMPDIR="$ROOT_FIX/missing/tmp"; hearting_test_isolate; echo continued) 2>/dev/null) || stopped_rc=$?
+[ "$stopped_rc" -eq 70 ]
+[ -z "$stopped_out" ]
 
 printf '%s\n' 'test isolation contract: PASS'

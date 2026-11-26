@@ -44,6 +44,13 @@ _MUTED_256 = {
     "warning": 131,   # #af5f5f — warning-band background
 }
 
+# 11-18: the three harnesses' own colors, apart from `_MUTED_256`: Claude orange 173 (its teal 116 stays the Opus
+# family's and the stage palette's, and a test pins it), Codex 147 (#afafff, the Sonnet model color's own step on purpose
+# - the person chose "the Sonnet color, as in its logo"; kept as its own entry so either can move alone), OpenCode 153
+# (#afd7ff, a pale sky). Only the harness keys (`h_<harness>`, `hb_<harness>`, `hbb_<harness>`, `nm_<harness>`,
+# `nmd_<harness>`) read these; the muted magenta 176 and blue 147 keep the model families, effort and stage meanings.
+_HARNESS_256 = {"claude": 173, "codex": 147, "opencode": 153}
+
 # On terminals that allow palette redefinition, open the semantic hues by only
 # a few RGB points.  The xterm indices above remain the stable fallback, while
 # these values add a barely perceptible amount of saturation at equal brightness.
@@ -56,6 +63,11 @@ _RICHER_RGB_1000 = {
     "blue": (663, 663, 1000),    # #a9a9ff
 }
 
+# Claude's orange opened to the brand's own #d97757 (173 is #d7875f), the same way the hues above are. Codex and OpenCode
+# stay at their 256-color values (#afafff, #afd7ff): nothing to redefine. (Codex's 147 is also `blue`'s step, which the
+# table above opens to #a9a9ff, so on a terminal that allows it both read as that one slot.)
+_HARNESS_RGB_1000 = {"claude": (851, 467, 341)}    # #d97757
+
 # Keep each panel rung dark and restrained while giving the near-black
 # backgrounds a slightly richer shared slate cast.
 _TINT_RGB_1000 = {
@@ -67,7 +79,7 @@ _TINT_RGB_1000 = {
 
 def _palette_fg(name, fallback):
     if curses is not None and getattr(curses, "COLORS", 0) >= 256:
-        return _MUTED_256[name]
+        return _MUTED_256[name] if name in _MUTED_256 else _HARNESS_256[name]
     return fallback
 
 
@@ -93,7 +105,7 @@ _LOOPS_KEYS = ("oncall", "note", "study", "drill")
 
 # fg color_key → (hue, attr) decomposition (spec §5.2) — the basis for composing (fg, tint_bg)
 # pairs. hue: d=default w=soft white g=green y=yellow v=vanilla r=red c=cyan
-# m=magenta l=blue.
+# m=magenta l=blue cl=Claude's harness orange.
 # Keys absent here render as default-hue plain text under tint (safe degradation).
 _A_B, _A_D = _A_BOLD, _A_DIM
 
@@ -102,7 +114,7 @@ _A_B, _A_D = _A_BOLD, _A_DIM
 # distinguishable from its harness cell, which several consumers (`_stack_split`, the
 # width suites) resolve by color key alone. Bright = a live top-level session, dim =
 # a dispatch row or lost telemetry — the same brightness axis the harness cell uses.
-_NAME_HUE = {"claude": "c", "codex": "m", "opencode": "l"}
+_NAME_HUE = {"claude": "cl", "codex": "cx", "opencode": "oc"}
 _NAME_KEY = {h: "nm_" + h for h in _NAME_HUE}
 _NAME_KEY_DIM = {h: "nmd_" + h for h in _NAME_HUE}
 # Every key a row's NAME zone can carry. Consumers that locate the name segment by color
@@ -124,6 +136,10 @@ _HDR_BAR_PAIR = 19
 _HDR_WARN_PAIR = 20
 _HDR_BLK_PAIR = 21
 _TINT_PAIR_START = 22
+# The tint pairs take 22 + 6 levels × the hue count (19 hues: 22..135); the pairs below stay clear of them (`_init_colors` turns the tints
+# off rather than let them reach these, and a test holds the two ranges apart).
+_KIND_PAIR_START = 160       # the five field hues
+_ZONE_PAIR_START = 165       # the three zone names (direct, dispatch, request)
 
 
 def _live_key(state):
@@ -143,7 +159,7 @@ _LIVE_GLYPH = {"working": "●", "idle": "●", "unused": "◌", "blocked": "◑
                "stale": "·", "dead": "✕", "queued": "◦", "unknown": "·"}
 _DETACHED_GLYPH = "○"   # Ring means no attached client; idle uses a filled dim-green dot.
 _GLYPH_KEY = {"working": "g_work", "idle": "g_work_off", "unused": "g_unused",
-              "blocked": "g_blocked", "done": "green",   # F-60: red, on its own key
+              "blocked": "g_blocked", "done": "grp_live",   # F-60: red, on its own key
               "stale": "g_stale", "dead": "g_dead", "degraded": "lvl_y", "queued": "dim", "unknown": "dim"}
 _INTERACTION_LABEL = {
     "decision": "answer needed",
@@ -232,8 +248,19 @@ def _model_family(model):
     return "other"
 
 
-def _model_key(model, dim=False):
-    return ("famd_" if dim else "fam_") + _model_family(model)
+_MODEL_HARNESSES = ("claude", "codex", "opencode")
+
+
+def _model_key(model, dim=False, harness=None):
+    """A model name's colour key: its family's, else the hue of the harness running it.
+
+    A model with no family of its own (glm/deepseek/… under OpenCode) wears that harness's
+    existing ``hb_*`` (``h_*`` dim) key instead of the default foreground, so the palette
+    gains no per-model colour. Without a known harness the ``other`` key stays."""
+    family = _model_family(model)
+    if family == "other" and harness in _MODEL_HARNESSES and str(model or "").strip():
+        return ("h_" if dim else "hb_") + harness
+    return ("famd_" if dim else "fam_") + family
 
 
 # bare model-ROLE tokens (dispatch env exports the portable role, not a concrete model id) →
@@ -697,11 +724,11 @@ def _eff_key(effort, dim):
 _EFF_SHORT = {"low": "lo", "medium": "md", "high": "hi", "xhigh": "xh", "max": "mx"}
 
 
-def _model_cell(model, effort, width, dim=False):
+def _model_cell(model, effort, width, dim=False, harness=None):
     """Render model and effort together as one flowing phrase, padded to width."""
     name = _clean_model(dash(model)) or "—"
     sfx = _effort_text(effort)
-    lkey = _model_key(model, dim=dim)
+    lkey = _model_key(model, dim=dim, harness=harness)
     if sfx:
         name = name[: max(1, width - len(sfx) - 4)]
         pad = max(0, width - len(name) - len(sfx) - 3)
@@ -743,16 +770,16 @@ def _harness_model_cell(harness, model, effort, width, hkey, dim=False, unknown=
         if eff and room < len(name) + 1 + len(eff):
             eff = ""
         if eff:
-            segs += [(" (", "dim"), (name, _model_key(model, dim=dim)),
+            segs += [(" (", "dim"), (name, _model_key(model, dim=dim, harness=harness)),
                      ("·", "dim"), (eff, _eff_key(eff_full, dim)), (")", "dim")]
             used += 2 + len(name) + 1 + len(eff) + 1
         elif effort_default and room >= len(name) + 1 + len(_DEFAULT_EFFORT_MARK):
-            segs += [(" (", "dim"), (name, _model_key(model, dim=dim)),
+            segs += [(" (", "dim"), (name, _model_key(model, dim=dim, harness=harness)),
                      ("·", "dim"), (_DEFAULT_EFFORT_MARK, "dim"), (")", "dim")]
             used += 2 + len(name) + 1 + len(_DEFAULT_EFFORT_MARK) + 1
         elif room > 0:
             nm = name[: max(1, room)]
-            segs += [(" (", "dim"), (nm, _model_key(model, dim=dim)), (")", "dim")]
+            segs += [(" (", "dim"), (nm, _model_key(model, dim=dim, harness=harness)), (")", "dim")]
             used += 2 + len(nm) + 1
     if used < width:
         segs.append((" " * (width - used), None))

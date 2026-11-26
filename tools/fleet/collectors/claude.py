@@ -167,8 +167,14 @@ def _tail_ai_title(path, chunk=8192, max_scan=None):
     return title
 
 
-_SUBAGENT_CACHE = {}   # path -> (mtime, size, [SubAgent,...]) — separate from _TITLE_CACHE;
-                        # same (mtime, size) key pattern, independent invalidation.
+_SUBAGENT_CACHE = {}   # path -> (identity, [SubAgent,...]) — separate from _TITLE_CACHE;
+                        # independent invalidation. ``identity`` is the exact stat identity
+                        # (dev, ino, size, mtime_ns, ctime_ns): a rewrite that restores size
+                        # and mtime still moves ctime, so it never answers from this cache.
+
+
+def _file_identity(st):
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
 # Async Agent lifecycle markers (see _tail_subagents docstring). The ack text and the
 # notification tag are harness-emitted fixed phrases; ids are compared verbatim.
@@ -214,9 +220,10 @@ def _tail_subagents(path, chunk=8192, max_scan=None):
         st = os.stat(path)
     except OSError:
         return None
+    identity = _file_identity(st)
     cached = _SUBAGENT_CACHE.get(path)
-    if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
-        return cached[2]
+    if cached and cached[0] == identity:
+        return cached[1]
     sz = st.st_size
     limit = sz if max_scan is None else min(sz, max_scan)
     window = chunk
@@ -303,7 +310,7 @@ def _tail_subagents(path, chunk=8192, max_scan=None):
         out.append(sa)
     _join_subagent_budget(path, calls)
     out.sort(key=lambda sa: sa.started_at or 0, reverse=True)
-    _SUBAGENT_CACHE[path] = (st.st_mtime, st.st_size, out)
+    _SUBAGENT_CACHE[path] = (identity, out)
     return out
 
 
@@ -456,7 +463,7 @@ def _apply_statusline(sess, d):
         sess.cost = cv
 
 
-def read_registry(pid, home=None):
+def read_registry(pid, home=None, extra=()):
     """~/.claude/sessions/<pid>.json → dict, or None.
 
     F-26 promotes this file from an incidental status lookup to a first-class tier-1
@@ -469,7 +476,7 @@ def read_registry(pid, home=None):
     dict still answers every ``.get()`` call the same way, just normalized to the
     shared field set instead of raw file contents.
     """
-    return session_registry.read("claude", pid, home=home)
+    return session_registry.read("claude", pid, home=home, extra=extra)
 
 
 def _apply_registry(sess, sj):
@@ -583,6 +590,17 @@ def _current_identity(sess, home, record, pane_claim=None):
 _STANDALONE_IDENTITY_WAIT_S = 0.75
 
 
+def _herdr_hosted(pid):
+    """Whether Herdr is this Claude process's host: its launch lineage or its own environment says so.
+
+    The caller's own Herdr variables count too (a hook runs inside the pane it reports)."""
+    if procscan.provenance(pid) == "herdr":
+        return True
+    own = procscan.read_environ(pid)
+    return any(env.get(name) for env in (own, os.environ)
+               for name in ("HERDR_PANE_ID", "HERDR_SOCKET_PATH", "HERDR_ENV"))
+
+
 def session_id_of_process(pid, home=None):
     """The same current identity used by Fleet and the pane reporting guard."""
     from ..model import Session
@@ -600,6 +618,10 @@ def session_id_of_process(pid, home=None):
     # collected foreground observation instead of calling this probe per row.
     from . import herdr
     from ..process_identity import pane_process_claims
+    if not _herdr_hosted(pid):
+        # Under tmux or a bare terminal there is no Herdr pane to observe;
+        # the registry and statusline taps already name the native identity.
+        return _current_identity(sess, home, record)[0]
     panes = herdr.list_panes(wait_timeout=_STANDALONE_IDENTITY_WAIT_S)
     if panes is None:
         sess.herdr_attached = True if procscan.provenance(pid) == "herdr" else None
@@ -612,7 +634,16 @@ def session_id_of_process(pid, home=None):
     return _current_identity(sess, home, record, claims.get(pid))[0]
 
 
-def enrich(sess, tick=None):
+def fill_subagents(sess):
+    """Read the sub-agent tail that `enrich(defer_subagents=True)` left for after a scoped filter."""
+    path = getattr(sess, "_transcript_path", None)
+    if path:
+        subs = _tail_subagents(path)
+        if subs is not None:
+            sess.subagents = subs
+
+
+def enrich(sess, tick=None, *, defer_subagents=False):
     home = _home()
     sj = read_registry(sess.pid, home)
     # Identity is settled before any identity-dependent name, state or telemetry.
@@ -695,7 +726,7 @@ def enrich(sess, tick=None):
     # been prompted has no transcript at all. Ephemeral (leading underscore) — evidence for
     # the classifier, not a --json field.
     sess._has_transcript = bool(path)
-    if path:
+    if path and not defer_subagents:
         subs = _tail_subagents(path)
         if subs is not None:
             sess.subagents = subs

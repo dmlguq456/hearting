@@ -2198,7 +2198,72 @@ def terminal_receipt_incomplete(metadata, *, terminal_receipt=True):
                 and not _cleanup_receipt_reason(metadata))
 
 
+_QUIESCENCE_RECORD: contextvars.ContextVar = contextvars.ContextVar(
+    "dispatch_quiescence_record", default=None
+)
+
+
+class QuiescenceRecord:
+    """What the process-liveness observations of one scope answered.
+
+    ``unquiet`` is True once any observation answered anything but ``quiescent`` or could
+    not answer at all (an exception counts). ``observed`` counts the observations. A
+    quiescent answer is monotonic (a stopped process is never alive again), so a verdict
+    that saw only quiescent answers stays true on its own; one that saw an unquiet answer
+    can flip with no file or row change, so its holder must prove it again."""
+
+    __slots__ = ("observed", "unquiet")
+
+    def __init__(self):
+        self.observed = 0
+        self.unquiet = False
+
+
+@contextmanager
+def quiescence_record_scope():
+    """Record the quiescence answers given inside this scope; outside it nothing is kept.
+
+    A nested scope records for itself and joins what it saw into the enclosing one."""
+
+    record = QuiescenceRecord()
+    token = _QUIESCENCE_RECORD.set(record)
+    try:
+        yield record
+    finally:
+        _QUIESCENCE_RECORD.reset(token)
+        outer = _QUIESCENCE_RECORD.get()
+        if outer is not None:
+            outer.observed += record.observed
+            outer.unquiet = outer.unquiet or record.unquiet
+
+
+def _record_quiescence(result) -> None:
+    record = _QUIESCENCE_RECORD.get()
+    if record is None:
+        return
+    record.observed += 1
+    if getattr(result, "state", None) != "quiescent":
+        record.unquiet = True
+
+
 def attempt_process_quiescence(
+    metadata: dict[str, str], *, terminal_receipt: bool = False
+) -> ProcessQuiescence:
+    """The exact governed process's quiescence verdict (see ``_attempt_process_quiescence``).
+
+    Inside a ``quiescence_record_scope`` the answer, or the failure to give one, is also
+    recorded; outside any scope this is the verdict alone."""
+
+    try:
+        result = _attempt_process_quiescence(metadata, terminal_receipt=terminal_receipt)
+    except BaseException:
+        _record_quiescence(None)
+        raise
+    _record_quiescence(result)
+    return result
+
+
+def _attempt_process_quiescence(
     metadata: dict[str, str], *, terminal_receipt: bool = False
 ) -> ProcessQuiescence:
     """Classify the exact governed process, then prove no tagged descendant survives.
@@ -2340,7 +2405,13 @@ def attempt_governed_process_quiescence(
     the governed process itself is provably gone.
     """
 
-    return _attempt_process_quiescence_impl(metadata)
+    try:
+        result = _attempt_process_quiescence_impl(metadata)
+    except BaseException:
+        _record_quiescence(None)
+        raise
+    _record_quiescence(result)
+    return result
 
 
 def attempt_identity_lineage(metadata: Mapping[str, str]) -> set[tuple[str, str]]:

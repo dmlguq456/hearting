@@ -1,5 +1,8 @@
 """The README's Fleet screens: neutral demo rows, a current SVG, and bounded image files."""
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import importlib.util
 import os
@@ -63,7 +66,7 @@ class ReadmeDemoRows(unittest.TestCase):
         time.tzset()
 
     def test_every_screen_draws_at_its_size_in_english(self):
-        for name, (_view, _scope, cols, rows, _raw) in self.readme_captures.SCREENS.items():
+        for name, (_view, _scope, cols, rows, *_rest) in self.readme_captures.SCREENS.items():
             with self.subTest(screen=name):
                 frame = self.frames[name]
                 self.assertEqual((frame.cols, frame.rows), (cols, rows))
@@ -83,10 +86,26 @@ class ReadmeDemoRows(unittest.TestCase):
         self.assertIn("codex", text["overview"])
         self.assertIn("opencode", text["overview"])
         self.assertIn("answer needed", text["overview"])
-        self.assertIn("plan ✓ › execute ●", text["overview"])
+        # Spec E9 rule 24, 11-17 (route row 5): a staged route reads its kind and place (`code(team·standard) · 2/4: execute`).
+        self.assertRegex(text["overview"], r"code\(team(?:·\w+)?\) · \d+/\d+: execute")      # (11-19: the bracket says `team`)
         self.assertIn("◑ to answer 1", text["questions"])
         self.assertIn("GPU", text["resources"])
-        self.assertIn("1 link", text["session"])
+        # The session page's MESSAGES (the note it sent [e8]) and the session it is linked with.
+        self.assertIn("MESSAGES", text["session"])
+        self.assertIn("Profile 4, 8 and 16 loader workers", text["session"])
+        # 11-17: the PEERS line sits under the page title (supervisor, flag, dash, supervised), and the routes stand
+        # under a named zone rule.
+        self.assertRegex(text["session"], r"PEERS +\[d1\] ⚑ ─ \[e8\]")
+        self.assertRegex(text["session"], r"─ dispatch ─+")
+        # The README's opening pictures: one moment, the request and the route [4f]'s panel shows,
+        # each Fleet list whole (nothing cut off below it).
+        # PEERS lists the newest link of each kind: the request [4f] sent [b2] stands as a PEER REQUEST link.
+        self.assertRegex(text["peers"], r"\[4f\] claude +→ +\[b2\] codex +PEER REQUEST")
+        self.assertIn("Test run for [4f]", text["overview"])
+        self.assertRegex(text["routes"], r"Rate limiting +code\(team(?:·\w+)?\) · 2/4: execute")
+        self.assertIn("leg 1 · code dev", text["routes"])
+        for name in ("overview", "peers", "routes"):
+            self.assertNotIn("more below", text[name], name)
         self.assertIn("owner raw", text["output"])
         self.assertIn("1,200 clips", text["output"])
 
@@ -117,7 +136,7 @@ class PublishedFiles(unittest.TestCase):
 
     def test_images_exist_with_the_drawn_size_and_a_small_file(self):
         from tools.fleet.tests import readme_captures
-        for name, (_view, _scope, cols, rows, _raw) in readme_captures.SCREENS.items():
+        for name, (_view, _scope, cols, rows, *_rest) in readme_captures.SCREENS.items():
             with self.subTest(image=name):
                 path = DOCS / "fleet" / f"{name}.png"
                 self.assertEqual(png_size(path), (cols * CELL_W, rows * CELL_H))
@@ -125,6 +144,29 @@ class PublishedFiles(unittest.TestCase):
         gif = DOCS / "fleet" / "walkthrough.gif"
         self.assertEqual(gif.read_bytes()[:6], b"GIF89a")
         self.assertLess(gif.stat().st_size, GIF_LIMIT)
+
+    @unittest.skipUnless(importlib.util.find_spec("PIL"), "Pillow is not installed (the pictures are drawn by a developer's tool)")
+    def test_quantising_keeps_the_named_colours_as_they_are(self):
+        """Median-cut once turned code blue into claude's teal and lab amber into the status yellow: the five fields' hues
+        and the three zones' stay exact, and a picture of them alone keeps each as its own palette entry."""
+        from PIL import Image
+        from tools.fleet.tests import readme_captures
+        named = readme_captures.named_colours()
+        wanted = [(95, 135, 255), (255, 175, 0), (255, 95, 175), (215, 175, 135), (0, 175, 215),
+                  (255, 135, 0), (135, 95, 255), (0, 215, 175)]
+        for colour in wanted:
+            self.assertIn(colour, named)
+        # The neighbours that carried the wrong meaning: claude's teal, the status yellow (xterm 186), a muted blue.
+        neighbours = [(88, 185, 177), (215, 215, 135), (112, 189, 191), (218, 218, 129), (133, 215, 202)]
+        image = Image.new("RGB", (len(wanted) + len(neighbours) + 200, 1), (16, 16, 16))
+        for x, colour in enumerate(wanted + neighbours):
+            image.putpixel((x, 0), colour)
+        for x in range(len(wanted) + len(neighbours), image.size[0]):       # many other colours, to force the merge
+            image.putpixel((x, 0), ((x * 37) % 256, (x * 91) % 256, (x * 53) % 256))
+        out = readme_captures.quantised(image).convert("RGB")
+        self.assertLessEqual(len({c for _n, c in out.getcolors()}), readme_captures.COLOURS)
+        for x, colour in enumerate(wanted):
+            self.assertEqual(out.getpixel((x, 0)), colour)
 
     def test_no_private_path_or_address_on_public_pages(self):
         for relative in ("docs/fleet.svg", "docs/index.html", "docs/fleet.html", "docs/map.html",

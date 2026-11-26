@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
+import contextlib
 import importlib.util
 import hashlib
 import json
@@ -1474,12 +1478,12 @@ class ObserverGenerationEndTest(unittest.TestCase):
 
     # --- U3: an observer on an older release hands its duty to the installed release ---------
 
-    def _observing_duty(self):
+    def _observing_duty(self, batch="batch-release-moved"):
         self.jobs.write_text("fixture\n", encoding="utf-8")
         created = self.module.parser().parse_args([
             "--queue-socket", str(self.base / "app-server-control" / "app-server-control.sock"),
             "--jobs", str(self.jobs), "--parent-session-id", SESSION, "--thread-id", SESSION,
-            "--sealed-batch-id", "batch-release-moved", "--attempt-id", self.ATTEMPT,
+            "--sealed-batch-id", batch, "--attempt-id", self.ATTEMPT,
             "--timeout", "86400"])
         duty_id, _record = self.batch.create(created)
         return duty_id
@@ -1530,6 +1534,202 @@ class ObserverGenerationEndTest(unittest.TestCase):
         self.assertEqual(len(joins), 2)  # joins ran while nothing was installed; none after
         self.assertEqual(binding.call_count, 3)
         handoff.assert_called_once()
+
+    # --- an observer past retention with no Codex execution left ends itself ----------------
+
+    def _age(self, duty_id, days):
+        self.batch.update(self.jobs, duty_id, accepted_at=time.time() - days * 86400)
+
+    def _expiry_patches(self, *, absent):
+        import peer_obligations
+        import dispatch_supervision
+        self.batch._EXPIRY_PROBE.clear()
+        self.addCleanup(self.batch._EXPIRY_PROBE.clear)
+        return (
+            mock.patch.object(self.batch, "_codex_execution_absent", return_value=absent),
+            mock.patch.object(peer_obligations, "ensure_normal_runner", return_value=False),
+            mock.patch.object(peer_obligations, "request_dispatch_reconciliation",
+                              return_value=False),
+            mock.patch.object(peer_obligations, "release_successor_binding", return_value=None),
+            mock.patch.object(self.module, "wait_for_session_launch_claims"),
+            mock.patch.object(self.module, "parent_session_stop_reason", return_value=""),
+            mock.patch.object(self.batch.subprocess, "Popen",
+                              side_effect=AssertionError("no successor")),
+            mock.patch.object(self.batch, "handoff_observer",
+                              side_effect=AssertionError("no handoff")),
+            mock.patch.object(self.batch, "request_runner",
+                              side_effect=AssertionError("no runner request")),
+        )
+
+    def _run_with(self, patches, duty_id, extra=()):
+        with contextlib.ExitStack() as stack:
+            for patch in (*patches, *extra):
+                stack.enter_context(patch)
+            return self._resume(duty_id)
+
+    def _timeout_then_ownership_lost(self, joins):
+        def join(_args, _attempts):
+            joins.append(1)
+            if len(joins) > 1:
+                raise self.module.ObserverOwnershipLost("fixture-stop")
+            return {"schema_version": 2, "state": "timeout"}
+        return mock.patch.object(self.module, "run_join", side_effect=join)
+
+    def test_long_lived_observer_ends_itself_on_the_same_judgment_while_waiting(self):
+        duty_id = self._observing_duty()
+        self._age(duty_id, 15)
+        joins = []
+        result, code = self._run_with(
+            self._expiry_patches(absent=True), duty_id,
+            extra=(self._timeout_then_ownership_lost(joins),))
+        self.assertEqual((code, result["status"], result["reason"]),
+                         (0, "expired", "expired-no-codex-execution"))
+        record = self.batch.read(self.jobs, duty_id)
+        self.assertEqual((record["state"], record["reason"]),
+                         ("expired", "expired-no-codex-execution"))
+        self.assertEqual(len(joins), 1)  # stopped at the first checkpoint, no second join
+
+    def test_long_lived_observer_ends_itself_at_the_projection_wait(self):
+        import dispatch_supervision
+        duty_id = self._observing_duty()
+        self._age(duty_id, 15)
+        calls = []
+
+        def wait(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return {"schema_version": 2, "state": "ready", "children": [],
+                        "replacement_lineage": []}
+            kwargs["stop_check"]()
+            raise AssertionError("the stop check must end the wait")
+
+        result, code = self._run_with(
+            self._expiry_patches(absent=True), duty_id,
+            extra=(mock.patch.object(dispatch_supervision, "wait_for_batch", side_effect=wait),))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual((code, result["status"]), (0, "expired"))
+        self.assertEqual(self.batch.read(self.jobs, duty_id)["state"], "expired")
+
+    def test_long_lived_observer_ends_itself_while_delivering(self):
+        self.jobs.write_text("fixture\n", encoding="utf-8")
+        duty_id = self._duty({"schema_version": 2, "state": "ready", "children": []})
+        self._age(duty_id, 15)
+        result, code = self._run_with(
+            self._expiry_patches(absent=True), duty_id,
+            extra=(mock.patch("dispatch_completion_join.cached_batch_delivery_state",
+                              return_value="current"),
+                   mock.patch.object(self.module, "deliver_to_native_queue",
+                                     side_effect=AssertionError("expired, never sent"))))
+        self.assertEqual((code, result["status"]), (0, "expired"))
+        record = self.batch.read(self.jobs, duty_id)
+        self.assertEqual(record["state"], "expired")
+        self.assertEqual(record["expired_from"]["state"], "delivery-pending")
+        self.assertIsNotNone(record["outcome"])
+
+    def test_observer_keeps_waiting_when_the_duty_is_not_expirable(self):
+        for name, days, absent in (("inside retention", 13, True),
+                                   ("absence not confirmed", 15, False)):
+            with self.subTest(name):
+                self._release_leases()
+                duty_id = self._observing_duty("batch-keep-" + name.replace(" ", "-"))
+                self._age(duty_id, days)
+                joins = []
+                patches = self._expiry_patches(absent=absent)
+                # a pending end keeps its normal route to the runner, as before
+                with contextlib.ExitStack() as stack:
+                    for patch in patches[:-1]:
+                        stack.enter_context(patch)
+                    runner = stack.enter_context(
+                        mock.patch.object(self.batch, "request_runner"))
+                    stack.enter_context(self._timeout_then_ownership_lost(joins))
+                    result, code = self._resume(duty_id)
+                self.assertEqual((code, result["reason"]),
+                                 (75, "completion-observer-ownership-lost"))
+                self.assertEqual(len(joins), 2)  # kept waiting past the first checkpoint
+                self.assertEqual(self.batch.read(self.jobs, duty_id)["state"], "observing")
+                self._release_leases()
+                # control: the same duty, expirable, does end
+                self._age(duty_id, 15)
+                self.batch._EXPIRY_PROBE.clear()
+                result, code = self._run_with(
+                    self._expiry_patches(absent=True), duty_id,
+                    extra=(self._timeout_then_ownership_lost([]),))
+                self.assertEqual(result["status"], "expired")
+
+    # --- a join that fails every round still reaches the expiry judgment ----------------------
+
+    def _join_fails_then_ownership_lost(self, joins, failures=3):
+        def join(_args, _attempts):
+            joins.append(1)
+            if len(joins) > failures:
+                raise self.module.ObserverOwnershipLost("fixture-stop")
+            raise RuntimeError("fixture join failure")
+        return mock.patch.object(self.module, "run_join", side_effect=join)
+
+    def _no_pause(self):
+        import dispatch_supervision
+        return mock.patch.object(dispatch_supervision.time, "sleep")
+
+    def test_observer_whose_join_fails_every_round_ends_on_the_expiry_judgment(self):
+        duty_id = self._observing_duty("batch-join-fails")
+        self._age(duty_id, 15)
+        joins = []
+        result, code = self._run_with(
+            self._expiry_patches(absent=True), duty_id,
+            extra=(self._join_fails_then_ownership_lost(joins), self._no_pause()))
+        self.assertEqual((code, result["status"], result["reason"]),
+                         (0, "expired", "expired-no-codex-execution"))
+        self.assertEqual(len(joins), 1)  # ended on the first error round
+        record = self.batch.read(self.jobs, duty_id)
+        self.assertEqual((record["state"], record["reason"]),
+                         ("expired", "expired-no-codex-execution"))
+        self.assertEqual({key: record["observer_error"][key] for key in ("type", "text")},
+                         {"type": "RuntimeError", "text": "fixture join failure"})
+
+    def test_observer_whose_join_fails_every_round_keeps_waiting_when_not_expirable(self):
+        for name, days, absent in (("inside retention", 13, True),
+                                   ("execution left", 15, False)):
+            with self.subTest(name):
+                self._release_leases()
+                duty_id = self._observing_duty("batch-join-fails-" + name.replace(" ", "-"))
+                self._age(duty_id, days)
+                joins = []
+                patches = self._expiry_patches(absent=absent)
+                with contextlib.ExitStack() as stack:
+                    judged = stack.enter_context(patches[0])
+                    for patch in patches[1:-1]:
+                        stack.enter_context(patch)
+                    stack.enter_context(mock.patch.object(self.batch, "request_runner"))
+                    writes = stack.enter_context(mock.patch.object(
+                        self.module, "_update_duty", wraps=self.module._update_duty))
+                    stack.enter_context(self._join_fails_then_ownership_lost(joins))
+                    stack.enter_context(self._no_pause())
+                    result, code = self._resume(duty_id)
+                self.assertEqual((code, result["reason"]),
+                                 (75, "completion-observer-ownership-lost"))
+                self.assertEqual(len(joins), 4)  # three error rounds, then the fixture stop
+                record = self.batch.read(self.jobs, duty_id)
+                self.assertEqual(record["state"], "observing")
+                self.assertEqual(record["observer_error"]["type"], "RuntimeError")
+                causes = [call for call in writes.call_args_list
+                          if "observer_error" in call.kwargs]
+                self.assertEqual(len(causes), 1)  # the same cause is written once
+                # inside retention costs no judgment; past it, one judgment per probe window
+                self.assertEqual(judged.call_count, 0 if days < 14 else 1)
+
+    def test_inside_retention_costs_no_judgment(self):
+        duty_id = self._observing_duty()
+        self._age(duty_id, 13)
+        joins = []
+        patches = self._expiry_patches(absent=True)
+        with contextlib.ExitStack() as stack:
+            spy = stack.enter_context(patches[0])
+            for patch in patches[1:-1]:
+                stack.enter_context(patch)
+            stack.enter_context(mock.patch.object(self.batch, "request_runner"))
+            stack.enter_context(self._timeout_then_ownership_lost(joins))
+            self._resume(duty_id)
+        spy.assert_not_called()
 
     def test_a_failed_handoff_returns_the_duty_to_the_runner(self):
         import peer_obligations
@@ -2707,8 +2907,7 @@ class NativeQueueSiblingBatchTest(unittest.TestCase):
         self.assertTrue(self.sent[0]["message"].startswith("AGENT_HARNESS_COMPLETION_V1\n"))
         record = self.pending.read(self.root, SESSION, failure[1])
         followup = self.module.completion_followup_text(
-            failure[2], jobs=str(self.jobs),
-            surface=str(ROOT / "adapters" / "codex" / "bin" / "preflight.sh"))
+            failure[2], jobs=str(self.jobs))
         self.assertEqual(self.sent[0]["message"], self.module.codex_queue_delivery.native_completion_body(
             SESSION, [record], failure[2], followup))
         self.assertEqual(results[0]["status"], "accepted")
@@ -2760,8 +2959,7 @@ class NativeQueueSiblingBatchTest(unittest.TestCase):
             expected_id = self.module.codex_queue_delivery.native_client_message_id(
                 storage, [records[0]["delivery_id"]])
             followup = self.module.completion_followup_text(
-                receipt, jobs=str(self.jobs),
-                surface=str(ROOT / "adapters" / "codex" / "bin" / "preflight.sh"))
+                receipt, jobs=str(self.jobs))
             expected_body = self.module.codex_queue_delivery.native_completion_body(
                 storage, records, receipt, followup)
             self.assertEqual(result["client_user_message_id"], expected_id)
@@ -2804,7 +3002,7 @@ class NativeQueueSiblingBatchTest(unittest.TestCase):
     def test_a_body_queued_with_the_previous_follow_up_wording_is_recognized_exactly(self):
         module = self.module
         member = self._create(0)
-        current = module._CURRENT_SUCCESS_FOLLOWUP_START + " Fixture current text.\nnext leg note"
+        current = module._SHIPPED_SUCCESS_FOLLOWUP_START + " Fixture current text.\nnext leg note"
         prior = module._prior_followup_text(current)
         self.assertTrue(prior.startswith(module._PRIOR_SUCCESS_FOLLOWUP))
         self.assertTrue(prior.endswith("\nnext leg note"))

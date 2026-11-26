@@ -596,6 +596,9 @@ def _hermetic_result(raw_fixture, fixture_hash, fixture_root, iterations):
         "XDG_DATA_HOME": os.path.join(fixture_root, "xdg-data"),
         "XDG_CACHE_HOME": os.path.join(fixture_root, "xdg-cache"),
         "TMPDIR": os.path.join(fixture_root, "tmp"),
+        # tmux finds its server through TMUX_TMPDIR, not TMPDIR: without it a pane
+        # query here reaches the caller's own default tmux server.
+        "TMUX_TMPDIR": os.path.join(fixture_root, "tmp"),
         "AGENT_DISPATCH_JOBS": jobs_path,
         "AGENT_RESOURCE_RUN_INDEX": os.path.join(
             fixture_root, "resource-runs.index.json"),

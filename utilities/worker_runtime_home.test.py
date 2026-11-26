@@ -1,6 +1,10 @@
 """Launch isolation must preserve user guards/login and the assigned input."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 import importlib.util
+import re
 import os
 import shutil
 import sqlite3
@@ -235,6 +239,40 @@ class WorkerHomes(unittest.TestCase):
         with self.assertRaises(builder._dispatch_defaults_module().DefaultsConfigError):
             builder._worker_account_selection('codex', env)
 
+    def test_v1_opencode_worker_pins_the_users_state_root_and_every_home_records_what_it_replaced(self):
+        # #1576 review follow-ups: a masked XDG_STATE_HOME moved the state root, and a worker
+        # built under another worker lost the user's own home.
+        root, builder = self._minimal_packaged_builder()
+        home = self.base / 'pin-user-home'
+        claude_parent = self.base / 'pin-claude-profile'
+        opencode_parent = self.base / 'pin-opencode'
+        for path in (home, claude_parent, opencode_parent):
+            path.mkdir(parents=True)
+        (claude_parent / '.claude.json').write_text(json.dumps(
+            {'oauthAccount': {'accountUuid': 'a', 'organizationUuid': 'a'}}))
+        (opencode_parent / 'opencode.json').write_text('{}')
+        env = {**self.env, 'HOME': str(home), 'CLAUDE_CONFIG_DIR': str(claude_parent),
+               'OPENCODE_CONFIG_DIR': str(opencode_parent)}
+        opencode = builder.build_worker_home(root, 'opencode', 'stage', 'pin-opencode',
+                                              env=env, destination=self.base / 'pin-opencode-home')
+        self.assertEqual(opencode['HARNESS_STATE_ROOT'], str(home / '.local/state/hearting'))
+        self.assertTrue(opencode['XDG_STATE_HOME'].startswith(str(self.base / 'pin-opencode-home')))
+        env['HARNESS_STATE_ROOT'] = str(self.base / 'chosen-state')
+        again = builder.build_worker_home(root, 'opencode', 'stage', 'pin-opencode-2',
+                                           env=env, destination=self.base / 'pin-opencode-home-2')
+        self.assertNotIn('HARNESS_STATE_ROOT', again)  # the inherited value already is the user's
+        first = builder.build_worker_home(root, 'claude', 'stage', 'pin-claude-1', env=env,
+                                           destination=self.base / 'pin-claude-home-1')
+        second = builder.build_worker_home(
+            root, 'claude', 'stage', 'pin-claude-2',
+            env={**env, 'CLAUDE_CONFIG_DIR': first['CLAUDE_CONFIG_DIR']},
+            destination=self.base / 'pin-claude-home-2')
+        recorded = json.loads((Path(first['CLAUDE_CONFIG_DIR']) / 'worker-home.json').read_text())
+        self.assertEqual(recorded['model_config_home'], str(claude_parent))
+        import peer_obligations
+        self.assertEqual(peer_obligations._original_home(second['CLAUDE_CONFIG_DIR']),
+                         str(claude_parent))
+
     def test_reused_homes_remove_only_stale_explicit_auth_links(self):
         root, builder = self._minimal_packaged_builder()
         parent = self.base / 'reuse-parent-codex'
@@ -399,7 +437,11 @@ class WorkerHomes(unittest.TestCase):
             self.assertNotIn('AGENTS.md — Codex Adapter Bootstrap', (home / 'AGENTS.md').read_text())
             for name in before:
                 self.assertEqual((home / name).resolve(), (self.source / name).resolve())
-            self.assertFalse((home / 'agents').exists())
+            if typ == 'owner':
+                self.assertEqual(sorted(p.name for p in (home / 'agents').iterdir()),
+                                 ['balanced.toml', 'deep.toml', 'light.toml'])
+            else:
+                self.assertFalse((home / 'agents').exists())
             self.assertFalse((home / 'plugins').exists())
             self.assertEqual((home / 'agent-config/models.conf').read_text(), 'user-model-policy')
             args = codex_worker_arguments(env)
@@ -498,10 +540,13 @@ class WorkerHomes(unittest.TestCase):
         env = prepare_worker_home(ROOT, 'codex', 'owner', 'native-fallback',
                                   env={**self.env, 'CODEX_HOME': str(self.source)})
         home = Path(env['CODEX_HOME'])
-        self.assertFalse((home / 'agents').exists())
+        # Only the light/balanced/deep tier roles, rendered as regular files.
+        self.assertEqual(sorted(p.name for p in (home / 'agents').iterdir()),
+                         ['balanced.toml', 'deep.toml', 'light.toml'])
+        self.assertFalse(any(p.is_symlink() for p in (home / 'agents').iterdir()))
         self.assertEqual(helper.read_text(), 'name="general-purpose"\nmodel="user-selected-model"\n')
         self.assertFalse((home / 'agents/unrelated.toml').exists())
-        self.assertFalse((home / 'agents/deep.toml').exists())  # withheld/missing stays missing
+        self.assertFalse((home / 'agents/general-purpose.toml').exists())
         self.assertFalse((home / 'plugins').exists())
         self.assertEqual((home / 'config.toml').resolve(), self.source / 'config.toml')
         self.assertNotIn('features.multi_agent=false', codex_worker_arguments(env))
@@ -520,7 +565,8 @@ class WorkerHomes(unittest.TestCase):
         # Nested owner projection also keeps native policy and masks the catalog.
         nested = prepare_worker_home(ROOT, 'codex', 'owner', 'nested-native-fallback',
                                      env={**self.env, **env})
-        self.assertFalse((Path(nested['CODEX_HOME']) / 'agents').exists())
+        self.assertEqual(sorted(p.name for p in (Path(nested['CODEX_HOME']) / 'agents').iterdir()),
+                         ['balanced.toml', 'deep.toml', 'light.toml'])
         self.assertNotIn('features.multi_agent=false', codex_worker_arguments(nested))
 
     def test_codex_owner_preserves_explicit_native_disablement_and_user_bytes(self):
@@ -1236,6 +1282,144 @@ class WorkerHomes(unittest.TestCase):
             self.assertEqual(actual['permission']['bash'], config['permission']['bash'])
         self.assertEqual(source.read_bytes(), before)
 
+    # -- light/balanced/deep native agents a worker can call by name ----------
+    def _user_models_conf(self, harness, home, **changes):
+        """A whole-file user copy of the shipped models.conf with ``changes`` applied."""
+        text = (ROOT / 'adapters' / harness / 'config/models.conf').read_text()
+        for key, value in changes.items():
+            text, count = re.subn(rf'(?m)^{key}=.*$', f'{key}={value}', text)
+            self.assertEqual(count, 1, key)
+        (home / 'agent-config').mkdir(parents=True, exist_ok=True)
+        (home / 'agent-config/models.conf').write_text(text)
+
+    @staticmethod
+    def _frontmatter(path):
+        return dict(line.split(': ', 1) for line in path.read_text().split('---')[1].strip().splitlines()
+                    if ': ' in line and not line.startswith('#'))
+
+    def test_claude_worker_gets_light_balanced_deep_on_the_users_tiers(self):
+        self._user_models_conf('claude', self.source, CFG_TIER_LIGHT_MODEL='haiku',
+                               CFG_TIER_DEEP_MODEL='sonnet')
+        self.env['CLAUDE_CONFIG_DIR'] = str(self.source)
+        for typ in ('owner', 'stage', 'review', 'support', 'frame'):
+            with self.subTest(worker_type=typ):
+                env = prepare_worker_home(ROOT, 'claude', typ, 'tiers-' + typ, env=self.env)
+                agents = Path(env['CLAUDE_CONFIG_DIR']) / 'agents'
+                self.assertEqual(sorted(p.name for p in agents.iterdir()),
+                                 ['balanced.md', 'deep.md', 'light.md'])
+                pins = {name: self._frontmatter(agents / f'{name}.md')
+                        for name in ('light', 'balanced', 'deep')}
+                self.assertEqual({n: (v['model'], v['effort']) for n, v in pins.items()},
+                                 {'light': ('haiku', 'medium'), 'balanced': ('haiku', 'high'),
+                                  'deep': ('sonnet', 'xhigh')})
+                manifest = json.loads((agents.parent / 'worker-home.json').read_text())
+                self.assertEqual(manifest['native_agents'], ['balanced', 'deep', 'light'])
+        self.assertFalse((self.source / 'agents').exists())
+
+    def test_claude_worker_withholds_a_main_session_only_tier_and_drops_its_old_file(self):
+        self.env['CLAUDE_CONFIG_DIR'] = str(self.source)
+        env = prepare_worker_home(ROOT, 'claude', 'owner', 'withheld', env=self.env)
+        agents = Path(env['CLAUDE_CONFIG_DIR']) / 'agents'
+        self.assertTrue((agents / 'deep.md').is_file())
+        # The user now lists the deep model as main-session-only: the same home loses it.
+        self._user_models_conf('claude', self.source, CFG_MAIN_SESSION_ONLY_MODELS='"fable opus"')
+        env = prepare_worker_home(ROOT, 'claude', 'owner', 'withheld', env=self.env)
+        self.assertEqual(sorted(p.name for p in agents.iterdir()), ['balanced.md', 'light.md'])
+
+    def test_profile_declaration_picks_the_agents_and_a_failed_plan_builds_without_them(self):
+        self.env['CLAUDE_CONFIG_DIR'] = str(self.source)
+        env = prepare_worker_home(ROOT, 'claude', 'stage', 'declared', env=self.env, profile='code-execute')
+        self.assertEqual(sorted(p.name for p in (Path(env['CLAUDE_CONFIG_DIR']) / 'agents').iterdir()),
+                         ['balanced.md', 'deep.md', 'light.md'])
+        with patch.object(worker_runtime_home._builder, 'load_declaration', return_value=(
+                ROOT / 'profiles/code-execute.yaml',
+                {'name': 'x', 'description': 'x', 'harness': 'claude', 'worker_type': 'stage',
+                 'model_role': 'fast implementer', 'expose': {'agents': ['light', 'general-purpose']}})):
+            env = prepare_worker_home(ROOT, 'claude', 'stage', 'light-only', env=self.env, profile='x')
+        self.assertEqual(sorted(p.name for p in (Path(env['CLAUDE_CONFIG_DIR']) / 'agents').iterdir()),
+                         ['light.md'])
+        with patch.object(worker_runtime_home._builder, '_native_agent_renderer',
+                          side_effect=ImportError('no renderer')):
+            env = prepare_worker_home(ROOT, 'claude', 'owner', 'no-renderer', env=self.env)
+        self.assertFalse((Path(env['CLAUDE_CONFIG_DIR']) / 'agents').exists())
+        self.assertEqual(json.loads((Path(env['CLAUDE_CONFIG_DIR']) / 'worker-home.json')
+                                    .read_text())['native_agents'], [])
+
+    def test_a_definition_that_cannot_be_placed_never_stops_the_worker_home(self):
+        self.env['CLAUDE_CONFIG_DIR'] = str(self.source)
+        outside = self.base / 'someone-elses'
+        outside.write_text('kept')
+        def build(name, prepare):
+            home = self.base / f'collide-{name}'
+            home.mkdir()
+            prepare(home)
+            env = prepare_worker_home(ROOT, 'claude', 'owner', f'collide-{name}', env=self.env,
+                                      destination=home)
+            return home, json.loads((home / 'worker-home.json').read_text())['native_agents']
+        def agents_file(home):
+            (home / 'agents').write_text('mine')
+        def agents_link(home):
+            (home / 'agents').symlink_to(outside)
+        def light_link(home):
+            (home / 'agents').mkdir()
+            (home / 'agents/light.md').symlink_to(outside)
+        def light_folder(home):
+            (home / 'agents/light.md').mkdir(parents=True)
+        for name, prepare in (('file', agents_file), ('link', agents_link),
+                              ('light-link', light_link), ('light-folder', light_folder)):
+            with self.subTest(case=name):
+                home, native = build(name, prepare)
+                self.assertTrue((home / 'CLAUDE.md').exists())
+                self.assertEqual(outside.read_text(), 'kept')
+                if name in ('file', 'link'):
+                    self.assertEqual(native, [])
+                else:
+                    self.assertEqual(native, ['balanced', 'deep'])
+                    self.assertTrue((home / 'agents/light.md').is_symlink() or
+                                    (home / 'agents/light.md').is_dir())
+        self.assertEqual((self.base / 'collide-file/agents').read_text(), 'mine')
+        self.assertEqual((self.base / 'collide-link/agents').resolve(), outside)
+
+    def test_an_unwritable_agents_folder_builds_the_home_without_definitions(self):
+        self.env['CLAUDE_CONFIG_DIR'] = str(self.source)
+        home = self.base / 'collide-readonly'
+        (home / 'agents').mkdir(parents=True)
+        (home / 'agents').chmod(0o500)
+        try:
+            prepare_worker_home(ROOT, 'claude', 'owner', 'collide-readonly', env=self.env,
+                                destination=home)
+            native = json.loads((home / 'worker-home.json').read_text())['native_agents']
+            self.assertTrue((home / 'CLAUDE.md').exists())
+            self.assertEqual(sorted(p.name for p in (home / 'agents').iterdir()),
+                             [f'{n}.md' for n in native])  # empty, or all three when the user may write anyway
+        finally:
+            (home / 'agents').chmod(0o700)
+
+    def test_a_stale_definition_vanishing_during_cleanup_does_not_stop_the_build(self):
+        self.env['CLAUDE_CONFIG_DIR'] = str(self.source)
+        env = prepare_worker_home(ROOT, 'claude', 'owner', 'vanish', env=self.env)
+        agents = Path(env['CLAUDE_CONFIG_DIR']) / 'agents'
+        self._user_models_conf('claude', self.source, CFG_MAIN_SESSION_ONLY_MODELS='"fable opus"')
+        real = Path.unlink
+        def racing(path, missing_ok=False):
+            real(path, missing_ok=True)       # another builder removed it first
+            return real(path, missing_ok=missing_ok)
+        with patch.object(Path, 'unlink', racing):
+            prepare_worker_home(ROOT, 'claude', 'owner', 'vanish', env=self.env)
+        self.assertEqual(sorted(p.name for p in agents.iterdir()), ['balanced.md', 'light.md'])
+
+    def test_opencode_v1_worker_gets_the_agents_and_v2_keeps_the_service_ones(self):
+        self.env['OPENCODE_CONFIG_DIR'] = str(self.source)
+        env = prepare_worker_home(ROOT, 'opencode', 'owner', 'v1-agents', env=self.env)
+        agents = Path(env['OPENCODE_CONFIG_DIR']) / 'agents'
+        self.assertEqual(sorted(p.name for p in agents.iterdir()), ['balanced.md', 'deep.md', 'light.md'])
+        self.assertIn('mode: subagent', (agents / 'light.md').read_text())
+        v2 = {**self.env, 'HOME': str(self.base), 'OPENCODE_RUNTIME_VERSION': '2.0.32',
+              'XDG_CONFIG_HOME': str(self.base / 'config'), 'XDG_STATE_HOME': str(self.base / 'state')}
+        result = prepare_worker_home(ROOT, 'opencode', 'owner', 'v2-agents', env=v2)
+        self.assertFalse((Path(result['HEARTING_WORKER_HOME']) / 'agents').exists())
+        self.assertNotIn('OPENCODE_CONFIG_DIR', result)
+
     def test_profile_specialization_uses_same_guard_preserving_home(self):
         (self.source / 'settings.json').write_text('{"permissions":{"deny":["Read(secret)"]}}')
         self.env['CLAUDE_CONFIG_DIR'] = str(self.source)
@@ -1377,7 +1561,8 @@ class WorkerHomes(unittest.TestCase):
         first = prepare_worker_home(ROOT, 'claude', 'stage', 'profile-refresh',
                                     env=env, profile='code-report')
         home = Path(first['CLAUDE_CONFIG_DIR'])
-        before = {p.name: p.read_bytes() for p in home.iterdir() if p.is_file()}
+        before = {p.name: p.read_bytes() for p in [*home.iterdir(), *(home / 'agents').iterdir()]
+                  if p.is_file()}
         bootstrap_inode = (home / 'CLAUDE.md').stat().st_ino
         original = os.replace
         publications = []
@@ -1397,6 +1582,8 @@ class WorkerHomes(unittest.TestCase):
         self.assertEqual((home / 'CLAUDE.md').stat().st_ino, bootstrap_inode)
         self.assertEqual(publications.count('settings.json'), 2)
         self.assertEqual(publications.count('worker-home.json'), 2)
+        for name in ('light.md', 'balanced.md', 'deep.md'):
+            self.assertEqual(publications.count(name), 2)
 
     def test_concurrent_profile_bootstrap_publication_is_idempotent(self):
         builder = worker_runtime_home._builder

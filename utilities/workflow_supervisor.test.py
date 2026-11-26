@@ -7,6 +7,9 @@ while nothing owned evaluation must now either be refused at compile or carried
 forward by the supervisor.
 """
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import contextlib
 import copy
@@ -1115,6 +1118,27 @@ class TestGateRelease(WorkflowFixture):
                          jobs.parent / "workflow" / route["route_id"])
         self.assertFalse((self.base / "raise-root" / route["route_id"]).exists())
         self.assertFalse((self.base / "release-root" / route["route_id"]).exists())
+
+    def test_the_status_line_of_a_unit_route_tells_no_intensity_and_the_record_keeps_it(self):
+        # 11-20: a unit route has no intensity (one unit does one job and nothing checks it). Its status line names the
+        # kind only; `effective_intensity` stays in the record and in `--json`. Every other route reads as it did.
+        for capability, mode, intensity, line in (("unit", "default", "quick", "(unit)"),
+                                                  ("autopilot-code", "dev", "quick", "(autopilot-code/dev quick)"),
+                                                  ("autopilot-lab", "setup", "standard", "(autopilot-lab/setup standard)")):
+            with self.subTest(capability=capability):
+                route, path = self.two_stage_route()
+                route.update(capability=capability, capability_mode=mode, effective_intensity=intensity)
+                path.write_text(json.dumps(route, indent=2), encoding="utf-8")
+                jobs, _session, _attempt = self.owner_registry(route_id=route["route_id"])
+                text, machine = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(text):
+                    SUP.main(["status", "--route", str(path), "--jobs", str(jobs)])
+                with contextlib.redirect_stdout(machine):
+                    SUP.main(["status", "--route", str(path), "--jobs", str(jobs), "--json"])
+                first = text.getvalue().splitlines()[0]
+                self.assertEqual(first, f"route      {route['route_id']} {line}")
+                payload = json.loads(machine.getvalue())
+                self.assertEqual((payload["capability"], payload["effective_intensity"]), (capability, intensity))
 
     def test_explicit_jobs_authority_rejects_missing_directory_and_symlink(self):
         missing = self.base / "missing-state" / "jobs.log"
@@ -4934,7 +4958,7 @@ class TestComputePollObservationBoundary(WorkflowFixture):
             "artifacts": {"checked": True, "missing": []},
         }
         if ledger.state()["nodes"]["run"]["state"] != "RUNNING":
-            ledger.record("run", "RUNNING", evidence={"fixture": "owner-terminal-settlement"},
+            ledger.record("run", "RUNNING", evidence={"fixture": "owner-terminal-owner-pass"},
                           actor="fixture")
         ledger.record("run", "STAGE_SUCCEEDED", evidence=evidence, actor="completion-controller")
         node = WS.route_node(route, "run")

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import threading
 import fcntl
 import math
 import uuid
@@ -38,11 +39,25 @@ _SAFE_ROUTE_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CACHE_MAX_BYTES = 2 * 1024 * 1024
 _DISPLAY_TTL = 180.0
 _REQUEST_TTL = 60.0
+# While a display wants routes the producer starts its next pass early on a change instead of
+# waiting out the 30 second cadence (a fallback that always remains; a wake never removes a pass,
+# it only shortens the sleep before one). Local sources wake it by kernel notification
+# (tools.fleet.native_events: the registry, a worker's stream, an S4 signal, an S1 state file, a
+# process ending). A file on a network mount raises no notification for another host's write, so
+# the registry and the route files are stat'ed every _REGISTRY_WAKE_SECONDS. A wake starts the pass
+# no sooner than _REGISTRY_MIN_GAP after the previous one ended, and never sooner than that pass
+# took, so busy sources cost at most half of one core.
+_REGISTRY_WAKE_SECONDS = 1.0
+_REGISTRY_MIN_GAP = 0.5
 _ROUTE_DEMAND_LIMIT = 64
 _ROUTE_DEMAND_MAX_BYTES = 32 * 1024
 _ROUTE_DEMAND_TTL = 600.0
 _SELECTED_DRAFT_MAX = 4096
 _SELECTED_RESPONSE_MAX = 256
+# Exact waits whose completion already took them out of the published views. A row leaves
+# once a collection that started after it is published; the bound only guards a clock
+# that went back.
+_SETTLED_WAITS_MAX = 256
 _SELECTED_STATES = frozenset(("open", "submitted", "received", "applied",
                               "cancelled", "expired", "unknown"))
 _SELECTED_ENTRY_KEYS = frozenset(("identity", "selected_id", "draft", "state", "action_id",
@@ -86,11 +101,31 @@ def wait_fold(since, now, *, owner_state=None):
     return "older" if math.isfinite(age) and age >= OLDER_AFTER else None
 
 
+def person_wait(item):
+    """Whether this wait is a person's to answer: every wait but a blocked owner (S3) and one
+    whose answer the person already sent.
+
+    A blocked owner takes its correction from its parent agent
+    (``owner-correction-native-parent-context-required``), not from a person. Every other wait
+    holds its session until a person answers it, wherever the answer is given (the panel, a
+    Claude native request in its own window, a marker question in that session's input), so
+    every surface counts it (11-14). Once the person's answer is recorded and on its way
+    (``answer: sent``, from the existing answer record) it has left the person's hands: no
+    surface counts it while it travels, and a failed delivery counts it again.
+    """
+    return (isinstance(item, dict) and str(item.get("source") or "") != "S3"
+            and item.get("answer") != "sent")
+
+
 def wait_counts(items):
-    """The single count every surface shows: current, folded (older), and ownerless."""
+    """The single count every surface shows: current, folded (older), and ownerless.
+
+    Every wait a person must answer counts, wherever it is answered (``person_wait``); a
+    blocked owner, its parent agent's to answer, stays listed and uncounted.
+    """
     current = folded = ownerless = 0
     for item in items:
-        if not isinstance(item, dict):
+        if not person_wait(item):
             continue
         if item.get("stale") in (True, "older"):
             folded += 1
@@ -98,6 +133,76 @@ def wait_counts(items):
         else:
             current += 1
     return {"total": current, "older": folded, "ownerless": ownerless}
+
+
+# The answer record's states while the person's answer travels to its session (rule 5, 11-14).
+_ANSWER_IN_TRANSIT = frozenset(("submitted", "received"))
+
+
+def _answers_in_transit(selected, observed_at=None):
+    """Wait ids whose person's answer is recorded and on its way: the existing answer record
+    (``selected_responses``) holds its action in ``submitted`` or ``received`` and its source
+    has not ended. A failed delivery leaves these states (``unknown``, ``expired``, ...).
+
+    An applied action (a human gate, a native request answered from the panel or Fleet) keeps
+    its mark until a collection observed after it is published (review 1633, follow-up 1):
+    the wait leaves no count before that collection drops it; what that collection still
+    lists is current again. A message question's completion ends its source, so it is gone."""
+    def marked(entry):
+        if entry.get("state") in _ANSWER_IN_TRANSIT:
+            return True
+        return entry.get("state") == "applied" and (
+            observed_at is None or entry.get("updated_at", 0) >= observed_at)
+    return {entry["selected_id"] for entry in (selected or {}).values()
+            if isinstance(entry, dict) and isinstance(entry.get("selected_id"), str)
+            and entry.get("action_id") and not entry.get("source_terminal") and marked(entry)}
+
+
+def _mark_answers(projection, sent, *, private=True):
+    """Mark the published waits whose answer is on its way and recount (rule 5, 11-14).
+
+    A marked wait stays listed (Fleet shows it as sent, the panel as one dim line), leaves
+    every count and this session's wait index; nothing else in the projection changes.
+    """
+    items = [row for row in projection.get("items") or () if isinstance(row, dict)]
+    for row in items:
+        if row.get("id") in sent:
+            row["answer"] = "sent"
+        else:
+            row.pop("answer", None)
+    counts = wait_counts(items)
+    projection.update(total=counts["total"], older=counts["older"], ownerless=counts["ownerless"])
+    if private:
+        projection["stale_total"] = counts["older"]
+        by_session = {}
+        for row in items:
+            owner = row.get("owner") or {}
+            if owner.get("harness") and owner.get("session_id") and not row.get("stale") and person_wait(row):
+                by_session.setdefault(str(owner["harness"]) + "\0" + str(owner["session_id"]), []).append(
+                    str(row.get("id") or ""))
+        projection["by_session"] = by_session
+    return projection
+
+
+def _republish_answer_marks(projection):
+    """After the answer record changed: the private projection (written by the caller) and
+    the Fleet view say the same at once. Best effort; the next collection writes the same."""
+    sent = _answers_in_transit(projection.get("selected_responses"), projection.get("observed_at"))
+    _mark_answers(projection, sent)
+    try:
+        path = _fleet_cache_path()
+        meta = os.lstat(path) if path.exists() else None
+        fleet = (json.loads(path.read_text(encoding="utf-8"))
+                 if meta and stat.S_ISREG(meta.st_mode) and meta.st_uid == os.getuid()
+                 and not stat.S_IMODE(meta.st_mode) & 0o077 and meta.st_size <= _CACHE_MAX_BYTES else None)
+        if isinstance(fleet, dict) and fleet.get("schema_version") == 1 and isinstance(fleet.get("items"), list):
+            before = [row.get("answer") for row in fleet["items"] if isinstance(row, dict)]
+            _mark_answers(fleet, sent, private=False)
+            if before != [row.get("answer") for row in fleet["items"] if isinstance(row, dict)]:
+                _write(path, fleet)
+    except (OSError, ValueError, TypeError):
+        pass
+    return projection
 
 
 def state_root() -> Path:
@@ -115,6 +220,21 @@ def _make_private_dir(path: Path) -> None:
     if _producer_root is not None and not _producer_root.is_dir():
         raise FileNotFoundError("answer-wait state root is gone")
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+
+def _chmod_private(path, mode: int = 0o700, meta=None) -> None:
+    """``chmod`` only when the mode differs.
+
+    The producer watches this directory by kernel notification; a ``chmod`` raises an
+    attribute event on it even when the mode is already right, so every cache write or
+    display demand would wake the producer for its own bookkeeping.
+    """
+    try:
+        current = stat.S_IMODE((meta if meta is not None else os.lstat(path)).st_mode)
+    except OSError:
+        current = None
+    if current != mode:
+        os.chmod(path, mode)
 
 
 def _path(seat_key: str) -> Path:
@@ -205,7 +325,7 @@ def _cache_write_lock():
     meta = os.lstat(root)
     if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid():
         raise OSError("answer-wait directory is not private owner state")
-    os.chmod(root, 0o700)
+    _chmod_private(root, 0o700, meta)
     # The producer holds .projection.lock for its whole lifetime. Cache writes
     # and selected-action claims need a separate short transaction lock.
     fd = os.open(root / ".cache-write.lock", os.O_CREAT | os.O_RDWR |
@@ -244,6 +364,71 @@ def _write_cache_value(value):
         return True
     except (OSError, ValueError, TypeError):
         return False
+
+
+def record_closed_question(item_id, status="closed", *, at=None):
+    """Body-free diagnostic history, never used by wait publication or answer authority."""
+    if (not isinstance(item_id, str) or len(item_id) > 512
+            or status not in {"answered", "cancelled", "expired", "replaced", "closed"}):
+        return False
+    try:
+        with _cache_write_lock():
+            value = _read_cache_file()
+            if value is None and _cache_path().exists():
+                return False
+            value = value or {"schema_version": 3, "observed_at": 0, "items": [],
+                              "by_session": {}, "complete": False}
+            history = value.get("closed_questions") or {}
+            history[item_id] = {"status": status, "at": time.time() if at is None else at}
+            value["closed_questions"] = dict(sorted(history.items(),
+                key=lambda row: row[1].get("at", 0))[-_SELECTED_RESPONSE_MAX:])
+            return _write_cache_value(value)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def closed_question(item_id):
+    """Read exact retained evidence only. Absence is not proof a question never existed."""
+    if not isinstance(item_id, str):
+        return None
+    projection = _read_cache_file() or {}
+    source_closed = None
+    if item_id.startswith("S4:"):
+        for path in state_root().glob("*.json"):
+            if not re.fullmatch(r"[0-9a-f]{64}", path.stem):
+                continue
+            signal = _read(path)
+            if (signal or {}).get("id") != item_id:
+                continue
+            if signal.get("lifecycle") == "open":
+                return None
+            if signal.get("lifecycle") == "answered":
+                source_closed = {"status": "answered", "at": (signal.get("completion") or {}).get("at")}
+    if item_id.startswith("S1:"):
+        from tools.fleet import interaction
+        parts = item_id.split(":")
+        if len(parts) == 4:
+            current = interaction.read_wait(parts[2], parts[1])
+            if current and str(int(current["waiting_since"] * 1000)) == parts[3]:
+                return None  # the same display id can be open again; diagnostics grant no authority
+    overlay = projection.get("selected_responses", {})
+    if _valid_selected_overlay(overlay):
+        entries = [entry for entry in overlay.values() if entry.get("selected_id") == item_id]
+        latest = max(entries, key=lambda row: row["updated_at"], default=None)
+        if latest and latest["state"] == "open":
+            return None
+        if source_closed:
+            return source_closed
+        if latest:
+            result = latest.get("result") or {}
+            status = {"applied": "answered", "cancelled": "cancelled", "expired": "expired"}.get(latest["state"])
+            if result.get("status") == "replaced":
+                status = "replaced"
+            if status:
+                return {"status": status, "at": latest["updated_at"], "observed": True}
+    if source_closed:
+        return source_closed
+    return (projection.get("closed_questions") or {}).get(item_id)
 
 
 def _clean(value: str) -> str:
@@ -303,7 +488,7 @@ def _write(path: Path, value: dict) -> None:
     meta = os.lstat(path.parent)
     if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid():
         raise OSError("answer-wait directory is not private owner state")
-    os.chmod(path.parent, 0o700)
+    _chmod_private(path.parent, 0o700, meta)
     fd, name = tempfile.mkstemp(prefix=".wait-", suffix=".tmp", dir=path.parent)
     try:
         os.fchmod(fd, 0o600)
@@ -378,8 +563,12 @@ def _prune_selected(overlay, needed=1):
 
 
 def register_message(harness, session_id, seat, text, *, sequence, choices=(),
-                     recommended=None, secret=False, cwd=None, incarnation=None):
-    """Register one explicit question on the caller's current prompt, without waiting."""
+                     recommended=None, secret=False, cwd=None, incarnation=None, replace=True):
+    """Register one explicit question on the caller's current prompt, without waiting.
+
+    A new question replaces this session's earlier waiting one; the returned value then carries
+    `replaced` (that question's id and text) so the caller can say so. `replace=False` leaves a
+    different open question in place and refuses instead (`question-open-elsewhere`)."""
     import session_tidy as tidy
     if (tidy.is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower()
             in {"owner", "worker", "auxiliary", "reviewer"}):
@@ -420,6 +609,9 @@ def register_message(harness, session_id, seat, text, *, sequence, choices=(),
         if tidy.read_prompt_seq(seat) != sequence:
             raise ValueError("question-prompt-changed")
         prior = _read(_signal_path(value))
+        if (not replace and prior and prior.get("id") != item_id and prior.get("mode") == "message"
+                and prior.get("lifecycle") == "open"):
+            raise ValueError("question-open-elsewhere")
         if prior and prior.get("id") == item_id:
             value = prior
         envelope = _message_envelope(value)
@@ -459,6 +651,10 @@ def register_message(harness, session_id, seat, text, *, sequence, choices=(),
     if prior:
         _queue_message_decision(prior)
     _request_producer()
+    if (prior and prior.get("id") != item_id and prior.get("mode") == "message"
+            and prior.get("lifecycle") == "open"):
+        # The earlier unanswered question of this session was just closed as replaced.
+        return {**value, "replaced": {"id": prior["id"], "question": str(prior.get("question") or "")}}
     return value
 
 
@@ -475,31 +671,51 @@ def _message_source(envelope):
 
 
 def _message_incarnation_current(signal):
+    """Whether the asking session still holds its seat.
+
+    The question belongs to its session id: the same session in a new process (a native
+    resume, a restart, a compaction) still answers it, and the answer goes to that session as
+    it is now (the exact-SID courier keeps its own process proof). Only another session that
+    took the seat (a confirmed handover) or an unreadable lineage ends it here (11-14). The
+    recorded process stays part of the question's identity, not of its currency.
+    """
     from dispatch_seat_handover import resolve_recipient
     resolved = resolve_recipient("provenance", session=signal["session_id"], harness=signal["harness"])
-    if (resolved.state == "unreadable" or resolved.session_id != signal["session_id"]
-            or resolved.harness != signal["harness"]):
-        return False
-    incarnation = signal.get("incarnation")
-    if incarnation is None:
-        return True  # Native exact-SID courier still enforces its own process proof.
-    pid = incarnation.get("pid") if isinstance(incarnation, dict) else None
-    return (type(pid) is int and pid > 1 and _proc_uid(pid) == os.getuid()
-            and _proc_start_ticks(pid) == str(incarnation.get("proc_start")))
+    return not (resolved.state == "unreadable" or resolved.session_id != signal["session_id"]
+                or resolved.harness != signal["harness"])
 
 
 def _message_answer_error(text):
     if not isinstance(text, str) or not text.strip():
         return "message-answer-empty"
-    if len(text) > 600 or len(text.encode("utf-8")) > _SELECTED_DRAFT_MAX:
+    if len(text.encode("utf-8")) > 16_384:
         return "message-answer-too-large-use-original-session"
     return None
 
 
-def _message_body(portable):
+def _message_answer_values(portable):
     answers = portable.get("answers") if isinstance(portable, dict) else None
     values = answers.get("message-response") if isinstance(answers, dict) else None
-    return values[0] if isinstance(values, list) and len(values) == 1 else None
+    if not isinstance(values, list) or not 1 <= len(values) <= 2 or any(not isinstance(v, str) for v in values):
+        return None
+    return values
+
+
+def _message_body(portable, *, bound_bytes=None):
+    values = _message_answer_values(portable)
+    if values is None:
+        return None
+    if len(values) == 1:
+        value = values[0]
+        # Older claims may bind the unwrapped bytes. The caller still verifies their digest.
+        if not value.lstrip().startswith("[") or len(value.encode("utf-8")) == bound_bytes:
+            return value
+        try:
+            if not isinstance(json.loads(value), list):
+                return value
+        except (ValueError, RecursionError):
+            return value
+    return json.dumps(values, ensure_ascii=False)
 
 
 def message_binding_valid(binding):
@@ -513,7 +729,7 @@ def message_binding_valid(binding):
             and binding["question_id"] == "message-response"
             and isinstance(binding["seat_key"], str) and bool(binding["seat_key"])
             and type(binding["sequence"]) is int and binding["sequence"] >= 0
-            and type(binding["body_bytes"]) is int and 0 < binding["body_bytes"] <= 4096
+            and type(binding["body_bytes"]) is int and 0 < binding["body_bytes"] <= 16_384
             and isinstance(binding["action_id"], str) and bool(_SAFE.fullmatch(binding["action_id"]))
             and all(isinstance(binding[key], str) and re.fullmatch(r"[0-9a-f]{64}", binding[key])
                     for key in ("body_id", "body_sha256")))
@@ -529,7 +745,7 @@ def message_answer_body(binding, *, current=False):
         raise ValueError("message-answer-storage-invalid")
     entry = overlay.get(binding["body_id"]) or {}
     identity = entry.get("identity") or {}
-    text = _message_body(entry.get("response"))
+    text = _message_body(entry.get("response"), bound_bytes=binding["body_bytes"])
     if (entry.get("message_binding") != binding or entry.get("action_id") != binding["action_id"]
             or any(identity.get(key) != binding[key]
                    for key in ("harness", "session_id", "request_id", "question_id"))
@@ -571,7 +787,58 @@ def message_answer_submission_current(binding):
                 and _answer_attachment_current(entry.get("answer_attachment"), envelope))
 
 
-def _complete_message_locked(signal, text, actor, *, sequence, action_id=None, verified=False):
+def _settled_waits(value):
+    """The waits a completion settled, as the shared cache records them (``id`` and ``at``)."""
+    rows = value.get("settled_waits") if isinstance(value, dict) else None
+    return [row for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)
+            and isinstance(row.get("at"), (int, float)) and not isinstance(row.get("at"), bool)
+            and math.isfinite(row["at"])] if isinstance(rows, list) else []
+
+
+def _settle_published_wait(wait_id):
+    """Drop one answered wait from the published views at once (correction 3, 11-13).
+
+    The collection leaves an answered message question out (``read_signals``); until it runs
+    again the cache kept the wait, so the panel and Fleet still counted and showed it. Only
+    that exact id goes; every other row and count stays as published. The id and the time
+    are kept in the shared cache, so a collection read before this completion never
+    publishes it again, even when its source cannot be read then (review 1597-r3). Best
+    effort: a later collection writes the same result.
+    """
+    try:
+        with _cache_write_lock():
+            value = _read_cache_file()
+            if value:
+                settled = [row for row in _settled_waits(value) if row["id"] != wait_id]
+                value["settled_waits"] = [*settled, {"id": wait_id, "at": time.time()}][-_SETTLED_WAITS_MAX:]
+            if value and any(row.get("id") == wait_id for row in value.get("items", ()) if isinstance(row, dict)):
+                value["items"] = [row for row in value["items"] if not isinstance(row, dict) or row.get("id") != wait_id]
+                by_session = value.get("by_session") if isinstance(value.get("by_session"), dict) else {}
+                value["by_session"] = {key: [ref for ref in refs if ref != wait_id]
+                                       for key, refs in by_session.items()
+                                       if isinstance(refs, list) and any(ref != wait_id for ref in refs)}
+                counts = wait_counts(value["items"])
+                value.update(total=counts["total"], older=counts["older"], stale_total=counts["older"],
+                             ownerless=counts["ownerless"],
+                             unattributed=[ref for ref in value.get("unattributed", ()) if ref != wait_id])
+            if value:
+                _write_cache_value(value)
+            path = _fleet_cache_path()
+            meta = os.lstat(path) if path.exists() else None
+            fleet = (json.loads(path.read_text(encoding="utf-8"))
+                     if meta and stat.S_ISREG(meta.st_mode) and meta.st_uid == os.getuid()
+                     and not stat.S_IMODE(meta.st_mode) & 0o077 and meta.st_size <= _CACHE_MAX_BYTES else None)
+            if isinstance(fleet, dict) and fleet.get("schema_version") == 1 and any(row.get("id") == wait_id for row in fleet.get("items", ()) if isinstance(row, dict)):
+                fleet["items"] = [row for row in fleet["items"] if not isinstance(row, dict) or row.get("id") != wait_id]
+                counts = wait_counts(fleet["items"])
+                fleet.update(total=counts["total"], older=counts["older"], ownerless=counts["ownerless"],
+                             unattributed=[ref for ref in fleet.get("unattributed", ()) if ref != wait_id])
+                _write(_fleet_cache_path(), fleet)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def _complete_message_locked(signal, text, actor, *, sequence, action_id=None, verified=False, answer_values=()):
     """Source seat lock held; completion is independent of the transport claim."""
     if (not isinstance(text, str) or not text.strip() or signal.get("lifecycle") != "open"
             or sequence < signal["sequence"]
@@ -579,12 +846,19 @@ def _complete_message_locked(signal, text, actor, *, sequence, action_id=None, v
         return False
     # A physical prompt bumps the sequence; a courier consumes the question's
     # exact recorded sequence. No late old prompt may complete a newer question.
+    # Claims are made under this same seat lock, so this read, before the source
+    # write, is the one that decides: a prompt never ends an answer already chosen.
+    if action_id is None and _message_claim_open(signal):
+        return False
     completion = {"actor": actor, "action_id": action_id, "at": time.time(),
                   "answer_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
     if not signal["detail"]["questions"][0].get("is_secret"):
-        completion["answer"] = text
+        completion["answer"] = answer_values[0] if answer_values else text
+        if len(answer_values) == 2:
+            completion["note"] = answer_values[1]
     signal.update(lifecycle="answered", completion=completion)
     _write_signal_source(signal)
+    _settle_published_wait(signal["id"])
     envelope = _message_envelope(signal)
     entry = _selected_entry(envelope) or {"draft": "", "state": "open"}
     entry["source_terminal"] = True
@@ -635,7 +909,8 @@ def complete_message_answer(receipt, recipient):
                 verified = True
             if verified:
                 _complete_message_locked(signal, text, "fleet", sequence=binding["sequence"],
-                                         action_id=binding["action_id"], verified=True)
+                                         action_id=binding["action_id"], verified=True,
+                                         answer_values=_message_answer_values(entry["response"]))
                 entry = _selected_entry(envelope) or entry
         won = bool(exact and (signal.get("completion") or {}).get("action_id") == binding["action_id"])
         status = "applied" if won else (
@@ -660,7 +935,8 @@ def _queue_message_decision(signal):
         question = signal["detail"]["questions"][0]
         saved = decisions.save_pending(decisions.make_payload(
             question["question"], [completion["answer"]], options=question["choices"],
-            cwd=signal.get("cwd"), origin={"kind": "message-question", "harness": signal["harness"],
+            note=completion.get("note", ""), cwd=signal.get("cwd"),
+            origin={"kind": "message-question", "harness": signal["harness"],
                                          "session_id": signal["session_id"], "request_id": signal["id"]}))
         if saved:
             import session_tidy as tidy
@@ -793,6 +1069,50 @@ def open_signal(harness: str, session_id: str, seat_key: str, text: str, *,
     return True
 
 
+_PROMPT_CHOICE_NUMBER = re.compile(r"([0-9]{1,2})\s*번?")
+
+
+def _prompt_choice_key(text):
+    return re.sub(r"[\s.。]+$", "", text.strip()).casefold()
+
+
+def message_prompt_answer(signal, text):
+    """The answer a physical prompt gives this message question, or None.
+
+    Deterministic and closed when unsure: a question without choices takes the
+    whole input; one with choices takes only one in-range choice number ("2",
+    "2번", "2.") or a choice's own wording (edge spaces, case, final period).
+    Anything else is an ordinary prompt and leaves the question open."""
+    if not isinstance(text, str) or not text.strip():
+        return None
+    choices = signal["detail"]["questions"][0].get("choices") or []
+    if not choices:
+        return text
+    key = _prompt_choice_key(text)
+    picked = {index for index, choice in enumerate(choices) if _prompt_choice_key(choice) == key}
+    number = _PROMPT_CHOICE_NUMBER.fullmatch(key)
+    if number and 1 <= int(number.group(1)) <= len(choices):
+        picked.add(int(number.group(1)) - 1)
+    return choices[picked.pop()] if len(picked) == 1 else None
+
+
+def message_answer_pending(signal):
+    """A Fleet/CLI answer is claimed and not yet settled; it, not a later prompt, is the answer.
+
+    An unreadable claim record is not "no claim": this prompt then registers no
+    automatic answer, the question and any claim stay as they are, and the next
+    readable prompt or the claim's own delivery decides."""
+    return _message_claim_open(signal)
+
+
+def _message_claim_open(signal):
+    entry, known = _selected_lookup(_message_envelope(signal))
+    if not known:
+        return True
+    entry = entry or {}
+    return bool(entry.get("action_id")) and not entry.get("source_terminal")
+
+
 def close_signal(seat_key: str, *, sequence: int | None = None,
                  harness: str | None = None, session_id: str | None = None,
                  answer: str | None = None) -> bool:
@@ -814,6 +1134,9 @@ def close_signal(seat_key: str, *, sequence: int | None = None,
             # The prompt hook already owns the source seat lock. Receipt callers
             # acquire it in complete_message_answer instead.
             if harness is None or session_id is None or sequence is None:
+                return False
+            answer = message_prompt_answer(current, answer)
+            if answer is None or message_answer_pending(current):
                 return False
             return _complete_message_locked(current, answer, "direct", sequence=sequence)
         _remove_signal_source(current, path)
@@ -882,6 +1205,207 @@ def _owner_projection(item: dict) -> dict:
     return row
 
 
+def _message_source_state(item: dict) -> str:
+    """What the exact S4 source a collection read says now: ``open`` (still that open
+    question), ``ended`` (removed, replaced by its session's next one, or no longer open),
+    ``unread`` (not read just now — not the same as ended; the collection's reading stands)
+    or ``unchecked`` (no exact source to re-read; the next collection decides)."""
+    owner = item.get("owner") or {}
+    if not owner.get("seat_key"):
+        return "unchecked"
+    try:
+        path = _signal_path({"harness": owner.get("harness"), "session_id": owner.get("session_id"),
+                             "seat_key": owner["seat_key"], "id": item.get("id")})
+    except (OSError, ValueError, TypeError):
+        return "unread"
+    if path is None:
+        return "unread"  # No single exact source to re-read; the next collection decides.
+    signal = _read(path)
+    if signal is None:
+        # `_read` folds a failed read into None; only a source that is gone has ended.
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return "ended"
+        except OSError:
+            pass
+        return "unread"
+    if signal.get("id") != item.get("id") or (
+            signal.get("mode") == "message" and signal.get("lifecycle") != "open"):
+        return "ended"
+    return "open"
+
+
+def _valid_doers(value):
+    """The bounded ``session_doers`` map, or {} (display detail never crowds question truth out)."""
+    if not isinstance(value, dict) or len(value) > _SESSION_DOERS:
+        return {}
+    kept = {}
+    for key, doer in value.items():
+        if (isinstance(key, str) and "\0" in key and len(key) <= 300 and isinstance(doer, dict)
+                and all(name in ("model", "effort", "repo") and isinstance(text, str) and len(text) <= 64
+                        and text.isprintable() for name, text in doer.items())):
+            kept[key] = dict(doer)
+    return kept
+
+
+def _valid_peers(value):
+    """The bounded ``session_peers`` map (who supervises whom, by Fleet number and harness), or {}."""
+    if not isinstance(value, dict) or len(value) > _SESSION_DOERS:
+        return {}
+    pair = lambda item: (isinstance(item, list) and len(item) == 2 and all(isinstance(x, str) and len(x) <= 32 and x.isprintable() for x in item))
+    kept = {}
+    for key, entry in value.items():
+        if (isinstance(key, str) and "\0" in key and len(key) <= 300 and isinstance(entry, dict)
+                and isinstance(entry.get("tag"), str) and len(entry["tag"]) <= 32
+                and all(isinstance(entry.get(name), list) and len(entry[name]) <= 16 and all(pair(i) for i in entry[name])
+                        for name in ("supervisors", "targets"))):
+            kept[key] = {"tag": entry["tag"], "supervisors": entry["supervisors"], "targets": entry["targets"]}
+    return kept
+
+
+_RESOURCE_HOSTS, _RESOURCE_GPUS = 8, 16
+
+
+def _valid_resources(value):
+    """The bounded ``resources`` view (the compute hosts' CPU, memory and GPU use, with the session numbers that hold a GPU), or {}."""
+    if not isinstance(value, dict) or not isinstance(value.get("hosts"), list) or len(value["hosts"]) > _RESOURCE_HOSTS:
+        return {}
+    number = lambda x, top=None: x is None or (isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and 0 <= x <= (top or 1e9))
+    text = lambda x: isinstance(x, str) and 0 < len(x) <= 32 and x.isprintable()
+    kept = []
+    for host in value["hosts"]:
+        if not (isinstance(host, dict) and text(host.get("name")) and isinstance(host.get("gpus"), list)
+                and len(host["gpus"]) <= _RESOURCE_GPUS and number(host.get("cpu"), 100) and number(host.get("mem"), 100)):
+            return {}
+        gpus = []
+        for gpu in host["gpus"]:
+            if not (isinstance(gpu, dict) and isinstance(gpu.get("i"), int) and 0 <= gpu["i"] < 1000 and isinstance(gpu.get("busy"), bool)
+                    and number(gpu.get("util"), 100) and number(gpu.get("used")) and number(gpu.get("total"))
+                    and isinstance(gpu.get("users"), list) and len(gpu["users"]) <= 4 and all(text(u) for u in gpu["users"])):
+                return {}
+            gpus.append({name: gpu[name] for name in ("i", "busy", "util", "used", "total", "users")})
+        kept.append({"name": host["name"], "self": host.get("self") is True, "cpu": host.get("cpu"), "mem": host.get("mem"), "gpus": gpus})
+    observed = value.get("observed_at")
+    return {"observed_at": float(observed), "hosts": kept} if kept and isinstance(observed, (int, float)) and not isinstance(observed, bool) else {}
+
+
+# The compute hosts' sample the producer shows the panels' RESOURCES from. It is Fleet's own host collector (`compute_hosts.collect`,
+# the sample Fleet's RESOURCES view draws). Reading a host costs the servers an SSH probe, so it is taken only for a display that draws it:
+#  * only while a side panel that draws RESOURCES has asked (`note_resources_wanted`; a status line alone, a bottom panel or no panel
+#    asks nothing, and then no host is read);
+#  * at most once in RESOURCE_SAMPLE_S, whatever the number of windows (one producer), by a pass that is already running, in one
+#    short-lived thread the pass never waits for: the pass uses the last sample it has, so a panel's refresh is never held behind a slow host;
+#  * not at all while Fleet is open: Fleet reads the hosts every ten seconds and leaves each sample for the producer
+#    (`share_resource_sample`), which uses a sample younger than RESOURCE_SAMPLE_S, whoever took it, before it reads a host itself.
+RESOURCE_SAMPLE_S = 60.0
+RESOURCE_WANT_S, _RESOURCE_WANT_TOUCH_S = 90.0, 20.0
+_RESOURCE_SHARED_MAX = 1 << 20
+# `on` is set by the resident producer's own loop alone: a refresh anywhere else (a test, a one-shot) reads no host.
+_resources = {"started": 0.0, "at": 0.0, "snapshot": None, "thread": None, "on": False}
+
+
+def note_resources_wanted(now=None):
+    """A side panel that draws RESOURCES asks for the host sample: the marker's time, touched at most every ``_RESOURCE_WANT_TOUCH_S``."""
+    now = time.time() if now is None else now
+    try:
+        root = state_root()
+        marker = root / ".resources-wanted"
+        try:
+            if 0 <= now - marker.lstat().st_mtime < _RESOURCE_WANT_TOUCH_S:
+                return
+        except OSError:
+            pass
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(marker, os.O_CREAT | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            os.utime(fd, (now, now))
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def _resources_wanted(now):
+    """Whether a side panel asked for the host sample within ``RESOURCE_WANT_S``."""
+    try:
+        info = (state_root() / ".resources-wanted").lstat()
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and 0 <= now - info.st_mtime < RESOURCE_WANT_S
+
+
+def share_resource_sample(snapshot):
+    """Leave a host sample Fleet took for the producer (it reads a sample younger than ``RESOURCE_SAMPLE_S`` instead of its own probe)."""
+    if not isinstance(snapshot, dict) or snapshot.get("error") or not isinstance(snapshot.get("hosts"), list):
+        return
+    try:
+        _write(state_root() / "resource-sample.json", {"at": time.time(), "snapshot": snapshot})
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def _shared_resource_sample():
+    """``(snapshot, at)`` of the sample Fleet left, or None."""
+    try:
+        path = state_root() / "resource-sample.json"
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > _RESOURCE_SHARED_MAX:
+            return None
+        value = json.loads(path.read_text(encoding="utf-8"))
+        at, snapshot = value["at"], value["snapshot"]
+        if isinstance(at, bool) or not isinstance(at, (int, float)) or not isinstance(snapshot, dict):
+            return None
+        return snapshot, float(at)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _resource_sample(now):
+    """``(snapshot, sampled_at)`` of the last compute-host sample, and a new one started in a thread when none is younger than
+    ``RESOURCE_SAMPLE_S`` (the sample Fleet left counts)."""
+    shared = _shared_resource_sample()
+    if shared is not None and _resources["at"] < shared[1] <= now + 5:
+        _resources.update(snapshot=shared[0], at=shared[1])
+    thread = _resources["thread"]
+    if (thread is None or not thread.is_alive()) and now - max(_resources["started"], _resources["at"]) >= RESOURCE_SAMPLE_S:
+        _resources["started"] = now
+
+        def run():
+            try:
+                from tools.fleet.collectors import compute_hosts
+                _resources.update(snapshot=compute_hosts.collect(timeout=20.0), at=time.time())
+            except Exception:
+                pass
+        _resources["thread"] = threading.Thread(target=run, name="resource-sample", daemon=True)
+        _resources["thread"].start()
+    return _resources["snapshot"], _resources["at"]
+
+
+def _clipped(value, limit):
+    """``value`` as text within ``limit`` characters, a longer one ending in ``…`` (never cut without the mark)."""
+    value = str(value)
+    return value if len(value) <= limit else value[:limit - 1] + "…"
+
+
+def resources_view(snapshot, sampled_at, index):
+    """The sample as the panels draw it, from the pass's own session records (``index``: the numbers of the sessions that hold a GPU)."""
+    if not isinstance(snapshot, dict) or snapshot.get("error") or not isinstance(snapshot.get("hosts"), list):
+        return {}
+    from tools.fleet.explorer.live import _host_records
+    _labels, compute = _host_records({"compute_hosts": snapshot}, index)
+    hosts = []
+    for name, base, cpu, mem, _swap, gpus in compute[:_RESOURCE_HOSTS]:
+        hosts.append({"name": _clipped(name, 32), "self": bool(base),
+                      "cpu": round(cpu[0] * 100 / cpu[1]) if cpu and cpu[1] else None,
+                      "mem": round(mem[0] * 100 / mem[1]) if mem and mem[1] else None,
+                      "gpus": [{"i": int(g[0]), "busy": g[1] == "working", "util": g[4], "used": g[5], "total": g[6],
+                                "users": [_clipped(t, 32) for t in g[7][:4]]}
+                               for g in gpus[:_RESOURCE_GPUS] if g[0] is not None]})
+    return _valid_resources({"observed_at": sampled_at, "hosts": hosts})
+
+
 def publish_cache(result: dict) -> bool:
     """Publish private and question-free Fleet views atomically per projection."""
     if not isinstance(result, dict) or not isinstance(result.get("items"), list):
@@ -907,7 +1431,9 @@ def publish_cache(result: dict) -> bool:
                 if ref is not None:
                     row[key] = ref
         items.append(row)
-        if harness and sid and not item.get("stale"):
+        # A blocked owner is its parent agent's to answer (``person_wait``): its route row says
+        # it waits, no session's question block or count does. The private board keeps it.
+        if harness and sid and not item.get("stale") and person_wait(item):
             key = str(harness) + "\0" + str(sid)
             by_session.setdefault(key, []).append(str(item.get("id") or ""))
     counts = wait_counts(items)
@@ -924,7 +1450,11 @@ def publish_cache(result: dict) -> bool:
              "items": items, "by_session": by_session,
              "route_status": result.get("route_status", {}),
              "route_panels": panels,
+             "session_doers": _valid_doers(result.get("session_doers")),
+             "session_peers": _valid_peers(result.get("session_peers")),
+             "resources": _valid_resources(result.get("resources")),
              "route_sessions": result.get("route_sessions", []),
+             "reconnect_aware": True,   # absent from an older release's cache (see `_replace_older_producer`)
              "unattributed": [item.get("id") for item in items
                               if item.get("attribution") == "unattributed" and not item.get("stale")],
              "health": [{"source": row.get("source"), "state": row.get("state")}
@@ -975,9 +1505,12 @@ def publish_cache(result: dict) -> bool:
                                   for row in result.get("health", ()) if isinstance(row, dict)]}
         with _cache_write_lock():
             previous = _read_cache_file()
+            if previous and previous.get("closed_questions"):
+                value["closed_questions"] = previous["closed_questions"]
             selected = previous.get("selected_responses", {}) if previous else {}
             if not _valid_selected_overlay(selected):
                 return False
+            removed = set()
             if selected:
                 value["selected_responses"] = selected
                 # A producer may briefly see an old native sidecar after its
@@ -998,19 +1531,57 @@ def publish_cache(result: dict) -> bool:
                             and all(identity.get(key) == row.get(key)
                                     for key in ("turn_id", "item_id")))
                 removed = {row["id"] for row in items if answered(row)}
-                if removed:
-                    value["items"] = [row for row in items if row["id"] not in removed]
-                    value["by_session"] = {key: [ref for ref in refs if ref not in removed]
-                                           for key, refs in by_session.items()
-                                           if any(ref not in removed for ref in refs)}
-                    fleet_value["items"] = [row for row in fleet_value["items"]
-                                            if row["id"] not in removed]
-                    counts = wait_counts(value["items"])
-                    for projection in (value, fleet_value):
-                        projection.update(counts)
-                        projection["unattributed"] = [ref for ref in projection["unattributed"]
-                                                       if ref not in removed]
-                    value["stale_total"] = value["older"]
+            # A registered question read by this pass may have been answered (or replaced by its
+            # session's next one) before this write. Its exact source, read under this same lock
+            # that its completion takes, decides (review 1597-1): open stays, even with its id in
+            # the completions (the same id registered again, review 1597-r4), ended leaves. Only
+            # a source that could not be read falls back on the completions (review 1597-r3): a
+            # settled id stays out; any other keeps what the collection read, and the publication
+            # says it is incomplete (review 1597-r2). A completion row leaves once a pass that
+            # started after it is published: that pass read the source after it.
+            settled_waits = _settled_waits(previous)
+            settled_ids = {row["id"] for row in settled_waits}
+            read_open = set()
+            unread = False
+            for item in result["items"]:
+                if isinstance(item, dict) and item.get("source") == "S4" and item.get("id"):
+                    source_state = _message_source_state(item)
+                    if source_state == "ended":
+                        removed.add(item["id"])
+                    elif source_state == "open":
+                        read_open.add(item["id"])
+                    elif item["id"] in settled_ids:
+                        removed.add(item["id"])
+                    elif source_state == "unread":
+                        unread = True
+            removed |= {row["id"] for row in items
+                        if row["id"] in settled_ids and row["id"] not in read_open}
+            kept_settled = [row for row in settled_waits
+                            if row["at"] >= observed_at and row["id"] not in read_open]
+            if kept_settled:
+                value["settled_waits"] = kept_settled[-_SETTLED_WAITS_MAX:]
+            if unread:
+                for projection in (value, fleet_value):
+                    projection["complete"] = False
+                    projection["health"] = [*projection["health"], {"source": "S4", "state": "unknown"}]
+            if removed:
+                value["items"] = [row for row in items if row["id"] not in removed]
+                value["by_session"] = {key: [ref for ref in refs if ref not in removed]
+                                       for key, refs in by_session.items()
+                                       if any(ref not in removed for ref in refs)}
+                fleet_value["items"] = [row for row in fleet_value["items"]
+                                        if row["id"] not in removed]
+                counts = wait_counts(value["items"])
+                for projection in (value, fleet_value):
+                    projection.update(counts)
+                    projection["unattributed"] = [ref for ref in projection["unattributed"]
+                                                   if ref not in removed]
+                value["stale_total"] = value["older"]
+            # An answer the person sent and that still travels (rule 5, 11-14): listed, uncounted.
+            sent = _answers_in_transit(selected, observed_at)
+            if sent:
+                _mark_answers(value, sent)
+                _mark_answers(fleet_value, sent, private=False)
             if not _write_cache_value(value):
                 return False
             _write(_fleet_cache_path(), fleet_value)
@@ -1089,8 +1660,8 @@ def cached_fleet_view(*, now=None, request=True):
     return value
 
 
-def cached_view(*, now=None, request=True):
-    value = _read_cache(now=now)
+def cached_view(*, now=None, request=True, max_age=_DISPLAY_TTL):
+    value = _read_cache(now=now, max_age=max_age)
     if request:
         observed = value.get("observed_at") if value else None
         if observed is None or (time.time() if now is None else float(now)) - float(observed) > _REQUEST_TTL:
@@ -1103,6 +1674,9 @@ def cached_view(*, now=None, request=True):
             "stale_total": value.get("stale_total", 0), "unattributed": value.get("unattributed", []),
             "health": value.get("health", []), "complete": bool(value.get("complete")),
             "route_panels": value.get("route_panels", {}),
+            "session_doers": _valid_doers(value.get("session_doers")),
+            "session_peers": _valid_peers(value.get("session_peers")),
+            "resources": _valid_resources(value.get("resources")),
             "observed_at": value["observed_at"]}
 
 
@@ -1206,20 +1780,32 @@ def _valid_selected_overlay(value):
     return True
 
 
-def _selected_entry(envelope):
+def _selected_lookup(envelope):
+    """(entry or None, known). ``known`` is False when a claim record may exist
+    but could not be read; only an absent or readable record confirms "none"."""
     identity = _selected_identity(envelope)
     if identity is None:
-        return None
+        return None, True
     projection = _read_cache_file()
     if projection is None:
-        return None
+        try:
+            os.lstat(_cache_path())
+        except FileNotFoundError:
+            return None, True
+        except OSError:
+            pass
+        return None, False
     overlay = projection.get("selected_responses", {})
     if not _valid_selected_overlay(overlay):
-        return None
+        return None, False
     entry = overlay.get(_selected_entry_key(identity))
     if not entry or entry.get("identity") != identity:
-        return None
-    return dict(entry)
+        return None, True
+    return dict(entry), True
+
+
+def _selected_entry(envelope):
+    return _selected_lookup(envelope)[0]
 
 
 def _store_selected_entry(envelope, entry):
@@ -1291,7 +1877,7 @@ def _store_selected_entry(envelope, entry):
                         entry["draft"] = ""
             overlay[key] = entry
             projection["selected_responses"] = overlay
-            return _write_cache_value(projection)
+            return _write_cache_value(_republish_answer_marks(projection))
     except (OSError, ValueError, TypeError):
         return False
 
@@ -1345,7 +1931,7 @@ def _claim_selected_action(envelope, action_id, response, *, answer_attachment=N
                 return False, None
             overlay[key] = claimed
             projection["selected_responses"] = overlay
-            if not _write_cache_value(projection):
+            if not _write_cache_value(_republish_answer_marks(projection)):
                 return False, None
             return True, dict(claimed)
     except (OSError, ValueError, TypeError):
@@ -1369,7 +1955,7 @@ def _release_unsubmitted_selected_action(envelope, action_id, result):
             entry.pop(name, None)
         overlay[key] = entry
         projection["selected_responses"] = overlay
-        return _write_cache_value(projection)
+        return _write_cache_value(_republish_answer_marks(projection))
 
 
 def _proc_start_ticks(pid):
@@ -2326,7 +2912,8 @@ def _workflow_current_item(item_id, source):
     matches = []
     for path in paths:
         try:
-            result = human_gate_observation.read_answer_waits(jobs_paths=(path,))
+            result = human_gate_observation.read_answer_waits(
+                jobs_paths=(path,), only_id=item_id)
         except Exception:
             return None, "workflow-wait-source-unknown"
         # Only the registry/route sources bind an S2/S3 answer; an unobserved native
@@ -2781,11 +3368,18 @@ def _workflow_gate_detail(binding, item):
         if not isinstance(question, dict):
             continue
         options = question.get("options") if isinstance(question.get("options"), list) else []
-        choices = [{"value": option["label"], "label": option["label"],
-                    **({"means": option["means"]} if isinstance(option.get("means"), str)
-                       else {})}
-                   for option in options if isinstance(option, dict)
-                   and isinstance(option.get("label"), str)]
+        choices = []
+        for option in options:
+            if not (isinstance(option, dict) and isinstance(option.get("label"), str)):
+                continue
+            choice = {"value": option["label"], "label": option["label"]}
+            # The card's own words, then the one line the runtime reads from the proposal's structure.
+            means = " ".join(part for part in (
+                option["means"] if isinstance(option.get("means"), str) else "",
+                FI.route_scope_note(interview, question.get("id"), option["label"])) if part)
+            if means or isinstance(option.get("means"), str):
+                choice["means"] = means
+            choices.append(choice)
         entry = {"id": question["id"], "question": question["question"], "choices": choices,
                  # The existing frame answer validator accepts off-menu notes.
                  "is_other": True}
@@ -3145,6 +3739,9 @@ def _selected_envelope(base, resolved):
                 envelope["state"] = entry["state"]
             if entry.get("action_id"):
                 envelope["action_id"] = entry["action_id"]
+        # What the person sent, for their own panel's one line while it travels (rule 5).
+        if envelope["state"] in _ANSWER_IN_TRANSIT and isinstance(entry.get("response"), dict):
+            envelope["sent"] = entry["response"]
     if envelope["state"] == "open" and support:
         envelope["actions"] = _selected_actions(kind, envelope.get("detail"), native_ref)
     else:
@@ -3611,11 +4208,14 @@ def _native_response_error(envelope, portable):
             if not isinstance(question, dict):
                 return "workflow-gate-question-invalid"
             values = answers.get(question.get("id"))
-            if not isinstance(values, list) or len(values) != 1:
+            mixed = detail.get("response_mode") == "frame-interview" and question.get("is_other") is True
+            if not isinstance(values, list) or len(values) not in ({1, 2} if mixed else {1}):
                 return "workflow-gate-answer-count-invalid"
             choices = question.get("choices")
             allowed = {choice.get("value", choice.get("label")) for choice in choices
                        if isinstance(choice, dict)} if isinstance(choices, list) else set()
+            if len(values) == 2 and values[0] not in allowed:
+                return "workflow-gate-answer-not-current-option"
             if values[0] not in allowed and question.get("is_other") is not True:
                 return "workflow-gate-answer-not-current-option"
         return None
@@ -3661,6 +4261,21 @@ def _native_response_error(envelope, portable):
     return None
 
 
+def _frame_interview_answers(detail, interview, answers):
+    """Keep the selected value and its note in the frame's existing answer fields."""
+    import frame_interview as FI
+    asked = []
+    for question in detail.get("questions", ()):
+        values = answers.get(question.get("id"))
+        if not isinstance(values, list) or len(values) not in {1, 2}:
+            return None
+        options = [choice.get("label", choice.get("value"))
+                   for choice in question.get("choices", ()) if isinstance(choice, dict)]
+        asked.append({"question": question.get("question"), "options": options,
+                      "answer": values[0], **({"note": values[1]} if len(values) == 2 else {})})
+    return FI.answers_from_native(interview, asked)
+
+
 def _workflow_gate_submit(envelope, portable, action_id):
     """Submit a current person's explicit S2 decision through the normal release CLI."""
     base, error = _selected_base(envelope)
@@ -3699,16 +4314,7 @@ def _workflow_gate_submit(envelope, portable, action_id):
     elif mode == "frame-interview":
         import frame_interview as FI
 
-        asked = []
-        for question in current["detail"].get("questions", ()):
-            values = answers.get(question.get("id"))
-            if not isinstance(values, list) or len(values) != 1:
-                return "unknown", {"reason": "workflow-interview-answer-incomplete"}
-            options = [choice.get("label", choice.get("value"))
-                       for choice in question.get("choices", ()) if isinstance(choice, dict)]
-            asked.append({"question": question.get("question"), "options": options,
-                          "answer": values[0]})
-        answers_file_value = FI.answers_from_native(current["interview"], asked)
+        answers_file_value = _frame_interview_answers(current["detail"], current["interview"], answers)
         if (not isinstance(answers_file_value, dict)
                 or FI.validate_answers(current["interview"], answers_file_value)):
             return "unknown", {"reason": "workflow-interview-answer-invalid"}
@@ -3766,12 +4372,41 @@ def _workflow_gate_submit(envelope, portable, action_id):
         if verified["state"] != "applied":
             return "unknown", {"reason": verified.get("reason") or
                                 "workflow-release-source-transition-unconfirmed"}
+        if mode == "frame-interview":
+            _frame_answer_notice(item, binding["route_path"], jobs, receipt)
         return "applied", receipt
     except (OSError, subprocess.TimeoutExpired) as exc:
         return "unknown", {"reason": "workflow-release-command-ambiguous:" + type(exc).__name__}
     finally:
         if temp_dir is not None:
             temp_dir.cleanup()
+
+
+def _frame_answer_notice(item, route_path, jobs, receipt):
+    """The board answered a frame interview and release started no owner: tell the session that opened the route.
+
+    That session ended its turn at the question; the answer arrives on the board, not in
+    its conversation. It gets one ordinary notice (the path a question's answer takes)
+    carrying `resume_command`, which renders the intent and starts the owner. Nothing is sent
+    when release already continued an owner. Best effort: the gate is already released."""
+    try:
+        continued = receipt.get("owner_continuation")
+        if isinstance(continued, dict) and continued.get("state") != "not-started":
+            return None
+        owner = item.get("owner") or {}
+        harness, session_id = owner.get("harness"), owner.get("session_id")
+        if not harness or not session_id:
+            return None
+        import session_notice
+        from parent_next_directive import resume_command
+        resume = resume_command(route_path, jobs, agent_home=Path(__file__).resolve().parents[1])
+        return session_notice.notify(
+            harness, session_id, key="frame-answer:" + item["id"], subject="Frame question answered",
+            text=f"The person answered the frame question on the board. Run this to continue; "
+                 f"it renders the intent and starts the owner: {resume}",
+            required_action="run-resume-command", jobs=jobs)
+    except Exception:  # noqa: BLE001 -- the release stands; the person can still tell the session
+        return None
 
 
 def _workflow_owner_submit(envelope, portable, action_id):
@@ -4125,6 +4760,9 @@ def cached_statusline(harness, session_id):
     label = routes.get(key, "") if isinstance(routes, dict) else ""
     if not isinstance(label, str) or len(label) > 256 or any(ord(c) < 32 or ord(c) == 127 for c in label):
         label = ""
+    # An earlier release wrote ``⏳ route N``; it reads as ``route N`` until rewritten.
+    if label.startswith("⏳ route "):
+        label = label[2:]
     return (total, count), label
 
 
@@ -4168,7 +4806,7 @@ def _request_producer(harness=None, session_id=None):
         root_meta = os.lstat(root)
         if not stat.S_ISDIR(root_meta.st_mode) or root_meta.st_uid != os.getuid():
             return
-        os.chmod(root, 0o700)
+        _chmod_private(root, 0o700, root_meta)
         marker = root / ".demand"
         demand_lock = os.open(root / ".demand.lock", os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:
@@ -4181,6 +4819,7 @@ def _request_producer(harness=None, session_id=None):
                 age = time.time() - marker.stat().st_mtime
             except OSError:
                 age = _REQUEST_TTL
+            recorded = False
             demands = _route_demands() if harness and session_id else None
             key = str(harness) + "\0" + str(session_id)
             changed = demands is not None and time.time() - demands.get(key, 0) >= _REQUEST_TTL
@@ -4188,6 +4827,7 @@ def _request_producer(harness=None, session_id=None):
                 demands[key] = time.time()
                 demands = dict(sorted(demands.items(), key=lambda item: item[1], reverse=True)[:_ROUTE_DEMAND_LIMIT])
                 _write(marker, demands)
+                recorded = True
             elif age >= _REQUEST_TTL:
                 marker.touch(exist_ok=True)
                 marker.chmod(0o600)
@@ -4196,9 +4836,30 @@ def _request_producer(harness=None, session_id=None):
         now = time.time()
         cache = _read_cache(now=now)
         fresh = cache is not None and now - float(cache["observed_at"]) <= _REQUEST_TTL
-        if not fresh or changed:
-            _ensure_producer()
+        if (not fresh or changed) and not _ensure_producer() and fresh and recorded:
+            _replace_older_producer(cache)
     except OSError:
+        return
+
+
+def _replace_older_producer(cache):
+    """Ask the install-time handoff, detached (a render never waits), to replace an older release's producer.
+
+    Its proof is unchanged: it signals only the one same-user, same-state, same-install producer that
+    holds the lock and is not already the installed release.
+    """
+    if cache.get("reconnect_aware") is True:   # an older release builds the cache afresh, without this key
+        return
+    try:
+        import peer_obligations
+        root = Path(__file__).resolve().parents[1]
+        if peer_obligations.installed_release(root=root) != root:   # only a window of the installed release asks
+            return
+        end_with_test(subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--reconnect-cache"],
+                         env={**os.environ, "AGENT_HOME": str(root), "PYTHONDONTWRITEBYTECODE": "1"},
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         close_fds=True, start_new_session=True))
+    except (OSError, subprocess.SubprocessError, ImportError):
         return
 
 
@@ -4208,7 +4869,7 @@ def _ensure_producer():
     root_meta = os.lstat(root)
     if not stat.S_ISDIR(root_meta.st_mode) or root_meta.st_uid != os.getuid():
         return False
-    os.chmod(root, 0o700)
+    _chmod_private(root, 0o700, root_meta)
     fd = os.open(root / ".projection.lock", os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
     os.fchmod(fd, 0o600)
     try:
@@ -4243,10 +4904,12 @@ def _cache_release_committed(code_root, observers):
 
 
 def reconnect_cache_producer(*, wait_for_commit=False):
-    """Install-time handoff through the existing managed observer lifecycle.
+    """Handoff through the existing managed observer lifecycle.
 
-    Ordinary render requests never call this. No new process ownership record
-    is needed: the existing private state root and actual flock identify duty.
+    The installer calls it after an install, and a window's request calls it
+    (`_replace_older_producer`); both run it in a detached child, so a render
+    never waits here. No new process ownership record is needed: the existing
+    private state root and actual flock identify duty.
     """
     import peer_obligations as observers
     code_root = Path(__file__).resolve().parents[1]
@@ -4348,6 +5011,35 @@ def _reconnect_locked_cache_producer(root, lock, binding, code_root, observers):
     return _ensure_producer()
 
 
+_SESSION_DOERS = 64
+
+
+def session_doers(snapshot):
+    """``{"<harness>\\0<session id>": {"model", "effort"}}`` (and, merged in after, ``"repo"``) for the sessions a refresh pass already
+    interpreted (each id the session answers to), bounded; a value it does not know is left out."""
+    doers = {}
+    for session in getattr(snapshot, "sessions", None) or ():
+        harness = getattr(session, "harness", None)
+        if harness not in {"claude", "codex", "opencode"}:
+            continue
+        value = {}
+        for name, limit in (("model", 64), ("effort", 16)):
+            found = getattr(session, name, None)
+            if isinstance(found, str) and 0 < len(found) <= limit and found.isprintable():
+                value[name] = found
+        if not value:
+            continue
+        for sid in (getattr(session, "session_id", None), *(getattr(session, "session_aliases", None) or ())):
+            if isinstance(sid, str) and _safe_native_ref(sid) == sid and len(doers) < _SESSION_DOERS:
+                doers[harness + "\0" + sid] = value
+    return doers
+
+
+def _bounded(value):
+    """At most as many keys as the cache keeps (`_valid_doers`, `_valid_peers`): a longer map would leave every panel with none."""
+    return dict(list(value.items())[:_SESSION_DOERS]) if isinstance(value, dict) else {}
+
+
 def _refresh_cache() -> bool:
     """Run one observational refresh. Caller owns the single-flight lock."""
     try:
@@ -4362,19 +5054,42 @@ def _refresh_cache() -> bool:
         result["route_sessions"] = demands
         result["route_status"] = {}
         result["route_panels"] = {}
+        wake_snapshot = None
         if demands:
             try:
                 # Share registry generations with the answer-wait pass, and interpret
                 # only the native sessions the displays actually requested.
                 from tools.fleet.collectors import collect_all
-                from tools.fleet.explorer.live import session_route_status
+                # The shared line helper adds each route row's job values from this
+                # same snapshot and counts their states in the label.
+                from tools.fleet.session_line import session_route_status
                 requested = [tuple(key.split("\0", 1)) for key in demands]
                 snapshot = collect_all(harness_filter={h for h, _ in requested},
                                        route_sessions=requested, include_report_verification=False)
+                wake_snapshot = snapshot
                 if snapshot.observations.get("basic", {}).get("all_new") is True:
-                    labels, panels = session_route_status(snapshot, include_details=True)
+                    records = []
+                    labels, panels = session_route_status(snapshot, include_details=True, records_out=records)
                     result["route_status"] = {key: label for key, label in labels.items() if key in demands}
                     result["route_panels"] = {key: panel for key, panel in panels.items() if key in demands}
+                    # The displayed sessions' own model and effort from this same pass: a panel names
+                    # the other session of a peer request with them (no second read or collection).
+                    result["session_doers"] = session_doers(snapshot)
+                    if records:
+                        # Each session's repository name as Fleet writes it (a request line names the other session's).
+                        from tools.fleet.explorer.live import session_repos
+                        for key, repo in session_repos(records[0]).items():
+                            if (key in result["session_doers"] or len(result["session_doers"]) < _SESSION_DOERS) and 0 < len(repo) <= 64 and repo.isprintable():
+                                result["session_doers"][key] = {**result["session_doers"].get(key, {}), "repo": repo}
+                    # Who supervises whom (the steward records this pass already holds): the panel's PEERS line.
+                    # (The session records the pass worked out for the route rows are used again, not worked out twice.)
+                    from tools.fleet.explorer.live import session_peers
+                    result["session_peers"] = _bounded(session_peers(snapshot, records=records[0] if records else None))
+                    # The compute hosts' last sample (the resident producer's loop only, and only while a side panel that draws RESOURCES
+                    # asks for it; a one-shot refresh has none): CPU, memory and each GPU's use.
+                    if _resources["on"] and records and _resources_wanted(time.time()):
+                        sample, sampled_at = _resource_sample(time.time())
+                        result["resources"] = resources_view(sample, sampled_at, records[0][1])
             except Exception:
                 pass  # route observation failure must not discard answer waits
         if not publish_cache(result):
@@ -4383,11 +5098,29 @@ def _refresh_cache() -> bool:
             publish_cache(failure)
             return False
         _notify_result(result)
+        if _producer_root is not None:
+            _remember_wake_sources(wake_snapshot)
         return True
     except Exception:
         publish_cache({"items": [], "complete": False, "observed_at": time.time(),
                        "health": [{"source": "producer", "state": "unknown"}]})
         return False
+    finally:
+        if _producer_root is not None:
+            _release_memory()
+
+
+def _release_memory():
+    """Hand the pass's freed heap back to the OS; the parse caches stay warm.
+
+    A pass frees hundreds of MiB of transient parse objects that glibc otherwise
+    keeps mapped for the producer's lifetime (measured: ~35 MiB per pass, 3 ms).
+    """
+    try:
+        import ctypes
+        ctypes.CDLL(None).malloc_trim(0)
+    except (OSError, AttributeError, ImportError, TypeError):
+        pass
 
 
 def _claim_notification(item_id: str, boundary: str):
@@ -4580,15 +5313,294 @@ def _notification_delay(items, now, *, enabled):
     return min(deadlines) if deadlines else None
 
 
+def _registry_paths():
+    try:
+        project_root = str(Path(__file__).resolve().parents[1])
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        from tools.fleet.collectors import dispatch
+        return tuple(dispatch.human_gate_registry_paths())
+    except Exception:
+        return None
+
+
+def _stat_row(path):
+    try:
+        info = os.stat(path)
+        return (str(path), info.st_ino, info.st_size, info.st_mtime_ns)
+    except OSError:
+        return (str(path), None)
+
+
+def _registry_generation():
+    """The dispatch registries' (inode, size, mtime): a route start, stage or close writes them."""
+    paths = _registry_paths()
+    if paths is None:
+        return None
+    return tuple(_stat_row(path) for path in paths)
+
+
+# Wake sources (the producer process only). _NEXT_WAKE is what the last pass learned to watch;
+# _WATCH_STAT is the part of it a stat beat must cover (network files, and local ones while the
+# kernel notification is unavailable). _WAKE_EVENTS is one NativeDisplayEvents for the producer's
+# life; it has no timer, only descriptors.
+_WAKE_EVENTS = None
+_WAKE_FAILED = False
+_NEXT_WAKE = None
+_WATCH_STAT = ()
+_LAST_WAKE_REASON = None
+_S4_PREFIXES = tuple("0123456789abcde") + tuple("f" + c for c in "0123456789abcdef")
+_JOB_ENDED = frozenset(("done", "failed", "cancelled", "canceled", "error", "closed"))
+_WAKE_PROCESS_LIMIT = 256
+
+
+def _wake_events():
+    """The producer's one kernel-notification listener, or None when it cannot be had."""
+    global _WAKE_EVENTS, _WAKE_FAILED
+    if _WAKE_EVENTS is None and not _WAKE_FAILED:
+        try:
+            project_root = str(Path(__file__).resolve().parents[1])
+            if project_root not in sys.path:
+                sys.path.insert(0, project_root)
+            from tools.fleet.native_events import NativeDisplayEvents
+            _WAKE_EVENTS = NativeDisplayEvents()
+        except Exception:
+            _WAKE_FAILED = True
+    return _WAKE_EVENTS
+
+
+def _stop_wake_events():
+    global _WAKE_EVENTS, _NEXT_WAKE, _WATCH_STAT
+    events, _WAKE_EVENTS, _NEXT_WAKE, _WATCH_STAT = _WAKE_EVENTS, None, None, ()
+    if events is not None:
+        try:
+            events.stop()
+        except Exception:
+            pass
+
+
+def _existing_directory(path):
+    directory = os.path.dirname(os.path.abspath(str(path)))
+    while directory and not os.path.isdir(directory):
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
+    return directory
+
+
+def _wake_sources(snapshot=None, *, registry_paths=None, route_paths=None):
+    """What the next pass should wake on, from what this pass read.
+
+    Returns ``(local_paths, local_patterns, processes, remote_paths)``: sorted tuples that are a
+    pure function of the inputs (no time, order or counter), so an idle producer computes the
+    same value every pass and the listener is never rebuilt. A path that does not exist yet stays
+    in the list (the listener watches its nearest existing parent); only a process that is no
+    longer the one recorded is left out. ``remote_paths`` are files on a network mount, which are
+    stat'ed instead of watched. Without a snapshot only the registry, the S4 signal directory
+    and the S1 state directories are named.
+    """
+    from claude_process_identity import is_local_path, read_mount_table
+    paths = set(registry_paths if registry_paths is not None else (_registry_paths() or ()))
+    if route_paths is None:
+        try:
+            import human_gate_observation
+            route_paths = human_gate_observation.last_pass_route_paths()
+        except Exception:
+            route_paths = ()
+    paths.update(route_paths)
+    patterns = {(str(state_root()), prefix) for prefix in _S4_PREFIXES}
+    try:
+        project_root = str(Path(__file__).resolve().parents[1])
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        from tools.fleet import interaction
+        root = interaction.state_root()
+        patterns.update((os.path.join(root, harness), "") for harness in ("claude", "codex", "opencode"))
+    except Exception:
+        pass
+    processes = set()
+    if snapshot is not None:
+        from tools.fleet.collectors.procscan import read_proc_start
+        opencode = False
+        for job in tuple(getattr(snapshot, "jobs", ()) or ()):
+            if str(getattr(job, "status", "") or "").lower() in _JOB_ENDED:
+                continue
+            stream = getattr(job, "_transcript_path", None)
+            if stream:
+                paths.add(os.path.abspath(str(stream)))
+            opencode = opencode or getattr(job, "harness", None) == "opencode"
+        if opencode:
+            try:
+                from tools.fleet.collectors import opencode as opencode_collector
+                database = opencode_collector._db()
+                paths.update((database, database + "-wal"))
+            except Exception:
+                pass
+        for item in (*tuple(getattr(snapshot, "jobs", ()) or ()),
+                     *tuple(getattr(snapshot, "sessions", ()) or ())):
+            pid, start = getattr(item, "pid", None), getattr(item, "proc_start", None)
+            if isinstance(pid, int) and pid > 0 and start and read_proc_start(pid) == str(start):
+                processes.add((pid, str(start)))
+        processes = set(sorted(processes)[:_WAKE_PROCESS_LIMIT])
+    local, local_patterns, remote = set(), set(), set()
+    kinds = {}
+    # One read of the mount table serves every directory of this call (a pass names about a
+    # thousand): re-reading and re-matching it per directory was most of a pass. It is read
+    # again on the next call, so a mount change is seen as before.
+    table = read_mount_table()
+
+    def is_local(directory):
+        if directory not in kinds:
+            try:
+                kinds[directory] = bool(is_local_path(directory, mount_table=table))
+            except Exception:
+                kinds[directory] = False
+        return kinds[directory]
+
+    for path in paths:
+        text = str(path)
+        (local if is_local(_existing_directory(text)) else remote).add(text)
+    for directory, prefix in patterns:
+        if is_local(_existing_directory(os.path.join(directory, "x"))):
+            local_patterns.add((directory, prefix))
+        else:
+            remote.add(directory)
+    return (tuple(sorted(local)), tuple(sorted(local_patterns)),
+            tuple(sorted(processes)), tuple(sorted(remote)))
+
+
+def _remember_wake_sources(snapshot=None):
+    """Keep what the pass just read as the next pass's wake sources (never raises)."""
+    global _NEXT_WAKE, _WATCH_STAT
+    try:
+        _NEXT_WAKE = _wake_sources(snapshot)
+        events = _WAKE_EVENTS
+        stat_paths = set(_NEXT_WAKE[3])
+        if events is not None and not events.available:
+            stat_paths.update(_NEXT_WAKE[0])
+            stat_paths.update(directory for directory, _prefix in _NEXT_WAKE[1])
+        _WATCH_STAT = tuple(sorted(stat_paths))
+    except Exception:
+        pass
+
+
+def _arm_wake_events():
+    """Install the wake sources the last pass chose, before the next pass reads anything.
+
+    The listener's setup raises one post-registration "changed" for a write that landed
+    between the last read and the watch. This pass reads after the setup, so that write is read
+    anyway; the flag is cleared here so the setup itself never starts another pass (an idle
+    producer would otherwise run one every gap). The same sources need no setup at all.
+    """
+    global _LAST_WAKE_REASON
+    events = _wake_events()
+    if events is None:
+        return
+    try:
+        local_paths, local_patterns, processes, _remote = _NEXT_WAKE or _wake_sources(None)
+        events.configure(local_paths, local_patterns, processes)
+        if events.ready.wait(1.0):
+            events.take_changed()
+        else:
+            _LAST_WAKE_REASON = "rebuild-late"
+    except Exception:
+        pass
+
+
+def _source_generation():
+    """Registry generation plus the stat'ed wake files (network, or all while unwatched)."""
+    registry = _registry_generation()
+    return tuple(registry or ()) + tuple(_stat_row(path) for path in _WATCH_STAT)
+
+
+def _sleep_until_registry_change(delay, generation, ready_at):
+    """Sleep `delay` seconds, or less once a watched source changed.
+
+    A route's start, stage change and close, a worker's tool call, an answer-wait
+    signal and an owner's exit all end the sleep: local sources by kernel notification
+    (no timer), the registry and network files by a stat every second compared with
+    `generation`. The pass that follows still reads everything; the 30 second cadence
+    stays as the fallback. A change is honoured no earlier than `ready_at`, so a source
+    that keeps changing gets at most one pass per pass duration.
+    """
+    global _LAST_WAKE_REASON
+    events = _wake_events()
+    if events is None and (not generation or all(len(row) == 2 for row in generation)):
+        time.sleep(delay)   # nothing to watch yet: the cadence alone
+        _LAST_WAKE_REASON = "cadence"
+        return
+    deadline = time.monotonic() + delay
+    while True:
+        now = time.monotonic()
+        if now >= deadline:
+            _LAST_WAKE_REASON = "cadence"
+            return
+        step = min(_REGISTRY_WAKE_SECONDS, deadline - now)
+        woke = False
+        if events is not None:
+            woke = events.wait_changed(step)
+        else:
+            time.sleep(step)
+        if woke:
+            _LAST_WAKE_REASON = "event"
+        elif generation and _source_generation() != generation:
+            _LAST_WAKE_REASON = "stat"
+        else:
+            continue
+        remaining = ready_at - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(remaining, max(0.0, deadline - time.monotonic())))
+        return
+
+
+def _timed_refresh():
+    """Run one pass; return the source generation it read and its duration."""
+    _arm_wake_events()
+    previous = _WATCH_STAT
+    registry = _registry_generation()
+    before = {row[0]: row for row in map(_stat_row, previous)}
+    began = time.monotonic()
+    _refresh_cache()
+    duration = time.monotonic() - began
+    # A file the pass newly learned of is stamped now; every other keeps the stamp taken before
+    # the pass read it, so a write during the pass is still a change.
+    rows = tuple(before.get(path) or _stat_row(path) for path in _WATCH_STAT)
+    generation = tuple(registry or ()) + rows
+    return (generation or None), duration
+
+
+def _follow_installed_release(fd: int) -> None:
+    """Hand the shared producer to the installed release in place (OPERATIONS §5.9a).
+
+    The producer keeps the code of the window that started it. Where nothing is
+    half done, it becomes the same script of the installed release under the
+    same PID, so the held single-flight lock stays held. A steady release only
+    reads the pointer; anything undecidable keeps this code.
+    """
+    try:
+        from parent_next_directive import release_moved
+        if not release_moved(Path(__file__).resolve().parents[1]):
+            return
+        import peer_obligations
+        os.set_inheritable(fd, True)  # the flock descriptor survives exec under the same number
+        peer_obligations.follow_installed_release(__file__, ["--refresh-cache", "--lock-fd", str(fd)])
+    except Exception:  # noqa: BLE001 -- a failed move keeps refreshing with this code
+        pass
+
+
 def _producer_loop(fd: int) -> None:
     global _producer_root
     root = state_root()
     _producer_root = root
+    _resources["on"] = True
     try:
         if not root.is_dir():
             return
-        _refresh_cache()
+        _follow_installed_release(fd)
+        generation, duration = _timed_refresh()
         while True:
+            _follow_installed_release(fd)
             now = time.time()
             try:
                 demand = (root / ".demand").stat().st_mtime
@@ -4626,14 +5638,17 @@ def _producer_loop(fd: int) -> None:
             delay = min(30.0, max(1.0, 600.0 - idle))
             if boundary is not None:
                 delay = min(delay, max(1.0, boundary))
-            time.sleep(delay)
+            _sleep_until_registry_change(delay, generation,
+                                         time.monotonic() + max(_REGISTRY_MIN_GAP, duration))
             if not root.is_dir():
                 return
-            _refresh_cache()
+            generation, duration = _timed_refresh()
     except Exception:
         return
     finally:
         _producer_root = None
+        _resources["on"] = False
+        _stop_wake_events()
         try:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)

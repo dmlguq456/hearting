@@ -6,14 +6,16 @@
 // the exact session id before its own SDK check; this entry publishes nothing
 // itself: no identity report, no peer write, no client calls. Routes without
 // a selected session (home, custom, unknown) and teardown remove the record,
-// so a blank home never claims an identity.
+// so a blank home never claims an identity. Teardown is also the TUI's exit:
+// it clears the selected session's Fleet wait, as Claude's SessionEnd and
+// Codex's TUI-exit watcher (utilities/codex_tui_exit.py) do.
 //
 // Plain JS (no type annotations) so the regression fixture can execute it
 // outside the TUI host; Bun loads it as a target-only module.
 
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
 
 const PLUGIN_ID = "hearting.tui-identity"
@@ -93,6 +95,40 @@ function recordPath(dir, own) {
   return path.join(dir, own.pid + "-" + own.start + ".json")
 }
 
+function heartingRoots() {
+  const home = process.env.HOME || ""
+  const config = process.env.XDG_CONFIG_HOME || path.join(home, ".config")
+  return [process.env.AGENT_HOME,
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.."),
+    path.join(config, "opencode", "hearting")].filter(Boolean)
+}
+
+function clearExitWait(mem) {
+  // The TUI is leaving its selected session: clear that session's Fleet wait
+  // through the existing hook, which owns the record (fleet.interaction). It
+  // runs to completion here because the process exits right after teardown,
+  // and only when tools/fleet/interaction.py sidecar_path names a wait.
+  const sid = cleanSid(String(mem.last || "").replace(/^S:/, ""))
+  if (!sid || !/^[A-Za-z0-9_.-]+$/.test(sid)) return
+  const env = process.env
+  const home = env.HOME || ""
+  const base = env.FLEET_INTERACTION_STATE_DIR || path.join(env.XDG_STATE_HOME
+    || (home ? path.join(home, ".local", "state") : ""), "agent-fleet", "interactions")
+  try {
+    if (!path.isAbsolute(base) || !existsSync(path.join(base, "opencode", sid + ".json"))) return
+  } catch { return }
+  for (const root of heartingRoots()) {
+    const hook = path.join(root, "hooks", "fleet-interaction-state.py")
+    if (!existsSync(hook)) continue
+    try {
+      spawnSync("python3", [hook, "clear", "--harness", "opencode"], {
+        input: JSON.stringify({ session_id: sid, scope: "session" }),
+        stdio: ["pipe", "ignore", "ignore"], timeout: 3000 })
+    } catch {}
+    return
+  }
+}
+
 function reportResumeOnce(mem, sid, own) {
   if (mem.resumeReported) return
   const argv = process.argv || []
@@ -103,12 +139,7 @@ function reportResumeOnce(mem, sid, own) {
       || ["--continue", "--last", "-c"].includes(arg))
   if (!requested) return
   mem.resumeReported = true
-  const home = process.env.HOME || ""
-  const config = process.env.XDG_CONFIG_HOME || path.join(home, ".config")
-  const roots = [process.env.AGENT_HOME,
-    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.."),
-    path.join(config, "opencode", "hearting")].filter(Boolean)
-  for (const root of roots) {
+  for (const root of heartingRoots()) {
     try {
       const script = path.join(root, "utilities", "session_resume.py")
       readFileSync(script, { encoding: "utf8", flag: "r" })
@@ -266,6 +297,7 @@ async function tui(api) {
       try { off() } catch { /* teardown is best-effort */ }
     }
     clearRecord()
+    clearExitWait(mem)
   }
   try {
     api.lifecycle.onDispose(done)
@@ -300,6 +332,7 @@ function setup(api) {
       try { off() } catch { /* teardown is best-effort */ }
     }
     clearRecord()
+    clearExitWait(mem)
   }
   try {
     api.lifecycle.onDispose(done)

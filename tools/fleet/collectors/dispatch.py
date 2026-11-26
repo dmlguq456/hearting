@@ -15,6 +15,7 @@ codex/opencode headless dispatch appears ONLY via jobs.log (their argv has no /a
 live_stage() derives the real pipeline stage from plans/*_<slug>/ artifacts (ported from
 statusline.sh:131-171) so the label reflects live progress, not the static argv.
 """
+import bisect
 import contextlib
 from contextvars import ContextVar
 import functools
@@ -78,7 +79,8 @@ from .. import model
 from ..model import (DONE_AFTERGLOW_MIN, ContextEvidence, DispatchJob,
                      etime_to_min, project_of)
 from ..token_budget import (context_policy_snapshot, context_policy_used_pct,
-                            parse_codex_token_count, telemetry_from_explicit)
+                            opencode_context_tokens, parse_codex_token_count,
+                            telemetry_from_explicit)
 from . import procscan
 from . import parse_cache
 from . import shell_jobs
@@ -92,6 +94,7 @@ _REGISTRY_METADATA_WHITESPACE_RE = re.compile(r"\s")
 _REGISTRY_METADATA_MISSING_EQUALS_RE = re.compile(r"(?:^|,)[^=,]*(?:,|$)")
 _REGISTRY_METADATA_INTERNAL_NAME_RE = re.compile(r"(?:^|,)_name=")
 _REGISTRY_METADATA_WHITESPACE_RUN_RE = re.compile(r"\s+")
+_ASCII_WHITESPACE = " \t\n\v\f\r\x1c\x1d\x1e\x1f"   # the ASCII characters ``\s`` matches
 _MODE = re.compile(r"(?:^|\s)--mode(?:=|\s+)([a-z][a-z0-9-]*(?:/[a-z][a-z0-9-]*)?)")
 _CAPABILITY_MODE = re.compile(r"(?:^|\s)--capability-mode(?:=|\s+)([a-z][a-z0-9-]*)")
 _WORKER_MODE = re.compile(r"(?:^|\s)--worker-mode(?:=|\s+)([a-z][a-z0-9-]*/[a-z][a-z0-9-]*)")
@@ -170,16 +173,13 @@ def _prime_route_display_rows(paths, scope):
         # interpreter Fleet's parent-edge join uses, never through pane/cwd.
         if scope["holders"]:
             from . import _parent_read_context
-            from dispatch_seat_handover import resolve_recipient
+            from dispatch_seat_handover import job_holders
             context = _parent_read_context()
             owners = {}
-            for record in view.answer_wait_owner_candidates():
-                owners[record.completion_metadata().get("attempt_id") or record.order] = record
-            for record in owners.values():
-                if record.order in chosen:
-                    continue
-                answer = resolve_recipient("job-holder", metadata=record.handover_metadata(),
-                                           jobs=path, read_context=context)
+            for attempt_key, record in view.answer_wait_owner_keyed():
+                owners[attempt_key] = record
+            asked = [record for record in owners.values() if record.order not in chosen]
+            for record, answer in zip(asked, job_holders(asked, path, read_context=context)):
                 if (answer.harness, answer.session_id) in scope["holders"]:
                     chosen[record.order] = record
         for record in chosen.values():
@@ -776,6 +776,12 @@ def _registry_metadata_analysis(raw):
     if ("(" in raw or eq_pos < 0
             or (colon_pos >= 0 and colon_pos < eq_pos)):
         return True, ()
+    if raw.isascii() and not any(ch in raw for ch in _ASCII_WHITESPACE):
+        # Pure computation of the string alone: with no whitespace anywhere there is
+        # nothing to clean up, so only "every comma piece has an '='" is left to
+        # decide (a piece without one needs the legacy parser). Non-ASCII text takes
+        # the full path below, whose ``\s`` also matches Unicode spaces.
+        return any("=" not in part for part in raw.split(",")), ()
     whitespace_keys = set()
     for part in raw.split(","):
         field_eq = part.find("=")
@@ -874,6 +880,92 @@ def _index_registry_rows_by_attempt(rows):
     return indexed
 
 
+def _registry_segments_of(path, rows):
+    """``(absolute path, segments)`` of the registry generation ``rows`` was parsed from, or None."""
+    absolute = os.path.abspath(os.fspath(path))
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        rows_key = _PARSED_REGISTRY_PATH_ORDER.get(absolute)
+        if rows_key is None or _PARSED_REGISTRY_ROWS.get(rows_key) is not rows:
+            return None
+        segments = _PARSED_REGISTRY_SEGMENTS.get(rows_key)
+    if not segments or not all(hasattr(segment, "records") and hasattr(segment, "order_start")
+                               for segment in segments):
+        return None
+    return absolute, segments
+
+
+def _index_segment_part(segment_rows):
+    """What ``_build_registry_derived_index`` collects from one segment's rows (immutable values)."""
+    all_by_attempt, latest_by_attempt, children, latest_jobs = {}, {}, {}, {}
+    for registry_order, fields, metadata in segment_rows:
+        attempt_id = metadata.get("attempt_id")
+        if attempt_id:
+            all_by_attempt.setdefault(attempt_id, []).append((fields, metadata))
+            latest_by_attempt[attempt_id] = (registry_order, fields, metadata)
+            parent = metadata.get('parent_attempt_id')
+            if parent:
+                children.setdefault(parent, set()).add(attempt_id)
+        if not "\t".join(fields).strip():
+            continue
+        latest_jobs[attempt_id or fields[4]] = (registry_order, fields, metadata)
+    return ({attempt: tuple(items) for attempt, items in all_by_attempt.items()}, latest_by_attempt,
+            {parent: frozenset(attempts) for parent, attempts in children.items()}, latest_jobs)
+
+
+def _segmented_derived_index(path, rows):
+    """``_build_registry_derived_index(rows)`` from per-segment parts, or None when not usable.
+
+    The same keying as ``_segmented_evidence``: a segment's part is a pure function of its rows, which
+    are a pure function of its ``records`` tuple. Parts merge in file order: later rows win in
+    ``latest_*``, an attempt's rows concatenate, a parent's children union; first-seen order of
+    jobs and attempts is the dict insertion order."""
+    found = _registry_segments_of(path, rows)
+    if found is None:
+        return None
+    absolute, segments = found
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        reusable = _REGISTRY_INDEX_PARTS.get(absolute) or {}
+    current, parts, covered = {}, [], 0
+    for segment in segments:
+        low = bisect.bisect_left(rows, segment.order_start, key=_row_order)
+        high = bisect.bisect_left(rows, segment.order_end, key=_row_order)
+        covered += high - low
+        key = id(segment.records)
+        entry = reusable.get(key) or current.get(key)
+        if entry is None or entry[0] is not segment.records:
+            entry = (segment.records, _index_segment_part(rows[low:high]))
+            _REGISTRY_FOLD_STATS["index_segment_builds"] += 1
+        else:
+            _REGISTRY_FOLD_STATS["index_segment_reuses"] += 1
+        current[key] = entry
+        parts.append(entry[1])
+    if covered != len(rows):
+        return None
+    all_by_attempt, latest_by_attempt, children_by_parent, latest_jobs = {}, {}, {}, {}
+    for part_all, part_latest, part_children, part_jobs in parts:
+        for attempt, items in part_all.items():
+            held = all_by_attempt.get(attempt)
+            all_by_attempt[attempt] = items if held is None else held + items
+        latest_by_attempt.update(part_latest)
+        for parent, attempts in part_children.items():
+            held = children_by_parent.get(parent)
+            children_by_parent[parent] = attempts if held is None else held | attempts
+        latest_jobs.update(part_jobs)
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        _REGISTRY_INDEX_PARTS[absolute] = current
+        while len(_REGISTRY_INDEX_PARTS) > _PARSED_REGISTRY_ROWS_LIMIT:
+            _REGISTRY_INDEX_PARTS.pop(next(iter(_REGISTRY_INDEX_PARTS)))
+    return MappingProxyType({
+        "token": object(),
+        "job_order": tuple(latest_jobs),
+        "latest_jobs": MappingProxyType(latest_jobs),
+        "all_by_attempt": MappingProxyType(all_by_attempt),
+        "attempt_positions": MappingProxyType({attempt: position for position, attempt in enumerate(all_by_attempt)}),
+        "children_by_parent": MappingProxyType(children_by_parent),
+        "latest_by_attempt": MappingProxyType(latest_by_attempt),
+    })
+
+
 def _registry_derived_index(path, rows):
     """Reuse immutable row indexes only while their parsed generation is retained."""
     absolute = os.path.abspath(os.fspath(path))
@@ -890,7 +982,7 @@ def _registry_derived_index(path, rows):
                 return cached
     if key is None:
         return _build_registry_derived_index(rows)
-    index = _build_registry_derived_index(rows)
+    index = _segmented_derived_index(path, rows) or _build_registry_derived_index(rows)
     with _PARSED_REGISTRY_CACHE_LOCK:
         if (key in _PARSED_REGISTRY_ROWS
                 and _PARSED_REGISTRY_ROWS[key] is rows
@@ -942,30 +1034,90 @@ def _build_registry_derived_index(rows):
     })
 
 
+def _row_order(row):
+    return row[0]
+
+
+def _carried_segment_rows(old_rows, old_segments, new_segments):
+    """Converted rows of every new segment whose rows are the very records of an old one.
+
+    A converted row is a pure function of its record and the physical order it stands at, and
+    ``records`` is the identity of a segment's content: a segment object that a rewrite recognised
+    again (``_RegistrySegment.resynced``) is a new object holding the old segment's own ``records``
+    tuple at the same physical orders. So the rows already converted for that range are the rows of
+    that segment now, whatever else the new generation changed. A segment of other records, or the
+    same records at other orders, is not carried; ``by_fields`` of ``_parse_registry_view`` proves
+    those row by row. Returns ``(carried, used)``: the rows by new segment, and the index ranges of
+    ``old_rows`` that were handed over (a row at an order a carried segment owns cannot be the
+    answer for a segment that was not carried).
+
+    The key is ``id(records)``, which names one object only while the old segments are held (and
+    the tuple itself is compared): ``_PARSED_REGISTRY_SEGMENTS`` keeps them for as long as
+    ``old_rows`` is kept.
+    """
+    if not old_rows or not old_segments:
+        return {}, []
+    spans = {}
+    start = 0
+    for segment in old_segments:
+        spans[id(segment.records)] = (start, segment.order_end, segment.records)
+        start = segment.order_end
+    carried, used = {}, []
+    for segment in new_segments:
+        span = spans.get(id(segment.records))
+        if (span is not None and span[2] is segment.records
+                and span[0] == segment.order_start and span[1] == segment.order_end):
+            low = bisect.bisect_left(old_rows, span[0], key=_row_order)
+            high = bisect.bisect_left(old_rows, span[1], key=_row_order)
+            carried[id(segment)] = old_rows[low:high]
+            used.append((low, high))
+    return carried, used
+
+
 def _parse_registry_view(path, view, generation):
     """Adapt already parsed immutable records without splitting the same rows again."""
     absolute = os.path.abspath(os.fspath(path))
     with _PARSED_REGISTRY_CACHE_LOCK:
         previous = _PARSED_REGISTRY_PATH_ORDER.get(absolute)
-        old_rows = (_PARSED_REGISTRY_ROWS.get(previous, ())
-                    if _PARSED_REGISTRY_SOURCES.get(previous) == _registry_parse_sources() else ())
+        current_sources = _PARSED_REGISTRY_SOURCES.get(previous) == _registry_parse_sources()
+        old_rows = _PARSED_REGISTRY_ROWS.get(previous, ()) if current_sources else ()
+        old_segments = _PARSED_REGISTRY_SEGMENTS.get(previous) if current_sources else None
+    carried, carried_ranges = _carried_segment_rows(old_rows, old_segments, view._segments)
     # A replacement carries a new file generation; exact fields still prove
     # an unchanged row conversion, independently of its new physical order.
-    by_fields = {row[1]: row for row in old_rows}
+    by_fields = None
     rows = []
-    for record in view.records:
-        old = (by_fields.get(record.fields)
-               if type(record) is _dispatch_registry_cache.RegistryRecord else None)
-        if old is not None and old[0] == record.order:
-            rows.append(old)
+    for segment in view._segments:
+        held = carried.get(id(segment))
+        if held is not None:
+            rows.extend(held)
+            _REGISTRY_FOLD_STATS["rows_carried_by_segment"] += len(held)
             continue
-        if old is None:
-            metadata = _registry_record_metadata(record)
-            if not isinstance(metadata, RegistryMetadata):
-                metadata = MappingProxyType(metadata)
-        else:
-            metadata = old[2]
-        rows.append((record.order, record.fields, metadata))
+        if by_fields is None:
+            # Only the old rows nobody carried over can answer for a segment that was not carried
+            # (the others stand at the orders of the carried segments).
+            by_fields, start = {}, 0
+            for low, high in sorted(carried_ranges):
+                for row in old_rows[start:low]:
+                    by_fields[row[1]] = row
+                start = high
+            for row in old_rows[start:]:
+                by_fields[row[1]] = row
+            _REGISTRY_FOLD_STATS["by_fields_rows"] += len(by_fields)
+        _REGISTRY_FOLD_STATS["rows_proved_by_fields"] += len(segment.records)
+        for record in segment.records:
+            old = (by_fields.get(record.fields)
+                   if type(record) is _dispatch_registry_cache.RegistryRecord else None)
+            if old is not None and old[0] == record.order:
+                rows.append(old)
+                continue
+            if old is None:
+                metadata = _registry_record_metadata(record)
+                if not isinstance(metadata, RegistryMetadata):
+                    metadata = MappingProxyType(metadata)
+            else:
+                metadata = old[2]
+            rows.append((record.order, record.fields, metadata))
     complete_count = view.line_count - int(view.has_partial_tail)
     malformed = sum(1 for segment in view._segments
                     for _order, line in segment.malformed_lines if line.strip())
@@ -1005,6 +1157,20 @@ def parsed_registry_rows(path):
     generation = None
     view = None
     if lines is None:
+        # Outside a pass the shared view is still the one parse of this file: a
+        # direct caller adapts it like a pass does instead of splitting the text again.
+        try:
+            shared = _dispatch_registry_cache.registry_view(Path(path))
+        except (OSError, ValueError):
+            shared = None
+        if shared is not None:
+            shared_generation = tuple(shared.signature)
+            found, cached = _cached_registry_rows(path, shared_generation)
+            if found:
+                return cached
+            if (shared._prefix_reuse_eligible and not shared.has_partial_tail
+                    and not shared.has_invalid_utf8):
+                return _parse_registry_view(path, shared, shared_generation)
         try:
             source = Path(path)
             before = source.stat()
@@ -1208,6 +1374,31 @@ _NATIVE_TERMINAL_PROOF = _terminal_row_process_alive
 _JOB_SELECTION_CACHE = ProjectionCache(max_entries=32, max_bytes=12 * 1024 * 1024)
 
 
+# What the selection index needs from one job's latest row is a pure function of that row (its
+# fields and parsed metadata) under the PID namespace and the policy functions of the pass. The
+# row tuples of a registry generation come from per-segment parts, so a segment a rewrite did not
+# rebuild still holds the very same tuples: their facts are kept per tuple object (and the tuple
+# is held beside them, so an id that is reused never answers for another row). Nothing that
+# changes with the clock or the processes is kept here: those are read per pass below.
+_SELECTION_FACTS = {"scope": None, "rows": {}}
+_JOB_SELECTION_BYTES_PER_JOB = 450
+
+
+def _selection_facts(fields, meta):
+    status = fields[1]
+    identity = _authoritative_registry_pid(meta)
+    if status in ('open', 'running'):
+        return (identity, True, None, None, None, False, False, False)
+    pid, start, _source = identity
+    pid_entry = (pid, str(start)) if pid and start else None
+    attempt = meta.get('attempt_id') or None
+    stamp = _iso_elapsed_start(fields[0], datetime) if isinstance(fields[0], str) else None
+    dead = bool(_dead_terminal_owner_row(status, meta))
+    dead_dated = dead and stamp is not None and meta.get('intensity') != 'quick'
+    done_dated = not dead and status == 'done' and stamp is not None
+    return (identity, False, pid_entry, attempt, stamp, dead, dead_dated, done_dated)
+
+
 def _job_selection(derived, live_attempt_ids, *, include_stall):
     """Reuse the whole generation's selection index, observing PID/time afresh."""
     if (_COLLECTION_INPUTS.get() is None
@@ -1228,32 +1419,48 @@ def _job_selection(derived, live_attempt_ids, *, include_stall):
             _JOB_SELECTION_CACHE.move_to_end(key)
     if compiled is None:
         fixed, dated, dead_dates, pids, attempts, identities, positions = set(), [], [], {}, {}, {}, {}
+        scope = (namespace, policy)
+        with _PARSED_REGISTRY_CACHE_LOCK:
+            if _SELECTION_FACTS["scope"] != scope:
+                _SELECTION_FACTS["scope"], _SELECTION_FACTS["rows"] = scope, {}
+            known = _SELECTION_FACTS["rows"]
+        kept = {}
         for position, job_key in enumerate(derived['job_order']):
-            _order, fields, meta = derived['latest_jobs'][job_key]
+            latest_row = derived['latest_jobs'][job_key]
+            held = known.get(id(latest_row))
+            if held is None or held[0] is not latest_row:
+                held = (latest_row, _selection_facts(latest_row[1], latest_row[2]))
+                _REGISTRY_FOLD_STATS["selection_fact_builds"] += 1
+            else:
+                _REGISTRY_FOLD_STATS["selection_fact_reuses"] += 1
+            kept[id(latest_row)] = held
+            identity, is_open, pid_entry, attempt, stamp, dead, dead_dated, done_dated = held[1]
             positions[job_key] = position
-            identity = _authoritative_registry_pid(meta)
             identities[job_key] = identity
-            status = fields[1]
-            if status in ('open', 'running'):
+            if is_open:
                 fixed.add(job_key)
                 continue
-            pid, start, _source = identity
-            if pid and start:
-                pids.setdefault(pid, []).append((job_key, str(start)))
-            if meta.get('attempt_id'):
-                attempts.setdefault(meta['attempt_id'], []).append(job_key)
-            stamp = _iso_elapsed_start(fields[0], datetime) if isinstance(fields[0], str) else None
-            if _dead_terminal_owner_row(status, meta):
+            if pid_entry is not None:
+                pids.setdefault(pid_entry[0], []).append((job_key, pid_entry[1]))
+            if attempt:
+                attempts.setdefault(attempt, []).append(job_key)
+            if dead:
                 fixed.add(job_key)
-                if stamp is not None and meta.get('intensity') != 'quick':
+                if dead_dated:
                     dead_dates.append((stamp, position, job_key))
-            elif status == 'done' and stamp is not None:
+            elif done_dated:
                 dated.append((stamp, position, job_key))
+        with _PARSED_REGISTRY_CACHE_LOCK:
+            if _SELECTION_FACTS["scope"] == scope:
+                _SELECTION_FACTS["rows"] = kept
         compiled = dict(fixed=frozenset(fixed), dated=tuple(sorted(dated)),
                         dead_dates=tuple(sorted(dead_dates)), pids=pids, attempts=attempts,
                         identities=identities, positions=positions)
         with _PARSED_REGISTRY_CACHE_LOCK:
-            _JOB_SELECTION_CACHE[key] = compiled
+            # Charged by schema (measured 377 bytes per job at 15,444 jobs) instead of walking
+            # the whole compiled index to size it, which cost as much as building it.
+            _JOB_SELECTION_CACHE.remember(
+                key, compiled, weight=_JOB_SELECTION_BYTES_PER_JOB * len(compiled['positions']) + 8192)
     alive = set()
     for pid in compiled['pids'].keys() & visible:
         start = procscan.read_proc_start(pid)
@@ -1889,7 +2096,8 @@ def _attempt_stall_attention(job):
                 or job.attempt_id not in (receipt.get("monitored_attempt_ids") or [])):
             return None
         import dispatch_supervision
-        if not dispatch_supervision.notice_is_current(record):
+        if not _notice_current_in_pass(dispatch_supervision, record, delivery_id, digest,
+                                       recipient_digest):
             return None
     except (OSError, ValueError, TypeError, KeyError, RuntimeError):
         return None
@@ -1899,6 +2107,30 @@ def _attempt_stall_attention(job):
         "observed_at", "episode_id", "delivery_id", "notice_digest")}
     result["observed_at"] = time.time()
     return result
+
+
+def _notice_current_in_pass(supervision, record, delivery_id, digest, recipient_digest):
+    """One currency verdict per exact delivery record in one collection pass.
+
+    Several monitored attempts point at the same stall delivery. Its receipt
+    (identified by delivery, receipt digest and recipient) is evaluated once
+    per pass; the next pass evaluates it again. A raised verdict is shared too.
+    The verdict is that pass's snapshot (see ``_stall_observation_for_notice``): a display input,
+    never the verdict a carrier or hook acts on, which asks ``notice_is_current`` itself.
+    """
+    from ..pass_scope import cached
+
+    def evaluate():
+        try:
+            return True, supervision.notice_is_current(record)
+        except Exception as exc:  # noqa: BLE001 -- re-raised to every reader below
+            return False, exc
+
+    ok, value = cached(("notice-current", delivery_id, digest, recipient_digest,
+                        record.get("receipt_digest")), evaluate)
+    if not ok:
+        raise value
+    return value
 
 
 def _parent_extinction_rows(paths, parent_ids=None):
@@ -2123,7 +2355,7 @@ def _jobs_path(override=None):
 
 
 def _opencode_config_home():
-    """OpenCode global config home (INSTALL_LAYOUT.md target layout)."""
+    """OpenCode global config home (docs/INSTALL_LAYOUT.md target layout)."""
     return os.path.expanduser("~/.config/opencode")
 
 
@@ -2139,7 +2371,7 @@ def _installed_registry_paths():
     """Installed per-runtime-home dispatch registries that exist as files.
 
     An activated harness install roots its agent home at `<runtime-home>/.harness/`
-    (INSTALL_LAYOUT.md activation record), so that install's SD-49 canonical registry
+    (docs/INSTALL_LAYOUT.md activation record), so that install's SD-49 canonical registry
     is `<runtime-home>/.harness/dispatch/jobs.log`, NOT the maintainer checkout's
     `<agent-home>/.dispatch/jobs.log`. A managed Codex parent therefore registers its
     dispatch children under ~/.codex/.harness/; without reading these, fleet reports
@@ -2227,8 +2459,10 @@ _CLAUDE_SUBAGENT_SCAN_BYTES = 8 * 1024 * 1024
 _CLAUDE_STREAM_CACHE = {}       # path -> ((mtime_ns, size, dev, ino), parsed)
 _CODEX_ATTEMPT_CACHE = {}       # path -> ((mtime_ns, size, dev, ino), parsed)
 _OPENCODE_ATTEMPT_CACHE = {}    # path -> ((mtime_ns, size, dev, ino), parsed)
-# Every registry attempt is re-observed each tick, so the FIFO bound must exceed the
-# attempt count; a smaller bound evicts each entry before its next hit.
+# The attempt logs a pass reads are those of the jobs ``_job_selection`` selects (an open or live
+# attempt, a recent one, a dead owner inside its window), not every registry attempt: a finished
+# attempt older than that is no job at all. The FIFO bound only has to exceed that selected set, so
+# a smaller bound would evict an entry before its next hit; 4,096 is well above it and unchanged.
 _ATTEMPT_PARSE_CACHE_LIMIT = 4096
 
 
@@ -2316,25 +2550,7 @@ def _counter(value):
 
 def _shell_command_label(command):
     """Return one privacy-minimal executable label, never the full command."""
-    if not isinstance(command, str):
-        return None
-    for line in command.splitlines():
-        line = line.strip()
-        if (not line or line.startswith("#")
-                or re.match(r"^(?:set|export|cd)(?:\s|$)", line)
-                or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", line)):
-            continue
-        try:
-            words = shlex.split(line, posix=True)
-        except ValueError:
-            words = line.split()
-        while words and words[0] in ("env", "command", "sudo"):
-            words.pop(0)
-        while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
-            words.pop(0)
-        if words:
-            return os.path.basename(words[0])[:48]
-    return None
+    return _shell_summary(command)[0]
 
 
 def _tool_label(name, tool_input=None, command=None):
@@ -2344,6 +2560,203 @@ def _tool_label(name, tool_input=None, command=None):
             raw = tool_input.get("command")
         return _shell_command_label(raw) or name
     return str(name)[:48] if isinstance(name, str) and name else None
+
+
+# What a tool call acts on reaches the public model only as an allow-listed summary:
+# a file tool's path, or a shell command's executable and at most one first argument
+# that is either an action listed for that executable in ``_KNOWN_ACTIONS`` or a file in
+# the worktree. A word's shape never admits it (``mysql secretword`` shows ``mysql``).
+# No other argument, option value,
+# assignment, quoted text, heredoc, pipe tail or URL is carried, and nothing the worker
+# wrote in its own words is either (masking free text cannot be made complete).
+_FILE_TOOLS = frozenset({"read", "edit", "write", "multiedit", "notebookedit", "notebookread"})
+_FILE_FIELDS = ("file_path", "notebook_path", "filePath", "path")
+_SHELL_WRAPPERS = frozenset({"sh", "bash", "zsh", "dash"})
+_SHELL_PREFIXES = frozenset({"env", "command", "sudo", "nohup", "exec", "time"})
+# Commands that only set up the shell for the next one (``cd x && cmd``).
+_SHELL_SETUP = frozenset({"cd", "pushd", "popd", "set", "export", "unset", "source", ".",
+                          "umask", "shopt", "trap", "true", ":"})
+_EXECUTABLE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,31}")
+# The only first arguments carried as an action: an executable listed here and a word that
+# equals one of its actions exactly. Anything else shows only the executable name.
+_KNOWN_ACTIONS = {
+    "git": frozenset({"status", "diff", "add", "commit", "push", "pull", "fetch", "merge",
+                      "rebase", "checkout", "switch", "log", "worktree", "stash", "show",
+                      "branch", "restore", "reset", "tag", "clone", "init", "remote",
+                      "cherry-pick", "revert", "blame", "grep", "rev-parse", "ls-files"}),
+    "gh": frozenset({"pr", "run", "issue", "api", "repo", "release", "workflow"}),
+    "cargo": frozenset({"build", "test", "check", "run", "clippy", "fmt"}),
+    "npm": frozenset({"install", "ci", "run", "test", "exec"}),
+    "pnpm": frozenset({"install", "run", "test", "add", "exec"}),
+    "yarn": frozenset({"install", "run", "test", "add"}),
+    "pip": frozenset({"install", "uninstall", "list", "show", "freeze"}),
+    "pip3": frozenset({"install", "uninstall", "list", "show", "freeze"}),
+    "uv": frozenset({"install", "run", "sync", "pip", "add", "venv"}),
+    "docker": frozenset({"build", "run", "ps", "exec", "logs", "pull", "push", "compose",
+                         "images"}),
+    "kubectl": frozenset({"get", "apply", "describe", "logs", "delete"}),
+    "go": frozenset({"build", "test", "run", "vet"}),
+    "make": frozenset(),
+    "hearting": frozenset({"run"}),
+}
+_PATH_LIKE = re.compile(r"(?=[^-])[A-Za-z0-9._/+-]{1,240}")
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+_SHELL_OPERATORS = ";&|<>()"
+
+
+def _shell_words(line):
+    try:
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=_SHELL_OPERATORS)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        return list(lexer)
+    except (ValueError, TypeError):
+        return None
+
+
+def _shell_summary(command, depth=0):
+    """``(executable, first_argument)`` of the command a shell call runs, else ``(None, None)``.
+
+    The argument is only a candidate (a listed action or a path-shaped word); the public
+    boundary keeps a path only when it names a file in the worktree. Unclear input yields
+    less: an unparsable line, a heredoc or anything past the first command stops the read.
+    """
+    if not isinstance(command, str) or len(command) > 16384 or depth > 2:
+        return None, None
+    for line in command.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        words = _shell_words(line)
+        if not words:
+            return None, None
+        segment = []
+        for word in words + [";"]:
+            if word and all(char in _SHELL_OPERATORS for char in word):
+                if word.startswith("<") or word.startswith(">") or word.startswith("("):
+                    if segment:
+                        break       # a redirect or heredoc ends what is read of this command
+                    return None, None
+                if segment:
+                    exe, arg = _segment_summary(segment, depth)
+                    if exe == "":
+                        segment = []
+                        if word in ("&&", ";", "||"):
+                            continue
+                        return None, None
+                    return exe, arg
+                if word not in ("&&", ";", "||"):
+                    return None, None
+                continue
+            segment.append(word)
+        if segment:
+            exe, arg = _segment_summary(segment, depth)
+            if exe != "":
+                return exe, arg
+        if "<<" in line:
+            return None, None
+    return None, None
+
+
+def _segment_summary(words, depth):
+    """One simple command's ``(exe, arg)``; ``("", None)`` for a setup-only command."""
+    words = list(words)
+    while words and (_ASSIGNMENT.match(words[0]) or words[0] in _SHELL_PREFIXES):
+        words.pop(0)
+    if not words:
+        return "", None
+    exe = os.path.basename(words[0])
+    if exe in _SHELL_SETUP:
+        return "", None
+    if exe in _SHELL_WRAPPERS and len(words) >= 3 and re.fullmatch(r"-[a-z]*c", words[1]):
+        return _shell_summary(words[2], depth + 1)
+    if not _EXECUTABLE.fullmatch(exe):
+        return None, None
+    arg = words[1] if len(words) > 1 else None
+    if arg is not None and not (_known_action(exe, arg)
+                                or ("://" not in arg and _PATH_LIKE.fullmatch(arg))):
+        arg = None
+    return exe, arg
+
+
+def _known_action(exe, arg):
+    return isinstance(arg, str) and arg in _KNOWN_ACTIONS.get(exe, ())
+
+
+def _tool_subject(name, tool_input=None, command=None):
+    """The allow-listed subject of one tool call, kept in the parse result until the job's
+    worktree is known: ``{"path"}`` for a file tool, ``{"exe", "arg"}`` for a shell call."""
+    lowered = name.lower() if isinstance(name, str) else ""
+    if lowered in ("bash", "command_execution", "exec", "shell") or command is not None:
+        raw = command if command is not None else (
+            tool_input.get("command") if isinstance(tool_input, Mapping) else None)
+        exe, arg = _shell_summary(raw)
+        return {"exe": exe, "arg": arg} if exe else {}
+    if lowered in _FILE_TOOLS and isinstance(tool_input, Mapping):
+        path = next((tool_input[key] for key in _FILE_FIELDS
+                     if isinstance(tool_input.get(key), str) and tool_input[key].strip()), None)
+        if path and len(path) <= 4096 and path.isprintable():
+            return {"path": path.strip()}
+    return {}
+
+
+def _in_worktree(path, cwd):
+    """``path`` relative to the worktree ``cwd`` when it lies inside it, else None."""
+    if not cwd or not isinstance(path, str):
+        return None
+    root = os.path.normpath(cwd)
+    full = os.path.normpath(path if os.path.isabs(path) else os.path.join(root, path))
+    if full != root and full.startswith(root.rstrip("/") + "/"):
+        return os.path.relpath(full, root)
+    return None
+
+
+def _public_tool(tool, cwd):
+    """The public form of one parsed tool call: ``{"name", "target"?, "since"?}`` only."""
+    if not isinstance(tool, Mapping) or not isinstance(tool.get("name"), str):
+        return None
+    out = {"name": tool["name"][:48]}
+    target = None
+    path = tool.get("path")
+    if isinstance(path, str):
+        target = _in_worktree(path, cwd) or os.path.basename(path.rstrip("/")) or None
+    exe = tool.get("exe")
+    if isinstance(exe, str) and _EXECUTABLE.fullmatch(exe):
+        arg = tool.get("arg")
+        if isinstance(arg, str) and not _known_action(exe, arg):
+            relative = _in_worktree(arg, cwd)
+            arg = (relative if relative and os.path.isfile(os.path.join(cwd, relative))
+                   and _PATH_LIKE.fullmatch(relative) else None)
+        words = ([] if exe == out["name"] else [exe]) + ([arg] if isinstance(arg, str) else [])
+        target = " ".join(words) or None
+    if target and target != out["name"] and target.isprintable():
+        out["target"] = target[:120]
+    since = tool.get("since")
+    if isinstance(since, (int, float)) and not isinstance(since, bool) and math.isfinite(since):
+        out["since"] = since
+    return out
+
+
+def _job_activity(job, exec_tool, last_tool, observed=True):
+    """Attach the open and the last finished tool call in their public form, and record
+    that this job's own native activity was read (the only ground for "no tool")."""
+    cwd = (getattr(job, "cwd", None) or "").rstrip("/") or None
+    job.exec_tool = _public_tool(exec_tool, cwd)
+    done = _public_tool(last_tool, cwd)
+    job.last_tool = {key: done[key] for key in ("name", "target") if key in done} if done else None
+    job._tool_observed = bool(observed)
+
+
+def _tool_call(label, name=None, tool_input=None, stamp=None, command=None):
+    """One parsed tool call: its label, allow-listed subject and native start time."""
+    tool = {"name": label, **_tool_subject(name, tool_input, command)}
+    since = shell_jobs.parse_time(stamp)
+    if since is not None:
+        tool["since"] = since
+    return tool
+
+
+def _codex_tool_call(label, command, stamp=None):
+    return _tool_call(label, "command_execution", stamp=stamp, command=command)
 
 
 def _supervised_claude_transcript(job, receipt_path):
@@ -2390,7 +2803,14 @@ def _supervised_claude_transcript(job, receipt_path):
 
 
 def _parse_claude_stream_tail(path):
-    """Read one bounded exact-attempt tail for identity, context, and open tool."""
+    """Read one bounded exact-attempt tail for identity, context, and open tool.
+
+    "No tool" (``tool_observed``) is settled only when the whole file was read. Past an
+    unread middle the only tool state shown is a call opened in the tail whose close never
+    follows; calls opened or closed in the head are not carried across the gap, and an
+    empty or gapped log settles no "no tool" (a sub-agent's rows can fill the tail while
+    the parent's call stays open).
+    """
     try:
         st = os.stat(path)
     except OSError:
@@ -2401,7 +2821,7 @@ def _parse_claude_stream_tail(path):
         return cached[1]
     disk_key = parse_cache.key("claude-attempt", path, cache_key,
                                (_CLAUDE_STREAM_HEAD_BYTES, _CLAUDE_STREAM_TAIL_BYTES,
-                                _CLAUDE_SUPERVISOR_HEAD_BYTES, "native-context-policy-v2"))
+                                _CLAUDE_SUPERVISOR_HEAD_BYTES, "native-context-policy-v2", "tool-subject-v4"))
     parsed = parse_cache.load(disk_key)
     if isinstance(parsed, dict):
         _CLAUDE_STREAM_CACHE[path] = (cache_key, parsed)
@@ -2419,13 +2839,18 @@ def _parse_claude_stream_tail(path):
                 tail = stream.read(_CLAUDE_STREAM_TAIL_BYTES)
     except OSError:
         return None
+    gap = tail_start > len(head)
+    if not gap:
+        # Head and tail are contiguous: read them as one, so no row at the seam is lost.
+        head, tail = head + tail, b""
     head_lines = head.decode("utf-8", "replace").splitlines()
-    if head and not head.endswith(b"\n") and head_lines:
+    if gap and head_lines and not head.endswith(b"\n"):
         head_lines.pop()  # the last head item may be a partial JSON line
     tail_lines = tail.decode("utf-8", "replace").splitlines()
-    if tail_start > 0 and tail_lines:
+    if gap and tail_lines:
         tail_lines = tail_lines[1:]  # the first tail item may be a partial JSON line
     lines = head_lines + tail_lines
+    tail_from = len(head_lines) if gap else None
     session_ids = set()
     latest_usage = None
     latest_model = None
@@ -2434,13 +2859,19 @@ def _parse_claude_stream_tail(path):
     model_windows = {}
     model_max_output = {}
     open_tools = {}
-    for line in lines:
+    last_tool = None
+    rows = 0
+    for index, line in enumerate(lines):
+        if index == tail_from:
+            open_tools.clear()   # a head call may have closed in the unread middle
+            last_tool = None
         try:
             payload = json.loads(line)
         except Exception:
             continue
         if not isinstance(payload, dict):
             continue
+        rows += 1
         sid = payload.get("session_id") or payload.get("sessionId")
         if isinstance(sid, str) and sid:
             session_ids.add(sid)
@@ -2465,13 +2896,16 @@ def _parse_claude_stream_tail(path):
                     tool_id = item.get("id")
                     label = _tool_label(item.get("name"), item.get("input"))
                     if isinstance(tool_id, str) and label:
-                        open_tools[tool_id] = {"name": label}
+                        # Raw here; only the open and the last finished call are summarized.
+                        open_tools[tool_id] = (label, item.get("name"), item.get("input"),
+                                               payload.get("timestamp"))
         elif row_type == "user" and isinstance(message, dict):
             content = message.get("content")
             if isinstance(content, list):
                 for item in content:
                     if isinstance(item, dict) and item.get("type") == "tool_result":
-                        open_tools.pop(item.get("tool_use_id"), None)
+                        done = open_tools.pop(item.get("tool_use_id"), None)
+                        last_tool = done or last_tool
         elif row_type == "result":
             usage = payload.get("usage")
             if isinstance(usage, dict):
@@ -2508,13 +2942,60 @@ def _parse_claude_stream_tail(path):
         "session_input_tokens": _counter(cumulative.get("input_tokens")),
         "session_cached_input_tokens": _counter(cumulative.get("cache_read_input_tokens")),
         "session_output_tokens": _counter(cumulative.get("output_tokens")),
-        "exec_tool": next(reversed(open_tools.values())) if open_tools else None,
+        "exec_tool": (_tool_call(*next(reversed(open_tools.values())))
+                      if open_tools else None),
+        "last_tool": _tool_call(*last_tool) if last_tool else None,
+        "tool_observed": bool(rows) and not gap,
     }
     _CLAUDE_STREAM_CACHE[path] = (cache_key, parsed)
     parse_cache.save(disk_key, parsed, path, cache_key)
     if len(_CLAUDE_STREAM_CACHE) > _ATTEMPT_PARSE_CACHE_LIMIT:
         _CLAUDE_STREAM_CACHE.pop(next(iter(_CLAUDE_STREAM_CACHE)))
     return parsed
+
+
+_CLAUDE_STANDARD_WINDOW = 200_000
+_CLAUDE_EXTENDED_WINDOW = 1_000_000
+_CLAUDE_MIN_CONFIGURED_WINDOW = 100_000
+
+
+def _claude_own_window(metadata, model_id, active_tokens=None):
+    """This attempt's own Claude context window before its first turn result, or None.
+
+    ``CLAUDE_CODE_DISABLE_1M_CONTEXT`` holds a Claude 4+ model at its standard 200K window
+    (each has at least 200K), so that switch as this attempt's launch recorded it
+    (``claude_compaction_disable_1m``, the home settings value beside it) settles the
+    window from the first observation. Otherwise the window is 200K or 1M: this attempt's
+    own active context above 200K cannot sit in a 200K window, so it is the 1M window.
+    At or under 200K it stays unknown until the attempt's own result reports it; nothing
+    comes from another attempt (#1514 F1). A disagreeing pair stays unknown too.
+    """
+    from ..context_policy import _claude_model_output_floor, _truthy
+    if _claude_model_output_floor(model_id) is None:
+        return None, None
+    values = {metadata.get(key) for key in ("claude_compaction_disable_1m",
+                                            "claude_settings_disable_1m")} - {None, "", "absent"}
+    if len(values) == 1 and _truthy(next(iter(values))):
+        return _CLAUDE_STANDARD_WINDOW, "claude-launch-disable-1m"
+    # Its own usage above 200K is its own evidence and wins over a configured value.
+    if type(active_tokens) is int and active_tokens > _CLAUDE_STANDARD_WINDOW:
+        return _CLAUDE_EXTENDED_WINDOW, "claude-own-usage-over-standard"
+    # Spec E9 rule 33 (a), narrowed: the window this attempt's launch requested
+    # (`CLAUDE_CODE_AUTO_COMPACT_WINDOW` in its launch env), when its settings `env` does
+    # not set another one (Claude assigns that over the launch env), for the model the
+    # launch chose. That variable is the compaction threshold, the smaller of it and the
+    # model's own window; this assumes a model the launch requested a window for runs with
+    # that window (Claude 4+ models here run with 1M). No request, a disagreeing setting or
+    # another model than the launch chose (one that may hold only 200K) stays unknown.
+    request = str(metadata.get("claude_context_window_request") or "").strip()
+    setting = str(metadata.get("claude_settings_window") or "").strip()
+    family = lambda value: (re.match(r"(?:claude-)?([a-z]+)", str(value or "").strip().lower()) or [None, None])[1]
+    launched = family(metadata.get("resolved_model") or metadata.get("model"))
+    if (request.isdigit() and setting in ("", "absent", request)
+            and launched is not None and launched == family(model_id)):
+        return (max(_CLAUDE_MIN_CONFIGURED_WINDOW, min(int(request), _CLAUDE_EXTENDED_WINDOW)),
+                "claude-launch-configured-window")
+    return None, None
 
 
 def _claude_attempt_policy(metadata, *, runtime_version, model_id, raw_window, max_output,
@@ -2614,6 +3095,11 @@ def _enrich_claude_stream_session(job, fast_first=False):
     job._dispatch_context_owned = True
     active_context_tokens = parsed.get("active_context_tokens")
     context_window_tokens = parsed.get("context_window_tokens")
+    job._context_window_source = "claude-result-model-usage" if context_window_tokens else None
+    if not context_window_tokens:
+        context_window_tokens, job._context_window_source = _claude_own_window(
+            getattr(job, "_registry_metadata", None) or {}, parsed.get("model"),
+            active_context_tokens)
     telemetry = telemetry_from_explicit(
         adapter="claude", session_id=parsed.get("session_id"),
         active_context_tokens=active_context_tokens,
@@ -2626,16 +3112,21 @@ def _enrich_claude_stream_session(job, fast_first=False):
             "session_cached_input_tokens", "session_output_tokens", "session_total_tokens"):
         setattr(job, field_name, getattr(telemetry, field_name))
     metadata = getattr(job, "_registry_metadata", None) or {}
+    # The gauge may read 1M from this attempt's own usage over 200K; the compaction policy
+    # (JSON ``ctx_pct``) keeps its reported or launch-settled raw window only.
+    policy_window = (None if job._context_window_source in ("claude-own-usage-over-standard", "claude-launch-configured-window")
+                     else context_window_tokens)
     policy = _claude_attempt_policy(
         metadata, runtime_version=parsed.get("runtime_version"), model_id=parsed.get("model"),
-        raw_window=context_window_tokens, max_output=parsed.get("max_output_tokens"),
+        raw_window=policy_window, max_output=parsed.get("max_output_tokens"),
         session_id=parsed.get("session_id"), attempt_id=job.attempt_id)
     job.context_policy = policy
     job.context_display_window_tokens = (
         policy["applied_trigger_tokens"] if policy["state"] == "applied" else None)
     job.ctx_pct = context_policy_used_pct(job.active_context_tokens, policy)
     job._context_evidence = None
-    job.exec_tool = parsed.get("exec_tool")
+    _job_activity(job, parsed.get("exec_tool"), parsed.get("last_tool"),
+                  observed=parsed.get("tool_observed") is True)
     if job.ctx_pct is not None:
         try:
             st = os.stat(telemetry_path)
@@ -2719,7 +3210,7 @@ def _parse_codex_attempt_tail(path):
     if cached and cached[0] == cache_key:
         return cached[1]
     disk_key = parse_cache.key("codex-attempt", path, cache_key,
-                               (_CLAUDE_STREAM_TAIL_BYTES, _CLAUDE_SUPERVISOR_HEAD_BYTES))
+                               (_CLAUDE_STREAM_TAIL_BYTES, _CLAUDE_SUPERVISOR_HEAD_BYTES, "tool-subject-v3"))
     parsed = parse_cache.load(disk_key)
     if isinstance(parsed, dict):
         _CODEX_ATTEMPT_CACHE[path] = (cache_key, parsed)
@@ -2729,6 +3220,10 @@ def _parse_codex_attempt_tail(path):
     head_bytes = _CLAUDE_SUPERVISOR_HEAD_BYTES
     tail_bytes = _CLAUDE_STREAM_TAIL_BYTES
     head_thread_ids = set()
+    # Past the unread middle a command opened there may still be open: "no command open"
+    # is settled only by the whole file or a turn boundary read in the tail.
+    settled = st.st_size <= head_bytes + tail_bytes
+    rows = 0
     if st.st_size <= head_bytes + tail_bytes:
         try:
             with open(path, "rb") as stream:
@@ -2754,6 +3249,7 @@ def _parse_codex_attempt_tail(path):
     latest_usage = None
     thread_ids = head_thread_ids | _codex_attempt_thread_ids(lines)
     open_commands = {}
+    last_tool = None
     activity = None
     current_turn = None
     closed_turns = set()
@@ -2764,11 +3260,13 @@ def _parse_codex_attempt_tail(path):
             continue
         if not isinstance(payload, dict):
             continue
+        rows += 1
         row_type = payload.get("type")
         if row_type == "dispatch.supervisor.turn.started":
             current_turn = payload.get("turn_id")
             activity = None
             open_commands.clear()
+            settled = True
         elif row_type in {
             "dispatch.supervisor.turn.completed", "dispatch.supervisor.parked",
             "dispatch.supervisor.resumed", "dispatch.supervisor.owner-boundary",
@@ -2778,6 +3276,7 @@ def _parse_codex_attempt_tail(path):
                 closed_turns.add(payload["turn_id"])
             activity = None
             open_commands.clear()
+            settled = True
         if row_type == "thread.started":
             thread_id = payload.get("thread_id")
             if isinstance(thread_id, str) and thread_id:
@@ -2805,16 +3304,21 @@ def _parse_codex_attempt_tail(path):
             item_id = item.get("id")
             label = _tool_label("command_execution", command=item.get("command"))
             if isinstance(item_id, str) and label:
-                open_commands[item_id] = {"name": label}
+                open_commands[item_id] = (label, item.get("command"), payload.get("timestamp"))
         elif row_type == "item.completed":
             item = payload.get("item")
             if isinstance(item, dict):
-                open_commands.pop(item.get("id"), None)
+                done = open_commands.pop(item.get("id"), None)
+                last_tool = done or last_tool
     parsed = {"token_usage": latest_usage,
               "thread_id": next(iter(thread_ids)) if len(thread_ids) == 1 else None,
               "thread_ambiguity": len(thread_ids) > 1,
               "activity": activity if len(thread_ids) == 1 else None,
-              "exec_tool": next(reversed(open_commands.values())) if open_commands else None}
+              "exec_tool": _codex_tool_call(*next(reversed(open_commands.values())))
+              if open_commands else None,
+              "last_tool": _codex_tool_call(*last_tool) if last_tool and len(thread_ids) <= 1
+              else None,
+              "tool_observed": bool(rows) and settled}
     _CODEX_ATTEMPT_CACHE[path] = (cache_key, parsed)
     parse_cache.save(disk_key, parsed, path, cache_key)
     if len(_CODEX_ATTEMPT_CACHE) > _ATTEMPT_PARSE_CACHE_LIMIT:
@@ -2877,7 +3381,7 @@ def _enrich_codex_attempt_session(job, fast_first=False):
         # supervisor usage event and open command item. Once the exact attempt log
         # contains multiple thread ids, none of its counters, activity, or exec
         # labels can be assigned to this worker without borrowing a thread's data.
-        parsed = dict(parsed, token_usage=None, activity=None, exec_tool=None)
+        parsed = dict(parsed, token_usage=None, activity=None, exec_tool=None, last_tool=None)
         job._runtime_session_id = None
         job.context = None
         job.ctx_pct = None
@@ -2983,7 +3487,9 @@ def _enrich_codex_attempt_session(job, fast_first=False):
                 observed_at=st.st_mtime, fresh_until=st.st_mtime + 900)
         except OSError:
             pass
-    job.exec_tool = parsed.get("exec_tool")
+    # An ambiguous or thread-less attempt log is no ground for "no tool open".
+    _job_activity(job, parsed.get("exec_tool"), parsed.get("last_tool"),
+                  observed=bool(thread_id) and parsed.get("tool_observed") is True)
     if thread_id and not fast_first:
         job.shell_jobs = shell_jobs.observe_jobs(
             shell_jobs.read_codex_jobs(path, session_id=thread_id, attempt_id=job.attempt_id),
@@ -3002,9 +3508,10 @@ def _parse_opencode_attempt_tail(path):
     """Read the last step's prompt size from an `opencode run --format json` attempt log.
 
     Every event is an envelope ``{"type":..., "sessionID":..., "part":{...}}``.  Only
-    ``step_finish`` carries ``part.tokens``. OpenCode 1.19.0's overflow consumer uses
-    ``tokens.total || input + output + cache.read + cache.write``; the per-step number is
-    never summed across turns.
+    ``step_finish`` carries ``part.tokens``; a supervised owner's log keeps the same
+    counters as ``dispatch.supervisor.step_tokens`` ``tokens``. Both are read with
+    ``opencode_context_tokens`` (``tokens.total || input + output + cache.read +
+    cache.write``); the per-step number is never summed across turns.
 
     No ``exec_tool`` is derived from the stream:
     opencode publishes a ``tool_use`` event only once the call has already finished.
@@ -3071,20 +3578,19 @@ def _parse_opencode_attempt_tail(path):
         sid = event.get("sessionID")
         if isinstance(sid, str) and sid:
             session_ids.add(sid)
-        if event.get("type") != "step_finish":
+        kind = event.get("type")
+        if kind == "step_finish":
+            part = event.get("part")
+            tokens = part.get("tokens") if isinstance(part, dict) else None
+        elif kind == "dispatch.supervisor.step_tokens":
+            # A supervised owner's log keeps each step's counters under this type.
+            tokens = event.get("tokens")
+        else:
             continue
-        part = event.get("part")
-        tokens = part.get("tokens") if isinstance(part, dict) else None
-        if not isinstance(tokens, dict):
-            continue
-        cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
-        total = _counter(tokens.get("total"))
-        parts = [_counter(tokens.get("input")), _counter(tokens.get("output")),
-                 _counter(cache.get("read")), _counter(cache.get("write"))]
-        if total is not None:
-            active = total
-        elif any(value is not None for value in parts):
-            active = sum(value or 0 for value in parts)     # native fallback; last step wins
+        # The prompt-size rule every OpenCode session uses; the last step wins.
+        step = opencode_context_tokens(tokens)
+        if step is not None:
+            active = step
     parsed = {
         "session_id": next(iter(session_ids)) if len(session_ids) == 1 else None,
         "ambiguity": "multiple-stream-session-ids" if len(session_ids) > 1 else None,
@@ -3115,7 +3621,11 @@ _OPENCODE_ACTIVITY_BYTES = 32 * 1024 * 1024
 
 
 def _enrich_opencode_native_activity(job, session_id, fast_first=False):
-    """Observe only the attempt-private DB; first publication remains log-only."""
+    """Observe only the attempt-private DB; first publication remains log-only.
+
+    The same snapshot gives ``_native_context_tokens``, the newest request's prompt
+    size, which includes the turn's last step the attempt log never receives."""
+    job._native_context_tokens = None
     if fast_first:
         job.shell_jobs = []
         job.shell_job_observation = {"state": "unobserved", "reason": "detail-refresh-deferred"}
@@ -3179,11 +3689,11 @@ def _enrich_opencode_native_activity(job, session_id, fast_first=False):
             _OPENCODE_ACTIVITY_CACHE[key] = (signatures, activity, shell_observation)
             if len(_OPENCODE_ACTIVITY_CACHE) > _ATTEMPT_PARSE_CACHE_LIMIT:
                 _OPENCODE_ACTIVITY_CACHE.pop(next(iter(_OPENCODE_ACTIVITY_CACHE)))
-        job.exec_tool = None
+        job._native_context_tokens = activity.get("context_tokens")
         tool = activity.get("tool")
-        if tool:
-            label = _tool_label(tool.get("name"), tool.get("input"))
-            job.exec_tool = {"name": label} if label else None
+        label = _tool_label(tool.get("name"), tool.get("input")) if tool else None
+        _job_activity(job, _tool_call(label, tool.get("name"), tool.get("input")) if label else None,
+                      None)
         if activity.get("summary"):
             job._native_now = (activity["summary"], activity.get("summary_ts"))
         observed = shell_observation
@@ -3228,9 +3738,11 @@ def _enrich_opencode_attempt_session(job, fast_first=False):
         job.association_ambiguity = "opencode-announcement-identity-mismatch"
         return
     job._dispatch_context_owned = True
+    native_context = None
     if parsed.get("session_id"):
         job._runtime_session_id = parsed["session_id"]
         _enrich_opencode_native_activity(job, parsed["session_id"], fast_first=fast_first)
+        native_context = getattr(job, "_native_context_tokens", None)
     metadata = getattr(job, "_registry_metadata", None) or {}
     raw_window = _opencode_job_context_window(job)
     record = None
@@ -3280,7 +3792,8 @@ def _enrich_opencode_attempt_session(job, fast_first=False):
             reason="native-chat-params-policy-not-found-or-stale")
     telemetry = telemetry_from_explicit(
         adapter="opencode", session_id=parsed.get("session_id"),
-        active_context_tokens=parsed.get("active_context_tokens"),
+        active_context_tokens=(parsed.get("active_context_tokens") if native_context is None
+                               else native_context),
         context_window_tokens=raw_window)
     for field_name in ("active_context_tokens", "context_window_tokens"):
         setattr(job, field_name, getattr(telemetry, field_name))
@@ -3867,6 +4380,171 @@ class RegistryEvidence(dict):
     """A published registry graph whose route histories have copy-on-write ownership."""
 
 
+# Per-segment partial folds of ``_registry_evidence_for_path`` (see ``_segmented_evidence``): the
+# partial of a segment is a pure function of its rows, which are a pure function of the segment's
+# ``records`` tuple (the same object means the same bytes at the same orders; a rewrite that
+# recognised a segment keeps that tuple) and of the four classifying functions. One generation per
+# path is held (each entry keeps its ``records`` alive, so the id cannot name another tuple).
+_REGISTRY_FOLD_PARTS = {}
+_REGISTRY_FOLD_STATS = {"segment_folds": 0, "segment_fold_reuses": 0,
+                        "index_segment_builds": 0, "index_segment_reuses": 0,
+                        "selection_fact_builds": 0, "selection_fact_reuses": 0,
+                        "rows_carried_by_segment": 0, "rows_proved_by_fields": 0,
+                        "by_fields_rows": 0}
+_REGISTRY_INDEX_PARTS = {}
+
+
+def registry_fold_metrics():
+    return dict(_REGISTRY_FOLD_STATS)
+
+
+def _fold_registry_segment(rows, path):
+    """What folding these rows one by one (``_registry_evidence_for_path``) adds, kept apart.
+
+    Returns ``(nodes, attempts)``: ``nodes[route_id][route_node] = (attempt history, values)`` where
+    the values are the keys the rows set on the node in file order (later rows win) and the history
+    is the entries they appended; ``attempts[attempt_id]`` is the evidence of that attempt's last row.
+    """
+    nodes = {}
+    for registry_order, fields, meta in rows:
+        ts, status, _repo, _worktree, slug, _pipe = fields
+        route_id = meta.get("route_id")
+        route_node = meta.get("route_node")
+        attempt_id = meta.get("attempt_id")
+        if not attempt_id and (not route_id or not route_node):
+            continue
+        attempt_contract = _attempt_contract(meta)
+        harness = _infer_harness(meta, slug) if attempt_id else None
+        if not route_id or not route_node:
+            continue
+        pid_s = meta.get("pid")
+        pid = int(pid_s) if (pid_s or "").isdigit() else None
+        attention_reason = _attempt_attention(meta)
+        per_route = nodes.get(route_id)
+        if per_route is None:
+            per_route = nodes[route_id] = {}
+        cell = per_route.get(route_node)
+        if cell is None:
+            cell = per_route[route_node] = ([], {})
+        history, values = cell
+        history.append({
+            "attempt_id": attempt_id,
+            "status": status,
+            "pid": pid,
+            "dispatch_depth": attempt_contract["dispatch_depth"],
+            "transport": attempt_contract["transport"],
+            "execution_surface": attempt_contract["execution_surface"],
+            "registered_worker": attempt_contract["registered_worker"],
+            "fallback_hop": attempt_contract["fallback_hop"],
+            "contract_status": attempt_contract["attempt_contract_status"],
+            "parent_attempt_id": meta.get("parent_attempt_id"),
+            "note": meta.get("note"),
+            "registry_order": registry_order,
+            "attention_reason": attention_reason,
+        })
+        values.update({
+            "route_file": meta.get("route_file"),
+            "route_hash": meta.get("route_hash"),
+            "parent": meta.get("parent") or meta.get("parent_slug"),
+            "parent_attempt_id": meta.get("parent_attempt_id"),
+            "registry_order": registry_order,
+            "_registry_path": path,
+            "attempt_id": attempt_id,
+            "attention_reason": (attention_reason
+                                 if attempt_contract["attempt_contract_status"] == "current"
+                                 else None),
+        })
+        if attempt_contract["attempt_contract_status"] != "current":
+            continue
+        values.update({
+            "status": status, "slug": slug, "ts": _iso_to_epoch(ts),
+            "pid": pid,
+            "harness": harness if harness is not None else _infer_harness(meta, slug),
+            "model": meta.get("model"),
+            "effort": meta.get("effort") or meta.get("reasoning"),
+            "completion_gate": meta.get("completion_gate"),
+            "note": meta.get("note"),
+        })
+    latest = {}
+    for registry_order, fields, meta in rows:
+        if meta.get("attempt_id"):
+            latest[meta["attempt_id"]] = (registry_order, fields, meta)
+    attempts = {}
+    for attempt_id, (registry_order, fields, meta) in latest.items():
+        _ts, status, _repo, _worktree, slug, _pipe = fields
+        attempts[attempt_id] = {
+            "attempt_id": attempt_id,
+            "status": status,
+            "route_id": meta.get("route_id"),
+            "route_node": meta.get("route_node"),
+            "harness": _infer_harness(meta, slug),
+            "slug": slug,
+            "registry_order": registry_order,
+            **_attempt_contract(meta),
+        }
+    return nodes, attempts
+
+
+def _segmented_evidence(path, rows, functions):
+    """The evidence of ``rows`` from per-segment partial folds, or None when they cannot be used.
+
+    The registry's segments are immutable ranges of whole rows; a rewrite recognises the segments
+    whose bytes and first order did not change and keeps their ``records``. The partial of such a
+    segment is kept, and only new or changed segments are folded; the partials are merged in file
+    order with the rules of the row-by-row fold (later rows win per key, histories concatenate,
+    an attempt's last row decides). The merge copies, so nothing a kept partial holds is mutated.
+    """
+    found = _registry_segments_of(path, rows)
+    if found is None:
+        return None
+    absolute, segments = found
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        held = _REGISTRY_FOLD_PARTS.get(absolute)
+    reusable = held[1] if held is not None and all(a is b for a, b in zip(functions, held[0])) else {}
+    current, parts, covered = {}, [], 0
+    for segment in segments:
+        low = bisect.bisect_left(rows, segment.order_start, key=_row_order)
+        high = bisect.bisect_left(rows, segment.order_end, key=_row_order)
+        covered += high - low
+        key = id(segment.records)
+        entry = reusable.get(key) or current.get(key)
+        if entry is None or entry[0] is not segment.records:
+            entry = (segment.records, _fold_registry_segment(rows[low:high], path))
+            _REGISTRY_FOLD_STATS["segment_folds"] += 1
+        else:
+            _REGISTRY_FOLD_STATS["segment_fold_reuses"] += 1
+        current[key] = entry
+        parts.append(entry[1])
+    if covered != len(rows):
+        return None
+    routes, path_attempts = {}, {}
+    for nodes, attempts in parts:
+        for route_id, per_route in nodes.items():
+            target = routes.get(route_id)
+            if target is None:
+                target = routes[route_id] = {}
+            for route_node, (history, values) in per_route.items():
+                cell = target.get(route_node)
+                if cell is None:
+                    cell = target[route_node] = ([], {})
+                cell[0].extend(history)
+                cell[1].update(values)
+        path_attempts.update(attempts)
+    path_result = {}
+    for route_id, per_route in routes.items():
+        evidence = RegistryRouteEvidence()
+        for route_node, (history, values) in per_route.items():
+            node = {"attempt_history": history}
+            node.update(values)
+            evidence[route_node] = node
+        path_result[route_id] = evidence
+    with _PARSED_REGISTRY_CACHE_LOCK:
+        _REGISTRY_FOLD_PARTS[absolute] = (functions, current)
+        while len(_REGISTRY_FOLD_PARTS) > _PARSED_REGISTRY_ROWS_LIMIT:
+            _REGISTRY_FOLD_PARTS.pop(next(iter(_REGISTRY_FOLD_PARTS)))
+    return path_result, path_attempts
+
+
 def _registry_evidence_for_path(path, rows):
     """Fold only appended records, without mutating any published history graph."""
     key = (type(path), os.fspath(path))
@@ -3887,6 +4565,12 @@ def _registry_evidence_for_path(path, rows):
     path_result = dict(held[2]) if prefix else {}
     path_attempts = dict(held[3]) if prefix else {}
     suffix = rows[len(held[0].rows):] if prefix else rows
+    if not prefix:
+        # A rewrite, not an append: only the segments that changed are folded again.
+        segmented = _segmented_evidence(path, rows, functions)
+        if segmented is not None:
+            path_result, path_attempts = segmented
+            suffix = ()
     changed_routes, changed_nodes = set(), set()
     for registry_order, fields, parsed_meta in suffix:
         # Parsed metadata is immutable and every consumer below is read-only.
@@ -3985,7 +4669,10 @@ def _registry_evidence_for_path(path, rows):
             **attempt_contract,
         }
     with _PARSED_REGISTRY_CACHE_LOCK:
-        _REGISTRY_EVIDENCE_CACHE.remember(key, (proof, functions, path_result, path_attempts))
+        # A schema-derived charge (about 3 KB of evidence per row, measured on the live shape):
+        # measuring the exact graph walks every row's evidence again on every new generation.
+        _REGISTRY_EVIDENCE_CACHE.remember(key, (proof, functions, path_result, path_attempts),
+                                          weight=len(rows) * 3000 + 4096)
         if key in _REGISTRY_EVIDENCE_CACHE:
             _REGISTRY_EVIDENCE_CACHE.move_to_end(key)
         while len(_REGISTRY_EVIDENCE_CACHE) > _PARSED_REGISTRY_ROWS_LIMIT:
@@ -4374,6 +5061,11 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
     latest = derived["latest_jobs"]
     selected, alive_keys, expired, observed_identities = _job_selection(
         derived, live_attempt_ids, include_stall=include_stall)
+    # A unit worker a worker started (`caller_attempt_id`) hangs below that worker's own row. Its `parent_slug` is
+    # only that hang for the older job list; the route readers follow `caller_attempt_id` itself (the job's own
+    # field), and the owner-child link (`projection._owner_children`) ignores a called row.
+    slug_of_attempt = {value[2].get("attempt_id"): value[1][4] for value in latest.values()
+                       if value[2].get("attempt_id")}
     for key in selected:
         registry_order, fields, parsed_meta = latest[key]
         if (allowed_attempt_ids is not None
@@ -4476,6 +5168,9 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
         parent_sid = meta.get("parent_sid") or meta.get("parent_session_id") or None
         parent_cwd = meta.get("parent_cwd") or meta.get("parent_worktree") or None
         parent_managed_dir = _managed_parent_dir(meta.get("managed_sidecar_log"))
+        called_by = slug_of_attempt.get(meta.get("caller_attempt_id")) if meta.get("caller_attempt_id") else None
+        if called_by and not parent_slug:
+            parent_slug = called_by
         harness = _infer_harness(meta, slug)
         worker_type = meta.get("worker_type")
         unit = meta.get("unit") or None
@@ -4498,6 +5193,7 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
             caller_pane=meta.get("caller_pane") or None, caller_cwd=meta.get("caller_cwd") or None,
             parent_managed_dir=parent_managed_dir,
             parent_slug=parent_slug,
+            caller_attempt_id=meta.get("caller_attempt_id") or None,
             is_child=bool(parent_slug or parent_sid or parent_cwd or parent_managed_dir),
             qa_source=qsrc, source="jobs", status=status,
             harness=harness, model=meta.get("model"), resolved_model=meta.get("resolved_model"),
@@ -4512,7 +5208,8 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
             pgid=int(pgid_s) if pgid_s.isdigit() else None,
             pid_identity_source=identity_source,
             profile=meta.get("profile"),
-            depth=_parse_depth(meta.get("dispatch_depth", meta.get("depth"))),
+            # The route-relative depth stays 1 in the registry; Fleet nests a called worker one level below its caller.
+            depth=max(_parse_depth(meta.get("dispatch_depth", meta.get("depth"))), 2 if called_by else 1),
             **attempt_contract,
             intensity=meta.get("intensity"),
             worker_type=worker_type,
@@ -4568,12 +5265,18 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
         # already settled history.
         if job.afterglow:
             continue
-        if job.intensity != "quick" or not job.route_id or not job.route_node:
+        # A serial owner row: a quick route's rows, and the owner of any route that makes its work itself
+        # (the node `one-shot`; the middle cell `solo·standard` is one). Its depth-2 review is not held to this shape.
+        serial_owner = job.worker_type == "owner" and job.route_node == "one-shot"
+        if not (job.intensity == "quick" or serial_owner) or not job.route_id or not job.route_node:
             continue
         key = (job.route_id, job.route_node)
         quick_groups.setdefault(key, []).append(job)
         violations = []
-        if job.dispatch_depth != 1 or job.parent_slug:
+        # (a unit leg a worker called hangs below that worker for the older job list through `parent_slug`, which is no
+        # owner link: that one is not held to the owner-child shape; its depth still is: `caller_attempt_receipt` writes the
+        # field only on a depth-1 unit leg, so a called row at another depth is a wrong row)
+        if job.dispatch_depth != 1 or (job.parent_slug and not job.caller_attempt_id):
             violations.append("quick-shape")
         if (
             job.execution_surface != "registered-headless"
@@ -5688,7 +6391,8 @@ def _collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=Fa
     paths = _candidate_jobs_paths(jobs_path)
     split_registries = _validated_split_registry_paths(paths, session_rows=session_rows)
     paths.extend(split_registries)
-    if (display_scope := _ROUTE_DISPLAY_ROWS.get()) is not None:
+    display_scope = _ROUTE_DISPLAY_ROWS.get()
+    if display_scope is not None:
         _prime_route_display_rows(paths, display_scope)
     orphan_rows_cache = ({} if _dispatch_registry_cache.registry_scope_active()
                          else None)
@@ -5758,7 +6462,9 @@ def _collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=Fa
     # a failed mark leaves the row on its already collected observations.
     for j in jobs:
         j._worker_home_admitted = _note_home_view(j, jobs_path)
-    if not fast_first:
+    # A route display (a session's popup or panel cache) draws no location, campaign label or
+    # pending-delivery count; the campaign label is still read once by `work_titles.annotate`.
+    if not fast_first and display_scope is None:
         _fill_locations(jobs)      # explanatory metadata, filled by live details
         _campaign_labels(jobs)
     # Typed-mode+profile backfill for proc jobs whose argv/env omitted metadata.
@@ -5931,7 +6637,9 @@ def _collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=Fa
     # last_malformed/last_route_nodes above -- additive, no return-signature
     # change. Enumeration failure fails open: keep every job row, drop the count.
     try:
-        if not fast_first:
+        if display_scope is not None:
+            collect.last_pending_delivery = None
+        elif not fast_first:
             collect.last_pending_delivery = _pending_delivery_counts(
                 paths, session_observation=session_observation)
     except Exception:

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Exact native metadata restores missing steward rows without borrowing caller cwd."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import contextlib
 import io
 import json
@@ -102,7 +105,10 @@ class NativeStewardProjectionTest(unittest.TestCase):
              mock.patch.object(peer_obligations,'ensure_normal_runner',return_value=False), \
              mock.patch('session_notice.notify',return_value={'state':'pending'}) as notify:
             seen=check._observe_role('codex','actor')
-            self.assertEqual([r['session_id'] for r in seen['targets']],['target'])
+            self.assertEqual([r['session_id'] for r in seen['targets']],['target','unknown'])
+            self.assertEqual(seen['targets'][1]['liveness'], 'live')
+            self.assertTrue(seen['targets'][1]['unresolved'])
+            self.assertNotIn('foreign', [r['session_id'] for r in seen['targets']])
             self.assertEqual(check._classify(seen),'run-steward-check')
             check.register('codex','actor',store=store,ensure_runner=False)
             duty=store.get(check.duty_id('codex','actor'))

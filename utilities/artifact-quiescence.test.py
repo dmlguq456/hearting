@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import importlib.util
 import contextlib
 import json
@@ -168,6 +171,31 @@ class QuiescenceTest(unittest.TestCase):
                 value = Q.collect(config)
                 self.assertFalse(value["observation_valid"])
                 self.assertIn("frame-route-axis-invalid", json.dumps(value["source_diagnostics"]))
+
+    def test_review_a_frame_row_does_not_bind_a_depth_0_leg_of_another_worker_type(self):
+        # A `unit` route's leg is a depth-0 leg too, but it is a review worker. A frame row that names
+        # it is not that row's node, even though the leg judgment alone would accept it.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); config = self.fixture(base)
+            root = Path(config["artifact_root"])
+            candidates = [{"harness": harness, "surface": "registered-headless", "transport": "headless",
+                           "status": "supported", "probe_source": "hermetic-fixture",
+                           "probe_time": "2026-09-07T00:00:00Z"} for harness in ("codex", "claude")]
+            route = Q.ROUTES.compose_route(
+                capability=None, capability_mode=None, shape=None, graph=None, slug="fixture", unit="qa/code-review",
+                cwd=str(root.parent), artifact_root=str(root), spec_read="hermetic-fixture",
+                drift_verdict="hermetic-fixture", registered_headless_evidence={"candidates": candidates},
+                unassigned=True)
+            path = root / ".runtime" / "routes" / f"{route['route_id']}.json"
+            path.write_text(json.dumps(route), encoding="utf-8")
+            Path(config["dispatch_jobs"]).write_text(self.dispatch_row(
+                slug="unit-as-frame", attempt="att-unit-as-frame", metadata={
+                    "dispatch_depth": "1", "worker_type": "frame", "unit": "plan/frame",
+                    "artifact_root": root, "route_file": path, "route_id": route["route_id"],
+                    "route_hash": route["route_hash"], "route_node": "unit"}))
+            value = Q.collect(config)
+            self.assertFalse(value["observation_valid"])
+            self.assertIn("frame-route-axis-invalid", json.dumps(value["source_diagnostics"]))
 
     def test_review_quick_owner_route_binds_regardless_of_node_count(self):
         # N2: the quick-owner-route binding asserts the `one-shot` node's own

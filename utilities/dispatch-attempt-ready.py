@@ -91,6 +91,36 @@ def classify_selection(jobs: Path, rows, *, settle: bool = False,
             "recovery_diagnostics": joined.get("recovery_diagnostics", [])}
 
 
+def archived_receipt(jobs: Path, attempt_id: str) -> dict[str, object] | None:
+    """An explicitly named attempt whose rows the registry archive moved (settled for over
+    14 days): answer from its last archived row, not from an empty selection, which reads as
+    ready. Only a done row the shared policy reads as success is ready; any other archived
+    end (a death, a cancel, a finished review or audit with findings) is a terminal result
+    to inspect. None when the archive does not hold it."""
+    try:
+        from dispatch_attempt_policy import success_note, verdict_pass
+        from dispatch_contract import parse_registry_metadata
+        from dispatch_registry_archive import archived_rows
+        lines = archived_rows(jobs, attempt_id)
+    except Exception:  # noqa: BLE001 -- an unreadable archive leaves the old answer
+        return None
+    last = None
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) == 6:
+            metadata = parse_registry_metadata(fields[5])
+            if metadata.get("attempt_id") == attempt_id:
+                last = (fields, metadata)
+    if last is None:
+        return None
+    fields, metadata = last
+    note = metadata.get("note", "-")
+    ready = fields[1] == "done" and (success_note(metadata) or verdict_pass(metadata))
+    child = {"attempt_id": attempt_id, "slug": fields[4], "status": fields[1], "note": note,
+             "readiness": "ready" if ready else "terminal-failure", "reason": "archived-row"}
+    return {"schema_version": 1, "state": "ready" if ready else "terminal", "children": [child]}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     from dispatch_contract import inherited_jobs_argument
@@ -108,7 +138,10 @@ def main() -> int:
                 slug=args.slug,
                 attempt_id=args.attempt_id,
             )
-        receipt = classify_selection(Path(args.jobs), rows, settle=args.settle)
+        receipt = (archived_receipt(Path(args.jobs), args.attempt_id)
+                   if args.attempt_id and not rows else None)
+        if receipt is None:
+            receipt = classify_selection(Path(args.jobs), rows, settle=args.settle)
     except (OSError, JOIN.JoinContractError, DispatchContractError) as exc:
         receipt = {
             "schema_version": 1,

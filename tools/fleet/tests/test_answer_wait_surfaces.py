@@ -1,4 +1,7 @@
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import os
 import json
@@ -48,7 +51,9 @@ class AnswerWaitSurfaceTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
 
     def result(self):
-        return {"items": [{"id": "S4:fixture", "source": "S4", "kind": "decision",
+        # A registered question: what a person answers from these surfaces (a marker question
+        # is answered in its own input and is not counted, 11-14).
+        return {"items": [{"id": "S4:fixture", "source": "S4", "kind": "message",
                            "question": "진행할까요?", "since": 100,
                            "owner": {"harness": "claude", "session_id": "sid-a"},
                            "attribution": "exact"}],
@@ -234,7 +239,7 @@ try {
         raw["items"][0]["stale"] = "current"
         view = fleet_answer_wait_view(raw)
         snapshot = SimpleNamespace(jobs=[], sessions=[], answer_waits=view, compute_hosts=None)
-        self.assertIn("답변 필요 2", job_summary(snapshot))
+        self.assertIn("답 필요 2", job_summary(snapshot))
         self.assertNotIn(answer_wait_word(), job_summary(snapshot))
         lines = system_lines(snapshot)
         self.assertIn(f"{answer_wait_word()} 2", lines)
@@ -322,8 +327,11 @@ try {
                          ["current", "current", "current", "older", "older", "current"])
         self.assertEqual([item.get("pane_id") for item in view["items"]],
                          [None, None, None, None, None, None])
+        # Every wait a person must answer counts, the marker question (answered in its own
+        # input) too; the blocked owners, their parent agent's to answer, are listed, not
+        # counted (11-14).
         self.assertEqual(view["total"], 4)
-        self.assertEqual(view["older"], 2)
+        self.assertEqual(view["older"], 0)
         self.assertEqual(view["unattributed"], ["s2", "s3-old"])
         ids_before = [item["id"] for item in view["items"]]
         self.assertTrue(human_wait_state.publish_cache(result))
@@ -333,7 +341,33 @@ try {
                                    compute_hosts=None)
         summary = job_summary(snapshot)
         self.assertIn(f"{answer_wait_word()} 1", summary)
-        self.assertIn("답변 필요 3", summary)
+        self.assertIn("답 필요 3", summary)
+        # Fleet's head is the sum of what its session rows wait on (their current waits, the
+        # way the collector attaches them), blocked owners aside: three rows, one wait each.
+        rows = {}
+        for item in view["items"]:
+            if item.get("stale") == "current" and item.get("session_id") and item["source"] not in ("S2", "S3"):
+                rows.setdefault((item["harness"], item["session_id"]), []).append(item["kind"])
+        self.assertEqual(sum(map(len, rows.values())), 3)
+        self.assertEqual(sorted(rows), [("claude", "c"), ("codex", "a"), ("opencode", "q")])
+        # Rule 5 (11-14): an answer the person sent (the existing record's ``submitted``) leaves
+        # the head, the view's counts and its session index at once; it stays listed as sent.
+        cached = human_wait_state._read_cache_file()
+        cached["selected_responses"] = {"fixture": {
+            "identity": {"harness": "claude", "session_id": "c", "request_id": "s4",
+                         "turn_id": None, "question_id": "message-response"},
+            "selected_id": "s4", "state": "submitted", "action_id": "fixture-action",
+            "draft": "", "updated_at": 101}}
+        self.assertTrue(human_wait_state._write_cache_value(
+            human_wait_state._republish_answer_marks(cached)))
+        view = human_wait_state.cached_fleet_view(now=101, request=False)
+        self.assertEqual([item["id"] for item in view["items"] if item.get("answer") == "sent"], ["s4"])
+        self.assertEqual(view["total"], 3)
+        self.assertNotIn("claude\0c", human_wait_state._read_cache_file()["by_session"])
+        summary = job_summary(SimpleNamespace(jobs=[], sessions=[], answer_waits=fleet_answer_wait_view(view),
+                                              compute_hosts=None))
+        self.assertIn("답 필요 2", summary)
+        self.assertEqual(fleet_answer_wait_view(view)["items"][-1].get("answer"), "sent")
 
     def test_fleet_reader_does_not_fall_back_to_private_projection_cache(self):
         private_path = human_wait_state._cache_path()
@@ -412,7 +446,7 @@ try {
             command = herdr_projection._metadata_command("herdr", "claude", "sid-a", "pane-a")
         self.assertIn("--title", command)
         title = command[command.index("--title") + 1]
-        self.assertIn("◑답변 필요", title)
+        self.assertIn("◑답 필요", title)
         self.assertIn("기존 제목", title)
         with mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "English"}), \
              mock.patch.object(herdr_projection, "session_title", return_value="title"), \
@@ -491,7 +525,7 @@ try {
             with self.subTest(lang=lang), mock.patch.dict("os.environ", {"FLEET_NOW_LANG": lang}):
                 rows = draw(vm, NavState(view="QUESTIONS"), 140, 45).text_rows()
                 text = "\n".join(rows)
-                self.assertIn(f"── {word} ?", text)
+                self.assertIn(f"│ {word} ?", text)
                 self.assertNotIn(f"{word} 0", text)
                 self.assertIn(f"{word} ? ·", rows[-1])
 
@@ -556,7 +590,7 @@ class FleetQuestionActionTests(unittest.TestCase):
 
         text = "\n".join(draw(vm, state, 140, 45).text_rows())
 
-        self.assertIn("answer in its pane", text)
+        self.assertIn("answer in its window", text)
         self.assertFalse(_has_hit(vm, state, ("question.submit",)))
         self.assertNotIn("approve", text)
 
@@ -1457,6 +1491,74 @@ class FleetQuestionBackendIntegrationTests(unittest.TestCase):
             rows, _ = _question_records(SimpleNamespace(answer_waits=public), [], {}, self.now)
             self.assertNotIn("request_id", rows[0]["ref"])
             self.assertNotIn("NOT-A-NATIVE-ID-SENTINEL", json.dumps(rows))
+        self.assertFalse(self.replies)
+
+    def _open_loading_row(self):
+        from fleet.explorer.state import NavState, reduce
+        selected, effects = reduce(NavState(view="QUESTIONS"), {
+            "type": "click", "action": ("question.select", self.ref["id"], self.ref)})
+        self.assertEqual(selected.question_overlay["state"], "loading")
+        return selected, effects[0]
+
+    def test_finished_read_survives_an_empty_follow_up_run(self):
+        """2026-11-11: an opened question stayed on "loading" for good.
+
+        The pump hands over only its latest value. A follow-up run that found
+        the action queue empty published ``None`` right after the read, and the
+        read was never adopted; reopening a "loading" row issues no new read.
+        """
+        from collections import deque
+        from fleet import render
+
+        selected, effect = self._open_loading_row()
+        pump = mock.Mock(running=False)
+        pump.poll.return_value = (2, None)  # the empty follow-up won the handover
+        with mock.patch.object(render, "_EXPLORER_STATE", selected), \
+             mock.patch.object(render, "_EXPLORER_MODEL", SimpleNamespace(
+                 questions=({"id": self.item_id, "ref": self.ref},))), \
+             mock.patch.object(render, "_EXPLORER_QUESTION_QUEUE", deque([effect])), \
+             mock.patch.object(render, "_EXPLORER_QUESTION_RESULTS", deque()), \
+             mock.patch.object(render, "_EXPLORER_QUESTION_PUMP", pump), \
+             mock.patch.object(render, "_EXPLORER_QUESTION_GENERATION", 0), \
+             mock.patch.object(render, "_EXPLORER_REPLAY_ACTIVE", False), \
+             mock.patch.dict(os.environ, {"FLEET_DEMO": ""}):
+            render._explorer_question_worker()
+            self.assertIsNone(render._explorer_question_worker())  # empty follow-up
+            render._explorer_question_pump_tick()
+            overlay = render._EXPLORER_STATE.question_overlay
+        self.assertEqual(overlay["state"], "open")
+        self.assertEqual(overlay["detail"]["request_id"], self.request_id)
+        self.assertFalse(self.replies)
+
+    def test_unread_question_ends_on_the_native_prompt_status_and_adopts_a_late_read(self):
+        from collections import deque
+        from fleet import render
+        from fleet.explorer.runtime import ExplorerRuntime
+
+        selected, effect = self._open_loading_row()
+        pump = mock.Mock(running=True)
+        pump.poll.return_value = None
+        clock = [100.0]
+        with mock.patch.object(render, "_EXPLORER_STATE", selected), \
+             mock.patch.object(render, "_EXPLORER_MODEL", SimpleNamespace(
+                 questions=({"id": self.item_id, "ref": self.ref},))), \
+             mock.patch.object(render, "_EXPLORER_QUESTION_QUEUE", deque()), \
+             mock.patch.object(render, "_EXPLORER_QUESTION_RESULTS", deque()), \
+             mock.patch.object(render, "_EXPLORER_QUESTION_PUMP", pump), \
+             mock.patch.object(render, "_EXPLORER_QUESTION_LOADING", (None, 0.0)), \
+             mock.patch.object(render.time, "monotonic", side_effect=lambda: clock[0]):
+            render._explorer_question_pump_tick()
+            clock[0] += render.QUESTION_READ_WAIT_S - 1
+            render._explorer_question_pump_tick()
+            self.assertEqual(render._EXPLORER_STATE.question_overlay["state"], "loading")
+            clock[0] += 2
+            render._explorer_question_pump_tick()
+            overlay = render._EXPLORER_STATE.question_overlay
+            self.assertEqual(overlay["state"], "unknown")
+            self.assertIn("native prompt", overlay["status"])
+            render._explorer_accept_question_result(
+                {"effect": effect, "result": ExplorerRuntime.execute_question_action(effect)})
+            self.assertEqual(render._EXPLORER_STATE.question_overlay["state"], "open")
         self.assertFalse(self.replies)
 
     def test_delayed_native_status_refreshes_until_terminal_without_resubmitting(self):
@@ -2660,7 +2762,7 @@ class FleetWorkflowQuestionIntegrationTests(unittest.TestCase):
             self.assertTrue(display_detail)
             panel = "\n".join(draw(vm, state, 140, 45).text_rows())
             self.assertIn(display_detail, panel)
-            self.assertIn("answer in its pane", panel)
+            self.assertIn("answer in its window", panel)
             self.assertFalse(_has_hit(vm, state, ("question.submit",)))
 
             draft_text = "Private " + source + " response draft"
@@ -3137,6 +3239,51 @@ class FleetS2WorkflowResponseTests(unittest.TestCase):
             ledger.journal(), "frame-review")
         self.assertEqual((resolution["status"], resolution["epoch"]), ("proceed", 1))
         self.assertEqual(result["result"]["request_id"], result["action_id"])
+
+    def _frame_answer_notice(self, envelope):
+        """The one notice a board answer to this frame interview leaves for the session that opened the route."""
+        import dispatch_pending_delivery as pending
+        import hashlib
+        import session_notice
+        key = "frame-answer:" + envelope["selected_id"]
+        delivery = "delivery-" + hashlib.sha256(f"{session_notice.KIND}\0{key}".encode()).hexdigest()
+        return pending.read(self.jobs.parent, "parent-session", delivery)
+
+    def test_a_board_answer_that_starts_no_owner_tells_the_session_that_opened_the_route(self):
+        """Frame answer -> gate released -> one notice carrying resume_command (the session ended its turn)."""
+        from fleet.explorer.runtime import ExplorerRuntime
+
+        ledger = self._open_gate()
+        self._write_owner("done")          # no live or parked owner: release continues nothing
+        self._observe()
+        state, envelope, _ = self._read_in_ui(self._row(self._view_model(self.latest_result), "S2"))
+        state, effect = self._question_response(envelope)
+        self.assertIsNone(self._frame_answer_notice(envelope))
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_REGISTERED_WORKER": ""}):
+            result = ExplorerRuntime.execute_question_action(effect)
+        self.assertEqual(result["state"], "applied", result)
+        self.assertNotIn("owner_continuation", result["result"])
+        record = self._frame_answer_notice(envelope)
+        self.assertIsNotNone(record)
+        receipt = record["receipt"]
+        self.assertEqual(receipt["required_action"], "run-resume-command")
+        self.assertIn("capability-route.py start --route", receipt["text"])
+        self.assertIn(self.route["route_id"] if "rt-" in self.route_file.name else str(self.route_file), receipt["text"])
+        again = ExplorerRuntime.execute_question_action(effect)
+        self.assertEqual(again["state"], "applied", again)
+        self.assertEqual(self._frame_answer_notice(envelope)["delivery_id"], record["delivery_id"])  # still the one
+
+    def test_a_board_answer_that_continues_the_owner_sends_no_notice(self):
+        from fleet.explorer.runtime import ExplorerRuntime
+
+        self._open_gate()                  # the owner is live: release reports `owner-live`
+        state, envelope, _ = self._read_in_ui(self._row(self._view_model(self.latest_result), "S2"))
+        state, effect = self._question_response(envelope)
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_REGISTERED_WORKER": ""}):
+            result = ExplorerRuntime.execute_question_action(effect)
+        self.assertEqual(result["state"], "applied", result)
+        self.assertEqual(result["result"]["owner_continuation"]["state"], "owner-live")
+        self.assertIsNone(self._frame_answer_notice(envelope))
 
     def test_empty_and_defer_leave_the_current_gate_blocked(self):
         from fleet.explorer.frame import draw

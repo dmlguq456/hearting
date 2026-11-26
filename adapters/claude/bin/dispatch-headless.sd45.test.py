@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import argparse,ast,importlib.util,io,json,os,shutil,subprocess,sys,tempfile,types,unittest
 from contextlib import ExitStack
 from pathlib import Path
@@ -8,6 +11,9 @@ S=importlib.util.spec_from_file_location("route",ROOT/"utilities/capability-rout
 WH_S=importlib.util.spec_from_file_location("claude_dispatch_headless",Path(__file__).with_name("dispatch-headless.py")); WH=importlib.util.module_from_spec(WH_S); WH_S.loader.exec_module(WH)
 from dispatch_contract import ROUTE_IDENTITY_METADATA_KEYS
 sys.path.append(str(Path(__file__).resolve().parents[3] / "utilities"))  # split_module_fixture
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
+SD45_PARENT = unique_attempt_id("att-sd45-parent")
 from split_module_fixture import patch_split  # noqa: E402
 
 
@@ -138,9 +144,9 @@ class ClaudeSD45(unittest.TestCase):
    with mock.patch.dict(os.environ,{"AGENT_HOME":str(ROOT),"AGENT_DISPATCH_JOBS":str(jobs),"AGENT_ARTIFACT_ROOT":str(art)},clear=False):
     route=R.compile_route("autopilot-code","dev","strong",repo,art,signals=["shared-contract"],transport="headless",tracking="tracked",tracked_gate_evidence=gate,dispatch_evidence=dispatch)
    path=base/"route.json"; path.write_text(json.dumps(route)); node=next(x for x in route["nodes"] if x["id"]=="execute")
-   parent=subprocess.Popen(["sleep","60"]);self.addCleanup(parent.wait);self.addCleanup(parent.kill);parent_start=(Path("/proc")/str(parent.pid)/"stat").read_text().split()[21];jobs.write_text(f"2026-07-23T00:00:00Z\topen\t{repo}\t{repo}\towner\tattempt_schema_version=2,dispatch_depth=1,transport=headless,execution_surface=registered-headless,registered_worker=1,fallback_hop=same-harness-headless,worker_type=owner,harness=claude,runtime_sandbox=adapter-default,attempt_id=att-sd45-parent,pid={parent.pid},pid_start={parent_start}\n")
+   parent=subprocess.Popen(["sleep","60"]);self.addCleanup(parent.wait);self.addCleanup(parent.kill);parent_start=(Path("/proc")/str(parent.pid)/"stat").read_text().split()[21];jobs.write_text(f"2026-07-23T00:00:00Z\topen\t{repo}\t{repo}\towner\tattempt_schema_version=2,dispatch_depth=1,transport=headless,execution_surface=registered-headless,registered_worker=1,fallback_hop=same-harness-headless,worker_type=owner,harness=claude,runtime_sandbox=adapter-default,attempt_id={SD45_PARENT},pid={parent.pid},pid_start={parent_start}\n")
    args=[sys.executable,str(ROOT/"adapters/claude/bin/dispatch-headless.py"),"--register","--worktree",str(repo),"--slug","claude-sd45","--capability","autopilot-code","--capability-mode","dev","--worker-mode",node["unit"],"--qa","standard","--intensity","strong","--dispatch-depth","2","--parent","owner","--parent-harness","claude","--parent-transport","headless","--parent-sandbox","adapter-default","--nested-eligibility","supported","--eligibility-source","claude-fixture","--fallback-ordinal","1","--route-file",str(path),"--route-id",route["route_id"],"--route-hash",route["route_hash"],"--route-node","execute","--unit",node["unit"],"--registry-digest",route["registry_digest"],"--write-scope",";".join(node["write_scope"]),"--completion-gate",node["completion_gate"],"--model-role",node["role"],"--model-profile",node["model_profile"],"--jobs",str(jobs),"--log-dir",str(logs)]
-   env=isolated_dispatch_env(AGENT_HOME=str(ROOT),AGENT_ARTIFACT_ROOT=str(art),AGENT_DISPATCH_JOBS=str(jobs),AGENT_DISPATCH_ATTEMPT_ID="att-sd45-parent"); ok=subprocess.run(args,text=True,capture_output=True,env=env); self.assertEqual(ok.returncode,0,ok.stdout+ok.stderr); output=dict(line.split("=",1) for line in ok.stdout.splitlines() if "=" in line); prompt=Path(output["prompt_file"]).read_text(); self.assertIn("consume the immutable record",prompt); self.assertNotIn("status -> prompt-signal -> mode -> route\n",prompt); self.assertIn("async_wait_policy=deny-proven",jobs.read_text()); self.assertIn(f"unit={node['unit']}",jobs.read_text()); self.assertIn(f"unit={node['unit']}",ok.stdout)
+   env=isolated_dispatch_env(AGENT_HOME=str(ROOT),AGENT_ARTIFACT_ROOT=str(art),AGENT_DISPATCH_JOBS=str(jobs),AGENT_DISPATCH_ATTEMPT_ID=SD45_PARENT); ok=subprocess.run(args,text=True,capture_output=True,env=env); self.assertEqual(ok.returncode,0,ok.stdout+ok.stderr); output=dict(line.split("=",1) for line in ok.stdout.splitlines() if "=" in line); prompt=Path(output["prompt_file"]).read_text(); self.assertIn("consume the immutable record",prompt); self.assertNotIn("status -> prompt-signal -> mode -> route\n",prompt); self.assertIn("async_wait_policy=deny-proven",jobs.read_text()); self.assertIn(f"unit={node['unit']}",jobs.read_text()); self.assertIn(f"unit={node['unit']}",ok.stdout)
    broken=json.loads(path.read_text()); del broken["tracked_gate_evidence"]; broken["route_hash"]=R.route_hash(broken); broken["route_id"]="rt-"+broken["route_hash"].split(":",1)[1][:16]; path.write_text(json.dumps(broken)); bad=args.copy(); bad[bad.index(route["route_id"])]=broken["route_id"]; bad[bad.index(route["route_hash"])]=broken["route_hash"]; denied=subprocess.run(bad,text=True,capture_output=True,env=env); self.assertEqual(denied.returncode,65); self.assertIn("tracked gate evidence",denied.stderr)
    legacy=[sys.executable,str(ROOT/"adapters/claude/bin/dispatch-headless.py"),"--dry-run","--worktree",str(repo),"--slug","claude-legacy-scope","--capability","autopilot-code","--mode","dev","--qa","standard","--write-scope","source/**","--model","claude-test","--effort","low"]
    compatible=subprocess.run(legacy,text=True,capture_output=True,env=env); self.assertEqual(compatible.returncode,0,compatible.stderr); self.assertIn("status=dry-run",compatible.stdout)
@@ -266,6 +272,26 @@ class ClaudeSD78CompletionDelivery(unittest.TestCase):
             "--state-file /tmp/supervisor-state/att-parent.json",
             command,
         )
+
+    def test_a_unit_leg_keeps_its_session_and_a_continued_turn_gives_its_permissions_again(self):
+        # Every other one-shot worker keeps `--no-session-persistence` byte for byte; a unit leg keeps its
+        # session in the worker home, and the turn that wakes it is told its own permissions, add-dirs and model.
+        one_shot = WH.shell_command(_shell_command_args(worker_type="review"), Path("/tmp/p.txt"), Path("/tmp/l.log"))
+        self.assertIn("--no-session-persistence", one_shot)
+        self.assertNotIn("--session-id", one_shot)
+        first = WH.shell_command(_shell_command_args(worker_type="review", unit_session_id="sess-1"),
+                                 Path("/tmp/p.txt"), Path("/tmp/l.log"))
+        self.assertIn("--session-id sess-1", first)
+        self.assertNotIn("--no-session-persistence", first)
+        import unit_continue
+        plan = unit_continue.SessionPlan("resumed", "", "sess-1", "/f", "projects/x/sess-1.jsonl")
+        woken = WH.shell_command(_shell_command_args(worker_type="review", unit_session_id="sess-1", session_plan=plan),
+                                 Path("/tmp/p.txt"), Path("/tmp/l.log"))
+        self.assertIn("--resume sess-1", woken)
+        self.assertNotIn("--session-id", woken)
+        for flag in ("--permission-mode", "--add-dir /tmp/fixture-artifacts"):
+            self.assertIn(flag, woken)
+        self.assertEqual(woken.replace("--resume sess-1", "--session-id sess-1"), first)
 
     def test_supervised_state_path_rejects_attempt_path_escape(self):
         args = _shell_command_args(attempt_id="att-../../outside")

@@ -5,16 +5,21 @@ in isolation: a prior release's managed env key must be dropped only when the
 user never changed it away, and `autoMemoryEnabled` merges like `statusLine`
 (apply when absent, keep-and-report when the user set a conflicting value).
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import claude_settings_config  # noqa: E402
 import fixture_env  # noqa: E402
 import runtime_activation  # noqa: E402
 
@@ -226,6 +231,249 @@ class ClaudeManagedSettingsTests(unittest.TestCase):
                 self.assertTrue(runtime_activation._claude_settings_health(active_root)[0])
                 settings["idleCompaction"] = False
                 self._write_user_settings(claude_home, settings)
+                self.assertEqual(runtime_activation._claude_settings_health(active_root), (False, []))
+
+
+class LeftArrowDefaultTests(unittest.TestCase):
+    """`leftArrowOpensAgents=false` lives in Claude's global config file, not settings.json."""
+
+    KEY = "leftArrowOpensAgents"
+    setUp = ClaudeManagedSettingsTests.setUp
+    _fixture = ClaudeManagedSettingsTests._fixture
+    _write_user_settings = ClaudeManagedSettingsTests._write_user_settings
+    _read_user_settings = ClaudeManagedSettingsTests._read_user_settings
+
+    def _setup(self, tmp, global_config=None):
+        active_root, claude_home = self._fixture(tmp)
+        self._write_user_settings(claude_home, {"hooks": {}, "statusLine": STATUS_LINE})
+        target = claude_home / ".claude.json"
+        if global_config is not None:
+            target.write_text(json.dumps(global_config), encoding="utf-8")
+        return active_root, claude_home, target
+
+    def _install(self, active_root, claude_home, previous=None):
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(claude_home)}):
+            return runtime_activation._merge_claude_settings(active_root, previous)
+
+    def _uninstall(self, claude_home, values):
+        state = {"managed_config": {"claude_values": values}}
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(claude_home)}):
+            return runtime_activation._unmerge_claude_settings(state, "global")
+
+    def test_absent_key_is_added_and_other_keys_and_order_survive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            active_root, claude_home, target = self._setup(
+                tmp, {"zeta": 1, "numStartups": 7, "alpha": {"k": "v"}})
+            result = self._install(active_root, claude_home)
+            data = json.loads(target.read_text())
+            self.assertEqual(list(data), ["zeta", "numStartups", "alpha", self.KEY])
+            self.assertIs(data[self.KEY], False)
+            self.assertEqual((data["zeta"], data["numStartups"], data["alpha"]), (1, 7, {"k": "v"}))
+            self.assertIs(result["managed_values"][self.KEY], False)
+            self.assertTrue(any(self.KEY in line for line in result["report_lines"]))
+            self.assertNotIn(self.KEY, self._read_user_settings(claude_home))
+            self.assertEqual(result["conflicts"], [])
+
+    def test_missing_file_is_not_created(self):
+        # A key-only file would hide Claude's "restore from backup" notice on its next start.
+        with tempfile.TemporaryDirectory() as tmp:
+            active_root, claude_home, target = self._setup(tmp)
+            result = self._install(active_root, claude_home)
+            self.assertFalse(target.exists())
+            self.assertFalse((claude_home / ".claude.json.lock").exists())
+            self.assertNotIn(self.KEY, result["managed_values"])
+            self.assertTrue(any("does not exist yet" in line for line in result["report_lines"]))
+            target.write_text(json.dumps({"x": 1}), encoding="utf-8")
+            self._install(active_root, claude_home)
+            self.assertIs(json.loads(target.read_text())[self.KEY], False)
+
+    def test_new_value_keeps_the_file_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            active_root, claude_home, target = self._setup(tmp, {"x": 1})
+            for mode in (0o600, 0o644):
+                target.write_text(json.dumps({"x": 1}), encoding="utf-8")
+                target.chmod(mode)
+                self._install(active_root, claude_home)
+                self.assertEqual(target.stat().st_mode & 0o777, mode)
+
+    def test_held_claude_lock_is_waited_for_then_skipped_and_never_broken(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            active_root, claude_home, target = self._setup(tmp, {"x": 1})
+            lock = claude_home / ".claude.json.lock"
+            lock.mkdir()
+            before = target.read_bytes()
+            with mock.patch.object(claude_settings_config, "_LOCK_WAIT_SECONDS", 0.15):
+                result = self._install(active_root, claude_home)
+                self.assertFalse(claude_settings_config.release_left_arrow_default(target))
+            self.assertEqual(target.read_bytes(), before)
+            self.assertTrue(lock.is_dir())  # Hearting never removes a lock it did not take
+            self.assertNotIn(self.KEY, result["managed_values"])
+            self.assertTrue(any("being saved by Claude" in line for line in result["report_lines"]))
+            self.assertEqual(result["conflicts"], [])
+            # destructive-ok: reason=free the fixture lock the test created; boundary=the empty .claude.json.lock directory inside this TemporaryDirectory
+            lock.rmdir()
+            self._install(active_root, claude_home)  # the next install tries again
+            self.assertIs(json.loads(target.read_text())[self.KEY], False)
+
+    def test_lock_released_while_waiting_lets_the_write_through(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            active_root, claude_home, target = self._setup(tmp, {"x": 1})
+            lock = claude_home / ".claude.json.lock"
+            lock.mkdir()
+            # destructive-ok: reason=free the fixture lock the test created; boundary=the empty .claude.json.lock directory inside this TemporaryDirectory
+            timer = threading.Timer(0.2, lock.rmdir)
+            timer.start()
+            self.addCleanup(timer.cancel)
+            result = self._install(active_root, claude_home)
+            timer.join()
+            self.assertIs(json.loads(target.read_text())[self.KEY], False)
+            self.assertIs(result["managed_values"][self.KEY], False)
+            self.assertFalse(lock.exists())
+
+    def test_lock_is_taken_while_writing_and_always_released(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            active_root, claude_home, target = self._setup(tmp, {"x": 1})
+            lock = claude_home / ".claude.json.lock"
+            seen = []
+            import safe_fs
+            real = safe_fs.atomic_write_bytes
+
+            def spy(auth, *args, **kwargs):
+                if auth.target.name == ".claude.json":
+                    seen.append(lock.is_dir())
+                return real(auth, *args, **kwargs)
+
+            with mock.patch.object(safe_fs, "atomic_write_bytes", spy):
+                self._install(active_root, claude_home)
+            self.assertEqual(seen, [True])
+            self.assertFalse(lock.exists())
+            # An exception inside the held section (write refused) still releases it.
+            target.write_text(json.dumps({"x": 1}), encoding="utf-8")
+            with mock.patch.object(safe_fs, "atomic_write_bytes", side_effect=OSError("disk full")):
+                result = self._install(active_root, claude_home)
+            self.assertFalse(lock.exists())
+            self.assertTrue(any("disk full" in line for line in result["report_lines"]))
+            self.assertEqual(json.loads(target.read_text()), {"x": 1})
+            # So does a termination signal turned into SystemExit, and Ctrl-C.
+            for exc in (SystemExit(143), KeyboardInterrupt()):
+                with mock.patch.object(safe_fs, "atomic_write_bytes", side_effect=exc):
+                    with self.assertRaises(type(exc)):
+                        self._install(active_root, claude_home)
+                self.assertFalse(lock.exists())
+
+    def test_sigterm_during_the_held_section_releases_the_lock(self):
+        import signal
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / ".claude.json"
+            target.write_text("{}", encoding="utf-8")
+            previous = signal.getsignal(signal.SIGTERM)
+            with self.assertRaises(SystemExit):
+                with claude_settings_config._claude_config_lock(target):
+                    self.assertTrue((Path(tmp) / ".claude.json.lock").is_dir())
+                    os.kill(os.getpid(), signal.SIGTERM)
+            self.assertFalse((Path(tmp) / ".claude.json.lock").exists())
+            self.assertIs(signal.getsignal(signal.SIGTERM), previous)
+
+    def test_another_users_file_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            active_root, claude_home, target = self._setup(tmp, {"x": 1})
+            before = target.read_bytes()
+            with mock.patch.object(claude_settings_config.os, "geteuid", return_value=os.geteuid() + 1):
+                result = self._install(active_root, claude_home)
+            self.assertEqual(target.read_bytes(), before)
+            self.assertTrue(any("belongs to another user" in line for line in result["report_lines"]))
+            self.assertFalse((claude_home / ".claude.json.lock").exists())
+
+    def test_out_of_range_number_is_not_rewritten_as_infinity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            active_root, claude_home, target = self._setup(tmp)
+            target.write_text('{"cost": 1e400, "x": 1}', encoding="utf-8")
+            before = target.read_bytes()
+            result = self._install(active_root, claude_home)
+            self.assertEqual(target.read_bytes(), before)
+            self.assertNotIn(self.KEY, result["managed_values"])
+            self.assertTrue(any("skipped" in line for line in result["report_lines"]))
+            self.assertFalse((claude_home / ".claude.json.lock").exists())
+            # The same for the uninstall rewrite: left as it is, no Infinity.
+            target.write_text('{"cost": 1e400, "%s": false}' % self.KEY, encoding="utf-8")
+            before = target.read_bytes()
+            self.assertFalse(claude_settings_config.release_left_arrow_default(target))
+            self.assertEqual(target.read_bytes(), before)
+
+    def test_user_value_is_never_overwritten_and_not_owned(self):
+        for user_value in (True, False):
+            with self.subTest(user_value=user_value), tempfile.TemporaryDirectory() as tmp:
+                active_root, claude_home, target = self._setup(tmp, {self.KEY: user_value, "x": 1})
+                before = target.read_bytes()
+                result = self._install(active_root, claude_home)
+                self.assertEqual(target.read_bytes(), before)
+                self.assertNotIn(self.KEY, result["managed_values"])
+                self.assertEqual(result["conflicts"], [])
+                self.assertFalse([line for line in result["report_lines"] if self.KEY in line])
+
+    def test_rerun_is_identical_and_keeps_ownership(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            active_root, claude_home, target = self._setup(tmp, {"x": 1})
+            first = self._install(active_root, claude_home)
+            written = target.read_bytes()
+            previous = {"managed_config": {"claude_hooks": first["managed_hooks"],
+                                           "claude_values": first["managed_values"]}}
+            second = self._install(active_root, claude_home, previous)
+            self.assertEqual(target.read_bytes(), written)
+            self.assertIs(second["managed_values"][self.KEY], False)
+            self.assertFalse([line for line in second["report_lines"] if self.KEY in line])
+
+    def test_user_flip_to_true_survives_next_install_and_drops_ownership(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            active_root, claude_home, target = self._setup(tmp, {"x": 1})
+            first = self._install(active_root, claude_home)
+            data = json.loads(target.read_text())
+            data[self.KEY] = True
+            target.write_text(json.dumps(data), encoding="utf-8")
+            previous = {"managed_config": {"claude_hooks": first["managed_hooks"],
+                                           "claude_values": first["managed_values"]}}
+            second = self._install(active_root, claude_home, previous)
+            self.assertIs(json.loads(target.read_text())[self.KEY], True)
+            self.assertNotIn(self.KEY, second["managed_values"])
+            # Later uninstall leaves the user's value alone.
+            self.assertNotIn(str(target), self._uninstall(claude_home, second["managed_values"]))
+            self.assertIs(json.loads(target.read_text())[self.KEY], True)
+
+    def test_uninstall_removes_only_the_value_it_wrote(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            active_root, claude_home, target = self._setup(tmp, {"x": 1})
+            first = self._install(active_root, claude_home)
+            restored = self._uninstall(claude_home, first["managed_values"])
+            self.assertIn(str(target), restored)
+            self.assertEqual(json.loads(target.read_text()), {"x": 1})
+
+    def test_uninstall_keeps_a_value_the_user_changed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            active_root, claude_home, target = self._setup(tmp, {"x": 1})
+            first = self._install(active_root, claude_home)
+            target.write_text(json.dumps({"x": 1, self.KEY: True}), encoding="utf-8")
+            self.assertNotIn(str(target), self._uninstall(claude_home, first["managed_values"]))
+            self.assertIs(json.loads(target.read_text())[self.KEY], True)
+
+    def test_unreadable_global_config_is_reported_not_fatal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            active_root, claude_home, target = self._setup(tmp)
+            target.write_text("{not json", encoding="utf-8")
+            result = self._install(active_root, claude_home)
+            self.assertEqual(target.read_text(), "{not json")
+            self.assertNotIn(self.KEY, result["managed_values"])
+            self.assertTrue(any("skipped" in line for line in result["report_lines"]))
+            self.assertEqual(result["conflicts"], [])
+
+    def test_health_has_no_row_for_the_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            active_root, claude_home, target = self._setup(tmp)
+            self._write_user_settings(claude_home, {"hooks": HOOKS, "statusLine": STATUS_LINE,
+                                                    "autoMemoryEnabled": False})
+            statusline = claude_home / "statusline.sh"
+            statusline.write_text("#!/bin/sh\n", encoding="utf-8")
+            statusline.chmod(0o755)
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(claude_home)}):
                 self.assertEqual(runtime_activation._claude_settings_health(active_root), (False, []))
 
 

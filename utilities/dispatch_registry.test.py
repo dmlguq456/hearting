@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import contextlib, dataclasses, hashlib, importlib.util, io, json, os, re, subprocess, sys, tempfile, time, types, unittest
 from pathlib import Path
 from unittest import mock
@@ -13,6 +16,8 @@ from dispatch_contract import (attempt_process_quiescence,  # noqa: E402
                                parse_registry_metadata,
                                post_exit_receipt_reason)
 from split_module_fixture import patch_split  # noqa: E402
+sys.path.insert(0,str(ROOT/"tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 CURRENT_ATTEMPT_CONTRACT=(
  "attempt_schema_version=2,dispatch_depth=2,transport=headless,"
  "execution_surface=registered-headless,registered_worker=1,"
@@ -897,7 +902,7 @@ class RegistryTest(RegistryFixtureTestCase):
  # B-N2. The same row with one of its own tagged processes actually running
  # stays active. This is the "no regression on a healthy worker" control.
  def test_live_tagged_process_keeps_the_ghost_shaped_row_active(self):
-  attempt="att-ghost000002"
+  attempt=unique_attempt_id("att-ghost000002")
   child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],
                          env={**os.environ,"AGENT_DISPATCH_ATTEMPT_ID":attempt})
   try:
@@ -1080,7 +1085,7 @@ class RegistryTest(RegistryFixtureTestCase):
            "registered_worker=1,fallback_hop=same-harness-headless")
   owner="att-positive-child-owner"
   outer=subprocess.Popen(["sleep","60"],start_new_session=True)
-  tagged_attempt="att-tagged-survivor"
+  tagged_attempt=unique_attempt_id("att-tagged-survivor")
   tagged_env=dict(os.environ,AGENT_DISPATCH_ATTEMPT_ID=tagged_attempt)
   tagged=subprocess.Popen(["sleep","60"],start_new_session=True,env=tagged_env)
   observer=os.readlink("/proc/self/ns/pid")
@@ -1447,7 +1452,7 @@ class RegistryTest(RegistryFixtureTestCase):
   # See the fresh-heartbeat fixture's comment above for why the namespace is
   # declared explicitly extinct here.
   module=self.load_registry_module("manual_receiptless_live_tagged")
-  attempt="att-receiptless-live"
+  attempt=unique_attempt_id("att-receiptless-live")
   empty_log=self.base/"receiptless-live.codex.jsonl"
   empty_log.write_text(json.dumps({"type":"system","subtype":"init"})+"\n")
   child=subprocess.Popen(
@@ -2201,7 +2206,7 @@ class ArtifactProofReceiptSealTest(RegistryFixtureTestCase):
   self.artifact.write_text("final worker output\n")
   self.digest=hashlib.sha256(self.artifact.read_bytes()).hexdigest()
   self.observer=os.readlink("/proc/self/ns/pid")
-  self.attempt="att-artifact-proof-1"
+  self.attempt=unique_attempt_id("att-artifact-proof-1")
   self.log=self.base/"worker.codex.jsonl"
   self.write_log(f"artifact: {self.artifact}\nverdict: PASS\nblocker: none")
   self.write_heartbeat(phase="artifact",evidence=f"sha256:{self.digest}")
@@ -2541,7 +2546,7 @@ class DetachedResidueDrainReconcileTest(RegistryFixtureTestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
   self.base=Path(self.tmp.name);self.jobs=self.base/"jobs.log"
-  self.attempt="att-residue-reconcile"
+  self.attempt=unique_attempt_id("att-residue-reconcile")
   self.repo=self.base/"repo";self.repo.mkdir()
   root=self.repo/".agent_reports";root.mkdir()
   artifact=root/"slice.md";artifact.write_text("finished slice\n")

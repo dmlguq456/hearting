@@ -1,4 +1,7 @@
 """Private complete-VM cache and stale replay regressions."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 import stat
 import tempfile
@@ -110,6 +113,35 @@ class PersistedReplayTests(unittest.TestCase):
         self.assertEqual(cached.compute[0][2], (12.0, 16))
         with self.assertRaises(TypeError):
             session["state"] = "dead"
+
+    def test_a_running_viewers_own_save_does_not_become_a_resume_payload(self):
+        # The resume payload is for a *restarted* viewer. A running viewer's writer thread reads
+        # the cache file back (to compare ``observed_at``); that read must not hand the payload it
+        # found to the detail worker, or the next detail pass resumes from a stale payload instead
+        # of reading the routes: every other pass it would draw routes without their detail.
+        payload = {"schema_version": 1, "captured_at": 1.0, "rows": []}
+        first = self.runtime.persist_complete_async(display_vm(), complete_readiness(at=100.0, generation=3),
+                                                    payload)
+        first.join(2)
+        # a restarted viewer takes the payload exactly once, at load
+        restarted = ExplorerRuntime(self.state_home)
+        self.assertIsNotNone(restarted.load_last_complete({"codex"}))
+        self.assertEqual(restarted.cached_continuation, payload)
+        self.assertEqual(restarted.clear_cached_continuation(), payload)
+        self.assertIsNone(restarted.cached_continuation)
+        # the running viewer saves again (the writer reads the first file back twice)
+        second = self.runtime.persist_complete_async(display_vm(), complete_readiness(at=110.0, generation=4),
+                                                     payload)
+        second.join(2)
+        self.assertFalse(second.is_alive())
+        self.assertIsNone(self.runtime.cached_continuation)
+        restarted_again = ExplorerRuntime(self.state_home)
+        restarted_again.load_last_complete({"codex"})
+        restarted_again.clear_cached_continuation()
+        third = restarted_again.persist_complete_async(display_vm(), complete_readiness(at=120.0, generation=5),
+                                                       payload)
+        third.join(2)
+        self.assertIsNone(restarted_again.cached_continuation)
 
     def test_incomplete_and_continued_generations_are_not_written(self):
         vm = display_vm()

@@ -26,7 +26,7 @@ Intensity supplies the default graph below; an explicit graph takes precedence. 
 - `quick`: intake → orient-lite → micro-plan → plan-check-lite → produce → verify-lite → report; no independent QA after every stage.
 - `standard`: frame already ran as a fixed two-leg depth-0 bootstrap (both legs `top`; a pin or explicit profile wins) before this graph starts → durable code-plan → plan-check → code-execute → impl-review → code-test → code-report.
 - `strong`: run separate 2-way plan (`plan` + `plan-alternative`) and implementation-review (`impl-review` + `impl-review-alternative`) groups before their declared convergence points; frame stays the same fixed two legs as `standard` — no third frame leg.
-- `thorough` and `adversarial`: widen plan plus implementation review to three legs by adding the sealed implementation-risk and failure-mode perspectives; frame still has no third leg at any intensity. Every width/profile/perspective comes from registry-v6; no owner invents a leg.
+- `thorough` and `adversarial`: widen plan, plan-check and implementation review to three legs by adding the sealed implementation-risk, simplicity-check (auxiliary) and failure-mode perspectives; frame still has no third leg at any intensity. Every width/profile/perspective comes from registry-v6; no owner invents a leg.
 
 Plan-check belongs to the default recipe. Do not add it to an explicit graph that omits it or claim it ran from QA policy output. Report only actual verification evidence.
 

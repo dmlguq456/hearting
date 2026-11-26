@@ -5,10 +5,10 @@
 Start shared behavior changes in `core/`, `capabilities/`, and `roles/`. These
 own the common meaning. Claude Code, Codex, and OpenCode are equal adapters;
 none is the reference implementation for the others. For an overview, read
-[MANUAL.md](MANUAL.md).
+[MANUAL.md](docs/MANUAL.md).
 
-Keep [README.ko.md](README.ko.md), [QUICKSTART.ko.md](QUICKSTART.ko.md), and
-[FAQ.ko.md](FAQ.ko.md) in step with their English files in the same pull
+Keep [README.ko.md](README.ko.md), [QUICKSTART.ko.md](docs/QUICKSTART.ko.md), and
+[FAQ.ko.md](docs/FAQ.ko.md) in step with their English files in the same pull
 request. The English file is canonical; the Korean file is its translation, and
 the Korean-language screens and regression inputs stay supported.
 
@@ -64,7 +64,7 @@ activation suite. Packaged activation refuses a dirty working tree, so run the
 installation lifecycle suites from a clean checkout. A small prose change does
 not call for every suite; say what you ran and what you did not.
 
-If you change what a Fleet screen shows, redraw the README pictures from their
+If you change what a Fleet or panel screen shows, redraw the README pictures from their
 demo rows and commit them with the change:
 
 ```sh
@@ -83,5 +83,5 @@ python3 tools/render-fleet-svg.py
   requests.
 - Use neutral host names and paths in fixtures (`gpu-a`, `192.0.2.x`,
   `/home/user`). Do not include secrets, credentials, or real conversations.
-- Releases follow [RELEASE_POLICY.md](RELEASE_POLICY.md); a contribution adds no
+- Releases follow [RELEASE_POLICY.md](docs/RELEASE_POLICY.md); a contribution adds no
   approval or signing step of its own.

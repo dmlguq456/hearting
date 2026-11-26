@@ -1,9 +1,10 @@
 """Bounded shell presentation of Fleet-owned facts, never input authority."""
 import re
 from .config import ui_text
-from .session_line import status_lines, _clean_model, _model_key, _effort_text, _eff_key, _percent, _level
+from .session_line import route_text, status_lines, _clean_model, _model_key, _effort_text, _eff_key, _percent, _level
 from .session_handle import sanitize_title
 from .token_budget import compaction_imminent
+from .render_stages import route_stage_key
 
 
 def state_label(value):
@@ -20,7 +21,7 @@ def evidence_text(value):
     return " · ".join(part.strip() for part in re.split(r"\s*·\s*", text) if part.strip() not in {"", "·"})
 
 
-def route_evidence(visibility):
+def route_evidence(visibility, unit=False):
     """Translate reader codes only; quoted evidence is never a verdict."""
     codes = visibility.get("codes")
     if not isinstance(codes, dict) or codes.get("schema") != "route_visibility_codes_v1":
@@ -30,6 +31,8 @@ def route_evidence(visibility):
     stages = codes.get("stages") or []
     shape = codes.get("shape") or "unknown"
     shape = shape if shape in {"direct", "solo", "staged", "framed"} else "unknown"
+    if unit:
+        shape = "unit"          # (11-19: a unit route's recorded shape is `solo`, but its form is `unit`)
     summary = [text("shape_" + shape)]
     tests = [row for row in stages if len(row) == 4 and row[1] == "test"]
     test_state = "pass" if tests and all(row[2] == "done" and row[3] == "1" for row in tests) else "recorded" if tests else "none"
@@ -73,6 +76,95 @@ def route_evidence(visibility):
     following = evidence_text(" · ".join(filter(None, [text("next_" + kind), nxt.get("node"), nxt.get("harness")])))
     lines.append([text("evidence_next"), following, "info"])
     return {"summary": summary[0] + " · " + " ".join(summary[1:]), "next": following, "lines": lines}
+
+
+def stage_mark(state):
+    """A stage's mark as Fleet's stage rail draws it: done ✓, running ●, failed ✕, else none."""
+    return {"active": "●", "running": "●", "working": "●", "reconciling": "●", "recovering": "●",
+            "done": "✓", "completed": "✓", "failed": "✕", "dead": "✕"}.get(str(state or ""), "")
+
+
+def stage_doer(node):
+    """The stage's own doer values from Fleet's route record: harness, model, effort, time, round."""
+    from .session_line import _clean_model, effort_label
+    shown = {}
+    harness = sanitize_title(str(node.get("h") or ""))[:32]
+    if harness:
+        shown["harness"] = harness
+    if node.get("m"):
+        shown["model"] = _clean_model(node["m"]) or sanitize_title(str(node["m"]))[:64]
+    if effort_label(node.get("e")):
+        shown["effort"] = effort_label(node.get("e"))
+    if node.get("el"):
+        shown["elapsed"] = sanitize_title(str(node["el"]))[:32]
+    if type(node.get("r")) is int and node["r"] > 1:
+        shown["round"] = node["r"]
+    if node.get("gate") is True:
+        shown["gate"] = True
+    for key in ("verdict", "when", "unit", "out", "note", "says"):
+        if node.get(key):
+            shown[key] = sanitize_title(str(node[key]))[:160]
+    return shown
+
+
+def route_kind(row):
+    """``autopilot-code (dev·q)``, the owner's model words and context: Fleet's unfolded kind line."""
+    from .session_line import _clean_model, effort_label, token_text, _percent
+    short = {"standard": "std", "light": "lt", "quick": "q", "thorough": "thr", "adversarial": "adv"}
+    suffix = "·".join(short.get(value, value) for value in (row.get("mode"), row.get("intensity")) if value)
+    kind = sanitize_title(str(row.get("capability") or ""))[:64]
+    shown = {"kind_text": (kind or "·") + ("(" + suffix + ")" if suffix else "") if kind or suffix else ""}
+    profile = sanitize_title(str(row.get("profile") or ""))[:32]
+    if profile and profile != "deep":
+        shown["profile"] = profile
+    if _percent(row.get("owner_ctx_pct")) != "?":
+        shown["owner_ctx"] = _percent(row["owner_ctx_pct"])
+    elif token_text(row.get("owner_ctx_tokens")):
+        shown["owner_ctx"] = token_text(row["owner_ctx_tokens"])
+    for key in ("age", "resume", "worker_unit"):
+        if row.get(key):
+            shown[key] = sanitize_title(str(row[key]))[:64]
+    if row.get("after"):
+        shown["after"] = sanitize_title(str(row["after"]))[:200]
+    if type(row.get("legs")) is int and row["legs"] > 0:
+        shown["legs"] = row["legs"]
+    # 11-17 (route row 5): the kind's own intensity word and the chain of kinds the route continues (name and state).
+    intensity = sanitize_title(str(row.get("intensity") or ""))[:32]
+    # 11-19 (the person, in order: "unit, one-shot, staged을 괄호로 넣어야하나 싶은데" / "unit도 어떤 모델을 부르냐에 따라서 강도는 정해질 수 있는 거잖아" /
+    # "강도도 표기해 항상" / "unit과 one-shot의 의미가 딱 들으면 잘 구분이 되나? staged도 그 framed랑 함께 잘 표현이 되는 단어인가? 전반적으로 전향적
+    # 검토가 필요해" / "team도 괜찮은데?"): the intensity of every route is sent, a unit route's too (11-20: the panel's drawing leaves a unit's out, `code(unit)`; this is the record's value); and the route's FORM (`unit`, `solo`, `team`:
+    # who makes the work; `palette.route_form`, decided here once), which the panel draws in the bracket before the intensity (`code(team·standard)`).
+    unit_route = str(row.get("capability") or "") == "unit"
+    if intensity:
+        shown["intensity"] = intensity
+    from .palette import route_form
+    form = route_form(row.get("capability"), row.get("shape"), row.get("field"))
+    if form:
+        shown["kind_form"] = form
+    chain = [{"name": sanitize_title(str(leg[0]))[:24], "state": sanitize_title(str(leg[1]))[:12]}
+             for leg in (row.get("chain") or ())[:6]
+             if isinstance(leg, (list, tuple)) and len(leg) >= 2 and sanitize_title(str(leg[0]))]
+    if chain and not unit_route:
+        shown["chain"] = chain
+    return shown
+
+
+def route_workers(row):
+    """Each live worker's stage, harness, model and context (Fleet's ``└ stage · n`` rows)."""
+    from .session_line import _clean_model, _percent
+    workers = []
+    for item in row.get("worker_contexts") or ():
+        if not isinstance(item, dict) or not item.get("stage"):
+            continue
+        worker = {"stage": sanitize_title(str(item["stage"]))[:64]}
+        if item.get("harness"):
+            worker["harness"] = sanitize_title(str(item["harness"]))[:32]
+        if item.get("model"):
+            worker["model"] = _clean_model(item["model"]) or sanitize_title(str(item["model"]))[:64]
+        if _percent(item.get("ctx_pct")) != "?":
+            worker["ctx"] = _percent(item["ctx_pct"])
+        workers.append(worker)
+    return {"workers": workers[:8]} if workers else {}
 
 
 def compact_status(values, columns, native_owned=()):
@@ -152,24 +244,29 @@ def session_brief(values):
     return items
 
 
-NOTICE_NEWS_SECONDS = 600
-
-
-def notice_line(values, routes, questions, display, now):
+def notice_line(values, routes, questions):
     """The one line under Claude's input while the panel paints the status area.
 
-    Only what the person must know now, one item by priority: an answer this
-    session owes, a warning already computed elsewhere, then fresh news. No
-    item means an empty line. Values, glyphs and colors are the panel's own;
-    nothing here collects, judges or authorizes anything new.
+    Only what the person must do now, one item by priority: an answer this session
+    owes, compaction imminent, a context or usage reading at Fleet's red level, then
+    a failed, attention-needing or blocked route. No item means an empty line. News
+    (a received report, a route's result) and the release lines stand in MESSAGES,
+    the ROUTE box and the panel's tidy-notice slot instead. Values, glyphs and colors
+    are the panel's own; nothing here collects, judges or authorizes anything new.
     """
     from .render_cells import _LIVE_GLYPH
-    waiting = sum(1 for item in questions or () if isinstance(item, dict) and item.get("answerable") is True
-                  and (item.get("request_state") or "open") == "open")
+    here = sum(1 for item in questions or () if isinstance(item, dict) and item.get("answerable") is True
+               and (item.get("request_state") or "open") == "open")
+    # The panel's own count (11-14): every wait of this session a person must answer, the ones
+    # answered in another place too. `Ctrl+]` is named only when the panel answers one; else the
+    # place the answer goes, from the guidance line.
+    counted = values.get("answer_wait")
+    waiting = counted if type(counted) is int and counted > here else here
     if waiting:
-        return [(_LIVE_GLYPH["blocked"] + " ", "g_blocked"),
-                (ui_text("fleet.session_panel.answer") + " " + str(waiting), "lvl_y"),
-                (" · Ctrl+]", "dim")]
+        from .session_line import answer_wait_word
+        place = sanitize_title(str(values.get("wait_place") or ""))[:40]
+        return [(answer_wait_word() + " " + str(waiting), "g_blocked"),
+                *([(" │ Ctrl+]", "dim")] if here else [(" │ " + place, "dim")] if place else [])]
     if compaction_imminent(values.get("compaction_pressure")):
         return [("⚠ ", "lvl_r"), (ui_text("fleet.context.compaction_imminent"), "lvl_r")]
     readings = [(ui_text("fleet.session_panel.context"), values.get("ctx_pct"))]
@@ -187,37 +284,631 @@ def notice_line(values, routes, questions, display, now):
             # its "answer needed" wording, not a failure.
             return [(_LIVE_GLYPH["blocked"] + " ", "g_blocked"), (ui_text("fleet.session_block.open"), "lvl_y"),
                     (" · " + (route.get("title") or route.get("id") or ""), "loc_repo")]
-    human = (display or {}).get("human") or {}
-    since = human.get("at") if type(human.get("at")) in (int, float) else 0
-    news = []
-    for row in (display or {}).get("received") or ():
-        at = row.get("at")
-        if type(at) in (int, float) and at > since and 0 <= now - at <= NOTICE_NEWS_SECONDS:
-            news.append((at, [("⇄ ", "loc_repo"), (sanitize_title(str(row.get("sender") or "peer"))[:48] + " · ", "loc_repo"),
-                              (sanitize_title(str(row.get("text") or ""))[:160], "dim")]))
-    for route in routes or ():
-        at = route.get("result_at")
-        if (route.get("state") == "done" and route.get("outcome") and type(at) in (int, float)
-                and at > since and 0 <= now - at <= NOTICE_NEWS_SECONDS):
-            news.append((at, [(_LIVE_GLYPH["done"] + " ", "lvl_g"),
-                              (ui_text("fleet.session_panel.ready") + " · ", "lvl_g"),
-                              (route.get("title") or route.get("id") or "", "loc_repo"),
-                              (" · " + route["outcome"], "dim")]))
-    return max(news, key=lambda item: item[0])[1] if news else []
+    return []
 
 
-def presentation(values, view, harness, sid, columns, *, native_owned=()):
+ROLES = ("owner", "frame", "worker")
+
+
+def route_gauge_cells(columns):
+    """The folded route's context gauge width beside the native area (spec E9 rule 38):
+    about eight cells in a 40-cell panel, five to ten as the panel narrows or widens."""
+    return max(5, min(10, (int(columns or 40) - 8) // 4))
+
+
+def doer_paint(row, cells=None):
+    """A doer's painted harness, model, effort and context (gauge at ``cells`` for the folded row)."""
+    from .session_line import effort_label, gauge_parts, token_text
+    shown = {}
+    harness = sanitize_title(str(row.get("harness") or ""))[:32]
+    if harness:
+        shown.update(harness=harness, harness_key="hb_" + harness)
+    model = row.get("model")
+    if model:
+        shown.update(model_text=_clean_model(model) or "", model_key=_model_key(model, harness=harness or None))
+    effort = effort_label(row.get("effort"))
+    if effort:
+        shown.update(effort=effort, effort_key=_eff_key(row.get("effort"), False))
+    # 11-17 (panel route row, CTX and NOW): what the session is on now, one line (Fleet's NOW value).
+    now_text = sanitize_title(str(row.get("now") or ""))[:160]
+    if now_text:
+        shown["now"] = now_text
+    percent = row.get("ctx_pct")
+    if _percent(percent) != "?":
+        shown.update(ctx=_percent(percent), ctx_key=_level(percent), gauge=[list(part) for part in gauge_parts(percent)],
+                     gauge5=[list(part) for part in gauge_parts(percent, cells=5)])
+        if cells:
+            # Spec E9 rule 38: the folded route's own context row: the head's context gauge
+            # (``gauge_parts``, its level colors) at the panel's width.
+            shown["gauge_row"] = [list(part) for part in gauge_parts(percent, cells=cells)]
+    elif token_text(row.get("ctx_tokens")):
+        # No window known: the exact token count, as Fleet writes it, never a made-up percent.
+        tokens = token_text(row["ctx_tokens"])
+        shown.update(ctx=tokens, ctx_key="dim", gauge=[[tokens, "dim"]], gauge5=[[tokens, "dim"]])
+        if cells:
+            shown["gauge_row"] = [[tokens, "dim"]]
+    return shown
+
+
+def called_rows(items, now, depth=0):
+    """The unit legs a row's attempt started and still runs, painted as a worker's row is: its mark, the unit's short
+    name, its harness, model and effort, its time; the ones it started in turn under it."""
+    from .session_line import route_glyph, elapsed_text, _number
+    out = []
+    for item in (items if isinstance(items, list) else ())[:8]:
+        if not isinstance(item, dict):
+            continue
+        unit = sanitize_title(str(item.get("unit") or ""))[:48]
+        if not unit:
+            continue
+        marker = item.get("marker") if item.get("marker") in ("working", "idle", "blocked", "dead", "stale") else "idle"
+        glyph, key = route_glyph(marker)
+        shown = {"glyph": glyph, "glyph_key": key, "kind": marker, "unit_word": unit, **doer_paint(item, None)}
+        # Under the route the unit is a row of its own: its title and its kind (its field: `code`, `docs`), as a unit route's.
+        title = sanitize_title(str(item.get("title") or ""))[:160]
+        if title:
+            shown["title"] = title
+        from .palette import route_field, ROUTE_FIELDS
+        word = sanitize_title(str(item.get("kind") or item.get("field") or ""))[:16]
+        if word in ROUTE_FIELDS:
+            shown["kind_word"] = word
+            if route_field(word, word):
+                shown["kind_field"] = route_field(word, word)
+        if _number(item.get("since")) is not None:
+            shown["elapsed"] = elapsed_text(max(0.0, (now - item["since"]) / 60))
+        below = called_rows(item.get("called"), now, depth + 1) if depth < 3 else []
+        if below:
+            shown["called"] = below
+        out.append(shown)
+    return out
+
+
+def route_row(row, now=None, *, cells=None):
+    """A route row's painted values (spec rules 5-7); an unreported value is left out."""
+    import time
+    from .session_line import (route_glyph, effort_label, gauge_parts, elapsed_text,
+                               stage_glyph, token_text, _number)
+    from .explorer.live import _short_capability
+    now = time.time() if now is None else now
+    # The producer's Fleet marker; an older cache row has only its state.
+    marker = row.get("marker")
+    if marker not in ("working", "idle", "blocked", "dead", "done", "stale"):
+        state = str(row.get("state") or "")
+        marker = {"failed": "dead", "attention": "dead", "degraded": "dead"}.get(state, state)
+        marker = marker if marker in ("working", "idle", "blocked", "dead", "done", "stale") else "idle"
+    glyph, key = route_glyph(marker)
+    shown = {"glyph": glyph, "glyph_key": key, "kind": marker}
+    # Spec E9 rule 36: the doer's recorded role (owner, frame or worker; none unrecorded) and
+    # the route's kind in Fleet's own word (``code``, ``lab``, ``frame``: Fleet's KIND).
+    if row.get("role") in ROLES:
+        shown["role"] = row["role"]
+    kind_word = _short_capability(sanitize_title(str(row.get("capability") or ""))[:64] or None)
+    if kind_word:
+        shown["kind_word"] = kind_word
+        # 11-18: the field whose hue the kind word and its bracket wear (one of five); none = the body color.
+        from .palette import route_field, ROUTE_FIELDS
+        field = route_field(sanitize_title(str(row.get("field") or ""))[:16], kind_word)
+        if field:
+            shown["kind_field"] = field
+        # A unit route (one worker, no owner): its first word is the route's field (what the work is: `code`, `docs`; an
+        # older route that records none keeps `unit`) and the unit's short name (`qa/code-review` reads `code-review`) stands
+        # on the worker's line. It is nobody's leg, and its bracket is its form alone (`code(unit)`, 11-20): its intensity is not a choice.
+        if kind_word == "unit":
+            shown["unit_route"] = True
+            unit = sanitize_title(str(row.get("worker_unit") or "")).rsplit("/", 1)[-1][:48]
+            if unit:
+                shown["unit_word"] = unit
+            word = sanitize_title(str(row.get("field") or ""))[:16]
+            if word in ROUTE_FIELDS:
+                shown["kind_word"] = word
+                field = route_field(word, word)
+                if field:
+                    shown["kind_field"] = field
+                else:
+                    shown.pop("kind_field", None)
+    shown.update(doer_paint(row, cells))
+    minutes = None
+    if _number(row.get("since")) is not None:
+        minutes = max(0.0, (now - row["since"]) / 60)
+    elif _number(row.get("elapsed_min")) is not None:
+        minutes = row["elapsed_min"]
+    if minutes is not None:
+        shown["elapsed"] = elapsed_text(minutes)
+    # Spec E9 rule 43: the owner's values when a worker leads the row, and each stage worker
+    # running now (its mark, role, stage, open tool and its own time); a row from an older
+    # producer has neither and keeps its one doer.
+    if isinstance(row.get("owner_doer"), dict):
+        shown["owner_paint"] = doer_paint(row["owner_doer"], cells)
+    if isinstance(row.get("workers_live"), list):
+        shown["workers_live"] = []
+        for item in row["workers_live"][:8]:
+            if not isinstance(item, dict):
+                continue
+            marker = item.get("marker") if item.get("marker") in ("working", "idle", "blocked", "dead", "stale") else "idle"
+            glyph, key = route_glyph(marker)
+            worker = {"glyph": glyph, "glyph_key": key, "kind": marker,
+                      "role": "frame" if item.get("role") == "frame" else "worker",
+                      "stage": sanitize_title(str(item.get("stage") or ""))[:64], **doer_paint(item, cells)}
+            for name, limit in (("tool", 48), ("target", 120)):
+                value = sanitize_title(str(item.get(name) or ""))[:limit]
+                if value and (name == "tool" or worker.get("tool")):
+                    worker[name] = value
+            if _number(item.get("since")) is not None:
+                worker["elapsed"] = elapsed_text(max(0.0, (now - item["since"]) / 60))
+            # The worker's stage name in the color Fleet gives that stage of this route (matched by its name).
+            keys = {sanitize_title(str(node.get("name") or ""))[:64]: route_stage_key(i, node.get("st"))
+                    for i, node in enumerate(n for n in (row.get("stages") or ())[:16] if isinstance(n, dict))}
+            if worker["stage"] in keys:
+                worker["stage_key"] = keys[worker["stage"]]
+            if item.get("called"):
+                worker["called"] = called_rows(item["called"], now)
+            shown["workers_live"].append(worker)
+    if row.get("called"):
+        shown["called"] = called_rows(row["called"], now)
+    # The doer reports its open tool only while it works (Fleet's ``_route_doer``).
+    tool = sanitize_title(str(row.get("tool") or ""))[:48]
+    if tool:
+        shown["tool"] = tool
+    if type(row.get("agents")) is int and row["agents"] > 0:
+        shown["agents"] = row["agents"]
+    # What the doer is on now and just finished: Fleet's own unfolded activity rows.
+    for key, limit in (("target", 120), ("tool_age", 16), ("after_tool", 160)):
+        value = sanitize_title(str(row.get(key) or ""))[:limit]
+        if value and (key == "after_tool" or tool):
+            shown[key] = value
+    if row.get("idle_tool") is True and not tool:
+        shown["idle_tool"] = True
+    stages = [node for node in (row.get("stages") or ()) if isinstance(node, dict)][:16]
+    if len(stages) > 1:
+        flow = []
+        for node in stages:
+            name = sanitize_title(str(node.get("name") or ""))[:64]
+            mark = stage_glyph(node.get("st"))
+            flow.append(name + (" " + mark if mark else ""))
+        shown["flow"] = " › ".join(flow)
+        current = next((i for i, node in enumerate(stages) if stage_glyph(node.get("st")) in {"●", "✕"}), None)
+        if current is not None:
+            shown["step"] = (sanitize_title(str(stages[current].get("name") or ""))[:32] + " "
+                             + stage_glyph(stages[current].get("st")) + " " + str(current + 1) + "/" + str(len(stages)))
+    return shown
+
+
+_REQUEST_STATES = ("preparing", "open", "partial", "final", "rejected", "cancelled")
+_REQUEST_BODY_LINES = 200
+
+
+def _request_age(seconds):
+    seconds = int(max(0, seconds))
+    if seconds < 90:
+        return "%ds" % seconds
+    if seconds < 90 * 60:
+        return "%dm" % round(seconds / 60)
+    if seconds < 48 * 3600:
+        return "%dh" % round(seconds / 3600)
+    return "%dd" % round(seconds / 86400)
+
+
+def _request_delivery(row, gone=False):
+    """The delivery word of one message's pending row (never the work state)."""
+    state = (row or {}).get("state")
+    # 11-17: a message the receiving window has not taken in is `waiting` (its words are `peer-steward show`'s:
+    # `awaiting delivery` and why), not `sent`.
+    word = {"pending": "waiting", "unverified": "sent", "queued": "delivered",
+            "received": "seen"}.get(state)
+    if gone and word in ("waiting", "sent", "delivered"):
+        word = "gone"
+    return word
+
+
+def request_rows(views, now, tag_of, doer_of=None, own_repo=None):
+    """The panel's lines for requests this session sent (``out``) and received (``in``).
+
+    ``views`` are plain dicts made by the host (a ``peer-request-v1`` record, which side this
+    session is on, the pending rows its messages are in, whether the receiver is confirmed
+    ended, the sealed body): this function only words them, so Fleet's later request list
+    can reuse it. Delivery (``sent``/``delivered``/``seen``) and the work state (``open``,
+    ``partial``, ``final``, ``rejected``, ``cancelled``) are two columns and are never mixed;
+    no ``in progress`` word appears (a route is what would say it). A closed request stays
+    ``DONE_AFTERGLOW_MIN`` minutes after it closed, sent or received (11-16: the receiving
+    window shows that it answered); a sent one longer while its last answer (or cancel
+    notice) has not been seen by this session. A value that is unknown is left out.
+
+    11-16 (the person: "[6c] claude opus 5.5 xhigh 이런식으로"): the other session's harness
+    (the record's), and its model and effort from ``doer_of(harness, session_id)`` (a session
+    value already read: ``{"model", "effort"}`` or None; nothing is collected here), painted as
+    a route's doer (:func:`doer_paint`). A session that is gone keeps its name alone.
+    """
+    from .model import DONE_AFTERGLOW_MIN
+    from .session_line import pending_wait
+    rows = []
+    for view in views or ():
+        record = view.get("record") if isinstance(view, dict) else None
+        if not isinstance(record, dict) or record.get("state") not in _REQUEST_STATES:
+            continue
+        state = record["state"]
+        side = "out" if view.get("side") == "out" else "in"
+        deliveries = view.get("rows") or {}
+        revisions = record.get("revisions") or []
+        reports = [r for r in record.get("reports") or () if isinstance(r, dict)]
+        current = next((r for r in reversed(revisions) if r.get("state") == "current"),
+                       revisions[-1] if revisions else {})
+        closed = state in ("final", "rejected", "cancelled")
+        if closed:
+            closed_at = ((record.get("cancel") or {}).get("at") if state == "cancelled"
+                         else max((r.get("at") or 0 for r in reports if not r.get("late")), default=0)) \
+                or record.get("updated") or 0
+            last_ref = ((record.get("cancel") or {}).get("notice_ref") if state == "cancelled"
+                        else next((r.get("transfer_ref") for r in reversed(reports) if not r.get("late")), None))
+            # (Only a sent one waits for this session to see its answer; a received one's answer is this session's own.)
+            unseen = (side == "out" and bool(last_ref)
+                      and (deliveries.get(last_ref) or {}).get("state") != "received")
+            if now - closed_at >= DONE_AFTERGLOW_MIN * 60 and not unseen:
+                continue
+        other = record.get("recipient" if side == "out" else "requester") or {}
+        tag = tag_of(other.get("harness"), other.get("session_id"))
+        who = "[" + str(tag).strip("[]") + "]" if tag else str(other.get("name") or "")
+        # The other session as a route's doer reads (`[6c] claude Opus 5.5 xhigh`): only while it has its
+        # Fleet number; its model and effort only as far as a value already read knows them.
+        doer = {}
+        if tag and other.get("harness") in ("claude", "codex", "opencode"):
+            known = None
+            if doer_of is not None:
+                try:
+                    known = doer_of(other.get("harness"), other.get("session_id"))
+                except Exception:  # noqa: BLE001 - a display value never costs the row
+                    known = None
+            known = known if isinstance(known, dict) else {}
+            doer = doer_paint({"harness": other["harness"], "model": known.get("model"), "effort": known.get("effort")})
+            # 11-18 (the person: "세션 id 외에도 repo 위치까지 request는 표시를 해주는게 좋겠네"): the other session's repository name as
+            # Fleet writes it (a value the shared pass already read); not drawn for a session of this window's own repository.
+            repo = known.get("repo")
+            if isinstance(repo, str) and repo and repo != own_repo:
+                doer["repo"] = repo
+        delivery = _request_delivery(deliveries.get(current.get("transfer_ref")),
+                                     gone=bool(view.get("gone")))
+        word = lambda key: ui_text("fleet.session_panel." + key)  # noqa: E731
+        work = word("request_state_" + state)
+        # A reserved message whose seal is not there is shown, never dropped (not confirmed).
+        unconfirmed = [e for e in record.get("sending") or () if isinstance(e, dict)]
+        # Folded: what this session still waits to see (a sent request not yet seen), else the work.
+        waiting = pending_wait(deliveries.get(current.get("transfer_ref"))) if delivery == "waiting" else None
+        delivery_text = (waiting[0] if waiting else word("request_delivery_" + delivery)) if delivery else ""
+        status = (delivery_text
+                  if side == "out" and state in ("open", "partial") and delivery in ("waiting", "sent", "delivered")
+                  else work)
+        glyph = {"final": "✓", "rejected": "✕", "cancelled": "✕"}.get(state, "→" if side == "out" else "◂")
+        kind = ("request-rejected" if state in ("rejected", "cancelled")
+                else "request-done" if closed else "request-in" if side == "in" else "request-out")
+        title = " ".join(str(record.get("title") or "").split())
+        details = []
+        head = ("%s %s %s · %s" % (str((record.get("requester") or {}).get("name") or ""), "→",
+                                  str((record.get("recipient") or {}).get("name") or ""), record["id"])).strip()
+        details.append(["", head, "dim"])
+        label = str(current.get("label") or "")
+        revision = ("%d %s" % (current.get("n", 1), label)).strip()
+        superseded = [r for r in revisions if r.get("state") == "superseded"]
+        if superseded:
+            revision += " · " + ", ".join("%d %s" % (r["n"], word("request_superseded")) for r in superseded[-2:])
+        details.append([word("request_label_revision"), revision, "loc_repo"])
+        if delivery:
+            details.append([word("request_label_delivery"), delivery_text, "dim"])
+        work_text = work
+        if state in ("partial", "final", "rejected") and reports:
+            tail = reports[-1]
+            if tail.get("remaining"):
+                work_text += " · %s %s" % (word("request_label_remaining"), tail["remaining"])
+            if state == "rejected" and tail.get("result"):
+                work_text += " · " + tail["result"]
+        if unconfirmed and state != "preparing":
+            work_text += " · %s %d" % (word("request_state_preparing"), len(unconfirmed))
+        details.append([word("request_label_work"), work_text,
+                        "lvl_r" if state in ("rejected", "cancelled") else "loc_repo"])
+        details.append([word("request_label_last"), _request_age(now - (record.get("updated") or now)), "dim"])
+        for report in reports[-4:]:
+            kind_word = word("request_report_" + str(report.get("kind")))
+            mark = "%d %s" % (report.get("n", 0), kind_word)
+            if report.get("late"):
+                rev = next((r for r in revisions if r.get("n") == report.get("revision")), {})
+                mark += " · %d(%s)" % (report.get("revision", 0), word(
+                    "request_superseded" if rev.get("state") == "superseded" else "request_state_cancelled"))
+            result = str(report.get("result") or "")
+            details.append([word("request_label_reports"), (mark + (" · " + result if result else "")), "dim"])
+        body = str(view.get("body") or "")
+        body_lines = body.splitlines()
+        rows.append({
+            "id": record["id"], "way": "→" if side == "out" else "◂", "glyph": glyph,
+            "who": who, "title": title, "status": status, "age": _request_age(now - (record.get("updated") or now)),
+            "kind": kind, "state": state, "side": side, "delivery": delivery or "",
+            **({"status_head": waiting[1]} if waiting and status == waiting[0] else {}),
+            "details": details, "body": body_lines[:_REQUEST_BODY_LINES],
+            "body_more": len(body_lines) > _REQUEST_BODY_LINES,
+            "body_label": word("request_body"), **doer})
+    order = {"request-in": 0, "request-rejected": 1, "request-out": 2, "request-done": 4}
+    rows.sort(key=lambda row: order.get(row["kind"], 2))
+    return rows
+
+
+def _git_part(part):
+    return part[1] == "dim" and str(part[0]).startswith(" (")
+
+
+def _head_and_git(values):
+    """The folder group's parts up to its Git parentheses, and the parentheses' parts on."""
+    from .session_line import line_segments
+    parts = line_segments(values, 10000, complete=True, fields={"folder"})
+    at = next((index for index, part in enumerate(parts) if _git_part(part)), len(parts))
+    return parts[:at], parts[at:]
+
+
+def session_head(values):
+    """``[e9] hearting``: the session number and project (the panel's top row)."""
+    return _head_and_git(values)[0]
+
+
+def session_git(values):
+    """``(main ↑2 🚧 3)``: the Git observation the panel paints on the row below, dim but
+    ``↑N``/``↓N`` in Fleet's green and red (spec E9 rule 50)."""
+    git = _head_and_git(values)[1]
+    return [(str(text).lstrip() if not index else text, key) for index, (text, key) in enumerate(git)]
+
+
+def session_git_side(values, columns=40):
+    """``fix/fleet-opencode-d… ✓``: the ``GIT`` row's value beside the native area (spec E9
+    rules 40 (b)-(e), 41 (b)): the branch cut at 20 cells (32 with 60 cells inside), then
+    ``✓`` or ``↑N``/``↓N``, then the existing warning; all dim but ``↑N``/``↓N`` in Fleet's
+    green and red (rule 50), no parentheses, and the worktree count on the ``REPO`` row. Empty
+    when Git has nothing else to say."""
+    from .session_line import _git_words, fresh_key, git_branch_cells
+    if not session_git(values):
+        return []
+    if (values.get("git") or {}).get("repo") == 0:
+        return [("no-git", "dim")]
+    words = _git_words(values, branch_cells=git_branch_cells(int(columns) - 4))
+    # One part per word, so the panel can shorten the branch and keep the status and warning whole.
+    shown = [(part, key) for part, key in ((words["branch"], "dim"), *((word, fresh_key(word)) for word in words["fresh"]),
+                                           (words["flag"], "dim")) if part]
+    return [((" " if index else "") + part, key) for index, (part, key) in enumerate(shown)]
+
+
+def session_repo_side(values):
+    """``hearting``: the ``REPO`` row's name beside the native area (spec E9 rule 41 (a)), the
+    repository row's own name and color without the trailing ``/``."""
+    repo = [part for part in session_head(values) if part[1] != "tag"]
+    if not repo:
+        return []
+    *head, (name, key) = repo
+    return [*head, (name[:-1] if name.endswith("/") and len(name) > 1 else name, key)]
+
+
+def session_worktrees(values):
+    """``wt 12`` beside the repository name (spec E9 rules 37 (a), 41 (a)), dim: the Git row's own
+    ``extra_worktrees``; nothing for none or an unknown count."""
+    git = values.get("git") or {}
+    count = git.get("extra_worktrees")
+    return [("wt " + str(count), "dim")] if git and git.get("repo") != 0 and type(count) is int and count > 0 else []
+
+
+def _memory_values(row, now=None):
+    """``(text, age, type)`` of one saved memory row: its headline (else the start of its
+    snippet), its age and its recorded type; no text for a row without either."""
+    import datetime
+    from .session_line import elapsed_text
+    headline = sanitize_title(str(row.get("headline") or "")).strip()
+    snippet = sanitize_title(str(row.get("snippet") or "")).strip()
+    if not headline and snippet.startswith("superseded_by="):
+        snippet = ""
+    text = (headline or snippet)[:160]
+    try:
+        saved = datetime.datetime.fromisoformat(str(row.get("ts") or ""))
+        clock = now or (datetime.datetime.now(saved.tzinfo) if saved.tzinfo else datetime.datetime.now())
+        age = elapsed_text(max(0.0, (clock - saved).total_seconds() / 60))
+    except (TypeError, ValueError):
+        age = ""
+    return text, age, sanitize_title(str(row.get("type") or "")).strip()[:32]
+
+
+MEMORY_BODY = 600      # characters of a record's snippet the MEM popup shows under its headline
+
+
+def _memory_body(row, text):
+    """The record's own snippet (what the journal keeps of its body, never anything else) for the MEM popup, ``MEMORY_BODY`` characters at
+    most; empty where it is the headline itself, a ``superseded_by=`` pointer or nothing."""
+    snippet = " ".join(str(row.get("snippet") or "").split())
+    if not snippet or snippet.startswith("superseded_by=") or snippet == text:
+        return ""
+    return "".join(ch for ch in snippet if ch.isprintable())[:MEMORY_BODY]
+
+
+def session_memory(values, now=None):
+    """``3m decision <headline>`` (spec E9 rule 37 (b)): this repo's newest saved memory row,
+    its age and type dim and its headline (else the start of its snippet) in the body color.
+    Nothing for no row; a body is never carried. (An earlier panel's MEM row reads this.)"""
+    row = values.get("memory_latest")
+    if not isinstance(row, dict):
+        return []
+    text, age, kind = _memory_values(row, now)
+    if not text:
+        return []
+    parts = []
+    if age:
+        parts.append((age + " ", "dim"))
+    if kind:
+        parts.append((kind + " ", "dim"))
+    return parts + [(text, "loc_repo")]
+
+
+# Spec E9 rule 46 (b): a memory type as its short word; another type stays as recorded.
+MEMORY_KIND_WORDS = {"user-correction": "correction", "completion": "done"}
+
+
+def memory_kind(kind):
+    """``decision``, ``lesson``, ``correction`` (``user-correction``), ``done`` (``completion``);
+    any other type as recorded, cut to twelve cells with ``…``."""
+    word = MEMORY_KIND_WORDS.get(kind, kind)
+    return word if len(word) <= 12 else word[:11] + "…"
+
+
+# 11-15 (panel polish 5): the memory system's own tier and scope names, as its records carry them.
+MEMORY_TIERS = ("durable", "working")
+MEMORY_SCOPES = ("project", "global")
+# 11-16 (panel polish 1116): the MEM section's records (the panel's `MEM_MAX`); 11-18 (the person: "MEM는 최대 최근 3개만 띄워도 되겠다"): the newest three.
+MEMORY_ITEMS = 3
+
+
+def session_memory_items(values, now=None):
+    """Spec E9 rule 46: the MEM section's records, ``MEMORY_ITEMS`` at most, newest first: each its short type
+    word, its age and its headline (else the start of its snippet), and (11-15) its tier and scope
+    as the record carries them (none where it carries neither name) and (11-20, the MEM popup) its body: the
+    snippet the journal keeps, ``MEMORY_BODY`` characters at most. Nothing without a record or a text."""
+    items = []
+    for row in values.get("memory_recent") or ():
+        if not isinstance(row, dict):
+            continue
+        text, age, kind = _memory_values(row, now)
+        if text:
+            items.append({"kind": memory_kind(kind), "age": age, "text": text,
+                          "tier": row.get("tier") if row.get("tier") in MEMORY_TIERS else "",
+                          "scope": row.get("scope") if row.get("scope") in MEMORY_SCOPES else "",
+                          "body": _memory_body(row, text)})
+        if len(items) >= MEMORY_ITEMS:
+            break
+    return items
+
+
+def quota_row(values):
+    """``5h 12%(↻ 2h) │ 7d 66%(↻ 5d)`` and per-model quotas; unreported values left out."""
+    from .session_line import _remaining, _text
+    parts = []
+    windows = [window for window in values.get("quota_windows") or () if _percent(window[1]) != "?"]
+    if not windows and _percent(values.get("weekly_pct")) != "?":
+        windows = [("7d", values["weekly_pct"], None)]
+    for label, used, reset in windows:
+        if parts:
+            parts.append((" │ ", "dim"))
+        parts += [(_text(label) + " ", "dim"), (_percent(used), _level(used))]
+        left = _remaining(reset)
+        if left:
+            parts.append(("(↻ " + left + ")", "dim"))
+    for label, used in values.get("model_quotas") or ():
+        if _percent(used) != "?":
+            if parts:
+                parts.append((" │ ", "dim"))
+            parts += [(_text(label) + " ", _model_key(label)), (_percent(used), _level(used))]
+    return parts
+
+
+USAGE_HARNESSES = ("claude", "codex", "opencode")
+
+
+def usage_rows(harness, values):
+    """Spec E9 rule 59 (11-16): the USAGE section's rows, one per harness in Fleet's header order (Claude, Codex,
+    OpenCode), each ``{"harness", "parts"}`` with the parts as the last row showed them (:func:`quota_row`).
+    This session's own harness takes the values the panel observed (its native callback included); the others
+    read the usage record Fleet already keeps (``usage_cache``): nothing is fetched here. A harness with no
+    reported window has no parts (the panel draws ``?``)."""
+    from .collectors import usage_cache
+    from .native_display import quota_windows
+    from .session_view import weekly_quota
+    rows = []
+    for name in USAGE_HARNESSES:
+        if name == harness:
+            source = values
+        else:
+            try:
+                payload = dict((usage_cache.read(name).get("payload")) or {})
+            except Exception:
+                payload = {}
+            source = {"quota_windows": quota_windows(payload), "weekly_pct": weekly_quota(payload),
+                      "model_quotas": payload.get("rl_ms") or []}
+        rows.append({"harness": name, "parts": quota_row(source)})
+    return rows
+
+
+# 11-18 (the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"): a host sample older than this is
+# not drawn (the producer takes a new one at most once a minute, and only while a side panel draws it: `human_wait_state.RESOURCE_SAMPLE_S`).
+RESOURCES_MAX_AGE = 150.0
+# The widths of the memory gauge a GPU's group may take (11-19): the panel picks one of these, 4 to 10 cells.
+GAUGE_MIN, GAUGE_MAX = 4, 10
+
+
+def resource_rows(value, now):
+    """The RESOURCES section's hosts, one dict each, its values painted as ``(text, key)`` parts: the host, its CPU and memory
+    use and one entry per GPU in its number's order (the percent, ``21/24G``, and the numbers of the sessions that hold it:
+    none where it does not know them). A GPU a process runs on has its percent in its level's color; one nothing runs on is
+    shown the same way with the sample's own values, all of it ``dim`` and with no session numbers (11-19, the person: "빈 GPU도
+    일관성있게 표시해줘. 그냥 0% 0/48GB 이런식으로 해놔. 컬러만 좀 어둡게 하면 되잖아. 0%에"). Fleet's host sample as the shared
+    producer kept it; nothing is read here. A sample older than ``RESOURCES_MAX_AGE`` gives no rows.
+
+    11-19 (the person, on v4.59.6's panel: "가로로 길어지면 RESOURCE에 게이지도 넣어주면 좋고"): each GPU also carries its memory
+    gauge drawn at every width the panel may give it (``gauge4`` … ``gauge10``, the keys the panel picks one of; it never draws a
+    fill of its own). It is Fleet's VRAM gauge: the fill is ``_gauge_segs`` over the memory ratio and the fill's color
+    ``_resource_level_key(ratio, True)``, so it reads the same as Fleet's ``VRAM ━━━━━─ 21/24GB``. A GPU nothing runs on has all of
+    it ``dim``; an unknown memory is Fleet's unknown gauge (the empty track, ``dim``) at the same width."""
+    if not isinstance(value, dict) or not isinstance(value.get("observed_at"), (int, float)) or now - value["observed_at"] > RESOURCES_MAX_AGE:
+        return []
+    from .render_gpu import _gauge_segs, _resource_level_key
+    percent = lambda x: "%d%%" % round(x)  # noqa: E731
+
+    def vram_gauge(used, total, busy, cells):
+        ratio = 100.0 * used / total if used is not None and total else None
+        key = _resource_level_key(ratio, True) if busy else "dim"
+        (filled, _), (empty, _) = _gauge_segs(ratio, cells, track=cells)
+        return [part for part in ((filled, key), (empty, "dim")) if part[0]]
+    rows = []
+    for host in value.get("hosts") or ():
+        gpus = []
+        for gpu in host["gpus"]:
+            busy = bool(gpu["busy"])
+            util, used, total = gpu["util"], gpu["used"], gpu["total"]
+            row = {"label": [("GPU%d" % gpu["i"], "dim")]}
+            if util is not None:
+                # 11-18: the use is its number, in its level's color (the gauge, 11-19, is the memory's).
+                row["pct"] = [(percent(util), _level(util) if busy else "dim")]
+            for cells in range(GAUGE_MIN, GAUGE_MAX + 1):
+                row["gauge%d" % cells] = vram_gauge(used, total, busy, cells)
+            if used is not None and total:
+                row["mem"] = [("%d/%dG" % (round(used), round(total)), "dim")]
+            users = [("[" + str(tag).strip("[]") + "]", "loc_repo") for tag in gpu["users"]] if busy else []
+            if users:
+                row["users"] = [part for i, one in enumerate(users) for part in ((one,) if not i else ((" ", "dim"), one))]
+            gpus.append(row)
+        row = {"host": [(host["name"], "loc_repo")], "gpus": gpus}
+        stats = []
+        for word, number in (("CPU", host.get("cpu")), ("MEM", host.get("mem"))):
+            if number is not None:
+                stats.append([(word + " ", "dim"), (percent(number), "loc_repo")])
+        row["stats"] = stats
+        rows.append(row)
+    return rows
+
+
+# A finished route's result row (the producer keeps the two most recent after the current
+# routes) is news: it stays until the person's next input, ten minutes at most (the bound the
+# notice line's news used), and a result that did not pass takes Fleet's failure mark.
+RESULT_SECONDS = 600
+PASSED = re.compile(r"(?i)pass(ed)?|success(ful)?|succeeded|ok|done|complete(d)?")
+
+
+def presentation(values, view, harness, sid, columns, *, native_owned=(), display=None, now=None):
+    """``display`` and ``now`` (the session's prompt display and the clock) let a finished
+    route's result leave the ROUTE box after the person's next input or ten minutes."""
     key = harness + "\0" + sid
     raw = (view.get("route_panels") or {}).get(key)
     routes = []
-    for row in raw[:8] if isinstance(raw, list) else ():
+    for row in raw if isinstance(raw, list) else ():
         if not isinstance(row, dict):
             continue
         clean = lambda value: sanitize_title(str(value or ""))[:320]
         stages = []
         for node in (row.get("stages") or ())[:16]:
             if isinstance(node, dict):
-                stages.append({"name": clean(node.get("name")), "state": state_label(node.get("st")), "current": node.get("st") in {"active", "running", "working"}})
+                stage = {"name": clean(node.get("name")), "state": state_label(node.get("st")),
+                         "current": node.get("st") in {"active", "running", "working"},
+                         "mark": stage_mark(node.get("st")),
+                         # 11-16 (spec E9 rule 43): the name's color is Fleet's (`route_stage_key`), by its place in the route.
+                         "key": route_stage_key(len(stages), node.get("st"))}
+                stage.update(stage_doer(node))
+                stages.append(stage)
         worker = row.get("worker") or []
         reason = "".join(str(part[0]) for part in worker if isinstance(part, (list, tuple)) and part)
         # The route's depth-1 owner, as Fleet's route row reads it. A one-shot owner runs its
@@ -226,28 +917,110 @@ def presentation(values, view, harness, sid, columns, *, native_owned=()):
         owner_text = "owner · " + owner if owner else ""
         runs_itself = bool(worker) and isinstance(worker[0], (list, tuple)) and worker[0][:1] == ["owner"]
         visibility = row.get("visibility") if isinstance(row.get("visibility"), dict) else {}
-        routes.append({"id": clean(row.get("id")), "title": clean(row.get("title")),
+        routes.append({**route_row(row, cells=route_gauge_cells(columns)), "id": clean(row.get("id")), "title": clean(row.get("title")),
                        "state": clean(row.get("state")), "state_label": state_label(row.get("state")), "stage": clean(row.get("worker_stage")),
                        "stages": stages, "stage_more": row.get("stage_more", 0),
-                       "visibility": route_evidence(visibility),
+                       "visibility": route_evidence(visibility, unit=str(row.get("capability") or "") == "unit"),
                        "reason": clean(reason), "outcome": clean(row.get("outcome")),
                        "owner": owner_text, "owner_line": "" if runs_itself else owner_text,
+                       # Spec E9 rule 24: the route's kind (its sealed topology) and, when a
+                       # stage worker leads the row, the owner's own model for its third row.
+                       # A direct route (the session does the work itself) is drawn with the shape word
+                       # in the person's language; the other shapes keep their own words.
+                       "shape": (ui_text("fleet.session_panel.shape_direct") if row.get("shape") == "direct"
+                                 else clean(row.get("shape"))[:32]), "owner_model": clean(row.get("owner_model"))[:64],
+                       "doer_worker": row.get("doer_worker") is True,
+                       # 11-17 (route zones): `direct` is what this session does itself, `dispatch` the route it started.
+                       "zone": "direct" if row.get("shape") == "direct" else "dispatch",
+                       **route_kind(row), **route_workers(row),
                        "result_at": row.get("result_at") if type(row.get("result_at")) in (int, float) else None})
+    if now is not None:
+        human = (display or {}).get("human") or {}
+        since = human.get("at") if type(human.get("at")) in (int, float) else 0
+        routes = [route for route in routes if not (route["state"] == "done" and route["outcome"])
+                  or route["result_at"] is not None and route["result_at"] > since
+                  and 0 <= now - route["result_at"] <= RESULT_SECONDS]
+    for route in routes:
+        if route["state"] == "done" and route["outcome"]:
+            passed = PASSED.fullmatch(route["outcome"].strip()) is not None
+            route["outcome_key"] = "lvl_g" if passed else "g_dead"
+            if not passed and route.get("kind") == "done":
+                from .session_line import route_glyph
+                route["glyph"], route["glyph_key"] = route_glyph("dead")
     model = values.get("model")
-    model_line = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model))]
+    model_line = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model, harness=harness))]
     effort = _effort_text(values.get("effort"))
     model_line += [(" · " + (effort or "?"), _eff_key(values.get("effort"), False) if effort else "dim")]
     labels = {name: ui_text("fleet.session_panel." + name) for name in (
-        "settings", "settings_title", "checking", "work", "no_work", "routes", "no_routes",
+        "settings", "settings_title", "checking", "work", "no_work", "routes",
         "results", "details", "back", "apply", "cancel", "defaults", "layout", "width",
-        "narrow", "auxiliary", "height", "threshold", "side", "bottom", "compact", "summary",
+        "narrow", "auxiliary", "height", "side", "bottom", "compact", "summary",
         "detail", "working", "answer", "ready", "unknown", "saved", "save_failed",
         "position", "position_right", "position_left", "theme", "theme_terminal", "theme_light",
-        "theme_mono", "shade", "shade_none", "shade_light", "shade_medium")}
-    return {"model": model_line, "model_value": model, "effort_value": values.get("effort"),
+        "theme_mono", "shade", "shade_none", "shade_light", "shade_medium",
+        # 11-15: the table popups' keys (the question popup's are the editor's own).
+        "popup_keys", "popup_unfold", "popup_fold", "popup_route", "popup_route_page",
+        # 11-17: the NOW popup's keys.
+        "popup_now", "popup_now_page",
+        # 11-21: the status popup's keys on its list screen (the document read whole has the keys every popup has).
+        "popup_status",
+        # 11-15 (panel polish 1): the action under a question to answer here.
+        "answer_action",
+        # 11-17 (route row 5): a frame route whose two legs are done waits for the person's direction.
+        "direction_wait")}
+    # Fixed words are English in every language (spec rule 3).
+    labels.update(settings="Settings", routes="route", context="context", route_line="route line", worker_box="worker box",
+                  rule_motion="rule motion")
+    from .session_line import effort_label, gauge_parts, answer_wait_word
+    selected = [(_clean_model(model) or ui_text("fleet.session_panel.checking"), _model_key(model, harness=harness))]
+    if effort_label(values.get("effort")):
+        selected += [(" ", "dim"), (effort_label(values.get("effort")), _eff_key(values.get("effort"), False))]
+    gauge = gauge_parts(values.get("ctx_pct"))
+    count = values.get("answer_wait")
+    # The producer's count is the session's whole current-route count; the kept
+    # current rows (the recent finished ones follow them) are counted apart from it.
+    current, total = len(routes), None
+    from .session_line import ROUTE_LABEL
+    match = ROUTE_LABEL.match(values.get("route_label") or "")
+    if match:
+        total = int(match.group(1))
+        current = min(len(routes), total)
+    mcp = values.get("mcp")
+    # OpenCode's hidden native sidebar listed these servers; keep the count.
+    mcp_parts = ([("MCP ", "dim"), (f"{mcp.get('connected', 0)}/{mcp['total']}",
+                                    "lvl_r" if mcp.get("failed") else "lvl_g")]
+                 if isinstance(mcp, dict) and mcp.get("total") else [])
+    # Spec E9 rule 29: Fleet's session-row head (number, harness, steward mark) goes to the
+    # top border; the repository row keeps the project alone (`hearting/`).
+    head = session_head(values)
+    tag = sanitize_title(str(values.get("tag") or "")).strip()
+    return {"head": head, "repo": [part for part in head if part[1] != "tag"],
+            "tag": tag if re.fullmatch(r"\[[^\]?]{1,16}\]", tag) else "",
+            "steward": values.get("steward") is True,
+            "now": sanitize_title(str(values.get("now") or ""))[:320],
+            "git": session_git(values), "git_side": session_git_side(values, columns), "worktrees": session_worktrees(values),
+            "repo_side": session_repo_side(values),
+            "memory": session_memory(values), "memory_items": session_memory_items(values), "selected": selected,
+            "context": [("context ", "dim"), *gauge] if gauge else [],
+            # Spec E9 rule 42 (b): beside the native area the `CTX` label stands for the word.
+            "context_side": gauge,
+            "wait": answer_wait_word() + " " + (str(count) if count is not None else "?")
+                    if count is None or type(count) is int and count > 0 else "",
+            # A wait this panel cannot answer: one line saying where it is answered (11-14),
+            # never counted with the answer wait.
+            "wait_guide": sanitize_title(str(values.get("wait_guide") or ""))[:120],
+            "session_title": sanitize_title(str(values.get("title") or ""))[:320],
+            "jobs": [(">_", "lvl_g"), (" running: ", "dim"), (sanitize_title(str(values["jobs"]))[:200], "loc_repo")]
+                    if values.get("jobs") else [],
+            "quota": quota_row(values), "route_count": current, "route_total": total, "mcp": mcp_parts,
+            # 11-16 (spec E9 rule 60): OpenCode's cost, once at the bottom of its own screen, stands beside the
+            # context in this window's panel only (the value comes from the session record Fleet already reads).
+            "cost": [("$%.2f" % values["cost"], "loc_repo")]
+                    if values.get("harness") == "opencode" and type(values.get("cost")) in (int, float) and values["cost"] > 0 else [],
+            "model": model_line, "model_value": model, "effort_value": values.get("effort"),
             "warning": ui_text("fleet.context.compaction_imminent") if compaction_imminent(values.get("compaction_pressure")) else "",
             "routes": routes, "routes_known": raw is not None,
-            "route_label": values.get("route_label") or "",
+            "route_label": route_text(values.get("route_label") or ""),
             "title": routes[0]["title"] if routes else "", "labels": labels,
             "summary": compact_status(values, columns, native_owned),
             "session": session_status(values, max(20, columns - 4)),

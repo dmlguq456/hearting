@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Daily entry identity, real completion and consolidation/restore boundaries."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import concurrent.futures
 import contextlib
 import ctypes
@@ -214,8 +217,8 @@ class EntryTest(unittest.TestCase):
         self.assertEqual(row["result_targets"][0]["availability"], "available")
         self.assertEqual(row["result_targets"][1]["version"], {"kind": "unknown"})
         t = lambda key, **kw: {"entrance.open_record": "기록 보기", "entrance.open_result": "결과물 열기"}.get(key, key)
-        markdown = entrance.render_markdown(snapshot, t)
-        html = entrance.render_html(snapshot, t)
+        markdown = entrance.render_recent_markdown(snapshot, t)
+        html = entrance.render_recent_html(snapshot, t)
         self.assertIn("기록 보기", markdown); self.assertIn("결과물 열기", markdown)
         self.assertIn(row["record_target"], markdown)
         self.assertIn(result.as_uri(), html)
@@ -224,6 +227,21 @@ class EntryTest(unittest.TestCase):
         missing = entrance.scan(self.root)["recent"][0]
         self.assertEqual(missing["result_targets"][0]["availability"], "missing")
         self.assertEqual(result.exists(), False)
+
+    def test_scan_scope_shares_one_scan_and_keeps_every_reader_result(self):
+        self.add("a"); self.add("b")
+        expected = [J.rows(self.root, limit=limit, session=session)
+                    for limit in (1, 200) for session in (None, {"harness": "codex", "sid": "x"})]
+        real = J.read_day
+        with mock.patch.object(J, "read_day", side_effect=real) as reads:
+            with J.scan_scope():
+                actual = [J.rows(self.root, limit=limit, session=session)
+                          for limit in (1, 200) for session in (None, {"harness": "codex", "sid": "x"})]
+            # One scan per scope; an unchanged day file is not even re-read.
+            self.assertLessEqual(reads.call_count, 1)
+        self.assertEqual(actual, expected)
+        self.add("c")  # outside the scope every read is fresh again
+        self.assertEqual(len(J.rows(self.root)["rows"]), 3)
 
     def test_A14_corrupt_day_does_not_become_an_empty_complete_entrance(self):
         import artifact_entrance as entrance
@@ -255,7 +273,7 @@ class EntryTest(unittest.TestCase):
         entry = self.add(results=F.result_versions(self.tmp.name, [result.name], []))
         snapshot = entrance.scan(self.root)
         links = Links()
-        links.feed(entrance.render_html(snapshot, entrance._translator()))
+        links.feed(entrance.render_recent_html(snapshot, entrance._translator()))
         targets = [urlsplit(href) for href in links.hrefs]
         self.assertIn(result, [Path(unquote(url.path)) for url in targets if url.scheme == "file"])
         self.assertTrue(any(not url.scheme and self.root / unquote(url.path) == self.root / self.binding["path"]
@@ -295,7 +313,9 @@ class CompletionTest(turns.EndToEndTest):
         (work / "evidence.md").write_text("Checks: synthetic command exit 0; scope verified\n")
         (work / "summary.md").write_text("Completed " + slug)
         env = turns.T._child_env(self.env, "claude", turns.SID)
-        selection = (["--capability", capability, "--capability-mode", mode] if capability else [])
+        # A direct compose names its kind (or field); these fixtures record code work.
+        selection = (["--capability", capability, "--capability-mode", mode] if capability
+                     else ["--capability", "autopilot-code"])
         result = turns.T._run(turns.T._route_command("compose", "--shape", "direct", *selection, "--cwd", str(self.repo),
             "--artifact-root", str(self.root), "--campaign-key", "journal-example", "--slug", slug,
             "--parent-harness", "claude", "--prompt-file", str(work / "task.md"),
@@ -1047,20 +1067,17 @@ class MigrationTest(turns.EndToEndTest):
         self.assertEqual(len(automatic), 1)
         self.assertEqual(automatic[0]["session"], {"harness": "claude", "sid": turns.SID})
 
-    def test_A12_recently_closed_keeps_user_text_and_links_exact_journal_entries(self):
+    def test_A12_recording_never_edits_a_hand_written_status_page(self):
         record = self.legacy()
         page = P.cycle_dir(self.root, record["campaign_id"], record["cycle_id"]) / "artifacts/STATUS.md"
-        page.write_text("# Project status\nUpdated 2026-11-01 09:00\n\n## Next\n- person's judgment\n")
+        text = "# Project status\nUpdated 2026-11-01 09:00\n\n## Next\n- person's judgment\n"
+        page.write_text(text)
         for n in range(2):
             turns.T.turn_start("codex", "journal-writer", str(self.repo), self.env)
             (self.repo / "README.md").write_text("result " + str(n))
             result = turns.T.turn_end("codex", "journal-writer", str(self.repo), self.env)
             self.assertIn(result["state"], {"recorded", "appended"})
-        text = page.read_text()
-        self.assertIn("## Next\n- person's judgment", text)
-        self.assertIn("View record", text)
-        self.assertIn("Open result", text)
-        self.assertIn("#art_", text)
+        self.assertEqual(page.read_text(), text)
 
     def test_M16_late_end_during_restore_resolves_target_after_original_record_lock(self):
         record = self.legacy(); cid = record["cycle_id"]

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import copy
 import hashlib
 import json
@@ -1700,6 +1703,276 @@ class ExperimentObservationTest(unittest.TestCase):
         self.assertIn("status=succeeded; exit=0; latest=no metrics; best=no metrics; trend=improving", text)
         self.assertIn("actual=1m; plan=unknown duration", text)
 
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})   # Korean notice words
+    def test_a_run_with_nothing_declared_says_so_in_one_phrase(self):
+        # Observation 3: "마지막 지표 없음; 최고 지표 없음; 추세 판정 불가; ETA 미상; source metrics
+        # unavailable" said one thing five times. Nothing declared is said once.
+        run = {"run_id": "r1", "status": "succeeded", "exit_code": 0}
+        bare = {"summary": {}, "elapsed_seconds": 3720, "planned_seconds": None}
+        final = "; ".join(progress._notice_texts(run, "final", {**bare, "undeclared": "not-declared"}, None, []))
+        self.assertIn("상태=succeeded; 종료 코드=0; 실제=1h02m; 진행 파일 선언 없음", final)
+        checkpoint = "; ".join(progress._notice_texts(run, "checkpoint", {**bare, "undeclared": "not-declared"},
+                                                      None, []))
+        self.assertIn("경과 1h02m; 진행 파일 선언 없음", checkpoint)
+        unmapped = "; ".join(progress._notice_texts(run, "checkpoint", {**bare, "undeclared": "remote-unmapped"},
+                                                    None, []))
+        self.assertIn("선언한 진행 폴더 — 여기서 안 보임", unmapped)
+        for text in (final, checkpoint, unmapped):
+            self.assertNotIn("지표 없음", text)
+            self.assertNotIn("판정 불가", text)
+            self.assertNotIn("ETA", text)
+            self.assertNotIn("지표 출처 없음", text)
+        # A declared folder that has not produced anything yet keeps the full form.
+        declared = "; ".join(progress._notice_texts(run, "final", {**bare, "undeclared": None}, None, []))
+        self.assertIn("마지막=지표 없음", declared)
+
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
+    def test_a_declared_run_carries_its_step_loss_and_the_time_since_its_last_update(self):
+        run = {"run_id": "r1", "status": "running"}
+        observation = {"summary": {"metric": "loss", "latest": {"value": 0.42, "epoch": 12},
+                                   "latest_metrics": {"loss": {"value": 0.42, "epoch": 12}},
+                                   "best": {"value": 0.40, "epoch": 11}, "trend": "개선"},
+                       "reached": 12, "total": 60, "unit": "epoch", "at": 10_000.0,
+                       "source_updated_at": 10_000.0 - 1500, "elapsed_seconds": 7200}
+        text = "; ".join(progress._notice_texts(run, "checkpoint", observation, None,
+                                                [{"format": "jsonl", "path": "/o/log.jsonl"}]))
+        self.assertIn("최근=loss=0.42@12", text)
+        self.assertIn("진행 12/60 epoch", text)
+        self.assertIn("마지막 갱신 25m 전", text)
+        self.assertIn("출처 jsonl=/o/log.jsonl", text)
+
+    def test_the_last_update_is_the_newest_source_change_this_observer_saw(self):
+        samples = [{"source_updated_at": 100.0}, {"source_updated_at": 400.0}, {"epoch": 3}]
+        self.assertEqual(progress._latest_source_update(samples, None, 1000), 400.0)
+        self.assertEqual(progress._latest_source_update(samples, {"age_s": 30}, 1000), 970.0)
+        self.assertIsNone(progress._latest_source_update([], None, 1000))
+        self.assertEqual(progress._latest_source_update([{"source_updated_at": 5000.0}], None, 1000), None)
+
+    def test_a_launch_without_a_declared_folder_gets_one_note_and_is_never_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            (cwd / "cfg.json").write_text(json.dumps({"output_dir": "out/run-1"}))
+            bare = {"command": ["python", "train.py"], "cwd": str(cwd)}
+            self.assertIn("--config", progress.declaration_note(bare))
+            for declared in ({**bare, "command": ["python", "train.py", "--config", "./cfg.json"]},
+                             {**bare, "output_dir": "/somewhere"},
+                             {**bare, "observation": {"source_bindings": [{"path": "/c.json"}]}}):
+                with self.subTest(declared=declared):
+                    self.assertIsNone(progress.declaration_note(declared))
+            with mock.patch.object(progress, "discover_output_binding", side_effect=RuntimeError("x")):
+                self.assertIsNone(progress.declaration_note(bare))
+
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
+    def test_a_declared_progress_file_is_a_declaration_however_old_its_value(self):
+        # RV-PR1619-1114 required fix 3: a readable progress file 25 minutes old was told
+        # "진행 파일 선언 없음". Declared is not the same as fresh: the old value and its age are shown.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, now = Path(tmp), 1_800_000_000.0
+            counter = base / "counter.json"
+            run = {"run_id": "counter-run", "node": "train", "status": "running",
+                   "progress_file": str(counter), "started_at": now - 3600}
+            counter.write_text(json.dumps({"schema_version": 1, "run_id": "counter-run", "node": "train",
+                                           "updated_at": now - 1500, "completed": 12, "total": 60,
+                                           "unit": "epoch"}))
+            read = progress.read_progress(run, now)
+            self.assertEqual((read["completed"], read["age_s"]), (12, 1500.0))
+            self.assertIsNone(progress.declaration_note(run))
+            with mock.patch.object(progress, "_observation_state_path", return_value=base / "state.json"):
+                result = progress.observe_experiment(run, base / "registry.json", now, progress=read,
+                                                     alive=True, status="running", notify_events=False)
+            observation = result["observation"]
+            self.assertIsNone(observation["undeclared"])
+            self.assertEqual((observation["reached"], observation["total"], observation["unit"]), (12, 60, "epoch"))
+            self.assertIsNone(observation["rate_per_second"])            # an old value gives no rate or ETA
+            text = "; ".join(progress._notice_texts(run, "checkpoint", observation, None, result["metrics"]))
+            self.assertIn("진행 12/60 epoch", text)
+            self.assertIn("마지막 갱신 25m 전", text)
+            self.assertNotIn("선언 없음", text)
+            self.assertNotIn("stagnation=unknown", text)
+            # Nothing declared at all is still said in one phrase.
+            bare = {"run_id": "bare-run", "status": "running", "started_at": now - 3600}
+            with mock.patch.object(progress, "_observation_state_path", return_value=base / "bare.json"):
+                nothing = progress.observe_experiment(bare, base / "registry.json", now, alive=True,
+                                                      status="running", notify_events=False)
+            self.assertEqual(nothing["observation"]["undeclared"], "not-declared")
+            self.assertIn("진행 파일 선언 없음", "; ".join(progress._notice_texts(
+                bare, "checkpoint", nothing["observation"], None, nothing["metrics"])))
+
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
+    def test_a_progress_file_the_run_names_is_declared_before_it_is_there_or_readable(self):
+        # RV-PR1619-R2-1114 required fix 2: the launch note counted a named progress file as a
+        # declaration, the run's notices only after a first successful read. One judgment now.
+        # The place the runner gives every run (log + ".progress.json") stays no declaration.
+        not_visible = "선언한 진행 파일 — 여기서 안 보임"   # a file was declared: say file
+        with tempfile.TemporaryDirectory() as tmp:
+            base, now = Path(tmp), 1_800_000_000.0
+
+            def told(run, name, read=None, at=now):
+                with mock.patch.object(progress, "_observation_state_path", return_value=base / f"{name}.json"):
+                    result = progress.observe_experiment(run, base / "registry.json", at, progress=read,
+                                                         alive=True, status="running", notify_events=False)
+                observation = result["observation"]
+                return observation, "; ".join(progress._notice_texts(
+                    run, "checkpoint", observation, None, result["metrics"]))
+
+            def declared(name, **extra):
+                return {"run_id": f"{name}-run", "node": "train", "status": "running",
+                        "started_at": now - 3600, "progress_file": str(base / f"{name}.progress.json"), **extra}
+
+            # Named, not there yet.
+            run = declared("missing")
+            self.assertIsNone(progress.declaration_note(run))
+            observation, text = told(run, "missing")
+            self.assertEqual(observation["undeclared"], "declared-unresolved")
+            self.assertIn(not_visible, text)
+            self.assertNotIn("진행 파일 선언 없음", text)
+            # Named, broken from the first read.
+            run = declared("broken")
+            Path(run["progress_file"]).write_text("{not json")
+            observation, text = told(run, "broken", progress.read_progress(run, now))
+            self.assertEqual(observation["undeclared"], "declared-unresolved")
+            self.assertIn(not_visible, text)
+            self.assertNotIn("진행 파일 선언 없음", text)
+            # Named, not there at first, written later: the value and its age.
+            run = declared("later")
+            self.assertEqual(told(run, "later")[0]["undeclared"], "declared-unresolved")
+            Path(run["progress_file"]).write_text(json.dumps({
+                "schema_version": 1, "run_id": run["run_id"], "node": "train",
+                "updated_at": now + 540, "completed": 12, "total": 60, "unit": "epoch"}))
+            observation, text = told(run, "later", progress.read_progress(run, now + 600), now + 600)
+            self.assertIsNone(observation["undeclared"])
+            self.assertIn("진행 12/60 epoch", text)
+            self.assertIn("마지막 갱신", text)
+            self.assertNotIn(not_visible, text)
+            self.assertNotIn("진행 파일 선언 없음", text)
+            # Read, then broken: it stays a declaration (the tracked source is simply not vouched for).
+            run = declared("lost")
+            Path(run["progress_file"]).write_text(json.dumps({
+                "schema_version": 1, "run_id": run["run_id"], "node": "train",
+                "updated_at": now, "completed": 12, "total": 60, "unit": "epoch"}))
+            told(run, "lost", progress.read_progress(run, now))
+            Path(run["progress_file"]).write_text("{not json")
+            observation, text = told(run, "lost", progress.read_progress(run, now + 1500), now + 1500)
+            self.assertIsNone(observation["undeclared"])
+            self.assertEqual(observation["stagnation"], {"state": "unknown"})
+            self.assertNotIn(not_visible, text)
+            self.assertNotIn("진행 파일 선언 없음", text)
+            # Only the runner's own place, never written, and nothing at all: still no declaration.
+            log = str(base / "run.log")
+            for name, run in (("default", {"run_id": "default-run", "status": "running", "log": log,
+                                           "progress_file": log + ".progress.json", "started_at": now - 3600}),
+                              ("nothing", {"run_id": "nothing-run", "status": "running",
+                                           "started_at": now - 3600})):
+                observation, text = told(run, name)
+                self.assertEqual(observation["undeclared"], "not-declared")
+                self.assertIn("진행 파일 선언 없음", text)
+                self.assertNotIn(not_visible, text)
+
+    def test_a_declared_file_and_a_declared_folder_are_named_by_their_own_word(self):
+        # RV-PR1619-R3-1114: a declared progress FILE not there yet was told "folder not visible".
+        bare = {"summary": {}, "elapsed_seconds": 60, "planned_seconds": None, "undeclared": "declared-unresolved"}
+        for lang, file_text, folder_text in (
+                ("Korean", "선언한 진행 파일 — 여기서 안 보임", "선언한 진행 폴더 — 여기서 안 보임"),
+                ("English", "declared progress file not visible here", "declared progress folder not visible here")):
+            with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}):
+                for name, run, wanted, other in (
+                        ("file", {"run_id": "r", "progress_file": "/data/mine/counter.json"}, file_text, folder_text),
+                        ("folder", {"run_id": "r", "output_dir": "/data/out"}, folder_text, file_text),
+                        ("both", {"run_id": "r", "output_dir": "/data/out",
+                                  "progress_file": "/data/mine/counter.json"}, folder_text, file_text),
+                        ("runner place", {"run_id": "r", "log": "/data/run.log",
+                                          "progress_file": "/data/run.log.progress.json"}, folder_text, file_text)):
+                    with self.subTest(lang=lang, run=name):
+                        text = "; ".join(progress._notice_texts(run, "checkpoint", bare, None, []))
+                        self.assertIn(wanted, text)
+                        self.assertNotIn(other, text)
+
+    def test_the_runners_own_progress_place_is_told_from_a_declaration_by_the_file_not_its_spelling(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            base = Path(tmp).resolve()
+            (base / "real").mkdir()
+            (base / "link").symlink_to(base / "real")
+            log = base / "real" / "run.log"
+            place = str(log) + ".progress.json"
+            (base / "link-file.json").symlink_to(place)        # a link to the file itself
+            Path(place).write_text("{}")
+            os.link(place, base / "hard.json")
+            other = base / "real" / "other.json"
+            other.write_text("{}")
+            relative = os.path.relpath(place, base / "work")
+            (base / "work").mkdir()
+            cases = (
+                ("same string", {"log": str(log), "progress_file": place}, False),
+                ("a dotted spelling", {"log": str(log), "progress_file": str(base / "real" / "." / "run.log.progress.json")}, False),
+                ("through a linked folder", {"log": str(log), "progress_file": str(base / "link" / "run.log.progress.json")}, False),
+                ("log through the link", {"log": str(base / "link" / "run.log"), "progress_file": place}, False),
+                ("a link to the file", {"log": str(log), "progress_file": str(base / "link-file.json")}, False),
+                ("a hard link", {"log": str(log), "progress_file": str(base / "hard.json")}, False),
+                ("relative to the run's folder", {"log": str(log), "progress_file": relative,
+                                                  "cwd": str(base / "work")}, False),
+                ("relative log", {"log": os.path.relpath(log, base / "work"), "progress_file": place,
+                                  "cwd": str(base / "work")}, False),
+                ("another file", {"log": str(log), "progress_file": str(other)}, True),
+                ("relative to nowhere", {"log": str(log), "progress_file": relative}, True),
+            )
+            for name, run, declared in cases:
+                with self.subTest(case=name):
+                    self.assertEqual(bool(progress._declared_progress_file(dict(run))), declared)
+            # A run on another host: its paths are not this machine's disk, so only spelling counts.
+            remote = {"log": str(log), "progress_file": str(base / "link" / "run.log.progress.json")}
+            self.assertTrue(progress._declared_progress_file({**remote, "host_is_local": False}))
+            self.assertTrue(progress._declared_progress_file({**remote, "path_namespace": {"/r": "/l"}}))
+            self.assertIsNone(progress._declared_progress_file({**remote, "host_is_local": True}))
+
+    @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
+    def test_the_launch_note_and_the_notice_come_from_the_same_undeclared_result(self):
+        # RV-PR1619-R3-1114: a run that writes progress at the runner's own place was told by the
+        # launch note that its notices carry no step or epoch, while its notice showed 12/60.
+        # The note speaks only when the notice's `undeclared` is set, and states facts, no prediction.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, now = Path(tmp), 1_800_000_000.0
+            log = str(base / "run.log")
+            default = log + ".progress.json"
+            run = {"run_id": "default-run", "node": "train", "status": "running", "log": log,
+                   "progress_file": default, "started_at": now - 3600}
+
+            def notice(name):
+                with mock.patch.object(progress, "_observation_state_path", return_value=base / f"{name}.json"):
+                    result = progress.observe_experiment(run, base / "registry.json", now,
+                                                         progress=progress.read_progress(run, now),
+                                                         alive=True, status="running", notify_events=False)
+                return result["observation"], "; ".join(progress._notice_texts(
+                    run, "checkpoint", result["observation"], None, result["metrics"]))
+
+            # Launch time: the place is empty. One note, no claim, the place shown; the notice says so too.
+            note = progress.declaration_note(run)
+            self.assertIn(default, note)
+            self.assertIn("--config", note)
+            self.assertNotIn("실리지 않습니다", note)
+            self.assertEqual(note.count("\n"), 0)
+            observation, text = notice("empty")
+            self.assertEqual(observation["undeclared"], "not-declared")
+            self.assertIn("진행 파일 선언 없음", text)
+            with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}):
+                english = progress.declaration_note(run)
+            self.assertIn(default, english)
+            self.assertNotIn("carry no", english)
+            # The workload writes 12/60 at that place afterwards: the notice carries it, and the note's
+            # "or the run writes progress there" still holds. The note opens no file (a value written
+            # earlier changes nothing in it: the same line).
+            Path(default).write_text(json.dumps({"schema_version": 1, "run_id": "default-run", "node": "train",
+                                                 "updated_at": now - 60, "completed": 12, "total": 60,
+                                                 "unit": "epoch"}))
+            self.assertEqual(progress.declaration_note(run), note)
+            observation, text = notice("written")
+            self.assertIsNone(observation["undeclared"])
+            self.assertIn("진행 12/60 epoch", text)
+            # A declaration (file or folder, there or not) gets no note either.
+            for declared in ({**run, "progress_file": str(base / "other.json")},
+                             {**run, "output_dir": str(base / "out")}):
+                with self.subTest(declared=declared):
+                    self.assertIsNone(progress.declaration_note(declared))
+
     def test_notice_words_follow_the_declared_language(self):
         run = {"run_id": "r1", "status": "succeeded", "exit_code": 0}
         observation = {"summary": {"metric": "loss", "latest": {"value": 0.5, "epoch": 3},
@@ -1722,12 +1995,30 @@ class ExperimentObservationTest(unittest.TestCase):
         self.assertIn("estimated total time unknown; planned unknown; elapsed 1h02m", checkpoint)
         self.assertIn("source jsonl=no path", checkpoint)
         final, checkpoint = texts["Korean"]
-        self.assertIn("public run record=기록 경로 없음", final)
+        self.assertIn("실행 기록=기록 경로 없음", final)
         self.assertIn("마지막=loss=0.5@3; 최고=loss=0.4@2; 추세=악화", final)
         self.assertIn("실제=1h02m; 계획=미상", final)
         self.assertIn("최근=loss=0.5@3; 최고=loss=0.4@2; 기준 delta=기준 없음; 추세=악화", checkpoint)
         self.assertIn("ETA 총 미상; 계획 미상; 경과 1h02m", checkpoint)
-        self.assertIn("source jsonl=경로 없음", checkpoint)
+        self.assertIn("출처 jsonl=경로 없음", checkpoint)
+
+    def test_a_short_or_metric_less_normal_end_and_a_bare_checkpoint_are_quiet(self):
+        metric = {"summary": {"latest": {"value": 0.5, "epoch": 3}}}
+        cases = [
+            ("final", {"elapsed_seconds": 30}, "succeeded", True),            # short
+            ("final", {"elapsed_seconds": 7200}, "succeeded", True),          # no metric
+            ("final", {**metric, "elapsed_seconds": 7200}, "succeeded", False),
+            ("final", {**metric, "elapsed_seconds": 30}, "succeeded", True),  # short with a value
+            ("final", {"elapsed_seconds": 30}, "failed", False),              # never a failure
+            ("final", {"elapsed_seconds": 30}, None, False),                  # nor an unknown end
+            ("checkpoint", {}, "working", True),
+            ("checkpoint", {"reached": 12}, "working", False),                # a progress count
+            ("checkpoint", metric, "working", False),
+            ("attention", {}, "working", False),
+        ]
+        for kind, observation, status, quiet in cases:
+            with self.subTest(kind=kind, observation=observation, status=status):
+                self.assertIs(progress._quiet_event(kind, observation, status), quiet)
 
     @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})   # Korean notice words
     def test_terminal_observation_keeps_durable_live_checkpoint_and_adds_one_final_notice(self):
@@ -1751,8 +2042,10 @@ class ExperimentObservationTest(unittest.TestCase):
                 terminal = progress.observe_experiment({**run, "status": "succeeded",
                     "ended_at": 7201}, root / "registry.json", 7201,
                     root=str(output), row_key="run", started_at=0, final=True)
+            # A checkpoint with neither a metric nor a progress count is quiet (one routine line);
+            # the final's status was not given, so it is not called quiet.
             self.assertEqual([item["subject"] for item in notices], [
-                "experiment checkpoint (1/1)", "experiment checkpoint (1/1)",
+                "experiment checkpoint, quiet (1/1)", "experiment checkpoint, quiet (1/1)",
                 "experiment final (1/1)"])
             self.assertEqual(notices[0]["key"], notices[1]["key"])
             self.assertNotEqual(notices[1]["key"], notices[2]["key"])
@@ -1761,6 +2054,27 @@ class ExperimentObservationTest(unittest.TestCase):
             self.assertEqual([item["kind"] for item in persisted["outbox"]],
                              ["checkpoint", "final"])
             self.assertTrue(terminal["available"])
+
+    def test_a_final_notice_does_not_call_an_ended_run_running(self):
+        # The registry row can still say `running` when the lifecycle authority has already finished the run
+        # (its exit evidence is in the sentinel, not in the row). The final notice says the status it was
+        # judged by, never the row's stale word.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "artifact").mkdir()
+            state = root / "state.json"
+            run = {"run_id": "ended-row", "started_at": 0, "artifact_root": str(root / "artifact"),
+                   "route_id": "route-a", "node": "eval", "status": "running",
+                   "notify": {"harness": "claude", "id": "owner-sid"}}
+            notices = []
+            with mock.patch.object(progress, "_observation_state_path", return_value=state), \
+                    mock.patch("session_notice.notify", side_effect=lambda *a, **kw:
+                               notices.append(kw) or {"state": "pending"}):
+                progress.observe_experiment(run, root / "registry.json", 7201, row_key="run",
+                                            started_at=0, final=True, status="exited")
+            text = " ".join(item["text"] for item in notices if item["subject"].startswith("experiment final"))
+            self.assertIn("status=exited;", text)
+            self.assertNotIn("status=running", text)
 
     def _terminal_source_fixture(self, root, *, run_id="counter-target"):
         artifact = root / "artifact"
@@ -1814,8 +2128,8 @@ class ExperimentObservationTest(unittest.TestCase):
             for item in observation["attention"]]
         digest = hashlib.sha256(json.dumps(identity, sort_keys=True,
             separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()[:16]
-        if observation["checkpoint_due"]:
-            return f"attention-checkpoint:run:{int(observation['due_checkpoint_at'])}:{digest}"
+        # A changed attention is `attention:` even when a checkpoint is due; only the same
+        # attention re-posted at a checkpoint is `attention-checkpoint:` (RV-PR1602 1).
         return f"attention:run:{digest}"
 
     def test_final_source_change_creates_attention_and_preserves_pending_or_acked_final(self):
@@ -1826,7 +2140,7 @@ class ExperimentObservationTest(unittest.TestCase):
                 notices = []
 
                 def send(*args, **kwargs):
-                    state = (final_receipt if kwargs["subject"].startswith("experiment final ")
+                    state = (final_receipt if kwargs["subject"].startswith("experiment final")
                              else "acked")
                     notices.append({"args": args, **kwargs})
                     return {"state": state}
@@ -1846,7 +2160,7 @@ class ExperimentObservationTest(unittest.TestCase):
                     first_final_event = next((item for item in first_state["outbox"]
                                               if item.get("kind") == "final"), None)
                     initial_final_calls = [item.copy() for item in notices
-                        if item["subject"].startswith("experiment final ")]
+                        if item["subject"].startswith("experiment final")]
                     final_delivery = next(item for item in first["delivery"]
                                           if item.get("key") == "final:run")
 
@@ -1900,7 +2214,7 @@ class ExperimentObservationTest(unittest.TestCase):
                         self.assertIn("final:run", first_state["event_keys"])
                         self.assertIn("final:run", changed_state["event_keys"])
                         self.assertEqual(len([item for item in notices
-                            if item["subject"].startswith("experiment final ")]),
+                            if item["subject"].startswith("experiment final")]),
                             len(initial_final_calls))
 
                     first_attention_key = next(item["key"] for item in first["delivery"]
@@ -1913,7 +2227,7 @@ class ExperimentObservationTest(unittest.TestCase):
                     repeated = observe(22, 1050, 1121)
                     equal_fresh = observe(22, 1170, 1183)
                     final_calls = [item for item in notices
-                        if item["subject"].startswith("experiment final ")]
+                        if item["subject"].startswith("experiment final")]
                     initial_final_signatures = [(initial["args"], initial["key"],
                         initial["subject"], initial["text"], initial["route_id"],
                         initial["required_action"], initial["lineage"])
@@ -1978,7 +2292,7 @@ class ExperimentObservationTest(unittest.TestCase):
                 enabled_state = progress._read_observation_state(fixture["state"])
                 self.assertEqual([item["key"] for item in enabled["delivery"]], ["final:run"])
                 self.assertEqual(notify.call_count, 1)
-                self.assertTrue(notify.call_args.kwargs["subject"].startswith("experiment final "))
+                self.assertTrue(notify.call_args.kwargs["subject"].startswith("experiment final"))
                 self.assertIn("raw counter=finished_items:32", notify.call_args.kwargs["text"])
                 self.assertEqual(enabled_state["event_keys"], ["final:run"])
                 repeated = progress.observe_experiment(fixture["run"], fixture["registry"],
@@ -2367,6 +2681,218 @@ class ExperimentObservationTest(unittest.TestCase):
         grown = progress.write_public_run_record(artifact, "omit", record())
         self.assertEqual(json.loads(grown.read_text())["compaction"]["metrics_omitted"], 5)
         self.assertLessEqual(grown.stat().st_size, 16384)
+
+
+class CatalogNoticeTest(unittest.TestCase):
+    """The notice names the run by its experiment-catalog name, and a periodic checkpoint with nothing new is quiet.
+
+    The catalog is a real one written by `experiment_catalog` into a temporary root; the metric file is the
+    run's own epoch log, read by the real observer.  Only the delivery (`session_notice.notify`) is a stand-in.
+    """
+    SPEC = {"groups": [{"display_name": "소리 분리 개선", "goal": "SI-SNRi가 8 dB보다 높은가",
+                        "metric": {"key": "SISNRi", "unit": "dB", "direction": "max", "split": "validation", "scoring": "s"},
+                        "target": {"kind": "fixed", "label": "fix", "value": 8.0, "split": "validation", "scoring": "s"}}],
+            "conditions": [{"display_name": "잔향 줄임", "group": "소리 분리 개선", "refs": {"runs": [{"run_id": "name-run"}]}}]}
+
+    def setUp(self):
+        import artifact_admission as admission
+        import experiment_catalog as catalog
+        self.catalog = catalog
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.artifact = self.root / "artifact"
+        self.artifact.mkdir()
+        admission.ensure_root_identity(self.artifact)
+        self.output = self.root / "run"
+        (self.output / "logs").mkdir(parents=True)
+        self.state = self.root / "runtime" / "state.json"
+        self.state.parent.mkdir()
+        self.notices = []
+        self.epochs(1)
+        patches = [mock.patch.object(progress, "_observation_state_path", return_value=self.state),
+                   mock.patch("session_notice.notify", side_effect=lambda *a, **kw: self.notices.append(kw) or {"state": "pending"}),
+                   mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def register(self, spec=None):
+        self.catalog.run_write(self.artifact, lambda ctx: self.catalog.op_register(ctx, spec or self.SPEC), now=1_790_000_000.0)
+
+    def epochs(self, count):
+        (self.output / "logs" / "epochs.jsonl").write_text("".join(
+            json.dumps({"epoch": epoch, "split": "valid", "losses": {"SISNRi": 10.0 + epoch}}) + "\n"
+            for epoch in range(1, count + 1)))
+
+    def run_spec(self, run_id="name-run", declared=True):
+        run = {"run_id": run_id, "started_at": 0, "artifact_root": str(self.artifact), "route_id": "r", "node": "eval",
+               "notify": {"harness": "claude", "id": "owner"}}
+        run["observation"] = {"time_budget": {"seconds": 14400}, "keys": {"valid": ["SISNRi"]}}
+        if declared:
+            run["observation"]["decision_metric"] = {"key": "SISNRi", "direction": "max"}
+        return run
+
+    def observe(self, now, run=None, **kwargs):
+        before = len(self.notices)
+        progress.observe_experiment(run or self.run_spec(), self.root / "registry.json", now,
+                                    root=str(self.output), row_key="run", started_at=0, **kwargs)
+        return {item["key"]: item["text"] for item in self.notices[before:]}  # a redelivery shows the same key
+
+    def test_the_first_line_is_the_catalog_name_goal_and_value_against_the_target(self):
+        self.register()
+        texts = self.observe(3600)
+        (text,) = texts.values()
+        self.assertTrue(text.startswith("잔향 줄임 — SI-SNRi가 8 dB보다 높은가; 최근 11.00 dB@1; fix 8.00 dB 대비 +3.00 dB; "
+                                        "지표: SISNRi (dB) ↑ · validation · s · 기준: fix 8.00 dB; 실행=name-run"), text)
+        self.assertTrue(text.endswith("; 표: hearting run experiment_catalog leaderboard --group '소리 분리 개선'"), text)
+        self.assertNotIn("정본 이름 없음", text)
+
+    def test_a_new_name_reaches_the_next_event_and_the_old_text_is_not_rewritten(self):
+        self.register()
+        first = self.observe(3600)
+        self.catalog.run_write(self.artifact, lambda ctx: self.catalog.op_rename(ctx, "잔향 줄임", "잔향 제거 켬"), now=1_790_000_100.0)
+        self.epochs(2)
+        later = self.observe(7200)
+        new = [text for key, text in later.items() if key not in first]
+        self.assertEqual(len(new), 1)
+        self.assertTrue(new[0].startswith("잔향 제거 켬 — "), new[0])
+        persisted = progress._read_observation_state(self.state)
+        self.assertTrue(persisted["outbox"][0]["text"].startswith("잔향 줄임 — "))  # no retroactive rewrite
+
+    def test_an_unregistered_run_gets_the_register_line_on_its_first_event_and_final_only(self):
+        self.register()
+        other = self.run_spec("stray-run")
+        first = self.observe(3600, other)
+        (text,) = first.values()
+        self.assertIn("정본 이름 없음: run을 정본에 등록; `hearting run experiment_catalog register --group-name <묶음> "
+                      "--condition-name <조건> --run stray-run`로 등록하면", text)   # the command, while the notice stays one part
+        self.assertTrue(text.startswith("정본 이름 없음"))
+        self.epochs(2)
+        second = self.observe(7200, other)
+        newer = [t for k, t in second.items() if k not in first]
+        self.assertEqual(len(newer), 1)
+        self.assertNotIn("정본 이름 없음", newer[0])  # not repeated on every checkpoint
+        self.epochs(3)
+        final = self.observe(14400, {**other, "status": "succeeded", "ended_at": 14400}, final=True)
+        self.assertTrue(any("정본 이름 없음" in t for k, t in final.items() if k.find("final") >= 0), final)
+
+    def test_a_broken_catalog_changes_nothing_and_holds_nothing_back(self):
+        path = self.catalog.catalog_path(self.artifact)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json", encoding="utf-8")
+        texts = self.observe(3600)
+        (text,) = texts.values()
+        self.assertTrue(text.startswith("실행=name-run"), text)
+
+    def test_a_checkpoint_with_no_new_evaluation_point_is_quiet_but_still_published(self):
+        self.register()
+        keys = set(self.observe(3600))
+        self.assertEqual(len(keys), 1)
+        quiet = self.observe(7200)  # 50 % slot, same epoch and value
+        self.assertEqual(set(quiet) - keys, set())
+        persisted = progress._read_observation_state(self.state)
+        self.assertEqual(persisted["last_checkpoint_at"], 7200.0)  # the schedule moved on
+        record = progress.read_public_run_record(self.artifact, "name-run")
+        self.assertEqual(record["last_checkpoint"]["at"], 7200.0)  # and the public record the board reads is current
+        told = persisted["notified_decision_point"]
+        self.assertEqual({k: told[k] for k in ("metric", "epoch", "value")}, {"metric": "SISNRi", "epoch": 1, "value": 11.0})
+        self.epochs(2)
+        news = set(self.observe(10800)) - keys
+        self.assertEqual(len(news), 1)  # a new epoch is a new decision point
+        self.epochs(2)
+        self.assertEqual(set(self.observe(14400)) - keys - news, set())  # and then quiet again
+
+    def append_point(self, epoch, value):
+        with (self.output / "logs" / "epochs.jsonl").open("a") as handle:
+            handle.write(json.dumps({"epoch": epoch, "split": "valid", "losses": {"SISNRi": value}}) + "\n")
+
+    def test_out_of_order_new_result(self):
+        """RV-PR1607-1113 #1: epochs 1 and 3 were told; epoch 2 arriving afterwards (here a new best) is news."""
+        self.register()
+        self.append_point(3, 13.0)
+        keys = set(self.observe(3600))
+        self.assertEqual(len(keys), 1)
+        self.append_point(2, 25.0)
+        late = set(self.observe(7200)) - keys
+        self.assertEqual(len(late), 1, "a first evaluation of an earlier epoch went untold")
+        summary = progress._read_observation_state(self.state)["observation"]["summary"]
+        self.assertEqual((summary["best"]["epoch"], summary["latest"]["epoch"]), (2, 3))  # the latest point did not move
+        self.assertEqual(set(self.observe(10800)) - keys - late, set())  # and nothing new afterwards is quiet again
+
+    def test_a_corrected_earlier_epoch_is_news(self):
+        """An earlier epoch's value rewritten (not the latest one) is a new evaluation as well."""
+        self.register()
+        self.append_point(3, 13.0)
+        keys = set(self.observe(3600))
+        self.append_point(1, 12.5)  # epoch 1 corrected from 11.0; the latest (epoch 3) stays 13.0
+        self.assertEqual(len(set(self.observe(7200)) - keys), 1)
+
+    def _drop_told_digest(self):
+        """A state saved before the evaluation digest existed: the told point is `{metric, epoch, value}` only."""
+        state = json.loads(self.state.read_text())
+        told = state["notified_decision_point"]
+        told.pop("points")
+        self.assertEqual(set(told), {"metric", "epoch", "value"})
+        self.state.write_text(json.dumps(state))
+
+    def test_a_state_saved_before_the_digest_with_nothing_new_stays_quiet(self):
+        """RV-PR1607-R2-1113: right after the install, an old told point equal to the latest is not news; the
+        digest is filled in quietly, and a late earlier epoch afterwards is told as before."""
+        self.register()
+        run = self.run_spec()
+        run["observation"]["time_budget"] = {"seconds": 28800}  # slots at 2880, 7200, 14400, 21600 s
+        self.append_point(3, 13.0)
+        keys = set(self.observe(3600, run))
+        self.assertEqual(len(keys), 1)
+        self._drop_told_digest()
+        self.assertEqual(set(self.observe(7200, run)) - keys, set(), "an old state with no new evaluation was told")
+        told = progress._read_observation_state(self.state)["notified_decision_point"]
+        self.assertEqual(({k: told[k] for k in ("metric", "epoch", "value")}, len(told.get("points") or "")),
+                         ({"metric": "SISNRi", "epoch": 3, "value": 13.0}, 16))  # the digest was filled in
+        self.assertEqual(set(self.observe(14400, run)) - keys, set())  # and the next checkpoint is quiet too
+        self.append_point(2, 25.0)  # a first evaluation of an earlier epoch; the latest (epoch 3) stays
+        self.assertEqual(len(set(self.observe(21600, run)) - keys), 1)
+
+    def test_a_state_saved_before_the_digest_with_a_new_point_is_told(self):
+        self.register()
+        keys = set(self.observe(3600))
+        self._drop_told_digest()
+        self.append_point(2, 12.0)  # the latest point moved from 11.0@1
+        news = set(self.observe(7200)) - keys
+        self.assertEqual(len(news), 1)
+        told = progress._read_observation_state(self.state)["notified_decision_point"]
+        self.assertEqual((told["epoch"], told["value"], len(told.get("points") or "")), (2, 12.0, 16))
+        self.assertEqual(set(self.observe(10800)) - keys - news, set())
+
+    def test_unconfirmed_runs_keep_their_checkpoints(self):
+        # no catalog at all
+        keys = set(self.observe(3600))
+        self.assertEqual(len(set(self.observe(7200)) - keys), 1)
+        # a catalog that does not declare the metric for this run: the run's own decision metric is absent
+        self.register({"groups": [{"display_name": "G", "goal": "g"}],
+                       "conditions": [{"display_name": "미선언 조건", "group": "G", "refs": {"runs": [{"run_id": "name-run"}]}}]})
+        again = self.observe(10800)
+        self.assertEqual(len(set(again) - keys), 2)  # both new slots are told: nothing was declared, nothing goes quiet
+
+    def test_a_declared_metric_the_run_never_reported_keeps_its_checkpoints(self):
+        self.register()
+        (self.output / "logs" / "epochs.jsonl").write_text("")
+        keys = set(self.observe(3600))
+        self.assertEqual(len(keys), 1)
+        self.assertEqual(len(set(self.observe(7200)) - keys), 1)  # no value yet is "unknown", not "nothing new"
+
+    def test_an_old_state_without_the_remembered_point_alerts_once_and_keeps_its_queue(self):
+        self.register()
+        keys = set(self.observe(3600))
+        state = json.loads(self.state.read_text())
+        state.pop("notified_decision_point")
+        self.state.write_text(json.dumps(state))
+        again = self.observe(7200)
+        self.assertEqual(len(set(again) - keys), 1)  # "nothing told yet" for the metric: the next checkpoint is told
+        persisted = progress._read_observation_state(self.state)
+        self.assertEqual([item["kind"] for item in persisted["outbox"]], ["checkpoint", "checkpoint"])
+        self.assertEqual(persisted["outbox"][0]["key"], state["outbox"][0]["key"])  # the queue was moved or rewritten by nothing
 
 
 if __name__ == "__main__":

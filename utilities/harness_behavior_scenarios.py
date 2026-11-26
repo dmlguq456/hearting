@@ -95,17 +95,25 @@ def native_binary(harness: str) -> str | None:
 # Loopback model fixture
 # --------------------------------------------------------------------------
 
+GATE_LIMIT = 170.0   # the longest a gated reply waits, so a forgotten gate never hangs a run
+
+
 class Reply:
     """One scripted model answer: plain text, a single shell tool call, or one
     named tool call (``tool=(name, arguments)``) such as a skill load.
-    ``input_tokens`` is the prompt size the answer reports (default 1)."""
+    ``input_tokens`` is the prompt size the answer reports (default 1).
+    ``gate`` (a ``threading.Event``) holds the answer: the request is recorded at once, the
+    reply is sent only once the event is set (or after ``GATE_LIMIT`` seconds), so a turn
+    stays running on the model's side."""
 
     def __init__(self, text: str = "", shell: str | None = None, tool=None,
-                 input_tokens: int = 1):
+                 input_tokens: int = 1, gate=None, http_error=None):
+        self.gate = gate
         self.text = text
         self.shell = shell
         self.tool = tool
         self.input_tokens = input_tokens
+        self.http_error = http_error
 
     def call(self, protocol: str, names):
         """The (name, arguments) of this reply's tool call, or None."""
@@ -117,6 +125,8 @@ class Reply:
         value = {"text": self.text, "shell": self.shell}
         if self.tool:
             value["tool"] = list(self.tool)
+        if self.http_error:
+            value["http_status"] = self.http_error[0]
         return value
 
 
@@ -174,6 +184,40 @@ def _last_turn(payload: dict, protocol: str):
     if last.get("role") == "tool":
         return "tool", _flatten_text(last.get("content"))
     return last.get("role", "user"), _flatten_text(last.get("content"))
+
+
+_OUTPUT_TYPES = ("function_call", "custom_tool_call", "local_shell_call", "reasoning", "web_search_call")
+
+
+def _turn_text(payload: dict, protocol: str) -> str:
+    """Everything that reached the model since its own last output, oldest first.
+
+    ``_last_turn`` is the newest item only. Codex puts its developer guidance after the
+    user line of a peer message, so the newest item may be the guidance alone; a scenario
+    that must see the line reads this: every user, developer and tool input after the
+    last assistant output."""
+    def is_output(item):
+        return isinstance(item, dict) and (item.get("role") == "assistant"
+                                           or item.get("type") in _OUTPUT_TYPES)
+    if protocol == "responses":
+        items = payload.get("input") or []
+        if isinstance(items, str):
+            return items
+        pending = []
+        for item in items:
+            if is_output(item):
+                pending = []
+            elif isinstance(item, dict):
+                pending.append(_flatten_text(item.get("output") if "output" in item else item.get("content")))
+        return "\n".join(text for text in pending if text)
+    messages = [m for m in payload.get("messages") or [] if isinstance(m, dict) and m.get("role") != "system"]
+    pending = []
+    for message in messages:
+        if message.get("role") == "assistant":
+            pending = []
+        else:
+            pending.append(_flatten_text(message.get("content")))
+    return "\n".join(text for text in pending if text)
 
 
 def _user_inputs(payload: dict, protocol: str) -> list[dict]:
@@ -258,6 +302,9 @@ class ModelFixture:
                 self.send_response(code)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body)))
+                if code == 429:
+                    self.send_header("Retry-After", "1")
+                    self.send_header("x-should-retry", "false")
                 if ctype == "text/event-stream":
                     self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
@@ -299,8 +346,8 @@ class ModelFixture:
                 else:
                     self._send(404, b"{}")
                     return
-                body, ctype = owner._answer(protocol, payload, raw)
-                self._send(200, body, ctype)
+                status, body, ctype = owner._answer(protocol, payload, raw)
+                self._send(status, body, ctype)
 
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
@@ -327,6 +374,7 @@ class ModelFixture:
                 "model": payload.get("model"),
                 "main_index": index if main else None,
                 "last_kind": kind, "last_text": last_text[-4000:],
+                "turn_text": _turn_text(payload, protocol)[-4000:],
                 "text": text, "tools": names[:60],
                 "user_inputs": _user_inputs(payload, protocol),
                 "sha256": hashlib.sha256(raw).hexdigest(),
@@ -335,12 +383,19 @@ class ModelFixture:
                 else (self.side and self.side(record)) or Reply("fixture title")
             record["reply"] = reply.as_dict()
             self.requests.append(record)
+        if reply.gate is not None:
+            reply.gate.wait(GATE_LIMIT)
+        if reply.http_error is not None:
+            status, error = reply.http_error
+            return status, json.dumps(error).encode(), "application/json"
         streaming = bool(payload.get("stream", protocol != "anthropic"))
         if protocol == "anthropic":
-            return self._anthropic(reply, streaming, names)
-        if protocol == "responses":
-            return self._responses(reply, names)
-        return self._chat(reply, streaming, names)
+            body, ctype = self._anthropic(reply, streaming, names)
+        elif protocol == "responses":
+            body, ctype = self._responses(reply, names)
+        else:
+            body, ctype = self._chat(reply, streaming, names)
+        return 200, body, ctype
 
     def main_requests(self) -> list[dict]:
         with self.lock:
@@ -751,7 +806,9 @@ class PrivateTui:
 
     def start(self):
         exports = " ".join(f"{k}={shlex.quote(v)}" for k, v in sorted(self.env.items()))
-        command = f"cd {shlex.quote(str(self.cwd))} && env -i {exports} " + \
+        # A process in a real tmux pane inherits TMUX and TMUX_PANE; `env -i` would drop them and
+        # a pane address (`%0@socket`) could then never match this TUI. Pass the pane's own values.
+        command = f"cd {shlex.quote(str(self.cwd))} && env -i TMUX=\"$TMUX\" TMUX_PANE=\"$TMUX_PANE\" {exports} " + \
             " ".join(shlex.quote(a) for a in self.argv) + \
             "; echo HEARTING-SCENARIO-TUI-EXIT=$?; sleep 3600"
         self._tmux("new-session", "-d", "-s", "scenario", "-x", "200", "-y", "50",
@@ -822,6 +879,11 @@ def _ids(node, key):
         for value in node:
             found.extend(_ids(value, key))
     return found
+
+
+# The tmux driver class itself, kept apart from the module's ``PrivateTui`` name, which
+# companion scenarios replace with a one-shot factory (``harness_behavior_cases_c.install_tui``).
+_TMUX_TUI = PrivateTui
 
 
 def private_herdr_env(root: Path, env: dict) -> str:
@@ -898,6 +960,17 @@ class PrivateHerdrTui:
     def _agent_start(self, name, pane):
         native = self.argv[1:]
         self.panes[name] = pane
+        if SESSION_SHELL:
+            # ``agent start --kind`` runs the kind's own executable, so the session shell's
+            # entry would become its argument: run the whole launch in the pane, then give
+            # the agent Herdr detects there (its integration reports it) the run's name.
+            launch = " ".join(shlex.quote(part) for part in self.argv)
+            ran = self.herdr("pane", "run", pane, launch, timeout=30)
+            found = ran.returncode == 0 and wait_for(
+                lambda: self.herdr("agent", "get", pane, timeout=10).returncode == 0, 120, 1)
+            named = bool(found) and self.herdr("agent", "rename", pane, name, timeout=10).returncode == 0
+            return {"ok": named, "rc": ran.returncode, "pane": pane, "shell_launch": True,
+                    "stderr": ran.stderr[-300:]}
         done = self.herdr("agent", "start", name, "--kind", self.harness, "--pane", pane,
                           "--timeout", "120000", *(["--", *native] if native else []), timeout=130)
         if done.returncode != 0 and "timeout" in done.stderr:
@@ -973,7 +1046,8 @@ class PrivateHerdrTui:
         return self._send(self.name, text)
 
     def settle(self, quiet: float = 3, timeout: float = 45):
-        return PrivateTui.settle(self, quiet, timeout)
+        # The class itself: a scenario may swap the module's ``PrivateTui`` for a factory.
+        return _TMUX_TUI.settle(self, quiet, timeout)
 
     def key(self, *keys: str):
         self.herdr("pane", "send-keys", self.panes.get(self.name, self.name), *keys, timeout=10)
@@ -1151,8 +1225,10 @@ class Run:
         runtime = Path(os.environ.get("HEARTING_SCENARIO_TMP") or tempfile.gettempdir())
         runtime.mkdir(parents=True, exist_ok=True)
         # Herdr puts its sockets under XDG_CONFIG_HOME inside this root: a short
-        # name keeps them within the ~107-byte UNIX socket path limit.
-        prefix = (f"hb-{self.harness[:2]}-" if SURFACE == "herdr"
+        # name keeps them within the ~107-byte UNIX socket path limit (also for a
+        # scenario that starts its own private Herdr server, e.g. ``tidy-compact-herdr``).
+        on_herdr = SURFACE == "herdr" or getattr(self.scenario, "surface", "") == "herdr"
+        prefix = (f"hb-{self.harness[:2]}-" if on_herdr
                   else f"hb-{self.harness}-{self.scenario.name}-")
         root = Path(tempfile.mkdtemp(prefix=prefix, dir=str(runtime)))
         row["fixture_root"] = str(root)
@@ -1306,6 +1382,10 @@ class Scenario:
         if not hasattr(module, "PrivateTui"):
             module = sys.modules[__name__]
         if module.SURFACE == "herdr":
+            # A tmux-only one-shot replacement a scenario installed is not used here; the
+            # module's class comes back so the next run in this process starts clean.
+            if getattr(module, "_TMUX_TUI", None) is not None:
+                module.PrivateTui = module._TMUX_TUI
             tui = module.PrivateHerdrTui(root, run.home.env, argv, run.home.workspace, run.harness)
             run.surface = tui
             return tui
@@ -1319,10 +1399,10 @@ class Scenario:
         raise NotImplementedError
 
 
-# The local-evidence probe's own header: every harness injects it on the first
-# prompt through its lifecycle hook (Claude/Codex UserPromptSubmit, OpenCode the
-# plugin's system-context hook), and no static instruction file contains it.
-HOOK_CONTEXT_MARKER = "# Local evidence present"
+# The memory-candidate probe's own header: every harness injects it on the prompt
+# through its lifecycle hook (Claude/Codex UserPromptSubmit, OpenCode the plugin's
+# system-context hook), and no static instruction file contains it.
+HOOK_CONTEXT_MARKER = "# Memory candidates"
 
 
 class BootScenario(Scenario):
@@ -1331,13 +1411,15 @@ class BootScenario(Scenario):
                "first model request carries Hearting's hook-injected context.")
 
     def prepare(self, run):
-        # One artifact makes the local-evidence probe emit its block, so the check
-        # reads hook output rather than the bootstrap instructions every harness loads.
-        root = Path(run.home.env.get("AGENT_ARTIFACT_ROOT")
-                    or run.home.workspace / ".agent_reports")
-        seeded = root / "research" / "2026-01-01_boot-hook-context" / "report.md"
-        seeded.parent.mkdir(parents=True, exist_ok=True)
-        seeded.write_text("boot scenario hook-context probe\n", encoding="utf-8")
+        # One global record that the boot prompt matches makes the candidate probe emit
+        # its block, so the check reads hook output rather than the bootstrap
+        # instructions every harness loads. The store lives in the throwaway HOME.
+        subprocess.run(
+            [sys.executable, str(SOURCE / "tools" / "memory" / "mem.py"), "add", "--scope", "global",
+             "--headline", "SCENARIO-BOOT hello hook context probe", "working", "note",
+             "SCENARIO-BOOT hello hook context probe"],
+            env={**run.home.env, "MEM_INIT": "1"}, cwd=run.home.workspace, capture_output=True,
+            timeout=60, check=False)
 
     def drive(self, run):
         run.prompt("SCENARIO-BOOT hello")

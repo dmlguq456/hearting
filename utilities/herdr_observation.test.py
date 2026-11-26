@@ -1,6 +1,10 @@
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 import os
 import socket
+import sys
 import subprocess
 import tempfile
 import threading
@@ -567,6 +571,58 @@ class NativeStatusTest(unittest.TestCase):
         with mock.patch.object(observation, "_process_start_ticks", return_value="2"):
             self.assertIsNone(observation.read_native_status(
                 "named", "w1:p9", "opencode", "sid", self.pid, self.start, now=100.0))
+
+    def _spawn(self, code="import time; time.sleep(30)"):
+        child = subprocess.Popen([sys.executable, "-c", code])
+        self.addCleanup(lambda: (child.kill(), child.wait()))
+        for _ in range(100):
+            start = observation._process_start_ticks(child.pid)
+            if start:
+                return child, start
+            time.sleep(0.01)
+        self.fail("child did not start")
+
+    def test_plugin_process_record_is_the_watched_tuis_own_when_a_descendant(self):
+        child, child_start = self._spawn()  # the plugin host the TUI (this process) spawned
+        self.assertTrue(observation.record_native_status(
+            dict(self.row, pid=child.pid, pid_start=child_start)))
+        row = observation.read_native_status("named", "w1:p9", "opencode", "sid",
+                                             self.pid, self.start, max_age=None)
+        self.assertEqual((row["status"], row["pid"]), ("idle", child.pid))
+        # A different pane or session id is another record: no match through the same TUI.
+        self.assertIsNone(observation.read_native_status(
+            "named", "w1:p9", "opencode", "other", self.pid, self.start, max_age=None))
+        self.assertIsNone(observation.read_native_status(
+            "named", "w1:p8", "opencode", "sid", self.pid, self.start, max_age=None))
+
+    def test_record_of_a_process_outside_the_watched_tuis_tree_never_matches(self):
+        sibling, sibling_start = self._spawn()
+        # The watched process is the sibling: the writer (this process) is its parent, not its child.
+        self.assertTrue(observation.record_native_status(self.row))
+        self.assertIsNone(observation.read_native_status(
+            "named", "w1:p9", "opencode", "sid", sibling.pid, sibling_start, max_age=None))
+        # A writer that is a different child than the watched process's own subtree.
+        other, other_start = self._spawn()
+        self.assertTrue(observation.record_native_status(
+            dict(self.row, pid=other.pid, pid_start=other_start)))
+        self.assertIsNone(observation.read_native_status(
+            "named", "w1:p9", "opencode", "sid", sibling.pid, sibling_start, max_age=None))
+
+    def test_descendant_record_needs_the_writers_exact_birth_and_a_live_tui_birth(self):
+        child, child_start = self._spawn()
+        self.assertTrue(observation.record_native_status(
+            dict(self.row, pid=child.pid, pid_start=child_start)))
+        with mock.patch.object(observation, "_process_start_ticks",
+                               side_effect=lambda p: self.start if p == self.pid else "1"):
+            self.assertIsNone(observation.read_native_status(
+                "named", "w1:p9", "opencode", "sid", self.pid, self.start, max_age=None))
+        self.assertIsNone(observation.read_native_status(
+            "named", "w1:p9", "opencode", "sid", self.pid, "1", max_age=None))
+        child.kill()
+        child.wait()
+        self.assertIsNone(observation.read_native_status(
+            "named", "w1:p9", "opencode", "sid", self.pid, self.start, max_age=None))
+
 
 if __name__ == "__main__":
     unittest.main()

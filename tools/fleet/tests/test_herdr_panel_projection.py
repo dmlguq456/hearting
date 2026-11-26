@@ -1,4 +1,7 @@
 """The Herdr mirror uses the exact shell board and grants no lifecycle authority."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import copy
 import os
 from pathlib import Path
@@ -48,8 +51,9 @@ class HerdrPanelProjectionTest(unittest.TestCase):
         before = copy.deepcopy((self.values, self.board))
         command = self.command()
         tokens = self.tokens(command)
-        self.assertEqual((tokens["hearting_questions"], tokens["hearting_answer_needed"]), ("4", "2"))
-        self.assertIn("Q4/◑A2", command[command.index("--display-agent")+1])
+        # The sent (`submitted`) row is the panel's receipt line, in no count (rule 5, 11-14).
+        self.assertEqual((tokens["hearting_questions"], tokens["hearting_answer_needed"]), ("3", "2"))
+        self.assertIn("Q3/◑A2", command[command.index("--display-agent")+1])
         self.assertNotIn("PRIVATE", repr(command))
         self.assertEqual((self.values, self.board), before)
 

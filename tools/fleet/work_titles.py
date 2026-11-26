@@ -1,4 +1,5 @@
 """One readable work-name rule; metadata IO stays in Fleet's detail pass."""
+import os
 import re
 import json
 import unicodedata
@@ -107,7 +108,10 @@ def cycle_title(root, record, read_json, *, validation_cache=None):
                 doc = read_json(str(directory / 'meta.json'))
                 identity = read_json(str(root / '.runtime/artifact-admission/v1/root-identity.json')) or {}
                 if isinstance(doc, dict) and identity.get('artifact_root_id'):
-                    members = {key: read_json(str(producer / 'cycles' / (key + '.json'))) or {}
+                    # Same member paths as producer/'cycles'/<key>.json, without a
+                    # Path object per historical cycle on every detail pass.
+                    cycles = os.path.join(str(producer), 'cycles')
+                    members = {key: read_json(os.path.join(cycles, key + '.json')) or {}
                                for key in (doc.get('cycles') or {})
                                if isinstance(key, str) and re.fullmatch(r'cyc_[0-9a-f]{32}', key)}
                     try:

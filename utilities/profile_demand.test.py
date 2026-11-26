@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """SD-88 behavioral regressions; fixtures never launch a model."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import copy
 import importlib.util
 import json
@@ -605,7 +608,11 @@ class TopExceptionRoute(unittest.TestCase):
         self.assertEqual(explicit, self.TOP)
         with self.assertRaises(ValueError) as refused:
             R._profile_input_maps(nodes, demands, {"execute": "top"})
-        self.assertEqual(str(refused.exception), "profile-explicit-top-owner-only:execute")
+        # no intensity known (or one below strong): the refusal says who may hold top and from where
+        self.assertTrue(str(refused.exception).startswith("profile-explicit-top-owner-only:execute: "))
+        self.assertIn("can take `top` at any intensity", str(refused.exception))
+        self.assertIn("needs strong or higher", str(refused.exception))
+        self.assertIn("this route is of unknown intensity", str(refused.exception))
         route = self.staged(profile_demands=self.owner_demand("predetermined"), explicit_profiles=self.TOP)
         self.assertEqual(route["owner_model_profile"], "top")
         R.verify_route(route, R.ROOT)

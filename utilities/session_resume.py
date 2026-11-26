@@ -547,6 +547,13 @@ def record_opencode_resume(payload):
         if not prior:
             tidy.record_event(seat, "opencode", sid, "start", source="resume", cwd=cwd,
                               resume_argv=argv, launch_process=launch)
+    # OpenCode's reopening is this report (its start hook names no source): it, like the
+    # SessionStart(resume) hook, takes over the routes this session left running.
+    try:
+        import session_route_resume
+        session_route_resume.reopened("opencode", sid)
+    except Exception:
+        pass
     return register("opencode", sid, source="resume")
 
 

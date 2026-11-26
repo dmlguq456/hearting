@@ -16,6 +16,9 @@ rt-f942824768304759) -- neither is a compiled recipe route (no `advance_class`
 et al in their node shape) and nothing in this cycle should have touched them."""
 
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import ast
 import hashlib

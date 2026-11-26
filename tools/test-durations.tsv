@@ -7,6 +7,8 @@
 # there both halves carry its duration apportioned by a local per-half timing
 # (216 s : 223 s); peer_steward.test.py, split in three after all four runs, likewise
 # (218 s : 140 s : 134 s). Unknown suites use the runner's median of known weights.
+# artifact_close_followups.test.py has one local isolated run (--jobs 2) until a shard report has it; so have
+# artifact_campaign_event_size, artifact_campaign_named_folder and artifact_campaign_scale.
 # Refresh this table from recent shard reports when shard times drift apart.
 suite_path	duration_s
 adapters/claude/bin/dispatch-headless.already-claimed.test.py	4.31
@@ -39,7 +41,6 @@ hooks/agent_home_equivalence.test.py	0.27
 hooks/core_write_guard.test.py	0.31
 hooks/design-postwrite.test.sh	0.21
 hooks/dispatch_owner_rewake.test.py	50.81
-hooks/local-evidence-inject.test.sh	1.45
 hooks/mem-recall-inject.test.sh	2.42
 hooks/peer_message_record.test.py	74.81
 hooks/peer_steward_rewake.test.py	53.44
@@ -378,7 +379,6 @@ tools/memory/tests/test_tidy_home_worktree.py	0.43
 tools/memory/tests/test_tidy_isolation.py	1.53
 tools/memory/tests/test_tidy_native.py	67.67
 tools/memory/tests/test_tidy_runner.py	150.65
-tools/migration_manifest.test.py	0.76
 tools/native-skill-discovery.test.py	0.14
 tools/opencode-text-request.test.py	0.21
 tools/release/ci_scope.test.py	1.19
@@ -407,7 +407,11 @@ utilities/artifact_admission_atomicity.test.py	2.25
 utilities/artifact_campaign.test.py	19.19
 utilities/artifact_campaign_current.test.py	7.61
 utilities/artifact_campaign_documents.test.py	0.56
+utilities/artifact_campaign_event_size.test.py	1.6
+utilities/artifact_campaign_named_folder.test.py	7.0
+utilities/artifact_campaign_scale.test.py	173.0
 utilities/artifact_checkpoint.test.py	9.05
+utilities/artifact_close_followups.test.py	77.96
 utilities/artifact_context.test.py	4.04
 utilities/artifact_cross_root_move.test.py	38.33
 utilities/artifact_cutover.test.py	10.96
@@ -446,7 +450,7 @@ utilities/artifact_workflow_groups.test.py	16.33
 utilities/atomic_publish.test.py	0.21
 utilities/attempt_view.test.py	3.64
 utilities/backlog_performance.test.py	6.08
-utilities/cairn-artifact-read.test.sh	0.15
+utilities/campaign_document.test.py	0.51
 utilities/campaign_title_repair.test.py	10.2
 utilities/capability_route.test.py	271.24
 utilities/capacity_auto_resume.test.py	1.11
@@ -580,7 +584,6 @@ utilities/foreground_terminal.test.py	0.52
 utilities/foreground_terminal_outcome.test.py	19.33
 utilities/frame_interview.test.py	0.24
 utilities/frame_launch_binding.test.py	22.86
-utilities/frame_native_answer.test.py	0.37
 utilities/frame_revision.test.py	15.62
 utilities/framed_route.test.py	24.56
 utilities/framed_start.test.py	189.62
@@ -780,7 +783,6 @@ utilities/stage_session_chain.test.py	7.66
 utilities/stage_session_runtime.test.py	2.3
 utilities/stage_session_subdivision.test.py	1.54
 utilities/start_receipt.test.py	1.83
-utilities/status_board.test.py	0.43
 utilities/steward_check.test.py	3.4
 utilities/steward_native_projection.test.py	0.98
 utilities/subdivision_batch_admission.test.py	1.25

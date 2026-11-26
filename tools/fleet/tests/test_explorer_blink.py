@@ -1,4 +1,7 @@
 """The existing live phase changes only active text and supervisor flags."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import copy
 import re
 import unicodedata
@@ -19,7 +22,8 @@ from tools.fleet.tests.explorer_capture import cell_style, palette
 FIXTURES = Path(__file__).parent / "fixtures" / "explorer"
 NAMES = ("plan", "execute", "review", "test", "report")
 STATES = ("done", "active", "active", "todo", "failed")
-DIM_KEYS = ("version_release", "h_claude", "g_work_off", "lvl_y_dim", "h_codex")
+# The stage palette's second hue is the cyan of Opus, not the Claude harness orange (11-18).
+DIM_KEYS = ("version_release", "famd_opus", "g_work_off", "lvl_y_dim", "famd_fable")
 
 
 def blink_view_model():
@@ -98,8 +102,8 @@ class BlinkAssertions(unittest.TestCase):
             self.assertFalse(render._HUE_OF[dim][1] & render._A_BOLD, (y, x, dim))
 
 
-# ``⏳`` is two cells wide; the grid's continuation cell reads as ``\0`` in the joined line.
-ROUTE_TAIL = "⏳" + ("\0" if __import__("tools.fleet.explorer.grid", fromlist=["cell_width"]).cell_width("⏳") == 2 else "") + " 1"
+# The folded session's route count, in the statusline word.
+ROUTE_TAIL = "route 1"
 
 
 class SessionRouteCountTests(BlinkAssertions):
@@ -119,9 +123,9 @@ class SessionRouteCountTests(BlinkAssertions):
                         # Include wide-character continuation cells when locating
                         # the suffix after a clipped CJK title.
                         lines = ["".join(cell[0] or "\0" for cell in row) for row in on.cells]
-                        # The folded session's title tail is ``⏳ N`` (the statusline word).
+                        # The folded session's title tail is ``route N`` (the statusline word).
                         badge = [(y, line.index(ROUTE_TAIL)) for y, line in enumerate(lines)
-                                 if ROUTE_TAIL in line]
+                                 if ROUTE_TAIL in line and "[c1]" in line]
                         if not current:
                             self.assertFalse(badge)
                             self.assert_structure(on, off)
@@ -145,9 +149,29 @@ class SessionRouteCountTests(BlinkAssertions):
                         adjusted = replace(on, cells=tuple(tuple(row) for row in masked))
                         self.assert_structure(adjusted, off)
                         expanded = draw(vm, NavState(opened="c1"), cols, 45, beat=1)
-                        self.assertNotIn(ROUTE_TAIL, "\n".join(
-                            "".join(cell[0] or "\0" for cell in row) for row in expanded.cells))
+                        self.assertNotIn(ROUTE_TAIL, "\n".join(line for line in (
+                            "".join(cell[0] or "\0" for cell in row) for row in expanded.cells) if "[c1]" in line))
 
+
+    def test_a_narrow_table_shows_the_whole_route_count_or_none_of_it(self):
+        # A folded row's `route N` is never cut to a shorter number or a part of the word
+        # (RV-PR1517-R3 §1 ②): the title and MODEL give way first, else the tail is left out.
+        base = blink_view_model()
+        sessions = tuple(dict(row, title="XXXX XXXX " * 8) for row in base.sessions)
+        first = dict(base.routes[0], current=True, state="working")
+        for count in (1, 12, 123):
+            vm = replace(base, sessions=sessions,
+                         routes=tuple(dict(first, id="r%d" % i) for i in range(count)))
+            whole = "route %d" % count
+            for cols in [*range(60, 100), 100, 140]:
+                with self.subTest(count=count, cols=cols):
+                    rows = [row.rstrip() for row in draw(vm, NavState(), cols, 45, beat=1).text_rows()
+                            if "[c1]" in row]
+                    tail = re.sub(r"X+|…|\(.*?\)", "", re.search(r"%(.*?)\d+h \d+m$", rows[0]).group(1)).strip()
+                    self.assertIn(tail, ("", whole), rows[0])
+                    # From 69 columns (and down to 67-69 by count) the whole count shows.
+                    if cols >= 69 or cols >= 66 + len(str(count)):
+                        self.assertEqual(tail, whole, rows[0])
 
 class StagePhaseTests(BlinkAssertions):
     def test_stage_boxes_pulse_only_active_names_and_dot_all_hues(self):
@@ -229,7 +253,7 @@ class StagePhaseTests(BlinkAssertions):
                         self.assertEqual(on.rows_text()[0].count("execute"), 1)
                         self.assert_structure(on, off)
                         x = on.rows_text()[0].index("execute")
-                        bright = normalize_style("hb_opencode" if status == "active" else "title_dim")[0]
+                        bright = normalize_style("fam_sonnet" if status == "active" else "title_dim")[0]
                         self.assertEqual([on.cells[0][col][1] for col in range(x, x + 7)],
                                          [bright] * 7)
                         expected = {(0, col): DIM_KEYS[0] for col in range(x, x + 7)} if status == "active" else {}
@@ -304,11 +328,16 @@ class SupervisorPhaseTests(BlinkAssertions):
 
 
 def route_count_spans(frame):
-    """The OVERVIEW ROUTES rule's ``N open`` pulses on the working pair while N > 0."""
+    """The OVERVIEW ROUTES rule's open count (``N ROUTES``) pulses on the working pair while N > 0.
+
+    A page's own ``N ROUTES`` section head (a session's routes) is a plain count: only the rule
+    whose count is drawn on the working beat's lit key is the OVERVIEW one."""
     spans = {}
     for y, line in enumerate(frame.text_rows()):
-        match = re.search(r"── ROUTES  ([0-9]+ open)", line)
-        if match and int(match.group(1).split()[0]) > 0:
+        match = re.search(r"│ ([0-9]+) ROUTES", line)
+        if match and frame.cells[y][match.start(1)][1] != "g_work":
+            continue
+        if match and int(match.group(1)) > 0:
             spans.update({(y, col): "g_work_off" for col in range(*match.span(1))})
     return spans
 
@@ -317,7 +346,7 @@ class FramePhaseTests(BlinkAssertions):
     def expected_spans(self, frame, state):
         """Declare spans from fixed semantic labels, never from the observed off diff."""
         expected = route_count_spans(frame)
-        active = {"execute": "h_claude", "review": "g_work_off"}
+        active = {"execute": "famd_opus", "review": "g_work_off"}     # stage hues: Opus's cyan, not the Claude orange (11-18)
         for y, line in enumerate(frame.text_rows()):
             for x, glyph in enumerate(line):
                 if glyph == "⚑" and (x < 32 or state.view == "PEERS"):
@@ -326,7 +355,7 @@ class FramePhaseTests(BlinkAssertions):
             if state.view == "PEERS" and state.scope == "-":
                 strip = pane.find("✓●●·✕")
                 if strip >= 0:
-                    expected[(y, 34 + strip + 1)] = "h_claude"
+                    expected[(y, 34 + strip + 1)] = "famd_opus"
                     expected[(y, 34 + strip + 2)] = "g_work_off"
                 continue
             if "└ " in pane:
@@ -335,7 +364,7 @@ class FramePhaseTests(BlinkAssertions):
                     run = "running 3m"
                     length = next((size for size in range(len(run), len("running") - 1, -1)
                                    if line[x:x + size] == run[:size]), len("running"))
-                    expected.update({(y, col): "h_claude" for col in range(x, x + length)})
+                    expected.update({(y, col): "famd_opus" for col in range(x, x + length)})
                 continue  # KIND is a steady stage label
             for name, dim in active.items():
                 for match in re.finditer(name, pane):
@@ -405,10 +434,10 @@ class FramePhaseTests(BlinkAssertions):
         self.assert_structure(on, off)
         # The long session list forces the closing ROUTES/RECENT block to be pinned.
         y = next(y for y, line in enumerate(on.text_rows())
-                 if "execute ●" in line[34:])
+                 if ": execute" in line[34:] and "(team" in line[34:])      # (11-19: `staged` is the bracket's `team`)
         self.assertGreater(y, 25)
         x = on.text_rows()[y].index("execute", 34)
-        self.assertEqual((on.cells[y][x][1], off.cells[y][x][1]), ("hb_claude", "h_claude"))
+        self.assertEqual((on.cells[y][x][1], off.cells[y][x][1]), ("fam_opus", "famd_opus"))
         flag_y = next(y for y, line in enumerate(on.text_rows()) if "[c1] claude ⚑" in line[:32])
         flag_x = on.text_rows()[flag_y].index("⚑")
         self.assertEqual(off.cells[flag_y][flag_x][1], "tag_steward_dim")
@@ -452,7 +481,7 @@ class FramePhaseTests(BlinkAssertions):
                         expected.update(route_count_spans(on))
                         if status == "active":
                             expected.update({(y, col): DIM_KEYS[0] for col in range(x, x + 7)})
-                            self.assertEqual(on.cells[y][x][1], "hb_opencode")
+                            self.assertEqual(on.cells[y][x][1], "fam_sonnet")
                         self.assertEqual({pos: pair[1] for pos, pair in _changes(on, off).items()}, expected)
                         self.assert_hues(on, off)
                         self.assertEqual(draw(current_vm, state, cols, 45, beat=0), off)

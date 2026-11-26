@@ -1,4 +1,6 @@
 #!/usr/bin/env sh
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/../../../tools/run-tests.py" --direct-run bash "$0" "$@"
 # A failed topology summary must leave nothing behind in the temp dir.
 #
 # capability-map.sh used to stage the summary in /tmp/opencode-capability-topology.$$

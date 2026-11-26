@@ -215,6 +215,17 @@ def bound_input_thread(jobs, attempt):
     return None
 
 
+def _owner_waits_on_review(metadata):
+    """Whether this owner parks on the review it starts and is woken again (the middle cell
+    `solo·standard`: A and B), so another turn *is* guaranteed. Read from the route's nodes."""
+    try:
+        route = json.loads(Path(str(metadata.get("route_file") or "")).read_text(encoding="utf-8"))
+        from route_form import one_shot_review_route
+        return one_shot_review_route(route)
+    except (OSError, ValueError, TypeError, ImportError):
+        return False
+
+
 def _public(value, *, live=False, reachable=None, owner_phase=None, metadata=None):
     reachable = live if reachable is None else reachable
     phase = owner_phase or _owner_phase(value["attempt_id"])
@@ -225,15 +236,18 @@ def _public(value, *, live=False, reachable=None, owner_phase=None, metadata=Non
                             "refuses it, it waits for the next owner turn."),
             "phase-unavailable": "Queued corrections may wait for the next owner turn."}.get(
                 timing, "Queued corrections are delayed until the next owner turn.")
-    notice = (lead + " A parked owner gets its next turn once the children running now finish or "
-              "require attention; a serial sub-session chain starts no further sub-session while a "
-              "correction waits. A bound correction is never replayed after a sending or "
+    notice = (lead + " An owner parked on its children gets that turn at its next wait checkpoint, "
+              "within about 30 seconds, and the children keep running; an owner waiting only on "
+              "resources gets it within seconds. A serial sub-session chain starts no further "
+              "sub-session while a correction waits, so there it waits for the running sub-session. "
+              "A bound correction is never replayed after a sending or "
               "delivery-unknown receipt; consumer recovery requires the effective parent and "
               "positive quiescence evidence.")
     if timing == "phase-unavailable":
         notice = ("Delivery timing is unknown because the exact owner phase is unavailable. " + notice)
     metadata = metadata or {}
-    one_shot = metadata.get("intensity") == "quick" or metadata.get("route_node") == "one-shot"
+    one_shot = (metadata.get("intensity") == "quick" or metadata.get("route_node") == "one-shot"
+                ) and not _owner_waits_on_review(metadata)
     if one_shot:
         notice += (" This is a one-shot owner: another turn is not guaranteed. "
                    "A next-owner-turn correction may remain undelivered when this turn ends. "
@@ -273,7 +287,7 @@ def inspect(jobs, attempt):
         return result
 
 
-def submit(jobs, attempt, text, request_id=None):
+def submit(jobs, attempt, text, request_id=None, unit=None):
     if not text.strip() or len(text.encode()) > 65536:
         raise InputError("correction-text-empty-or-oversized")
     row, target = _target(jobs, attempt)
@@ -322,6 +336,11 @@ def submit(jobs, attempt, text, request_id=None):
             retain = choice.state == "retained"
             item = {"id": request_id, "digest": digest, "text": text, "events": [],
                     "source_session": route_authority.correction_source_session()}
+            # Read later by the main session's work-style record (memory_work_labels);
+            # nothing here writes memory.
+            item["route_id"] = row.metadata.get("owner_route_id") or row.metadata.get("route_id") or ""
+            if unit:
+                item["unit"] = unit
             _transition(item, "retained" if retain else "queued")
             value["requests"].append(item)
             _write(path, value)
@@ -640,15 +659,37 @@ def retained(jobs, attempt):
             if isinstance(item, dict) and item.get("state") in UNCONSUMED_STATES]
 
 
+# How often the owner-input decision ran for an owner that held a kept answer (``owner_decisions``)
+# against how often there was nothing kept, so the decision could not change the result
+# (``owner_decision_skips``).
+_METRICS = {"owner_decisions": 0, "owner_decision_skips": 0}
+
+
+def metrics_snapshot() -> dict:
+    return dict(_METRICS)
+
+
 def blocked_owner_answers(jobs, attempt):
-    """The unconsumed answers of an owner that ended waiting for a person, read now; [] otherwise."""
+    """The unconsumed answers of an owner that ended waiting for a person, read now; [] otherwise.
+
+    The answer is ``retained()`` when the decision lets the kept answers through and ``[]`` when it
+    does not, so with nothing kept it is ``[]`` whatever the decision says. The kept answers (this
+    attempt's own ``.input.json``, read on every call) are therefore read first, and the decision
+    (the supervisor lease probe and ``decide_continuation`` -> route verification) only runs for an
+    owner that holds one.
+    """
     try:
         row, _ = _target(jobs, attempt)
     except (InputError, JoinContractError, OSError, ValueError, KeyError):
         return []
+    kept = retained(jobs, attempt)
+    if not kept:
+        _METRICS["owner_decision_skips"] += 1
+        return []
+    _METRICS["owner_decisions"] += 1
     if not _answers_blocked_owner(row, supervisor_lease_is_held(jobs, row.metadata), jobs):
         return []
-    return retained(jobs, attempt)
+    return kept
 
 
 def initialize_owner_input(jobs, attempt, transport):

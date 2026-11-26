@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/../tools/run-tests.py" --direct-run bash "$0" "$@"
 # dispatch-wait.test.sh — SD-14 one-shot 대기 헬퍼 conformance (exit-code 매트릭스).
 #   증명 대상: (0) 대상 없음/종료 → 수확, (2) 실행 중·검증 불가 → 재호출,
 #   (3) 확정된 실패/충돌 → 진단; 미확정 결과는 공통 writer의 복구 의무 유지.

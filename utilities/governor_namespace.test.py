@@ -1,4 +1,7 @@
 """부모 비모델 보강: 실제 namespace와 공용 API, 임시 root만 변경. 생산 소스 변경 없음."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import os,sys,json,subprocess,tempfile,select,hashlib,importlib.util,time,ctypes,unittest,shutil
 from pathlib import Path
 from unittest import mock

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/../../../tools/run-tests.py" --direct-run bash "$0" "$@"
 # installed-layout-home.test.sh — F-2 (plan §6 Phase 1) 설치 레이아웃 워커 홈 해석 회귀.
 #   증명 대상: model-map.sh / worktree-cleanup.sh 가 설치 레이아웃
 #   (~/.claude/bin, 고정 3단 hop 이 잘못된 루트를 잡는 위치)에서도 harness root 를 정확히

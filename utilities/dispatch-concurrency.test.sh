@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/../tools/run-tests.py" --direct-run bash "$0" "$@"
 # dispatch-concurrency.test.sh — SD-16(d) thorough+ 다축 동시성 실측 검증
 #   (계약: WORKFLOW §1.1 / OPERATIONS §5.10 ④ — thorough/adversarial 에서 depth-1 owner 가
 #   다축 depth-2 perspective/verifier/adversary 워커를 열고 ⑤ 동시 상한 아래 병렬 실행).
@@ -66,7 +68,7 @@ wt="$tmp/wt/shared"; mkdir -p "$wt"
 ( cd "$wt" && git init -q && git -c user.email=a@b -c user.name=a commit -q --allow-empty -m x )
 sleep 60 & parent_pid=$!
 parent_start=$(awk '{print $22}' "/proc/$parent_pid/stat")
-parent_attempt="att-concurrency-parent"
+parent_attempt="att-concurrency-parent-$$"  # per-run: a fixed id would let a second copy of this suite signal our processes
 mkdir -p "$AH/.dispatch"
 printf '2026-07-23T00:00:00Z\topen\t%s\t%s\t%s\tattempt_schema_version=2,dispatch_depth=1,transport=headless,execution_surface=registered-headless,registered_worker=1,fallback_hop=same-harness-headless,worker_type=owner,harness=claude,runtime_sandbox=fixture,attempt_id=%s,pid=%s,pid_start=%s\n' \
   "$wt" "$wt" "$PARENT" "$parent_attempt" "$parent_pid" "$parent_start" > "$AH/.dispatch/jobs.log"

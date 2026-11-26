@@ -1,4 +1,7 @@
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import copy
 import os
@@ -387,6 +390,57 @@ class TestIndex(unittest.TestCase):
             index, doc2, idempotency_key=doc2["manifest_id"], manifest_digest=digest2
         )
         self.assertTrue(report.ok, [v.to_payload() for v in report.violations])
+
+    # -- a unit route's next turn: a second cycle of a route only as the child of its current cycle ---
+
+    def _turn_of(self, route_doc, parent_doc):
+        """A document for the same route as `route_doc`, whose cycle is a child of `parent_doc`'s."""
+        doc = _document(self.root_id, self.alloc)
+        doc["routes"][0]["route_id"] = route_doc["routes"][0]["route_id"]
+        doc["cycle"]["parent_cycle_id"] = parent_doc["cycle"]["cycle_id"]
+        return doc
+
+    def _check(self, index, doc):
+        return ix.check(index, doc, idempotency_key=doc["manifest_id"], manifest_digest=m.manifest_digest(doc))
+
+    def _codes(self, report):
+        return {v.code for v in report.violations}
+
+    def test_check_allows_the_child_of_the_routes_current_cycle_as_its_next_turn(self):
+        first = _document(self.root_id, self.alloc)
+        index, _d, _k = self._apply(ix.empty(self.root_id), first)
+        second = self._turn_of(first, first)
+        self.assertTrue(self._check(index, second).ok)
+        index, _d, _k = self._apply(index, second)
+        third = self._turn_of(first, second)          # and the next turn is the child of the second
+        self.assertTrue(self._check(index, third).ok)
+
+    def test_check_rejects_a_sibling_cycle_of_a_route_that_already_has_its_child(self):
+        first = _document(self.root_id, self.alloc)
+        index, _d, _k = self._apply(ix.empty(self.root_id), first)
+        index, _d, _k = self._apply(index, self._turn_of(first, first))
+        sibling = self._turn_of(first, first)          # the same parent as the turn the route already points at
+        self.assertIn("index-route-composite-duplicate", self._codes(self._check(index, sibling)))
+
+    def test_check_rejects_a_cycle_whose_parent_belongs_to_another_route(self):
+        first = _document(self.root_id, self.alloc)
+        index, _d, _k = self._apply(ix.empty(self.root_id), first)
+        other = _document(self.root_id, self.alloc)    # another route, with a cycle of its own
+        index, _d, _k = self._apply(index, other)
+        stray = self._turn_of(first, other)            # takes first's route id but is the child of other's cycle
+        self.assertIn("index-route-composite-duplicate", self._codes(self._check(index, stray)))
+
+    def test_check_rejects_a_child_of_an_earlier_cycle_once_the_route_has_moved_on(self):
+        first = _document(self.root_id, self.alloc)
+        index, _d, _k = self._apply(ix.empty(self.root_id), first)
+        second = self._turn_of(first, first)
+        index, _d, _k = self._apply(index, second)
+        third = self._turn_of(first, second)
+        index, _d, _k = self._apply(index, third)
+        stale = self._turn_of(first, first)            # the route's current cycle is the third, not the first
+        self.assertIn("index-route-composite-duplicate", self._codes(self._check(index, stale)))
+        also_stale = self._turn_of(first, second)
+        self.assertIn("index-route-composite-duplicate", self._codes(self._check(index, also_stale)))
 
     # -- F3a: repository identity is part of admission tenancy (D-4) ---------
 

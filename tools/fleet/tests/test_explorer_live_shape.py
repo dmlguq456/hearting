@@ -7,6 +7,9 @@ the live record's keys are drawn from the fixture's keys, its value types are th
 and an unknown value is ``None``. Additive route and question fields and the repo ``status``
 record have the explicit optional contracts below, so old render fixtures remain valid inputs.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import unittest
 import math
 from datetime import datetime
@@ -19,7 +22,7 @@ from tools.fleet.tests import explorer_fixture as ef
 
 FIXTURE = Path(__file__).parent / "fixtures" / "explorer" / "view_model.json"
 HARNESSES = ("claude", "codex", "opencode")
-FREE_KEYED = frozenset(("peer_edges.cards", "dialogue.logs", "models.shown", "models.profile_map", "models.model_choices",
+FREE_KEYED = frozenset(("peer_edges.cards", "peer_edges.sessions", "dialogue.logs", "models.shown", "models.profile_map", "models.model_choices",
                         "models.main_only", "models.pools", "models.context", "models.context_source",
                         "models.token_units", "models.effort_keys"))
 # Sections only the selection pump's reads can fill: without them they are omitted (empty), never invented.
@@ -33,7 +36,7 @@ def route_extension(key, value):
     pair = lambda item: isinstance(item, (list, tuple)) and len(item) == 2
     if key == "owner_gauge":
         return pair(value) and optional_pct(value[0]) and optional_number(value[1])
-    if key in ("current", "owner_waits", "closed"):
+    if key in ("current", "closed"):
         return type(value) is bool
     if key == "worker_context_index":
         return type(value) is int and value >= 0
@@ -53,19 +56,28 @@ def route_extension(key, value):
                     for row in value["lines"])))
     if key == "worker_contexts":
         return isinstance(value, (list, tuple)) and all(
-            isinstance(row, dict) and set(row) == {"stage", "harness", "model", "context", "window"}
+            isinstance(row, dict) and set(row) - {"attempt"} == {"stage", "harness", "model", "context", "window"}
             and isinstance(row["stage"], str)
+            # The attempt Fleet chose for the stage (a recorded id, or none).
+            and (row.get("attempt") is None or isinstance(row["attempt"], str))
             and (row["harness"] is None or isinstance(row["harness"], str))
             and (row["model"] is None or pair(row["model"]) and all(
                 isinstance(item, str) for item in row["model"]))
             and optional_pct(row["context"]) and optional_number(row["window"])
             for row in value)
     if key == "doer":
-        # The one-line route row: who does the work now, its context and its open tool.
+        # The one-line route row: who does the work now, its context and its open tool,
+        # with what that tool acts on, since when, and the call it just finished when reported.
         optional_text = lambda item: item is None or isinstance(item, str)
+        activity = {"target": str, "tool_age": str, "after_tool": str,
+                    "tool_since": (int, float), "idle_tool": bool, "worker": bool}
         return (isinstance(value, dict)
-                and set(value) == {"harness", "model", "effort", "context", "window", "tokens",
-                                   "tool", "agents"}
+                and {"harness", "model", "effort", "context", "window", "tokens",
+                     "tool", "agents"} <= set(value)
+                and all(key in activity and isinstance(value[key], activity[key])
+                        and not (key == "idle_tool" and value[key] is not True)
+                        for key in set(value) - {"harness", "model", "effort", "context",
+                                                 "window", "tokens", "tool", "agents"})
                 and optional_text(value["harness"]) and optional_text(value["effort"])
                 and optional_text(value["tool"])
                 and (value["model"] is None or pair(value["model"]) and all(
@@ -79,13 +91,19 @@ def route_extension(key, value):
 _QUESTION_TEXT_FIELDS = frozenset(("node", "since_at", "route_id", "route_title", "owner_sid",
                                    "registered"))
 _QUESTION_ENUMS = {"owner_state": ("live", "successor", "none", "unknown"),
-                   "fold": ("older", "ownerless")}
+                   "fold": ("older", "ownerless"),
+                   # What a sent answer waits for (11-16, `session_shell.answer_delivery_wait`).
+                   "answer_wait": ("old-shell", "no-shell")}
+# Rule 5 (11-14): the person's answer is on its way.
+_QUESTION_FLAGS = frozenset(("sent",))
 
 
 def question_extension(key, value):
     """Validate the optional who/when/route fields of an answer-wait row (body-free text)."""
     if value is None:
         return True
+    if key in _QUESTION_FLAGS:
+        return type(value) is bool
     if key in _QUESTION_ENUMS:
         return value in _QUESTION_ENUMS[key]
     return isinstance(value, str)
@@ -190,12 +208,13 @@ def conform(live, samples, path, problems):
                     problems.append(f"{path}.{key}: expected optional finite completion timestamp")
                 continue
             if path == "routes[]" and key in ("owner_gauge", "worker_contexts", "current",
-                                              "worker_context_index", "owner_waits", "visibility", "doer",
+                                              "worker_context_index", "visibility", "doer",
                                               "closed"):
                 if not route_extension(key, live[key]):
                     problems.append(f"{path}.{key}: invalid optional route field shape")
                 continue
-            if path == "questions[]" and (key in _QUESTION_TEXT_FIELDS or key in _QUESTION_ENUMS):
+            if path == "questions[]" and (key in _QUESTION_TEXT_FIELDS or key in _QUESTION_ENUMS
+                                          or key in _QUESTION_FLAGS):
                 if not question_extension(key, live[key]):
                     problems.append(f"{path}.{key}: invalid optional question field shape")
                 continue
@@ -206,6 +225,10 @@ def conform(live, samples, path, problems):
             if path == "repos[]" and key == "done_result":
                 if live[key] is not None and not isinstance(live[key], str):
                     problems.append(f"{path}.done_result: expected optional outcome string")
+                continue
+            if path == "routes[]" and key == "field":               # 11-18: the field a route records (its kind word's hue)
+                if live[key] is not None and not isinstance(live[key], str):
+                    problems.append(f"{path}.field: expected optional string")
                 continue
             if path == "system.gpu_processes[]" and key == "session_tag":
                 if live[key] is not None and not isinstance(live[key], str):
@@ -230,6 +253,13 @@ def conform(live, samples, path, problems):
                 if path == "peer_edges" and key == "watches":        # PEERS field contract: steward watch footers
                     if not all(isinstance(item, dict) and set(item) == {"repo", "text"} for item in live[key]):
                         problems.append("peer_edges.watches: invalid shape")
+                    continue
+                if path == "peer_edges" and key == "supervision":    # PEERS field contract: {steward tag: [watched tags]}
+                    if not (isinstance(live[key], dict) and all(
+                            isinstance(steward, str) and isinstance(watched, (list, tuple)) and watched
+                            and all(isinstance(tag, str) for tag in watched)
+                            for steward, watched in live[key].items())):
+                        problems.append("peer_edges.supervision: invalid shape")
                     continue
                 if path == "system" and key == "gpu_processes":
                     for index, process in enumerate(live[key]):

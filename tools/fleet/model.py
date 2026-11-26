@@ -401,6 +401,12 @@ class WorkProjection:
     _route_view: Optional[dict] = field(default=None, repr=False, compare=False)
     report_verification: Optional[dict] = field(default=None, compare=False)
     result: Optional[dict] = None  # recorded task result and event time; never file mtime
+    # The first fast pass left this row's route details for the detail pass: an
+    # absent _route_view then means "not read yet", never "no route record".
+    _details_deferred: bool = field(default=False, repr=False, compare=False)
+    # A detail pass tried this row and did not bring its route (an error, a timeout or a
+    # part of the rows): still unknown, but no longer "to come" (_details_deferred is off).
+    _details_unread: bool = field(default=False, repr=False, compare=False)
 
     def to_dict(self):
         payload = _public_value(self)
@@ -743,6 +749,7 @@ class DispatchJob:
     legacy_read_only: bool = False
     attempt_contract_status: Optional[str] = None
     parent_slug: Optional[str] = None   # parent dispatch slug for dispatch-depth-2 rows
+    caller_attempt_id: Optional[str] = None  # the worker that started this unit leg (a called unit; not an owner link)
     intensity: Optional[str] = None     # direct|quick|standard|strong|thorough|adversarial
     worker_type: Optional[str] = None   # owner | stage | review | support bootstrap overlay
     assigned_contract: Optional[str] = None  # exact portable Skill/contract assigned to worker
@@ -823,7 +830,13 @@ class DispatchJob:
     session_reasoning_output_tokens: Optional[int] = None
     session_total_tokens: Optional[int] = None
     exec_child: Optional[dict] = None
+    # `exec_tool` may also carry `target` (an allow-listed summary of what the call acts
+    # on: a worktree-relative file, or an executable with one subcommand word or worktree
+    # file; never a raw command or text) and `since` (its native start time). `last_tool`
+    # is the last finished call in the same form {'name', 'target'?}. None = not in the
+    # stream read.
     exec_tool: Optional[dict] = None
+    last_tool: Optional[dict] = None
     shell_jobs: list[ShellJob] = field(default_factory=list)
     shell_job_observation: Optional[dict] = None
     context: Optional[ContextProjection] = None
@@ -836,6 +849,9 @@ class DispatchJob:
     resource_wait: Optional[dict] = None  # display-only current parked activity; summary is preserved
     _context_evidence: Optional[ContextEvidence] = field(default=None, repr=False, compare=False)
     _dispatch_context_owned: bool = field(default=False, repr=False, compare=False)
+    _context_window_source: Optional[str] = field(default=None, repr=False, compare=False)
+    # True only once this job's own native activity was read: the sole ground for "no tool".
+    _tool_observed: bool = field(default=False, repr=False, compare=False)
     _refresh_source: Optional[dict] = field(default=None, repr=False, compare=False)
     # The runtime's row_is_registered_only verdict for this registry row: a pre-registered
     # serial successor that has not launched yet (no process, no log).
@@ -1476,7 +1492,9 @@ def deterministic_progress_fingerprint(ev_in):
     """Hash only bounded, attempt-scoped progress evidence.
 
     Transcript text/mtime and speech are deliberately excluded.  Callers may
-    pass a registry transition, heartbeat, tool call, file/artifact signature,
+    pass a registry transition, heartbeat, tool call, the position of the worker's
+    newest event row (``turn``: a new turn is progress, its prose is never read),
+    file/artifact signature,
     or test result.  The normalized JSON digest is stable across processes.
     """
     scoped = {
@@ -1486,6 +1504,7 @@ def deterministic_progress_fingerprint(ev_in):
         "registry_transition": ev_in.get("registry_transition"),
         "heartbeat": ev_in.get("heartbeat"),
         "tool": ev_in.get("tool"),
+        "turn": ev_in.get("turn"),
         "file_signature": ev_in.get("file_signature"),
         "artifact_signature": ev_in.get("artifact_signature"),
         "test_result": ev_in.get("test_result"),
@@ -1493,7 +1512,7 @@ def deterministic_progress_fingerprint(ev_in):
     }
     present = {key: value for key, value in scoped.items() if value not in (None, "", {})}
     if not any(key in present for key in (
-        "registry_transition", "heartbeat", "tool", "file_signature",
+        "registry_transition", "heartbeat", "tool", "turn", "file_signature",
         "artifact_signature", "test_result", "terminal_observation",
     )):
         return ""

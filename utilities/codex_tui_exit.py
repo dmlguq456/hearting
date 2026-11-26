@@ -99,6 +99,14 @@ def watch(session_id: str) -> int:
     from fleet.collectors import procscan
     if procscan.read_proc_start(pid) == str(start):
         select.select([fd], [], [])  # sleeps until the proven TUI process ends
+    os.close(fd)
+    # Reopening the same thread while its old watcher unwinds is a resume.
+    from fleet.collectors import codex
+    current = codex.process_for_thread(session_id, fresh=True)
+    if current and current != owner:
+        return 0
+    from peer_steward_base import peer_message
+    peer_message.observe_steward_end("codex", session_id, reason="tui-exited")
     # Gone already, or now: either way the TUI that owned this thread has left.
     from fleet import interaction
     interaction.clear_wait(session_id, "codex")

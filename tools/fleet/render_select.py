@@ -538,7 +538,7 @@ def _route_chain_node_knobs(node, with_knobs):
         mode = node.get("capability_mode")
         if mode and mode != "default":
             items.append(str(mode).replace(",", "·"))
-        level = _short_level(node.get("intensity"))
+        level = None if node.get("capability") == "unit" else _short_level(node.get("intensity"))   # 11-20: a unit shows none
         if level:
             items.append(level)
     round_n = node.get("round")

@@ -32,7 +32,7 @@ from dispatch_contract import (
     REPLICA_RESERVATION_ROW_KEYS, STANDARD_PLUS_INTENSITIES, SUPERVISOR_LEASE_KIND,
     DispatchContractError, diff_attribution_lines,
     dispatch_state_root, dispatch_state_roots, resolve_dispatch_state_root, runtime_ancestry_binding,
-    sealed_launch_home, source_lineage_row_fields, supervisor_lease_path, workflow_completion_receipt,
+    sealed_launch_home, source_lineage_row_fields, supervisor_lease_path, workflow_completion_receipt, caller_attempt_receipt, unit_continue_receipt,
     ensure_terminal_claim_absent, _atomic_registry_replace, close_attempt_row,
     parse_registry_metadata,
     diagnostic_line,
@@ -208,6 +208,22 @@ def prepare_runtime_root(artifact_root: str, environ=None, *, repository_kind=No
     candidate = worker_bootstrap.runtime_dir_candidate(
         artifact_root, values, repository_kind=repository_kind, source_root=source_root)
     return worker_bootstrap.prepare_runtime_dir(candidate)
+
+
+def prepare_raw_data_root(artifact_root: str, runtime_dir: str, environ=None, *, source_root=None) -> str:
+    """The launch's raw_data_dir: this project's folder below the user's raw
+    data root, else exactly ``runtime_dir`` (never a gate or a question)."""
+    import worker_bootstrap
+    values = os.environ if environ is None else environ
+    candidate = worker_bootstrap.raw_data_dir_candidate(
+        artifact_root, runtime_dir, values, source_root=source_root)
+    return worker_bootstrap.prepare_raw_data_dir(candidate, runtime_dir)
+
+
+def raw_data_grant(args) -> str:
+    """The raw_data_dir a launch grants beside its runtime_dir, or "" when it is that dir."""
+    raw = getattr(args, "raw_data_dir", "") or ""
+    return raw if raw and raw != (getattr(args, "runtime_dir", "") or "") else ""
 
 
 def is_report_bundle_publish_stage(route_file: str | None, route_node: str | None) -> bool:
@@ -712,7 +728,7 @@ def append_job(jobs: Path, args: argparse.Namespace, *, harness: str, runtime_sa
             f",owner_route_id={args.owner_route_binding.route_id}"
             f",owner_route_hash={args.owner_route_binding.route_hash}"
         )
-    pipe += workflow_completion_receipt(args)
+    pipe += workflow_completion_receipt(args) + caller_attempt_receipt(args) + unit_continue_receipt(args)
     settings = args.resolved_model_settings
     for key, value in sorted(getattr(args, "profile_selection_receipt", {}).items()):
         # The resolved selection below owns model_source. A diversity receipt
@@ -850,11 +866,15 @@ def append_job(jobs: Path, args: argparse.Namespace, *, harness: str, runtime_sa
         jobs, args.route_id, args.parent_attempt_id or args.attempt_id
     )
     mutation_precheck._dispatch_registry_scoped = True
+    attempt_limit = getattr(args, "quick_attempt_limit", None)
+    if attempt_limit is not None and getattr(args, "continues_attempt_id", None):
+        # A unit route's earlier turns ended on purpose; they are not spent retries of this one.
+        attempt_limit += max(0, int(getattr(args, "turn", 0) or 2) - 1)
     claimed = claim(
         jobs, args.attempt_id, row, launch=False,
         exclusive_metadata=exclusive,
         exclusive_live_metadata=quick_exclusive,
-        terminal_attempt_limit=getattr(args, "quick_attempt_limit", None),
+        terminal_attempt_limit=attempt_limit,
         replacement_attempt_limit=getattr(args, "replacement_attempt_limit", 0),
         replacement_notes=getattr(args, "replacement_notes", frozenset()),
         mutation_precheck=mutation_precheck,
@@ -1098,6 +1118,7 @@ def attach_summary_owner(args, log_path: Path, prompt_path: Path, identity, *,
         target_start=identity["pid_start"],
         runtime_home=runtime_home,
         attempt_cwd=getattr(args, "worktree", None),
+        jobs=getattr(args, "jobs_path", None),
         review_artifact_root=review["artifact_root"] if review else None,
         review_cycle_id=review["cycle_id"] if review else None,
         review_lease_nonce=args.review_governed_lease_nonce if review else None,

@@ -7,6 +7,9 @@ temp tree and appends the actual values to evidence/sd111/fixture_env.tsv
 """
 
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import importlib.util
 import contextlib
@@ -24,6 +27,7 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
 from unittest import mock
 from types import SimpleNamespace
 from split_module_fixture import patch_split, split_patch  # noqa: E402
@@ -93,6 +97,75 @@ _FROZEN_LEGACY_COMPLETION_DELIVERY_HEADER = (
     "and direct user questions. "
     "Do not start Monitor, dispatch-wait, or a polling loop."
 )
+_FROZEN_PREVIOUS_RUNTIME_V1_FOLLOWUP = (
+    "Original request/format apply. Review result; do approved follow-through or existing "
+    "continuation. First close: changes/why, before/after, checks run/reused/skipped/unrun, "
+    "commit/PR/deployment/serving, limits. No harvest/restart/manual finalize. "
+    "Receipt/ACK isn't execution; handled exact repeats need no ACK."
+)
+_FROZEN_PREVIOUS_RUNTIME_V1_SUMMARY_FOLLOWUP = (
+    "Original request/format apply. Review result; do approved follow-through or existing "
+    "continuation. First close: show the runtime summary below to the person first, as written; "
+    "then add what it does not show of changes/why, before/after, checks run/reused/skipped/unrun, "
+    "commit/PR/deployment/serving, limits. No harvest/restart/manual finalize. "
+    "Receipt/ACK isn't execution; handled exact repeats need no ACK."
+)
+_FROZEN_SHORT_RUNTIME_V1_FOLLOWUP = (
+    "Original request/format apply. Review the result and continue approved work or its existing "
+    "continuation. First close: give the result in one or two sentences, preserve any important "
+    "remaining failure, unfinished work, or user-impacting limit, ask for at most one necessary "
+    "decision, and point to the detailed record.  No harvest/restart/manual finalize. "
+    "Receipt/ACK isn't execution; handled exact repeats need no ACK."
+)
+_FROZEN_SHORT_RUNTIME_V1_SUMMARY_FOLLOWUP = (
+    "Original request/format apply. Review the result and continue approved work or its existing "
+    "continuation. First close: give the result in one or two sentences; preserve any important "
+    "remaining failure, unfinished work, or user-impacting limit; ask for at most one decision the "
+    "person must make; and point to the detailed record. Keep the runtime summary below as agent "
+    "context and record; do not reproduce it for the person.  No harvest/restart/manual finalize. "
+    "Receipt/ACK isn't execution; handled exact repeats need no ACK."
+)
+_FROZEN_DECISION_RUNTIME_V1_FOLLOWUP = (
+    "Original request/format apply. Review the result and continue approved work or its existing "
+    "continuation. First close: give the result in one or two sentences, preserve any important "
+    "remaining failure, unfinished work, or user-impacting limit, ask only what only the person can "
+    "decide, state a recommended in-scope next step (such as fixing and re-testing) as proceeding, "
+    "and point to the detailed record.  No harvest/restart/manual finalize. "
+    "Receipt/ACK isn't execution; handled exact repeats need no ACK."
+)
+_FROZEN_DECISION_RUNTIME_V1_SUMMARY_FOLLOWUP = (
+    "Original request/format apply. Review the result and continue approved work or its existing "
+    "continuation. First close: give the result in one or two sentences; preserve any important "
+    "remaining failure, unfinished work, or user-impacting limit; ask only what only the person can "
+    "decide and state a recommended in-scope next step (such as fixing and re-testing) as proceeding; "
+    "and point to the detailed record. Keep the runtime summary below as agent context and record; "
+    "do not reproduce it for the person.  No harvest/restart/manual finalize. "
+    "Receipt/ACK isn't execution; handled exact repeats need no ACK."
+)
+# The completion header and runtime-v1 follow-ups v4.32.4 shipped (frozen bytes).
+_FROZEN_SHIPPED_COMPLETION_DELIVERY_HEADER = (
+    "Hearting runtime delivery. Follow required_action/next-action receipt; "
+    "inspect-recovery: diagnostic. runtime-v1 finalizes. Tracked-Workflow Continuation. "
+    "Keep new failures/conflicts, unfinished work, questions; no extra "
+    "harness-scheduled calls/Monitor/dispatch-wait/polling."
+)
+_FROZEN_SHIPPED_RUNTIME_V1_FOLLOWUP = (
+    "Original request/format apply. Review the result and continue approved work or its existing "
+    "continuation. First close: give the result in one or two sentences, preserve any important "
+    "remaining failure, unfinished work, or user-impacting limit, ask only what only the person can "
+    "decide, state a recommended in-scope, reversible next step (such as fixing and re-testing) as "
+    "proceeding, and point to the detailed record.  No harvest/restart/manual finalize. "
+    "Receipt/ACK isn't execution; handled exact repeats need no ACK."
+)
+_FROZEN_SHIPPED_RUNTIME_V1_SUMMARY_FOLLOWUP = (
+    "Original request/format apply. Review the result and continue approved work or its existing "
+    "continuation. First close: give the result in one or two sentences; preserve any important "
+    "remaining failure, unfinished work, or user-impacting limit; ask only what only the person can "
+    "decide and state a recommended in-scope, reversible next step (such as fixing and re-testing) as "
+    "proceeding; and point to the detailed record. Keep the runtime summary below as agent context and "
+    "record; do not reproduce it for the person.  No harvest/restart/manual finalize. "
+    "Receipt/ACK isn't execution; handled exact repeats need no ACK."
+)
 _FROZEN_LEGACY_RUNTIME_V1_FOLLOWUP = (
     "The requested work is complete, including its declared stages and runtime workflow/route/cycle settlement. "
     "Continue and complete the original user task itself, preserving every explicit content and output-format "
@@ -108,15 +181,21 @@ _FROZEN_LEGACY_RUNTIME_V1_FOLLOWUP = (
 )
 
 
+def _current_runtime_v1_followup():
+    import dispatch_completion_join
+    return dispatch_completion_join.RUNTIME_V1_FOLLOWUP_PREFIXES[False]
+
+
 def _previous_native_body(text, *, legacy=False):
+    _CURRENT_RUNTIME_V1_FOLLOWUP = _current_runtime_v1_followup()
     text = text.replace(SWEEP.GATE_DELIVERY_HEADER, _FROZEN_GATE_DELIVERY_HEADER, 1)
     text = text.replace(SWEEP.NOTICE_DELIVERY_HEADER, _FROZEN_NOTICE_DELIVERY_HEADER, 1)
     text = text.replace(SWEEP.COMPLETION_DELIVERY_HEADER,
                         _FROZEN_LEGACY_COMPLETION_DELIVERY_HEADER if legacy
                         else _FROZEN_COMPLETION_DELIVERY_HEADER, 1)
-    if legacy:
-        text = text.replace(SWEEP._CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX,
-                            _FROZEN_LEGACY_RUNTIME_V1_FOLLOWUP, 1)
+    text = text.replace(_CURRENT_RUNTIME_V1_FOLLOWUP,
+                        _FROZEN_LEGACY_RUNTIME_V1_FOLLOWUP if legacy
+                        else _FROZEN_PREVIOUS_RUNTIME_V1_FOLLOWUP, 1)
     return text
 
 
@@ -292,8 +371,6 @@ def _slow_recovery_probe(base: Path, record_path: Path, snapshot_path: Path,
         "subprocess.Popen = _tracked_popen\n"
         "def _tracked_run(args, *pos, **kwargs):\n"
         "    argv = [str(item) for item in args] if not isinstance(args, str) else [args]\n"
-        "    if os.environ.get('R1_CONTEXT_OUTPUT') and any(Path(item).name == 'local-evidence-inject.sh' for item in argv):\n"
-        "        return subprocess.CompletedProcess(args, 0, os.environ['R1_CONTEXT_OUTPUT'], '')\n"
         "    return _real_run(args, *pos, **kwargs)\n"
         "subprocess.run = _tracked_run\n"
         "def _slow_ensure(*args, **kwargs):\n"
@@ -650,6 +727,19 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
         request.assert_called_once_with(lifecycle_root=ROOT)
 
     def test_claude_native_feedback_settles_exact_receipt_without_reexposure(self):
+        self._native_feedback_settles(str(ROOT))
+
+    def test_claude_native_feedback_settles_after_moving_to_a_subfolder(self):
+        # The record stays where the session started; the hook's cwd is only where it is now.
+        self._native_feedback_settles(str(ROOT / "sub" / "dir"))
+
+    def test_claude_native_feedback_settles_after_moving_to_another_worktree(self):
+        self._native_feedback_settles(str(Path(self._tmp.name) / "other-worktree"))
+
+    def test_claude_native_feedback_settles_after_leaving_the_repository(self):
+        self._native_feedback_settles("/")
+
+    def _native_feedback_settles(self, cwd):
         import dispatch_recipient_receipt as recipient_receipt
         import claude_project_dir
         self._seed()
@@ -659,7 +749,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
         PD.mark_sent_ambiguous(self.root, "sess-owner", did, claim_owner="async-rewake")
         current = PD.read(self.root, "sess-owner", did)
         marker = recipient_receipt.receipt_marker(current, "sess-owner")
-        runtime_home = Path(self._tmp.name) / "claude-home"
+        runtime_home = Path(self._tmp.name) / "claude-home" / uuid.uuid4().hex
         project = runtime_home / "projects" / claude_project_dir.encode_project_dir(str(ROOT))
         project.mkdir(parents=True)
         transcript = project / "sess-owner.jsonl"
@@ -672,7 +762,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
                 "<summary>Stop hook feedback</summary>" + marker +
                 "</task-notification>")},
         }) + "\n", encoding="utf-8")
-        payload = {"hook_event_name": "UserPromptSubmit", "cwd": str(ROOT),
+        payload = {"hook_event_name": "UserPromptSubmit", "cwd": cwd,
                    "transcript_path": str(transcript)}
         output = io.StringIO()
         with mock.patch.object(HOOK, "resolve_agent_home", return_value=ROOT), \
@@ -1278,7 +1368,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
         self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
         self.assertIn("att-0000000000000000000000000000bbbb", context)
         self.assertNotIn("Harvest each attempt", context)
-        self.assertIn("Follow required_action", context)
+        self.assertIn("Act on each required_action", context)
         state = PD.read(self.root, "sess-owner", "delivery-" + "a" * 32)["state"]
         self.assertEqual(state, "acked")
 
@@ -2201,6 +2291,27 @@ class StrictGateReceiptRenderTest(unittest.TestCase):
         self.assertIn("route_file=/r/route.json", text)
 
 
+class GateHeaderQuestionBoardTest(unittest.TestCase):
+    """A gate's question is already on the Hearting question board: the delivery text never sends the
+    agent to another question tool, and the header the previous release shipped is still recognized."""
+
+    def test_the_gate_header_points_to_the_board_and_names_no_native_question_tool(self):
+        header = SWEEP.GATE_DELIVERY_HEADER
+        self.assertIn("question board", header)
+        self.assertIn("do not ask them again through another tool", header)
+        for tool in ("AskUserQuestion", "request_user_input", "`question`"):
+            self.assertNotIn(tool, header)
+        self.assertIn("workflow-supervisor.py release", header)           # an answer given in conversation is still recorded
+
+    def test_the_previous_release_header_is_still_recognized_and_rebuilt_for_recovery(self):
+        import dispatch_recipient_receipt as receipt
+        shipped = SWEEP._SHIPPED_V440_GATE_DELIVERY_HEADER
+        self.assertIn("AskUserQuestion", shipped)                           # frozen text of the earlier release
+        self.assertIn(shipped + "\n", receipt._delivery_heads())
+        rebuilt = SWEEP._shipped_headers(SWEEP.GATE_DELIVERY_HEADER + "\nroute_file=/r/route.json")
+        self.assertTrue(rebuilt.startswith(shipped))
+
+
 class OpenCodeTurnCarrierTest(IsolatedRootMixin, unittest.TestCase):
     """The OpenCode plugin carrier: look, claim and render through the shared sweep, hand the text
     to the idle session's next turn, then ack (taken) or release (not taken)."""
@@ -2222,10 +2333,10 @@ class OpenCodeTurnCarrierTest(IsolatedRootMixin, unittest.TestCase):
     def seed_turn(self, **overrides):
         return self._seed(self.SID, recipient_kind="opencode-turn", **overrides)
 
-    def _compute_notice(self, run_id, host, code=0, session_id=None):
+    def _compute_notice(self, run_id, host, code=0, session_id=None, name=None, summary=""):
         import session_notice
-        text = (f"run {run_id} on {host} ended with exit {code}"
-                f"; read it with: compute-hosts tail {run_id}")
+        text = ((f"{name}: " if name else "") + f"run {run_id} on {host} ended with exit {code}"
+                f"{summary}; read it with: compute-hosts tail {run_id}")
         row = session_notice.notify(
             "opencode", session_id or self.SID, key=f"compute-run:{run_id}", subject="compute run",
             text=text, required_action="report-to-user", jobs=self.root / "jobs.log")
@@ -2240,13 +2351,53 @@ class OpenCodeTurnCarrierTest(IsolatedRootMixin, unittest.TestCase):
         forward = SWEEP.delivery_context([(self.root, records)])
         reverse = SWEEP.delivery_context([(self.root, list(reversed(records)))])
         self.assertEqual(forward, reverse)
-        self.assertIn("compute run summary: 3 runs on gpu-a label=resnet-e4-w4", forward)
-        self.assertIn("exit 0:3", forward)
-        self.assertIn("compute-hosts tail gpu-a-20261024-120003-resnet-e4-w4", forward)
+        # The failure is shown first and on its own; the five normal ends are one routine line.
+        lines = forward.splitlines()
+        self.assertEqual(lines[1], "Needs attention (1), shown first:")
+        self.assertIn("ended with exit 2", lines[2])
+        self.assertIn("- Routine, nothing to do (5 runs): 5 ended normally -- "
+                      "gpu-a-20261024-120001-resnet-e4-w4, gpu-a-20261024-120002-resnet-e4-w4, "
+                      "gpu-a-20261024-120003-resnet-e4-w4 and 2 more", forward)
         self.assertEqual(forward.count("HEARTING_RECEIPT_V1 "), len(records))
-        self.assertIn("exit 2", forward)
-        self.assertIn("resnet-e4-w5", forward)
-        self.assertEqual(forward.count("run gpu-a-20261024-120004-resnet-e4-w5"), 1)
+        self.assertEqual(forward.count("run gpu-a-20261024-120004-resnet-e4-w5"), 0)
+        self.assertTrue(all(record["delivery_id"] in forward for record in records))
+
+    def test_named_compute_run_notices_bundle_by_name_and_the_summary_keeps_the_name(self):
+        # `compute-hosts` leads an ended notice with the experiment catalog name; the sweep recognizes that
+        # optional prefix, folds three exit-0 notices of one name and label, and says the name in the summary.
+        named = [self._compute_notice(f"gpu-a-20261024-12000{i}-sweep", "gpu-a", name="잔향 줄임") for i in (1, 2, 3)]
+        other = [self._compute_notice(f"gpu-a-20261024-12001{i}-sweep", "gpu-a", name="잡음 줄임") for i in (1, 2)]
+        plain = [self._compute_notice(f"gpu-a-20261024-12002{i}-sweep", "gpu-a") for i in (1, 2, 3)]
+        records = named + other + plain
+        forward = SWEEP.delivery_context([(self.root, records)])
+        reverse = SWEEP.delivery_context([(self.root, list(reversed(records)))])
+        self.assertEqual(forward, reverse)
+        # One routine line counts every run and names the catalog names first.
+        self.assertIn("- Routine, nothing to do (8 runs): 8 ended normally -- "
+                      "잔향 줄임, 잡음 줄임, gpu-a-20261024-120021-sweep and 2 more", forward)
+        self.assertNotIn("Needs attention", forward)
+        self.assertEqual(forward.count("run gpu-a-20261024-120011-sweep"), 0)
+        self.assertEqual(forward.count("HEARTING_RECEIPT_V1 "), len(records))
+
+    def test_a_named_run_that_carries_metrics_is_named_by_its_catalog_name_not_its_run_id(self):
+        # The observation summary `compute-hosts` appends after a run's metrics must not hide the name.
+        summary = ("; 마지막 val_loss=0.31 (step 900); 최고 val_loss=0.30 (step 800); 추세 개선"
+                   "; 실제 2h05m / 계획 3h00m; run 기록 /a/b/c.json")
+        records = [self._compute_notice(f"gpu-a-20261024-12000{i}-fit", "gpu-a", name="잔향 줄임", summary=summary)
+                   for i in (1, 2)]
+        self.assertEqual({SWEEP._notice_run(record) for record in records},
+                         {("gpu-a-20261024-120001-fit", "잔향 줄임"), ("gpu-a-20261024-120002-fit", "잔향 줄임")})
+        unnamed = self._compute_notice("gpu-a-20261024-120003-fit", "gpu-a", summary=summary)
+        self.assertEqual(SWEEP._notice_run(unnamed), ("gpu-a-20261024-120003-fit",) * 2)
+
+    def test_the_notice_pattern_takes_an_optional_name_and_nothing_else_in_front(self):
+        tail = "run gpu-a-20261024-120001-x on gpu-a ended with exit 0; read it with: compute-hosts tail gpu-a-20261024-120001-x"
+        for text, name in ((tail, None), ("잔향 줄임: " + tail, "잔향 줄임"), ("A — B: " + tail, "A — B")):
+            match = SWEEP._COMPUTE_RUN_NOTICE_RE.fullmatch(text)
+            self.assertIsNotNone(match, text)
+            self.assertEqual(match.group("name"), name)
+        self.assertIsNone(SWEEP._COMPUTE_RUN_NOTICE_RE.fullmatch("line one\n잔향: " + tail))   # one line only
+        self.assertIsNone(SWEEP._COMPUTE_RUN_NOTICE_RE.fullmatch("잔향 줄임 " + tail))          # the name needs its colon
 
     def test_idle_opencode_finds_and_acks_notice_under_lineage_predecessor(self):
         predecessor = "ses-oc-before-clear"
@@ -2614,7 +2765,7 @@ try {
         owed = self.cli("deliver")
         self.assertEqual([item["delivery_id"] for item in owed["records"]], ["delivery-" + "a" * 32])
         self.assertIn("att-0000000000000000000000000000bbbb", owed["text"])
-        self.assertIn("Follow required_action", owed["text"])
+        self.assertIn("Act on each required_action", owed["text"])
         self.assertEqual(self.state(), "claimed")
         self.assertEqual(self.cli("deliver")["records"], [])      # a live claim is not handed out twice
         self.assertEqual(self.cli("release", json.dumps(owed))["count"], 1)
@@ -3248,7 +3399,7 @@ console.log(JSON.stringify({prompts, logs}));
     def test_previous_full_completion_body_matches_exactly_with_frozen_renderer(self):
         self.seed_turn()
         record = self._mark_sent_ambiguous("delivery-" + "a" * 32)
-        current_followup = (SWEEP._CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX +
+        current_followup = (_current_runtime_v1_followup() +
                             "\nprior next-action handle\n\n" +
                             SWEEP.NOTICE_DELIVERY_HEADER + "\nquoted payload header")
         with mock.patch.object(SWEEP, "_followup", return_value=current_followup):
@@ -3257,10 +3408,14 @@ console.log(JSON.stringify({prompts, logs}));
                                        _FROZEN_COMPLETION_DELIVERY_HEADER, 1)
             legacy = current.replace(SWEEP.COMPLETION_DELIVERY_HEADER,
                                      _FROZEN_LEGACY_COMPLETION_DELIVERY_HEADER, 1).replace(
-                                         SWEEP._CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX,
+                                         _current_runtime_v1_followup(),
                                          _FROZEN_LEGACY_RUNTIME_V1_FOLLOWUP, 1)
+            previous_short = previous.replace(
+                _current_runtime_v1_followup(),
+                _FROZEN_PREVIOUS_RUNTIME_V1_FOLLOWUP, 1)
             for version, body in (("current", current),
-                                  ("previous-short", previous), ("legacy-long", legacy)):
+                                  ("previous-short", previous_short),
+                                  ("legacy-long", legacy)):
                 with self.subTest(version=version):
                     messages = [{"info": {"sessionID": self.SID, "role": "user"},
                                  "parts": [{"type": "text", "text": body}]}]
@@ -3274,6 +3429,150 @@ console.log(JSON.stringify({prompts, logs}));
                         messages[0]["parts"][0]["text"] = altered
                         self.assertEqual(SWEEP._opencode_delivery_expectations(
                             [self.root], "opencode-turn", self.SID, messages), [])
+
+    def test_a_finished_work_delivery_has_one_line_for_the_window_and_the_same_full_text_for_the_agent(self):
+        import dispatch_completion_join as JOIN
+        import route_parent_close
+        import work_intent
+        from types import SimpleNamespace
+        owner = SimpleNamespace(metadata={"dispatch_depth": "1", "worker_type": "owner",
+                                          "workflow_completion": "runtime-v1"})
+        summary = ("[완료 요약] autopilot-code · route rt-example\n의도: 받는 창에 찍히는 글을 줄인다\n"
+                   "결과: 끝남 — 실패·못 한 것 있음(아래)\n비용: 걸린 시간 12m 30s · 토큰 알 수 없음\n산출물: 없음")
+        did = "delivery-" + "9" * 32
+        self.seed_turn(delivery_id=did, receipt=_receipt(children=[{
+            "attempt_id": "att-0000000000000000000000000000cccc", "status": "done",
+            "readiness": "ready", "reason": "completed",
+            "required_action": "advance-completed", "harness": "claude",
+            "delivery_classification": "completion"}]))
+        record = {**self._mark_sent_ambiguous(did), SWEEP.STORAGE_KEY: self.SID}
+        korean = work_intent._ui_text().translator("ko")
+        with mock.patch.object(JOIN, "exact_attempt_row", return_value=owner), \
+                mock.patch.object(route_parent_close, "row_requested", return_value=False), \
+                mock.patch.object(work_intent, "ui_translator", return_value=korean), \
+                mock.patch.object(work_intent, "sealed_summary", return_value=summary):
+            full = SWEEP.delivery_context([(self.root, [record])])
+            line = SWEEP.delivery_display_text([(self.root, [record])])
+        self.assertEqual(line, "↳ 작업 끝: 받는 창에 찍히는 글을 줄인다 — 끝남 — 실패·못 한 것 있음 (12분 30초)")
+        # the agent's text is the one it always got: header, receipt marker, follow-up and summary
+        self.assertIn(SWEEP.COMPLETION_DELIVERY_HEADER, full)
+        self.assertIn("HEARTING_RECEIPT_V1 " + did, full)
+        self.assertIn(summary, full)
+        self.assertGreater(len(full.splitlines()), 5)
+        # a summary that cannot be read as one line keeps the whole delivery in full
+        with mock.patch.object(JOIN, "exact_attempt_row", return_value=owner), \
+                mock.patch.object(route_parent_close, "row_requested", return_value=False), \
+                mock.patch.object(work_intent, "ui_translator", return_value=korean), \
+                mock.patch.object(work_intent, "sealed_summary", return_value="[완료 요약] autopilot-code\n산출물: 없음"):
+            self.assertIsNone(SWEEP.delivery_display_text([(self.root, [record])]))
+
+    def test_immediately_previous_runtime_v1_body_from_real_producer_is_recognized(self):
+        # The release before the short first close shipped the current headers
+        # with the earlier follow-up, with and without a sealed runtime summary.
+        # Build the current body with the real producer and the previous one
+        # from frozen shipped bytes, never from the module's own constants.
+        import dispatch_completion_join as JOIN
+        import route_parent_close
+        import work_intent
+        from types import SimpleNamespace
+        owner = SimpleNamespace(metadata={"dispatch_depth": "1", "worker_type": "owner",
+                                          "workflow_completion": "runtime-v1"})
+        summary = "[완료 요약] autopilot-code · route rt-example\n결과: 완료\n산출물: 없음"
+        for case, sealed, frozen in (("no-summary", None, _FROZEN_PREVIOUS_RUNTIME_V1_FOLLOWUP),
+                                     ("summary", summary,
+                                      _FROZEN_PREVIOUS_RUNTIME_V1_SUMMARY_FOLLOWUP)):
+            with self.subTest(case=case):
+                did = "delivery-" + ("e" if sealed else "f") * 32
+                self.seed_turn(delivery_id=did, receipt=_receipt(children=[{
+                    "attempt_id": "att-0000000000000000000000000000bbbb", "status": "done",
+                    "readiness": "ready", "reason": "completed",
+                    "required_action": "advance-completed", "harness": "opencode",
+                    "delivery_classification": "completion"}]))
+                record = {**self._mark_sent_ambiguous(did), SWEEP.STORAGE_KEY: self.SID}
+                with mock.patch.object(JOIN, "exact_attempt_row", return_value=owner), \
+                        mock.patch.object(route_parent_close, "row_requested", return_value=False), \
+                        mock.patch.object(work_intent, "sealed_summary", return_value=sealed):
+                    followup = SWEEP._followup(self.root, record)
+                    self.assertIn("Close per §0.5", followup)
+                    self.assertEqual(sealed is not None, summary in followup)
+                    current = SWEEP.delivery_context([(self.root, [record])])
+                    self.assertEqual(current.count(followup), 1)
+                    previous = current.replace(
+                        followup, frozen + ("\n" + sealed if sealed else ""), 1)
+                    self.assertNotEqual(previous, current)
+                    older = previous.replace(SWEEP.COMPLETION_DELIVERY_HEADER,
+                                             _FROZEN_COMPLETION_DELIVERY_HEADER, 1)
+                    short_frozen = (_FROZEN_SHORT_RUNTIME_V1_SUMMARY_FOLLOWUP if sealed
+                                    else _FROZEN_SHORT_RUNTIME_V1_FOLLOWUP)
+                    short = current.replace(followup, short_frozen + ("\n" + sealed if sealed else ""), 1)
+                    self.assertNotEqual(short, current)
+                    decision_frozen = (_FROZEN_DECISION_RUNTIME_V1_SUMMARY_FOLLOWUP if sealed
+                                       else _FROZEN_DECISION_RUNTIME_V1_FOLLOWUP)
+                    decision = current.replace(followup, decision_frozen + ("\n" + sealed if sealed else ""), 1)
+                    self.assertNotEqual(decision, current)
+                    shipped_frozen = (_FROZEN_SHIPPED_RUNTIME_V1_SUMMARY_FOLLOWUP if sealed
+                                      else _FROZEN_SHIPPED_RUNTIME_V1_FOLLOWUP)
+                    shipped = current.replace(followup, shipped_frozen + ("\n" + sealed if sealed else ""), 1)
+                    self.assertNotEqual(shipped, current)
+                    # What v4.32.4 sent went out under its own completion header, for each
+                    # follow-up it or the releases before it shipped.
+                    under_shipped = [body.replace(SWEEP.COMPLETION_DELIVERY_HEADER,
+                                                  _FROZEN_SHIPPED_COMPLETION_DELIVERY_HEADER, 1)
+                                     for body in (shipped, previous, short, decision)]
+                    self.assertTrue(all(_FROZEN_SHIPPED_COMPLETION_DELIVERY_HEADER in body
+                                        for body in under_shipped))
+                    accepted_bodies = ([current, previous, short, decision, shipped, *under_shipped]
+                                       + ([] if sealed else [older]))
+                    for body in accepted_bodies:
+                        messages = [{"info": {"sessionID": self.SID, "role": "user"},
+                                     "parts": [{"type": "text", "text": body}]}]
+                        accepted = SWEEP._opencode_delivery_expectations(
+                            [self.root], "opencode-turn", self.SID, messages)
+                        self.assertEqual([item["text"] for item in accepted], [body])
+                    never_shipped = current.replace(SWEEP.COMPLETION_DELIVERY_HEADER,
+                                                    _FROZEN_COMPLETION_DELIVERY_HEADER, 1)
+                    for altered in (previous + " ", previous.replace("First close:", "First close :", 1),
+                                    short + " ", short.replace(short_frozen, short_frozen[:-1], 1),
+                                    decision + " ", decision.replace(decision_frozen, decision_frozen[:-1], 1),
+                                    previous.replace(frozen, frozen[:-1], 1), never_shipped):
+                        messages = [{"info": {"sessionID": self.SID, "role": "user"},
+                                     "parts": [{"type": "text", "text": altered}]}]
+                        self.assertEqual(SWEEP._opencode_delivery_expectations(
+                            [self.root], "opencode-turn", self.SID, messages), [])
+
+    def test_open_row_harvest_line_from_the_previous_release_is_recognized(self):
+        # PG-35: the open-row line now names the shared entry point. A body the
+        # previous release already queued named the Codex wrapper of the same
+        # tree; build that one from frozen bytes, never from the module helper.
+        import dispatch_completion_join as JOIN
+        did = "delivery-" + "9" * 32
+        attempt = "att-0000000000000000000000000000cccc"
+        self.seed_turn(delivery_id=did, receipt=_receipt(children=[{
+            "attempt_id": attempt, "status": "open", "readiness": "ready",
+            "reason": "terminal-observed", "required_action": "complete-open",
+            "harness": "opencode", "delivery_classification": "attention"}]))
+        record = {**self._mark_sent_ambiguous(did), SWEEP.STORAGE_KEY: self.SID}
+        followup = SWEEP._followup(self.root, record)
+        jobs = SWEEP.record_jobs(self.root, record)
+        current_line = (f"python3 {JOIN.ROOT / 'utilities' / 'dispatch-harvest.py'} --jobs "
+                        f"{jobs} --attempt-id {attempt} --status open --mark-done")
+        frozen_line = (f"{JOIN.ROOT / 'adapters' / 'codex' / 'bin' / 'preflight.sh'} harvest --jobs "
+                       f"{jobs} --attempt-id {attempt} --status open --mark-done")
+        self.assertIn(current_line, followup)
+        current = SWEEP.delivery_context([(self.root, [record])])
+        previous = current.replace(current_line, frozen_line, 1)
+        self.assertNotEqual(previous, current)
+        for body in (current, previous):
+            messages = [{"info": {"sessionID": self.SID, "role": "user"},
+                         "parts": [{"type": "text", "text": body}]}]
+            self.assertEqual([item["text"] for item in SWEEP._opencode_delivery_expectations(
+                [self.root], "opencode-turn", self.SID, messages)], [body])
+        for altered in (previous + " ", previous.replace("preflight.sh harvest", "preflight.sh  harvest", 1),
+                        current.replace(current_line, frozen_line.replace("/codex/", "/opencode/"), 1)):
+            messages = [{"info": {"sessionID": self.SID, "role": "user"},
+                         "parts": [{"type": "text", "text": altered}]}]
+            self.assertEqual(SWEEP._opencode_delivery_expectations(
+                [self.root], "opencode-turn", self.SID, messages), [])
 
     def test_previous_mixed_headers_settle_exact_native_receipts_without_resend(self):
         import session_notice
@@ -3293,7 +3592,7 @@ console.log(JSON.stringify({prompts, logs}));
                 ids = [completion_id, gate_id, notice["delivery_id"]]
                 records = [{**self._mark_sent_ambiguous(did), SWEEP.STORAGE_KEY: self.SID}
                            for did in ids]
-                followup = SWEEP._CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX + "\nprior next-action handle"
+                followup = _current_runtime_v1_followup() + "\nprior next-action handle"
                 with mock.patch.object(SWEEP, "_followup", return_value=followup):
                     current = SWEEP.delivery_context([(self.root, records)])
                     previous = _previous_native_body(current, legacy=legacy)
@@ -4050,7 +4349,6 @@ class AdapterRecoveryRequestTest(IsolatedRootMixin, unittest.TestCase):
                     "AGENT_DISPATCH_JOBS": str(dispatch_root / "jobs.log"),
                     "HARNESS_STATE_ROOT": str(case_base / "stable-state"),
                     "AGENT_PEER_LEDGER_ROOT": str(case_base / "peer-ledger"),
-                    "R1_CONTEXT_OUTPUT": "fixture SessionStart context",
                 })
                 payload = {"source": "startup", "cwd": str(self.root.parent)}
                 if sid:

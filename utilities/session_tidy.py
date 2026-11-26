@@ -4,8 +4,9 @@
 One entry point for the parts of ``session-tidy`` that a session touches directly:
 
     session_tidy.py card [--harness H] [--session-id S] [--cwd D] [--file F | --text T]
-        Write the calling session's card (body from stdin, a file or --text).
-        Prints one line: ``card=<path> seat=<key>``.  Nothing is required.
+        Write the calling session's card (body from stdin, a file or --text), exactly as written.
+        Prints one line: ``card=<path> seat=<key>``, then a ``names=`` advice line only when the
+        card names an experiment condition by an internal name alone.  Nothing is required.
     session_tidy.py tidy [--harness H] [--session-id S] [--cwd D] [--file F | --text T]
                          [--no-clear | --no-continue] [--handoff TARGET]
         ``card`` then, only when the card was written, ``enqueue`` (and ``handoff``)
@@ -27,7 +28,8 @@ One entry point for the parts of ``session-tidy`` that a session touches directl
         booking, ``--no-continue`` clears without a continuation action.
     session_tidy.py handoff <target> [--harness H] [--session-id S] [--cwd D]
         Deliver this seat's card to a peer session through ``peer-steward.py prompt``
-        and report its structured delivery verdict and exit code on one line. The
+        and report its structured delivery verdict and exit code on one line (plus the
+        same ``names=`` advice as ``card`` for the handed-off card). The
         card is marked as handed off: this window is not continued from it.
 
 State lives in ``${XDG_STATE_HOME:-~/.local/state}/hearting/session-tidy/``
@@ -2557,6 +2559,51 @@ def _write_card_pair(seat: Seat, card: dict, *, rollback_on_error: bool = False)
         raise
 
 
+NAME_ADVICE_MAX = 8
+
+
+def card_name_advice(body: str, cwd: str) -> str:
+    """One `names=` advice line for a saved card that says a condition only by its internal name, or "".
+
+    The card is saved exactly as written; this only tells the writer which run ids, aliases, or former
+    names have no catalog name beside them, through the same quiet scan the question advice uses
+    (`experiment_catalog.scan_text`).  The dated user quotes and PRD locations are left out, since they
+    stay verbatim.  No model call, no question; no catalog, a broken one, or any failure gives ""."""
+    try:
+        import experiment_catalog
+        context = experiment_catalog.card_context(cwd)
+        if context is None or not body:
+            return ""
+        verbatim = {field["id"] for field in card_format.policy()["preserved"]}
+        text = "\n".join(part for key, _title, part in card_format._sections(body) if key not in verbatim)
+        pairs: list[str] = []
+        for hit in experiment_catalog.scan_text(text, context[1]):
+            pair = f"{hit['token']} (= {hit['name']})" if hit.get("name") else hit["token"]
+            if pair not in pairs:
+                pairs.append(pair)
+        if not pairs:
+            return ""
+        more = len(pairs) - NAME_ADVICE_MAX
+        shown = ", ".join(pairs[:NAME_ADVICE_MAX]) + (f", +{more} more" if more > 0 else "")
+        return ("names=The saved card uses internal names without their catalog names: " + shown
+                + ". It was saved as written; write the catalog name beside each next time (advice, not a gate).")
+    except Exception:  # noqa: BLE001 -- the card is saved whatever happens here
+        return ""
+
+
+LAB_BLOCK_BYTES = 360
+
+
+def _lab_block(cwd: str, room: int) -> str:
+    """The folder's experiment catalog for the start context (the results-table command, names, metric line
+    and words; or how to start a catalog when runs exist without one): at most 360 bytes, never more than `room`."""
+    try:
+        import experiment_catalog
+        return experiment_catalog.folder_brief(cwd, max(0, min(LAB_BLOCK_BYTES, room)))[0]
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def write_card(seat: Seat, harness: str, sid: str, body: str, *, cwd: str = "",
                now: Optional[float] = None, prompt_seq: Optional[int] = None,
                origin: Optional[str] = None, compact_context: Optional[dict] = None) -> dict:
@@ -2868,6 +2915,10 @@ def apply_deferred(entries) -> int:
                                  "memory_receipts": receipts[-200:]})
                 data["schema"] = SCHEMA
                 atomic_write_json(path, data)
+            elif kind == "repeat-seen":
+                import context_repeat
+                if not context_repeat.commit({**entry, "kind": entry.get("name")}):
+                    continue
             elif kind == "notices":
                 data = read_json(path)
                 if entry.get("require_existing") and not isinstance(data, dict):
@@ -3029,33 +3080,188 @@ def prompt_first_line(text: str) -> str:
             if body.strip():
                 bodies.append(body)
         value = "\n".join(bodies)
+    # A person's prompt can arrive behind runtime blocks the harness put in front of it (a
+    # reminder, a notification): its first line is the person's own, not the block's opener.
+    # Only leading blocks go, and only while some text of the person's follows them.
+    stripped = False
+    while True:
+        lead = _RUNTIME_BLOCK.match(value.lstrip())
+        rest = value.lstrip()[lead.end():] if lead else ""
+        if not lead or not rest.strip():
+            break
+        value, stripped = rest, True
+    if stripped:
+        # What is left may be one pasted block: its text, not the wrapper's opener, is the first line.
+        wrapped = _PROMPT_PASTE_BLOCK.fullmatch(value.strip())
+        if wrapped:
+            value = wrapped.group("body")
     value = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value)
     line = next((line.strip() for line in value.splitlines() if line.strip()), "")
     line = "".join(char for char in work_intent.redact_secrets(line) if char.isprintable())
     return line if len(line) <= PROMPT_LINE_CHARS else line[:PROMPT_LINE_CHARS - 1] + "…"
 
 
-def _received_prompt_line(prompt_text: str, origin: dict) -> str:
-    """Resolve a verified large-message preview once at arrival, never in Fleet."""
+def _received_prompt_line(prompt_text: str, origin: dict, read_payload=None) -> str:
+    """Resolve a verified large-message preview once at arrival, never in Fleet.
+
+    ``read_payload`` is ``peer-message``'s own ``read_peer_payload`` when the caller already
+    runs inside it, so that module is not loaded a second time."""
     ref = origin.get("transfer_ref")
     if isinstance(ref, str) and re.fullmatch(r"[0-9a-f]{32}", ref):
         try:
-            import importlib.util
-            path = Path(__file__).resolve().with_name("peer-message.py")
-            spec = importlib.util.spec_from_file_location("_prompt_display_payload", path)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            payload = module.read_peer_payload(ref)
-            if isinstance(payload, dict) and isinstance(payload.get("body"), str):
+            if read_payload is None:
+                import importlib.util
+                path = Path(__file__).resolve().with_name("peer-message.py")
+                spec = importlib.util.spec_from_file_location("_prompt_display_payload", path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                read_payload = module.read_peer_payload
+            payload = read_payload(ref)
+            if (isinstance(payload, dict) and isinstance(payload.get("body"), str)
+                    and (payload.get("descriptor") or {}).get("presentation_mode") != "request-body"):
+                # A request's sealed body is not a preview: the display keeps the
+                # one-line notice the conversation received.
                 return prompt_first_line(payload["body"])
         except (OSError, ValueError, TypeError, ImportError, AttributeError):
             pass
     return prompt_first_line(prompt_text)
 
 
+def _prompt_shape(text: str, lines=None) -> tuple:
+    """``(line count, whole text was one pasted block)`` of a prompt, for its timeline row.
+
+    The count is the person's own lines: a paste envelope's tag lines and leading runtime blocks
+    are not counted. ``lines``, when the harness counted the person's own text itself (OpenCode
+    joins attached files' text into the prompt it hands over), is that count.
+    """
+    value = text if isinstance(text, str) else ""
+    wrapped = _PROMPT_PASTE_BLOCK.fullmatch(value.strip())
+    body = wrapped.group("body") if wrapped else _PROMPT_PASTE_BLOCK.sub(
+        lambda match: match.group("body"), value)
+    while True:
+        lead = _RUNTIME_BLOCK.match(body.lstrip())
+        if not lead or not body.lstrip()[lead.end():].strip():
+            break
+        body = body.lstrip()[lead.end():]
+    count = lines if type(lines) is int and lines > 0 else max(1, len(body.strip().splitlines()))
+    return count, bool(wrapped)
+
+
+def _record_prompt_timeline(harness: str, sid: str, sequence: int, now: float, text: str,
+                            prompt_text: str, answered: bool, transcript: str,
+                            lines=None) -> None:
+    """One bounded line of the person's prompt beside the session's NOW record.
+
+    Only the one-line display text is kept (never the original); ``from`` is the
+    conversation file's size when the hook saw it, the cursor a later reader can start at.
+    """
+    tools = str(Path(__file__).resolve().parents[1] / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    from fleet import titles
+    lines, paste = _prompt_shape(prompt_text, lines)
+    row = {"kind": "prompt", "at": now, "seq": sequence, "text": text, "lines": lines,
+           "paste": paste, "answer": bool(answered)}
+    with contextlib.suppress(OSError, TypeError, ValueError):
+        if transcript and os.path.isfile(transcript):
+            row["from"] = os.stat(transcript).st_size
+    titles.append_timeline(sid, row, harness=harness)
+
+
+def _latest_by_class(rows, order) -> list:
+    """The newest ``RECEIVED_INPUTS_LIMIT`` peer rows and the newest as many other rows, by ``order``."""
+    kept = []
+    for peer in (True, False):
+        kept += sorted((item for item in rows if (item.get("source") == "peer") is peer),
+                       key=order)[-RECEIVED_INPUTS_LIMIT:]
+    return sorted(kept, key=order)
+
+
+def _row_sequence(item) -> int:
+    return item["sequence"] if type(item.get("sequence")) is int else 0
+
+
+def _received_peers_path(seat: Seat) -> Path:
+    """The peer messages a session received, in a small file of their own beside its prompt
+    frontier (same key). A message may reach the session as no prompt of its own (a hook
+    comment added to a person's prompt, or to a tool result), and the prompt hook's frontier
+    is written by other hooks at the same time, so the receive path keeps its lines here."""
+    return state_root() / "peer-received" / _prompt_seq_path(seat).name
+
+
+def _received_peer_valid(row, harness: str, sid: str) -> bool:
+    return (isinstance(row, dict) and row.get("source") == "peer"
+            and row.get("harness") == harness and row.get("sid") == sid
+            and isinstance(row.get("ref"), str) and bool(row["ref"])
+            and isinstance(row.get("at"), (int, float)) and not isinstance(row["at"], bool)
+            and math.isfinite(row["at"]) and row["at"] >= 0
+            and isinstance(row.get("text"), str) and bool(row["text"])
+            and len(row["text"]) <= PROMPT_LINE_CHARS
+            and all(char.isprintable() for char in row["text"]))
+
+
+def read_received_peers(seat: Seat, harness: str, sid: str) -> list:
+    """The kept received peer lines of one exact session, oldest first (one small file read)."""
+    data = read_json(_received_peers_path(session_seat(seat, harness, sid)))
+    rows = data.get("rows") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return []
+    return [dict(item) for item in rows if _received_peer_valid(item, harness, sid)][-RECEIVED_INPUTS_LIMIT:]
+
+
+def received_peer_sidecar_path(harness: str, sid: str) -> Path:
+    """Where ``harness``/``sid``'s received peer lines live (for a reader that caches by file)."""
+    return _received_peers_path(session_seat(Seat("native", "", harness=harness, sid=sid), harness, sid))
+
+
+def record_received_peer(harness: str, sid: str, text: str, origin: dict, now: Optional[float] = None,
+                         read_payload=None) -> bool:
+    """Keep the one display line of a peer message this session has just received.
+
+    Called by the receive path every harness goes through, whatever carried the message in (its
+    own prompt, a hook comment added to another prompt, a tool boundary). ``text`` is the
+    delivered text and ``origin`` the verified ``peer-message.prompt_origin`` of it; only a
+    message from another session counts. Only the one-line display text is kept, never the
+    body. A message already kept (its ``ref``) is left as it is. Returns whether a line was written."""
+    if (harness not in HARNESSES or not isinstance(sid, str) or not sid or not isinstance(origin, dict)
+            or origin.get("kind") != "peer" or origin.get("sender_harness") not in HARNESSES
+            or not isinstance(origin.get("sender_session_id"), str)):
+        return False
+    ref = origin.get("transfer_ref")
+    if not isinstance(ref, str) or not re.fullmatch(r"[0-9a-f]{32}", ref):
+        return False
+    body = runtime_prompt_text(text or "")
+    wrapped = _PROMPT_PASTE_BLOCK.fullmatch(body.strip())
+    body = wrapped.group("body") if wrapped else body
+    body = re.sub(r"^\s*<cross-session-message\b[^>]*>", "", body)
+    line = _received_prompt_line(body, origin, read_payload)
+    if not line:
+        return False
+    seat = session_seat(Seat("native", "", harness=harness, sid=sid), harness, sid)
+    path = _received_peers_path(seat)
+    row = {"harness": harness, "sid": sid, "at": time.time() if now is None else now, "text": line,
+           "source": "peer", "ref": ref,
+           "sender": prompt_first_line(str(origin.get("name") or "peer"))[:96],
+           "sender_harness": origin["sender_harness"],
+           "sender_session_id": origin["sender_session_id"][:160]}
+    ensure_dir(path.parent)
+    with seat_lock("peer-received-" + path.stem, wait=2.0):
+        rows = read_received_peers(seat, harness, sid)
+        if any(item.get("ref") == ref for item in rows):
+            return False
+        atomic_write_json(path, {"schema": 1, "harness": harness, "sid": sid,
+                                 "rows": (rows + [row])[-RECEIVED_INPUTS_LIMIT:]})
+    return True
+
+
 def record_prompt_display(seat: Seat, harness: str, sid: str, sequence: int,
-                          prompt_text: str, now: float) -> None:
-    """Retain only the existing classifier's final result in its existing frontier."""
+                          prompt_text: str, now: float, answered: bool = False,
+                          transcript: str = "", prompt_meta: Optional[dict] = None) -> None:
+    """Retain only the existing classifier's final result in its existing frontier.
+
+    ``prompt_meta`` is what the harness knows of the prompt itself: ``child`` (an OpenCode task
+    session, whose prompt is its parent agent's, not a person's: no timeline row) and ``lines``
+    (the person's own line count)."""
     seat = session_seat(seat, harness, sid)
     path = _prompt_seq_path(seat)
     current = read_json(path)
@@ -3084,14 +3290,26 @@ def record_prompt_display(seat: Seat, harness: str, sid: str, sequence: int,
         rows = current.get("received_inputs")
         rows = [item for item in rows if isinstance(item, dict) and item.get("sequence") != sequence] \
             if isinstance(rows, list) else []
-        current["received_inputs"] = (rows + [row])[-RECEIVED_INPUTS_LIMIT:]
+        rows.append(row)
+        # A peer message and a runtime notice keep their own eight places: a run of completion
+        # notices never pushes a received peer message out.
+        current["received_inputs"] = _latest_by_class(rows, _row_sequence)
     atomic_write_json(path, current)
+    meta = prompt_meta if isinstance(prompt_meta, dict) else {}
+    if source == "real" and meta.get("child") is not True:
+        with contextlib.suppress(Exception):    # the timeline never fails the prompt hook
+            _record_prompt_timeline(harness, sid, sequence, now, row["text"], prompt_text,
+                                    answered, transcript, lines=meta.get("lines"))
 
 
-def prompt_display(seat: Seat, harness: str, sid: str, *, current=_PROMPT_DISPLAY_UNREAD) -> dict:
-    """Read exact-session display facts, never a conversation or a new prompt judgment."""
+def prompt_display(seat: Seat, harness: str, sid: str, *, current=_PROMPT_DISPLAY_UNREAD, peers=None) -> dict:
+    """Read exact-session display facts, never a conversation or a new prompt judgment.
+
+    ``peers`` is the session's received peer lines when the caller has read them already (a
+    reader that caches by file passes ``[]`` for a file it saw is not there)."""
     current = prompt_state(session_seat(seat, harness, sid)) if current is _PROMPT_DISPLAY_UNREAD else current
-    empty = {"human": None, "human_state": "unknown", "received": []}
+    peers = read_received_peers(seat, harness, sid) if peers is None else peers
+    empty = {"human": None, "human_state": "unknown", "received": peers}
     if (not isinstance(current, dict) or current.get("schema") != SCHEMA or current.get("harness") != harness
             or current.get("sid") != sid or type(current.get("seq")) is not int):
         return empty
@@ -3128,9 +3346,15 @@ def prompt_display(seat: Seat, harness: str, sid: str, *, current=_PROMPT_DISPLA
                 or not isinstance(item.get("sender_session_id"), str)):
             item.pop("sender_harness", None)
             item.pop("sender_session_id", None)
+    # A peer message and a runtime notice keep their own places: the newest eight of each, by time.
+    # The receive path's own line of a message stands for the prompt's line of the same one (its ref).
+    kept = {item["ref"] for item in peers}
+    received = [item for item in received if not (item.get("source") == "peer" and isinstance(item.get("ref"), str)
+                                                  and item["ref"] in kept)] + peers
+    received = _latest_by_class(received, lambda item: item["at"])
     return {"human": dict(human) if human else None,
             "human_state": "known" if human else "none" if human_seq == 0 else "unknown",
-            "received": received[-RECEIVED_INPUTS_LIMIT:]}
+            "received": received}
 
 
 def runtime_turn_source(prompt_text: str) -> str:
@@ -3160,6 +3384,25 @@ def runtime_turn_source(prompt_text: str) -> str:
 def is_task_notification(prompt_text: str) -> bool:
     """A turn the runtime started for a finished background task (Claude ``<task-notification>``)."""
     return runtime_turn_source(prompt_text) == "notification"
+
+
+def _bound_delivery_source(prompt_text: str, sid: str) -> str:
+    """``runtime`` when the whole prompt is a Hearting delivery stored for this exact session.
+
+    A Codex native-queue item arrives as a user message ending in its receipt marker; the
+    marker must bind to that delivery's stored identity (the same proof its ACK uses) and
+    the rest must be the text Hearting sent, like ``runtime_turn_source``: a person who
+    pastes a notice with words of their own is still the person.
+    """
+    if not isinstance(prompt_text, str) or "HEARTING_RECEIPT_V1" not in prompt_text or not sid:
+        return ""
+    try:
+        from dispatch_contract import dispatch_state_roots, resolve_agent_home
+        import dispatch_recipient_receipt as receipt
+        roots = list(dict.fromkeys(dispatch_state_roots(resolve_agent_home())))
+        return "runtime" if receipt.bound_delivery_ids(prompt_text, sid, roots) else ""
+    except Exception:  # noqa: BLE001 - unproven stays the person's prompt
+        return ""
 
 
 def _current_request_origin(prompt_text: str, harness: str, sid: str) -> Optional[dict]:
@@ -3203,15 +3446,18 @@ def record_prompt_origin(seat: Seat, harness: str, sid: str, sequence: int, orig
 
 
 def write_notice(seat: Seat, text: str, *, author_harness: str = "", author_sid: str = "",
-                 now: Optional[float] = None, notice_id: str = "") -> dict:
-    """Leave one result line for the seat's next start/prompt (takes the seat lock)."""
+                 now: Optional[float] = None, notice_id: str = "", level: str = "") -> dict:
+    """Leave one result line for the seat's next start/prompt (takes the seat lock).
+
+    ``level`` ``"done"`` marks a line that reports work ended well and leaves the person nothing
+    to do (11-16: the shell panel shows it quietly); without it the line reads as before."""
     if author_harness and author_sid:
         seat = session_seat(seat, author_harness, author_sid)
     now = now_epoch() if now is None else now
     line = " ".join((text or "").split())
     line = _cut_bytes("".join(ch for ch in line if ch.isprintable()), NOTICE_MAX_BYTES)[0]
     item = {"id": (notice_id[:96] if notice_id else secrets.token_hex(6)), "text": line, "created": now,
-            "author": {"harness": author_harness, "sid": author_sid}}
+            "author": {"harness": author_harness, "sid": author_sid}, **({"level": level} if level else {})}
     with seat_lock(seat_state_key(seat)):
         data = read_json(_notices_path(seat))
         items = data.get("items", []) if isinstance(data, dict) else []
@@ -3221,7 +3467,8 @@ def write_notice(seat: Seat, text: str, *, author_harness: str = "", author_sid:
             return item
         for index, existing in enumerate(items):
             if existing.get("id") == item["id"]:
-                items[index] = {**existing, "text": line}
+                items[index] = {**{k: v for k, v in existing.items() if k != "level"}, "text": line,
+                                **({"level": level} if level else {})}
                 atomic_write_json(_notices_path(seat), {"schema": SCHEMA, "items": items[-20:],
                                                         "delivered": delivered[-200:],
                                                         "lineage_received": lineage_received[-200:]})
@@ -3311,21 +3558,25 @@ def _notice_groups(seat: Seat, harness: str, sid: str, *, now: float,
 
 
 def waiting_notice_display(seat: Seat, harness: str, sid: str, *,
-                           now: Optional[float] = None) -> tuple[str, list[str]]:
+                           now: Optional[float] = None, with_level: bool = False) -> tuple:
     """Read-only: the newest result line still waiting for this session's next hook.
 
     A cleared window's next hook is the person's next input, so the shell panel and
     the status line paint this line meanwhile (2026-11-10: a failed continue stayed
-    unseen for ~55 minutes). Returns the line and the files to watch; reading it
-    delivers nothing and settles nothing -- the hook still shows it to the session.
+    unseen for ~55 minutes). Returns the line and the files to watch (and, ``with_level``,
+    its ``level``: ``"done"`` or ``""``); reading it delivers nothing and settles nothing --
+    the hook still shows it to the session.
     """
     seat = session_seat(seat, harness, sid)
     try:
         groups, notices = _notice_groups(seat, harness, sid, now=now_epoch() if now is None else now)
     except Exception:
-        return "", []
+        return ("", [], "") if with_level else ("", [])
     paths = list(dict.fromkeys(str(_notices_path(origin)) for origin, _group in groups))
-    return (str(notices[-1].get("text") or "") if notices else ""), paths
+    text = str(notices[-1].get("text") or "") if notices else ""
+    if not with_level:
+        return text, paths
+    return text, paths, (str(notices[-1].get("level") or "") if notices else "")
 
 
 def _appeared_after(sessions: dict, harness: str, sid: str, author_key: tuple[str, str]) -> bool:
@@ -3452,6 +3703,38 @@ def build_human_history_notice(seat: Seat, harness: str, sid: str, *, env=None,
              sid=str(previous.get("sid", ""))[:8], availability=availability)
 
 
+def _open_question_line(waits, harness, sid, seat_key):
+    """After a physical prompt, one context line for this session's still-open question.
+
+    The prompt was handled as an ordinary prompt; if it was in fact the answer,
+    the agent records it through the existing ``questions answer`` path."""
+    own = waits._read(waits._signal_path({"harness": harness, "session_id": sid,
+                                          "seat_key": seat_key}))
+    if not own or own.get("mode") != "message" or own.get("lifecycle") != "open":
+        return None
+    question = " ".join(str(own.get("question") or "").split())[:120]
+    if waits.message_answer_pending(own):
+        return "[답변 필요] 질문 %s: Fleet에서 고른 답이 전달 대기 중입니다(방금 입력은 답으로 기록하지 않음). %s" % (
+            own["id"], question)
+    return ("[답변 필요] 질문 %s이 아직 열려 있습니다(방금 입력은 답으로 기록하지 않음): %s — 방금 입력이 "
+            "이 질문의 답이면 `hearting run questions answer %s --choice N` 또는 `--text-file`로 기록하세요."
+            % (own["id"], question, own["id"]))
+
+
+def answer_wait_text(questions, limit: int = 3) -> list[str]:
+    """One ``[답변 필요]`` line per distinct wait, a repeat folded into its count.
+
+    Several children waiting on the person without a question of their own would
+    otherwise print the same line once each on every prompt.
+    """
+    counts: dict[str, int] = {}
+    for question in questions:
+        text = str(question)[:160]
+        counts[text] = counts.get(text, 0) + 1
+    return ["[답변 필요] " + text + (f" ×{count}" if count > 1 else "")
+            for text, count in list(counts.items())[:limit]]
+
+
 def run_hook(*args, **kwargs) -> str:
     """Record the session and print its card / notices (see ``_run_hook``).
 
@@ -3462,6 +3745,12 @@ def run_hook(*args, **kwargs) -> str:
     try:
         result = _run_hook(*args, _closed=closed, **kwargs)
         if len(args) >= 3 and args[1] == "start" and kwargs.get("source") == "resume":
+            # Only the reopening itself takes over this session's running routes
+            # (before the notice filter, once per resume generation); the steward's
+            # periodic `register` pass does not.
+            with contextlib.suppress(Exception):
+                import session_route_resume
+                session_route_resume.reopened(args[0], args[2], env=kwargs.get("env"))
             with contextlib.suppress(Exception):
                 import session_resume
                 session_resume.register(args[0], args[2], source="resume", env=kwargs.get("env"))
@@ -3485,7 +3774,8 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
               human_only: bool = False,
               render_context: bool = True, startup_context: Optional[dict] = None,
               deferred: Optional[list] = None, _closed: Optional[list] = None,
-              human_deadline: Optional[float] = None, read_context=None) -> str:
+              human_deadline: Optional[float] = None, read_context=None,
+              prompt_meta: Optional[dict] = None) -> str:
     """Record the session, and print the card / notices it is due exactly once.
 
     Returns the text that was emitted ("" for none). The receipt is written only
@@ -3502,13 +3792,13 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
         # applies its worker/attachment checks before selecting a terminal.
         with contextlib.suppress(Exception):
             import session_shell
-            session_shell.lifecycle(harness, event, sid, env=env)
+            session_shell.lifecycle(harness, event, sid, env=env, source=source)
     if is_worker(env) or harness not in HARNESSES or not sid or event not in ("start", "prompt", "compact", "runtime-status"):
         return ""
     if env.get("HEARTING_SHELL_SOCKET") and event in ("start", "prompt") and harness == "claude":
         with contextlib.suppress(Exception):
             import session_shell
-            session_shell.lifecycle(harness, event, sid, env=env)
+            session_shell.lifecycle(harness, event, sid, env=env, source=source)
     if event == "runtime-status":
         if harness == "opencode":
             observed = False
@@ -3574,6 +3864,7 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             if event == "start":
                 session_tidy_runner.reconcile_reservation_queue(seat)
     answer_wait_lines = []
+    wait_questions: list = []
     if render_context and event in ("start", "prompt"):
         with contextlib.suppress(BaseException):
             utilities = str(Path(__file__).resolve().parent)
@@ -3606,10 +3897,9 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                 if (event == "prompt" and item.get("source") == "S4"
                         and owner.get("seat_key") == seat.key):
                     continue
-                question = item.get("question") or "사용자 답 대기"
-                answer_wait_lines.append("[답변 필요] " + str(question)[:160])
-                if len(answer_wait_lines) == 3:
-                    break
+                wait_questions.append(item.get("question") or "답 필요")
+    answer_wait_lines = answer_wait_text(wait_questions)
+    open_question_lines: list = []     # the person spoke while a question is open (this prompt only)
     state_seats = [seat]
     if _native_session_key(harness, sid) and prior_seat:
         state_seats.append(prior_seat)
@@ -3637,7 +3927,10 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             sequence = bump_prompt_seq(seat, harness, sid, now)
             runtime_source = runtime_turn_source(prompt_text)
             request_origin = None if runtime_source else _current_request_origin(prompt_text, harness, sid)
+            if not runtime_source and not request_origin:
+                runtime_source = _bound_delivery_source(prompt_text, sid)
             self_request = matching_tidy_claim(seat, harness, sid, prompt_text, sequence)
+            answered_wait = False
             notification = bool(runtime_source or request_origin or self_request)
             if runtime_source:
                 # A finished background task or another session reporting in is new content,
@@ -3664,22 +3957,36 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                 if isinstance(prompt_text, str) and prompt_text.strip():
                     with contextlib.suppress(BaseException):
                         import human_wait_state
-                        human_wait_state.close_signal(seat.key, sequence=sequence,
-                                                      harness=harness, session_id=sid,
-                                                      answer=prompt_text)
+                        open_wait = human_wait_state._read(human_wait_state._signal_path(
+                            {"harness": harness, "session_id": sid, "seat_key": seat.key}))
+                        closed_wait = human_wait_state.close_signal(
+                            seat.key, sequence=sequence, harness=harness, session_id=sid,
+                            answer=prompt_text)
+                        answered_wait = bool(open_wait and closed_wait)
+                        line = render_context and _open_question_line(
+                            human_wait_state, harness, sid, seat.key)
+                        if line:
+                            open_question_lines.append(line)
             with contextlib.suppress(BaseException):
                 import session_tidy_clear as clear
                 claimed = clear.observe_prompt_locked(seat, harness, sid, prompt_text, now, sequence)
                 if not claimed and not notification:
                     clear.note_real_prompt_locked(seat, harness, sid, sequence, now)
             with contextlib.suppress(Exception):
-                record_prompt_display(seat, harness, sid, sequence, prompt_text, now)
+                record_prompt_display(seat, harness, sid, sequence, prompt_text, now,
+                                      answered=answered_wait, transcript=transcript,
+                                      prompt_meta=prompt_meta)
         sessions = session_summary(seat)
         prior = sessions.get((harness, sid))
         # SessionStart(source=compact) and a separate compact event describe the same
         # compaction; count it once.
         compacting = (event == "compact" or source == "compact") and not (
             prior and now - prior["last_compact_at"] < COMPACT_DEDUPE_SEC)
+        if compacting or (event == "start" and source == "clear"):
+            # The earlier text may be gone from the session's context: let it in once more.
+            with contextlib.suppress(Exception):
+                import context_repeat
+                context_repeat.reset(harness, sid)
         launch = None
         if event == "start" and source in {"startup", "resume", "select", "clear", "compact", "fork"}:
             try:
@@ -3845,7 +4152,25 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             resume_text = handover.resume_line(seat, harness, sid)
             if resume_text:
                 parts.append(resume_text)
-        parts.extend(answer_wait_lines)
+        # An unchanged "[답변 필요]" status line is already in the session's context: it goes in
+        # once per question, again only when its text changes or after a compaction/clear.
+        # OpenCode keeps system-prompt context for the one request only, so its repeat is the
+        # carrier. The open-question line is not filtered: it judges this very input ("not
+        # recorded as the answer"), so it is new every time the person types.
+        repeat_entries: list = []
+        if harness != "opencode" and render_context and event in ("start", "prompt"):
+            with contextlib.suppress(BaseException):
+                import context_repeat
+                answer_wait_lines, entry = context_repeat.filter_fresh(
+                    harness, sid, "answer-needed", answer_wait_lines)
+                if entry:
+                    repeat_entries.append(dict(entry, kind="repeat-seen", name="answer-needed"))
+        parts.extend(answer_wait_lines + open_question_lines)
+        if card_due or event == "start" or (event == "prompt" and (startup_context or {}).get("due")):
+            # The experiment catalog's names, after everything else and inside the same 2400-byte budget.
+            lab = _lab_block(cwd, INJECTION_MAX_BYTES - 1 - len("\n".join(parts).encode("utf-8")) - 1)
+            if lab:
+                parts.append(lab)
         text = "\n".join(parts)
         # The person-only "previous conversation" line needs the whole shared
         # lineage (every seat ledger, about half of a 1 s start). Past
@@ -3859,6 +4184,7 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                 if notice:
                     emit_human(notice)
         if not text:
+            apply_deferred(repeat_entries)     # nothing goes out, so nothing is left to protect
             return ""
         (emit or (lambda t: None))(text)
         # The receipts are prepared here and applied by the caller when it
@@ -3866,6 +4192,7 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
         # card bridge prints in-process, a text CLI prints inside ``emit``) has
         # no later boundary, so it applies them immediately.
         receipts = [] if deferred is None else deferred
+        receipts.extend(repeat_entries)
         if card_due:
             receipts.append({"kind": "card-consumed",
                              "path": str(_consumed_path(card_seat)),
@@ -3912,6 +4239,11 @@ def _run_compact_after(harness: str, sid: str, summary: str, *, cwd: str, transc
                        compact_context: Optional[dict], env, now: Optional[float]) -> str:
     """Observe native compaction. Never turn it into another card/clear/model request."""
     now = now_epoch() if now is None else now
+    # Every compaction (not deduped, and even when the state lock is busy) may have dropped
+    # the earlier text from the context: let it in once more and mark the compaction.
+    with contextlib.suppress(Exception):
+        import context_repeat
+        context_repeat.reset(harness, sid, compaction=True)
     seat = session_seat(resolve_seat(harness, cwd or None, env, sid, "compact", hook=True), harness, sid)
     try:
         with session_state_lock(seat, wait=COMPACT_LOCK_WAIT_SEC):
@@ -4022,8 +4354,9 @@ def _write_caller_card(args, cwd: str) -> tuple[Optional[tuple[Seat, str, str]],
     if caller is None:
         return None, "card=none reason=no-seat"
     seat, harness, sid = caller
-    write_session_card(seat, harness, sid, body, cwd=cwd)
-    return caller, f"card={card_text_path(seat)} seat={seat.key}"
+    card = write_session_card(seat, harness, sid, body, cwd=cwd)
+    advice = card_name_advice(card.get("body", "") if isinstance(card, dict) else "", cwd)
+    return caller, f"card={card_text_path(seat)} seat={seat.key}" + ("\n" + advice if advice else "")
 
 
 def cmd_card(args) -> int:
@@ -4256,6 +4589,9 @@ def cmd_handoff(args) -> int:
             raise StateError(str(exc)) from exc
     else:
         line, code = runner.handoff(caller[0], args.target, caller=caller)
+        advice = card_name_advice((read_latest_card(caller[0]) or {}).get("body", ""), args.cwd or os.getcwd())
+        if advice:
+            line += "\n" + advice
     print(line)
     return code
 
@@ -4272,6 +4608,7 @@ def cmd_hook(args) -> int:
         sid = args.session_id or session_from_env(args.harness)[1] or ""
         summary = ""
         prompt_text = ""
+        prompt_meta = {}
         compact_context = {}
         if args.phase == "after" or args.event in ("runtime-status", "prompt"):
             try:
@@ -4283,6 +4620,14 @@ def cmd_hook(args) -> int:
                     summary = payload["summary"]
                 if isinstance(payload.get("prompt"), str):
                     prompt_text = payload["prompt"]
+                # What the harness itself knows of the prompt (OpenCode: a task session, the
+                # person's own line count): display facts only, never the prompt's source.
+                meta = payload.get("prompt_meta")
+                if isinstance(meta, dict):
+                    if meta.get("child") is True:
+                        prompt_meta["child"] = True
+                    if type(meta.get("lines")) is int and 0 < meta["lines"] <= 100000:
+                        prompt_meta["lines"] = meta["lines"]
                 for key in ("trigger", "summary_id", "parent_id", "tail_start_id", "compaction_part_id",
                             "turn_id", "event_id", "status", "observed_at"):
                     value = payload.get(key)
@@ -4299,7 +4644,8 @@ def cmd_hook(args) -> int:
                           human_only=getattr(args, "human_only", False),
                           startup_context=startup_context,
                           phase=args.phase, compact_summary=summary, compact_context=compact_context,
-                          prompt_text=prompt_text, deferred=deferred)
+                          prompt_text=prompt_text, deferred=deferred,
+                          prompt_meta=prompt_meta or None)
         if output_format == "json":
             payload = {"additionalContext": "\n".join(emitted),
                        "humanNotice": "\n".join(human)}

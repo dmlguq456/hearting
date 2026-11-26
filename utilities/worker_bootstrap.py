@@ -15,6 +15,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple
 
+from parent_next_directive import entrypoint
+from route_form import one_shot_owner, one_shot_review_node_ids, one_shot_review_nodes, one_shot_review_route
+
 WORKER_TYPES = ("owner", "stage", "review", "support", "frame")
 UNIT_REF_RE = re.compile(r"^[a-z-]+/[a-z-]+$")
 RESERVED_UNITS = ("_kernel/owner", "_kernel/resource")
@@ -164,13 +167,151 @@ def unit_persona_path(root: Path, unit: str | None) -> Path | None:
     return path
 
 
-def unit_persona_body(root: Path, unit: str | None) -> str | None:
-    """Return the unit BODY as plain markdown (frontmatter stripped), or None."""
+def unit_persona_body(root: Path, unit: str | None, field: str | None = None) -> str | None:
+    """Return the unit BODY as plain markdown (frontmatter stripped), or None.
+
+    A unit whose ``## 참고`` keys some sections by field (``### 참고 — <field>``) gets
+    ``unit_field_reference``: the field's fundamentals and only that field's sections.
+    Any other body is returned as written."""
     path = unit_persona_path(root, unit)
     if path is None:
         return None
     text = path.read_text(encoding="utf-8")
-    return _FRONTMATTER_RE.sub("", text, count=1).strip()
+    return unit_field_reference(root, _FRONTMATTER_RE.sub("", text, count=1).strip(), field)
+
+
+_FIELD_NAME = r"[a-z][a-z0-9_-]{0,31}"
+# One section may name several fields (``### 참고 — code, lab``): it is carried for each, written once.
+_FIELD_SECTION_RE = re.compile(rf"^### 참고 — ({_FIELD_NAME}(?:, {_FIELD_NAME})*)[ \t]*$")
+_REFERENCE_LAYER = "## 참고"
+
+
+def field_fundamentals(root: Path, field: str | None) -> list[str]:
+    """The lines of ``roles/fields/<field>.md``'s ``## Fundamentals`` list, each without its gloss
+    and source numbers; ``[]`` for no field, ``other``, a missing page or any read failure.
+
+    An item is ``- head sentence — gloss [source]``; an indented line after it continues it, so
+    a wrapped item is joined before it is cut."""
+    if not isinstance(field, str) or not _FIELD_LABEL_RE.match(field):
+        return []
+    try:
+        text = (Path(root) / "roles" / "fields" / f"{field}.md").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return []
+    items, inside = [], False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            inside = line.startswith("## Fundamentals")
+        elif inside and line.startswith("- "):
+            items.append(line[2:].strip())
+        elif inside and items and line[:1] in (" ", "\t") and line.strip():
+            items[-1] += " " + line.strip()
+    lines = []
+    for item in items:
+        head = item.split(" — ", 1)[0]
+        lines.append(re.sub(r"\s*\[[^\]]*\]\s*$", "", head).strip())
+    return [line for line in lines if line]
+
+
+def unit_field_reference(root: Path, body: str, field: str | None) -> str:
+    """Select a common unit's reference for the route's field (R31).
+
+    Only a body whose ``## 참고`` holds ``### 참고 — <field>`` sections changes: sections of
+    other fields are left out, and the field's fundamentals (``roles/fields/<field>.md``) are
+    carried just before ``## 참고``. A route whose field is unknown (None) gets the body as
+    written, every field's section and no fundamentals, as before this selection existed.
+    ``other`` or a field with no section here carries the common reference only. A missing page
+    drops only the fundamentals; the field's own sections stay. ``## 지킬 것`` and everything
+    outside those sections stay as written."""
+    fence, layer_at, keep, kept, found = None, None, True, [], False
+    for line in body.split("\n"):
+        if line.startswith(("```", "~~~")):
+            fence = None if fence == line[:3] else (fence or line[:3])
+        heading = not fence and line.startswith(("## ", "### "))
+        if heading and line.rstrip() == _REFERENCE_LAYER and layer_at is None:
+            layer_at = len(kept)
+        if heading and layer_at is not None:
+            match = _FIELD_SECTION_RE.match(line)
+            found = found or bool(match)
+            keep = match is None or field in match.group(1).split(", ")
+        if keep:
+            kept.append(line)
+    if not found or field is None:
+        return body
+    fundamentals = field_fundamentals(root, field)
+    if fundamentals:
+        block = [f"## 갈래의 기본 — {field}", "",
+                 f"From `roles/fields/{field}.md`, which gives the reasons and sources. Hold these in view; "
+                 "they set no order, tool or depth.", ""]
+        block += [f"- {line}" for line in fundamentals] + [""]
+        kept[layer_at:layer_at] = block
+    return "\n".join(kept).strip()
+
+
+def unit_route_field(args) -> str | None:
+    """The field sealed on this worker's route, read only, for its unit text; None when unknown.
+
+    A route sealed before fields existed reads its recipe's default field through
+    ``capability_topology.route_field``. An unreadable route or any failure is None, so the
+    unit text is carried as written and the launch goes on."""
+    try:
+        route_file = getattr(args, "route_file", None) or getattr(
+            getattr(args, "owner_route_binding", None), "route_file", None)
+        if not route_file or not getattr(args, "unit", None):
+            return None
+        route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+        if not isinstance(route, dict):
+            return None
+        field = route.get("field")
+        if "field" not in route:
+            field, _source = _route_topology().route_field(route)
+        return field if isinstance(field, str) and _FIELD_LABEL_RE.match(field) else None
+    except Exception:
+        return None
+
+
+@functools.lru_cache(maxsize=1)
+def _route_topology():
+    """``tools/capability_topology.py``, loaded once by path (an old route's recipe field)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "worker_field_topology", _REPO_ROOT / "tools" / "capability_topology.py")
+    topology = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(topology)
+    return topology
+
+
+_STANCE_LINE_RE = re.compile(r"^stance:[ \t]*(.*?)[ \t]*(?:#.*)?$", re.MULTILINE)
+
+
+def unit_stance_text(root: Path, unit: str | None) -> str | None:
+    """Return the review-stance text a unit's ``stance:`` ref names, or None.
+
+    The ref resolves under ``roles/units/`` (catalog root first, then the unit's own
+    folder). ``none``, an absent or unresolvable ref, or a file outside the catalog
+    yields None so the persona body alone is rendered. The leading ``# `` title and
+    ``>`` quote header are dropped; only the operational text remains.
+    """
+    try:
+        path = unit_persona_path(root, unit)
+        if path is None:
+            return None
+        front = _FRONTMATTER_RE.match(path.read_text(encoding="utf-8"))
+        found = _STANCE_LINE_RE.search(front.group(0)) if front else None
+        ref = found.group(1).strip("\"' ") if found else ""
+        if not ref or ref == "none":
+            return None
+        units_dir = (root / "roles" / "units").resolve()
+        for base in (units_dir, path.parent):
+            target = (base / ref).resolve()
+            if target.is_relative_to(units_dir) and target.is_file():
+                lines = target.read_text(encoding="utf-8").strip().splitlines()
+                while lines and (not lines[0].strip() or lines[0].startswith(("#", ">"))):
+                    lines.pop(0)
+                return "\n".join(lines).strip() or None
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 _BOOTSTRAP_BLOCK_RE = re.compile(r"^bootstrap:[ \t]*(?:#.*)?\n((?:[ \t]+\S.*\n?)+)", re.MULTILINE)
@@ -324,6 +465,100 @@ def runtime_dir_candidate(artifact_root, environ=None, *, repository_kind=None, 
         return ""
 
 
+RAW_DATA_ROOT_KEY = "raw_data_root"
+
+
+def raw_data_root_setting(environ=None) -> str:
+    """The `raw_data_root:` line of the user's compute-hosts.yaml, or "".
+
+    The data folder is one user value, written once beside the compute-host
+    paths it shares (`COMPUTE_HOSTS_CONFIG` or the XDG path compute-hosts.py
+    reads). Only this top-level line is read; the inventory's own state
+    (template, invalid hosts) never matters here and nothing ever raises.
+    """
+    values = os.environ if environ is None else environ
+    try:
+        override = values.get("COMPUTE_HOSTS_CONFIG", "")
+        if override:
+            path = Path(override).expanduser()
+        else:
+            config_home = values.get("XDG_CONFIG_HOME", "")
+            if not config_home or not Path(config_home).is_absolute():
+                config_home = str(Path(values.get("HOME") or Path.home()) / ".config")
+            path = Path(config_home) / "hearting" / "compute-hosts.yaml"
+        if path.is_symlink() or not path.is_file():
+            return ""
+        text = path.read_text(encoding="utf-8")
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        return ""
+    for line in text.splitlines():
+        key, colon, value = line.partition(":")
+        if colon and key == RAW_DATA_ROOT_KEY:
+            value = value.split(" #", 1)[0].strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                value = value[1:-1]
+            return value
+    return ""
+
+
+def raw_data_dir_candidate(artifact_root, runtime_dir, environ=None, *, source_root=None) -> str:
+    """`<raw_data_root>/<project>` when that folder is usable, else `runtime_dir` unchanged.
+
+    The project is the directory that holds the resolved artifact root, the
+    same directory that names the runtime home, so linked names of one project
+    share one folder. A missing, invisible, unwritable or overlapping location
+    falls back without a question, a gate or a notice. Never creates anything.
+    """
+    fallback = runtime_dir or ""
+    setting = raw_data_root_setting(environ)
+    if not setting:
+        return fallback
+    try:
+        if not Path(setting).is_absolute():
+            return fallback
+        root = Path(os.path.realpath(setting))
+        if not root.is_dir() or not os.access(root, os.W_OK | os.X_OK):
+            return fallback
+        project = Path(os.path.realpath(Path(artifact_root).expanduser())).parent
+        if project.name in ("", ".", ".."):
+            return fallback
+        candidate = root / project.name
+        if candidate.is_symlink() or (candidate.exists() and (
+                not candidate.is_dir() or not os.access(candidate, os.W_OK | os.X_OK))):
+            return fallback
+        values = os.environ if environ is None else environ
+        homes = {Path(os.path.realpath(Path.home()))}
+        if values.get("HOME"):
+            homes.add(Path(os.path.realpath(values["HOME"])))
+        source = Path(os.path.realpath(source_root)) if source_root else project
+
+        def overlaps(left: Path, right: Path) -> bool:
+            return left == right or left.is_relative_to(right) or right.is_relative_to(left)
+
+        # The same fence as a runtime override: never home, the project or the source.
+        if (candidate == Path("/") or any(overlaps(candidate, home) for home in homes)
+                or overlaps(candidate, project) or overlaps(candidate, source)
+                or "releases" in candidate.parts or ".harness" in candidate.parts):
+            return fallback
+        return str(candidate)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return fallback
+
+
+def prepare_raw_data_dir(candidate: str, runtime_dir: str) -> str:
+    """Create only the project folder below an existing raw root; else `runtime_dir`."""
+    if not candidate or candidate == runtime_dir:
+        return runtime_dir or ""
+    try:
+        path = Path(candidate)
+        path.mkdir(exist_ok=True)  # the root itself is never created here
+        if path.is_symlink() or not path.is_dir():
+            return runtime_dir or ""
+        return str(path)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return runtime_dir or ""
+
+
 def prepare_runtime_dir(candidate: str) -> str:
     """Create only the optional runtime root and its private ignore marker."""
     if not candidate:
@@ -336,14 +571,69 @@ def prepare_runtime_dir(candidate: str) -> str:
         if not path.is_dir():
             return ""
         marker = path / ".gitignore"
-        if marker.exists() or marker.is_symlink():
-            if marker.is_symlink() or not marker.is_file() or marker.read_bytes() != b"*\n":
-                return ""
-        else:
-            marker.write_bytes(b"*\n")
+        if not marker.exists() and not marker.is_symlink():
+            _publish_runtime_marker(marker)
+        if _read_runtime_marker(marker) != _RUNTIME_MARKER:
+            return ""
         return str(path)
     except (OSError, RuntimeError, TypeError, ValueError):
         return ""
+
+
+_RUNTIME_MARKER = b"*\n"
+# Without hard links the marker is visible empty between its exclusive create
+# and its fill; a reader re-reads such a prefix for at most this long.
+_RUNTIME_MARKER_SETTLE_SECONDS = 0.5
+
+
+def _publish_runtime_marker(marker: Path) -> None:
+    """Publish the marker, never over an existing file.
+
+    `write_bytes` creates the file before it fills it. A second launcher
+    preparing the same root at that moment read an empty marker, took it for
+    a foreign one and launched without its runtime root. A hard link makes
+    the whole file appear at once.
+    """
+    temporary = marker.with_name(f".gitignore.{os.getpid()}.{os.urandom(6).hex()}.tmp")
+    temporary.write_bytes(_RUNTIME_MARKER)
+    try:
+        os.link(temporary, marker)
+    except FileExistsError:
+        pass  # Another launcher published it first; the caller reads it back.
+    except OSError:
+        # Without hard links (EXDEV, EPERM, ENOTSUP...) an exclusive create is
+        # the only portable step that never replaces a marker another
+        # launcher published after the last look (a rename did, and took that
+        # root as its own). It is filled right after; `_read_runtime_marker`
+        # waits out the instant it is still empty.
+        try:
+            descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        except FileExistsError:
+            pass
+        else:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(_RUNTIME_MARKER)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _read_runtime_marker(marker: Path) -> bytes | None:
+    """Read the marker; a prefix of `*\\n` is re-read briefly, never rewritten.
+
+    A launcher still filling the marker shows it empty (or `*`) for an
+    instant; that is not a foreign marker. One left that way past the bound
+    (its writer died between create and fill) is returned as is, so the root
+    is refused and the marker stays for whoever made it.
+    """
+    deadline = time.monotonic() + _RUNTIME_MARKER_SETTLE_SECONDS
+    while True:
+        if marker.is_symlink() or not marker.is_file():
+            return None
+        content = marker.read_bytes()
+        if (content == _RUNTIME_MARKER or not _RUNTIME_MARKER.startswith(content)
+                or time.monotonic() >= deadline):
+            return content
+        time.sleep(0.005)
 
 
 def artifact_context_prompt(environ) -> str:
@@ -352,8 +642,17 @@ def artifact_context_prompt(environ) -> str:
     if not output:
         return ""
     runtime = values.get("AGENT_RUNTIME_DIR", "")
-    runtime_line = (f"- runtime_dir: {runtime}\n"
-                    "- Put environments, caches, external checkouts, and checkpoints under runtime_dir; keep reports and provenance in artifacts.\n") if runtime else ""
+    raw = environ.get("AGENT_RAW_DATA_DIR", "")
+    if not runtime:
+        runtime_line = ""
+    elif not raw or raw == runtime:
+        # No separate raw place: the old line, byte for byte (checkpoints do go to runtime_dir).
+        runtime_line = (f"- runtime_dir: {runtime}\n"
+                        "- Put environments, caches, external checkouts, and checkpoints under runtime_dir; keep reports and provenance in artifacts.\n")
+    else:
+        runtime_line = (f"- runtime_dir: {runtime}\n"
+                        "- Put environments, caches, external checkouts under runtime_dir; "
+                        f"checkpoints and raw results under raw_data_dir ({raw}); reports and summaries in artifacts.\n")
     return (f"- artifact_cycle_id: {values['AGENT_ARTIFACT_CYCLE_ID']}\n"
             f"- artifact_output_dir: {output}\n"
             f"{runtime_line}"
@@ -409,7 +708,7 @@ def resolve_node_scope(
         outputs = tuple((node or {}).get("outputs", []))
         write_scope = tuple((node or {}).get("write_scope", []))
         if (route.get("capability") == "autopilot-code"
-                and route.get("effective_intensity") == "quick" and node_id == "one-shot"
+                and one_shot_owner(route) and node_id == "one-shot"
                 and (node or {}).get("kind") == "capability-owner"
                 and (node or {}).get("unit") == "_kernel/owner"
                 and set(write_scope) == {"source-scoped", "plans/<cycle>/**"}):
@@ -436,7 +735,7 @@ def resolve_node_scope(
     outputs = tuple((node or {}).get("outputs", []))
     write_scope = tuple((node or {}).get("write_scope", []))
     if (route.get("capability") == "autopilot-code"
-            and route.get("effective_intensity") == "quick"
+            and one_shot_owner(route)
             and node_id == "one-shot" and (node or {}).get("kind") == "capability-owner"
             and (node or {}).get("unit") == "_kernel/owner"
             and set(write_scope) == {"source-scoped", "plans/<cycle>/**"}):
@@ -732,7 +1031,7 @@ def owner_gate_prompt(args) -> str:
     lines = []
     for node, gate in held:
         jobs = getattr(args, "jobs", None)
-        command = (f"python3 {Path(__file__).resolve().with_name('workflow-supervisor.py')} gate --route {route_file} "
+        command = (f"python3 {shlex.quote(entrypoint(_REPO_ROOT, 'utilities/workflow-supervisor.py'))} gate --route {route_file} "
                    f"--gate {gate} --block --artifact <preview>" + (f" --jobs {jobs}" if jobs else ""))
         before = _owner_stage_predecessors(route, node)
         first = (f"first finish stage {', '.join(before)} (dispatch it, or run it yourself and publish its marker "
@@ -776,17 +1075,62 @@ def owner_inline_marker_prompt(args) -> str:
                   and not dispatch_contract._owner_executed_node(n)]
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return ""
-    if not stages:
-        return ""
-    command = (f"python3 {Path(__file__).resolve().with_name('capability-route.py')} complete --inline "
+    if not stages or one_shot_review_route(route):
+        return ""  # the middle cell's owner never closes its review inline: `one_shot_review_prompt`
+    command = (f"python3 {shlex.quote(entrypoint(_REPO_ROOT, 'utilities/capability-route.py'))} complete --inline "
                f"--node <node> --reason \"<one line>\"")
     return (f"A declared stage ({', '.join(str(n['id']) for n in stages)}) you run yourself instead of dispatching "
             f"still publishes its completion marker: `{command}` (route and attempt axes are derived; pass --evidence with a cycle-local file when the stage produced one or the route has no bound cycle). Without it the route never settles.\n\n")
 
 
+def _review_rounds(route) -> int:
+    import review_round_cap
+    return review_round_cap.max_review_rounds(route["effective_intensity"])
+
+
+def one_shot_review_prompt(route, route_file, jobs=None) -> str:
+    """The middle cell's paragraph for its owner: make the work, then start the declared review (from `strong`,
+    the review group) with this one command and wait for it. Text only; the runtime still decides every start
+    and every verdict."""
+    nodes = one_shot_review_nodes(route)
+    if not nodes:
+        return ""
+    node = nodes[0]
+    command = route_start_command(route_file, node.get("parallel_anchor") or node["id"], jobs=jobs)
+    if len(nodes) > 1:
+        legs = ", ".join(f"{n['id']} ({n.get('unit')}, {n.get('perspective')})" for n in nodes)
+        return (f"This route is one session that makes the work and {len(nodes)} independent reviews of it, one review "
+                f"group ({legs}) that a single start command runs together. Make the work, run your own checks, and "
+                f"commit it in this worktree. Once those checks pass, start the review group with exactly this "
+                f"command: `{command}`. When the receipt shows the children started, end the turn with the standalone "
+                "line `runtime_wait: registered-children`; the runtime waits for every review and brings the verdicts "
+                "back to this same session. (A receipt that prints `parent_next=bounded-wait` instead names its own "
+                "wait command: run that printed command once, then read each review's result.) If any verdict "
+                "blocks, fix every blocking finding of every blocking report in this worktree in one pass, run the "
+                "same checks, commit, and start the closure checks with the same command, then wait again. Each "
+                f"review gets {_review_rounds(route)} rounds in all: when its last round still blocks, correct no "
+                "further, write the remaining findings in your report, and end with `verdict: FAIL`. If no review "
+                "blocks, return your final handoff. You cannot review your own work or close any of these reviews "
+                "yourself: do not run `complete --inline` for them, and do not report PASS without every review. "
+                "Do not start the reviews before your work is committed.\n\n")
+    return (f"This route is one session that makes the work and one independent review ({node['id']}, "
+            f"{node.get('unit')}) of it. Make the work, run your own checks, and commit it in this worktree. "
+            f"Once those checks pass, start the independent review with exactly this command: `{command}`. "
+            "When the receipt shows the child started, end the turn with the standalone line "
+            "`runtime_wait: registered-children`; the runtime waits for the review and brings its verdict back "
+            "to this same session. (A receipt that prints `parent_next=bounded-wait` instead names its own wait "
+            "command: run that printed command once, then read the review's result.) If the verdict blocks, fix every blocking finding in this worktree in one "
+            "pass, run the same checks, commit, and start the closure check with the same command, then wait "
+            f"again. The review gets {_review_rounds(route)} rounds in all: if the closure check blocks too, correct "
+            "no further, write the remaining findings in your report, and end with `verdict: FAIL`. "
+            "If it does not block, return your final handoff. You cannot review your own work or close "
+            "this review yourself: do not run `complete --inline` for it, and do not report PASS without the "
+            "review. Do not start the review before your work is committed.\n\n")
+
+
 def route_start_command(route_file, node_id: str, *, jobs=None, reviewed_evidence=None) -> str:
     """The exact command that starts `node_id` of a sealed route (text only; the start gate still decides)."""
-    script = Path(__file__).resolve().with_name("stage-dispatch-fallback.py")
+    script = entrypoint(_REPO_ROOT, "utilities/stage-dispatch-fallback.py")
     return (f"python3 {shlex.quote(str(script))} --route {shlex.quote(str(route_file))} "
             f"--node {shlex.quote(str(node_id))} --start"
             + (f" --jobs {shlex.quote(str(jobs))}" if jobs else "")
@@ -909,6 +1253,16 @@ def continuation_followup_fields(route, node, metadata, jobs, route_file):
             producers = [n for n in _route_nodes(route) if n.get("kind") == "pipeline-stage"
                          and node["id"] in {n2["id"] for n2 in judging_stages(route, n["id"])}]
             source_review = bool(subject and subject.get("family") == "source")
+            if node["id"] in one_shot_review_node_ids(route):
+                # The middle cell: the owner made the work this review blocked, so the owner corrects it. Every
+                # leg of a review group counts its own rounds, so one leg's spent rounds spend the correction.
+                verdicts = sum(1 for st, m in _lineage_rows(route, jobs).get(node["id"], ())
+                               if ROUND.classify_round_row(st, m, worker_type="review") == "verdict")
+                cap = ROUND.max_review_rounds(route["effective_intensity"])
+                return {"kind": "review", "attempt": attempt, "artifact": str(artifact), "target": "",
+                        "source": True, "command": command, "producer_command": "", "owner_fixes": True,
+                        "closure_spent": verdicts >= cap, "corrections": cap - 1,
+                        **({"group": True} if node.get("parallel_group") else {})}
             targets = [reviewed["path"]] if reviewed else []
             if (reviewed and subject and any(item.get("path") == "checklist.md"
                     for item in subject.get("manifest", ()) if isinstance(item, dict))):
@@ -958,6 +1312,21 @@ def continuation_followup_text(fields):
             return ""
         if len(fields) == 1:
             return continuation_followup_text(fields[0])
+        if all(item.get("kind") == "review" and item.get("owner_fixes") for item in fields):
+            # A review group of the owner's own work: several legs blocked. Name every report, give one command.
+            attempts = ", ".join(dict.fromkeys(str(item["attempt"]) for item in fields))
+            artifacts = ", ".join(dict.fromkeys(bounded(item.get("artifact")) for item in fields))
+            commands = "; ".join(dict.fromkeys(command(item.get("command")) for item in fields if item.get("command")))
+            if any(item.get("closure_spent") for item in fields):
+                n = min(item.get("corrections", 1) for item in fields)
+                allowed = "the correction allowed is" if n == 1 else f"the {n} corrections allowed are"
+                return (f"Review FAIL {attempts}: a review still blocks, and {allowed} spent. "
+                        f"Do not correct further. Write the remaining findings from {artifacts} in your report and "
+                        "end with `verdict: FAIL`.")
+            return (f"Review FAIL {attempts}: the independent reviews of your work block. Fix every blocking finding "
+                    f"in {artifacts} in this worktree in one pass, run the same checks you ran before, commit, then "
+                    f"start the closure checks with the same command: {commands}. "
+                    "Do not review it yourself and do not close any of them inline.")
         if all(item.get("kind") == "review" for item in fields):
             artifacts = list(dict.fromkeys(bounded(item.get("artifact")) for item in fields))
             targets = list(dict.fromkeys(bounded(item.get("target")) for item in fields if item.get("target")))
@@ -969,6 +1338,19 @@ def continuation_followup_text(fields):
                     + (" First use " + "; ".join(producers) + "." if producers else "")
                     + " Then run the same start for the closure check: " + "; ".join(commands))
         return "\n".join(dict.fromkeys(filter(None, (continuation_followup_text(item) for item in fields))))
+    if fields.get("kind") == "review" and fields.get("owner_fixes"):
+        if fields.get("closure_spent"):
+            allowed = ("the one correction allowed is" if fields.get("corrections", 1) == 1
+                       else f"the {fields['corrections']} corrections allowed are")
+            # A leg of a review group may have its last round as the first judgment of changed work, not a closure check.
+            blocks = "a review still blocks" if fields.get("group") else "the closure check still blocks"
+            return (f"Review FAIL {fields['attempt']}: {blocks}, and {allowed} "
+                    f"spent. Do not correct further. Write the remaining findings from "
+                    f"{bounded(fields['artifact'])} in your report and end with `verdict: FAIL`.")
+        return (f"Review FAIL {fields['attempt']}: the independent review of your work blocks. Fix every blocking "
+                f"finding in {bounded(fields['artifact'])} in this worktree in one pass, run the same checks you "
+                f"ran before, commit, then start the closure check with the same command: {command(fields['command'])}. "
+                "Do not review it yourself and do not close it inline.")
     if fields.get("kind") == "review":
         target = bounded(fields.get("target")) or ("the source through the bounded producing stage" if fields.get("source") else "the reviewed inputs")
         producer = (" First use " + command(fields["producer_command"]) + ".") if fields.get("producer_command") else ""
@@ -1009,7 +1391,7 @@ def continuation_followup_for_row(metadata, jobs, *, return_fields=False):
 
 def inline_complete_command(node_id: str, evidence: str | None = None) -> str:
     """The exact command that publishes the completion marker of a stage the owner ran itself."""
-    script = Path(__file__).resolve().with_name("capability-route.py")
+    script = entrypoint(_REPO_ROOT, "utilities/capability-route.py")
     return (f"python3 {shlex.quote(str(script))} complete --inline --node {shlex.quote(str(node_id))}"
             + (f" --evidence {shlex.quote(str(evidence))}" if evidence else "") + ' --reason "<one line>"')
 
@@ -1047,6 +1429,8 @@ def owner_route_steps_prompt(args, environ) -> str:
         stages = [n for n in nodes if _dispatchable_stage(n)]
         if not stages:
             return ""
+        if one_shot_review_route(route):
+            return one_shot_review_prompt(route, route_file)
         ready = [n["id"] for n in dispatch_stage_advance.runnable_successors(route, frozenset(), frozenset())]
     except (OSError, ValueError, KeyError, TypeError, AttributeError, ImportError):
         return ""
@@ -1108,7 +1492,7 @@ def owner_route_steps_prompt(args, environ) -> str:
                                if isinstance(name, str) and Path(name).name == "plan.md"), None)
             if node.get("subdivision") and plan_input and output_dir:
                 plan_path = _resolved_paths(output_dir, [plan_input])[0]
-                command = shlex.join(["python3", str(Path(__file__).with_name("dispatch-batch.py").resolve()),
+                command = shlex.join(["python3", entrypoint(_REPO_ROOT, "utilities/dispatch-batch.py"),
                                       "--parallel-group", node["id"], "--slices", plan_path, "--start"])
                 lines.append(f"   If the plan declares slices, use: `{command}`; "
                              "single-session-required returns to this node's ordinary start command.")
@@ -1125,7 +1509,7 @@ def owner_route_steps_prompt(args, environ) -> str:
                       f"auxiliary_findings_considered with exactly {len(auxiliary)} dispositions")
         if kind == route_base.AUXILIARY_ARBITER_OWNER_MERGE and output_dir:
             memo = str(Path(output_dir) / "_internal" / f"{route_base._safe_group_id(group)}-owner-merge.md")
-            command = shlex.join(["python3", str(Path(__file__).with_name("capability-route.py").resolve()),
+            command = shlex.join(["python3", entrypoint(_REPO_ROOT, "utilities/capability-route.py"),
                                   "arbitrate", "--route", str(route_file), "--group", group, "--evidence", memo])
             lines.append(f"{obligation} in `{memo}`, then run: `{command}`.")
         elif kind == route_base.AUXILIARY_ARBITER_NODE:
@@ -1845,6 +2229,21 @@ def _child_scope_environment(args, route, environ, source_worktree=None):
     return child
 
 
+def declared_scope_prompt(args, environ) -> str:
+    """This node's declared scope (`node_scope_prompt`), resolved as `assignment_prompt` resolves it; '' without
+    a route file."""
+    route_file = getattr(args, "route_file", None)
+    if not route_file:
+        return ""
+    route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+    source_worktree = _linked_slice_source_worktree(args, route)
+    scope = resolve_node_scope(
+        route, getattr(args, "route_node", None), _child_scope_environment(args, route, environ, source_worktree),
+        parent_attempt_id=getattr(args, "parent_attempt_id", None), route_file=route_file,
+        source_worktree=source_worktree, source_worktree_verified=source_worktree is not None)
+    return node_scope_prompt(scope)
+
+
 def assignment_prompt(args, task: str, environ) -> str:
     """Project the route's input/output boundary, rather than ask a caller to copy it.
 
@@ -1983,8 +2382,61 @@ def supervised_owner_prompt() -> str:
     )
 
 
+def unit_verdict_prompt(worker_type: str) -> str:
+    """How a unit route's review opens its report so the runtime can read a FAIL end as a finished review.
+
+    The runtime treats a `verdict: FAIL` end as finished work (a review that found blocking issues) only
+    when the report opens on a closed review verdict line (`codex_dispatch_terminal.closed_review_kind`,
+    the one an audit report carries, a unit's also without its head); the units name their own verdict tokens (clean/issues,
+    CLEAN/FINDINGS), which that reading does not know."""
+    if worker_type != "review":
+        return ""
+    return ("Open the report (its first line that is not a heading) with the review's closed verdict, as "
+            "`Final verdict: changes requested — head <sha>` when you found blocking issues, or "
+            "`Final verdict: mergeable — head <sha>` when you found none (`hold` for a held review); "
+            "<sha> is the commit you reviewed (`git rev-parse HEAD`); where there is no git repository, leave out "
+            "` — head <sha>` and keep the verdict wording. Then say what you found. "
+            "If you could not do the review, end `BLOCKED` and say what stopped you.\n")
+
+
 _TERMINAL_CONTRACT_START = "<!-- worker-terminal-contract:start -->"
 _TERMINAL_CONTRACT_END = "<!-- worker-terminal-contract:end -->"
+
+
+def unit_safety_prompt(worker_type: str) -> str:
+    """The kernel's safety lines for a unit route's worker, whose first instruction is not the whole kernel.
+
+    Only what keeps a bounded worker inside its node: its role, its guards and scope, what it leaves to
+    the supervisor, and where its scratch goes. (Starting another worker is `unit_call_prompt`.)"""
+    lines = ["You are a bounded worker, not the user-facing main session. Treat the assigned route, node "
+             "scope and completion gate as fixed. Preserve permission, safety and git-state guards, and write "
+             "only inside the assigned scope.",
+             "Do not perform merge, release, installation, cleanup or UI/status publication, and do not publish "
+             "task branches or PRs; integration and cleanup stay with the supervisor.",
+             "Bind fixtures you create to their command lifetime (a private `TMPDIR`, `TemporaryDirectory` or "
+             "shell trap), keep needed output in the artifact, and retire only your own scratch. That does not "
+             "authorize cleanup of user worktrees, native HOME, existing experiments, parent or sibling roots, "
+             "or shared runtime state."]
+    if worker_type == "review":
+        lines.append("Inspect only the assigned question and evidence; source is read-only unless the node's scope "
+                     "says otherwise. Record prioritized findings, locations, checks and uncertainty in the review "
+                     "artifact. Do not implement fixes or widen the review.")
+    return "\n".join(lines) + "\n"
+
+
+def unit_call_prompt(root: Path) -> str:
+    """How a unit route's worker hands a lookup to another worker (the one way a worker starts another).
+
+    One read-only unit worker per question, opened by `compose --start --unit <u> --ephemeral`: nothing
+    lands in the project's artifact folder, and its answer comes back as the `Answer:` text of the wait
+    result. The called worker carries the same limits and its scope is its own read-only report: starting
+    it widens nothing of yours. What a worker leaves running when it ends is stopped with it."""
+    command = f"python3 {root / 'utilities' / 'capability-route.py'} compose --start --unit <family/name> --ephemeral --prompt-file <brief>"
+    return ("Starting another worker: hand a read-only lookup you need (a search, many files to read, text to "
+            f"transcribe) to a unit worker with `{command}`; the brief holds the question. Run the wait command its "
+            "receipt prints and read the `Answer:` text. Wait for it before you end: a worker you started is "
+            "stopped when you end. If the start is refused (the shared worker limit), say so in your result; "
+            "never start the same question again.\n")
 
 
 def worker_terminal_contract(root: Path) -> str:
@@ -1993,12 +2445,17 @@ def worker_terminal_contract(root: Path) -> str:
     return kernel.split(_TERMINAL_CONTRACT_START, 1)[1].split(_TERMINAL_CONTRACT_END, 1)[0].strip()
 
 
-def render_worker_bootstrap(root: Path, worker_type: str, unit: str | None = None) -> str:
+def render_worker_bootstrap(root: Path, worker_type: str, unit: str | None = None,
+                            field: str | None = None) -> str:
     """Return exactly one canonical kernel plus one type fragment.
 
     When the assigned route node carries a catalog ``unit``, the unit BODY from
     ``roles/units/<unit>.md`` is appended as the worker persona (kernel +
-    worker-type overlay + unit body); kernel and overlay mechanics are unchanged.
+    worker-type overlay + [review stance] + unit body); a unit whose ``stance:``
+    resolves under ``roles/units/`` gets that text just before its body. ``field``
+    is the route's sealed field (``unit_route_field``): a unit with field-keyed
+    reference sections carries that field's only (``unit_field_reference``). Kernel
+    and overlay mechanics are unchanged.
     """
     if worker_type not in WORKER_TYPES:
         raise ValueError(f"invalid worker type: {worker_type}")
@@ -2013,8 +2470,11 @@ def render_worker_bootstrap(root: Path, worker_type: str, unit: str | None = Non
     fragments[0] = "\n".join(
         line for line in fragments[0].splitlines()
         if line not in {_TERMINAL_CONTRACT_START, _TERMINAL_CONTRACT_END})
-    persona = unit_persona_body(root, unit)
+    persona = unit_persona_body(root, unit, field)
     if persona:
+        stance = unit_stance_text(root, unit)
+        if stance and stance not in persona:
+            fragments.append(stance)
         fragments.append(persona)
     return "\n\n".join(fragments) + "\n"
 
@@ -2105,7 +2565,8 @@ def _contract_read_prompt(args, harness: str) -> str:
         return ("- Your frame unit contract is already included above. Read its named inputs within "
                 "the requested scope; no owner capability Skill or full harness bootstrap is needed.\n")
     if args.worker_type == "owner":
-        return (f"- Read only `capabilities/{args.assigned_contract}/references/owner-execution.md`. "
+        # Absolute: an owner usually runs in another project, where a relative path misses.
+        return (f"- Read only `{_REPO_ROOT}/capabilities/{args.assigned_contract}/references/owner-execution.md`. "
                 "Run only the commands your Route steps and the latest receipt print; "
                 "never assemble a runtime command yourself. Read another reference or `core/` "
                 "only when a receipt names that section.\n")
@@ -2225,16 +2686,24 @@ def _query_tokens(task: str, worktree: str | None) -> str:
 
 
 def _bootstrap_memory_block(topics, task, worktree, *, root=None, timeout_s: float = 3.0,
-                            environ=None) -> str:
-    """Bounded read-only preference bodies through ``mem bootstrap-context``; failure is ``""``."""
+                            environ=None, labels=()) -> str:
+    """Bounded read-only preference bodies through ``mem bootstrap-context``; failure is ``""``.
+
+    ``labels`` are exact capsule labels (``unit:<family/name>``, ``field:<id>``): records
+    tagged with one come first, declared query groups fill the rest, one record once.
+    """
     q1 = " ".join(BOOTSTRAP_MEMORY_TOPICS[t] for t in topics if t in BOOTSTRAP_MEMORY_TOPICS)
-    if not q1 or not worktree:
+    if not (q1 or labels) or not worktree:
         return ""
     mem = Path(root or _REPO_ROOT) / "tools" / "memory" / "mem.py"
-    cmd = [sys.executable, str(mem), "bootstrap-context", "--cwd", str(worktree), "--query", q1]
-    q2 = _query_tokens(task, worktree)
-    if q2:
-        cmd += ["--query", q2]
+    cmd = [sys.executable, str(mem), "bootstrap-context", "--cwd", str(worktree)]
+    for label in labels:
+        cmd += ["--topic", label]
+    if q1:
+        cmd += ["--query", q1]
+        q2 = _query_tokens(task, worktree)
+        if q2:
+            cmd += ["--query", q2]
     cmd += ["--limit", "4", "--max-bytes", str(_MEMORY_BLOCK_MAX_BYTES)]
     try:
         done = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, cwd=str(worktree),
@@ -2247,20 +2716,62 @@ def _bootstrap_memory_block(topics, task, worktree, *, root=None, timeout_s: flo
     return out
 
 
-def unit_bootstrap_prompt(args, task: str, environ, *, root: Path | None = None) -> str:
-    """Material a unit declared in its ``bootstrap:`` frontmatter, or ``""``.
+_FIELD_LABEL_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
-    Runtime-supplied and read-only. A unit without a declaration receives nothing
-    (no subprocess, no scan); any failure drops the material, never the launch.
+
+def _work_style_labels(args) -> tuple[str, ...]:
+    """Exact capsule labels for this node: its ``unit:`` label, then the route's sealed ``field:``.
+
+    A conductor owner (a route whose stages run at dispatch depth 2) gets none: its stages' units do
+    that work. A route's one-shot owner is the whole worker, so it gets the ``field:`` label only.
+    Any failure is no label.
+    """
+    try:
+        worker_type = getattr(args, "worker_type", None)
+        unit = getattr(args, "unit", None) or ("plan/frame" if worker_type == "frame" else None)
+        labels: list[str] = []
+        if unit and unit not in RESERVED_UNITS and UNIT_REF_RE.match(unit) and worker_type in WORKER_TYPES[1:]:
+            labels.append(f"unit:{unit}")
+        route: dict = {}
+        try:   # an unreadable route costs only its own labels; the unit label stays
+            route_file = getattr(args, "route_file", None) or getattr(
+                getattr(args, "owner_route_binding", None), "route_file", None)
+            loaded = json.loads(Path(route_file).read_text(encoding="utf-8")) if route_file else {}
+            route = loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            route = {}
+        nodes = route.get("nodes") or []
+        if worker_type == "owner" and any(n.get("dispatch_depth") == 2 for n in nodes):
+            return ()
+        field = route.get("field")
+        if isinstance(field, str) and _FIELD_LABEL_RE.match(field):
+            labels.append(f"field:{field}")
+        return tuple(labels)
+    except Exception:
+        return ()
+
+
+def unit_bootstrap_prompt(args, task: str, environ, *, root: Path | None = None) -> str:
+    """Read-only material attached while a worker's prompt is assembled, or ``""``.
+
+    Two sources, both runtime-supplied and read-only: records the user tagged with this node's
+    unit label or the route's field label ("work style", every unit, no declaration), and what a
+    unit declared in its ``bootstrap:`` frontmatter. Neither is automatic memory injection and a
+    worker never writes memory. Nothing found, or any failure, drops the material, never the launch.
     """
     try:
         root = Path(root or _REPO_ROOT)
-        decl = unit_bootstrap_declaration(root, getattr(args, "unit", None))
-        if not decl or getattr(args, "worker_type", None) not in BOOTSTRAP_STAGE_TYPES:
+        worker_type = getattr(args, "worker_type", None)
+        decl = {}
+        if worker_type in BOOTSTRAP_STAGE_TYPES:
+            decl = unit_bootstrap_declaration(root, getattr(args, "unit", None))
+            gate = getattr(args, "completion_gate", None)
+            if decl.get("gates") and gate not in decl["gates"]:
+                decl = {}
+        labels = _work_style_labels(args)
+        if not decl and not labels:
             return ""
         gate = getattr(args, "completion_gate", None)
-        if decl.get("gates") and gate not in decl["gates"]:
-            return ""
         lines = []
         if decl.get("exemplar") in BOOTSTRAP_EXEMPLAR_KINDS:
             found = _deliverable_exemplars(gate, getattr(args, "artifact_root", None), environ)
@@ -2272,15 +2783,24 @@ def unit_bootstrap_prompt(args, task: str, environ, *, root: Path | None = None)
                     "Take every fact only from your assigned inputs.\n"
                     "  For HTML, skim the structure; do not load embedded media.\n")
         memory = _bootstrap_memory_block(decl.get("memory", ()), task, getattr(args, "worktree", None),
-                                         root=root, environ=environ)
+                                         root=root, environ=environ, labels=labels)
         if memory:
-            lines.append("- Saved preferences from memory (reference only; apply only what fits your assignment; "
+            if labels and decl:
+                head = ("Your user's working style and saved preferences from memory (after this turn's "
+                        "instruction and the project's conventions, before the unit's defaults; those tagged "
+                        "for this unit or field come first; ")
+            elif labels:
+                head = ("Your user's working style for this work, from records tagged with its unit or field "
+                        "(after this turn's instruction and the project's conventions, before the unit's defaults; ")
+            else:
+                head = "Saved preferences from memory ("
+            lines.append(f"- {head}reference only; apply only what fits your assignment; "
                          "do not write, curate, or sync memory):\n" + memory + "\n")
         if not lines:
             return ""
-        return ("Unit bootstrap material (runtime-supplied, read-only reference):\n" + "".join(lines)
-                + "- If format guidance and your inputs disagree: content follows the inputs, "
-                  "format follows these conventions.\n\n")
+        tail = ("- If format guidance and your inputs disagree: content follows the inputs, "
+                "format follows these conventions.\n" if decl else "")
+        return "Unit bootstrap material (runtime-supplied, read-only reference):\n" + "".join(lines) + tail + "\n"
     except Exception:
         return ""
 

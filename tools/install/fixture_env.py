@@ -49,6 +49,11 @@ def build_environment(
     *,
     base: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
+    if not str(fixture_root).strip() or not Path(fixture_root).expanduser().is_absolute():
+        # An empty root is a failed `mktemp -d`; resolving it would make the current
+        # checkout the fixture root, and the caller's `rm -rf "$TMP"` trap would
+        # delete it (2026-11-12: a direct run with a missing TMPDIR did).
+        raise ValueError(f"fixture root must be an absolute path, got {str(fixture_root)!r}")
     root = Path(fixture_root).expanduser().resolve()
     source = Path(agent_home).expanduser().resolve()
     env = dict(os.environ if base is None else base)
@@ -148,7 +153,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("fixture_root")
     parser.add_argument("agent_home")
     args = parser.parse_args(argv)
-    env = build_environment(args.fixture_root, args.agent_home)
+    try:
+        env = build_environment(args.fixture_root, args.agent_home)
+    except ValueError as exc:
+        print(f"fixture_env: {exc}; nothing was exported", file=__import__("sys").stderr)
+        return 2
     prepare_environment(env)
     if args.command == "shell":
         print(shell_exports(env))

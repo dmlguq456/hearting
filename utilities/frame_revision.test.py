@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Review regressions for approved frame preparation and input delivery."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import importlib.util
 import json
 import os
@@ -166,55 +169,6 @@ class RepositoryBoundary(F.FrameFrictionContinuationTest):
         self.assertFalse((outside / 'new-project/.git').exists())
         self.assertFalse(result.get('owner_started'))
 
-class NativeRevision(S.FrameInterviewStepTest):
-    def test_native_candidate_cannot_inherit_revised_brief_with_identical_question_text(self):
-        question = self.scope_question()
-        self.step(interview=self.question_file)
-        shown = [{'question': '제가 이해한 내용: ' + question['understanding'],
-                  'options': ['예 (권장)', '아니오(고쳐 말하기)'], 'answer': '예'},
-                 {'question': question['questions'][0]['question'],
-                  'options': ['Both (recommended)', 'Approval only'], 'answer': 'Approval only'}]
-        candidate = S.W.native_answer_candidate(self.route, self.jobs, shown)
-        self.question_file.write_text(json.dumps({**question, 'brief': {
-            **question['brief'], 'outcome': 'A revised deliverable with identical visible choices.'}}))
-        self.step(interview=self.question_file)
-        self.assertIsNone(S.W.record_native_answer(self.route, self.jobs, shown,
-                                                  expected_interview_digest=candidate[2]))
-        self.assertEqual(self.step()['state'], 'needs-question')
-
-    def stale_reply(self, partial):
-        question = self.scope_question()
-        first = self.step(interview=self.question_file)
-        shown = [{'question': '제가 이해한 내용: ' + question['understanding'],
-                  'options': ['예 (권장)', '아니오(고쳐 말하기)'], 'answer': '예'}]
-        if not partial:
-            shown.append({'question': question['questions'][0]['question'],
-                          'options': ['Both (recommended)', 'Approval only'], 'answer': 'Approval only'})
-        real = S.W._native_progress
-        def interleave(*args):
-            progress = real(*args)
-            self.assertIsNotNone(progress)
-            changed = {**question, 'understanding': 'A newly revised project scope.',
-                       'brief': {**question['brief'], 'outcome': 'A different deliverable.'}}
-            self.question_file.write_text(json.dumps(changed))
-            self.step(interview=self.question_file)
-            return progress
-        with mock.patch.object(S.W, '_native_progress', side_effect=interleave):
-            saved = S.W.record_native_answer(self.route, self.jobs, shown)
-        directory = Path(first['interview_file']).parent
-        self.assertIsNone(saved)
-        self.assertFalse((directory / 'answers.native.json').exists())
-        self.assertFalse((directory / 'answers.native.partial.json').exists())
-        self.assertEqual(self.step()['state'], 'needs-question')
-        self.assertEqual(self.resolution()['status'], 'blocked')
-        self.assertEqual(self.resolution()['epoch'], 1)
-
-    def test_complete_native_reply_cannot_approve_replacement(self):
-        self.stale_reply(False)
-
-    def test_partial_native_reply_cannot_occupy_replacement(self):
-        self.stale_reply(True)
-
 class CorrectionDelivery(F.StartBase):
     def test_large_retained_history_delivers_recent_conditions_with_coverage(self):
         import dispatch_owner_input as inputs
@@ -249,7 +203,6 @@ if __name__ == '__main__':
     # Imported fixture classes are helpers, not additional copies of their suites.
     suite = unittest.TestSuite()
     for cls, names in [(RepositoryBoundary, [n for n in RepositoryBoundary.__dict__ if n.startswith('test_')]),
-                       (NativeRevision, [n for n in NativeRevision.__dict__ if n.startswith('test_')]),
                        (CorrectionDelivery, [n for n in CorrectionDelivery.__dict__ if n.startswith('test_')])]:
         suite.addTests(cls(n) for n in names)
     if len(sys.argv) > 1:

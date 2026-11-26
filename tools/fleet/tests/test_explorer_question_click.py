@@ -4,6 +4,9 @@ A press is the event ``render._explorer_handle`` hands the reducer after decodin
 aimed at the cell where the words are painted, at 80 and 140 columns, after scrolling, with
 Korean and emoji text. ``open pane`` reaches the multiplexer that holds the question's pane.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 import os
 import socket
@@ -122,7 +125,7 @@ class PressLandsOnThePaintedLine(unittest.TestCase):
         for lang, word in (("English", "◑ to answer 2"), ("Korean", "◑답 대기 2")):
             with self.subTest(lang=lang), mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}):
                 rows = draw(_vm(2), NavState(view="QUESTIONS"), 140, 45).text_rows()
-                self.assertTrue(any(f"── {word} ─" in row for row in rows), rows)
+                self.assertTrue(any(f"│ {word} ─" in row for row in rows), rows)
         vm = ExplorerViewModel(questions=(_row(0, h="claude", m=("Fable 5.2", "fam_fable"),
                                                 e="medium"),))
         rows = draw(vm, NavState(view="QUESTIONS"), 140, 45).text_rows()
@@ -133,7 +136,7 @@ class PressLandsOnThePaintedLine(unittest.TestCase):
             with self.subTest(count=count):
                 frame = draw(_vm(count), NavState(view="QUESTIONS"), 80, 45)
                 rows = frame.text_rows()
-                self.assertTrue(any(f"── ◑ to answer {count} ─" in row for row in rows))
+                self.assertTrue(any(f"│ ◑ to answer {count} ─" in row for row in rows))
                 opens = [h for h in frame.hits if h.action[:1] == ("question.open",)]
                 self.assertEqual(len(opens), count)
                 for index in range(count):
@@ -191,13 +194,29 @@ class PressLandsOnThePaintedLine(unittest.TestCase):
         unknown = {"state": "unknown", "support": {"supported": False}, "detail": None}
         state = _selected(unknown)
         frame = draw(_vm(), state, 80, 45)
-        self.assertIn("answer in its pane │ open pane", "\n".join(frame.text_rows()))
+        self.assertIn("answer in its window │ open pane", "\n".join(frame.text_rows()))
         x, y = _locate(frame, "open pane")
         _state, effects = _press(state, frame, x + 2, y)
         self.assertEqual(effects, (("focus", "a0", "w1:p2"),))
         pressable = {h.action[0] for h in frame.hits if h.y > 4 and h.x0 >= 33}
         self.assertNotIn("question.submit", pressable)
         self.assertNotIn("question.choice", pressable)
+
+    def test_a_wait_fleet_cannot_answer_names_where_by_its_reason(self):
+        # Spec E9 rule 54 (b)-(e): from Fleet a wait it cannot answer says what to do by the
+        # request's reason, in the same words as the shell panel (another session's window).
+        for reason, words in (("marker-has-no-bound-native-response-surface", "answer in its window"),
+                              ("owner-correction-lineage-unverified", "answer in the parent"),
+                              ("owner-correction-already-pending", "sending"),
+                              ("codex-native-request-not-current", "closed"),
+                              ("some-later-reason", "answer in its window")):
+            for envelope in ({"state": "unknown", "support": {"supported": False, "reason": reason}, "detail": None},
+                             {**_envelope(), "support": {"supported": False, "reason": reason}, "native_ref": None}):
+                state = _selected(envelope)
+                text = "\n".join(draw(_vm(), state, 120, 45).text_rows())
+                self.assertIn(words + " │ open pane", text, reason)
+                self.assertNotIn(reason, text)
+                self.assertNotIn("answer in its pane", text)
 
 
 def _tmux(name, *argv):

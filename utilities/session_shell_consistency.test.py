@@ -1,4 +1,7 @@
 """The shared panel's content order is independent of the native harness."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 from pathlib import Path
 import subprocess
 import unittest
@@ -23,7 +26,7 @@ const seen=d.observe('claude',['  📁 project · ⎇ ? · context ? · 5h ? · 
 assert.equal(seen,null,'an unknown native reading claims nothing');
 const numeric=d.observe('claude',['  📁 project · ⎇ main · context ━━━━────── 42% · 5h ? · 7d ?'],'exact');
 assert.deepEqual(numeric,{sid:'exact',percent:42},'quota must not replace the observed model');
-const full=d.observe('claude',['  📁 project · ⎇ main · context ━━━━────── 42% · Opus high · 5h ? · 7d ? · ⏳ route 1 · plan · ◑ 1'],'exact');
+const full=d.observe('claude',['  📁 project · ⎇ main · context ━━━━────── 42% · Opus high · 5h ? · 7d ? · route 1 · plan · ◑ 1'],'exact');
 assert.deepEqual(full,{sid:'exact',percent:42,model:'Opus',effort:'high'},'route, wait and quota stay with the panel');
 '''
         result = subprocess.run(['node','-e',script,str(ROOT/'utilities/session-shell/native-display.cjs')],capture_output=True,text=True,timeout=5)
@@ -42,6 +45,13 @@ assert.deepEqual([...d.claudeStatusRows(screen,'exact',{...record,lines:['📁 p
 const two=['x',...box,'  📁 a · ⎇ b','  >_ running: job','  footer'];
 assert.deepEqual([...d.claudeStatusRows(two,'exact',{session_id:'exact',lines:['📁 a · ⎇ b','>_ running: job']})],[4,5]);
 assert.equal(d.claudeStatusRows(two,'exact',{session_id:'exact',lines:['📁 a · ⎇ b','>_ running: other']}).size,0,'partial block');
+// The bottom layout's short native screen ends on the record's first row (live
+// 80x24 capture, 2026-11-11): that row is the recorded one and yields; a second
+// row that differs, or a first row that differs, keeps everything.
+const cut=['x',...box,'  📁 a · ⎇ b'];
+assert.deepEqual([...d.claudeStatusRows(cut,'exact',{session_id:'exact',lines:['📁 a · ⎇ b','5h 12% 7d 66%']})],[4],'record cut by the screen end');
+assert.equal(d.claudeStatusRows(cut,'exact',{session_id:'exact',lines:['📁 a · ⎇ c','5h 12% 7d 66%']}).size,0,'cut and changed');
+assert.equal(d.claudeStatusRows([...cut,'  5h 12% 7d 67%'],'exact',{session_id:'exact',lines:['📁 a · ⎇ b','5h 12% 7d 66%']}).size,0,'whole block shown and changed');
 const emoji=[...box,'  📁 a · ⎇ b ⚠ ? 🚧 ?   '];
 assert.deepEqual([...d.claudeStatusRows(emoji,'exact',{session_id:'exact',lines:['📁 a · ⎇ b ⚠️? 🚧 ?']})],[3],'wide-glyph cell spacing');
 const clipped=[...box,'  📁 project · ⎇ main · cont…'];
@@ -53,6 +63,23 @@ const below=['  📁 project · ⎇ main · context 42%',...box,'  ⏵⏵ auto m
 assert.equal(d.claudeStatusRows(below,'exact',record).size,0,'text above the box is conversation');
 const quoted=[...box,'● reply','  📁 project · ⎇ main · context 42%','  ⏵⏵ auto mode on'];
 assert.equal(d.claudeStatusRows(quoted,'exact',record).size,0,'only the rows directly under the box');
+// A named session draws its name in the box's upper border (invented names): the box is still the box.
+const named=top=>[rule,'conversation',top,'❯  ',rule,'  📁 project · ⎇ main · context 42%','  ⏵⏵ auto mode on'];
+const tail='─'.repeat(30);
+for(const [what,top] of [['right-aligned',tail+tail+' demo-session ──'],['left-aligned','── demo-session '+tail+tail],['centred',tail+' demo-session '+tail],
+  ['long name clipped with an ellipsis',tail+' a-very-long-demo-session-na… ──'],['name with spaces',tail+tail+' demo session two ──'],['indented',' '+tail+' demo-session ──']])
+  assert.deepEqual([...d.claudeStatusRows(named(top),'exact',record)],[5],'named upper border: '+what);
+// Shapes that are not the box's named border keep today's answer: nothing concealed.
+for(const [what,top] of [['no blanks around the text',tail+'demo-session──'],['text at the very start',"demo-session "+tail],['text at the very end',tail+' demo-session'],
+  ['two pieces of text',tail+' demo ── session ──'],['too short a rule','─ demo ─'],['only text','  demo-session  ']]){
+  assert.equal(d.claudeStatusRows(named(top),'exact',record).size,0,'not a named border: '+what);
+}
+// The named line is only an upper border when the prompt row sits directly under it.
+const quotedNamed=[rule,'❯ typed',rule,'● reply',tail+' demo-session ──','  📁 project · ⎇ main · context 42%','  ⏵⏵ auto mode on'];
+assert.equal(d.claudeStatusRows(quotedNamed,'exact',record).size,0,'a named-looking line in the conversation is no box');
+// The lower border stays a plain rule: a named one below the prompt is not a box.
+const namedBelow=[rule,'❯  ',tail+' demo-session ──','  📁 project · ⎇ main · context 42%'];
+assert.equal(d.claudeStatusRows(namedBelow,'exact',record).size,0,'only the upper border may carry a name');
 '''
         result = subprocess.run(['node','-e',script,str(ROOT/'utilities/session-shell/native-display.cjs')],capture_output=True,text=True,timeout=5)
         self.assertEqual(result.returncode,0,result.stderr)
@@ -78,29 +105,23 @@ assert.equal(d.claudeStatusRows(quoted,'exact',record).size,0,'only the rows dir
         sys.path.insert(0, str(ROOT))
         from tools.fleet.session_panel import notice_line
         text = lambda parts: ''.join(t for t, _ in parts)
-        now = 10_000.0
         calm = {'ctx_pct': 40, 'quota_windows': [('5h', 30, None), ('7d', 50, None)]}
-        display = {'human': {'at': now - 300, 'text': 'x'},
-                   'received': [{'at': now - 60, 'sender': '[e7]', 'text': '#1445 병합 가능'}]}
         ask = [{'answerable': True, 'request_state': 'open'}, {'answerable': False}]
         blocked = [{'state': 'attention', 'state_label': 'Needs attention', 'title': 'shell'}]
-        done = [{'state': 'done', 'outcome': 'PASS', 'title': 'shell', 'result_at': now - 10}]
-        self.assertEqual(notice_line(calm, [], [], {}, now), [], 'nothing means an empty line')
-        self.assertIn('1 · Ctrl+]', text(notice_line({**calm, 'ctx_pct': 95}, blocked, ask, display, now)))
-        self.assertIn('95%', text(notice_line({**calm, 'ctx_pct': 95}, blocked, [], display, now)))
-        self.assertIn('85%', text(notice_line({**calm, 'quota_windows': [('5h', 85, None)]}, [], [], display, now)))
-        self.assertIn('Needs attention · shell', text(notice_line(calm, blocked, [], display, now)))
+        done = [{'state': 'done', 'outcome': 'PASS', 'title': 'shell', 'result_at': 10_000.0}]
+        self.assertEqual(notice_line(calm, [], []), [], 'nothing means an empty line')
+        self.assertIn("1 │ Ctrl+]", text(notice_line({**calm, 'ctx_pct': 95}, blocked, ask)))
+        self.assertIn('95%', text(notice_line({**calm, 'ctx_pct': 95}, blocked, [])))
+        self.assertIn('85%', text(notice_line({**calm, 'quota_windows': [('5h', 85, None)]}, [], [])))
+        self.assertIn('Needs attention · shell', text(notice_line(calm, blocked, [])))
         # The common reader's blocked route waits on a person: Fleet's ◑ "answer needed".
         waiting = [{'state': 'blocked', 'state_label': '?', 'title': 'review approval'}]
         from tools.fleet.session_panel import ui_text
-        self.assertEqual(text(notice_line(calm, waiting, [], {}, now)),
+        self.assertEqual(text(notice_line(calm, waiting, [])),
                          '◑ ' + ui_text('fleet.session_block.open') + ' · review approval')
-        self.assertEqual(notice_line(calm, [{**waiting[0], 'state': 'working'}], [], {}, now), [], 'a working route is calm')
-        self.assertIn('PASS', text(notice_line(calm, done, [], display, now)), 'newest news first')
-        self.assertIn('[e7] · #1445', text(notice_line(calm, [], [], display, now)))
-        later = {**display, 'human': {'at': now - 5, 'text': 'next'}}
-        self.assertEqual(notice_line(calm, done, [], later, now), [], 'the next input retires news')
-        self.assertEqual(notice_line(calm, done, [], display, now + 3600), [], 'and so does time')
+        self.assertEqual(notice_line(calm, [{**waiting[0], 'state': 'working'}], []), [], 'a working route is calm')
+        # 2026-11-14: news is no item to do; the ROUTE box and MESSAGES carry it.
+        self.assertEqual(notice_line(calm, done, []), [], 'a route result stays off the line')
 
     def test_structured_route_codes_never_promote_report_prose_or_no_response(self):
         import sys
@@ -161,29 +182,18 @@ assert.equal(d.claudeStatusRows(quoted,'exact',record).size,0,'only the rows dir
  let finish;
  const block=make({changed(){},answer:()=>new Promise(resolve=>finish=resolve),action(){}});
  const item={id:'q',revision:'one',answerable:true,questions:[{id:'q1',question:'Answer?',choices:[]}]};
- block.update([item]);block.enter();block.input(Buffer.from('tdraft'));
+ block.update([item]);block.enter();block.input(Buffer.from('draft'));
  assert.equal(block.waitingForReceipt,false);
  block.input(Buffer.from('\r'));assert.equal(block.waitingForReceipt,false,'in-flight API is not a receipt');
  finish({ok:true,state:'submitted'});await new Promise(resolve=>setImmediate(resolve));
- assert.equal(block.waitingForReceipt,true);
- block.update([item,{...item,id:'new'}]);block.input(Buffer.from('\t'));
+ // Rule 5 (11-14): a sent answer returns the person to the native input, so it holds no delivery.
+ assert.equal(block.focused,false);assert.equal(block.waitingForReceipt,false);
+ block.update([item,{...item,id:'new'}]);block.enter();
  assert.equal(block.waitingForReceipt,false,'another editable question');
- block.input(Buffer.from('tkept'));block.update([{...item,id:'new',revision:'two'}]);
+ block.input(Buffer.from('kept'));block.update([{...item,id:'new',revision:'two'}]);
  assert.equal(block.waitingForReceipt,false,'stale draft remains protected');
 })().catch(e=>{console.error(e);process.exitCode=1;});'''
         result = subprocess.run(['node', '-e', script, str(ROOT/'utilities/session-shell/block-input.cjs')], capture_output=True, text=True, timeout=5)
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_route_evidence_wraps_between_tokens_not_inside_a_head_or_word(self):
-        script = r'''
-const assert=require('node:assert/strict'),v=require(process.argv[1]);
-const value='CI 1234567 SUCCESS [same head]';
-const model={routes:[{title:'Review',state:'working',visibility:{lines:[['CI',value,'info']]}}]};
-const rows=v.render({width:32,height:20,side:true,routeDetail:true,model,questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
-for(const token of ['1234567','SUCCESS','[same','head]'])assert(rows.some(row=>row.includes(token)),token+' split across rows');
-'''
-        result = subprocess.run(['node', '-e', script, str(ROOT / 'utilities/session-shell/panel-view.cjs')],
-                                capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_compact_native_owned_fields_and_long_head_presentation_are_explicit(self):
@@ -203,32 +213,40 @@ for(const token of ['1234567','SUCCESS','[same','head]'])assert(rows.some(row=>r
 const assert=require('node:assert/strict'),v=require(process.argv[1]);
 const id='00000000-0000-4000-8000-000000000052';
 for(const [width,height,side] of [[37,21,true],[80,14,false]])for(const state of ['start','idle','question','focus','draft','restored']){
- const model={model:[{text:'fixture'}],model_value:'fixture',effort_value:'',routes_known:state!=='start',
+ const model={model:[{text:'fixture'}],model_value:'fixture',effort_value:'',routes_known:true,
    status:[[{text:'Full detail '+id}]],summary:[[{text:'shared telemetry'}]],
    routes:state==='start'?[]:[{title:'Current task',state:'working',stages:[{name:'inline',state:'active'}],visibility:{summary:'solo · test? · review? · CI?'}}]};
  const question=['question','focus','draft','restored'].includes(state);
  const args={width,height,side,model,native:{model:'fixture',effort:''},focused:['focus','draft'].includes(state),
-   questions:()=>question?[[{text:'Choose the destination'}],[{text:'1 Current project'}],[{text:state==='draft'?'› My draft':'Ctrl+] answer'}]]:[]};
- const rows=['claude','codex','opencode'].map(harness=>v.render({...args,harness}).rows.map(r=>r.map(p=>p.text).join('')));
+   // 11-15: the panel shows the question's summary (11-16: in the thin rounded QUESTIONS box); the editor (a draft too) reads in the popup.
+   brief:()=>question?{count:1,label:'QUESTIONS',rows:[[{text:'◑ '},{text:'Choose the destination'}],[{text:'  '},{text:'1 Current project'}]],
+     one:[[{text:'◑ '},{text:'Choose the destination'}]],line:[{text:'Choose the destination'}],choices:1}:null};
+ const all=['claude','codex','opencode'].map(harness=>v.render({...args,harness}).rows.map(r=>r.map(p=>p.text).join('')));
+ // Spec rule 29: the top border names the harness (Fleet's session-row head); every other row is the same.
+ all.forEach((rows,i)=>assert(rows[0].includes(['claude','codex','opencode'][i]),state+' top border names its harness'));
+ const rows=all.map(r=>r.slice(1));
  assert.deepEqual(rows[1],rows[0],state+' codex');assert.deepEqual(rows[2],rows[0],state+' opencode');
  const text=rows[0].join('\n');assert(!text.includes(id),state+' default exposes full ID');
- assert(text.includes('fixture · ?'),state+' missing effort placeholder');
- assert(text.includes('Current work'),state+' missing work section');
- if(question){assert(text.includes('│ Choose the destination'),state+' inner padding');}
- if(state!=='start')assert(text.includes('solo · test?'),state+' verification summary missing');
+ // Spec 2026-11-11: an unreported effort is left out, never painted as `?`.
+ assert(text.includes('fixture')&&!text.includes('fixture · ?'),state+' model row');
+ if(question){assert(text.includes('│ ╭─ 1 QUESTIONS ─')&&text.includes('│ │ ◑ Choose the destination')&&text.includes('│ │   1 Current project'),state+' question summary under its label');}
+ // Spec E9 rule 45: beside the native area the count leads its upper-case word.
+ if(state!=='start')assert(text.includes(side?'1 ROUTE':'route 1')&&text.includes('Current task'),state+' route row missing');
+ else assert(!/route/i.test(text),state+' a known-empty route list draws no box');
 }
 '''
         result = subprocess.run(['node', '-e', script, str(ROOT / 'utilities/session-shell/panel-view.cjs')],
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_opencode_settings_offer_the_same_width_and_threshold_as_the_others(self):
+    def test_opencode_settings_offer_the_same_width_as_the_others(self):
+        # Spec rule 49 (d): the fold judgment is one constant, so no harness offers a `threshold`.
         script = r"""
 const assert=require('node:assert/strict'),v=require(process.argv[1]);
 assert.equal(v.nativePanelHit,undefined);assert.equal(v.nativeSidebarColumns,undefined);
 const text=harness=>v.render({width:40,height:21,side:true,harness,model:{labels:{layout:'Layout',width:'Width',threshold:'Threshold'}},
   settings:{value:{...v.defaults},index:0},questions:()=>[]}).rows.flat().map(p=>p.text).join('');
-const opencode=text('opencode');assert(opencode.includes('Width')&&opencode.includes('Threshold'));
+const opencode=text('opencode');assert(opencode.includes('Width')&&!opencode.includes('Threshold'));
 assert(!/fixed 42/.test(opencode));assert.equal(opencode,text('claude'));assert.equal(opencode,text('codex'));
 """
         result = subprocess.run(['node', '-e', script, str(ROOT / 'utilities/session-shell/panel-view.cjs')],

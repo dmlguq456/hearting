@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import copy, hashlib, importlib.util, json, unittest
 from pathlib import Path
 
@@ -108,7 +111,7 @@ def full_field_digest(value):
 class TestTopology(unittest.TestCase):
     def setUp(self): self.r = T.load_registry()
     def test_exact_coverage_and_digest(self):
-        result = T.validate_registry(self.r); self.assertEqual((13, 29), (result["capabilities"], result["recipes"])); self.assertEqual(T.registry_digest(self.r), T.registry_digest(json.loads(json.dumps(self.r, sort_keys=True))))
+        result = T.validate_registry(self.r); self.assertEqual((14, 30), (result["capabilities"], result["recipes"])); self.assertEqual(T.registry_digest(self.r), T.registry_digest(json.loads(json.dumps(self.r, sort_keys=True))))
     def test_missing_coverage(self):
         r=copy.deepcopy(self.r); r["recipes"].pop(); self.assertRaises(T.TopologyError, T.validate_registry, r)
     def test_cycle(self):
@@ -541,6 +544,8 @@ class TestTopology(unittest.TestCase):
     def test_non_owner_nodes_and_parallel_groups_match_frozen_full_field_census(self):
         observed = {}
         for recipe in self.r["recipes"]:
+            if recipe["capability"] == T.UNIT_CAPABILITY:
+                continue  # added after this census was frozen; its shape check is route_unit.test.py
             key = (recipe["capability"], tuple(recipe["modes"]))
             non_owners = [
                 node for node in recipe["standard_plus"]["nodes"]
@@ -764,6 +769,8 @@ class DepthOneFrameNeverReachesWorkerTypeForKindTest(unittest.TestCase):
         for recipe in registry["recipes"]:
             nodes = recipe.get("standard_plus", {}).get("nodes", [])
             for node in nodes:
+                if T.is_unit_template_node(recipe, node):
+                    continue  # its worker type is the unit head's, declared on the realized node (route_unit.test.py)
                 if node.get("kind") in non_owner_kinds:
                     with self.subTest(
                         capability=recipe.get("capability"), node=node.get("id")
@@ -796,6 +803,8 @@ class DepthOneFrameNeverReachesWorkerTypeForKindTest(unittest.TestCase):
         seen = 0
         for recipe in registry["recipes"]:
             for node in recipe.get("standard_plus", {}).get("nodes", []):
+                if T.is_unit_template_node(recipe, node):
+                    continue  # its worker type is the unit head's, declared on the realized node (route_unit.test.py)
                 if (node.get("kind") in non_owner_kinds
                         and node.get("dispatch_depth") == 1):
                     with self.subTest(
@@ -823,7 +832,7 @@ class PartCatalogTest(unittest.TestCase):
     def test_every_recipe_stage_has_one_row_and_a_summary(self):
         T.validate_registry(self.r)
         stages = {f"{r['capability']}:{n['id']}" for r in self.r["recipes"] for n in r["standard_plus"]["nodes"]
-                  if r["capability"] != "route-frame"}  # compiler-internal: never composable, no catalog parts
+                  if r["capability"] not in T.COMPILER_INTERNAL_CAPABILITIES}  # never composable, no catalog parts
         optional = {part for part, row in self.parts.items() if "optional" in row}
         self.assertEqual(set(self.parts), stages | optional)
         self.assertEqual(optional, {"autopilot-lab:diagnose", "autopilot-lab:eval-spec", "autopilot-lab:eval-smoke",

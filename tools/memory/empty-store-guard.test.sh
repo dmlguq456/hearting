@@ -1,4 +1,6 @@
 #!/usr/bin/env sh
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/../run-tests.py" --direct-run bash "$0" "$@"
 . "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/test-isolation.sh"
 hearting_test_isolate
 # Regression: empty-store creation guard (2026-07-22 memory audit P2).

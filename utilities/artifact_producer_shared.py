@@ -11,6 +11,7 @@ import hashlib
 import os
 import re
 import shutil
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
@@ -46,7 +47,9 @@ from artifact_producer_refresh import (
 from artifact_producer_spec import (
     _check_shared_base, _commit_shared, _legacy_adopted_spec_base, _merge_spec_publication,
     _sealed_source_files, _spec_admission_base, _spec_bytes, _spec_inventory,
-    _spec_seed_components, _verified_shared_spec, _verify_exact_spec_publication,
+    _spec_seed_components, _verified_shared_spec, _verified_shared_spec_lazy,
+    shared_revision_read_scope,
+    _verify_exact_spec_publication,
     _verify_spec_publication, component_set, SPEC_BASE_RECEIPT,
 )
 
@@ -603,7 +606,13 @@ def _code_cycle_publication_decision(root: Path, record: Mapping[str, Any],
 
 def _code_spec_tree_changed(root: Path, record: Mapping[str, Any], source_rel: str,
                             source_path: Path, seed: Mapping[str, Any]) -> bool:
-    """Compare only seeded authoring content to its pinned base, not seed metadata/history."""
+    """Compare only seeded authoring content to its pinned base, not seed metadata/history.
+
+    `seed_complete` is the one completion fact every seed writer records. A
+    whole-tree receipt (`spec-transaction` on the bucket top) carries no
+    `component_seeds`; it is as complete as a component receipt, so it is not
+    asked for one (a whole-tree code cycle stayed unpublished on that question).
+    """
     if seed.get("seed_complete") is not True:
         raise ProducerError("shared-base-invalid", "incomplete seed")
     directory = cycle_dir(root, record["campaign_id"], record["cycle_id"], record)
@@ -613,13 +622,6 @@ def _code_spec_tree_changed(root: Path, record: Mapping[str, Any], source_rel: s
                        for row in _spec_inventory(source_tree)]:
         raise ProducerError("source-manifest-mismatch", source_rel)
     components = _spec_seed_components(source_tree)
-    if components is None:
-        states = seed.get("component_seeds")
-        if (not isinstance(states, dict)
-                or any(not isinstance(name, str)
-                       or not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*", name)
-                       or value is not True for name, value in states.items())):
-            raise ProducerError("shared-base-invalid", "incomplete seed")
     reference_id = seed.get("reference_id")
     base_id = _spec_admission_base(root, source_path, reference_id, None)
     base_tree: Mapping[str, bytes] = {}
@@ -677,7 +679,8 @@ def _covered_spec_publication(root, record, source_rel, source_path, seed, refer
             _verify_spec_publication(root, reference, revision, completed=True)
         else:
             _verify_exact_spec_publication(root, reference, revision, completed=True)
-        published, _ = _verified_shared_spec(root, reference["shared_reference_id"], revision_id)
+        # Coverage reads only the files the source changed from its base.
+        published, _ = _verified_shared_spec_lazy(root, reference["shared_reference_id"], revision_id)
         if spec_merge.changes_covered(base, source, published):
             return reference, revision_id, revision, publishing_cycle
     return None
@@ -686,6 +689,20 @@ def _covered_spec_publication(root, record, source_rel, source_path, seed, refer
 def completed_spec_publication(root: Path, *, cycle_id: str, settle: bool = False,
                                references: Optional[Sequence[Mapping[str, Any]]] = None,
                                known_publications: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """Finish publication after the work is complete, without changing its outcome.
+
+    One call proves each immutable shared revision it reads once (see
+    `shared_revision_read_scope`); a caller's enclosing read pass extends that.
+    """
+    with shared_revision_read_scope():
+        return _completed_spec_publication(
+            root, cycle_id=cycle_id, settle=settle, references=references,
+            known_publications=known_publications)
+
+
+def _completed_spec_publication(root: Path, *, cycle_id: str, settle: bool = False,
+                                references: Optional[Sequence[Mapping[str, Any]]] = None,
+                                known_publications: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """Finish publication after the work is complete, without changing its outcome.
 
     Spec routes keep their established primary-artifact contract. Code routes
@@ -888,7 +905,23 @@ def completed_route_spec_publication(route: Mapping[str, Any], *, settle: bool =
     return publication if publication.get("status") != "not-applicable" else result
 
 
-def admit_shared(
+def admit_shared(root: Path, **kwargs: Any) -> Dict[str, Any]:
+    """Admit one shared revision; a new spec revision also asks for the entrance to be drawn again.
+
+    The entrance links each spec topic to its latest revision, so a publication redraws it
+    the way a seal does (`finalize`): best effort, without waiting, outside the admission
+    lock. Neither a slow refresh nor its failure changes the admission."""
+    result = _admit_shared(root, **kwargs)
+    if kwargs.get("kind") == "spec" and result.get("status") == "admitted":
+        try:
+            import artifact_entrance  # lazy: an admission never depends on the entrance
+            artifact_entrance.request_refresh(Path(root))
+        except Exception as exc:  # noqa: BLE001 -- the entrance never changes or fails an admission
+            print(f"artifact_entrance skipped error={type(exc).__name__}", file=sys.stderr)
+    return result
+
+
+def _admit_shared(
     root: Path,
     *,
     cycle_id: str,

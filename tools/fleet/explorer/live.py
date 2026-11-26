@@ -16,7 +16,8 @@ import time
 from .view_model import ExplorerViewModel
 from ..config import ui_text
 from ..display import codex_credits
-from ..model import current_attempt_rank, exec_child_is_wait
+from ..model import current_attempt_rank
+from ..palette import ROUTE_FIELDS
 from .. import route_visibility
 
 HARNESSES = ("claude", "codex", "opencode")
@@ -91,15 +92,18 @@ def _clock(epoch):
         return None
 
 
-def _model_pair(model):
-    """``[text, colour key]`` for a runtime model name, or None when it is unknown."""
+def _model_pair(model, harness=None):
+    """``[text, colour key]`` for a runtime model name, or None when it is unknown.
+
+    ``harness`` is the runtime running it: a model without a family colour wears that
+    harness's hue (``render._model_key``)."""
     name = _text(model)
     if name is None:
         return None
     try:
         from .. import render
         text = render._clean_model(render._dispatch_display_model(name)) or name
-        key = render._model_key(name)
+        key = render._model_key(name, harness=_text(harness))
     except Exception:
         text = name.split(" (", 1)[0]
         key = "fam_other"
@@ -118,7 +122,7 @@ def _session_model_effort(session, state):
     dead row has no live telemetry (bare harness); the runtime's own default effort is ``default``."""
     if state in ("stale", "dead"):
         return None, None
-    model = _model_pair(_get(session, "model", "m"))
+    model = _model_pair(_get(session, "model", "m"), _get(session, "harness", "h"))
     effort = _effort(_get(session, "effort", "e"))
     if effort is None and model is not None and _get(session, "effort_default"):
         effort = "default"
@@ -458,6 +462,10 @@ def _session_records(snapshot, now, resolver):
             **_session_pane(session, delivery_panes),
             "generation": None, "last_clear": None,
             "running": _running(session), "gpu": None, "pane_meta": None, "pane_lines": [],
+            # The CTX line's exact token count and, for a resting session, when its rest began
+            # (its newest transcript write); the line is worded when drawn, no timer keeps it.
+            "tokens": _context_tokens(session),
+            "rest_since": _num(_get(session, "mtime")) if state == "idle" else None,
         }
         if (_get(session, "_resume_attention") == "stopped"
                 and state not in ("working", "dead", "stale") and not record["ask"]):
@@ -527,14 +535,14 @@ def _stage_state(node):
     return _NODE_STAGE.get(node.get("state"), "todo")
 
 
-def _stage_model(model):
+def _stage_model(model, harness=None):
     """A stage's model as the route record names it (``opus`` stays ``opus``): ``[name, colour key]``."""
     name = _text(model)
     if name is None:
         return None
     try:
         from .. import render
-        return [name, render._model_key(name)]
+        return [name, render._model_key(name, harness=_text(harness))]
     except Exception:
         return [name, "fam_other"]
 
@@ -544,7 +552,7 @@ def _stage_record(node):
     stage = {
         "name": _text(node.get("id")) or "·", "st": _stage_state(node),
         "el": _dur(node.get("elapsed_min")), "h": harness,
-        "m": _stage_model(node.get("model")), "e": _effort(node.get("effort")),
+        "m": _stage_model(node.get("model"), harness), "e": _effort(node.get("effort")),
         "gate": bool(node.get("gate_passed")),
     }
     rounds = _num(node.get("route_attempt_round")) or _num(node.get("attempt_round"))
@@ -607,8 +615,8 @@ def _worker_segments(node, resources, state_text=None, owner=None):
         return None
     # The session shell reads these segments too; Fleet draws them in its MODEL cell words.
     segs = [[harness, "hb_" + harness]]
-    pair = _model_pair(node.get("model")) or (
-        _model_pair(_get(owner, "resolved_model", "model")) if owner is not None else None)
+    pair = _model_pair(node.get("model"), harness) or (
+        _model_pair(_get(owner, "resolved_model", "model"), _get(owner, "harness")) if owner is not None else None)
     effort = _effort(node.get("effort")) or (_effort(_get(owner, "effort")) if owner is not None else None)
     if pair:
         segs += [[" (", _SEG_DIM], [pair[0], pair[1]]]
@@ -717,7 +725,14 @@ def _route_subject(rid, record, view, owner, result, chain_nodes):
     if isinstance(request, str):
         # A sealed request's own first line is a literal fallback, not a model
         # summary or an extraction from accumulated session conversation.
-        first = next((line.strip() for line in request.splitlines() if line.strip()), "")
+        # Fleet starts with tools/ alone on sys.path (also in installed layouts).
+        import sys
+        from pathlib import Path
+        utilities = str(Path(__file__).resolve().parents[3] / "utilities")
+        if utilities not in sys.path:
+            sys.path.insert(0, utilities)
+        from work_intent import original_work_request
+        first = next((line.strip() for line in original_work_request(request).splitlines() if line.strip()), "")
         return subject(re.sub(r"^#{1,6}\s+", "", first))
     return None
 
@@ -754,13 +769,63 @@ def _chain_leg_name(node):
     return "frame" if capability == "route-frame" else _short_capability(capability) or "·"
 
 
+def _is_unit_node(node):
+    return _chain_leg_name(node) == "unit"
+
+
+def _chain_links(node, earlier, frames):
+    """Whether ``earlier`` is tied to ``node`` by what the routes themselves recorded: the route it
+    continues (``source_route_id``), a leg of the same approved plan (``route_plan``) or the frame that
+    opened that plan, or the next step of a declared ``--plan``. One tie needs no record: a route opened
+    right after a frame route (``frames``) belongs to that frame, since a frame that ends with nothing to
+    choose leaves the next route to be composed by hand. A route that only sits in the same session or
+    campaign is not otherwise tied. A unit route is nobody's leg and has no legs of its own."""
+    if _is_unit_node(node) or _is_unit_node(earlier):
+        return False
+    plan, before = node.get("route_plan"), earlier.get("route_plan")
+    if node.get("source_route_id") and node["source_route_id"] == earlier.get("route_id"):
+        return True
+    if node.get("planned") and earlier.get("planned"):
+        return True
+    if isinstance(plan, Mapping) and isinstance(before, Mapping):
+        return (plan.get("decision") == before.get("decision") and plan.get("digest") == before.get("digest")
+                and (_num(before.get("index")) or 0) < (_num(plan.get("index")) or 0))
+    frame = frames.get(node.get("route_id"))
+    return earlier.get("capability") == "route-frame" and frame is not None and earlier.get("route_id") == frame
+
+
 def _chain_legs(nodes, rid, own, status, progress):
     """``[[leg, status, progress], ...]``: the frame that opened the route, the latest finished leg
-    of every other capability since it, and the route's own leg."""
+    of every other capability since it, and the route's own leg. Only routes tied to this one by a
+    recorded relation (``_chain_links``) are legs; the others are not part of its work."""
     index = _chain_position(nodes, rid)
     if index is None:
         return [[own, status, progress]] if own else []
-    before = nodes[:index]
+    # ``frames[route]``: the frame a route belongs to without anyone having recorded it. A plan leg's is the
+    # frame that opened its plan (the nearest frame before the plan's first leg, so a frame opened between two
+    # legs is not theirs); any other route's is the route right before it when that is a frame route (unit
+    # routes between are skipped; a frame or unit route has none: frame -> frame needs a record).
+    frames, plan_frame = {}, {}
+    for i, node in enumerate(nodes[:index + 1]):
+        plan = node.get("route_plan")
+        if isinstance(plan, Mapping):
+            key = (plan.get("decision"), plan.get("digest"))
+            if key not in plan_frame:
+                plan_frame[key] = next((nodes[j].get("route_id") for j in range(i - 1, -1, -1)
+                                        if nodes[j].get("capability") == "route-frame"), None)
+            frames[node.get("route_id")] = plan_frame[key]
+        elif node.get("capability") != "route-frame" and not _is_unit_node(node):
+            before = next((nodes[j] for j in range(i - 1, -1, -1) if not _is_unit_node(nodes[j])), None)
+            if before is not None and before.get("capability") == "route-frame":
+                frames[node.get("route_id")] = before.get("route_id")
+    tied, pending = {index}, [index]
+    while pending:
+        later = pending.pop()
+        for i in range(later):
+            if i not in tied and _chain_links(nodes[later], nodes[i], frames):
+                tied.add(i)
+                pending.append(i)
+    before = [nodes[i] for i in sorted(tied) if i != index]
     frame = next((i for i in range(len(before) - 1, -1, -1)
                   if before[i].get("capability") == "route-frame"), None)
     legs = []
@@ -927,7 +992,7 @@ def _frame_leg_displays(jobs):
         rank = _frame_leg_job_rank(job)
         if key not in found or rank > found[key][0]:
             found[key] = (rank, {"harness": _text(_get(job, "harness")),
-                                 "model": _model_pair(_get(job, "resolved_model", "model")),
+                                 "model": _model_pair(_get(job, "resolved_model", "model"), _get(job, "harness")),
                                  "effort": _effort(_get(job, "effort")),
                                  "rank": rank})
     return {key: value for key, (_rank, value) in found.items()}
@@ -960,17 +1025,20 @@ def _context_tokens(job):
     return value if type(value) is int and value >= 0 else None
 
 
-def _route_doer(worker, owner, dead):
+def _route_doer(worker, owner, dead, now=None):
     """Who does the route's work now, for its one-line row: harness, model, effort, context
     (percent, window, or the exact token count when no window is known), the open tool and
     the live sub-agent count. The live worker of the shown stage wins; otherwise the owner
-    attempt (a one-shot route's owner is its worker). A dead route keeps the harness only."""
+    attempt (a one-shot route's owner is its worker). With nothing of a dead or unanswering
+    route running, the attempt's recorded harness, model and effort remain (spec rule 27);
+    its context, tool and sub-agents are no longer read."""
     job = worker if worker is not None else owner
     if job is None:
         return None
     harness = _text(_get(job, "harness"))
     if dead:
-        return {"harness": harness, "model": None, "effort": None, "context": None,
+        return {"harness": harness, "model": _model_pair(_get(job, "resolved_model", "model"), harness),
+                "effort": _effort(_get(job, "effort")), "context": None,
                 "window": None, "tokens": None, "tool": None, "agents": 0}
     pct, window = _context_gauge(job)
     tool = _get(job, "exec_tool")
@@ -978,10 +1046,43 @@ def _route_doer(worker, owner, dead):
     live = _get(job, "liveness") == "working"
     agents = sum(1 for item in (_get(job, "subagents") or ())
                  if _get(item, "active") is True)
-    return {"harness": harness, "model": _model_pair(_get(job, "resolved_model", "model")),
+    doer = {"harness": harness, "model": _model_pair(_get(job, "resolved_model", "model"), harness),
             "effort": _effort(_get(job, "effort")), "context": pct, "window": window,
+            # Spec E9 rule 24: a stage worker (not the owner) does the work now.
+            **({"worker": True} if worker is not None and worker is not owner else {}),
             "tokens": _context_tokens(job) if pct is None else None,
             "tool": tool_name if live else None, "agents": agents if live else 0}
+    # 11-17 (panel route row, CTX and NOW): the session's own NOW, the value Fleet's session rows carry (`_session_records`),
+    # already attached to the job; nothing is read for it.
+    if _text(_get(job, "summary", "now")):
+        doer["now"] = _text(_get(job, "summary", "now"))
+    doer.update(_doer_activity(job, tool if live and tool_name else None, live, now))
+    return doer
+
+
+def _doer_activity(job, tool, live, now=None):
+    """What the doer is on now and just finished, from its own stream read (nothing derived):
+    the open tool's summary and age (only from that call's native start time; a process of
+    the same attempt or executable is no evidence of this call), ``idle_tool`` only when its
+    own native activity was read and showed no call open, and the last finished call as
+    ``after_tool`` (``Edit · utilities/x.py``). Values are the collector's allow-listed
+    summaries; nothing the worker wrote is carried."""
+    out = {}
+    if isinstance(tool, Mapping):
+        target = _text(tool.get("target"))
+        if target:
+            out["target"] = target
+        since = _num(tool.get("since"))
+        if since is not None:
+            out["tool_since"] = since
+            out["tool_age"] = _dur(max(0.0, (time.time() if now is None else now) - since) / 60)
+    elif live and _get(job, "_tool_observed") is True:
+        out["idle_tool"] = True
+    done = _get(job, "last_tool")
+    if isinstance(done, Mapping) and _text(done.get("name")):
+        out["after_tool"] = " · ".join(
+            part for part in (_text(done["name"]), _text(done.get("target"))) if part)
+    return out
 
 
 def _route_records(snapshot, session_rows, session_index, resolver, now):
@@ -997,6 +1098,15 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         view = slot["view"] or {}
         record = slot["record"] or {}
         jobs = slot["jobs"]
+        # The fast first pass left this route's record for the detail pass (the projection
+        # says so): no record here is "not read yet", not "nothing runs". A detail pass that
+        # tried it and did not bring it leaves it unread: unknown as well, no longer to come.
+        deferred = not view and not record and any(
+            getattr(_work(entity), "_details_deferred", False) is True
+            for entity in jobs + slot["sessions"])
+        unread = not view and not record and not deferred and any(
+            getattr(_work(entity), "_details_unread", False) is True
+            for entity in jobs + slot["sessions"])
         expected_owner = _text(record.get("owner_attempt_id"))
         if expected_owner == "-":
             expected_owner = None
@@ -1042,6 +1152,12 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             capability, record,
             _text(view.get("execution_topology")) or _text(record.get("execution_topology")))
         short = "frame" if framed_route else _short_capability(capability)
+        if short == "unit":
+            # A unit route's kind word is what its work is (its field), not how it is run; one that records none keeps `unit`.
+            recorded = _text(view.get("field")) or _text(record.get("field"))
+            short_label = recorded if recorded in ROUTE_FIELDS else short
+        else:
+            short_label = short
         cwd = _text(view.get("cwd")) or _text(record.get("cwd")) or _text(_get(owner, "cwd"))
         repo = (session_row or {}).get("repo") or _repo_of(resolver, cwd)
         owner_state = (session_row or {}).get("state")
@@ -1089,11 +1205,12 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         worker = _worker_segments(worker_node, run_children, state_text,
                                   owner if _runs_node(owner, worker_node) else None)
         dead = state in ("dead", "stale")
-        owner_model = None if dead else (
-            _model_pair(_get(owner, "resolved_model", "model")) if owner is not None else None)
+        # Spec rule 27: the owner's harness, model and effort are what its attempt
+        # recorded when the route started; they stay when nothing of it runs now.
+        owner_model = (_model_pair(_get(owner, "resolved_model", "model"), _get(owner, "harness"))
+                       if owner is not None else None)
         owner_harness = _text(_get(owner, "harness")) if owner is not None else None
-        owner_effort = None if dead else (
-            _effort(_get(owner, "effort")) if owner is not None else None)
+        owner_effort = _effort(_get(owner, "effort")) if owner is not None else None
         worktree = None
         if cwd and ("-wt" in cwd or "/.worktrees/" in cwd):
             worktree = os.path.basename(cwd.rstrip("/")) or None
@@ -1153,8 +1270,8 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
                 worker_context_index = len(worker_contexts)
             context_jobs.append(job)
             worker_contexts.append({"stage": node_id, "harness": _get(job, "harness"),
-                                    "model": _model_pair(_get(job, "resolved_model", "model")),
-                                    "context": pct, "window": window})
+                                    "model": _model_pair(_get(job, "resolved_model", "model"), _get(job, "harness")),
+                                    "context": pct, "window": window, "attempt": attempt})
         resume = None
         if state == "dead":
             resume = next((n.get("id") for n in view_nodes if _stage_state(n) == "failed"), None) or \
@@ -1181,25 +1298,19 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
                        or owner_live in ("working", "idle", "blocked")
                        and total and done != total and (active is not None or not failed))
         running = current and (active is not None or state == "working" or run_children or worker_contexts)
-        # 3cffaf: while a live worker holds the stage, the route row shows the owner's own
-        # state. An owner that is idle, or whose running call is only a wait, has delegated
-        # and is waiting; one doing its own work still reads as running.
-        owner_self = owner_live if owner is not None else owner_state
-        owner_raw = owner if owner is not None else (session_index.get(owner_tag) or {}).get("session")
-        owner_waits = bool(running and (worker_contexts or run_children) and (
-            owner_self == "idle"
-            or owner_self == "working" and exec_child_is_wait(_get(owner_raw, "exec_child"))))
         route = {
             "id": rid, "repo": repo, "session_tag": owner_tag, "title": title, "state": state,
             "outcome": _text(_get(result, "result", "status")),
             "result_at": _num(_get(result, "at")),
             "worker": worker, "age": age, "legs": legs,
             "stages": stages, "resume": resume, "activity": "running" if running else "ended",
-            "loops": None, "worktree": worktree, "tree_label": short,
+            "loops": None, "worktree": worktree, "tree_label": short_label,
             "harness": owner_harness, "model": owner_model, "effort": owner_effort,
             "mode": mode,
             "intensity": intensity,
             "profile": _text(_get(owner, "model_profile", "profile")) if owner is not None else None,
+            # 11-18: the field the route records (``code``, ``lab``, ``docs`` …); the kind word's hue follows it.
+            "field": _text(view.get("field")) or _text(record.get("field")),
             "capability": short, "shape": shape, "past_from": None,
             "worker_stage": worker_stage or "·", "worker_unit": worker_unit,
             "worker_stage_key": None, "worker_step_key": None,
@@ -1207,13 +1318,13 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             "owner_context": ([owner_tokens, None] if owner_tokens is not None else None),
             "owner_gauge": list(owner_gauge),
             "worker_contexts": worker_contexts, "subworker": None,
-            "current": current, "owner_waits": owner_waits,
+            "current": current,
         }
         if worker_context_index is not None:
             route["worker_context_index"] = worker_context_index
         doer_job = (selected_worker if worker_context_index is not None
                     else context_jobs[0] if len(context_jobs) == 1 else None)
-        doer = _route_doer(doer_job, owner, dead)
+        doer = _route_doer(doer_job, owner, dead, now)
         if doer is not None:
             route["doer"] = doer
         if record:
@@ -1234,10 +1345,158 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             if isinstance(verification, Mapping) and verification.get("closed_at"):
                 route["closed"] = True
                 route["resume"] = None
+        if deferred or unread:
+            # Not known: whether it runs, its state and its stages. Never ended, 0 or an empty
+            # rail, never counted or drawn in a running colour. It reads "details wait" only
+            # while the details are still to come (``details_wait``); once tried and not
+            # brought, Fleet's usual unknown marks (``·``, ``?``) stand for it.
+            route.update(state="wait", activity="wait", current=None, stages=None, legs=[],
+                         resume=None, details_wait=deferred)
         routes.append(route)
         nodes[rid] = _node_groups(view_nodes, route, rid, legs, now, done, leg_status,
                                   borrowed_frame_identity)
-    return routes, nodes
+    return _stand_called_units(routes, collected), nodes
+
+
+_CALLED_MARK = {"working": "working", "idle": "idle", "blocked": "blocked", "dead": "dead", "queued": "idle", "stale": "stale"}
+
+
+def _stand_called_units(routes, collected):
+    """A unit leg a worker started stands below its caller's route, not as a route of its own.
+
+    The registry row names the calling worker (``caller_attempt_id``); this follows it to that worker's row and
+    its route, and on while that route is itself a called unit's. A leg whose chain ends at a route that is no
+    called unit's is listed on that route as ``called``, in the order they were called (``caller`` names the
+    attempt each hangs under, so a called unit's own calls nest under it); it is no route in this list, so no
+    count of routes holds it. Only a leg that ended cleanly (``done``) is left out; one that is not running (dead and
+    not yet closed, waiting for a place, not known) stays, with its state. A chain that breaks (the calling row is not read) or turns back on itself leaves
+    the leg as the route it is. Only the rows already read are followed."""
+    at, called = {}, {}
+    for rid, slot in collected.items():
+        for job in slot["jobs"]:
+            attempt = _text(_get(job, "attempt_id"))
+            if attempt is None:
+                continue
+            at.setdefault(attempt, rid)
+            caller = _text(_get(job, "caller_attempt_id"))
+            if caller is not None:
+                called.setdefault(attempt, (rid, job, caller))
+    if not called:
+        return routes
+    by_id = {route["id"]: route for route in routes}
+
+    def root(attempt):
+        seen = set()
+        while attempt in called and attempt not in seen:
+            seen.add(attempt)
+            own, _job, caller = called[attempt]
+            if caller not in at or at[caller] == own:
+                return None
+            if caller not in called:
+                return at[caller]
+            attempt = caller
+        return None
+    gone, listed = set(), {}
+    for attempt, (rid, job, caller) in called.items():
+        top = root(attempt)
+        if top is None or top not in by_id or rid not in by_id or top == rid:
+            continue
+        gone.add(rid)
+        state = _text(_get(job, "liveness")) or "unknown"
+        if state == "done":
+            continue                       # ended cleanly: its line goes (the result reaches its caller)
+        shown, harness = by_id[rid], _text(_get(job, "harness"))
+        order = _num(_get(job, "registry_order"))
+        listed.setdefault(top, []).append((order if order is not None else len(listed.get(top, ())), {
+            "id": rid, "attempt": attempt, "caller": caller, "title": shown.get("title"),
+            "unit": (_text(_get(job, "unit")) or "").rsplit("/", 1)[-1] or None,
+            "kind": shown.get("tree_label"), "field": shown.get("field"),
+            # what is not running and not over still stands (a dead leg not yet closed, one waiting for a place, one not known) with
+            # the mark Fleet's route row gives that state, and its own word
+            "marker": _CALLED_MARK.get(state, "stale"), "state": state,
+            "harness": harness, "model": _model_pair(_get(job, "resolved_model", "model"), harness),
+            "effort": _effort(_get(job, "effort")), "elapsed_min": _num(_get(job, "elapsed_min"))}))
+    for top, items in listed.items():
+        by_id[top]["called"] = [item for _order, item in sorted(items, key=lambda pair: pair[0])]
+    return [route for route in routes if route["id"] not in gone]
+
+
+def _direct_routes(routes, session_rows, session_index, now=None):
+    """The route a session declared with ``--shape direct`` and does itself (11-16).
+
+    A direct route has no job, stage record or worker row, so no route entity carries it and
+    :func:`_route_records` has nothing to read; its one witness is the session's own route chain
+    (``route_chain.current``: the last actual route, its shape and state, after ``finish`` its
+    result). It stands like any route while open (the session is its owner, so it is current
+    while the session is live) and retires by the same rule as a finished one (a ``done`` row
+    with its outcome and time). The row has no stages: the shape ``direct`` is its whole kind.
+    An open declaration older than this session's own process stands for nothing (Fleet's open-route rule,
+    ``route_chain.current_capability``: its ``ts`` is not before the session's start less the marker slack), so
+    a route left unfinished in an earlier run of the same session neither stands nor holds an idle tidy back.
+    Only the session panel reads these rows (Fleet's own route list is not changed)."""
+    from .. import route as route_reader
+    from ..projection import _SPEC_MARKER_FRESHNESS_SLACK_S
+    now = time.time() if now is None else now
+    known = {route.get("id") for route in routes}
+    state_of = {row["tag"]: row.get("state") for row in session_rows}
+    found = []
+    for tag, info in session_index.items():
+        chain = _get(info["session"], "route_chain")
+        node = _get(chain, "current") if isinstance(chain, Mapping) else None
+        rid = _text(node.get("route_id")) if isinstance(node, Mapping) else None
+        if not rid or rid in known or node.get("shape") != "direct" or node.get("automatic"):
+            continue
+        status = node.get("state")
+        result = node.get("result") if isinstance(node.get("result"), Mapping) else None
+        outcome = result_at = None
+        if status in ("open", "finish-pending"):
+            state = state_of.get(tag)
+            if state not in ("working", "idle", "blocked"):
+                continue                    # the owner is the session: no live session, no standing route
+            started = now - (_num(_get(info["session"], "elapsed_min")) or 0) * 60
+            stamp = node.get("ts")
+            if type(stamp) not in (int, float) or stamp < started - _SPEC_MARKER_FRESHNESS_SLACK_S:
+                continue                    # declared before this session process began: an earlier run's, left open
+        elif status == "done" and result is not None:
+            state = "done"
+            outcome, result_at = _text(_get(result, "result", "status")), _num(_get(result, "at"))
+            if outcome is None or result_at is None:
+                continue
+        else:
+            continue
+        record = route_reader.load(_text(node.get("route_file")), None, rid) or {}
+        capability = _text(record.get("capability")) or _text(node.get("capability"))
+        cwd = _text(record.get("cwd"))
+        row = {
+            "id": rid, "repo": (next((r for r in session_rows if r["tag"] == tag), {})).get("repo"),
+            "session_tag": tag,
+            "title": _route_subject(rid, record, {}, None, result,
+                                    [n for n in (chain.get("nodes") or ()) if isinstance(n, Mapping)]),
+            "state": state, "outcome": outcome, "result_at": result_at,
+            "worker": [], "age": None, "legs": [], "stages": [], "resume": None,
+            "activity": "running" if state == "working" else "ended",
+            "loops": None, "worktree": (os.path.basename(cwd.rstrip("/")) or None)
+            if cwd and ("-wt" in cwd or "/.worktrees/" in cwd) else None,
+            "tree_label": _short_capability(capability), "harness": None, "model": None, "effort": None,
+            "mode": _text(record.get("capability_mode")) or _text(node.get("capability_mode")),
+            "intensity": _text(record.get("effective_intensity")) or _text(node.get("intensity")),
+            "profile": None, "capability": _short_capability(capability), "shape": "direct",
+            "field": _text(record.get("field")),
+            "past_from": None, "worker_stage": "·", "worker_unit": None,
+            "worker_stage_key": None, "worker_step_key": None,
+            "owner_context": None, "owner_gauge": [None, None], "worker_contexts": [], "subworker": None,
+            "current": state != "done",
+        }
+        if record:
+            try:
+                row["visibility"] = route_visibility.bounded(route_visibility.describe(record, {}, owner=None))
+            except Exception:
+                pass
+            verification = ((row.get("visibility") or {}).get("codes") or {}).get("verification")
+            if isinstance(verification, Mapping) and verification.get("closed_at"):
+                row["closed"] = True
+        found.append(row)
+    return found
 
 
 def _node_groups(view_nodes, route, rid, legs, now, done, leg_status, borrowed_identity=False):
@@ -1246,6 +1505,8 @@ def _node_groups(view_nodes, route, rid, legs, now, done, leg_status, borrowed_i
         return []
     detail = _parallel_stage_details(view_nodes, now)
     short, mode = route.get("capability"), route.get("mode")
+    unit_route = short == "unit"         # no owner and no mode: its leg band names neither
+    mode = None if unit_route else mode
     name = f"leg {len(legs) or 1} · {short or '·'}{' ' + mode if mode else ''}"
     frame_nodes = [node for node in view_nodes if _is_frame_leg(node)]
     if frame_nodes and (short == "frame" or route.get("shape") == FRAME_ROUTE_SHAPE):
@@ -1256,7 +1517,7 @@ def _node_groups(view_nodes, route, rid, legs, now, done, leg_status, borrowed_i
             line = [[short_id + "  ", "dim"]]
             harness = _text(node.get("harness"))
             if harness:
-                model = _stage_model(node.get("model"))
+                model = _stage_model(node.get("model"), harness)
                 effort = _effort(node.get("effort"))
                 line += _model_segments(harness, model or None, effort if model else None)
             lines.append(line)
@@ -1280,8 +1541,9 @@ def _node_groups(view_nodes, route, rid, legs, now, done, leg_status, borrowed_i
         owner_line.append([" · " + route["age"], "dim"])
     return [{
         "kind": "leg", "n": name, "st": leg_status, "verdict": f"{done}/{len(view_nodes)}",
-        "lines": [owner_line], "detail": detail,
-        "title": [[name, "head"]] + _route_title_line(rid, route, route.get("resume")), "loops": [],
+        "lines": [] if unit_route else [owner_line], "detail": detail,
+        "title": [[name, "head"]] + _route_title_line(rid, route, route.get("resume"), "worker" if unit_route else "owner"),
+        "loops": [],
     }]
 
 
@@ -1390,6 +1652,10 @@ def _repo_status(repos, snapshot, session_rows, session_index, routes, questions
     """
     documents = _get(snapshot, "project_status")
     documents = documents if isinstance(documents, Mapping) else {}
+    waits = _get(snapshot, "answer_waits")
+    raw_waits = _get(waits, "items", default=()) if isinstance(waits, Mapping) else ()
+    raw_by_id = {str(item.get("id")): item for item in raw_waits
+                 if isinstance(item, Mapping) and item.get("id") and not item.get("older")}
     cwds = {}
     for row in session_rows:
         cwd = _text(_get(session_index[row["tag"]]["session"], "cwd"))
@@ -1406,13 +1672,36 @@ def _repo_status(repos, snapshot, session_rows, session_index, routes, questions
                     and (doc is None or found["mtime"] > doc["mtime"])):
                 doc = found
         open_routes = sum(1 for route in routes if route["repo"] == name and route.get("current"))
-        asked = sum(1 for item in questions if item.get("project") == name and not item.get("older"))
+        # Routes not known (details to come, or tried and not brought): never counted, never a 0.
+        route_wait = unknown_kind([unknown_route_kind(route) for route in routes if route["repo"] == name]
+                                  + [row.get("route_wait") for row in session_rows
+                                     if row["repo_id"] == name])
+        asked = sum(1 for item in questions if item.get("project") == name and not item.get("older")
+                    and not item.get("sent"))
         result = (results or {}).get(name) or {}
         done_at = _num(result.get("at")) if result.get("result") == "success" else None
-        if doc is None and not (open_routes or asked or repo.get("done")):
+        if doc is None and not (open_routes or route_wait or asked or repo.get("done")):
             continue
         status = {"routes": open_routes, "questions": asked,
                   "done": repo.get("done"), "done_age": repo.get("age")}
+        if route_wait:
+            status["routes_wait"] = route_wait
+        question_lines = []
+        for question in questions:
+            if question.get("project") != name or question.get("older") or question.get("sent"):
+                continue
+            source = raw_by_id.get(str(question.get("id")))
+            value = source.get("question") if isinstance(source, Mapping) else None
+            if not isinstance(value, str) and isinstance(source, Mapping):
+                detail = source.get("detail")
+                listed = detail.get("questions") if isinstance(detail, Mapping) else None
+                value = (listed[0].get("question") if isinstance(listed, (list, tuple))
+                         and listed and isinstance(listed[0], Mapping) else None)
+            first = str(value or "").splitlines()[0:1]
+            if first and first[0].strip():
+                question_lines.append(first[0].strip()[:100])
+        if question_lines:
+            status["question_lines"] = question_lines[:3]
         if open_routes:
             by_state = route_state_counts(route for route in routes if route["repo"] == name)
             status.update({"routes_running": by_state["running"],
@@ -1438,6 +1727,31 @@ def _repo_status(repos, snapshot, session_rows, session_index, routes, questions
                            and now - item["mtime"] >= STATUS_STALE_DAYS * 86400))
                 for item in tuple(doc.get("campaigns") or ())[:3]]
         repo["status"] = status
+
+
+def _repo_lab(repos, snapshot, session_rows, session_index):
+    """Attach the project's experiment board (``collectors.experiment_status``) as ``lab``.
+
+    The board is the shared summary from ``utilities/experiment_board``; nothing is judged
+    here.  A project whose boards are all hidden (no experiments yet) gets no ``lab``; a
+    broken or unread catalog is a visible board, never an empty one.  Of several sessions'
+    boards (they normally share one root) the first visible one is used.
+    """
+    boards = _get(snapshot, "experiment_status")
+    boards = boards if isinstance(boards, Mapping) else {}
+    cwds = {}
+    for row in session_rows:
+        cwd = _text(_get(session_index[row["tag"]]["session"], "cwd"))
+        if cwd:
+            cwds.setdefault(row["repo_id"], []).append(cwd)
+    for repo in repos:
+        if repo["id"] == UNKNOWN_REPO:
+            continue
+        for cwd in cwds.get(repo["id"], ()):
+            found = boards.get(cwd)
+            if isinstance(found, Mapping) and found.get("visible"):
+                repo["lab"] = found
+                break
 
 
 _OWNER_STATES = frozenset(("live", "successor", "none", "unknown"))
@@ -1554,9 +1868,13 @@ def _question_records(snapshot, session_rows, session_index, now, routes=(), res
             "owner_sid": sid[:8] if sid and not session else None,
             "registered": registered if owner_state == "successor" else None,
             "fold": fold,
+            # The person's answer is on its way (rule 5, 11-14): listed as sent, waiting on no one.
+            "sent": item.get("answer") == "sent",
+            # What that answer waits for when its session cannot take it by itself (`session_block`).
+            "answer_wait": (_text(item.get("answer_wait")) or None) if item.get("answer") == "sent" else None,
         }
         questions.append(record)
-        if session and not older:
+        if session and not older and not record["sent"]:
             session["ask"] = "answer needed"
             marker = "◑" if source == "S2" else "●"
             if session.get("answer_wait_marker") != "●":
@@ -1604,7 +1922,7 @@ def _handover_links(snapshot, session_index, seat_rows, now):
         words = (_text(message.get("summary")) or "").split(" true ", 1)[-1].strip()
         links.append((_epoch_of(message.get("ts")) or 0.0, [
             source, [tag, _text(_get(session_index[tag]["session"], "harness")) or "claude"], "handover",
-            _iso_age(message.get("ts"), now),
+            when_text(_epoch_of(message.get("ts")), now) or None,
             f"clear → {words} ({found.group(1)[:8]} → {found.group(2)[:8]})".replace("  ", " ")]))
     newest = {}
     for stamp, link in links:
@@ -1729,6 +2047,236 @@ def _finish_peers(nodes, edges, session_rows, session_index, routes, handovers, 
     return nodes, edges
 
 
+def when_text(at, now=None):
+    """``HH:MM`` today, ``MM-DD`` on another day: the one time-of-day form (session_line)."""
+    from ..session_line import when_text as shared
+    return shared(at, now)
+
+
+def _not_conversation(kind, harness):
+    """A runtime notice (sent by ``runtime``) and a notice record are no message between two
+    sessions: PEERS and LINKS leave them out (the feed line and route results show them)."""
+    return str(kind or "") == "notice" or str(harness or "") == "runtime"
+
+
+_REQUEST_REF = re.compile(r"peer-request:(rq-[0-9a-f]{6}):\d+:[a-z-]+\Z")
+
+
+def _request_ref(refs):
+    """The request id a message's refs name (``peer-request:<id>:<revision>:<role>``), else None."""
+    for ref in refs or () if isinstance(refs, (list, tuple)) else ():
+        found = _REQUEST_REF.match(ref) if isinstance(ref, str) else None
+        if found:
+            return found.group(1)
+    return None
+
+
+def _peer_observed_requests(snapshot):
+    """The peer observation's sent records and requests (``details._peer_requests``), or {}."""
+    observations = _get(snapshot, "observations", default={}) or {}
+    peers = observations.get("optional:peers") if isinstance(observations, Mapping) else None
+    found = peers.get("messages") if isinstance(peers, Mapping) else None
+    return found if isinstance(found, Mapping) else {}
+
+
+_REQUEST_CLOSED = ("final", "rejected", "cancelled")
+
+
+def _request_closed_at(record):
+    """When a closed request closed: its cancel, else its last answer that was not late."""
+    if record.get("state") == "cancelled":
+        return _num((record.get("cancel") or {}).get("at")) or _num(record.get("updated"))
+    return max((_num(report.get("at")) or 0 for report in record.get("reports") or ()
+                if isinstance(report, Mapping) and not report.get("late")), default=0) or _num(record.get("updated"))
+
+
+def request_state_text(record, now):
+    """``최종 답 21:21`` / ``열림``: the request's work state in the shell panel's words, with
+    the time a closed one closed."""
+    state = str(record.get("state") or "")
+    word = ui_text("fleet.session_panel.request_state_" + state) if state else ""
+    closed = when_text(_request_closed_at(record), now) if state in _REQUEST_CLOSED else ""
+    return (word + " " + closed).strip() if closed else word
+
+
+def _one_request_line(candidates, endpoint, observed, now):
+    """A request and its answers on one ``REQUEST`` link from the requester to the recipient.
+
+    With the request's record (the peer observation's) the link carries its work state in the
+    shell panel's words and its title; without one, a ``request`` and its ``report`` still make
+    one line. Every other link is kept as it was."""
+    records = observed.get("requests") if isinstance(observed.get("requests"), Mapping) else {}
+    built = {}
+    for record in records.values():
+        if not isinstance(record, Mapping) or now is not None and now - float(record.get("updated") or 0) > 86400:
+            continue                                   # the LINKS window (the peer collection's 24 hours)
+        requester, recipient = record.get("requester") or {}, record.get("recipient") or {}
+        src = endpoint(requester.get("session_id"), requester.get("harness"))
+        dst = endpoint(recipient.get("session_id"), recipient.get("harness"))
+        if not (src and dst):
+            continue
+        stamp = float(record.get("created") or 0)
+        key = (repr(src), repr(dst))
+        if key in built and built[key][0] >= stamp:
+            continue
+        title = " ".join(str(record.get("title") or "").split())
+        note = " · ".join(part for part in (request_state_text(record, now), title) if part)
+        built[key] = (stamp, [src, dst, "REQUEST", when_text(stamp, now) or None, note,
+                              {"request": record.get("id"), "state": record.get("state")}])
+    pairs = {frozenset(key) for key in built}
+    kept, pending = [], {}
+    for stamp, link in candidates:
+        kind = str(link[2])
+        if kind not in ("request", "report"):
+            kept.append((stamp, link))
+            continue
+        meta = link[5] if len(link) > 5 and isinstance(link[5], Mapping) else {}
+        ident = meta.get("request")
+        if ident in records or frozenset((repr(link[0]), repr(link[1]))) in pairs:
+            continue                                   # the record's REQUEST line words it once
+        src, dst = (link[0], link[1]) if kind == "request" else (link[1], link[0])
+        key = ident or (repr(src), repr(dst))
+        held = pending.get(key)
+        if held is None or kind == "request" and held[2] != "request" or kind == held[2] and stamp > held[0]:
+            pending[key] = (stamp, [src, dst, "REQUEST", link[3], link[4] if kind == "request" else ""], kind)
+    return kept + list(built.values()) + [(stamp, link) for stamp, link, _kind in pending.values()]
+
+
+def _peer_session_views(session_rows, session_index, now, snapshot):
+    """``{tag: {"messages": [...], "requests": [...]}}`` for the session page, worded by the
+    shell panel's own functions over the same records: the session's received inputs and its
+    own sent ledger records (:func:`peer_message_rows`, a request's own messages left out) and
+    its peer requests (:func:`request_rows`). Only a session with one of them has an entry."""
+    observed = _peer_observed_requests(snapshot)
+    from ..session_line import peer_message_rows
+    from ..session_panel import request_rows
+    tags = {(_get(info["session"], "harness"), ident): tag
+            for tag, info in session_index.items() for ident in info["ids"]}
+
+    def tag_of(harness, sid):
+        return tags.get((harness, sid))
+    owned = set(observed.get("refs") or ())
+    records = observed.get("requests") if isinstance(observed.get("requests"), Mapping) else {}
+    pending = observed.get("rows") if isinstance(observed.get("rows"), Mapping) else {}
+    sent_by = observed.get("sent") if isinstance(observed.get("sent"), Mapping) else {}
+    sides = observed.get("sides") if isinstance(observed.get("sides"), Mapping) else {}
+    views = {}
+    for row in session_rows:
+        info = session_index[row["tag"]]
+        key = f"{row['harness']}:{info['sid']}"
+        display = _get(info["session"], "_prompt_display")
+        received = [item for item in ((display or {}).get("received") or () if isinstance(display, Mapping) else ())
+                    if isinstance(item, Mapping) and not (isinstance(item.get("ref"), str) and item["ref"] in owned)]
+        sent = [item for item in sent_by.get(key) or () if isinstance(item, Mapping)
+                and not _request_ref(item.get("refs"))]
+        messages = (peer_message_rows(received, sent, tag_of, limit=8, now=now, own=(row["harness"], info["sid"]),
+                                      pending_of=pending.get)
+                    if received or sent else [])
+        request_views = []
+        for ident, side in sides.get(key) or ():
+            record = records.get(ident)
+            if not isinstance(record, Mapping):
+                continue
+            refs = [revision.get("transfer_ref") for revision in record.get("revisions") or ()]
+            refs += [report.get("transfer_ref") for report in record.get("reports") or ()]
+            refs.append((record.get("cancel") or {}).get("notice_ref"))
+            request_views.append({"record": record, "side": side, "gone": False, "body": "",
+                                  "rows": {ref: pending.get(ref) for ref in refs if isinstance(ref, str) and ref}})
+        requests = request_rows(request_views, now, tag_of) if request_views else []
+        for request in requests:
+            record = records.get(request.get("id")) or {}
+            other = record.get("recipient" if request.get("side") == "out" else "requester") or {}
+            request["harness"] = other.get("harness") if other.get("harness") in HARNESSES else ""
+            request["opened"] = when_text(_num(record.get("created")), now)
+            request["state_text"] = request_state_text(record, now)
+        if messages or requests:
+            views[row["tag"]] = {"messages": messages, "requests": requests}
+    return views
+
+
+def _steward_targets(session_rows, session_index, tag_by_sid):
+    """``{steward tag: [watched tags]}``: the registered steward relations between two live sessions of
+    one repository, the one reading of "who supervises whom" (the steward columns and the panel's PEERS line)."""
+    harness_of = {row["tag"]: row["harness"] for row in session_rows}
+    repo_of = {row["tag"]: row["repo"] for row in session_rows}
+    steward_targets = {}
+    for row in session_rows:
+        tag = row["tag"]
+        session = session_index[tag]["session"]
+        targets = []
+        for target in (_get(session, "steward_targets") or ()):
+            sid = _text(_get(target, "session_id"))
+            other = tag_by_sid.get(sid)
+            if (other and other in harness_of and other != tag
+                    and repo_of.get(other) == row["repo"] and other not in targets):
+                targets.append(other)
+        if targets:
+            steward_targets[tag] = targets
+    return steward_targets
+
+
+def _registered_tag(harness, sid):
+    """The Fleet number the tag registry holds for a session this pass has no row for, or None."""
+    from ..session_tags import assigned_tag
+    tag = assigned_tag(harness, sid)
+    return str(tag) if tag else None
+
+
+def session_repos(records):
+    """``{"<harness>\\0<session id>": repo name}``: the repository name Fleet puts on each session of a pass (its session
+    row's ``repo``), for each id the session answers to. No read of its own: ``records`` is the pass's ``(rows, index)``."""
+    rows, index = records
+    repo_of = {row["tag"]: row.get("repo") for row in rows}
+    found = {}
+    for tag, info in index.items():
+        repo, harness = repo_of.get(tag), _text(_get(info["session"], "harness", "adapter", "h"))
+        if isinstance(repo, str) and repo and harness:
+            for known in info["ids"]:
+                found[harness + "\0" + str(known)] = repo
+    return found
+
+
+def session_peers(snapshot, now=None, records=None):
+    """``{"<harness>\\0<session id>": {"tag", "supervisors": [[tag, harness]], "targets": [[tag, harness]]}}`` for each
+    session in a supervision relation, from the steward records the snapshot already holds (no read of its own).
+    ``records`` is the ``(rows, index)`` pair a pass has already worked out (``session_route_status``'s
+    ``records_out``); with it the session records are not worked out a second time."""
+    clock = time.time() if now is None else now
+    rows, index = records if records is not None else _session_records(snapshot, clock, _resolver(snapshot))
+    tag_by_sid = {known: tag for tag, info in index.items() for known in info["ids"]}
+    joined = _get(_get(snapshot, "observations", default={}) or {}, "replay_sources", default={}) or {}
+    tag_by_sid.update(_get(joined, "historical_tags", default={}) or {})
+    targets = _steward_targets(rows, index, tag_by_sid)
+    harness_of = {row["tag"]: row["harness"] for row in rows}
+    supervisors = {}
+    for steward, watched in targets.items():
+        for tag in watched:
+            supervisors.setdefault(tag, []).append(steward)
+    found, registered = {}, {}
+    for tag, info in index.items():
+        above = [[t, harness_of.get(t) or ""] for t in supervisors.get(tag, [])]
+        below = [[t, harness_of.get(t) or ""] for t in targets.get(tag, [])]
+        # 11-18: a registered relation is a fact whether or not the other end drew a panel in the last ten minutes. An end
+        # this pass has no row for stands by the number the tag registry already holds for it (a local read, no collection).
+        session = info["session"]
+        for entries, side in ((_get(session, "steward_targets"), below), (_get(session, "steward_parents"), above)):
+            for item in entries or ():
+                sid, other_harness = _text(_get(item, "session_id")), (_text(_get(item, "harness")) or "").lower()
+                if not sid or tag_by_sid.get(sid) in harness_of or sid in info["ids"] or other_harness not in HARNESSES:
+                    continue
+                if (other_harness, sid) not in registered:           # one registry read per end, not one per window
+                    registered[(other_harness, sid)] = _registered_tag(other_harness, sid)
+                other = registered[(other_harness, sid)]
+                if other and other != tag and other not in harness_of and all(other != seen[0] for seen in side):
+                    side.append([other, other_harness])
+        if not (above or below):
+            continue
+        entry = {"tag": tag, "supervisors": above[:8], "targets": below[:16]}
+        for sid in info["ids"]:
+            found[str(_get(info["session"], "harness")) + "\0" + sid] = entry
+    return found
+
+
 def _peer_records(session_rows, session_index, now, snapshot=None):
     tag_by_sid = {known: tag for tag, info in session_index.items() for known in info["ids"]}
     observations = _get(snapshot, "observations", default={}) or {}
@@ -1746,25 +2294,31 @@ def _peer_records(session_rows, session_index, now, snapshot=None):
             return [tag, harness_of.get(tag) or harness]
         return str(sid)[:8] if _text(sid) and _text(harness) else None      # an ended session: its short id
 
+    def observed_at(record):
+        """When a newest-message record was observed: its stamp, else ``now`` less its age."""
+        stamp = _epoch_of(record.get("ts", record.get("at")))
+        if stamp is None and _num(record.get("age_min")) is not None and now is not None:
+            stamp = now - float(record["age_min"]) * 60
+        return stamp
+
     for row in session_rows:
         session = session_index[row["tag"]]["session"]
         me = [row["tag"], row["harness"]]
         received = _get(session, "peer_last_recv")
-        if isinstance(received, Mapping):
+        if isinstance(received, Mapping) and not _not_conversation(received.get("kind"),
+                                                                     received.get("from_harness")):
             other = endpoint(received.get("from_session_id"), received.get("from_harness"))
             if other and _text(received.get("kind")):
-                age = _dur(received.get("age_min"))
-                add([other, me, received["kind"], f"{age} ago" if age else None, ""],
-                    _epoch_of(received.get("ts", received.get("at"))) or
-                    -float(_num(received.get("age_min")) or 0))
+                stamp = observed_at(received)
+                add([other, me, received["kind"], when_text(stamp, now) or None, ""],
+                    stamp or -float(_num(received.get("age_min")) or 0))
         sent = _get(session, "peer_last_sent")
-        if isinstance(sent, Mapping):
+        if isinstance(sent, Mapping) and not _not_conversation(sent.get("kind"), sent.get("to_harness")):
             other = endpoint(sent.get("to_session_id"), sent.get("to_harness"))
             if other and _text(sent.get("kind")):
-                age = _dur(sent.get("age_min"))
-                add([me, other, sent["kind"], f"{age} ago" if age else None, ""],
-                    _epoch_of(sent.get("ts", sent.get("at"))) or
-                    -float(_num(sent.get("age_min")) or 0))
+                stamp = observed_at(sent)
+                add([me, other, sent["kind"], when_text(stamp, now) or None, ""],
+                    stamp or -float(_num(sent.get("age_min")) or 0))
         targets = [t for t in (_get(session, "steward_targets") or ()) if isinstance(t, Mapping) or hasattr(t, "get")]
         for target in targets:
             sid = _text(_get(target, "session_id"))
@@ -1775,9 +2329,7 @@ def _peer_records(session_rows, session_index, now, snapshot=None):
                 continue
             raw_ts = _get(target, "ts", "start_ts")
             stamp = _epoch_of(raw_ts)
-            when = _iso_age(raw_ts, now)
-            if when is None and stamp is not None:
-                when = datetime.datetime.fromtimestamp(stamp).strftime("%m-%d")
+            when = when_text(stamp, now) or None
             live_tag = tag_by_sid.get(sid)
             live_tag = live_tag if live_tag in harness_of else None
             if live_tag:
@@ -1791,20 +2343,27 @@ def _peer_records(session_rows, session_index, now, snapshot=None):
         summary = _text(message.get("summary")) or ""
         if summary in _RECEIPTS or summary.startswith("[notice] action="):
             continue                          # delivery receipts and clear/continue notices are not conversations
+        if _not_conversation(_text(message.get("kind")) or "notice", _get(source, "harness")):
+            continue                          # a runtime notice is no link between two sessions
         src = endpoint(_get(source, "session_id"), _get(source, "harness"))
         dst = endpoint(_get(target, "session_id"), _get(target, "harness"))
         if src and dst:
-            add([src, dst, _text(message.get("kind")) or "notice",
-                 _iso_age(message.get("ts"), now), _text(message.get("summary")) or ""],
-                _epoch_of(message.get("ts")))
+            stamp = _epoch_of(message.get("ts"))
+            link = [src, dst, _text(message.get("kind")) or "notice",
+                    when_text(stamp, now) or None, _text(message.get("summary")) or ""]
+            request = _request_ref(message.get("refs"))
+            if request:
+                link.append({"request": request})
+            add(link, stamp)
     for handover in _get(joined, "history_handovers", default=()) or ():
         if not isinstance(handover, Mapping):
             continue
         src = endpoint(_get(handover, "frm"), _get(handover, "frm_h"))
         dst = endpoint(_get(handover, "to"), _get(handover, "to_h"))
         if src and dst:
-            add([src, dst, "handover", _iso_age(handover.get("ts", handover.get("at")), now), ""],
-                _epoch_of(handover.get("ts", handover.get("at"))))
+            stamp = _epoch_of(handover.get("ts", handover.get("at")))
+            add([src, dst, "handover", when_text(stamp, now) or None, ""], stamp)
+    candidates = _one_request_line(candidates, endpoint, _peer_observed_requests(snapshot), now)
     # Keep the newest observation for each directed endpoint pair and kind; a link needs a live
     # session at one end (two ended sessions talking is history, not the fleet) and two different ends.
     def live_end(end):
@@ -1835,24 +2394,12 @@ def _peer_records(session_rows, session_index, now, snapshot=None):
         if (b, a) in sent and repo_of.get(a) == repo_of.get(b) and a not in paired and b not in paired:
             side_lanes.append(sorted((a, b)))             # the lower tag sits below the higher one
             paired.update((a, b))
-    cross = next(([a, b, re.sub(r" ago$", "", link[3] or "")] for (a, b), link in sent.items()
+    cross = next(([a, b, str(link[3] or "")] for (a, b), link in sent.items()
                   if repo_of.get(a) != repo_of.get(b) and link[3]), None)
     by_repo = {}
     for row in session_rows:
         by_repo.setdefault(row["repo"], []).append(row["tag"])
-    steward_targets = {}
-    for row in session_rows:
-        tag = row["tag"]
-        session = session_index[tag]["session"]
-        targets = []
-        for target in (_get(session, "steward_targets") or ()):
-            sid = _text(_get(target, "session_id"))
-            other = tag_by_sid.get(sid)
-            if (other and other in harness_of and other != tag
-                    and repo_of.get(other) == row["repo"] and other not in targets):
-                targets.append(other)
-        if targets:
-            steward_targets[tag] = targets
+    steward_targets = _steward_targets(session_rows, session_index, tag_by_sid)
     mutual = {(a, b) for (a, b) in sent if (b, a) in sent}
     nodes, steward_columns, ordered_lanes = [], [], []
     for repo, tags in by_repo.items():
@@ -1904,7 +2451,8 @@ def _peer_records(session_rows, session_index, now, snapshot=None):
                 if (upper, lower) in mutual or (lower, upper) in mutual:
                     ordered_lanes.append([upper, lower])
     return nodes, {"links": unique, "cross": [cross] if cross else [],
-                   "side_lanes": ordered_lanes, "steward_columns": steward_columns}
+                   "side_lanes": ordered_lanes, "steward_columns": steward_columns,
+                   "supervision": steward_targets}
 
 
 # -- hosts / compute / usage / memory / system / events ------------------------------------
@@ -2239,6 +2787,81 @@ def current_session_activity(model, candidate, snapshot):
         rows.append(dict(row, **values) if values else row)
         changed = changed or bool(values)
     return model.with_updates(sessions=rows) if changed else model
+
+
+# Display cells one collection may fail to observe; groups move together.
+_UNOBSERVED_CELL_GROUPS = (("model", "effort"), ("context", "window", "context_detail"), ("title",))
+
+
+# A late source in one of these states was tried this generation (it is not "to come").
+_TRIED_STATES = frozenset(("failed", "partial", "timeout", "error", "unavailable"))
+
+
+def mark_details_wait(model, readiness):
+    """A frame shown on the basic collection alone: say which cells are still to come.
+
+    The required details are not in yet, so a cell they fill is marked, never left looking
+    empty (or filled). Session rows with no title carry ``title_wait`` and the TITLE header
+    says "details wait" while any required source is pending. Nothing else changes, and the
+    model is not the last complete one (``mark_published`` and persistence never see it).
+    """
+    pending = (tuple(readiness.get("details_pending") or ())
+               if isinstance(readiness, Mapping) else ())
+    # Only a source not tried yet is "to come": one that ran and failed, timed out or brought a
+    # part leaves its cells to the usual unknown mark (``·``), never a lasting wait.
+    sources = readiness.get("sources") if isinstance(readiness, Mapping) else None
+    sources = sources if isinstance(sources, Mapping) else {}
+    pending = tuple(name for name in pending
+                    if str((sources.get(name) or {}).get("state") or "pending").lower()
+                    not in _TRIED_STATES)
+    if model is None or not pending:
+        return model
+    rows = [dict(row, title_wait=True) if row.get("title") is None
+            and row.get("state") not in {"dead", "stale"} else row for row in model.sessions]
+    system = dict(model.system) if isinstance(model.system, Mapping) else {}
+    system["details_wait"] = True
+    return model.with_updates(sessions=rows, system=system)
+
+
+def retain_unobserved_cells(candidate, published):
+    """Keep a same-process row's shown cells when the new ready pass did not observe them.
+
+    A required source being ready says nothing about model/context/title. A
+    real new value replaces the old one; a changed SID, PID or process birth,
+    a removed row or a dead row receives nothing from the earlier publication.
+    """
+    if candidate is None or published is None:
+        return candidate
+    old_records, new_records = published.source_records or {}, candidate.source_records or {}
+    old_bindings, new_bindings = old_records.get("_detail_bindings", {}), new_records.get("_detail_bindings", {})
+    old_tags, new_tags = old_records.get("_detail_tags", {}), new_records.get("_detail_tags", {})
+    if not old_bindings or not new_bindings:
+        return candidate
+    shown = {row.get("tag"): row for row in published.sessions}
+    previous = {}
+    for ref, binding in new_bindings.items():
+        old = old_bindings.get(ref)
+        if (isinstance(binding, (list, tuple)) and isinstance(old, (list, tuple))
+                and len(binding) >= 4 and tuple(binding[:4]) == tuple(old[:4])
+                and ref in new_tags and old_tags.get(ref) in shown):
+            previous[new_tags[ref]] = shown[old_tags[ref]]
+    rows, retained = [], {}
+    for row in candidate.sessions:
+        old = previous.get(row.get("tag"))
+        updates = {}
+        if old is not None and row.get("state") not in {"dead", "stale"}:
+            for group in _UNOBSERVED_CELL_GROUPS:
+                if row.get(group[0]) is None and old.get(group[0]) is not None:
+                    updates.update({key: old[key] for key in group if key in old})
+        if updates:
+            retained[row["tag"]] = tuple(sorted(updates))
+            rows.append(dict(row, **updates))
+        else:
+            rows.append(row)
+    if not retained:
+        return candidate
+    return candidate.with_updates(sessions=rows,
+                                  source_records={**new_records, "_retained_cells": retained})
 
 
 def current_claude_usage(model, snapshot, now):
@@ -2940,7 +3563,7 @@ def selected_detail(model, detail, *, peer_model=None):
         if ended_seat(seat):
             continue
         by_tag[seat[0]]["generation"] = seat[2]
-        by_tag[seat[0]]["last_clear"] = None if seat[3] == "·" else seat[3].split(" · ")[0]
+        by_tag[seat[0]]["last_clear"] = _clear_when(seat[3])
     panes_result = detail.results.get("panes")
     pane_request = _get(panes_result, "request")
     if tag in by_tag and pane_request is not None and "pane" in pane_request.wants:
@@ -3011,6 +3634,16 @@ def _stamp(epoch, now):
     except (OverflowError, OSError, ValueError):
         return None
     return when.strftime("%m-%d %H:%M")
+
+
+def _clear_when(text):
+    """A seat's clear text (``HH:MM · Nm ago`` / ``MM-DD HH:MM``) in the time-of-day form the
+    screens write: ``HH:MM`` today, ``MM-DD`` on another day; None without one."""
+    text = str(text or "").split(" · ")[0].strip()
+    if not text or text == "·":
+        return None
+    day = re.fullmatch(r"(\d\d-\d\d) \d\d:\d\d", text)
+    return day.group(1) if day else text
 
 
 def _clear_text(entries, now):
@@ -3202,14 +3835,61 @@ def route_marker_state(route):
     """The one route marker every Fleet route row draws: ``working`` (⠏), ``idle`` (● waits),
     ``blocked`` (● answer), ``dead`` (✕), ``done`` (✓) or ``stale`` (◌ no response).
 
-    A route whose worker still runs reads as working; an owner that only waits on its
-    worker reads as waiting, the worker's own line being the one that spins."""
-    if route.get("owner_waits"):
-        return "idle"
+    Spec rule 27: while anything of the route runs, its owner or a worker, it reads as
+    working. A route its reader found with nothing running reads as no response and never
+    spins, as the session tree's mark already reads it."""
+    if route.get("state") == "wait":
+        return "wait"                 # not known (details to come or unread): neither working nor ended
+    state = str(route.get("state") or "")
+    if state == "stale":
+        return "stale"
     if route.get("activity") == "running":
         return "working"
-    state = str(route.get("state") or "")
-    return state if state in ("working", "blocked", "dead", "done", "stale") else "idle"
+    return state if state in ("working", "blocked", "dead", "done") else "idle"
+
+
+def unknown_route_kind(route):
+    """``"wait"`` while a route's details are still to come, ``"unread"`` once a detail pass
+    tried and did not bring them, None for a route that is known."""
+    if route.get("state") != "wait":
+        return None
+    return "wait" if route.get("details_wait") else "unread"
+
+
+def unknown_kind(kinds):
+    """The one unknown mark several routes share: ``"wait"`` while any is still to come, else
+    ``"unread"`` when any was not read, else None (``True`` is an older spelling of wait)."""
+    kinds = [kind for kind in kinds if kind]
+    if not kinds:
+        return None
+    return "unread" if all(kind == "unread" for kind in kinds) else "wait"
+
+
+def route_waits(routes, session_rows, session_index):
+    """Mark the session rows whose route count is not known (``route_wait``: wait or unread).
+
+    A route not known counts for the session it is bound to. One not bound yet may belong to
+    any session whose own route binding is not known either (deferred or unread), so those rows
+    carry it too: no route count reads as a current value (0) before the details are in."""
+    unknown = [(route, unknown_route_kind(route)) for route in routes if unknown_route_kind(route)]
+    if not unknown:
+        return
+    bound = {}
+    for route, kind in unknown:
+        if route.get("session_tag"):
+            bound.setdefault(route["session_tag"], []).append(kind)
+    unbound = unknown_kind([kind for route, kind in unknown if not route.get("session_tag")])
+    for row in session_rows:
+        session = session_index[row["tag"]]["session"]
+        work = _work(session)
+        own = (getattr(work, "_details_deferred", False) is True
+               or getattr(work, "_details_unread", False) is True)
+        kinds = list(bound.get(row["tag"], ()))
+        if unbound and own and row.get("state") not in ("dead", "stale"):
+            kinds.append(unbound)
+        kind = unknown_kind(kinds)
+        if kind:
+            row["route_wait"] = kind
 
 
 def route_state_counts(routes):
@@ -3268,12 +3948,39 @@ def _worker_pieces(worker):
     return pieces[:8]
 
 
-def session_route_status(snapshot, now=None, *, include_details=False):
-    """Question-free labels from the same route records OVERVIEW consumes."""
+def _panel_stage(stage, box=None):
+    """One stage of a route record for the shell panel: its state and its doer's values,
+    with what its box in Fleet's route detail reads (verdict, time, unit, output, note)."""
+    row = {"name": str(stage.get("name") or "")[:64], "st": str(stage.get("st") or "")[:24]}
+    for key, source, limit in (("verdict", "verdict", 32), ("when", "when", 48), ("unit", "unit", 64),
+                               ("out", "out", 160), ("note", "rounds_note", 120), ("says", "says", 160)):
+        value = box.get(source) if isinstance(box, Mapping) else None
+        if isinstance(value, str) and value.strip() and value.strip() != "·":
+            row[key] = value.strip()[:limit]
+    model = stage.get("m")
+    if isinstance(model, (list, tuple)) and model and model[0]:
+        row["m"] = str(model[0])[:64]
+    for key, limit in (("h", 32), ("e", 32), ("el", 32)):
+        if isinstance(stage.get(key), str) and stage[key]:
+            row[key] = stage[key][:limit]
+    if type(stage.get("r")) is int and stage["r"] > 1:
+        row["r"] = stage["r"]
+    if stage.get("gate") is True:
+        row["gate"] = True
+    return row
+
+
+def session_route_status(snapshot, now=None, *, include_details=False, records_out=None):
+    """Question-free labels from the same route records OVERVIEW consumes. ``records_out`` (a list) receives the
+    ``(rows, index)`` session records this call worked out, for a caller that needs them again in the same pass."""
     now = time.time() if now is None else now
     resolver = _resolver(snapshot)
     rows, index = _session_records(snapshot, now, resolver)
-    routes, _ = _route_records(snapshot, rows, index, resolver, now)
+    if records_out is not None:
+        records_out.append((rows, index))
+    routes, route_nodes = _route_records(snapshot, rows, index, resolver, now)
+    # In place: the caller that observes this list (session_line) reads the same rows.
+    routes.extend(_direct_routes(routes, rows, index, now))
     counts, opened = current_route_counts(routes)
     result = {}
     for tag in opened:
@@ -3288,7 +3995,7 @@ def session_route_status(snapshot, now=None, *, include_details=False):
             if isinstance(stage, str) and re.fullmatch(r"[A-Za-z0-9_./-]{1,64}", stage):
                 if stage not in stages:
                     stages.append(stage)
-        label = f"⏳ route {counts[tag]}"
+        label = f"route {counts[tag]}"
         if stages:
             label += " · " + ", ".join(stages[:3])
             if len(stages) > 3:
@@ -3309,17 +4016,56 @@ def session_route_status(snapshot, now=None, *, include_details=False):
                         key=lambda r: r["result_at"], reverse=True)
         selected += recent[:2]
         records = []
-        for route in selected[:8]:
+        # Spec rule 23: every current route (the panel shows them all, scrolling in place).
+        for route in selected:
             row = {key: str(route.get(key) or "")[:320] for key in
-                   ("id", "title", "state", "shape", "worker_stage", "outcome", "repo", "capability")}
-            row["stages"] = [{"name": str(stage.get("name") or "")[:64],
-                              "st": str(stage.get("st") or "")[:24]}
+                   ("id", "title", "state", "shape", "worker_stage", "outcome", "repo", "capability", "field")}
+            # Each stage's box in Fleet's route detail (verdict, time, unit, output, rounds note).
+            boxes = {}
+            for group in (route_nodes or {}).get(route.get("id")) or ():
+                for item in (group.get("detail") or ()) if isinstance(group, Mapping) else ():
+                    if isinstance(item, Mapping) and item.get("n"):
+                        boxes.setdefault(str(item["n"]), item)
+            row["stages"] = [_panel_stage(stage, boxes.get(str(stage.get("name") or "")))
                              for stage in (route.get("stages") or ())[:16]]
+            # The unfolded route's kind, owner and doer lines, as ROUTES reads them: the
+            # same record values, bounded; nothing here is collected a second time.
+            for key in ("mode", "intensity", "profile", "age", "worker_unit", "resume"):
+                if isinstance(route.get(key), str) and route[key]:
+                    row[key] = route[key][:64]
+            row["legs"] = len(route.get("legs") or ())
+            # The route's chain (``frame ✓ → code``), the legs Fleet already reads: name and state only.
+            row["chain"] = [[str(leg[0])[:24], str(leg[1])[:12]] for leg in (route.get("legs") or ())[:6]
+                            if isinstance(leg, (list, tuple)) and len(leg) >= 2]
+            # The note right of the detail band (``detail_after``), as Fleet's route detail reads it.
+            from .pages import _route_after
+            nodes = tuple((route_nodes or {}).get(route.get("id")) or ())
+            after = route["detail_after"] if "detail_after" in route else _route_after(route, nodes)
+            if isinstance(after, str) and after.strip():
+                row["after"] = after.strip()[:200]
+            gauge = route.get("owner_gauge")
+            if isinstance(gauge, (list, tuple)) and gauge and isinstance(gauge[0], (int, float)):
+                row["owner_ctx_pct"] = round(gauge[0], 1)
+            context = route.get("owner_context")
+            if (row.get("owner_ctx_pct") is None and isinstance(context, (list, tuple)) and context
+                    and type(context[0]) is int):
+                row["owner_ctx_tokens"] = context[0]
+            row["worker_contexts"] = [
+                {"stage": str(item.get("stage") or "")[:64], "harness": str(item.get("harness") or "")[:32],
+                 **({"model": str(item["model"][0])[:64]} if isinstance(item.get("model"), (list, tuple))
+                    and item["model"] and item["model"][0] else {}),
+                 **({"ctx_pct": round(item["context"], 1)} if isinstance(item.get("context"), (int, float)) else {}),
+                 # The attempt Fleet chose, so the shell finds this very job again (spec E9 rule 43).
+                 **({"attempt": item["attempt"]} if isinstance(item.get("attempt"), str) and 0 < len(item["attempt"]) <= 128 else {})}
+                for item in (route.get("worker_contexts") or ())[:8] if isinstance(item, dict)]
             row["stage_more"] = max(0, len(route.get("stages") or ()) - 16)
             if type(route.get("result_at")) in (int, float):
                 row["result_at"] = route["result_at"]
             row["worker"] = _worker_pieces(route.get("worker"))
             row["owner"] = _owner_text(route)
+            pair = route.get("model")
+            if isinstance(pair, (list, tuple)) and pair and isinstance(pair[0], str) and pair[0]:
+                row["owner_model"] = pair[0][:64]
             visibility = route.get("visibility")
             if isinstance(visibility, dict) and visibility.get("schema") == "route_visibility_v1" and visibility.get("route_id") == row["id"]:
                 row["visibility"] = {"summary": str(visibility.get("summary") or "")[:160],
@@ -3410,6 +4156,7 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
         sid_of = {row["tag"]: session_index[row["tag"]]["sid"] for row in session_rows}
         session_rows.sort(key=lambda row: position.get(str(sid_of.get(row["tag"])), len(position)))
     routes, nodes = _route_records(snapshot, session_rows, session_index, resolver, clock)
+    route_waits(routes, session_rows, session_index)
     results = _repo_results(snapshot, resolver, clock)
     repos = _repo_records(session_rows, routes, results, clock)
     if not order:
@@ -3426,6 +4173,7 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
     questions, answer_wait_summary = _question_records(snapshot, session_rows, session_index, clock,
                                                        routes=routes, resolver=resolver)
     _repo_status(repos, snapshot, session_rows, session_index, routes, questions, results, clock)
+    _repo_lab(repos, snapshot, session_rows, session_index)
     peer_nodes, peer_edges = _peer_records(session_rows, session_index, clock, snapshot)
     hosts, compute = _host_records(snapshot, session_index)
     gpu_lines = _session_gpu_lines(snapshot, session_index)
@@ -3447,19 +4195,21 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
     peer_nodes, peer_edges = _finish_peers(peer_nodes, peer_edges, session_rows, session_index, routes,
                                            _handover_links(snapshot, session_index, seat_rows, clock),
                                            _routeless_jobs(snapshot, session_index))
+    # The session page's MESSAGES and REQUEST lines travel with the observed peer graph.
+    peer_sessions = _peer_session_views(session_rows, session_index, clock, snapshot)
+    if peer_sessions:
+        peer_edges = dict(peer_edges or {}, sessions=peer_sessions)
     by_tag = {row["tag"]: row for row in session_rows}
     for seat in seat_rows:
         if ended_seat(seat):
             continue
         row = by_tag[seat[0]]
         row["generation"] = seat[2]
-        row["last_clear"] = None if seat[3] == "·" else seat[3].split(" · ")[0]
+        row["last_clear"] = _clear_when(seat[3])
     cleared = _clear_times(snapshot, session_index)
     for row in session_rows:
         if row["last_clear"] is None and row["tag"] in cleared and not any(seat[0] == row["tag"] for seat in seat_rows):
-            when = datetime.datetime.fromtimestamp(cleared[row["tag"]])
-            today = datetime.datetime.fromtimestamp(clock).date()
-            row["last_clear"] = when.strftime("%H:%M" if when.date() == today else "%m-%d %H:%M")
+            row["last_clear"] = when_text(cleared[row["tag"]], clock) or None
     if pane_read:
         tag, read = pane_read
         if _text(read.get("pane")):

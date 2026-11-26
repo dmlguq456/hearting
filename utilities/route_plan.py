@@ -61,8 +61,11 @@ SHAPES = ("direct", "solo", "staged")
 # A leg's optional work size and the shape that fits it. The frame judges the size from its
 # evidence before the shape; an omitted shape follows the size, a different one is kept and shown.
 SIZE_SHAPE = {"one-change": "direct", "one-pass": "solo", "multi-stage": "staged"}
-SHAPE_INTENSITY = {"direct": "direct", "solo": "quick", "staged": "standard", "framed": "standard"}
-INTENSITIES = frozenset(("direct", "quick", "standard", "strong", "thorough", "adversarial"))
+from route_form import (  # noqa: E402,F401
+    FORM_INTENSITIES, INTENSITIES, INTENSITY_SHAPE, SHAPE_INTENSITY, UNIT_CAPABILITY, allowed_intensities,
+    INTENSITY_ORDER, form_of, intensity_mismatch, nearest_allowed, one_shot_owner, route_form, serial_attempt_form, serial_attempt_route,
+    shape_for_intensity, staged_form,
+)
 APPROVAL_KEYS = ("full-run", "deploy", "handback", "preview")
 VALID = "valid"
 _SLUG = re.compile(r"[a-z][a-z0-9-]{0,31}")
@@ -91,11 +94,22 @@ def is_framed_route(route) -> bool:
             and nodes[-1].get("kind") == "runtime-terminal" and nodes[-1].get("terminal") is True)
 
 
+def is_depth0_leg(node) -> bool:
+    """The one judgment for "a depth-1 worker the depth-0 session launches itself, with no owner":
+    a sealed node that carries `launch_authority: depth-0` at dispatch depth 1. Only the frame legs
+    are sealed that way today, so this is true for them alone; an owner, a stage node, an unsealed
+    node, or anything that is not a node reads false. What the leg runs (worker type, unit) is read
+    from the sealed node itself, never inferred from this answer."""
+    depth = node.get("dispatch_depth") if isinstance(node, dict) else None
+    return (isinstance(depth, int) and not isinstance(depth, bool) and depth == 1
+            and node.get("launch_authority") == "depth-0")
+
+
 def frame_legs(route) -> tuple:
     """The frame legs a route declares, in order: both legs of a pair, or the one leg of a framed
     route that runs one."""
     ids = {n.get("id") for n in (route or {}).get("nodes") or [] if isinstance(n, dict)
-           and n.get("worker_type") == "frame" and n.get("dispatch_depth") == 1}
+           and n.get("worker_type") == "frame" and is_depth0_leg(n)}
     return tuple(node for node in FRAME_PAIR if node in ids)
 
 
@@ -103,6 +117,24 @@ def valid_frame_legs(route, legs) -> bool:
     """Whether `legs` is a frame set this route may have: the pair, or `frame` alone on a framed route."""
     legs = set(legs)
     return legs == set(FRAME_PAIR) or (legs == {"frame"} and is_framed_route(route))
+
+
+def frame_signals(request_text="", capability=None) -> list:
+    """The signs that a request's direction is worth settling first, as `(kind, detail)` pairs in
+    a fixed order: a protected path (`core/`, `capabilities/`, `roles/`, `spec/`, a PRD), two or
+    more adapters, or a spec/ship kind. Pure reading of the request; nothing here blocks or
+    seals anything -- `frame_leg_decision` and the compose card's advice line both read it."""
+    text = str(request_text or "")
+    signals = []
+    match = _FRAME_PATH.search(text)
+    if match:
+        signals.append(("protected-path", re.sub(r"[`\n\r]+", "", match.group(0))[:72]))
+    adapters = list(dict.fromkeys(_ADAPTER_PATH.findall(text)))
+    if len(adapters) >= 2:
+        signals.append(("adapters", ",".join(adapters)))
+    if capability in {"autopilot-spec", "autopilot-ship"}:
+        signals.append(("capability", capability))
+    return signals
 
 
 def frame_leg_decision(given_intensity, request_text="", routing_hints=None):
@@ -113,17 +145,12 @@ def frame_leg_decision(given_intensity, request_text="", routing_hints=None):
         raise ValueError("invalid intensity")
     if given_intensity not in {"direct", "quick"}:
         return 2, "explicit", f"--intensity {given_intensity} 표시"
-    text = str(request_text or "")
-    match = _FRAME_PATH.search(text)
-    if match:
-        reason = re.sub(r"[`\n\r]+", "", match.group(0))[:72]
-        return 2, "automatic", f"자동 지킴: --intensity {given_intensity}이지만 과제에 {reason}"
-    adapters = list(dict.fromkeys(_ADAPTER_PATH.findall(text)))
-    if len(adapters) >= 2:
-        return 2, "automatic", f"자동 지킴: --intensity {given_intensity}이지만 과제에 어댑터 둘 이상"
-    hints = routing_hints or {}
-    if hints.get("capability") in {"autopilot-spec", "autopilot-ship"}:
-        return 2, "automatic", f"자동 지킴: --intensity {given_intensity}이지만 과제에 {hints['capability']} 작업"
+    signals = frame_signals(request_text, (routing_hints or {}).get("capability"))
+    if signals:
+        kind, detail = signals[0]
+        what = {"protected-path": detail, "adapters": "어댑터 둘 이상",
+                "capability": f"{detail} 작업"}[kind]
+        return 2, "automatic", f"자동 지킴: --intensity {given_intensity}이지만 과제에 {what}"
     return 1, "explicit", f"간단 표시 --intensity {given_intensity}"
 
 
@@ -344,8 +371,27 @@ def _text(value, *, name, required=False):
     return value.strip()
 
 
-_LEG_FIELDS = frozenset({"capability", "mode", "shape", "size", "graph", "intensity", "cwd", "why",
+_LEG_FIELDS = frozenset({"capability", "mode", "field", "shape", "size", "graph", "intensity", "cwd", "why",
                          "done_when", "verify", "hands_over", "parallel", "extra_stages"})
+
+
+def field_vocabulary() -> tuple:
+    """The registry's field names (`capabilities/topologies.json` `fields`)."""
+    try:
+        return tuple(json.loads((ROOT / "capabilities" / "topologies.json").read_text(encoding="utf-8"))["fields"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return ()
+def one_shot_review_declared(capability) -> bool:
+    """Whether a recipe of `capability` declares the middle cell's review (`one_shot_review`), so `solo`
+    may carry `standard` for it."""
+    try:
+        recipes = json.loads((ROOT / "capabilities" / "topologies.json").read_text(encoding="utf-8"))["recipes"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return any(isinstance(row, dict) and row.get("capability") == capability and "one_shot_review" in row
+               for row in recipes)
+
+
 MAX_DONE_WHEN = 5
 MAX_PLAN_NOTES = 8
 
@@ -448,18 +494,20 @@ def _normal_leg(raw, index, notes=None):
     mode, intensity = raw.get("mode"), raw.get("intensity")
     if mode is not None and (not isinstance(mode, str) or not _MODE.fullmatch(mode)):
         raise ProposalError(f"schema-invalid:legs[{index}].mode")
+    field = raw.get("field")
+    if field is not None and field not in field_vocabulary():
+        # Optional: an unknown field is left out and named; the leg keeps its kind's default field.
+        if notes is not None:
+            notes.append(f"ignored:legs[{index}].field")
+        field = None
     if intensity is not None and (not isinstance(intensity, str) or not _MODE.fullmatch(intensity)):
         raise ProposalError(f"schema-invalid:legs[{index}].intensity")
-    if intensity in INTENSITIES and intensity != SHAPE_INTENSITY[shape]:
-        allowed = {
-            "direct": {"direct"},
-            "solo": {"quick"},
-            "staged": set(INTENSITIES) - {"direct", "quick"},
-        }[shape]
-        if intensity not in allowed:
-            if notes is not None:
-                notes.append(f"ignored:legs[{index}].intensity:{intensity}-for-{shape}")
-            intensity = SHAPE_INTENSITY[shape]
+    allowed = allowed_intensities(shape, one_shot_review_declared(capability))
+    if intensity in INTENSITIES and intensity not in allowed:
+        if notes is not None:
+            notes.append(f"ignored:legs[{index}].intensity:{intensity}-for-{shape}")
+        # The highest intensity the form allows at or below the proposed one, else the form's default.
+        intensity = nearest_allowed(intensity, allowed) or SHAPE_INTENSITY[shape]
     graph = raw.get("graph")
     if graph is not None:
         if shape != "staged":
@@ -471,7 +519,8 @@ def _normal_leg(raw, index, notes=None):
                 raise ProposalError(f"schema-invalid:legs[{index}].graph")
             if set(token.split(":")[:2]) & set(_FRAME_NODES):
                 raise ProposalError(f"leg-invalid:{index}:frame-stage-not-allowed")
-    return {"capability": capability, "mode": mode, "shape": shape, "graph": list(graph) if graph else None,
+    return {"capability": capability, "mode": mode, **({"field": field} if field is not None else {}),
+            "shape": shape, "graph": list(graph) if graph else None,
             "intensity": intensity, "why": _text(raw.get("why"), name=f"legs[{index}].why"),
             **({"size": size} if size is not None else {}),
             **({"cwd": _text(raw["cwd"], name=f"legs[{index}].cwd", required=True)} if "cwd" in raw else {}),
@@ -701,6 +750,47 @@ def evaluate_brief(path, *, root, node, compile_leg, start_approvals) -> dict:
         if notes + facts["notes"]:
             row["read_notes"] = notes + facts["notes"]
     return row
+
+
+def keep_card_copy(row, recorded, *, compile_leg, start_approvals) -> dict:
+    """`row`, with a lower intensity for a leg when the card the person answered showed one, or `row`
+    itself in every other case.
+
+    The caller has already shown that the brief's bytes are the ones the card was made from. This
+    exists for one drift: a card drawn by an earlier runtime showed a `solo` leg of a kind with a
+    one-shot review as `standard`, where this runtime reads the brief's `strong`, `thorough` or
+    `adversarial`; the person chose what the card showed, so that `standard` starts. The legs that start
+    are the brief's own with only that intensity moved: the copy names the row and the intensity and
+    nothing else (its stages, end conditions and fields are never read). Any other difference leaves
+    `row`, and the choice is then not verified."""
+    own = row.get("proposal")
+    try:
+        legs = [_normal_leg(leg, index) for index, leg in enumerate(recorded["legs"])]
+        if (own is None or len(legs) != len(own["legs"]) or recorded.get("summary") != own["summary"]
+                or recorded.get("execution_scope", own["execution_scope"]) != own["execution_scope"]):
+            return row
+        moved = []
+        for card, mine in zip(legs, own["legs"]):
+            if any(card.get(key) != mine.get(key) for key in (*_LEG_KEYS, "why") if key != "intensity"):
+                return row
+            if card.get("intensity") == mine.get("intensity"):
+                moved.append(mine)
+            elif (mine.get("shape") == "solo" and card.get("intensity") == "standard"
+                  and mine.get("intensity") in ("strong", "thorough", "adversarial")
+                  and one_shot_review_declared(mine.get("capability"))):
+                moved.append({**mine, "intensity": "standard"})
+            else:
+                return row
+        if moved == own["legs"]:
+            return row
+        proposal = {**own, "legs": moved}
+        facts = validate_proposal(proposal, compile_leg=compile_leg, start_approvals=start_approvals)
+    except (ProposalError, AttributeError, KeyError, TypeError, ValueError):
+        return row
+    if len(facts["legs"]) != len(moved):
+        return row
+    return {**row, "proposal": {**proposal, "entry_approvals": facts["entry_approvals"]}, "facts": facts,
+            "read_notes": [*dict.fromkeys([*row.get("read_notes", []), *facts["notes"], "card-copy-kept"])]}
 
 
 def _relative(path, root) -> str:

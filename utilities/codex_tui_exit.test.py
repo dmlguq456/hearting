@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """codex_tui_exit: the Codex session's Fleet wait clears when its proven TUI exits."""
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import json
 import os
@@ -34,9 +37,14 @@ class CodexTuiExitTest(unittest.TestCase):
         tui = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.5)"])
         self.addCleanup(tui.wait)
         start = procscan.read_proc_start(tui.pid)
+        from peer_steward_base import peer_message
+        marker = peer_message.steward_marker_path("codex", SID)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps({"harness":"codex", "session_id":SID, "targets":{}}))
         with mock.patch.object(codex, "process_for_thread", return_value=(tui.pid, start)):
             self.assertEqual(codex_tui_exit.watch(SID), 0)
         self.assertIsNone(interaction.read_wait(SID, "codex"))
+        self.assertEqual(json.loads(marker.read_text())["session_end"]["reason"], "tui-exited")
 
     def test_unproven_tui_leaves_the_wait_alone(self):
         with mock.patch.object(codex, "process_for_thread", return_value=None), \

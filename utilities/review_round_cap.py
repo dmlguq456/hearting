@@ -189,58 +189,188 @@ def is_deterministic_check(node):
     return isinstance(node, Mapping) and node.get("completion_gate") in DETERMINISTIC_CHECK_GATES
 
 
+def _recorded_smoke(route, node, jobs):
+    """Read the exact completed smoke payload; stale inputs may be rerun, not reused."""
+    import importlib.util
+    import json
+    from pathlib import Path
+    import dispatch_contract as contract
+    if not route or not node or jobs is None or not is_deterministic_check(node):
+        return None
+    try:
+        marker_path = contract._route_module().completion_dir(route["route_id"], jobs=jobs) / (node["id"] + ".json")
+        marker = json.loads(marker_path.read_text())
+        if any(marker.get(key) != expected for key, expected in (
+                ("route_id", route["route_id"]), ("route_hash", route["route_hash"]), ("node_id", node["id"]))):
+            return None
+        # The existing currency reader proves immutable history and attempt
+        # linkage even when upstream edits superseded this smoke's inputs.
+        currency = contract.gate_currency(route, node, marker_path, marker,
+                                         jobs=jobs, observe=True, allow_source_transition=True)
+        if currency.state not in {"current", "superseded"}:
+            return None
+        evidence = marker["evidence"]
+        path = Path(evidence["path"])
+        path.resolve(strict=True).relative_to(Path(route["artifact_root"]).resolve(strict=True))
+        raw = path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != evidence["sha256"]:
+            return None
+        data = json.loads(raw)
+        bare = {key: value for key, value in data.items() if key != "attestation_hash"}
+        if data.get("attestation_hash") != "sha256:" + hashlib.sha256(json.dumps(
+                bare, sort_keys=True, separators=(",", ":")).encode()).hexdigest():
+            return None
+        if (not isinstance(data.get("command"), list) or not data["command"]
+                or not all(isinstance(arg, str) and arg for arg in data["command"])
+                or Path(data["cwd"]).resolve(strict=True) != Path(route["cwd"]).resolve(strict=True)
+                or not data.get("inputs")
+                or not all(isinstance(item.get("path"), str) and Path(item["path"]).is_absolute()
+                           for item in data["inputs"])):
+            return None
+        spec = importlib.util.spec_from_file_location("_round_smoke", Path(__file__).resolve().parents[1] / "tools/smoke-attestation.py")
+        smoke = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(smoke)
+        return marker_path, marker, path, data, smoke
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def reuse_deterministic_pass(route, node, jobs, budget):
+    """Return existing completion, before another model is invoked or round spent."""
+    from pathlib import Path
+    import dispatch_contract as contract
+    if budget.state not in {"admit", "exhausted"}:
+        return None  # A live, unsettled or blocking attempt retains precedence.
+    recorded = _recorded_smoke(route, node, jobs)
+    if recorded is None:
+        return None
+    marker_path, marker, evidence, data, smoke = recorded
+    # Attestation-only inputs and the execution environment are outside the
+    # node subject epoch. Returning their bytes to A must not revive a PASS
+    # over verdicts recorded since that marker (including a FAIL on B).
+    marker_rounds = (marker.get("round_census") or {}).get("verdict_rounds", 0)
+    if not isinstance(marker_rounds, int) or budget.verdict_rounds > marker_rounds:
+        return None
+    try:
+        if not contract.completion_marker_is_current(route, node, marker_path, marker, jobs=jobs):
+            return None
+        if contract.completion_attempt_readiness(route, node, marker, Path(jobs)).state != "ready":
+            return None
+        smoke.verify(data)
+        smoke.verify_execution_environment(data, data["command"], data["cwd"])
+    except (contract.DispatchContractError, OSError, ValueError, KeyError, TypeError):
+        return None
+    return {"check": "ok", "launch_state": "existing", "reason": "existing-completed-attempt",
+            "child_spawned": "0", "registered": "0", "started": "0",
+            "attempt_id": marker["attempt_id"], "artifact": str(evidence),
+            "next_action": "successor-start", "required_action": "use-current-pass",
+            "review_independence": marker.get("review_independence", "degraded")}
+
+
 def recovery_fields(node_kind, state="exhausted", *, route=None, node=None, jobs=None, route_file=None):
     fields = _review_recovery_fields(node_kind, state, route=route, node=node, jobs=jobs,
                                      route_file=route_file)
+    if is_deterministic_check(node) and fields.get("required_action") == "use-current-pass":
+        # Registry PASS text is not evidence that the current smoke still passes.
+        budget = round_budget(route, node, [])
+        if reuse_deterministic_pass(route, node, jobs, budget) is None:
+            fields = _base_recovery_fields(node_kind, state)
     if (state in {"exhausted", "verdictless-bound"} and is_deterministic_check(node)
             and fields.get("required_action", "report-unresolved-verification")
             == "report-unresolved-verification" and "recovery_complete_command" not in fields):
-        return _deterministic_check_fields(fields, route=route, node=node, route_file=route_file)
+        return _deterministic_check_fields(fields, route=route, node=node, jobs=jobs, route_file=route_file)
     return fields
 
 
-def _deterministic_check_fields(fields, *, route, node, route_file):
-    """Owner-run path for a deterministic gate whose reviewer rounds are spent.
-
-    The check runs again through the existing verification runner and closes
-    through the existing inline completion, whose marker already records
-    `reviewer_kind=owner-inline` with degraded independence. No registered
-    round, approval, or registry edit is added; without a fresh passing
-    attestation the result stays unverified.
-    """
+def _deterministic_check_fields(fields, *, route, node, jobs, route_file):
+    """Replay the existing smoke payload, with no new owner, gate or manual seal."""
     from pathlib import Path
+    import json
     import shlex
     utilities = Path(__file__).resolve().parent
-    tools = utilities.parent / "tools"
-    route_path = route_file
-    if not route_path and isinstance(route, Mapping) and route.get("artifact_root") and route.get("route_id"):
-        try:
-            from route_lineage import canonical_route_path
-            route_path = canonical_route_path(route["artifact_root"], route["route_id"])
-        except (ImportError, OSError, ValueError, KeyError, TypeError):
-            route_path = None
-    attestation = "<current-cycle reviews/smoke-attestation.json>"
-    return {**fields,
-        "recovery_surface": "capability-route complete --inline",
-        "next_action": "owner-inline",
-        "required_action": "run-deterministic-check",
-        "review_independence_when_owner_run": "degraded",
-        "recovery_hint": ("The gate is a deterministic check; the spent budget limits model-reviewer "
-            "re-invocations, not the check. Run it on the current inputs under the verification runner, "
-            "verify the fresh attestation, then complete inline: the marker records owner-inline "
-            "(degraded) independence. A check that cannot run or does not pass stays unverified."),
-        "recovery_run_command": shlex.join([
-            "python3", str(utilities / "verification-background-lease.py"), "--timeout", "<seconds>", "--",
-            "python3", str(tools / "smoke-attestation.py"), "attest", "--input", "<each sealed input>",
-            "--config-manifest", "<sealed config manifest>", "--cwd", "<experiment cwd>",
-            "--output", attestation, "--", "<one-batch smoke command>"]),
-        "recovery_check_command": shlex.join([
-            "python3", str(tools / "smoke-attestation.py"), "verify", "--attestation", attestation]),
-        "recovery_complete_command": shlex.join([
-            "python3", str(utilities / "capability-route.py"), "complete", "--inline",
-            "--route", str(route_path or "<route-file>"), "--node", str(node.get("id")),
-            "--evidence", attestation]),
-    }
+    smoke_tool = utilities.parent / "tools/smoke-attestation.py"
+    result = {**fields, "next_action": "owner-inline", "required_action": "run-deterministic-check",
+              "recovery_surface": "capability-route complete --inline",
+              "review_independence_when_owner_run": "degraded",
+              "recovery_hint": "Run the recorded deterministic check on current inputs, then complete inline with its fresh attestation. Independence is degraded; a failed or unavailable check stays unverified."}
+    recorded = _recorded_smoke(route, node, jobs)
+    if recorded is None:
+        result["recovery_unavailable"] = "recorded-smoke-command-unavailable"
+        return result
+    _marker_path, marker, evidence, data, smoke = recorded
+    try:
+        smoke.verify_execution_environment(data, data["command"], data["cwd"])
+    except (OSError, ValueError, KeyError, TypeError):
+        result["recovery_unavailable"] = "recorded-smoke-environment-unavailable"
+        return result
+    inputs = [item["path"] for item in data["inputs"]]
+    argv = list(data["command"])
+    config_args = []
+    if any(key in data for key in smoke.CONFIG_KEYS):
+        # Existing manifests already bind source and snapshot. Locate the current
+        # one beside the old snapshot; never mint a new seal as recovery work.
+        source = data.get("config_source_path")
+        candidates = set()
+        for item in inputs:
+            candidates.update(Path(item).parent.glob("*.manifest.json"))
+        manifests = []
+        old_manifests = set()
+        for candidate in sorted(candidates):
+            try:
+                manifest = json.loads(candidate.read_text())
+                if (manifest.get("source_path") == source
+                        and manifest.get("snapshot_sha256") == data.get("config_sha256")):
+                    old_manifests.add(str(candidate))
+                if (manifest.get("source_path") == source
+                        and manifest.get("source_sha256") == smoke.digest(source)
+                        and manifest.get("snapshot_sha256") == smoke.digest(manifest["snapshot_path"])):
+                    manifests.append((candidate, manifest))
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+        if not manifests:
+            result["recovery_unavailable"] = "current-sealed-config-manifest-unavailable"
+            return result
+        config_args = ["--config-manifest", str(manifests[-1][0])]
+        # The current manifest contributes its snapshot. Do not preserve an old
+        # snapshot as an extra smoke input when config bytes have changed.
+        old_snapshots = {item["path"] for item in data["inputs"]
+                         if item["path"] != source and item.get("sha256") == data.get("config_sha256")}
+        replacements = {path: str(manifests[-1][1]["snapshot_path"]) for path in old_snapshots}
+        replacements.update({path: str(manifests[-1][0]) for path in old_manifests})
+        replacements = {old: new for old, new in replacements.items() if old != new}
+        rebound = []
+        for arg in argv:
+            # Only replace a whole path operand (also --config=path). Shell
+            # snippets/embedded paths have no safe argv-level rewrite.
+            prefix, sep, value = arg.partition("=") if arg.startswith("-") else ("", "", arg)
+            operand = value if sep else arg
+            resolved = str((Path(data["cwd"]) / operand).resolve())
+            if resolved in replacements:
+                rebound.append((prefix + sep if sep else "") + replacements[resolved])
+            elif any(Path(old).name in arg for old in replacements):
+                result["recovery_unavailable"] = "recorded-smoke-command-binds-old-config"
+                return result
+            else:
+                rebound.append(arg)
+        argv = rebound
+        inputs = [replacements.get(item, item) for item in inputs if item not in old_snapshots]
+    # Never overwrite the marker's immutable command/evidence on a failed
+    # replay. Binding the sibling name to that evidence also protects a PASS
+    # produced by an earlier recheck when the next recheck fails.
+    evidence = evidence.with_name(f"{node['id']}-recheck-{marker['evidence']['sha256']}.json")
+    command = ["python3", str(utilities / "verification-background-lease.py"), "--timeout", "600", "--",
+               "python3", str(smoke_tool), "attest"]
+    for item in inputs:
+        command.extend(["--input", item])
+    command.extend([*config_args, "--cwd", data["cwd"], "--output", str(evidence), "--", *argv])
+    if not route_file:
+        from route_lineage import canonical_route_path
+        route_file = canonical_route_path(route["artifact_root"], route["route_id"])
+    result.update(recovery_run_command=shlex.join(command),
+        recovery_check_command=shlex.join(["python3", str(smoke_tool), "verify", "--attestation", str(evidence)]),
+        recovery_complete_command=shlex.join(["python3", str(utilities / "capability-route.py"), "complete", "--inline",
+            "--route", str(route_file), "--node", node["id"], "--jobs", str(jobs), "--evidence", str(evidence)]))
+    return result
 
 
 def _review_recovery_fields(node_kind, state="exhausted", *, route=None, node=None, jobs=None, route_file=None):

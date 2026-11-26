@@ -2,6 +2,9 @@
 """Isolated A→B service exec keeps one PID, lock and acknowledged duty."""
 
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import importlib.util
 import json
@@ -78,7 +81,9 @@ class ReleaseTransitionTest(unittest.TestCase):
         shutil.copytree(ROOT / "utilities", root / "utilities",
                         ignore=shutil.ignore_patterns("*.test.py", "*.test.sh", "__pycache__", "*.pyc"))
         # The shared card format is runtime data from the portable contract.
-        for relative in ("tools/install", "core", "capabilities"):
+        # Fleet records (session registry, shell attachments) resolve the
+        # recipient's native session, as in an installed release.
+        for relative in ("tools/install", "tools/fleet", "core", "capabilities"):
             shutil.copytree(ROOT / relative, root / relative,
                             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         (root / "RELEASE_VERSION").write_text(version + "\n", encoding="utf-8")

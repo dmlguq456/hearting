@@ -1,4 +1,7 @@
 """Real answer-release tests must never write to the caller's memory paths."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import contextlib
 import importlib.util
 import io
@@ -29,7 +32,7 @@ class MemoryBoundaryTest(unittest.TestCase):
             module = load("memory_boundary_work_start", ROOT / "utilities/work_start.test.py")
             cases = [
                 (module.FrameInterviewStepTest, "test_answers_without_the_envelope_release_the_registered_interview"),
-                (module.FrameInterviewStepTest, "test_the_persons_native_reply_is_recorded_and_the_next_start_takes_it"),
+                (module.FrameInterviewStepTest, "test_a_legacy_native_reply_record_is_still_taken_by_the_next_start"),
                 (module.WF.TestGateSubjectNotCaller, "test_proceed_requires_the_answers_and_records_them"),
             ]
             sentinel = ambient.mem_store / "write-events.jsonl"

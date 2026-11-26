@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import argparse
 import importlib.util
@@ -618,14 +621,78 @@ class TopExceptionProfileTest(unittest.TestCase):
 
     def test_top_is_limited_to_a_registered_depth_one_owner(self):
         PROFILE.validate_registered_profile("top", registered_worker=True, dispatch_depth=1, worker_type="owner")
-        for kwargs in (dict(registered_worker=True, dispatch_depth=2, worker_type="stage"),
-                       dict(registered_worker=True, dispatch_depth=2, worker_type="review"),
+        for kwargs in (dict(registered_worker=True, dispatch_depth=1, worker_type="stage"),
                        dict(registered_worker=True, dispatch_depth=1, worker_type="review"),
+                       dict(registered_worker=True, dispatch_depth=2, worker_type="owner"),
+                       dict(registered_worker=True, dispatch_depth=2, worker_type="support"),
+                       dict(registered_worker=False, dispatch_depth=2, worker_type="stage"),
+                       dict(registered_worker=True, dispatch_depth=3, worker_type="stage"),
                        dict(registered_worker=False, dispatch_depth=1, worker_type="owner"),
                        dict(registered_worker=True, dispatch_depth=1, worker_type="support")):
             with self.subTest(**kwargs), self.assertRaises(PROFILE.ModelProfileError) as refused:
                 PROFILE.validate_registered_profile("top", **kwargs)
             self.assertEqual(refused.exception.reason, "profile-top-depth-forbidden")
+
+    def test_a_registered_depth_two_stage_or_review_worker_passes_the_depth_check(self):
+        # 2026-11-23: the depth check admits the class; `require_top_route` decides per node.
+        for worker_type in ("stage", "review"):
+            PROFILE.validate_registered_profile(
+                "top", registered_worker=True, dispatch_depth=2, worker_type=worker_type)
+
+    def _stage_route(self, tmp, **over):
+        route = {"owner_model_profile": "deep", "effective_intensity": "strong",
+                 "explicit_profiles": {"inspect": "top"},
+                 "nodes": [{"id": "inspect", "kind": "pipeline-stage", "dispatch_depth": 2, "model_profile": "top"},
+                           {"id": "report", "kind": "pipeline-stage", "dispatch_depth": 2, "model_profile": "deep"}]}
+        route.update(over)
+        # one file per route: the refusal table below builds every route before it checks any
+        path = tmp / f"stage-route-{len(list(tmp.glob('stage-route-*.json')))}.json"
+        path.write_text(json.dumps(route), encoding="utf-8")
+        return str(path)
+
+    def test_a_stage_worker_holds_top_only_for_the_node_the_route_sealed_by_name_at_strong_and_above(self):
+        import tempfile
+        tmp = Path(tempfile.mkdtemp())
+        for worker_type in ("stage", "review"):
+            for intensity in ("strong", "thorough", "adversarial"):
+                PROFILE.require_top_route(self._stage_route(tmp, effective_intensity=intensity), profile="top",
+                                          node="inspect", worker_type=worker_type)
+        refused = {
+            "lower intensity (an old route)": self._stage_route(tmp, effective_intensity="standard"),
+            "no intensity": self._stage_route(tmp, effective_intensity=None),
+            "not named by the person": self._stage_route(tmp, explicit_profiles={}),
+            "named for another node": self._stage_route(tmp, explicit_profiles={"report": "top"}),
+            "node sealed something else": self._stage_route(tmp, nodes=[
+                {"id": "inspect", "kind": "pipeline-stage", "dispatch_depth": 2, "model_profile": "deep"}]),
+            "a fan-out leg (launches as support)": self._stage_route(tmp, nodes=[
+                {"id": "inspect", "kind": "map-worker", "dispatch_depth": 2, "model_profile": "top"}]),
+            "a node with no kind": self._stage_route(tmp, nodes=[
+                {"id": "inspect", "dispatch_depth": 2, "model_profile": "top"}]),
+            "node at depth 1": self._stage_route(tmp, nodes=[
+                {"id": "inspect", "kind": "pipeline-stage", "dispatch_depth": 1, "model_profile": "top"}]),
+            "only the owner sealed top": self._stage_route(
+                tmp, owner_model_profile="top", explicit_profiles={},
+                nodes=[{"id": "inspect", "kind": "pipeline-stage", "dispatch_depth": 2, "model_profile": "deep"}]),
+        }
+        for label, path in refused.items():
+            with self.subTest(label), self.assertRaises(PROFILE.ModelProfileError) as mismatch:
+                PROFILE.require_top_route(path, profile="top", node="inspect", worker_type="stage")
+            self.assertEqual(mismatch.exception.reason, "profile-top-route-mismatch")
+        with self.assertRaises(PROFILE.ModelProfileError) as no_node:
+            PROFILE.require_top_route(self._stage_route(tmp), profile="top", worker_type="stage")
+        self.assertEqual(no_node.exception.reason, "profile-top-route-mismatch")
+        with self.assertRaises(PROFILE.ModelProfileError) as unknown:
+            PROFILE.require_top_route(self._stage_route(tmp), profile="top", node="ghost", worker_type="stage")
+        self.assertEqual(unknown.exception.reason, "profile-top-route-mismatch")
+        with self.assertRaises(PROFILE.ModelProfileError) as no_route:
+            PROFILE.require_top_route(None, profile="top", node="inspect", worker_type="stage")
+        self.assertEqual(no_route.exception.reason, "profile-top-route-required")
+        # the owner and frame doors are unchanged by the new class
+        PROFILE.require_top_route(self._stage_route(tmp, owner_model_profile="top"), profile="top", worker_type="owner")
+
+    def test_top_stage_intensity_is_strong_and_above_only(self):
+        self.assertEqual([i for i in ("direct", "quick", "standard", "strong", "thorough", "adversarial", None, "")
+                          if PROFILE.top_stage_intensity(i)], ["strong", "thorough", "adversarial"])
 
     def test_top_requires_the_route_that_sealed_it(self):
         import tempfile
@@ -893,8 +960,8 @@ class FrameTierLadder(unittest.TestCase):
 
     def test_frame_is_a_top_worker_type_and_the_anchor_demand_is_valid(self):
         self.assertEqual(PROFILE.TOP_WORKER_TYPES, frozenset({"owner", "frame"}))
-        # A registered depth-1 frame worker may carry `top`; a depth-2 one
-        # still may not.
+        # A registered depth-1 frame worker may carry `top`; a depth-2 frame
+        # worker still may not (the depth-2 door is the stage/review class).
         PROFILE.validate_registered_profile(
             "top", registered_worker=True, dispatch_depth=1, worker_type="frame")
         with self.assertRaises(PROFILE.ModelProfileError) as deep_frame:

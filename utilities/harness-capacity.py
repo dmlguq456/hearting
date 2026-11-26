@@ -22,6 +22,11 @@ import urllib.request
 
 HARNESSES = ("claude", "codex", "opencode")
 
+# Gauges whose read writes the shared usage cache (`_codex_api_score`, `_opencode_api_score`). The next
+# start's limit judgment (`gauge_limits`) reads that cache, so a read that is left out is a refresh that
+# is left out. Only a gauge that merely reads (Claude's) may be skipped.
+CACHE_WRITING_GAUGES = frozenset({"codex", "opencode"})
+
 
 def _limited(state: str) -> bool:
     return state == "limited" or state.startswith("limited(")
@@ -363,30 +368,83 @@ def _opencode_api_score() -> float | None:
     return _headroom(used)
 
 
-def capacity_report(*, stale_after: int = 3600, now: float | None = None) -> dict[str, dict]:
+def _warm_collectors() -> None:
+    """Import the two networked collectors once, before they are read side by side."""
+    _fleet_collectors()
+    for name in ("codex", "zen_go_usage"):
+        try:
+            __import__("fleet.collectors." + name)
+        except Exception:
+            pass  # the probe itself reports an unusable collector (`collector-unavailable:...`)
+
+
+def capacity_report(*, stale_after: int = 3600, now: float | None = None,
+                    skip: dict[str, str] | None = None) -> dict[str, dict]:
     """Headroom percentages plus where each one came from.
 
     ``scores``: unknown is ``None`` and never invented. ``sources``: ``manual``,
     ``live``, ``cache:<age>s`` (Claude: Fleet's credential-bound account cache, tried
     before the taps), ``cache:<age>s;live=<reason>``, ``rollout;live=<reason>``,
-    ``taps``, ``active-limit`` or ``unknown:<reason>`` — the receipt prints it so
+    ``taps``, ``active-limit``, ``skipped:<why>`` or ``unknown:<reason>`` — the receipt prints it so
     an unknown gauge says why (timeout, http-503, no-auth) instead of nothing.
     ``freshness`` optionally describes admitted Claude tap file mtimes; an mtime
     does not establish when usage was observed.
+
+    ``skip`` maps a harness to why its gauge is not read: a caller that has already ruled the
+    harness out (its usage state is limited, or the harness is named and eligible so no other is
+    asked) never selects on that gauge, so it is not read. Only a gauge that merely reads can be
+    skipped (``CACHE_WRITING_GAUGES`` are always read: a read refreshes the cache the next start's
+    limit judgment uses). A manual score still stands, and an active limit still reads 0 as before.
+
+    The two networked gauges (codex, opencode) are read side by side: each is its own HTTP call
+    with its own timeout, so one start waits for the slower of them, not for both.
     """
     now = time.time() if now is None else now
     manual = _manual_scores()
+    skipped = {name: why for name, why in (skip or {}).items() if name not in CACHE_WRITING_GAUGES}
     scores: dict[str, float | None] = {}
     sources: dict[str, str] = {}
     freshness: dict[str, dict] = {}
-    if "codex" in manual:
-        scores["codex"], sources["codex"] = manual["codex"], "manual"
-    else:
+    networked = {name: probe for name, probe in (("codex", _codex_probe), ("opencode", _opencode_probe))
+                 if name not in manual and name not in skipped}
+    results: dict[str, tuple] = {}
+    errors: dict[str, BaseException] = {}
+
+    def read(name):
+        try:
+            results[name] = networked[name](now, stale_after)
+        except BaseException as exc:  # noqa: BLE001 - re-raised below, as the sequential read raised it
+            errors[name] = exc
+
+    side = None
+    if len(networked) == 2:
         # Active probe first: the rollout gauge only refreshes while codex runs,
         # so on its own it starves an idle harness into permanent unknown.
-        scores["codex"], sources["codex"] = _codex_probe(now, stale_after)
+        _warm_collectors()
+        import threading
+        side = threading.Thread(target=read, args=("codex",), name="capacity-codex")
+        side.start()
+    for name in networked:
+        if side is None or name != "codex":
+            read(name)
+    if side is not None:
+        side.join()
+    if errors:
+        raise next(iter(errors.values()))
+
+    def settle(name):
+        if name in manual:
+            scores[name], sources[name] = manual[name], "manual"
+        elif name in skipped:
+            scores[name], sources[name] = None, "skipped:" + skipped[name]
+        else:
+            scores[name], sources[name] = results[name]
+
+    settle("codex")
     if "claude" in manual:
         scores["claude"], sources["claude"] = manual["claude"], "manual"
+    elif "claude" in skipped:
+        scores["claude"], sources["claude"] = None, "skipped:" + skipped["claude"]
     else:
         # The account's own cached reading first; the per-session taps only when it is
         # absent, stale, or bound to another credential.
@@ -398,10 +456,7 @@ def capacity_report(*, stale_after: int = 3600, now: float | None = None) -> dic
             scores["claude"], sources["claude"] = claude, ("taps" if claude is not None else "unknown:no-fresh-taps")
             if claude is not None and claude_freshness is not None:
                 freshness["claude"] = claude_freshness
-    if "opencode" in manual:
-        scores["opencode"], sources["opencode"] = manual["opencode"], "manual"
-    else:
-        scores["opencode"], sources["opencode"] = _opencode_probe(now, stale_after)
+    settle("opencode")
 
     from dispatch_capacity_evidence import active_limits
     jobs = os.environ.get("AGENT_DISPATCH_JOBS")

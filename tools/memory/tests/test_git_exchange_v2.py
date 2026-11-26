@@ -2,6 +2,9 @@
 """Checkout-free local Git exchange tests for protocol v2."""
 
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import os
 import tempfile
@@ -569,6 +572,108 @@ class BareGitExchangeTest(unittest.TestCase):
                 forbidden_roots=(project,),
             )
         self.assertFalse(exchange_root.exists())
+
+    def _marker_home(self):
+        home = self.root / "home"
+        (home / "state").mkdir(parents=True)
+        return home
+
+    def test_leftover_git_directories_are_not_project_markers(self):
+        import git_exchange_v2
+
+        home = self._marker_home()
+        marker = home / ".git"
+        marker.mkdir()
+        git_exchange_v2.GitExchange(home / "state" / "empty.git", self.remote, ref=REF)
+        (marker / "config.worktree").write_text("[core]\n")
+        git_exchange_v2.GitExchange(home / "state" / "worktree-config.git",
+                                    self.remote, ref=REF)
+
+    def test_real_repository_markers_still_reject_the_exchange_path(self):
+        import git_exchange_v2
+
+        kinds = {}
+        home = self._marker_home()
+        (home / ".git").mkdir()
+        (home / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+        kinds["directory-with-head"] = home
+
+        linked = self.root / "linked"
+        (linked / "state").mkdir(parents=True)
+        (linked / ".git").write_text("gitdir: /somewhere/else\n")
+        kinds["gitdir-file"] = linked
+
+        real = init_bare(self.root / "real-git-dir")
+        pointed = self.root / "pointed"
+        (pointed / "state").mkdir(parents=True)
+        (pointed / ".git").symlink_to(real)
+        kinds["symlink-to-repository"] = pointed
+
+        for name, base in kinds.items():
+            with self.subTest(name):
+                with self.assertRaises(git_exchange_v2.ExchangeError) as caught:
+                    git_exchange_v2.GitExchange(
+                        base / "state" / "exchange.git", self.remote, ref=REF)
+                self.assertEqual(caught.exception.check, "exchange-in-git-tree")
+                self.assertFalse((base / "state" / "exchange.git").exists())
+
+    def test_invalid_git_files_and_links_are_not_project_markers(self):
+        import git_exchange_v2
+
+        cases = {
+            "plain-file": lambda m: m.write_text("not a pointer\n"),
+            "dangling-link": lambda m: m.symlink_to(self.root / "nowhere"),
+            "link-to-empty-dir": lambda m: m.symlink_to(self.root / "empty-dir"),
+        }
+        (self.root / "empty-dir").mkdir()
+        for name, make in cases.items():
+            with self.subTest(name):
+                base = self.root / name
+                (base / "state").mkdir(parents=True)
+                make(base / ".git")
+                git_exchange_v2.GitExchange(
+                    base / "state" / "exchange.git", self.remote, ref=REF)
+
+    def test_failure_label_names_the_check_and_a_shortened_path_only(self):
+        import git_exchange_v2
+
+        home = self._marker_home()
+        (home / ".git").mkdir()
+        (home / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+        saved = os.environ.get("HOME")
+        os.environ["HOME"] = str(home)
+        try:
+            with self.assertRaises(git_exchange_v2.ExchangeError) as at_home:
+                git_exchange_v2.GitExchange(home / "state" / "x.git", self.remote, ref=REF)
+            nested = home / "work" / "secret-project"
+            (nested / ".git").mkdir(parents=True)
+            (nested / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+            with self.assertRaises(git_exchange_v2.ExchangeError) as deeper:
+                git_exchange_v2.GitExchange(nested / "x.git", self.remote, ref=REF)
+            home_label = git_exchange_v2.failure_label(at_home.exception)
+            label = git_exchange_v2.failure_label(deeper.exception)
+        finally:
+            if saved is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = saved
+        self.assertEqual(home_label, "exchange-in-git-tree at ~")
+        self.assertEqual(label, "exchange-in-git-tree at ~/…")
+        self.assertNotIn("secret-project", label)
+        self.assertEqual(git_exchange_v2.failure_label(
+            git_exchange_v2.ExchangeError("free text with a body")), "")
+
+    def test_local_remote_inside_a_real_repository_is_rejected_but_not_inside_debris(self):
+        import git_exchange_v2
+
+        base = self.root / "remote-home"
+        base.mkdir()
+        (base / ".git").mkdir()
+        git_exchange_v2.GitExchange(self.root / "fine.git", base / "remote.git", ref=REF)
+        (base / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+        with self.assertRaises(git_exchange_v2.ExchangeError) as caught:
+            git_exchange_v2.GitExchange(self.root / "nope.git", base / "remote.git", ref=REF)
+        self.assertEqual(caught.exception.check, "remote-in-git-tree")
 
     def test_empty_publish_cannot_hide_deferred_remote_dependency(self):
         missing = make_operation(

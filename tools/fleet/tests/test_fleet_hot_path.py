@@ -18,6 +18,9 @@ Three tick-scoped fixes, each tested here against the measured cause:
    `--remote` TUI client on the same exact managed `--state-dir`; a row that cannot pair
    draws `[--]` instead of a blank slot. Existing tags are never rewritten.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 import os
 import subprocess
@@ -40,6 +43,7 @@ if _UTILITIES not in sys.path:
 
 import artifact_reader as reader                                  # noqa: E402
 import dispatch_contract as D                                     # noqa: E402
+from fixture_processes import unique_attempt_id                   # noqa: E402
 from fleet import projection, render                              # noqa: E402
 from fleet.collectors import codex                                # noqa: E402
 from fleet.collectors import dispatch as dispatch_collector       # noqa: E402
@@ -199,7 +203,7 @@ class ProcessTableScanScopeTest(unittest.TestCase):
         return proc
 
     def test_scope_answers_like_the_single_shot_probes_from_one_walk(self):
-        attempt = "att-fleet-hot-path-scope-fixture"
+        attempt = unique_attempt_id("att-fleet-hot-path-scope-fixture")
         proc = self._spawn_tagged(attempt)
         identity = dict(D.process_launch_identity(os.getpid()), attempt_id=attempt)
         single = None

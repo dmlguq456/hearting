@@ -2,6 +2,9 @@
 """Tests for the one-shot Claude interactive owner completion bridge."""
 
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import ast
 import contextlib
@@ -604,7 +607,10 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         )
         message = rewake.receipt(launch, "ready", "terminal-quiescent", self.root)
         self.assertIn("attempt_id=att-owner-1", message)
-        self.assertIn("Do not start or re-arm Background Bash", message)
+        # The no-waiting rule is every adapter bootstrap's; the receipt does not repeat it.
+        self.assertNotIn("re-arm Background Bash", message)
+        bootstrap = (Path(__file__).resolve().parents[1] / "adapters/claude/CLAUDE.md").read_text(encoding="utf-8")
+        self.assertIn("Do not build your own waiting: no sleep or poll loops, background watchers", bootstrap)
         self.assertIn("required_action=inspect-done-failure", message)
         self.assertIn("state=attention", message)
         self.assertIn("Hearting dispatch requires attention", message)
@@ -757,6 +763,21 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
             self.jobs.read_text(encoding="utf-8").count("classifier_source=marker-bound-delivery-v1"),
             1,
         )
+
+    def test_success_receipt_close_directive_asks_only_the_persons_decision(self) -> None:
+        self.write_marker_bound_owner()
+        launch = rewake.parse_launch(self.payload())
+        assert launch is not None
+        with mock.patch.object(rewake, "_sealed_summary", return_value="[완료 요약] fixture"):
+            _state, message = rewake.classified_receipt(
+                launch, "attention", "terminal-failure-or-unclosed", self.root)
+        flat = " ".join(message.split())
+        # The receipt points at the §0.5 close contract, which the bootstrap and WORKFLOW hold.
+        self.assertIn("Close per §0.5", flat)
+        self.assertIn("do not reproduce it for the person", flat)
+        self.assertNotIn("at most one decision", flat)
+        workflow = (Path(__file__).resolve().parents[1] / "core/WORKFLOW.md").read_text(encoding="utf-8")
+        self.assertIn("### 0.5. Post-Execution Completion Report", workflow)
 
     def test_marker_open_row_failed_advance_is_nonblocking_attention(self) -> None:
         self.write_marker_bound_owner()
@@ -1053,12 +1074,15 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         self.assertIn("--attempt-id att-owner-1", message)
         self.assertIn("--status open --mark-done", message)
 
-    def test_receipt_prefers_the_sealed_launch_home_over_a_mutable_root(self) -> None:
+    def test_receipt_names_the_shared_harvest_entry_point_not_a_mutable_root(self) -> None:
+        # The open-row line names this tree's shared entry point on every
+        # harness (PG-35), never the Codex wrapper and never a mutable
+        # AGENT_HOME checkout the hook may have inherited.
         launch = rewake.parse_launch(self.payload())
         assert launch is not None
         sealed_home = self.root / "sealed-release"
-        (sealed_home / "adapters" / "codex" / "bin").mkdir(parents=True)
-        (sealed_home / "adapters" / "codex" / "bin" / "preflight.sh").write_text("#!/bin/sh\n")
+        (sealed_home / "core").mkdir(parents=True)
+        (sealed_home / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
         self.jobs.write_text(
             "2026-08-06T00:00:00Z\topen\t/repo\t/wt\towner\t"
             f"attempt_schema_version=2,attempt_id=att-owner-1,launch_home={sealed_home}\n",
@@ -1067,39 +1091,25 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         mutable_root = self.root / "mutable-checkout"
         mutable_root.mkdir()
         message = rewake.receipt(launch, "attention", "terminal-quiescent", mutable_root)
-        self.assertIn(
-            str(sealed_home / "adapters" / "codex" / "bin" / "preflight.sh"),
-            message,
-        )
+        commands = JOIN.harvest_command_lines(message)
+        self.assertEqual(len(commands), 1, message)
+        self.assertEqual(shlex.split(commands[0])[:2],
+                         ["python3", str(JOIN.ROOT / "utilities" / "dispatch-harvest.py")])
+        self.assertNotIn("/adapters/", message)
         self.assertNotIn(str(mutable_root), message)
-
-    def test_receipt_falls_back_to_root_when_launch_home_is_absent(self) -> None:
-        launch = rewake.parse_launch(self.payload())
-        assert launch is not None
-        self.jobs.write_text(
-            "2026-08-06T00:00:00Z\topen\t/repo\t/wt\towner\t"
-            "attempt_schema_version=2,attempt_id=att-owner-1\n",
-            encoding="utf-8",
-        )
-        message = rewake.receipt(launch, "attention", "terminal-quiescent", self.root)
-        self.assertIn(
-            str(self.root / "adapters" / "codex" / "bin" / "preflight.sh"),
-            message,
-        )
 
     def test_sealed_launch_home_harvest_is_admitted_after_release_rotation(self) -> None:
         # SD-115 axis 4 R1 (conditional, plan.md §8): once (a) seals a row's
         # `launch_home` to the resolved OLD release, a rotation that moves
-        # `current`/AGENT_HOME/ROOT to a NEW release means the harvest
-        # command this hook renders (naming the OLD sealed release's
-        # preflight.sh) must still be admitted by the supervisor's own
-        # command guard -- `dispatch_completion_join.py`'s
-        # `_local_contract_path` -- not just rendered by this hook.
+        # `current`/AGENT_HOME/ROOT to a NEW release means a harvest command
+        # naming the OLD sealed release's shared entry point must still be
+        # admitted by the supervisor's own command guard --
+        # `dispatch_completion_join.py`'s `_local_contract_path`.
         launch = rewake.parse_launch(self.payload())
         assert launch is not None
         sealed_home = self.root / "sealed-old-release"
-        (sealed_home / "adapters" / "codex" / "bin").mkdir(parents=True)
-        (sealed_home / "adapters" / "codex" / "bin" / "preflight.sh").write_text("#!/bin/sh\n")
+        (sealed_home / "utilities").mkdir(parents=True)
+        (sealed_home / "utilities" / "dispatch-harvest.py").write_text("", encoding="utf-8")
         (sealed_home / "core").mkdir()
         (sealed_home / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
         self.jobs.write_text(
@@ -1111,14 +1121,9 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         (new_release / "core").mkdir(parents=True)
         (new_release / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
 
-        message = rewake.receipt(launch, "attention", "terminal-quiescent", new_release)
-        commands = JOIN.harvest_command_lines(message)
-        self.assertEqual(len(commands), 1, message)
-        harvest_line = commands[0]
-        # The command this hook renders does name the sealed OLD release --
-        # that half of the pipeline already works (see the sibling
-        # `test_receipt_prefers_the_sealed_launch_home_over_a_mutable_root`).
-        self.assertIn(str(sealed_home), harvest_line)
+        harvest_line = (f"python3 {sealed_home / 'utilities' / 'dispatch-harvest.py'} "
+                        f"--jobs {self.jobs} --attempt-id att-owner-1 --status open --mark-done")
+        self.assertEqual(JOIN.harvest_command_lines(harvest_line), [harvest_line])
 
         with mock.patch.dict(os.environ, {"AGENT_HOME": str(new_release)}, clear=False), \
              patch_split(JOIN, "ROOT", new_release):
@@ -1678,11 +1683,12 @@ class RegistryConfirmArmTest(unittest.TestCase):
              mock.patch.object(rewake.sys, "stderr", io.StringIO()):
             self.assertEqual(rewake.main(), 0)
         self.assertEqual(self.ledger("att-owner-1")["state"], "lapsed")
-        self.assertIsNone(self.arm())  # the settling process is still alive for an instant
-        self.holder_exited("att-owner-1")
+        # Nobody waits on a lapsed arm, even while the settling process is still
+        # alive for an instant (RV-PR1565: a boundary wait lives on after lapsing rows).
         launch = self.arm(self.payload(tool_input={"command": "git status"}))
         assert launch is not None
         self.assertEqual(launch.armed, "registry-rearm")
+        self.assertIsNone(self.arm())  # the re-armed wait is held by a live process
 
     def test_foreign_stale_or_sessionless_input_never_arms(self) -> None:
         self.jobs.write_text(self.row(parent_sid="session-2"), encoding="utf-8")
@@ -1782,11 +1788,17 @@ from split_module_fixture import patch_split  # noqa: E402
 import dispatch_completion_join as JOIN  # noqa: E402
 
 
-# The Codex courier's interrupted-start gate reads the visible pane once; an empty
-# input box (same shape as peer_steward.test.py CODEX_EMPTY) lets it start.
-CODEX_SCREEN_READ = ("agent", "read", "w1:p9", "--source", "visible", "--format", "ansi")
-CODEX_EMPTY_SCREEN = ("recap line\n\n\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n"
-                      "  proj · master · Context 85% used\n")
+import peer_session_fixture  # noqa: E402
+
+
+def _install_session_bridge(test, steward):
+    """Live sessions for ``peer_address`` come from the mocked ``agent list`` reply;
+    no Codex thread owner is read from this machine's processes."""
+    import peer_address
+    test.enterContext(mock.patch.object(peer_address, "native_sessions", peer_address.native_sessions))
+    peer_session_fixture.install(steward)
+    from fleet.collectors import codex as codex_collector
+    test.enterContext(mock.patch.object(codex_collector, "process_for_thread", return_value=None))
 
 
 class CarrierOneClaimGateTest(unittest.TestCase):
@@ -1970,9 +1982,6 @@ class CarrierOneClaimGateTest(unittest.TestCase):
     def test_original_retained_duty_follows_confirmed_handover(self):
         self._check_lost_carrier_completion(recipient_sid="session-2")
 
-    def test_changed_pane_does_not_receive_or_complete_retained_duty(self):
-        self._check_lost_carrier_completion(changed_pane=True)
-
     def test_a_live_native_holder_cannot_suppress_wake_after_its_parent_died(self):
         self._check_lost_carrier_completion(live_holder=True)
 
@@ -2005,6 +2014,7 @@ class CarrierOneClaimGateTest(unittest.TestCase):
         from dispatch_session_sweep import activate, sweep_deliver
         self.enterContext(mock.patch.dict(os.environ, {"AGENT_PEER_LEDGER_ROOT": str(self.root)}))
         self.enterContext(mock.patch.object(steward.peer_obligations, "ensure_normal_runner"))
+        _install_session_bridge(self, steward)
         # The recipient is a restorable native session: activation happens
         # while its agent is unavailable, then the same session becomes
         # available below. Keep the recorded parent process live for this
@@ -2058,11 +2068,6 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                     elif command[:2] == ["pane", "process-info"]:
                         self.assertEqual(command[command.index("--pane") + 1], "w1:p9")
                         payload = {"result": {"process_info": process_info}}
-                    elif harness == "codex" and command == list(CODEX_SCREEN_READ):
-                        # The Codex courier reads the visible screen once, read-only, as
-                        # its interrupted-start gate; answer with an empty input box.
-                        return subprocess.CompletedProcess(
-                            argv, 0, stdout=CODEX_EMPTY_SCREEN, stderr="")
                     else:
                         self.fail(f"unexpected herdr observation request: {command!r}")
                     return subprocess.CompletedProcess(
@@ -2118,15 +2123,14 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                         text, {"harness": harness, "session_id": "session-1"}, include_ref=True
                     )["transfer_ref"]
                     if harness == "claude":
-                        # Claude's existing UserPromptSubmit context carrier emits the exact
-                        # pending row; context emission is still not receiver acknowledgement.
+                        # No Claude hook carries the runner's copy of a completion (the rewake
+                        # sends the completion; the copy is for a resting session). The shell
+                        # injects it, and the prompt hook receives that prompt.
                         stream = io.StringIO()
                         steward.peer_message.emit_peer_context(
                             {"harness": harness, "session_id": "session-1"},
                             "UserPromptSubmit", stream=stream)
-                        emitted = json.loads(stream.getvalue())["hookSpecificOutput"]["additionalContext"]
-                        self.assertIn(text, emitted)
-                        text = emitted
+                        self.assertEqual(stream.getvalue(), "")
                     elif harness == "opencode":
                         # Match the plugin's existing promptAsync acceptance transition.
                         message_id = "opencode-item-" + ref
@@ -2145,6 +2149,18 @@ class CarrierOneClaimGateTest(unittest.TestCase):
 
                 native_sends = []
                 native_send_restarts = []
+                shell_injects = []
+                shell_attachment = {"harness": "claude", "sid": "session-1", "incarnation": "i1",
+                                    "host_pid": 4242, "host_start": "1", "native_pid": 4243,
+                                    "native_start": "1", "socket": "/nonexistent.sock"}
+
+                def shell_control(_binding, operation, **fields):
+                    # The resting shell's host: idle, empty input, takes the injected prompt.
+                    if operation == "status":
+                        return {"ok": True, "state": "idle", "empty": True, "epoch": 1}
+                    self.assertEqual(operation, "inject")
+                    shell_injects.append(fields["ref"])
+                    return {"ok": True}
                 def codex_native_send(_socket, *, thread_id, client_message_id, message,
                                       before_add, **_options):
                     native_sends.append((thread_id, client_message_id, message))
@@ -2170,7 +2186,6 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                             mock.patch.object(steward, "_from_name", return_value="fixture"), \
                             mock.patch.object(steward, "_pane_readiness", return_value=type(
                                 "Ready", (), {"state": "ready", "reason": ""})()), \
-                            mock.patch.object(steward, "_flush_pending_for_target", return_value=(0, 0)), \
                             mock.patch.object(steward, "_schedule_message_obligation") as scheduled, \
                             mock.patch.object(steward, "_herdr_prompt",
                                               side_effect=AssertionError("native courier used PTY prompt")), \
@@ -2180,10 +2195,9 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                                               side_effect=codex_native_send), \
                             mock.patch.object(steward, "_record"):
                         code = real_prompt(args, **kwargs)
-                        if harness == "codex":
-                            scheduled.assert_not_called()
-                        else:
-                            scheduled.assert_called_once()
+                        # A runtime-produced notice is retried by its registered
+                        # duty, never by a separate peer message duty.
+                        scheduled.assert_not_called()
                         if immediate and harness in {"claude", "opencode"}:
                             receive_native(steward.peer_message._read_pending(prepared_refs[0])["text"])
                         if immediate and recovery is None:
@@ -2201,7 +2215,21 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                                 prepared_refs[0])
                             repair_ack.assert_called_once_with(received)
                         return code
+                import session_shell
+                real_exact = session_shell.exact_binding
+                real_current_binding = steward._current_shell_binding
+
+                def shell_for(harness_name, sid):
+                    # The Claude recipient is a resting session inside a Hearting shell once
+                    # it is available; before that the shell is not there to take anything.
+                    if harness == "claude" and harness_name == "claude" and agents["result"]["agents"]:
+                        return shell_attachment, ""
+                    return None, "attachment-unavailable"
+
                 with mock.patch.object(steward.shutil, "which", return_value="/usr/bin/herdr"), \
+                        mock.patch.object(session_shell, "exact_binding", side_effect=shell_for), \
+                        mock.patch.object(steward, "_current_shell_binding", side_effect=shell_for), \
+                        mock.patch.object(session_shell, "control", side_effect=shell_control), \
                         mock.patch.object(steward.subprocess, "run", side_effect=external_observation), \
                         mock.patch.object(native_identity, "process_identity", side_effect=process_identity), \
                         mock.patch.object(pane_ownership, "current_codex_thread",
@@ -2224,21 +2252,18 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                     self.assertEqual(prompt_call.call_args.kwargs["expected_recipient"], (harness, "session-1"))
                     self.assertTrue(any(call.kwargs.get("jobs") == self.jobs
                                         for call in claim_spy.call_args_list))
-                    self.assertIn(("agent", "get", "w1:p9"), observed_commands)
-                    self.assertTrue(any(command[:2] == ("pane", "process-info")
-                                        for command in observed_commands))
-                    screen_reads = observed_commands.count(CODEX_SCREEN_READ)
+                    # The recipient is addressed as harness:session from Hearting's
+                    # records: only the live-session table is read, never the window
+                    # (no agent get, process-info or screen read).
+                    self.assertEqual(set(observed_commands), {("agent", "list")})
+                    self.assertEqual(prompt_call.call_args.args[0].target, harness + ":session-1")
+                    # A Claude completion copy reaches the session only through its resting
+                    # shell's host, once: the real session-shell delivery reserves and injects.
+                    self.assertEqual(shell_injects, [prepared_refs[0]] if harness == "claude" else [])
                     if harness == "codex":
-                        self.assertTrue(codex_thread_calls)
-                        self.assertTrue(all(pane == "w1:p9" and pid == process_pid
-                                            for pane, pid, _server in codex_thread_calls))
-                        self.assertEqual(screen_reads, 1)
-                        self.assertEqual(native_send_restarts[:1], [True])
-                    else:
-                        self.assertEqual(screen_reads, 0)
-                        self.assertTrue(native_identity_calls)
-                        self.assertTrue(all((pid, observed_harness) == (process_pid, harness)
-                                            for pid, observed_harness in native_identity_calls))
+                        # Without a shell attachment there is no input evidence to
+                        # restart an interrupted thread; the exact queue holds it.
+                        self.assertEqual(native_send_restarts[:1], [False])
                     if not immediate:
                         queued = store.get(duty["id"])
                         self.assertEqual(queued["state"], "pending")
@@ -2273,9 +2298,13 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                                 self.assertEqual(len(native_sends), send_count)
                             else:
                                 self.assertIsNotNone(msg)
-                                with mock.patch.object(steward, "_flush_pending_for_target") as resend:
+                                import session_shell
+                                with mock.patch.object(session_shell, "deliver_pending") as resend, \
+                                        mock.patch.object(steward.peer_message,
+                                                          "deliver_pending_codex") as requeue:
                                     steward._resume_message_obligation(msg, store)
                                     resend.assert_not_called()
+                                    requeue.assert_not_called()
                             if msg is not None:
                                 self.assertEqual(store.get(msg["id"])["state"], "complete")
                             self.assertEqual(
@@ -2335,8 +2364,35 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                 # The next subcase uses a distinct notice identity.
                 self.jobs.write_text("")
 
+    def test_a_claude_completion_stays_pending_unless_a_resting_shell_takes_it(self):
+        # Outside a Hearting shell, or in a busy or typed-into one, the runner holds no
+        # lease on the completion: it stays pending for the turn's Stop and the next
+        # input, which a 30 s claim would have kept from carrying it.
+        for label, shell in (("no shell", None),
+                             ("busy shell", {"ok": True, "state": "busy", "empty": True}),
+                             ("typed input", {"ok": True, "state": "idle", "empty": False}),
+                             ("host unreachable", {"ok": False, "reason": "control-unavailable"})):
+            with self.subTest(label):
+                sent, path, store, duty = self._lost_carrier_runner(shell=shell)
+                self.assertEqual(sent, [])
+                self.assertEqual(json.loads(path.read_text())["state"], "pending")
+                self.assertEqual(store.get(duty["id"])["state"], "pending")
+                self.jobs.write_text("")
+        sent, path, store, duty = self._lost_carrier_runner(
+            shell={"ok": True, "state": "idle", "empty": True})
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(json.loads(path.read_text())["state"], "sent-ambiguous")
+
     def _check_lost_carrier_completion(self, crash_sid="session-1", recipient_sid="session-1",
-                                       changed_pane=False, live_holder=False):
+                                       live_holder=False):
+        self._lost_carrier_runner(crash_sid=crash_sid, recipient_sid=recipient_sid,
+                                  live_holder=live_holder,
+                                  shell={"ok": True, "state": "idle", "empty": True}, ack=True)
+
+    def _lost_carrier_runner(self, crash_sid="session-1", recipient_sid="session-1",
+                             live_holder=False, shell=None, ack=False):
+        """Run the runner over a completion its dead carrier left; ``shell`` is the status the
+        recipient's Hearting shell reports, ``None`` for a session outside any shell."""
         self._open_row()
         from route_identity import route_hash
         route = {"route_id": "rt-owner", "nodes": [{"id": "report"}]}
@@ -2349,6 +2405,7 @@ class CarrierOneClaimGateTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("retained_steward_test", ROOT / "utilities/peer-steward.py")
         steward = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(steward)
+        _install_session_bridge(self, steward)
         launch = rewake.Launch("att-owner-1", self.jobs, crash_sid)
         claim = rewake.ArmClaim(rewake.arm_path(self.jobs, launch.attempt_id), launch.attempt_id,
                                 launch.session_id, 1, tuple(DEAD_HOLDER))
@@ -2367,7 +2424,6 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                      **{"from": "session-1"}, ts=1,
                      bindings=[rewake.seat_handover.binding_of(self.jobs, meta)]))
         sent = []
-        real_prompt = steward.cmd_prompt
         def prompt(args, *, expected_recipient, on_prepared=None, producer_binding=None):
             self.assertEqual(expected_recipient, ("claude", recipient_sid))
             self.assertIsInstance(producer_binding, dict)
@@ -2385,24 +2441,20 @@ class CarrierOneClaimGateTest(unittest.TestCase):
             self.assertEqual(producer_binding["route_node"], "report")
             self.assertEqual(args.ref, [duty["id"], duty["intent"]["identity"]["attempt_id"],
                                         delivery["delivery_id"]])
-            if changed_pane:
-                # The real courier must refuse before sealing any payload if
-                # its own target read no longer matches the retained identity.
-                with patch_split(steward, "_herdr_missing", return_value=False), \
-                        mock.patch.object(steward, "_resolve_prompt_target", return_value=({
-                            "harness": "claude", "session_id": "stranger", "pane": "w1:p9",
-                            "name": "stranger", "state": "idle"}, None, ["w1:p9"])), \
-                        mock.patch.object(steward.peer_message, "prepare_peer_message") as sealed:
-                    code = real_prompt(args, expected_recipient=expected_recipient,
-                                       on_prepared=on_prepared, producer_binding=producer_binding)
-                    sealed.assert_not_called()
-                    return code
+            self.assertEqual(args.target, "claude:" + recipient_sid)
             sent.append(Path(args.body_file).read_text())
             return 0
         agents = {"result": {"agents": [{"agent": "claude", "pane_id": "w1:p9",
                                         "agent_session": {"value": recipient_sid}}]}}
         holder_alive = (lambda holder: holder == list(DEAD_HOLDER)) if live_holder else rewake._holder_alive
+        import session_shell
+        attachment = {"harness": "claude", "sid": recipient_sid, "incarnation": "i1", "host_pid": 4242,
+                      "host_start": "1", "native_pid": 4243, "native_start": "1",
+                      "socket": "/nonexistent.sock"}
         with mock.patch.dict(sys.modules, {"_retained_rewake": rewake}), \
+                mock.patch.object(steward, "_current_shell_binding", return_value=(
+                    (attachment, "") if shell is not None else (None, "attachment-unavailable"))), \
+                mock.patch.object(session_shell, "control", return_value=shell or {}), \
                 mock.patch.object(rewake, "_holder_alive", side_effect=holder_alive), \
                 mock.patch.object(steward.subprocess, "run", return_value=type("Reply", (), {
                     "stdout": json.dumps(agents), "returncode": 0})()), \
@@ -2414,20 +2466,19 @@ class CarrierOneClaimGateTest(unittest.TestCase):
             self.assertEqual(sent, [])
             path = self._close_and_materialize()
             steward._resume_registered_obligation(duty, store)
-            if changed_pane:
-                self.assertEqual(sent, [])
-                self.assertEqual(store.get(duty["id"])["state"], "pending")
-                self.assertEqual(json.loads(path.read_text())["state"], "pending")
-                return
+            if not (shell or {}).get("ok") or (shell["state"], shell["empty"]) != ("idle", True):
+                return sent, path, store, duty
             self.assertEqual(len(sent), 1)
             self.assertIn("att-owner-1", sent[0])
             self.assertEqual(store.get(duty["id"])["state"], "pending")
             self.assertEqual(json.loads(path.read_text())["state"], "sent-ambiguous")
-            # Acknowledged notices retain their original delivery identity.
-            rewake.pending_delivery.ack(self.root, "session-1", json.loads(path.read_text())["delivery_id"],
-                                         acked_by="session-sweep:session-1")
-            steward._resume_registered_obligation(duty, store)
-            self.assertEqual(len(sent), 1)
+            if ack:
+                # Acknowledged notices retain their original delivery identity.
+                rewake.pending_delivery.ack(self.root, "session-1", json.loads(path.read_text())["delivery_id"],
+                                             acked_by="session-sweep:session-1")
+                steward._resume_registered_obligation(duty, store)
+                self.assertEqual(len(sent), 1)
+        return sent, path, store, duty
 
     def test_claim_win_emits_and_transitions_to_sent_ambiguous(self):
         self._open_row()
@@ -3606,7 +3657,8 @@ class GateCarrierTest(unittest.TestCase):
         gate = {"receipt": {"children": [{"required_action": "human-gate:frame-review"}]}}
         text = rewake.gate_wake_message(self._launch(), [notice, "actual gate"],
                                          human_gate=is_human_gate_record(gate))
-        self.assertIn("AskUserQuestion", text)
+        self.assertIn("question board", text)
+        self.assertNotIn("AskUserQuestion", text)
         self.assertIn(notice, text)
 
     def setUp(self) -> None:
@@ -3970,7 +4022,8 @@ class GateCarrierTest(unittest.TestCase):
         self.assertIn("or has paused at the gate", text)
         self.assertIn("human-gate:frame-review", text)
         self.assertIn("await-release", text)
-        self.assertIn("AskUserQuestion", text)
+        self.assertIn("question board", text)
+        self.assertNotIn("AskUserQuestion", text)
         self.assertNotIn("harvest --jobs", text)
         # review round 1, M6: the in-wait wake is speculative, so the record is
         # left `sent-ambiguous` -- the next-prompt sweep can still deliver it if
@@ -4059,6 +4112,237 @@ class GateCarrierTest(unittest.TestCase):
             ).read_text(encoding="utf-8")
         )
         self.assertFalse(rewake.is_human_gate_record(record))
+
+
+def _resource_notice(state_root, jobs, *, session, key, lineage="attempt-parent", attempt="att-gate-owner",
+                     subject="experiment attention (1/1)"):
+    """The notice `resource_progress` stores for a supervising session (the runner wake is not started)."""
+    import session_notice
+    binding = {"kind": lineage, "harness": "claude", "session_id": session}
+    if lineage != "provenance":
+        binding["attempt_id"] = attempt
+    with mock.patch.object(session_notice, "_retain"):
+        return session_notice.notify("claude", session, key=key, subject=subject, text="loss is NaN",
+                                     jobs=jobs, lineage=binding)
+
+
+class ResourceNoticeWakeTest(unittest.TestCase):
+    """A resting Claude supervisor is woken, while its owner is waited on, by an experiment's
+    attention or failure (BC-AMI-CHILD-FAIL-NO-WAKE-1111, observation 2)."""
+
+    _launch = GateCarrierTest._launch
+
+    def setUp(self):
+        GateCarrierTest.setUp(self)
+        for table in (rewake._PROBE_DIRECTORY_MTIME, rewake._PROBE_NEXT_DEADLINE_NS, rewake._RECIPIENT_KEY_CACHE):
+            table.clear()
+
+    def notice(self, key="experiment:run-1:attention:id:0123:1:claude:session-gate", **kw):
+        return _resource_notice(self.state, self.jobs, session="session-gate", key=key, **kw)
+
+    def other_owner(self, attempt="att-gate-owner-b"):
+        row = self.jobs.read_text().strip().split("\t")
+        row[5] = row[5].replace("attempt_id=att-gate-owner", f"attempt_id={attempt}")
+        self.jobs.write_text(self.jobs.read_text() + "\t".join(row) + "\n")
+        return rewake.Launch(attempt_id=attempt, jobs=self.jobs, session_id="session-gate")
+
+    def test_the_hook_and_the_notice_use_the_same_recipient_directory(self):
+        record = self.notice()
+        launch = self._launch()
+        self.assertEqual(rewake._recipient_key(launch), "session-gate")
+        directory = rewake.pending_delivery.record_directory(launch.jobs.resolve(strict=False).parent,
+                                                              rewake._recipient_key(launch))
+        self.assertTrue((directory / (record["delivery_id"] + ".json")).is_file())
+
+    def test_an_attention_notice_for_this_owner_is_announced_once_and_touches_no_owner_row(self):
+        record = self.notice()
+        rows_before = self.jobs.read_bytes()
+        self.assertTrue(rewake._open_gate_pending(self._launch()))
+        claims = []
+        notices = rewake._gate_notices(self._launch(), attempt_only=True, supervision_claims=claims)
+        self.assertEqual(len(notices), 1)
+        self.assertIn("loss is NaN", notices[0])
+        self.assertEqual(rewake.pending_delivery.read(self.state, "session-gate", record["delivery_id"])["state"],
+                         "sent-ambiguous")
+        self.assertEqual([c[2] for c in claims], [record["delivery_id"]])
+        self.assertEqual(rewake._gate_notices(self._launch(), attempt_only=True), [])
+        self.assertEqual(self.jobs.read_bytes(), rows_before)
+        text = rewake.gate_wake_message(self._launch(), notices, human_gate=False, resource_notice=True)
+        self.assertIn("not the owner's completion", text)
+        self.assertIn("loss is NaN", text)
+
+    def test_only_what_needs_a_decision_wakes(self):
+        import session_notice
+        self.notice("experiment:run-2:checkpoint:id:1:claude:session-gate", subject="experiment checkpoint (1/1)")
+        self.notice("experiment:run-3:final:id:1:claude:session-gate", subject="experiment final (1/1)")
+        with mock.patch.object(session_notice, "_run_state", return_value={"status": "succeeded"}):
+            self.assertFalse(rewake._open_gate_pending(self._launch()))
+            self.assertEqual(rewake._gate_notices(self._launch(), attempt_only=True), [])
+        rewake._PROBE_DIRECTORY_MTIME.clear()
+        with mock.patch.object(session_notice, "_run_state", return_value={"status": "failed"}):
+            self.assertTrue(rewake._open_gate_pending(self._launch()))
+
+    def test_a_notice_whose_lineage_does_not_check_out_is_not_this_hooks_to_wake(self):
+        record = self.notice()
+        path = rewake.pending_delivery.record_path(self.state, "session-gate", record["delivery_id"])
+        value = json.loads(path.read_text())
+        value["lineage"] = []
+        path.write_text(json.dumps(value))
+        self.assertFalse(rewake._open_gate_pending(self._launch()))
+        self.assertEqual(rewake._gate_notices(self._launch(), attempt_only=True), [])
+
+    def test_parallel_owners_wake_for_their_own_notice_and_a_shared_one_exactly_once(self):
+        other = self.other_owner()
+        self.notice()  # attempt-parent of att-gate-owner
+        self.assertFalse(rewake._open_gate_pending(other))
+        self.assertEqual(rewake._gate_notices(other, attempt_only=True), [])
+        self.assertEqual(len(rewake._gate_notices(self._launch(), attempt_only=True)), 1)
+        self.notice("experiment:run-9:attention:id:abcd:1:claude:session-gate", lineage="provenance")
+        woken = [len(rewake._gate_notices(launch, attempt_only=True)) for launch in (other, self._launch())]
+        self.assertEqual(sorted(woken), [0, 1])
+
+    def test_a_notice_another_carrier_holds_live_is_left_alone(self):
+        record = self.notice()
+        rewake.pending_delivery.claim(self.state, "session-gate", record["delivery_id"],
+                                      claim_owner="courier", lease_seconds=600)
+        rewake._PROBE_DIRECTORY_MTIME.clear()
+        self.assertFalse(rewake._open_gate_pending(self._launch()))
+        self.assertEqual(rewake._gate_notices(self._launch(), attempt_only=True), [])
+
+    def _wake_and_ack(self, record):
+        """One hook look: whether it wakes, and the notice acknowledged as the sweep would."""
+        rewake._PROBE_DIRECTORY_MTIME.clear()
+        woke = rewake._open_gate_pending(self._launch())
+        announced = rewake._gate_notices(self._launch(), attempt_only=True)
+        if announced:
+            rewake.pending_delivery.ack(self.state, "session-gate", record["delivery_id"],
+                                        acked_by="session-sweep:fixture")
+        return woke, len(announced)
+
+    def test_the_same_attention_reposted_at_a_checkpoint_does_not_wake_again(self):
+        """RV-PR1602 finding 1 (direct keys): the first attention wakes once; the same digest
+        at the 2h checkpoint waits for the next input; a changed attention wakes again."""
+        first = self.notice("experiment:run-1:attention:id:0123:1:claude:session-gate")
+        self.assertEqual(self._wake_and_ack(first), (True, 1))
+        repost = self.notice("experiment:run-1:attention-checkpoint:id:7200:0123:1:claude:session-gate")
+        self.assertEqual(self._wake_and_ack(repost), (False, 0))
+        # Not lost: it stays pending for the recipient's next input.
+        self.assertEqual(rewake.pending_delivery.read(self.state, "session-gate", repost["delivery_id"])["state"],
+                         "pending")
+        changed = self.notice("experiment:run-1:attention:id:4567:1:claude:session-gate")
+        self.assertEqual(self._wake_and_ack(changed), (True, 1))
+
+    def test_an_unchanged_attention_from_the_producer_wakes_once_across_a_checkpoint(self):
+        """RV-PR1602 finding 1 (real producer): epoch 1's NaN, unchanged, observed at 100s and
+        again at the 7201s checkpoint wakes the resting session once; a new NaN wakes again."""
+        import resource_progress as progress
+        import session_notice
+        original_notify = session_notice.notify
+        output = self.root / "training"
+        (output / "logs").mkdir(parents=True)
+        epochs = output / "logs" / "epochs.jsonl"
+        epochs.write_text('{"epoch":1,"split":"valid","losses":{"L_se":NaN}}\n')
+        artifact = self.root / "artifacts"
+        artifact.mkdir(exist_ok=True)
+        run = {"run_id": "run-1", "status": "running", "started_at": 1, "artifact_root": str(artifact),
+               "route_id": "rt-gate", "node": "full-run", "jobs": str(self.jobs)}
+        notices = []
+
+        def notify(harness, session_id, **kw):
+            with mock.patch.object(session_notice, "notify", original_notify):
+                record = self.notice(kw["key"], subject=kw["subject"])
+            woke, announced = self._wake_and_ack(record)
+            notices.append({"key": kw["key"], "wake": woke, "announced": announced})
+            return {"state": "acked"}
+
+        with mock.patch.object(progress, "_observation_state_path", return_value=self.root / "observation.json"), \
+             mock.patch.object(progress, "_notice_targets", return_value=[("claude", "session-gate")]), \
+             mock.patch("session_notice.notify", side_effect=notify):
+            due = [progress.observe_experiment(run, self.root / "runs.json", now,
+                                               root=str(output), row_key="ident", started_at=1
+                                               )["observation"]["checkpoint_due"] for now in (100, 7201)]
+            self.assertTrue(due[1])
+            self.assertEqual([n["wake"] for n in notices], [True, False], notices)
+            self.assertTrue(notices[0]["key"].startswith("experiment:run-1:attention:"))
+            self.assertTrue(notices[1]["key"].startswith("experiment:run-1:attention-checkpoint:"))
+            # A new NaN (epoch 2) at the next (12h) checkpoint is a changed attention: it wakes.
+            epochs.write_text(epochs.read_text() + '{"epoch":2,"split":"valid","losses":{"L_se":NaN}}\n')
+            changed = progress.observe_experiment(run, self.root / "runs.json", 7201 + progress.CHECKPOINT_INTERVAL,
+                                                  root=str(output), row_key="ident", started_at=1)
+            self.assertTrue(changed["observation"]["checkpoint_due"])
+        self.assertEqual([n["wake"] for n in notices], [True, False, True], notices)
+        self.assertTrue(notices[2]["key"].startswith("experiment:run-1:attention:"))
+
+    def _eta_notices(self, planned, total, sequence):
+        """The real producer over step progress only (an ETA attention, no metric); one
+        hook look per notice it sends, acknowledged as the next prompt's sweep would."""
+        import resource_progress as progress
+        import session_notice
+        original_notify = session_notice.notify
+        output = self.root / "training"
+        output.mkdir()
+        artifact = self.root / "artifacts"
+        artifact.mkdir(exist_ok=True)
+        run = {"run_id": "run-1", "status": "running", "started_at": 1, "artifact_root": str(artifact),
+               "route_id": "rt-gate", "node": "full-run", "jobs": str(self.jobs)}
+        notices, predicted = [], []
+
+        def notify(harness, session_id, **kw):
+            with mock.patch.object(session_notice, "notify", original_notify):
+                record = self.notice(kw["key"], subject=kw["subject"])
+            woke, announced = self._wake_and_ack(record)
+            notices.append({"key": kw["key"], "wake": woke, "announced": announced})
+            return {"state": "acked"}
+
+        with mock.patch.object(progress, "_observation_state_path", return_value=self.root / "observation.json"), \
+             mock.patch.object(progress, "_notice_targets", return_value=[("claude", "session-gate")]), \
+             mock.patch("session_notice.notify", side_effect=notify):
+            for now, completed in sequence:
+                result = progress.observe_experiment(
+                    run, self.root / "runs.json", now, root=str(output), row_key="ident", started_at=1,
+                    planned_seconds=planned,
+                    progress={"completed": completed, "total": total, "unit": "step", "updated_at": now})
+                predicted.append(result["observation"]["predicted_total_seconds"])
+        return notices, predicted
+
+    def test_an_eta_attention_that_grew_several_fold_wakes_again_at_a_checkpoint(self):
+        """RV-PR1602-R2 finding 1: the predicted total grew from ~1.0M to ~4.0M seconds; that
+        is a changed attention even at the 7201s checkpoint, so it wakes instead of reposting."""
+        notices, predicted = self._eta_notices(100000, 10000, [(6700, 0), (6800, 1), (7201, 2)])
+        self.assertEqual([round(value) if value else value for value in predicted], [None, 1006699, 4016398])
+        self.assertEqual([n["wake"] for n in notices], [True, True], notices)
+        self.assertTrue(all(n["key"].startswith("experiment:run-1:attention:") for n in notices), notices)
+
+    def test_an_eta_attention_that_cleared_and_came_back_wakes_again(self):
+        """RV-PR1602-R2 finding 1: ETA over plan, then back within plan, then over plan again
+        is a new episode of the attention, not the first one still standing."""
+        notices, predicted = self._eta_notices(1000, 1000, [(100, 0), (200, 1), (300, 900), (400, 901)])
+        self.assertLess(predicted[2], 1000)
+        attention = [n for n in notices if n["key"].startswith("experiment:run-1:attention:")]
+        self.assertEqual([n["wake"] for n in attention], [True, True], notices)
+        # The plain 250s checkpoint in between (no attention then) does not wake.
+        self.assertEqual(sum(n["wake"] for n in notices), 2, notices)
+
+    def test_the_same_eta_attention_wobbling_does_not_wake_again(self):
+        """The same attention whose prediction only wobbles (under the rule's own 1.5x step,
+        or around its 1.5x-plan boundary without coming back within plan) does not wake again;
+        at a checkpoint it is reposted for the next input."""
+        notices, predicted = self._eta_notices(
+            100000, 10000, [(6700, 0), (6800, 1), (6940, 2), (7201, 4)])
+        self.assertLess(max(predicted[1:]), 1.5 * predicted[1])
+        self.assertEqual([n["wake"] for n in notices], [True, False], notices)
+        self.assertTrue(notices[1]["key"].startswith("experiment:run-1:attention-checkpoint:"), notices)
+
+    def test_an_eta_attention_wobbling_at_its_boundary_does_not_wake_again(self):
+        notices, predicted = self._eta_notices(
+            1000, 1000, [(901, 450), (1001, 500), (1101, 600), (1201, 702), (1301, 800)])
+        # Over 1.5x plan, just under it (not back within plan), and over it again.
+        self.assertGreaterEqual(predicted[1], 1500)
+        self.assertTrue(1000 < predicted[3] < 1500, predicted)
+        self.assertGreaterEqual(predicted[4], 1500)
+        # The plain 100s checkpoint (no attention yet) does not wake; the attention wakes once.
+        self.assertEqual([n["wake"] for n in notices], [False, True], notices)
+        self.assertTrue(notices[0]["key"].startswith("experiment:run-1:checkpoint:"), notices)
 
 
 class SupervisionWakeRearmTest(unittest.TestCase):
@@ -4306,27 +4590,73 @@ class SupervisionWakeRearmTest(unittest.TestCase):
         self.assertEqual(self._run("ready", stop)[0], 2)
         self.assertEqual(json.loads(completion.read_text())["state"], "sent-ambiguous")
 
-    def test_stop_never_first_arms_or_takes_a_foreign_or_live_arm(self):
+    def test_stop_first_arms_a_fresh_unwatched_row_never_a_foreign_or_live_arm(self):
+        # A launch registered after its own Bash call returned (a start the TUI
+        # moved to the background) has no arm yet: the turn end arms it.
         stop = {"hook_event_name": "Stop", "session_id": "session-1"}
-        self.assertIsNone(rewake.registry_launch(stop))  # no ledger yet
-        claim = rewake.claim_arm(self.jobs, "att-owner-1", "session-1", fresh=True)
+        launch, claim = rewake.registry_launch(stop)
+        self.assertEqual((launch.attempt_id, launch.armed, claim.arms),
+                         ("att-owner-1", "registry", 1))
         self.assertEqual(rewake.registry_launch(stop).reason, "held-live")
         self._dead_holder()
         self.assertIsNone(rewake.registry_launch({**stop, "session_id": "foreign"}))
         self.assertEqual(rewake._read_arm(claim.path)["arms"], 1)
         self.assertIsNone(rewake.registry_launch({**stop, "hook_event_name": "SubagentStop"}))
 
-    def test_claude_stop_registers_the_same_async_completion_carrier(self):
+    def test_claude_stop_and_session_start_register_the_same_async_completion_carrier(self):
         settings = json.loads((ROOT / "adapters/claude/settings.json").read_text())
         by_event = {}
-        for event in ("PostToolUse", "Stop"):
+        for event in ("PostToolUse", "Stop", "SessionStart"):
             by_event[event] = [hook for entry in settings["hooks"][event]
                                for hook in entry["hooks"]
                                if "dispatch-owner-rewake.py" in hook.get("command", "")]
-        self.assertEqual(len(by_event["Stop"]), 1)
-        self.assertEqual(by_event["Stop"], by_event["PostToolUse"])
-        self.assertTrue(by_event["Stop"][0]["asyncRewake"])
+        for event in ("Stop", "SessionStart"):
+            self.assertEqual(len(by_event[event]), 1)
+            self.assertEqual(by_event[event], by_event["PostToolUse"])
+            self.assertTrue(by_event[event][0]["asyncRewake"])
 
+
+
+class ResourceNoticeRearmTest(unittest.TestCase):
+    """The wake a resource notice causes hands the notice to the prompt sweep, so that turn
+    re-arms the same owner and its own completion still wakes the session (observation 2, R5)."""
+
+    ANCESTRY = CarrierOneClaimGateTest.ANCESTRY
+    payload = CarrierOneClaimGateTest.payload
+    _run = SupervisionWakeRearmTest._run
+    _parent_call = SupervisionWakeRearmTest._parent_call
+    _dead_holder = SupervisionWakeRearmTest._dead_holder
+    _complete_owner = SupervisionWakeRearmTest._complete_owner
+
+    def setUp(self):
+        CarrierOneClaimGateTest.setUp(self)
+        CarrierOneClaimGateTest._open_row(self)
+        self.jobs.write_text(self.jobs.read_text().replace("parent_attempt_id=att-owner-parent,", ""), encoding="utf-8")
+        for table in (rewake._RECIPIENT_KEY_CACHE, rewake._PROBE_DIRECTORY_MTIME, rewake._PROBE_NEXT_DEADLINE_NS):
+            table.clear()
+        self.notice = _resource_notice(self.root, self.jobs, session="session-1", attempt="att-owner-1",
+                                       key="experiment:run-1:attention:id:0123:1:claude:session-1")
+
+    def test_a_notice_wake_then_the_owners_own_completion_wake(self):
+        from dispatch_session_sweep import sweep_deliver, ack_delivered
+        code, text = self._run("gate")
+        self.assertEqual(code, 2)
+        self.assertIn("not the owner's completion", text)
+        self.assertIn("loss is NaN", text)
+        self._dead_holder()  # the first async hook process exited with its wake
+        records, _ = sweep_deliver(self.root, "claude-parent-runtime", "session-1")
+        self.assertEqual([r["delivery_id"] for r in records], [self.notice["delivery_id"]])
+        self.assertEqual(ack_delivered(self.root, "session-1", records, acked_by="parent-prompt"), 1)
+        # The ordinary Bash call in that awakened turn arms the same owner again.
+        launch, claim = rewake.registry_launch(self._parent_call())
+        self.assertEqual((launch.attempt_id, claim.arms), ("att-owner-1", 2))
+        self.assertFalse(rewake._open_gate_pending(launch))
+        self._dead_holder()
+        completion = self._complete_owner()
+        code, text = self._run("ready", self._parent_call())
+        self.assertEqual(code, 2)
+        self.assertIn("state=success", text)
+        self.assertEqual(json.loads(completion.read_text())["state"], "sent-ambiguous")
 
 class GateCloseRearmTest(GateCarrierTest):
     """SD-129 without command parsing: the wake spent on a gate is re-armed by
@@ -4607,6 +4937,19 @@ class FrameWorkerTypeArmingTest(unittest.TestCase):
                 self.assertEqual(rewake._session_owner_rows(self.jobs, "session-1"), [])
                 stdout_launch = rewake.parse_launch(self.stdout_payload(worker_type=worker_type))
                 self.assertIsNone(stdout_launch)
+
+
+    def test_a_support_leg_of_a_unit_route_arms_but_a_route_free_support_row_does_not(self) -> None:
+        # G1: `general/explore` is a support unit; the one leg of its route wakes the session like a review leg.
+        self.jobs.write_text(self.row(worker_type="support", route_id="rt-0123456789abcdef", route_node="unit",
+                                      attempt_id="att-lookup-1"), encoding="utf-8")
+        rows = rewake._session_owner_rows(self.jobs, "session-1")
+        self.assertEqual([attempt_id for attempt_id, _age in rows], ["att-lookup-1"])
+        self.jobs.write_text(self.row(worker_type="support", attempt_id="att-tidy-1"), encoding="utf-8")
+        self.assertEqual(rewake._session_owner_rows(self.jobs, "session-1"), [])
+        self.jobs.write_text(self.row(worker_type="support", route_id="rt-0123456789abcdef", attempt_id="att-no-node"),
+                             encoding="utf-8")
+        self.assertEqual(rewake._session_owner_rows(self.jobs, "session-1"), [])
 
 
 class SeatHandoverRewakeTest(unittest.TestCase):
@@ -5507,6 +5850,320 @@ class ExpandedBatchAuthorityTest(unittest.TestCase):
             for index in (0, 1):
                 with self.subTest(kind=kind, index=index):
                     self.case(kind + '-' + str(index))
+
+
+class ReopenedConversationWakeTest(CarrierOneClaimGateTest):
+    """BC-IDLE-WAKE-MISSED-1112: a supervising Claude conversation reopened in a
+    new process (to pick up a release) lost every waiter with the old process
+    and was woken only by the next typed prompt. Its session start now watches
+    its unwatched attempts, and its own runtime carries the wake once the
+    launching runtime is provably gone."""
+
+    START = {"hook_event_name": "SessionStart", "session_id": "session-1", "source": "resume"}
+
+    def _arm_then_lose_holder(self, attempt_id="att-owner-1", runtime=None):
+        with mock.patch.object(rewake, "runtime_ancestry_binding", return_value=runtime):
+            claim = rewake.claim_arm(self.jobs, attempt_id, "session-1", fresh=True)
+        self.assertIsInstance(claim, rewake.ArmClaim)
+        record = rewake._read_arm(claim.path)
+        record["holder"] = DEAD_HOLDER   # the old Claude process took its hook down with it
+        claim.path.write_text(json.dumps(record), encoding="utf-8")
+        return claim
+
+    def _main(self, payload, runtime):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(rewake.sys, "stdin", io.StringIO(json.dumps(payload))), \
+             mock.patch.object(rewake.sys, "stdout", stdout), \
+             mock.patch.object(rewake.sys, "stderr", stderr), \
+             mock.patch.object(rewake, "runtime_ancestry_binding", return_value=runtime), \
+             mock.patch.object(rewake, "wait_for_attempt", return_value=("ready", "terminal-quiescent")):
+            code = rewake.main()
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_a_reopened_conversation_is_woken_for_work_its_old_process_started(self):
+        launched_under = tuple(DEAD_HOLDER)          # the launching Claude process, now gone
+        reopened = ("999", "888", DEAD_HOLDER[2])    # the same conversation in a new process
+        self._open_row(ancestry=launched_under)
+        claim = self._arm_then_lose_holder(runtime=launched_under)
+        self.assertEqual(rewake._read_arm(claim.path)["runtime"], list(launched_under))
+        record_path = self._close_and_materialize()
+        code, _stdout, stderr = self._main(self.START, reopened)
+        self.assertEqual(code, 2)   # the one exit that wakes the resting session
+        self.assertIn("attempt_id=att-owner-1 armed=registry-rearm", stderr)
+        self.assertIn("HEARTING_RECEIPT_V1", stderr)
+        self.assertEqual(json.loads(record_path.read_text())["state"], "sent-ambiguous")
+        arm = rewake._read_arm(claim.path)
+        self.assertEqual((arm["arms"], arm["state"], arm["runtime"]), (2, "ended", list(reopened)))
+
+    def test_a_second_live_process_on_the_same_session_still_claims_nothing(self):
+        live = rewake._process_identity(os.getpid())
+        self._open_row(ancestry=live)
+        record_path = self._close_and_materialize()
+        with mock.patch.object(rewake, "runtime_ancestry_binding",
+                               return_value=("999", "888", live[2])):
+            code, stdout, stderr = self._run_main()
+        self.assertEqual((code, stdout, stderr), (0, "", ""))
+        record = json.loads(record_path.read_text())
+        self.assertEqual((record["state"], record["claim_owner"]), ("pending", None))
+
+    def test_session_start_without_unwatched_work_stays_silent(self):
+        self._open_row()
+        self.assertIsNone(rewake.registry_launch({**self.START, "session_id": "foreign"}))
+        stale = self.jobs.read_text().replace(
+            datetime.now(timezone.utc).strftime("%Y-%m-%d"), "2020-01-01", 1)
+        self.jobs.write_text(stale, encoding="utf-8")  # older than the arm window, never armed
+        self.assertEqual(self._main(self.START, self.ANCESTRY), (0, "", ""))
+        self.assertFalse(rewake.arm_path(self.jobs, "att-owner-1").exists())
+
+    def test_one_boundary_process_wakes_for_the_first_due_of_several(self):
+        self._open_row()
+        row = self.jobs.read_text()
+        self.jobs.write_text(row + row.replace("att-owner-1", "att-owner-2"), encoding="utf-8")
+        for attempt_id in ("att-owner-1", "att-owner-2"):
+            self._arm_then_lose_holder(attempt_id)
+        statuses = {"att-owner-1": iter(()), "att-owner-2": iter(("open", "done"))}
+        with mock.patch.object(rewake, "_owner_status",
+                               side_effect=lambda launch: next(statuses[launch.attempt_id], "open")), \
+             mock.patch.object(rewake, "_retain_completion") as retained, \
+             mock.patch.object(rewake.time, "sleep"):
+            launch, claim = rewake.registry_launch(self.START)
+        self.assertEqual((launch.attempt_id, launch.armed), ("att-owner-2", "registry-rearm"))
+        self.assertEqual(sorted(call.args[0].attempt_id for call in retained.call_args_list),
+                         ["att-owner-1", "att-owner-2"])
+        self.assertEqual(rewake._read_arm(claim.path)["state"], "waiting")
+        other = rewake._read_arm(rewake.arm_path(self.jobs, "att-owner-1"))
+        self.assertEqual((other["state"], other["arms"]), ("lapsed", 2))
+
+    def test_an_owner_gate_waiting_for_a_carrier_is_due(self):
+        launches = [rewake.Launch("att-owner-1", self.jobs, "session-1"),
+                    rewake.Launch("att-owner-2", self.jobs, "session-1")]
+        rewake.pending_delivery.record_directory(self.jobs.parent, "session-1").mkdir(
+            parents=True, exist_ok=True)
+        records = [(self.jobs.parent, "session-1", "delivery-gate",
+                    {"state": "pending", "attempt_ids": ["att-owner-2"]})]
+        scans = {}
+        with mock.patch.object(rewake, "_recipient_key", return_value="session-1"), \
+             mock.patch.object(rewake, "_recipient_gate_records", side_effect=lambda _l: records):
+            self.assertEqual(rewake._gate_due_attempt(launches, scans), "att-owner-2")
+            records[0][3]["state"] = "claimed"
+            records[0][3]["claim_deadline_ns"] = time.monotonic_ns() + 10**12
+            scans.clear()
+            self.assertIsNone(rewake._gate_due_attempt(launches, scans))
+            records[0][3]["claim_deadline_ns"] = time.monotonic_ns() - 1
+            self.assertIsNone(rewake._gate_due_attempt(launches, scans))  # unchanged, lease still read as live
+            scans.clear()
+            self.assertEqual(rewake._gate_due_attempt(launches, scans), "att-owner-2")
+
+
+class BoundaryWaitOverSeveralRowsTest(CarrierOneClaimGateTest):
+    """RV-PR1565 required 2: one boundary wait holding several rows must not
+    spend its one wake on a finished row whose completion another carrier
+    already delivered, and the rows it leaves `lapsed` are armed again while
+    that wait still runs (review probe `rv1565_probe.test.py.txt`)."""
+
+    def _rows(self, n):
+        self._open_row()
+        row = self.jobs.read_text(encoding="utf-8")
+        self.jobs.write_text("".join(row.replace("att-owner-1", f"att-owner-{i}") for i in range(1, n + 1)),
+                             encoding="utf-8")
+
+    def _arm(self, attempt_id, state):
+        claim = rewake.claim_arm(self.jobs, attempt_id, "session-1", fresh=True)
+        self.assertIsInstance(claim, rewake.ArmClaim)
+        record = rewake._read_arm(claim.path)
+        record["holder"] = DEAD_HOLDER      # the hook process that held it has exited
+        record["state"] = state
+        claim.path.write_text(json.dumps(record), encoding="utf-8")
+
+    def _hook_process_exited(self, *attempt_ids):
+        for attempt_id in attempt_ids:
+            path = rewake.arm_path(self.jobs, attempt_id)
+            record = rewake._read_arm(path)
+            record["holder"] = DEAD_HOLDER
+            path.write_text(json.dumps(record), encoding="utf-8")
+
+    def _state(self, attempt_id):
+        return rewake._read_arm(rewake.arm_path(self.jobs, attempt_id))["state"]
+
+    def _close(self, attempt_id):
+        self.assertTrue(D.close_attempt_row(self.jobs, attempt_id, "completed-marker"))
+        line = next(line for line in reversed(self.jobs.read_text(encoding="utf-8").splitlines())
+                    if f"attempt_id={attempt_id}," in line)
+        path = JOIN.materialize_pending_delivery(self.jobs, line.split("\t"))
+        self.assertIsNotNone(path)
+        return Path(path)
+
+    def _deliver_elsewhere(self, path):
+        # The woken turn's in-turn sweep (or a sibling's batch claim) delivered it.
+        record = json.loads(path.read_text(encoding="utf-8"))
+        rewake.pending_delivery.claim(self.jobs.parent, "session-1", record["delivery_id"],
+                                      claim_owner="sweep-sim", lease_seconds=30)
+        rewake.pending_delivery.ack(self.jobs.parent, "session-1", record["delivery_id"],
+                                    acked_by="sweep-sim")
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["state"], "acked")
+
+    def _boundary(self, event, *, meanwhile=None):
+        # `meanwhile` runs at the wait's first sleep (work finishing while the session rests);
+        # a second sleep means the wait outlived every row it watches.
+        sleeps = iter([meanwhile] if meanwhile else [])
+
+        def sleep(_seconds):
+            step = next(sleeps, None)
+            if step is None:
+                raise AssertionError("boundary kept waiting")
+            step()
+
+        payload = {"hook_event_name": event, "session_id": "session-1", "source": "resume"}
+        stderr = io.StringIO()
+        with mock.patch.object(rewake.sys, "stdin", io.StringIO(json.dumps(payload))), \
+             mock.patch.object(rewake.sys, "stdout", io.StringIO()), \
+             mock.patch.object(rewake.sys, "stderr", stderr), \
+             mock.patch.object(rewake, "runtime_ancestry_binding", return_value=self.ANCESTRY), \
+             mock.patch.object(rewake, "_retain_completion"), \
+             mock.patch.object(rewake, "wait_for_attempt", return_value=("ready", "terminal-quiescent")), \
+             mock.patch.object(rewake.time, "sleep", side_effect=sleep):
+            return rewake.main(), stderr.getvalue()
+
+    def test_a_row_delivered_elsewhere_leaves_the_stop_wait_on_the_open_row(self):
+        self._rows(2)
+        self._arm("att-owner-1", "lapsed")       # left lapsed by an earlier boundary wait
+        self._arm("att-owner-2", "lapsed")
+        self._deliver_elsewhere(self._close("att-owner-1"))
+        late = {}
+        code, stderr = self._boundary("Stop", meanwhile=lambda: late.update(path=self._close("att-owner-2")))
+        self.assertEqual(code, 2)                 # the wake is spent on the open row's completion
+        self.assertIn("attempt_id=att-owner-2", stderr)
+        self.assertNotIn("attempt_id=att-owner-1", stderr)
+        self.assertEqual(json.loads(late["path"].read_text(encoding="utf-8"))["state"], "sent-ambiguous")
+        self.assertEqual((self._state("att-owner-1"), self._state("att-owner-2")), ("ended", "ended"))
+
+    def test_rows_lapsed_by_a_live_boundary_wait_are_armed_again_and_the_last_completion_wakes(self):
+        self._rows(3)
+        for attempt_id in ("att-owner-1", "att-owner-2", "att-owner-3"):
+            self._arm(attempt_id, "waiting")      # waiters SIGTERMed with the old Claude process
+        self._close("att-owner-1")                # finished while the conversation was closed
+        code, stderr = self._boundary("SessionStart")
+        self.assertEqual(code, 2)
+        self.assertIn("attempt_id=att-owner-1", stderr)
+        self.assertEqual([self._state(a) for a in ("att-owner-1", "att-owner-2", "att-owner-3")],
+                         ["ended", "lapsed", "lapsed"])
+        # That hook process (this one) still lives: a rest it lapsed is not `held-live`.
+        again = rewake.claim_arm(self.jobs, "att-owner-2", "session-1", fresh=False)
+        self.assertIsInstance(again, rewake.ArmClaim)
+        self.assertEqual(rewake._read_arm(again.path)["arms"], 3)
+        self._hook_process_exited("att-owner-2", "att-owner-3")
+        self._deliver_elsewhere(self._close("att-owner-2"))   # the woken turn's sweep shows it
+        late = {}
+        code, stderr = self._boundary("Stop", meanwhile=lambda: late.update(path=self._close("att-owner-3")))
+        self.assertEqual(code, 2)                 # the session rests; row 3's completion wakes it
+        self.assertIn("attempt_id=att-owner-3", stderr)
+        self.assertEqual(json.loads(late["path"].read_text(encoding="utf-8"))["state"], "sent-ambiguous")
+        self.assertEqual((self._state("att-owner-2"), self._state("att-owner-3")), ("ended", "ended"))
+
+
+class SettledArmClaimLoopTest(unittest.TestCase):
+    """A settled arm (`ended`, or `arms` at the limit) refuses before the ledger lock.
+
+    2026-11-17: every ended arm of a long session re-took the shared `rewake-arms/.lock`
+    and re-read the registry row and lineage under it (~40ms each), so one hook held the
+    lock ~700 times for ~23s of CPU and the session's other hooks queued behind it."""
+
+    PAYLOAD = {"hook_event_name": "PostToolUse", "tool_name": "Bash", "session_id": "session-1",
+               "tool_input": {"command": "true"}, "tool_response": {"stdout": "", "stderr": ""}}
+
+    def _fixture(self, settled: int, *, live: bool = True) -> Path:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        tmp = Path(temporary.name)
+        jobs = tmp / "jobs.log"
+        row = DispatchOwnerRewakeTest.row
+        rows = [row(attempt_id=f"att-done-{i}", status="done", age_seconds=300 + i) for i in range(1, settled + 1)]
+        if live:
+            rows.append(row(attempt_id="att-lapsed", status="done", age_seconds=120))
+            rows.append(row(attempt_id="att-fresh", status="open", age_seconds=0))
+        jobs.write_text("".join(rows), encoding="utf-8")
+
+        def arm(attempt_id: str, **fields) -> None:
+            path = rewake.arm_path(jobs, attempt_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"schema": 1, "attempt_id": attempt_id, "session_id": "session-1",
+                                        "holder": DEAD_HOLDER, "gate_delivery_id": None, **fields}), encoding="utf-8")
+
+        for i in range(1, settled + 1):
+            if i % 2 == 0:
+                arm(f"att-done-{i}", state="ended", arms=1)
+            else:
+                arm(f"att-done-{i}", state="lapsed", arms=rewake.ARM_LIMIT)
+        if live:
+            arm("att-lapsed", state="lapsed", arms=1)
+        environment = mock.patch.dict(os.environ, {
+            "AGENT_DISPATCH_JOBS": str(jobs), "XDG_STATE_HOME": str(tmp / "state"), "HOME": str(tmp / "home")},
+            clear=False)
+        environment.start()
+        self.addCleanup(environment.stop)
+        child = mock.patch.dict(os.environ)
+        child.start()
+        self.addCleanup(child.stop)
+        os.environ.pop("AGENT_DISPATCH_CHILD", None)
+        return jobs
+
+    @staticmethod
+    def _counted(call):
+        with mock.patch.object(rewake, "claim_arm", wraps=rewake.claim_arm) as claims, \
+                mock.patch.object(rewake, "_row_metadata", wraps=rewake._row_metadata) as metadata, \
+                mock.patch.object(rewake.seat_handover, "owns", wraps=rewake.seat_handover.owns) as owns:
+            result = call()
+        # The scan (`_session_owner_states`) passes a shared `read_context` to `owns` for every
+        # row; that cost is bounded by #935 and follows the row count. The lock path
+        # (`_handed_to`, `_reclaim_refusal`) passes none, and that is what must not grow.
+        lock_path_owns = sum(1 for c in owns.call_args_list if c.kwargs.get("read_context") is None)
+        return result, (claims.call_count, metadata.call_count, lock_path_owns)
+
+    def test_settled_arms_take_no_lock_or_lineage_read_however_many_on_a_bash_call(self) -> None:
+        counts, armed = {}, {}
+        for settled in (2, 20):
+            self._fixture(settled)
+            first, counts[settled] = self._counted(lambda: rewake.registry_launch(dict(self.PAYLOAD)))
+            self.assertIsInstance(first, tuple)
+            self.assertEqual((first[0].attempt_id, first[0].armed), ("att-lapsed", "registry-rearm"))
+            second = rewake.registry_launch(dict(self.PAYLOAD))   # this live process now holds the lapsed arm
+            self.assertIsInstance(second, tuple)
+            armed[settled] = (second[0].attempt_id, second[0].armed, second[1].arms)
+        self.assertEqual(counts[2], counts[20])
+        self.assertEqual(counts[20][0], 1, "only the lapsed row is claimed under the lock")
+        self.assertEqual(armed[2], ("att-fresh", "registry", 1))
+        self.assertEqual(armed[20], ("att-fresh", "registry", 1))
+
+    def test_settled_arms_take_no_lock_or_lineage_read_however_many_at_a_turn_end(self) -> None:
+        counts, taken = {}, {}
+        for settled in (2, 20):
+            self._fixture(settled)
+            seen: list = []
+
+            def first_due(claims):
+                seen.extend(claims)
+                return claims[0]
+
+            with mock.patch.object(rewake, "_first_due", side_effect=first_due):
+                result, counts[settled] = self._counted(
+                    lambda: rewake.boundary_launch({"hook_event_name": "Stop", "session_id": "session-1"}))
+            self.assertIsInstance(result, tuple)
+            taken[settled] = {launch.attempt_id: launch.armed for launch, _claim in seen}
+        self.assertEqual(counts[2], counts[20])
+        self.assertEqual(counts[20][0], 2, "only the lapsed and the fresh row are claimed under the lock")
+        for settled in (2, 20):
+            self.assertEqual(taken[settled], {"att-lapsed": "registry-rearm", "att-fresh": "registry"})
+
+    def test_a_session_with_only_settled_arms_still_gets_the_same_refusal(self) -> None:
+        for settled in (2, 20):
+            self._fixture(settled, live=False)
+            for call in (lambda: rewake.registry_launch(dict(self.PAYLOAD)),
+                         lambda: rewake.boundary_launch({"hook_event_name": "Stop", "session_id": "session-1"})):
+                with self.subTest(settled=settled):
+                    result, counts = self._counted(call)
+                    self.assertIsInstance(result, rewake.ArmRefusal)
+                    self.assertIn(result.reason, {"ended", "exhausted"})
+                    self.assertEqual(counts, (0, 0, 0))
 
 
 if __name__ == "__main__":

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -368,6 +372,143 @@ class DispatchDefaultsV3Tests(unittest.TestCase):
         config = self.config()
         config["allocation"]["harness_weights"] = inline["allocation"]["harness_weights"]
         self.assertTrue(any("block mapping" in e for e in D.validate(config, capmap)))
+
+    # --- field rows: `allocation.harness_weights.<field>` overrides one field's default row ---
+
+    TABLE = json.loads(Path(D.default_topology_path()).read_text(encoding="utf-8"))["field_harness_weights"]
+
+    def _balanced(self, weights=None):
+        config = self.config()
+        config["allocation"]["strategy"] = "balanced"
+        if weights is not None:
+            config["allocation"]["harness_weights"] = weights
+        return config
+
+    def test_field_blocks_and_numbers_validate_beside_harness_names(self):
+        capmap = D.load_topology_capabilities(D.default_topology_path())
+        config = self._balanced({"opencode": 0.4, "design": {"codex": 1.0, "claude": 0.8}, "docs": 1.0})
+        self.assertEqual(D.validate(config, capmap), [])
+        parsed = D.parse_yaml_subset(
+            "allocation:\n  harness_weights:\n    opencode: 0.4\n    design:\n      codex: 1.0\n"
+            "      claude: 0.8\n    docs: 1.0\n")
+        self.assertEqual(parsed["allocation"]["harness_weights"],
+                         {"opencode": 0.4, "design": {"codex": 1.0, "claude": 0.8}, "docs": 1.0})
+
+    def test_field_rows_reject_what_harness_weights_rejects(self):
+        capmap = D.load_topology_capabilities(D.default_topology_path())
+        cases = [
+            ({"design": 0}, "harness_weights.design must be a number"),
+            ({"design": 1.5}, "harness_weights.design must be a number"),
+            ({"design": True}, "harness_weights.design must be a number"),
+            ({"design": {"codex": 0}}, "harness_weights.design.codex must be a number"),
+            ({"design": {"codex": 1.2}}, "harness_weights.design.codex must be a number"),
+            ({"design": {"codex": True}}, "harness_weights.design.codex must be a number"),
+            ({"design": {"gemini": 0.5}}, "harness_weights.design names an unknown harness"),
+            ({"gemini": 0.5}, "harness_weights names an unknown harness or field"),
+            ({"painting": 0.5}, "harness_weights names an unknown harness or field"),
+            ({"painting": {"codex": 0.5}}, "harness_weights names an unknown harness or field"),
+        ]
+        for weights, fragment in cases:
+            errors = D.validate(self._balanced(weights), capmap)
+            self.assertTrue(any(fragment in error for error in errors), (weights, errors))
+
+    def test_the_sealed_flat_harness_weights_leave_the_field_entries_out(self):
+        config = self._balanced({"opencode": 0.4, "design": {"codex": 1.0}, "docs": 1.0})
+        self.assertEqual(D.query_allocation(config)["harness_weights"], {"opencode": 0.4})
+        only_fields = D.query_allocation(self._balanced({"design": {"codex": 1.0}}))
+        self.assertNotIn("harness_weights", only_fields)
+        self.assertNotIn("field_weights", only_fields)  # the row is sealed per route, never here
+
+    def test_normalizing_drops_a_disabled_harness_but_keeps_field_entries(self):
+        config = self._balanced({"opencode": 0.4, "design": {"codex": 1.0}})
+        config["harnesses"]["enabled"] = ["claude", "codex"]
+        weights = D.normalize_policy(config)["allocation"]["harness_weights"]
+        self.assertEqual(weights, {"design": {"codex": 1.0}})
+
+    def test_the_applied_row_is_the_default_row_plus_the_user_override(self):
+        row = lambda config, field: D.query_field_weights(config, field, self.TABLE)  # noqa: E731
+        order = ["claude", "codex", "opencode"]
+        self.assertEqual(row(self._balanced(), "code"), {"claude": 0.95, "codex": 0.85, "opencode": 1.0})
+        self.assertEqual(list(row(self._balanced(), "code")), order)
+        # a block sets only the cells it names; the rest keep the default row
+        got = row(self._balanced({"design": {"codex": 1.0, "claude": 0.8}}), "design")
+        self.assertEqual(got, {"claude": 0.8, "codex": 1.0, "opencode": 0.85})
+        # a number sets all three cells, and equal cells cancel in the share: no row at all, whatever the number
+        self.assertIsNone(row(self._balanced({"docs": 0.7}), "docs"))
+        self.assertIsNone(row(self._balanced({"docs": 1.0}), "docs"))
+        self.assertIsNone(row(self._balanced({"design": {"claude": 0.5, "codex": 0.5, "opencode": 0.5}}), "design"))
+        # one cell off the others keeps the whole row
+        self.assertEqual(row(self._balanced({"design": {"claude": 0.5, "codex": 0.5}}), "design"),
+                         {"claude": 0.5, "codex": 0.5, "opencode": 0.85})
+        # admin/other have no default row (1.0) until the user gives them one
+        self.assertIsNone(row(self._balanced(), "admin"))
+        self.assertEqual(row(self._balanced({"admin": {"codex": 0.5}}), "admin"),
+                         {"claude": 1.0, "codex": 0.5, "opencode": 1.0})
+        # an override of another field, a harness-name entry, and no field leave a row alone
+        self.assertEqual(row(self._balanced({"design": 0.5, "opencode": 0.4}), "code"),
+                         {"claude": 0.95, "codex": 0.85, "opencode": 1.0})
+        self.assertIsNone(row(self._balanced(), None))
+        self.assertIsNone(D.query_field_weights(self._balanced(), "code", None))
+
+    def test_the_display_reader_keeps_a_switched_off_row_and_names_the_overridden_cells(self):
+        row = lambda config, field: D.field_weight_row(config, field, self.TABLE)  # noqa: E731
+        config = self._balanced({"design": {"codex": 1.0}, "docs": 0.7, "opencode": 0.4})
+        self.assertEqual(row(config, "design"), ({"claude": 1.0, "codex": 1.0, "opencode": 0.85}, ("codex",)))
+        cells, named = row(config, "docs")
+        self.assertEqual((cells, named), ({"claude": 0.7, "codex": 0.7, "opencode": 0.7},
+                                          ("claude", "codex", "opencode")))
+        self.assertTrue(D.field_weights_off(config, cells))
+        self.assertEqual(row(config, "code"), ({"claude": 0.95, "codex": 0.85, "opencode": 1.0}, ()))
+        self.assertFalse(D.field_weights_off(config, row(config, "code")[0]))
+        config["allocation"]["strategy"] = "capacity-aware"
+        self.assertEqual(row(config, "code"), (None, ()))
+
+    def test_a_row_equal_across_the_enabled_harnesses_is_neutral_too(self):
+        # `research` is claude 0.9 / codex 1.0 / opencode 1.0: with claude disabled the choosable
+        # cells are equal and the row cancels; a differing enabled cell keeps it.
+        config = self._balanced()
+        config["harnesses"]["enabled"] = ["codex", "opencode"]
+        self.assertIsNone(D.query_field_weights(config, "research", self.TABLE))
+        config["harnesses"]["enabled"] = ["claude", "codex"]
+        self.assertEqual(D.query_field_weights(config, "research", self.TABLE),
+                         {"claude": 0.9, "codex": 1.0, "opencode": 1.0})
+
+    def test_the_validator_reads_field_names_from_the_registry_it_was_given(self):
+        import tempfile
+        capmap = D.load_topology_capabilities(D.default_topology_path())
+        config = self._balanced({"painting": 0.5})
+        self.assertTrue(any("unknown harness or field" in e for e in D.validate(config, capmap)))
+        registry = json.loads(Path(D.default_topology_path()).read_text(encoding="utf-8"))
+        registry["fields"] = list(registry["fields"]) + ["painting"]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "topologies.json"
+            path.write_text(json.dumps(registry), encoding="utf-8")
+            self.assertEqual(D.validate(config, capmap, str(path)), [])
+            cfg = Path(tmp) / "defaults.yaml"
+            cfg.write_text("schema_version: 3\nharnesses:\n  enabled: [claude, codex, opencode]\n"
+                           "profiles:\n"
+                           + "".join(f"  {n}:\n    primary: [claude, codex]\n    relief: [opencode]\n"
+                                     "    last_resort: []\n    promote_relief_below: 35\n"
+                                     for n in ("deep", "balanced-deep", "light", "mini"))
+                           + "allocation:\n  strategy: balanced\n  window: 30\n  harness_weights:\n"
+                           "    painting: 0.5\ncapabilities:\n", encoding="utf-8")
+            loaded, _warnings = D.load_validated(str(cfg), str(path))
+            self.assertEqual(loaded["allocation"]["harness_weights"], {"painting": 0.5})
+            with self.assertRaises(D.DefaultsConfigError):
+                D.load_validated(str(cfg), D.default_topology_path())
+
+    def test_only_the_balanced_strategy_reads_a_field_row(self):
+        for strategy in ("capacity-aware", "least-recent-attempts"):
+            config = self._balanced(); config["allocation"]["strategy"] = strategy
+            self.assertIsNone(D.query_field_weights(config, "code", self.TABLE), strategy)
+        self.assertIsNone(D.query_field_weights({"schema_version": 1}, "code", self.TABLE))
+
+    def test_the_shipped_table_names_declared_fields_and_depth_profiles_only(self):
+        fields = D.field_vocabulary()
+        self.assertTrue(set(self.TABLE["weights"]) <= set(fields), fields)
+        self.assertEqual(self.TABLE["checked_on"], "2026-11-20")
+        self.assertTrue(all(0.0 < v <= 1.0 for row in self.TABLE["weights"].values() for v in row.values()))
+        self.assertTrue(set(sum(self.TABLE["basis"]["profiles"].values(), [])) <= set(D.MODEL_PROFILES))
 
     def test_ac10_quality_peer_set_follows_the_config(self):
         # AC 10: the quality-peer derivation is config-driven, never hardcoded.

@@ -2,6 +2,9 @@
 """Managed service provenance through the existing lifecycle callbacks."""
 
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import importlib.util
 import errno
@@ -65,6 +68,32 @@ _PIDFD_HANDOFF = _pidfd_handoff_available()
 # 2026-11-04) the same window costs ~25% whatever the change under test does.
 _CENSUS_PROCESS_LIMIT = 600
 _HOST_PROCESSES = sum(1 for entry in os.listdir("/proc") if entry.isdigit())
+
+
+class RunnerWaitSignalTest(unittest.TestCase):
+    """The runner backs off only while nothing moves: an unfinished owner proof moves it."""
+
+    def test_the_proofs_of_an_unfinished_owner_scan_are_part_of_the_wait_signal(self):
+        import dispatch_batch_obligations as obligations
+        context = obligations.OwnerSettlementReadContext()
+        self.addCleanup(context.close)
+        scan = (("/jobs.log", 29),)             # a drain's resume order stays put between passes
+        signals = []
+        for _ in range(3):
+            context.record_historical_check()    # one proof per pass
+            signals.append((scan, peer_steward._owner_scan_proofs(context, scan)))
+        self.assertEqual(len(set(signals)), 3, "a pass that proved an owner must change the signature")
+        # No proof made: the signature is the same again, so the wait grows as before.
+        self.assertEqual((scan, peer_steward._owner_scan_proofs(context, scan)), signals[-1])
+
+    def test_without_an_unfinished_scan_the_signal_is_unchanged(self):
+        import dispatch_batch_obligations as obligations
+        context = obligations.OwnerSettlementReadContext()
+        self.addCleanup(context.close)
+        for _ in range(3):
+            context.record_historical_check()
+            self.assertIsNone(peer_steward._owner_scan_proofs(context, ()))
+        self.assertIsNone(peer_steward._owner_scan_proofs(object(), (("k", 1),)))   # no metrics: never raises
 
 
 class LifecycleBindingTest(unittest.TestCase):
@@ -952,7 +981,6 @@ console.log(JSON.stringify(calls[0]));
                                return_value=False), \
              mock.patch.object(peer_steward.herdr_observation,
                                "socket_path_for_endpoint", return_value=None), \
-             patch_split(peer_steward, "_watch_terminal_from_view", return_value=None), \
              patch_split(peer_steward, "_herdr_missing", return_value=False), \
              patch_split(peer_steward, "subprocess", CapturingSubprocess()):
             binding = obligations.managed_service_binding(host_a)
@@ -1210,7 +1238,6 @@ console.log(JSON.stringify(calls[0]));
                                    "socket_path_for_endpoint", return_value=None), \
                  mock.patch.object(peer_steward.herdr_observation,
                                    "pane_census", return_value=None), \
-                 patch_split(peer_steward, "_watch_terminal_from_view", return_value=None), \
                  mock.patch.object(batch, "_jobs_paths",
                                    side_effect=lambda jobs=None, strict=True: [
                                        Path(jobs).resolve(strict=False) if jobs else self.jobs.resolve()
@@ -2255,6 +2282,79 @@ console.log(JSON.stringify(calls[0]));
         self.assertEqual(self._reconnect_cache_fixture(), (False, 0))
         self.assertIsNone(child.poll())
         self.assertEqual((self.base / "cache-events").read_text(), str(child.pid) + " TERM\n")
+
+    def _ask_by_request(self, session, *, marked=False, publish=True, committed=None):
+        """A window of release B draws (its request path); the detached handoff child's work then runs in place.
+
+        Every process this starts is a stub the test itself launched; the state folder is the fixture's
+        (`XDG_STATE_HOME` in the environment the handoff's proof reads), so no signal can reach another process.
+        """
+        import human_wait_state as cache
+        started, observed = [], []
+        real_replace, real_committed = obligations.replace_managed_observer, cache._cache_release_committed
+        def popen(command, **kwargs):
+            started.append(command[2:])
+            return SimpleNamespace()
+        def replace(*args, **kwargs):
+            observed.append(real_replace(*args, **kwargs))
+            return observed[-1]
+        with mock.patch.object(cache, "__file__", str(self.b / "utilities/human_wait_state.py")), \
+             mock.patch.object(obligations, "__file__", str(self.b / "utilities/peer_obligations.py")), \
+             mock.patch.dict(os.environ, self._environment(self.b), clear=True), \
+             mock.patch.object(cache.subprocess, "Popen", side_effect=popen), \
+             mock.patch.object(obligations, "replace_managed_observer", side_effect=replace), \
+             mock.patch.object(cache, "_cache_release_committed",
+                               side_effect=(lambda *a: real_committed(*a) and committed()) if committed else real_committed):
+            self.assertEqual(cache.state_root(), self.base / "xdg-state/hearting/human-waits")
+            if publish:
+                self.assertTrue(cache.publish_cache({"items": [], "complete": True, "observed_at": time.time(), "health": []}))
+                if not marked:   # what an older release's producer publishes
+                    value = json.loads(cache._cache_path().read_text(encoding="utf-8"))
+                    value.pop("reconnect_aware", None)
+                    cache._write(cache._cache_path(), value)
+            cache._request_producer("claude", session)
+            asked = started.count(["--reconnect-cache"])
+            handoff = cache.reconnect_cache_producer(wait_for_commit=True) if asked else None
+        return asked, handoff, [command[0] for command in started if command[0] != "--reconnect-cache"], observed
+
+    def test_a_window_request_replaces_an_older_producer_and_starts_the_installed_one(self):
+        self._point_current(self.b)
+        self._publish_cache_fixture_install()
+        child, lock = self._start_cache_fixture()          # a window of release A's producer, a child this test launched
+        asked, handoff, producers, results = self._ask_by_request("sid-new-window")
+        self.assertEqual((asked, handoff, producers, results), (1, True, ["--refresh-cache"], ["replaced"]))
+        self.assertEqual((self.base / "cache-events").read_text(), str(child.pid) + " TERM\n")
+        self.assertIsNotNone(child.poll())
+
+    def test_requests_overlapping_the_replacement_never_signal_the_installed_producer(self):
+        self._point_current(self.b)
+        self._publish_cache_fixture_install()
+        # Release B's producer already holds the lock but has not written its first cache (7-19 s): the cache is still A's.
+        installed, lock = self._start_cache_fixture(current=True)
+        for window in ("sid-window-1", "sid-window-2", "sid-window-3"):
+            asked, handoff, producers, results = self._ask_by_request(window, publish=window == "sid-window-1")
+            self.assertEqual((asked, handoff, producers, results), (1, False, [], ["current"]))
+        self.assertIsNone(installed.poll())
+        self.assertFalse((self.base / "cache-events").exists())      # nobody was signaled
+        # Its first cache names it: nobody asks any more.
+        self.assertEqual(self._ask_by_request("sid-window-4", marked=True)[:2], (0, None))
+
+    def test_a_seat_an_older_window_took_after_a_handoff_that_did_not_refill_it_is_taken_back(self):
+        """The handoff may signal and then not start a producer (it did not see the exit in time, or its second
+        commit check failed): the seat goes to whichever window asks first, an older one among them. The next
+        request of a window of the installed release takes it back."""
+        self._point_current(self.b)
+        self._publish_cache_fixture_install()
+        first, lock = self._start_cache_fixture()
+        asked, handoff, producers, results = self._ask_by_request(
+            "sid-new-window-1", committed=lambda: first.poll() is None)   # the second check fails once it exited
+        self.assertEqual((asked, handoff, producers, results), (1, False, [], ["replaced"]))
+        self.assertIsNotNone(first.poll())
+        older, lock = self._start_cache_fixture()          # an older window's request fills the empty seat with its own file
+        asked, handoff, producers, results = self._ask_by_request("sid-new-window-2", publish=False)
+        self.assertEqual((asked, handoff, producers, results), (1, True, ["--refresh-cache"], ["replaced"]))
+        self.assertIsNotNone(older.poll())
+        self.assertEqual((self.base / "cache-events").read_text(), f"{first.pid} TERM\n{older.pid} TERM\n")
 
     def test_observer_rejects_pid_boundaries_and_negative_process_group_before_pidfd(self):
         child, lock = self._start_cache_fixture()

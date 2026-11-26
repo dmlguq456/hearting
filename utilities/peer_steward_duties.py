@@ -16,7 +16,6 @@ from pathlib import Path
 import peer_obligations
 import shared_readiness
 import dispatch_batch_obligations
-import herdr_observation
 
 from peer_steward_base import (
     _codex_home_dir, _plain, peer_message,
@@ -46,11 +45,13 @@ def _watch_readiness_identity(arm, native_state):
     endpoint = _watch_selected_readiness_endpoint(arm, server)
     if not endpoint:
         return None
+    native = int(arm.get("observer_protocol", 0) or 0) >= 3
+    pid = agent.get("pid") if native else pane_identity.get("shell_pid")
+    start = agent.get("pid_start") if native else pane_identity.get("shell_start")
     identity = shared_readiness.target_identity(
         server=server, endpoint=str(endpoint), pane=agent.get("pane"),
         harness=agent.get("harness"), session_id="" if session_id == "-" else session_id,
-        shell_pid=pane_identity.get("shell_pid"),
-        shell_start=pane_identity.get("shell_start"), native_state=native_state,
+        shell_pid=pid, shell_start=start, native_state=native_state,
         purpose="completion")
     if identity is not None:
         return identity
@@ -460,23 +461,24 @@ def _publish_run_states(store, notice_duties):
 
 
 def _live_recipients(root):
-    """Sessions that may need a derived inbox: census panes and open handovers."""
+    """Sessions that may need a derived inbox: live native sessions and open handovers.
+
+    Live sessions come from Hearting's own records (``peer_address.native_sessions``:
+    shell attachments and exact native session records), never a terminal census."""
     from harness_capabilities import HARNESSES, parent_completion
     from dispatch_seat_handover import _registered_parent_harness
+    import peer_address
 
     found = set()
     try:
-        census = herdr_observation.pane_census()
-    except (OSError, ValueError, TypeError, RuntimeError):
-        census = None
-    if census is not None and census.complete:
-        for pane in census.panes:
-            harness = pane.get("agent")
-            session = pane.get("agent_session")
-            value = session.get("value") if isinstance(session, dict) else None
-            if (harness in HARNESSES and isinstance(value, str) and value
-                    and parent_completion(harness).get("carrier")):
-                found.add((harness, value))
+        sessions = peer_address.native_sessions()
+    except Exception:  # noqa: BLE001 - an unreadable table names no live session
+        sessions = []
+    for row in sessions:
+        harness, value = row.get("harness"), row.get("sid")
+        if (harness in HARNESSES and isinstance(value, str) and value
+                and parent_completion(harness).get("carrier")):
+            found.add((harness, value))
     jobs = root / "jobs.log"
     from dispatch_supervision import _rows
     try:
@@ -637,6 +639,9 @@ def _peer_history_order(name):
 def _prune_received_peer_history(*, now=None, deadline_ns=None, start_after=None):
     """Drop received queue rows past the 7-day history window; transfers stay.
 
+    A dropped row's visible-text fingerprint hint (`.display/<sha256>/<ref>`) goes with it, and
+    the fingerprint folder once empty.
+
     The same walk then removes ``.lock-<ref>`` files whose row no longer exists
     and that were created before the window (`remove_rowless_ref_lock`); no
     other code deletes them. Preparation locks are left alone: a ``prepare-``
@@ -698,6 +703,10 @@ def _prune_received_peer_history(*, now=None, deadline_ns=None, start_after=None
             continue
         rows.discard(name)
         result["removed"] += 1
+        # The row's own summary names its visible-text fingerprint; without one nothing is guessed.
+        shown = row.get("display")
+        if isinstance(shown, dict):
+            peer_message.remove_display_hint(row.get("ref"), shown.get("sha256"))
     if result["removed"]:
         try:
             import dispatch_recipient_inbox as inbox

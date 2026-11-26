@@ -57,7 +57,19 @@ def main():
         if session_id:
             from fleet import interaction
 
+            resumed = interaction.read_wait(session_id, "codex") is not None
             interaction.clear_wait(session_id, "codex")
+            if resumed:
+                # The approved tool ran: this session's shell border leaves `waiting`.
+                try:
+                    utilities = str(ROOT / "utilities")
+                    if utilities not in sys.path:
+                        sys.path.insert(0, utilities)
+                    from session_shell import lifecycle
+
+                    lifecycle("codex", "working", session_id)
+                except Exception:
+                    pass
             import importlib.util
             spec = importlib.util.spec_from_file_location("_peer_context", ROOT / "utilities/peer-message.py")
             mod = importlib.util.module_from_spec(spec)

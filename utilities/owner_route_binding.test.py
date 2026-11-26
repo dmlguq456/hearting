@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
+import contextlib
 import importlib.util
 from concurrent.futures import ThreadPoolExecutor
 import json
@@ -1096,6 +1100,113 @@ class DefaultOwnerRouteTest(unittest.TestCase):
                 self.assertEqual(M.default_owner_route_file(environ=env), current.route_file)
             with self.assertRaisesRegex(M.OwnerRouteBindingError, "outside-owner"):
                 M.default_owner_route_file(environ={})
+
+
+class RecordWalkScopeTest(unittest.TestCase):
+    """Inside one owner pass the ancestors of the jobs directory are looked at once."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name).resolve()
+        self.state = self.base / "a" / "b" / "state"
+        (self.state / M.OWNER_ROUTE_ATTACHMENT_DIR).mkdir(parents=True)
+        self.jobs = self.state / "jobs.log"
+        self.jobs.write_text("fixture\n", encoding="utf-8")
+        self.reason = "owner-route-attachment-record-invalid"
+
+    def _present(self, *parts):
+        return M._record_present(self.jobs, *parts, reason=self.reason)
+
+    @contextlib.contextmanager
+    def _lstats(self):
+        real, seen = os.lstat, []
+
+        def counted(path, *args, **kwargs):
+            seen.append(str(path))
+            return real(path, *args, **kwargs)
+
+        with mock.patch.object(os, "lstat", side_effect=counted):
+            yield seen
+
+    def test_ancestors_are_looked_at_once_and_the_leaf_every_time(self):
+        leaf = self.state / M.OWNER_ROUTE_ATTACHMENT_DIR / "rec.json"
+        leaf.write_text("{}", encoding="utf-8")
+        with M.record_walk_scope(), self._lstats() as seen:
+            for _ in range(3):
+                self.assertTrue(self._present(M.OWNER_ROUTE_ATTACHMENT_DIR, "rec.json"))
+        ancestors = [path for path in seen if Path(path) in (self.base / "a", self.base / "a" / "b", self.state)]
+        self.assertEqual(len(ancestors), 3, "each ancestor, jobs directory included, once")
+        self.assertEqual(seen.count(str(leaf)), 3)
+        self.assertEqual(seen.count(str(self.state / M.OWNER_ROUTE_ATTACHMENT_DIR)), 3,
+                         "the directories below the jobs directory are never memoized")
+
+    def test_a_record_created_inside_the_scope_is_seen_by_the_next_call(self):
+        leaf = self.state / M.OWNER_ROUTE_ATTACHMENT_DIR / "late.json"
+        with M.record_walk_scope():
+            self.assertFalse(self._present(M.OWNER_ROUTE_ATTACHMENT_DIR, "late.json"))
+            leaf.write_text("{}", encoding="utf-8")
+            self.assertTrue(self._present(M.OWNER_ROUTE_ATTACHMENT_DIR, "late.json"))
+
+    def test_an_ancestor_changed_between_scopes_is_seen_by_the_next_scope(self):
+        with M.record_walk_scope():
+            self.assertTrue(self._present(M.OWNER_ROUTE_ATTACHMENT_DIR))
+        moved = self.base / "a" / "b" / "moved"
+        self.state.rename(moved)
+        with M.record_walk_scope():
+            self.assertFalse(self._present(M.OWNER_ROUTE_ATTACHMENT_DIR))
+        moved.rename(self.state)
+        link = self.base / "a" / "b" / "state-link"
+        link.symlink_to(self.state)
+        self.state.rename(self.base / "a" / "b" / "state-real")
+        with M.record_walk_scope():  # a dangling link is a read error, never absence
+            with self.assertRaises(M.OwnerRouteBindingError):
+                M._record_present(link / "jobs.log", M.OWNER_ROUTE_ATTACHMENT_DIR, reason=self.reason)
+
+    def test_lookup_errors_and_links_are_never_memoized(self):
+        blocked = self.base / "a" / "b" / "blocked"
+        blocked.write_text("not a directory", encoding="utf-8")
+        inside = blocked / "state" / "jobs.log"
+        with M.record_walk_scope():
+            for _ in range(2):
+                with self.assertRaises(M.OwnerRouteBindingError):
+                    M._record_present(inside, M.OWNER_ROUTE_ATTACHMENT_DIR, reason=self.reason)
+        real = self.base / "real-state"
+        (real / M.OWNER_ROUTE_ATTACHMENT_DIR).mkdir(parents=True)
+        (real / "jobs.log").write_text("fixture\n", encoding="utf-8")
+        link = self.base / "linked"
+        link.symlink_to(real)
+        with M.record_walk_scope(), self._lstats() as seen:
+            for _ in range(2):
+                self.assertTrue(M._record_present(
+                    link / "jobs.log", M.OWNER_ROUTE_ATTACHMENT_DIR, reason=self.reason))
+        self.assertEqual(seen.count(str(link)), 2, "a link is read again every time")
+
+    def test_outside_a_scope_every_call_walks_as_before(self):
+        with self._lstats() as seen:
+            for _ in range(2):
+                self.assertTrue(self._present(M.OWNER_ROUTE_ATTACHMENT_DIR))
+        self.assertEqual(seen.count(str(self.base / "a")), 2)
+
+    def test_nested_scopes_share_the_outer_memo_and_the_resolved_jobs_path_is_read_once(self):
+        calls = []
+        real = Path.resolve
+
+        def counted(path, *args, **kwargs):
+            calls.append(str(path))
+            return real(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "resolve", autospec=True, side_effect=counted):
+            with M.record_walk_scope():
+                with M.record_walk_scope():
+                    for _ in range(4):
+                        M._attachment_root(self.jobs)
+                        M._advance_root(self.jobs)
+                M._attachment_root(self.jobs)
+            self.assertEqual(calls.count(str(self.jobs)), 1)
+            M._attachment_root(self.jobs)
+            self.assertEqual(calls.count(str(self.jobs)), 2, "the memo ended with its scope")
+        self.assertEqual(M._attachment_root(self.jobs), self.state / M.OWNER_ROUTE_ATTACHMENT_DIR)
 
 
 if __name__ == "__main__":

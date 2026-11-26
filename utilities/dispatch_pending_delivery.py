@@ -1906,6 +1906,49 @@ def expire_if_due(
         return _public_record(updated)
 
 
+# SD-111 §(7) `pending-delivery-ttl-exceeded`: an open notice whose last write
+# is older than this, and whose owner a valid registry observation confirmed
+# absent, has no delivery left to make. Its file mtime is the clock, as for
+# terminal retention: an unclaimed notice for a gone session is never rewritten.
+NOTICE_TTL_SECONDS = 7 * 86400
+
+
+def expire_notice_past_ttl(path: Path, *, actor: str, eligible,
+                           now: float | None = None) -> str:
+    """Expire one open notice past the notice TTL whose owner is confirmed absent.
+
+    The same declared actor and record lock as ``expire_if_due``. Age alone
+    never expires a record: ``eligible(record)`` is the caller's one judgment
+    of the record read under the lock, and only its literal ``True`` (the
+    owner's absence was confirmed by a successful, valid registry observation)
+    lets the record expire. Anything else -- unread, unparsed, protected,
+    raised -- keeps it as it is. Returns expired, fresh, or skipped.
+    """
+    if actor != EXPIRY_ACTOR:
+        raise PendingDeliveryError("pending-delivery-expiry-actor-invalid", actor)
+    now = time.time() if now is None else now
+    path = Path(path)
+    try:
+        with _record_reference_lock(path) as value:
+            if value is None:
+                return "skipped"
+            if now - path.stat().st_mtime < NOTICE_TTL_SECONDS:
+                return "fresh"
+            try:
+                confirmed = eligible(value) is True
+            except Exception:  # noqa: BLE001 -- an unjudged record is kept
+                confirmed = False
+            if not confirmed:
+                return "skipped"
+            updated = dict(value)
+            updated["state"] = "expired"
+            updated["expiry_reason"] = "pending-delivery-ttl-exceeded"
+            _write_unlocked(path, updated)
+            return "expired"
+    except (PendingDeliveryError, OSError):
+        return "skipped"
+
+
 def expire_recovery(
     root: Path, recipient_key: str, delivery_id: str, *, expected: dict,
     actor: str, reason: str, apply: bool = True,

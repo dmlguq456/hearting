@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Proof, race and crash falsifiers for automatic replacement (no model calls)."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import concurrent.futures
 import contextlib
 import copy
@@ -3440,6 +3443,40 @@ class ReplacementTest(unittest.TestCase):
             self.assertIn(expected, text)
         self.assertNotIn('ended BLOCKED', text)
 
+    def test_an_owner_the_provider_refused_continues_in_its_lineage_with_the_correction(self):
+        """2026-11-13: eight owners ended `dead-auth` on a passing 403; `start` and `correct` had no
+        way on, and the supervisor wrote a new route by hand. The same route continues now."""
+        import route_authority as RA
+        meta = self._blocked_owner()
+        meta.pop('launch_outcome', None)
+        meta.update(note='dead-auth', failure_class='auth', terminal_event='claude-result',
+                    reconcile_reason='runtime-auth-envelope', api_status='403', process_exit='1',
+                    launch_started='1', supervisor_lease='flock-v1',
+                    supervisor_lease_file=str(D.supervisor_lease_path(self.jobs, meta['attempt_id'])))
+        self.write(meta)
+        self.assertTrue(RA.runtime_owner_can_resume('done', meta))
+        self.assertEqual(RA.decide_continuation(action='owner-input', status='done', metadata=meta,
+                                                facts={}).state, 'retained')
+        answer = '로그인은 고쳤습니다. 남은 평가만 이어가세요.'
+        self.assertTrue(self._answer(text=answer)['retained'])
+        with mock.patch('codex_dispatch_terminal.inspect_terminal_attempt',
+                        return_value={'state': 'invalid', 'failure_class': 'auth'}):
+            result, commands = self._launch()
+        self.assertEqual(len(commands), 1)
+        record = result['record']
+        self.assertEqual(record['route_id'], self.route['route_id'])
+        self.assertEqual(record['proof']['source_result'], 'EXITED')
+        text = R.recovery_instructions(SimpleNamespace(automatic_retry_of='att-source', worker_type='owner',
+                                       jobs_path=self.jobs, attempt_id=record['replacement_attempt_id']))
+        for expected in (answer, 'exited before settlement', 'existing route'):
+            self.assertIn(expected, text)
+        # an owner that is still open, or that finished with a result, is unchanged
+        self.assertFalse(RA.runtime_owner_can_resume('open', meta))
+        for change in ({'note': 'completed-supervisor', 'failure_class': 'pass'},
+                       {'note': 'dead-worker-fail', 'failure_class': 'fail'},
+                       {'launch_started': '0'}):
+            self.assertFalse(RA.runtime_owner_can_resume('done', {**meta, **change}), change)
+
     def test_interrupted_supervisor_accepts_answer_after_previous_replacement(self):
         import dispatch_owner_input as I
         for harness in ('claude', 'codex', 'opencode'):
@@ -6853,6 +6890,177 @@ class RegistryRowsTest(unittest.TestCase):
             with jobs.open('a', encoding='utf-8') as handle:
                 handle.write(row('att-b'))
             self.assertEqual(set(R.registry_rows(jobs)), {'att-a', 'att-b'})
+
+class RegistryRowsSharedViewTest(unittest.TestCase):
+    """``registry_rows`` answers from the shared registry view exactly as the text parse did."""
+
+    @staticmethod
+    def _row(number, status='done', aid=None):
+        return (f'2026-10-28T00:00:00Z\t{status}\th\t/w\ts-{number}\t'
+                f'attempt_id={aid or "att-%d" % number},k={number},k={number + 1}\n')
+
+    @staticmethod
+    def _oracle(path):
+        """The text parse ``registry_rows`` did before it used the shared view."""
+        try:
+            return R._parse_rows(Path(path).read_text(encoding='utf-8').splitlines())
+        except D.DispatchContractError as exc:
+            return ('error', exc.reason, exc.args[-1] if exc.args else None)
+
+    @staticmethod
+    def _actual(path):
+        try:
+            return R.registry_rows(path)
+        except D.DispatchContractError as exc:
+            return ('error', exc.reason, exc.args[-1] if exc.args else None)
+
+    def setUp(self):
+        import dispatch_registry_cache as cache
+        self.cache = cache
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.jobs = Path(tmp.name) / 'jobs.log'
+        cache.clear_cache()
+        cache.reset_metrics()
+        R._REGISTRY_ROWS_MEMO[:] = [None, None, None]
+        patcher = mock.patch.object(cache, '_PARSE_CHUNK_LINES', 3)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(cache.clear_cache)
+
+    def _same(self, data):
+        self.jobs.write_bytes(data)
+        self.cache.clear_cache()
+        got, want = self._actual(self.jobs), self._oracle(self.jobs)
+        self.assertEqual(got, want, data)
+        if isinstance(want, dict):
+            for aid, (fields, meta) in got.items():
+                self.assertIs(type(fields), list)
+                self.assertIs(type(meta), dict)
+        return got
+
+    def test_matches_the_text_parse_on_every_shape(self):
+        rows = [self._row(n) for n in range(10)]
+        join = lambda items: ''.join(items).encode()
+        self._same(join(rows))
+        self._same(join(rows) + b'')
+        # duplicate inside one segment (rows 1 and 2 share a segment of three)
+        dup_inside = list(rows); dup_inside[2] = self._row(2, aid='att-1')
+        self.assertEqual(self._same(join(dup_inside))[0:2], ('error', 'replacement-attempt-ambiguous'))
+        # duplicate across segments
+        dup_across = list(rows); dup_across[7] = self._row(7, aid='att-1')
+        self.assertEqual(self._same(join(dup_across))[2], 'att-1')
+        # both: the second occurrence that comes first in the file wins
+        both = list(rows); both[4] = self._row(4, aid='att-2'); both[8] = self._row(8, aid='att-0')
+        self.assertEqual(self._same(join(both))[2], 'att-2')
+        both = list(rows); both[1] = self._row(1, aid='att-0'); both[8] = self._row(8, aid='att-5')
+        self.assertEqual(self._same(join(both))[2], 'att-0')
+        # an unterminated last row is still a row, and still counts for duplicates
+        self._same(join(rows) + self._row(10).rstrip('\n').encode())
+        tail_dup = self._row(10, aid='att-3').rstrip('\n').encode()
+        self.assertEqual(self._same(join(rows) + tail_dup)[2], 'att-3')
+        self._same(join(rows) + b'half a row')
+        # malformed rows, blank rows, a row without an attempt id
+        self._same(join(rows[:4]) + b'\nmalformed\n' + b't\topen\th\t/w\ts\tno_attempt=1\n' + join(rows[4:]))
+
+    def test_other_line_separators_and_invalid_utf8_keep_the_text_path(self):
+        rows = ''.join(self._row(n) for n in range(5)).encode()
+        self._same(rows.replace(b'att-1', b'att-1\r'))
+        self._same(rows + b'\xe2\x80\xa8' + self._row(9).encode())
+        self._same(rows + b'x\x0bt\topen\th\t/w\ts\tattempt_id=att-z\n')
+        self.jobs.write_bytes(rows + b'\xff\n')
+        with self.assertRaises(UnicodeDecodeError):
+            R.registry_rows(self.jobs)
+        with self.assertRaises(UnicodeDecodeError):
+            self._oracle(self.jobs)
+
+    def test_a_rewrite_that_keeps_the_leading_rows_keeps_their_rows(self):
+        rows = [self._row(n) for n in range(10)]
+        self.jobs.write_text(''.join(rows), encoding='utf-8')
+        first = R.registry_rows(self.jobs)
+        segments = self.cache.registry_view(self.jobs)._segments
+        self.assertGreater(len(segments), 2)
+        staged = self.jobs.with_name('jobs.staged')
+        rows[8] = self._row(8, 'killed')
+        rows.append(self._row(10))
+        staged.write_text(''.join(rows), encoding='utf-8')
+        os.replace(staged, self.jobs)
+        before = self.cache.metrics_snapshot()
+        second = R.registry_rows(self.jobs)
+        after = self.cache.metrics_snapshot()
+        self.assertIsNot(first, second)
+        self.assertEqual(after['full_metadata_parses'], before['full_metadata_parses'])
+        self.assertEqual(after['prefix_reuses'], before['prefix_reuses'] + 1)
+        new_segments = self.cache.registry_view(self.jobs)._segments
+        self.assertIs(new_segments[0].replacement_rows, segments[0].replacement_rows)
+        self.assertIs(second['att-0'], first['att-0'])           # carried over, not rebuilt
+        self.assertEqual(second['att-8'][0][1], 'killed')
+        self.assertEqual(second, self._oracle(self.jobs))
+        # the segments parsed after the first request were indexed with the parse
+        self.assertEqual(after['replacement_segment_builds'], before['replacement_segment_builds'])
+        self.assertIs(R.registry_rows(self.jobs), second)
+
+    def test_an_append_through_the_shared_view_is_seen(self):
+        self.jobs.write_text(self._row(0), encoding='utf-8')
+        first = R.registry_rows(self.jobs)
+        with self.jobs.open('a', encoding='utf-8') as handle:
+            handle.write(self._row(1))
+        second = R.registry_rows(self.jobs)
+        self.assertEqual(set(first), {'att-0'})
+        self.assertEqual(set(second), {'att-0', 'att-1'})
+        self.assertEqual(second, self._oracle(self.jobs))
+
+    def test_segments_built_before_the_first_request_are_indexed_once_on_demand(self):
+        with mock.patch.object(self.cache, '_REPLACEMENT_ROWS_DEMAND', False):
+            self.jobs.write_text(''.join(self._row(n) for n in range(7)), encoding='utf-8')
+            view = self.cache.registry_view(self.jobs)
+            self.assertTrue(all(segment.replacement_rows is None for segment in view._segments))
+            built = self.cache.metrics_snapshot()['replacement_segment_builds']
+            rows = view.replacement_rows()
+            self.assertEqual(self.cache.metrics_snapshot()['replacement_segment_builds'],
+                             built + len(view._segments))
+            view.replacement_rows()
+            self.assertEqual(self.cache.metrics_snapshot()['replacement_segment_builds'],
+                             built + len(view._segments))
+            self.assertEqual(rows[0], self._oracle(self.jobs))
+
+
+class SuccessorSetsTests(unittest.TestCase):
+    """The per-generation successor sets answer exactly what scanning every row answered."""
+
+    @staticmethod
+    def _scan_plain(rows, aid):
+        return any((meta.get('automatic_retry_of') == aid or meta.get('prior_attempt_id') == aid)
+                   and not meta.get('replacement_family_id') for _, meta in rows.values())
+
+    @staticmethod
+    def _scan_replaced(rows, aid):
+        return any(meta.get('replacement_original_attempt_id') == aid
+                   and fields[1] in {'open', 'running', 'done'} for fields, meta in rows.values())
+
+    def test_sets_agree_with_a_scan_of_every_row(self):
+        import dispatch_replacement as mod
+        rows = {
+            'att-a': (['t', 'done'], {'attempt_id': 'att-a'}),
+            'att-b': (['t', 'open'], {'attempt_id': 'att-b', 'automatic_retry_of': 'att-a'}),
+            'att-c': (['t', 'done'], {'attempt_id': 'att-c', 'prior_attempt_id': 'att-b'}),
+            'att-d': (['t', 'open'], {'attempt_id': 'att-d', 'prior_attempt_id': 'att-x',
+                                      'replacement_family_id': 'fam'}),
+            'att-e': (['t', 'killed'], {'attempt_id': 'att-e', 'replacement_original_attempt_id': 'att-y'}),
+            'att-f': (['t', 'running'], {'attempt_id': 'att-f', 'replacement_original_attempt_id': 'att-z'}),
+        }
+        for aid in ('att-a', 'att-b', 'att-c', 'att-d', 'att-x', 'att-y', 'att-z', 'att-nobody'):
+            self.assertEqual(mod._plain_retry_successor(rows, aid), self._scan_plain(rows, aid), aid)
+            self.assertEqual(mod._replacement_row_of(rows, aid), self._scan_replaced(rows, aid), aid)
+        self.assertTrue(mod._plain_retry_successor(rows, 'att-a'))
+        self.assertFalse(mod._plain_retry_successor(rows, 'att-x'))     # only a replacement claim names it
+        self.assertTrue(mod._replacement_row_of(rows, 'att-z'))
+        self.assertFalse(mod._replacement_row_of(rows, 'att-y'))        # that replacement was killed
+        # Another rows object, even an equal one, is scanned on its own; a longer one is not stale.
+        longer = dict(rows)
+        longer['att-g'] = (['t', 'open'], {'attempt_id': 'att-g', 'automatic_retry_of': 'att-nobody'})
+        self.assertTrue(mod._plain_retry_successor(longer, 'att-nobody'))
+        self.assertFalse(mod._plain_retry_successor(rows, 'att-nobody'))
 
 
 if __name__=='__main__':unittest.main()

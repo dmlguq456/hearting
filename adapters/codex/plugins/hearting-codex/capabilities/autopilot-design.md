@@ -25,8 +25,7 @@ Adapters may expose this capability through native commands, skill files, prompt
 
 **One gate, raised from the frame legs (SD-123/SD-129).** A `quick+` route seals `human_gates: ["frame-review"]` and both
 `frame` and `frame-alternative` continuations as that human gate, bound at
-`one-shot`'s entry for `quick` and `refs`'s entry for `standard+`. `frame-review` is the recipe's only human gate: the old
-`direction-confirmation` continuation on `refs` is retired, because a route
+`one-shot`'s entry for `quick` and `refs`'s entry for `standard+`. `frame-review` is the recipe's only human gate, because a route
 must have exactly one place a person is asked for direction. A route sealed
 before this cycle keeps its own generation's gate name, binding and node
 shape and is **never retro-fitted** — the entry fence in
@@ -62,6 +61,19 @@ route carries no gate binding.
 The declared `confirmation.mode` (default `hybrid`) governs the ordered pair —
 blocking direction gate first, route notice after; `core/WORKFLOW.md` §0.4 owns
 the user-facing card.
+
+## Ending in a Choice
+
+When the design is the first half of a development job that changes the screen
+(`core/WORKFLOW.md` "Screen first"), the route's end product is one to three
+options with a comparison for the person to choose from. The choosing is not a
+stage and not a unit: it is the conversation between the opening session and
+the person. The chosen option's path then goes to the development task as a
+decision. Leave the `handoff` stage out of such a route
+(`--shape staged --graph refs,build,visual-verify,critic-review`, which compose
+accepts); the development handoff is packaged after the choice. A route that is
+meant to hand over straight away keeps `handoff`. Neither form adds a gate or a
+required input.
 
 ## Artifact Ownership
 

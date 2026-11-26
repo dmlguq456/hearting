@@ -1,4 +1,7 @@
 """Focused renderer regressions for the r14 frame and dynamic data layouts."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import unittest
 from pathlib import Path
 
@@ -238,7 +241,8 @@ class R14Renderer(unittest.TestCase):
         tail = links[-1]
         tail_to = tail[1]
         tail_identity = str(tail_to[0]) if isinstance(tail_to, (list, tuple)) else str(tail_to)
-        tail_kind, tail_when = str(tail[2]), str(tail[3])
+        from tools.fleet.explorer.peers import link_kind_text
+        tail_kind, tail_when = link_kind_text(tail[2]), str(tail[3])     # the KIND words a row shows
 
         def assert_tail_text(frame):
             rows = frame.text_rows()

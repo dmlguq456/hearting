@@ -37,6 +37,15 @@ sequence alone do not grant another review budget. The node-lineage round number
 remains unchanged, and an earlier PASS does not become current when content
 returns to an old digest.
 
+## A Chosen Mockup
+
+When the task carries a mockup the person already chose (a path given as a
+decision, `core/WORKFLOW.md` "Screen first"), the plan follows it as written and
+does not decide the screen's look again. Where the mockup is silent, the plan
+records the gap as an open item and follows the project's existing style instead
+of filling it with a new design; the report lists those items for the person. A task
+without a mockup plans as before.
+
 ## Slices Block
 
 When the plan splits into 2–4 packages that own exactly disjoint files and can each finish on their own, `plan.md` carries exactly one fenced block whose info string is `slices`: a JSON list of `{"id", "files", "verify", "brief"?, "adapter"?, "expected_round_trips"?}` (`files` are exact paths, no globs; `verify` is one line). The owner's `dispatch-batch.py --slices <plan.md>` reads it and runs the slices in parallel. A plan that cannot be split that way carries no block and runs as one session; a duplicated or malformed block also falls back to one session.

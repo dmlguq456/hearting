@@ -1408,11 +1408,17 @@ def _adopt_exact_owner_job_binding(entity, jobs):
 
 
 def _owner_children(entity, jobs):
-    """Return only children named by the stable owner-link contracts."""
+    """Return only children named by the stable owner-link contracts.
+
+    A unit leg a worker started (`caller_attempt_id`) is another route called by that worker, not a child of
+    its owner: the registry row carries the calling session's id and Fleet hangs it below its caller by
+    `parent_slug`, but neither makes it part of the caller's own route."""
     sid = _field(entity, "session_id")
     slug = _field(entity, "slug")
     children = []
     for child in jobs:
+        if _field(child, "caller_attempt_id"):
+            continue
         if sid and _field(child, "parent_sid") == sid:
             children.append(child)
         elif slug and _field(child, "parent_slug") == slug:
@@ -1780,7 +1786,8 @@ def attach_projections(sessions: Iterable[Session], jobs: Iterable[DispatchJob],
             entity.work_projection = WorkProjection(
                 source="registry-exact" if rid else "none", route_id=rid,
                 route_hash=rhash, route_node=_field(entity, "route_node"),
-                attempt_id=_field(entity, "attempt_id"), node_state="unknown")
+                attempt_id=_field(entity, "attempt_id"), node_state="unknown",
+                _details_deferred=True)
             if isinstance(entity, DispatchJob):
                 entity.stage = None
                 observed = ((_field(entity, "state_evidence") or {}).get("inputs") or {}).get(

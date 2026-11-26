@@ -1,8 +1,12 @@
 """Non-blocking main-session notices from the latest request's input usage.
 
 500K/700K are absolute token thresholds, not historical usage or window ratios.
-A session jumping across both gets the urgent line; both thresholds are consumed.
-Only a new native session ID resets them. Adapters own user/model presentation.
+Each threshold speaks once while the session stays above it; a session jumping
+across both gets the urgent line and both are consumed. A latest request at or
+below 400K -- the session's own compaction, by session-tidy or the runtime, or
+a new native session ID -- clears them, so the next crossing speaks once more;
+a small dip under 500K (old tool results trimmed) is not a compaction.
+A zero or unknown count observes nothing. Adapters own user/model presentation.
 These work-preservation notices do not promise headroom before native compaction.
 """
 from __future__ import annotations
@@ -18,6 +22,11 @@ import sys
 import tempfile
 
 THRESHOLDS = (500_000, 700_000)
+# A request this small means the context was compacted, not merely trimmed.
+REARM_BELOW = THRESHOLDS[0] * 4 // 5
+# The 700K line says what the 2026-10-07 decision asks for: a default tidy at the
+# next work boundary, and that 정리만 does not shrink the context.
+URGENT = "하던 일 하나를 넘긴 뒤 /session-tidy 기본 정리('정리만'은 문맥을 줄이지 않음)"
 
 
 def main_session(env=None) -> bool:
@@ -159,16 +168,22 @@ def codex_notice(payload: dict) -> str:
 
 
 def notice(harness: str, session_id: str, tokens: int | None, *, state_dir=None, env=None) -> str:
-    """Atomically consume newly exceeded thresholds. Any unavailable state is silent."""
-    if (not main_session(env) or not session_id or not isinstance(tokens, int)
-            or isinstance(tokens, bool) or tokens <= THRESHOLDS[0]):
-        return ""
+    """Atomically consume newly exceeded thresholds; at or below 400K, clear them.
+
+    Any unavailable state is silent and leaves the record as it is."""
+    if (not session_id or not isinstance(tokens, int) or isinstance(tokens, bool)
+            or tokens <= 0):
+        return ""  # Zero is a runtime's empty or interrupted request, not a smaller context.
     crossed = [threshold for threshold in THRESHOLDS if tokens > threshold]
     base = Path(state_dir) if state_dir else Path(
         os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state"
     ) / "hearting/context-alert"
     digest = hashlib.sha256(f"{harness}\0{session_id}".encode()).hexdigest()
     target = base / (digest + ".json")
+    if not crossed and (tokens > REARM_BELOW or not os.path.lexists(target)):
+        return ""  # Nothing crossed and nothing to clear: no state is touched.
+    if not main_session(env):
+        return ""
     temporary = None
     try:
         base.mkdir(parents=True, exist_ok=True)
@@ -180,6 +195,10 @@ def notice(harness: str, session_id: str, tokens: int | None, *, state_dir=None,
                 seen = []
             if not isinstance(seen, list) or any(item not in THRESHOLDS for item in seen):
                 return ""
+            if not crossed:
+                # Back at or below 400K: the context was compacted. Both may speak again.
+                target.unlink()
+                return ""
             fresh = [threshold for threshold in crossed if threshold not in seen]
             if not fresh:
                 return ""
@@ -188,7 +207,7 @@ def notice(harness: str, session_id: str, tokens: int | None, *, state_dir=None,
                 json.dump(sorted(set(seen + crossed)), handle)
             os.replace(temporary, target)
             temporary = None
-        suffix = ("지금 /session-tidy로 정리하세요" if max(fresh) == THRESHOLDS[1]
+        suffix = (URGENT if max(fresh) == THRESHOLDS[1]
                   else "/session-tidy로 작업 상태 저장 권장")
         return f"입력 문맥 약 {tokens / 1000:.0f}K — {suffix} · 자동 압축 여유 보장 아님"
     except (OSError, ValueError, TypeError):

@@ -8,6 +8,9 @@ explicit fakes; a missing fake is an unknown observation, which the product
 code must treat as "do not act".
 """
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import contextlib
 import importlib.util
@@ -35,6 +38,7 @@ import dispatch_recipient_inbox as inbox  # noqa: E402
 import dispatch_supervision as supervision  # noqa: E402
 import herdr_observation  # noqa: E402
 import peer_obligations  # noqa: E402
+import peer_steward_native  # noqa: E402
 import session_notice  # noqa: E402
 import session_tidy as tidy  # noqa: E402
 from route_identity import route_hash  # noqa: E402
@@ -129,30 +133,22 @@ class IsolatedCase(unittest.TestCase):
 
     @contextlib.contextmanager
     def transport(self, sid="B", *, sent=None):
-        inventory = {"result": {"agents": [{"agent": "claude",
-            "agent_session": {"value": sid}, "pane_id": "w1:pLive"}]}}
-        resolved = {"pane": "w1:pLive", "harness": "claude", "session_id": sid,
-                    "name": "fixture", "state": "idle"}
+        """A shell-attached recipient; the courier's prompt is counted, never typed."""
+        import session_shell
+        binding = {"harness": "claude", "sid": sid, "native_pid": 0}
+
+        def exact_binding(harness, session_id):
+            return (binding, None) if (harness, session_id) == ("claude", sid) else (
+                None, "attachment-missing")
 
         def courier(args, *, expected_recipient, on_prepared, producer_binding):
             body = Path(args.body_file).read_text()
             if sent is not None:
-                sent.append({"body": body, "recipient": expected_recipient})
+                sent.append({"body": body, "recipient": expected_recipient,
+                             "target": args.target})
             return 3
 
-        with mock.patch.object(peer_steward.subprocess, "run",
-                               return_value=SimpleNamespace(
-                                   returncode=0, stdout=json.dumps(inventory))), \
-             mock.patch.object(peer_steward, "_resolve_target",
-                               return_value=("claude", sid, "fixture")), \
-             patch_split(peer_steward, "_herdr_missing", return_value=False), \
-             mock.patch.object(peer_steward, "_resolve_prompt_target",
-                               return_value=(resolved, None, [])), \
-             mock.patch.object(peer_steward, "_pane_readiness",
-                               return_value=SimpleNamespace(state="ready")), \
-             mock.patch.object(peer_steward, "_native_idle_prompt_guard",
-                               return_value=(None, {})), \
-             mock.patch.object(peer_steward, "_herdr_prompt", return_value=(0, {})), \
+        with mock.patch.object(session_shell, "exact_binding", side_effect=exact_binding), \
              mock.patch.object(peer_steward, "cmd_prompt", side_effect=courier):
             yield
 
@@ -213,14 +209,34 @@ class ClassifyTest(IsolatedCase):
         self.assertEqual(session_notice.classify(base), session_notice.PROGRESS)
         self.assertEqual(session_notice.classify(
             {**base, "required_action": "report-to-user"}), session_notice.TERMINAL)
+        # A final whose outcome the runner has not published yet needs attention; a
+        # published success, or one its producer called quiet, is routine.
+        final = {**base, "key": "experiment:run-1:final:1:claude:A",
+                 "subject": "experiment final (1/1)"}
+        self.assertEqual(session_notice.classify(final), session_notice.ATTENTION)
+        self.publish_run_state("run-1", status="succeeded")
+        self.assertEqual(session_notice.classify(final), session_notice.ROUTINE)
+        self.publish_run_state("run-1", status="failed", exit_code=6)
+        self.assertEqual(session_notice.classify(final), session_notice.ATTENTION)
         self.assertEqual(session_notice.classify(
-            {**base, "key": "experiment:run-1:final:1:claude:A",
-             "subject": "experiment final (1/1)"}), session_notice.TERMINAL)
+            {**final, "subject": "experiment final, quiet (1/1)", "key": "experiment:run-2:final:1:claude:A"}),
+            session_notice.ROUTINE)
+        # An experiment attention is attention whatever its subject (it was `progress` before).
         self.assertEqual(session_notice.classify(
             {**base, "key": "experiment:run-1:attention:abc",
-             "subject": "experiment final (1/1)"}), session_notice.TERMINAL)
+             "subject": "experiment final (1/1)"}), session_notice.ATTENTION)
         self.assertEqual(session_notice.classify(
-            {**base, "key": "experiment:run-1:attention:abc"}), session_notice.PROGRESS)
+            {**base, "key": "experiment:run-1:attention:abc"}), session_notice.ATTENTION)
+        self.assertEqual(session_notice.classify(
+            {**base, "key": "experiment:run-1:attention-checkpoint:abc:7:d"}), session_notice.PROGRESS)
+        self.assertEqual(session_notice.classify(
+            {**base, "key": "experiment:run-1:checkpoint:run:7:1:claude:A"}), session_notice.ROUTINE)
+        compute = {**base, "key": "compute-run:h-20261114-101010-x", "subject": "compute run",
+                   "required_action": "report-to-user",
+                   "text": "run h-20261114-101010-x on h ended with exit 0; read it with: compute-hosts tail h-20261114-101010-x"}
+        self.assertEqual(session_notice.classify(compute), session_notice.ROUTINE)
+        self.assertEqual(session_notice.classify(
+            {**compute, "text": compute["text"].replace("exit 0", "exit 6")}), session_notice.ATTENTION)
         # A broken receipt is progress, never a terminal wake.
         self.assertEqual(session_notice.classify({"kind": "notice"}), session_notice.PROGRESS)
 
@@ -250,6 +266,221 @@ class TerminalFirstDeliveryTest(IsolatedCase):
             peer_steward._resume_session_notice_obligations(self.duties(), self.store)
         self.assertEqual(len(sent), 2)
         self.assertIn("routine progress", sent[1]["body"])
+
+
+class EndedOwnerNoticeTest(IsolatedCase):
+    """A run notice whose owner session ended is never re-sent; it closes by TTL.
+
+    The producer (``resource_progress._notice_targets``) makes one notice per
+    destination at the start: one for the owner session and one for the
+    owner's parent, the parent's own copy. So when the owner has ended, the
+    parent already holds the failure, and the owner's copy has nowhere to go:
+    the resolver refuses it, nobody is woken for it, and the existing notice
+    TTL (plus the dead-lease reclaim) closes it.
+    """
+
+    DAY = 86400
+
+    def world(self, token, *, harness="claude", status="done", attention=True,
+              owner="sid-owner", supervisor="sid-supervisor",
+              supervisor_harness="claude", waiting_supervisor=False,
+              with_parent=True):
+        """One isolated state root: the owner's row and the producer's notices."""
+        import resource_progress
+        from harness_capabilities import parent_completion
+        state = self.root / f"world-{token}"
+        state.mkdir()
+        jobs = state / "jobs.log"
+        store = peer_obligations.ObligationStore(state)
+        self.assertTrue(store.ensure_directory())
+        sup_carrier = parent_completion(supervisor_harness)["carrier"]
+        attempt = f"att-{token}"
+        meta = ",".join(("attempt_schema_version=2", f"attempt_id={attempt}",
+                         "dispatch_depth=1", "worker_type=owner", f"harness={harness}",
+                         f"parent_sid={supervisor}", f"parent_harness={supervisor_harness}",
+                         f"parent_completion_delivery={sup_carrier}", "registered_worker=1",
+                         f"route_id=rt-{token}", f"route_hash={'h' * 8}", "route_node=execute"))
+        world = SimpleNamespace(state=state, jobs=jobs, store=store, attempt=attempt,
+                                owner=owner, supervisor=supervisor, harness=harness,
+                                meta=meta, run=f"run-{token}", records={})
+        self.set_status(world, status)
+        if waiting_supervisor:
+            join._write_supervisor_state_unlocked(
+                state / "supervisor-state" / (attempt + ".json"), attempt, set(),
+                resource={"session_id": owner, "delivered": [], "outbox": None})
+        if attention:
+            subject, text = "compute run", (
+                f"run {world.run} on here ended with exit 6; read it with: "
+                f"compute-hosts tail {world.run}")
+        else:
+            subject, text = "compute run, quiet", (
+                f"run {world.run} on here ended with exit 0; read it with: "
+                f"compute-hosts tail {world.run}")
+        # The producer's own destinations, then one notify per destination --
+        # exactly what the resource-progress sender does for one event.
+        targets = resource_progress._notice_targets({"jobs": str(jobs), "owner_wait": {
+            "harness": harness, "session_id": owner, "parent_attempt_id": attempt,
+            "jobs": str(jobs)}})
+        kinds = {target["lineage"]["kind"] if isinstance(target, dict) else None
+                 for target in targets}
+        self.assertEqual(kinds, {"owner-session", "attempt-parent"})
+        for target in targets:
+            kind = target["lineage"]["kind"]
+            if kind == "attempt-parent" and not with_parent:
+                continue
+            record = session_notice.notify(
+                target["harness"], target["session_id"],
+                key=f"compute-run:{world.run}:{target['harness']}:{target['session_id']}",
+                subject=subject, text=text, lineage=target["lineage"], jobs=jobs)
+            world.records[kind] = (target["session_id"], record)
+        for duty in store.list(kinds={"run-notice"}):
+            self.backdate(world, duty, hours=1.0)
+        return world
+
+    def set_status(self, world, status):
+        world.jobs.write_text("\t".join(("2026-11-14T00:00:00Z", status, "/repo", "/wt",
+                                         "owner", world.meta)) + "\n")
+        import dispatch_seat_handover as handover
+        handover._LINEAGE_GRAPH_CACHE.clear()
+
+    def backdate(self, world, duty, *, hours):
+        path = world.store._record_path(duty["id"])
+        value = json.loads(path.read_text("utf-8"))
+        value["accepted_at"] = time.time() - hours * 3600
+        path.write_text(json.dumps(value), encoding="utf-8")
+
+    def record_state(self, world, kind):
+        sid, record = world.records[kind]
+        return pending.read(world.state, sid, record["delivery_id"])
+
+    def age_record(self, world, kind, *, days):
+        sid, record = world.records[kind]
+        old = time.time() - days * self.DAY
+        os.utime(pending.record_path(world.state, sid, record["delivery_id"]), (old, old))
+
+    def _pass(self, world, *, sent=None, lifetime=None, recipient=None):
+        context = mock.patch.object(peer_steward_native, "native_lifetime",
+                                    return_value=lifetime) if lifetime is not None else contextlib.nullcontext()
+        with context, self.transport(recipient or world.supervisor, sent=sent):
+            peer_steward._resume_session_notice_obligations(
+                world.store.list(kinds={"run-notice"}), world.store)
+
+    def failures_to(self, sent, world):
+        return [entry for entry in sent if f"run {world.run} on here ended with exit 6" in entry["body"]]
+
+    def test_the_parent_gets_the_failure_exactly_once_when_both_notices_wait(self):
+        # Same pass: the owner ended while both of the producer's notices are
+        # still pending. The parent's own copy is delivered; the owner's copy is
+        # not re-sent to the parent, so the parent is woken once for the failure.
+        for status, lifetime in (("killed", "live"), ("cancelled", "live"), ("done", "ended")):
+            for harness in ("claude", "codex", "opencode"):
+                with self.subTest(status=status, harness=harness):
+                    world = self.world(f"same-{status}-{harness}", harness=harness, status=status)
+                    sent = []
+                    self._pass(world, sent=sent, lifetime=lifetime)
+                    self._pass(world, sent=sent, lifetime=lifetime)
+                    self.assertEqual(len(self.failures_to(sent, world)), 1)
+                    self.assertEqual(sent[0]["recipient"], ("claude", world.supervisor))
+                    self.assertEqual(self.record_state(world, "owner-session")["state"], "pending")
+                    self.assertEqual(self.record_state(world, "attempt-parent")["state"], "sent-ambiguous")
+
+    def test_the_parent_gets_the_failure_exactly_once_when_its_copy_was_read_first(self):
+        # The owner is still alive (no waiting supervisor yet) when the failure
+        # lands: the parent's copy is delivered and read. Only afterwards the
+        # owner is killed; the parent is not woken a second time for the owner's copy.
+        world = self.world("read-first", status="open")
+        sent = []
+        self._pass(world, sent=sent)
+        self.assertEqual(len(self.failures_to(sent, world)), 1)
+        sid, record = world.records["attempt-parent"]
+        pending.ack(world.state, sid, record["delivery_id"], acked_by="fixture-receipt")
+        self.set_status(world, "killed")
+        self._pass(world, sent=sent)
+        self._pass(world, sent=sent, lifetime="ended")
+        self.assertEqual(len(self.failures_to(sent, world)), 1)
+        self.assertEqual(self.record_state(world, "owner-session")["state"], "pending")
+
+    def test_an_ended_owners_notice_wakes_nobody_and_closes_by_the_seven_day_ttl(self):
+        for attention in (True, False):
+            with self.subTest(attention=attention):
+                world = self.world(f"ttl-{attention}", status="killed",
+                                   attention=attention, with_parent=False)
+                sent = []
+                self._pass(world, sent=sent)
+                self.assertEqual(sent, [])
+                duty, = world.store.list(kinds={"run-notice"})
+                self.assertEqual(duty["state"], "pending")
+                self.assertEqual((duty.get("observation") or {}).get("reason"),
+                                 "recipient-lineage-unavailable")
+                # Before the age limit nothing closes; at eight days the notice TTL does.
+                self.age_record(world, "owner-session", days=6)
+                self.assertEqual(join.reconcile_pending_delivery(world.jobs)["expired"], 0)
+                self.age_record(world, "owner-session", days=8)
+                self.assertEqual(join.reconcile_pending_delivery(world.jobs)["expired"], 1)
+                self.assertEqual(self.record_state(world, "owner-session")["state"], "expired")
+                self._pass(world, sent=sent)
+                self.assertEqual(sent, [])
+                self.assertEqual(world.store.list(kinds={"run-notice"}), [])
+
+    def test_an_owner_that_cannot_receive_is_neither_served_nor_redirected(self):
+        # Every way the owner-session answer is refused keeps its notice
+        # pending with nobody woken: no waiting supervisor, an unproven end, a
+        # confirmed successor of the owner's seat.
+        cases = {
+            "done-without-waiting-supervisor": dict(status="done", lifetime="ended"),
+            "done-session-not-provably-ended": dict(status="done", lifetime="unknown"),
+            "killed-with-successor": dict(status="killed", lifetime="live", successor=True),
+        }
+        for name, case in cases.items():
+            with self.subTest(case=name):
+                world = self.world(f"refused-{name}", status=case["status"], with_parent=False)
+                if case.get("successor"):
+                    self.edge(world.owner, "sid-next")
+                sent = []
+                self._pass(world, sent=sent, lifetime=case["lifetime"])
+                self.assertEqual(sent, [])
+                duty, = world.store.list(kinds={"run-notice"})
+                self.assertEqual(duty["state"], "pending")
+
+    def test_a_live_owner_keeps_its_own_notice(self):
+        # An owner whose waiting supervisor still names it receives its notice
+        # itself, as before; the parent's copy is the parent's own.
+        world = self.world("alive", status="open", waiting_supervisor=True, with_parent=False)
+        sent = []
+        self._pass(world, sent=sent, recipient=world.owner)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["recipient"], ("claude", world.owner))
+
+    def _claim(self, world, *, lease_seconds):
+        sid, record = world.records["owner-session"]
+        claimed = pending.claim(world.state, sid, record["delivery_id"],
+                                claim_owner="dead-runner", lease_seconds=lease_seconds)
+        self.assertEqual(claimed["state"], "claimed")
+
+    def test_a_dead_lease_on_an_unresolvable_notice_is_reclaimed_then_expires(self):
+        world = self.world("lease-dead", status="killed", with_parent=False)
+        self._claim(world, lease_seconds=0.001)
+        time.sleep(0.05)
+        sent = []
+        self._pass(world, sent=sent)
+        self.assertEqual(sent, [])
+        record = self.record_state(world, "owner-session")
+        self.assertEqual(record["state"], "pending")
+        self.assertIsNone(record["claim_owner"])
+        # Reclaimed, it ends like any other unreachable notice.
+        self.age_record(world, "owner-session", days=8)
+        self.assertEqual(join.reconcile_pending_delivery(world.jobs)["expired"], 1)
+        self.assertEqual(self.record_state(world, "owner-session")["state"], "expired")
+
+    def test_a_live_lease_on_an_unresolvable_notice_is_left_alone(self):
+        world = self.world("lease-live", status="killed", with_parent=False)
+        self._claim(world, lease_seconds=600)
+        sent = []
+        self._pass(world, sent=sent)
+        self.assertEqual(sent, [])
+        record = self.record_state(world, "owner-session")
+        self.assertEqual(record["state"], "claimed")
+        self.assertEqual(record["claim_owner"], "dead-runner")
 
 
 class RunNoticeSupersedeTest(IsolatedCase):
@@ -567,6 +798,134 @@ class ReconcileDutyTest(IsolatedCase):
         self.assertNotIn("retention", result)
         self.assertEqual(self._retention_starts(popen), [])
 
+    # -- log retirement follow-up: the runner starts the retention child again when the
+    #    last log pass left `more`, instead of waiting out the six-hour window.
+    def _log_state(self, ago_s, *, raw=None, **last_result):
+        state = {"cursor": "", "last_pass_ns": time.time_ns() - int(ago_s * 1_000_000_000),
+                 "last_result": last_result, "round_left": 10}
+        (self.root / "dispatch-log-retention.json").write_bytes(
+            raw if raw is not None else json.dumps(state).encode())
+
+    def _runner_state(self, ago_s, **extra):
+        peer_obligations.write_runner_duty_state(
+            self.root, "retention",
+            {"last_pass_ns": time.time_ns() - int(ago_s * 1_000_000_000), **extra})
+
+    def _maintenance(self, *, observation=None, popen_error=None, canonical=True):
+        import dispatch_contract
+        group = mock.Mock(return_value=SimpleNamespace(state=observation or "empty"))
+        with mock.patch.object(peer_steward.subprocess, "Popen", side_effect=popen_error) as popen, \
+                patch_split(dispatch_contract, "stable_state_root",
+                            return_value=self.root if canonical else self.root / "elsewhere"), \
+                patch_split(dispatch_contract, "process_group_observation", group):
+            popen.return_value.pid = 4242
+            result = peer_steward._runner_maintenance_pass(self.store)
+        return result, len(self._retention_starts(popen)), group
+
+    def test_a_log_pass_that_left_more_restarts_the_retention_child_after_a_minute(self):
+        self._runner_state(3600)
+        self._log_state(61, more=1, round_left=10)
+        result, starts, _group = self._maintenance()
+        self.assertEqual((starts, result["retention"]), (1, {"started": 4242, "follow_up": 1}))
+        state = peer_obligations.read_runner_duty_state(self.root, "retention")
+        self.assertEqual(state["child_pgid"], 4242)
+        self.assertGreater(state["last_pass_ns"], time.time_ns() - 60 * 1_000_000_000)
+        self._runner_state(3600)
+        self._log_state(59, more=1, round_left=10)
+        self.assertEqual(self._maintenance()[1], 0)
+
+    def test_a_follow_up_waits_for_a_log_pass_after_the_previous_start(self):
+        self._runner_state(30)
+        self._log_state(61, more=1, round_left=10)     # the log pass is older than the start
+        self.assertEqual(self._maintenance()[1], 0)
+        # a start that cannot be recorded or run is not chased every minute
+        self._runner_state(3600)
+        self._log_state(61, more=1, round_left=10)
+        self.assertEqual(self._maintenance(popen_error=OSError("no fork"))[1], 1)
+        self.assertEqual(self._maintenance()[1], 0)
+
+    def test_a_follow_up_waits_while_the_previous_process_group_is_not_known_empty(self):
+        for why, observation, starts in (("populated", "populated", 0), ("unverifiable", "unverifiable", 0),
+                                         ("empty", "empty", 1)):
+            with self.subTest(why=why):
+                self._runner_state(3600, child_pgid=4300)
+                self._log_state(61, more=1, round_left=10)
+                result, count, group = self._maintenance(observation=observation)
+                self.assertEqual(count, starts)
+                group.assert_called_once_with(4300)
+        for why, pgid in (("text", "4300"), ("zero", 0), ("negative", -1), ("bool", True)):
+            with self.subTest(why=why):
+                self._runner_state(3600, child_pgid=pgid)
+                self._log_state(61, more=1, round_left=10)
+                self.assertEqual(self._maintenance()[1], 0)
+        with self.subTest(why="no recorded group"):
+            self._runner_state(3600)
+            self._log_state(61, more=1, round_left=10)
+            result, count, group = self._maintenance()
+            self.assertEqual(count, 1)
+            group.assert_not_called()
+
+    def test_a_populated_previous_group_is_looked_at_again_at_most_once_a_minute(self):
+        peer_steward._RETENTION_GROUP_SEEN.clear()
+        self.addCleanup(peer_steward._RETENTION_GROUP_SEEN.clear)
+        self._runner_state(3600, child_pgid=4300)
+        self._log_state(61, more=1, round_left=10)
+        clock = [1000.0]
+        with mock.patch.object(peer_steward.time, "monotonic", side_effect=lambda: clock[0]):
+            first = self._maintenance(observation="populated")
+            within = self._maintenance(observation="empty")
+            clock[0] += 61
+            after = self._maintenance(observation="populated")
+            self._log_state(61, more=1, round_left=9)      # a newer log pass: look at once
+            newer = self._maintenance(observation="empty")
+        self.assertEqual((first[1], first[2].call_count), (0, 1))
+        self.assertEqual((within[1], within[2].call_count), (0, 0))   # no /proc walk this tick
+        self.assertEqual((after[1], after[2].call_count), (0, 1))
+        self.assertEqual((newer[1], newer[2].call_count), (1, 1))
+
+    def test_an_unknown_log_state_leaves_the_six_hour_window_alone(self):
+        states = {
+            "no file": None,
+            "garbage": {"raw": b"\xff{"},
+            "a list": {"raw": b"[1]"},
+            "pass time as text": {"raw": json.dumps({"last_pass_ns": "1", "cursor": "",
+                                                       "last_result": {"more": 1}}).encode()},
+            "no more": {"round_left": 3},
+            "more zero": {"more": 0},
+            "more as text": {"more": "1"},
+        }
+        for why, kwargs in states.items():
+            with self.subTest(why=why):
+                self._runner_state(3600)
+                (self.root / "dispatch-log-retention.json").unlink(missing_ok=True)
+                if kwargs is not None:
+                    self._log_state(61, **kwargs)
+                self.assertEqual(self._maintenance()[1], 0)
+
+    def test_a_follow_up_from_an_older_release_pass_follows_its_more_and_never_writes_the_log_state(self):
+        self._runner_state(3600)
+        self._log_state(61, more=1)                      # no round_left: an older release wrote it
+        path = self.root / "dispatch-log-retention.json"
+        before = path.read_bytes()
+        self.assertEqual(self._maintenance()[1], 1)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(sorted(p.name for p in self.root.glob("*retention*")),
+                         ["dispatch-log-retention.json"])
+
+    def test_the_six_hour_window_is_unchanged_and_does_not_look_at_the_previous_group(self):
+        self._runner_state(6 * 3600 + 60, child_pgid=4300)
+        result, starts, group = self._maintenance(observation="populated")
+        self.assertEqual((starts, result["retention"]), (1, {"started": 4242}))
+        group.assert_not_called()
+        self.assertEqual(peer_obligations.read_runner_duty_state(self.root, "retention")["child_pgid"], 4242)
+
+    def test_a_fixture_root_never_follows_up(self):
+        self._runner_state(3600)
+        self._log_state(61, more=1, round_left=10)
+        result, starts, _group = self._maintenance(canonical=False)
+        self.assertEqual(starts, 0)
+        self.assertNotIn("retention", result)
+
     def test_incomplete_registry_never_judges_records_and_still_prunes(self):
         records = self._open_records(3)
         result = join.reconcile_pending_delivery(self.jobs, time_budget_s=0)
@@ -817,6 +1176,57 @@ class PeerHistoryCleanupTest(IsolatedCase):
         self.assertTrue(old_pending.exists())
         self.assertTrue(transfer.exists())
 
+    def test_a_dropped_row_takes_its_fingerprint_hint_and_an_emptied_folder_with_it(self):
+        peer_message = peer_steward.peer_message
+        pending_dir = peer_message._pending_dir()
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        now = time.time()
+        shared, alone, kept_digest = "1" * 64, "2" * 64, "3" * 64
+        old_a, old_b, young, no_summary, pending = ("a" * 32, "b" * 32, "c" * 32, "d" * 32, "e" * 32)
+        hints = {(shared, old_a), (shared, young), (alone, old_b), (kept_digest, no_summary),
+                 (kept_digest, pending)}
+        for digest, ref in hints:
+            (peer_message._display_root() / digest).mkdir(parents=True, exist_ok=True)
+            (peer_message._display_root() / digest / ref).touch()
+        for ref, state, age, digest in ((old_a, "received", 8, shared), (old_b, "received", 8, alone),
+                                        (young, "received", 1, shared), (no_summary, "received", 8, None),
+                                        (pending, "pending", 30, kept_digest)):
+            row = self._row(ref, state, now - age * 86400)
+            if digest is not None:
+                row["display"] = {"form": 2, "kind": "peer", "sha256": digest}
+            (pending_dir / (ref + ".json")).write_text(json.dumps(row))
+        result = peer_steward._prune_received_peer_history(now=now)
+        self.assertEqual(result["removed"], 3)
+        root = peer_message._display_root()
+        self.assertFalse((root / shared / old_a).exists())       # its own hint goes
+        self.assertTrue((root / shared / young).exists())        # another row's hint on the same text stays
+        self.assertFalse((root / alone).exists())                # an emptied folder is removed
+        self.assertTrue((root / kept_digest / no_summary).exists())   # no fingerprint in the summary: nothing guessed
+        self.assertTrue((root / kept_digest / pending).exists())      # a row that is not dropped keeps its hint
+
+    def test_queued_and_native_pending_rows_are_not_closed_by_the_seven_day_window(self):
+        # #1576 review follow-up F9: the 7-day window closes only received rows. A row
+        # accepted by a native carrier but never received (`claude-pty-continue-submitted`,
+        # `queued`) or one still waiting for its native callback (`native-pending`) stays:
+        # dropping it would drop the sender's still-unreceived sealed request, which is not a
+        # one-condition extension of this sweep. Recorded, not changed.
+        pending_dir = peer_steward.peer_message._pending_dir()
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        now = time.time()
+        kept = {}
+        for index, (state, receipt) in enumerate((("queued", "claude-pty-continue-submitted"),
+                                                   ("pending", "native-pending"),
+                                                   ("unverified", "hook-context-inflight"))):
+            ref = f"{index + 1:032x}"
+            row = self._row(ref, state, now - 30 * 86400)
+            row["receipt"] = receipt
+            path = pending_dir / (ref + ".json")
+            path.write_text(json.dumps(row))
+            kept[ref] = path
+        result = peer_steward._prune_received_peer_history(now=now)
+        self.assertEqual(result["removed"], 0)
+        self.assertTrue(all(path.exists() for path in kept.values()))
+
     def _lock(self, ref, mtime):
         path = peer_steward.peer_message._pending_dir() / (".lock-" + ref)
         path.touch(mode=0o600)
@@ -887,14 +1297,13 @@ class LineageBundleRetirementTest(IsolatedCase):
             {"ts": ts, "harness": "claude", "sid": "B", "event": "handover",
              "source": "clear", "from": {"harness": "claude", "sid": "A"}}])
 
-    def census(self):
-        return herdr_observation.PaneCensus("default", (), time.monotonic())
-
     def retire(self, **kwargs):
-        with mock.patch.object(peer_steward.herdr_observation, "pane_census",
-                               return_value=kwargs.pop("census", self.census())):
-            return peer_steward._retire_finished_lineage_bundles(
+        lifetime = kwargs.pop("lifetime", "ended")
+        with mock.patch.object(peer_steward, "native_lifetime", return_value=lifetime) as proof:
+            result = peer_steward._retire_finished_lineage_bundles(
                 self.store, now=time.time(), **kwargs)
+        self.lifetime_proof = proof
+        return result
 
     def archived(self):
         archive = tidy.state_root() / peer_steward.RETIRE_ARCHIVE_DIRECTORY
@@ -921,36 +1330,23 @@ class LineageBundleRetirementTest(IsolatedCase):
         self.assertEqual(peer_steward._purge_retired_archives()["removed"], 1)
         self.assertEqual(self.archived(), ["seat-A.jsonl"])
 
-    def test_retirement_uses_the_endpoint_session_and_caches_process_checks(self):
+    def test_retirement_uses_native_lifetime_once_per_exact_session(self):
         self.component()
         self.write_ledger("seat-C", [
             {"ts": self.OLD, "harness": "claude", "sid": "C", "event": "start", "source": "startup"}])
         self.write_ledger("seat-D", [
             {"ts": self.OLD, "harness": "claude", "sid": "D", "event": "handover",
              "source": "clear", "from": {"harness": "claude", "sid": "C"}}])
-        peer_steward._HERDR_SESSION = "fixture-server"
-        calls = []
-
-        def census(**kwargs):
-            calls.append(kwargs)
-            return herdr_observation.PaneCensus("fixture-server", (
-                {"agent": "claude", "pane_id": "w1:pA",
-                 "agent_session": {"value": "other-a"}},
-                {"agent": "claude", "pane_id": "w1:pB",
-                 "agent_session": {"value": "other-b"}},
-            ), time.monotonic())
-
-        with mock.patch.object(peer_steward.herdr_observation, "pane_census",
-                               side_effect=census), \
-             mock.patch.object(peer_steward, "_process_session",
-                               return_value="not-a-member") as process:
-            result = peer_steward._retire_finished_lineage_bundles(
-                self.store, now=time.time())
-        self.assertEqual(calls, [{"session": "fixture-server"}])
-        # Two components look at the same two panes; each pane is asked once
-        # per pass instead of once per component.
-        self.assertEqual(process.call_count, 2)
+        result = self.retire()
+        calls = self.lifetime_proof.call_args_list
+        self.assertCountEqual([call.args for call in calls],
+                              [("claude", "A"), ("claude", "B"), ("claude", "C"), ("claude", "D")])
+        # One shared session-holder reading serves the whole pass.
+        observations = {id(call.kwargs.get("observation")) for call in calls}
+        self.assertEqual(len(observations), 1)
+        self.assertIsNotNone(calls[0].kwargs.get("observation"))
         self.assertEqual(result["retired"], 2)
+
 
     def test_retirement_stamps_the_archive_and_never_overwrites_an_entry(self):
         self.component()
@@ -990,10 +1386,6 @@ class LineageBundleRetirementTest(IsolatedCase):
 
         def recent_activity():
             self.component(ts=time.time())
-
-        def unknown_census():
-            self.component()
-            self._census = None
 
         def open_binding():
             self.component()
@@ -1038,7 +1430,7 @@ class LineageBundleRetirementTest(IsolatedCase):
                 self.assertEqual(result["retired"], 0, name)
                 self.assertTrue(self.sessions(), name)
         self.component()
-        result = self.retire(census=None)
+        result = self.retire(lifetime="unknown")
         self.assertEqual(result["retired"], 0)
 
 

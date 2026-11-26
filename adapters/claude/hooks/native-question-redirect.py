@@ -1,0 +1,1 @@
+../../../hooks/native-question-redirect.py

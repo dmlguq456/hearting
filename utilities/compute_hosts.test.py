@@ -3,6 +3,9 @@
 The local host mode runs everything in-process, so the whole lifecycle —
 launch, log, exit code, listing — is exercised without a network.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import contextlib
 import importlib.util
@@ -26,6 +29,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent
 TOOL = ROOT / "compute-hosts.py"
+sys.path.insert(0, str(ROOT.parent / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 
 
 def controlled_proc_root(root, processes):
@@ -169,9 +174,9 @@ class ComputeRunLauncherIdentityTest(unittest.TestCase):
                  mock.patch("sys.stdout"):
                 self.assertEqual(module.cmd_run(args), 0)
 
-            launched = remote.call_args.args[1]
-            self.assertIn("export CLAUDE_CODE_SESSION_ID=route-parent", launched)
-            script = shlex.split(launched)[2]
+            self.assertEqual(remote.call_args.args[1], "python3 -")
+            script = remote.call_args.kwargs["input"]
+            self.assertIn("export CLAUDE_CODE_SESSION_ID=route-parent", script)
             self.assertIn("'owner': {'kind': 'session', 'harness': 'claude', 'id': 'route-parent'", script)
             run_dirs = list(run_root.iterdir())
             self.assertEqual(len(run_dirs), 1)
@@ -242,7 +247,7 @@ class ComputeRunLauncherIdentityTest(unittest.TestCase):
             self.assertEqual(meta["provenance"]["agent_home_status"], "published")
             self.assertTrue(meta["execution_contract"]["share"])
             self.assertEqual(meta["execution_contract"]["resource_parent"], parent_contract)
-            launch_script = shlex.split(remote.call_args.args[1])[2]
+            launch_script = remote.call_args.kwargs["input"]
             self.assertIn("'HEARTING_RESOURCE_RUN_ID': 'parent-run'", launch_script)
 
 
@@ -410,7 +415,7 @@ class RunGPUObservationTest(unittest.TestCase):
         receipt = json.loads(output.getvalue())
         meta = json.loads((self.run_root / receipt["run_id"] / "meta.json").read_text())
         self.assertEqual(meta["provenance"]["session"], receipt["provenance"]["session"])
-        return receipt["provenance"]["session"], launch.call_args.args[1]
+        return receipt["provenance"]["session"], launch.call_args.kwargs["input"]
 
     def test_clear_alias_conflict_records_and_exports_the_route_writer_session(self):
         tools = str(ROOT.parent / "tools")
@@ -628,7 +633,7 @@ class RunGPUObservationTest(unittest.TestCase):
         self.assertEqual(observed["suggested_gpu"], 0)
         self.assertEqual(observed["gpus"][2]["utilization_gpu_pct"], None)
         self.assertEqual(receipt["gpus"], "0")
-        self.assertIn("launch_compute", launch.call_args.args[1])
+        self.assertIn("launch_compute", launch.call_args.kwargs["input"])
         meta = json.loads((self.run_root / receipt["run_id"] / "meta.json").read_text())
         self.assertEqual(meta["gpu_observation"], observed)
 
@@ -1342,8 +1347,9 @@ class ComputeHostsTest(unittest.TestCase):
         }
         captured = {}
 
-        def fake_remote(_host, script, *, timeout):
-            captured["script"] = script
+        def fake_remote(_host, command, *, timeout, input):
+            captured["command"] = command
+            captured["script"] = input
             captured["timeout"] = timeout
             payload = {"hostname": "remote", "gpus": [], "observed_at": 1.0}
             return subprocess.CompletedProcess([], 0, json.dumps(payload), "")
@@ -1617,7 +1623,7 @@ class ComputeHostsTest(unittest.TestCase):
                 {**clean, "CODEX_THREAD_ID": "same-session-token",
                  "CLAUDE_CODE_SESSION_ID": "same-session-token"})
             job_proc = launch_fixture(
-                {**clean, "AGENT_DISPATCH_ATTEMPT_ID": "att-42",
+                {**clean, "AGENT_DISPATCH_ATTEMPT_ID": unique_attempt_id("att-42"),
                  "AGENT_DISPATCH_SELF_SLUG": "train-test",
                  "HEARTING_COMPUTE_RUN_ID": "shadowed-run"})
             session_proc = launch_fixture(
@@ -2403,13 +2409,10 @@ class LauncherProvenanceTest(unittest.TestCase):
         hidden = source.with_name(source.name + ".hidden-for-test")
         source.rename(hidden)
         self.addCleanup(lambda: hidden.rename(source) if hidden.exists() else None)
-        campaign = self.root / "campaigns" / "fixture" / "artifacts" / "raw-results"
-        campaign.mkdir(parents=True)
         preflight = Path(payload_home) / "adapters/codex/bin/preflight.sh"
-        result = subprocess.run([str(preflight), "write", str(campaign)],
+        result = subprocess.run([str(preflight), "--help"],
                                 text=True, capture_output=True, env=self.env)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertEqual(list(campaign.iterdir()), [])
         hidden.rename(source)
 
         # Absolute and escaping links are rejected by real and dry-run paths.
@@ -2457,7 +2460,7 @@ class LauncherProvenanceTest(unittest.TestCase):
         remote_env["COMPUTE_HOSTS_CONFIG"] = str(self.config)
         launched = self.run_tool("run", "remote", "--name", "payload-write", "--",
                                  "bash", "-c",
-                                 f'"$AGENT_HOME/adapters/codex/bin/preflight.sh" write {shlex.quote(str(campaign))}',
+                                 '"$AGENT_HOME/adapters/codex/bin/preflight.sh" --help',
                                  env=remote_env)
         self.assertEqual(launched.returncode, 0, launched.stderr + launched.stdout)
         run_id = launched.stdout.split()[1]
@@ -2683,10 +2686,10 @@ class LauncherProvenanceTest(unittest.TestCase):
         self.assertEqual(
             module._launcher_provenance({
                 "AGENT_HOME": str(home),
-                "AGENT_DISPATCH_ATTEMPT_ID": "att-9f2c4b1ad34e",
+                "AGENT_DISPATCH_ATTEMPT_ID": unique_attempt_id("att-9f2c4b1ad34e"),
             }),
             {"AGENT_HOME": str(home.resolve()),
-             "AGENT_DISPATCH_ATTEMPT_ID": "att-9f2c4b1ad34e"})
+             "AGENT_DISPATCH_ATTEMPT_ID": unique_attempt_id("att-9f2c4b1ad34e")})
         # An unknown attempt shape is omitted, never forwarded or executed.
         self.assertEqual(
             module._launcher_provenance({
@@ -2698,7 +2701,7 @@ class LauncherProvenanceTest(unittest.TestCase):
                     "att-" + "x" * 241, None, 7, ["att-9f2c"]):
             with self.subTest(bad=bad):
                 self.assertFalse(module._valid_attempt_id(bad))
-        for good in ("att-9f2c4b1ad34e", "att-retry-abc123", "att-x",
+        for good in (unique_attempt_id("att-9f2c4b1ad34e"), "att-retry-abc123", "att-x",
                      "att-a.B_c-d"):
             with self.subTest(good=good):
                 self.assertTrue(module._valid_attempt_id(good))
@@ -2756,7 +2759,7 @@ class LauncherProvenanceTest(unittest.TestCase):
         home = self.make_home()
         env = self.scrubbed_env(
             AGENT_HOME=str(home),
-            AGENT_DISPATCH_ATTEMPT_ID="att-9f2c4b1ad34e",
+            AGENT_DISPATCH_ATTEMPT_ID=unique_attempt_id("att-9f2c4b1ad34e"),
             AWS_SECRET_ACCESS_KEY="canary-secret",
             SSH_AUTH_SOCK="/tmp/canary-agent.sock",
             AGENT_DISPATCH_JOBS="/tmp/canary-jobs.log",
@@ -2767,7 +2770,7 @@ class LauncherProvenanceTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("export AGENT_HOME=", result.stdout)
         self.assertIn(str(home.resolve()), result.stdout)
-        self.assertIn("export AGENT_DISPATCH_ATTEMPT_ID=att-9f2c4b1ad34e",
+        self.assertIn("export AGENT_DISPATCH_ATTEMPT_ID=" + unique_attempt_id("att-9f2c4b1ad34e"),
                       result.stdout)
         # Without dispatch depth, this attempt's session identity is unresolved.
         self.assertNotIn("export CODEX_THREAD_ID=launch-thread", result.stdout)
@@ -2807,11 +2810,11 @@ class LauncherProvenanceTest(unittest.TestCase):
 
     def test_forwarded_provenance_crosses_a_scrubbed_tmux_boundary(self):
         home = self.make_home()
-        attempt = "att-9f2c4b1ad34e"
+        attempt = unique_attempt_id("att-9f2c4b1ad34e")
         fakebin = self.root / "tmux-bin"
         install_fake_tmux(fakebin, stale_environment={
             "AGENT_HOME": "/foreign/old-release",
-            "AGENT_DISPATCH_ATTEMPT_ID": "att-stale-owner",
+            "AGENT_DISPATCH_ATTEMPT_ID": unique_attempt_id("att-stale-owner"),
         })
         env = self.scrubbed_env(
             AGENT_HOME=str(home), AGENT_DISPATCH_ATTEMPT_ID=attempt,
@@ -2841,7 +2844,7 @@ class LauncherProvenanceTest(unittest.TestCase):
         home = self.make_home()
         env = self.scrubbed_env(
             AGENT_HOME=str(home),
-            AGENT_DISPATCH_ATTEMPT_ID="bogus; touch /tmp/prov-pwned")
+            AGENT_DISPATCH_ATTEMPT_ID=unique_attempt_id("bogus; touch /tmp/prov-pwned"))
         dry = self.run_tool("run", "here", "--name", "prov-bad", "--dry-run",
                             "--", "bash", "-c", "echo hi", env=env)
         self.assertEqual(dry.returncode, 0, dry.stderr)
@@ -2869,12 +2872,12 @@ class LauncherProvenanceTest(unittest.TestCase):
         home = self.make_home()
         env = self.scrubbed_env(
             AGENT_HOME=str(home),
-            AGENT_DISPATCH_ATTEMPT_ID="att-9f2c4b1ad34e")
+            AGENT_DISPATCH_ATTEMPT_ID=unique_attempt_id("att-9f2c4b1ad34e"))
         dry = self.run_tool("run", "here", "--name", "prov-order",
                             "--dry-run", "--", "bash", "-c", "echo hi", env=env)
         self.assertEqual(dry.returncode, 0, dry.stderr)
         setup = dry.stdout.split("setup: ", 1)[1]
-        self.assertIn("export AGENT_DISPATCH_ATTEMPT_ID=att-9f2c4b1ad34e", setup)
+        self.assertIn("export AGENT_DISPATCH_ATTEMPT_ID=" + unique_attempt_id("att-9f2c4b1ad34e"), setup)
         self.assertIn("export AGENT_HOME=", setup)
         # Unknown here is the empty string, never an absent key a strict read dies on.
         unknown = self.run_tool("run", "here", "--name", "prov-unknown", "--dry-run", "--",
@@ -2886,7 +2889,7 @@ class LauncherProvenanceTest(unittest.TestCase):
         fakebin = self.root / name
         install_fake_tmux(fakebin, stale_environment={
             "AGENT_HOME": "/foreign/stale-home",
-            "AGENT_DISPATCH_ATTEMPT_ID": "att-unrelated-old-owner",
+            "AGENT_DISPATCH_ATTEMPT_ID": unique_attempt_id("att-unrelated-old-owner"),
         })
         env = {**env, "PATH": str(fakebin) + os.pathsep
                + os.environ.get("PATH", "")}
@@ -2917,14 +2920,14 @@ class LauncherProvenanceTest(unittest.TestCase):
         run_id = self.run_with_foreign_transport(
             "prov-foreign-invalid",
             self.scrubbed_env(AGENT_HOME=str(home),
-                              AGENT_DISPATCH_ATTEMPT_ID="bogus-value"))
+                              AGENT_DISPATCH_ATTEMPT_ID=unique_attempt_id("bogus-value")))
         self.assertEqual(
             (self.run_root / run_id / "log").read_text(encoding="utf-8"),
             f"{home.resolve()}|")
 
     def test_known_provenance_overrides_foreign_values(self):
         home = self.make_home()
-        attempt = "att-9f2c4b1ad34e"
+        attempt = unique_attempt_id("att-9f2c4b1ad34e")
         run_id = self.run_with_foreign_transport(
             "prov-foreign-known",
             self.scrubbed_env(AGENT_HOME=str(home),
@@ -2941,6 +2944,342 @@ def probe_namespace():
     exec(compile(source.split("\ncpu_count = os.cpu_count()", 1)[0],
                  "<probe-helpers>", "exec"), namespace)
     return namespace
+
+
+class ClaimRunRecipientTest(unittest.TestCase):
+    """Claims use synthetic runs and remote identities, never an operating host."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.module = load_module()
+        self.run_dir = self.root / "runs" / "here-1"
+        self.run_dir.mkdir(parents=True)
+        self.old = {"harness": "claude", "id": "old-session"}
+        self.new = {"harness": "codex", "id": "new-session"}
+        self.meta = {"run_id": "here-1", "host": "here",
+                     "artifact_root": str(self.root / "artifacts"),
+                     "provenance": {"session": self.old, "notify": self.old}}
+        self.write_meta()
+        self.identity = {"pid": 321, "start": 42, "cmdline_sha256": "a" * 64,
+                         "run_id": "here-1"}
+        self.config = {"run_root": self.run_dir.parent,
+                       "hosts": {"here": {"hostname": "local", "transport": "local"}}}
+        patches = [mock.patch.dict(os.environ, {"HARNESS_STATE_ROOT": str(self.root / "state"),
+                                              "AGENT_ARTIFACT_ROOT": str(self.root / "artifacts")}),
+                   mock.patch.object(self.module, "load_config", return_value=self.config),
+                   mock.patch.object(self.module, "remote", side_effect=lambda *a, **kw:
+                                     SimpleNamespace(returncode=0, stdout=json.dumps(self.identity))),
+                   mock.patch("session_notice.notify", return_value={"state": "pending"})]
+        for patch in patches:
+            value = patch.start()
+            self.addCleanup(patch.stop)
+        self.notify = value
+        watch = mock.patch.object(self.module, "_spawn_completion_watch", return_value=True)
+        self.watch = watch.start()
+        self.addCleanup(watch.stop)
+        self.frozen = datetime.datetime(2026, 11, 14, 1, 2, 3)
+        clock = mock.patch.object(self.module.datetime, "datetime", wraps=datetime.datetime)
+        clock.start().now.return_value = self.frozen
+        self.addCleanup(clock.stop)
+
+    def write_meta(self):
+        (self.run_dir / "meta.json").write_text(json.dumps(self.meta))
+
+    def read_meta(self):
+        return json.loads((self.run_dir / "meta.json").read_text())
+
+    def claim(self, recipient=None, *, as_json=True):
+        recipient = self.new if recipient is None else recipient
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = self.module.cmd_claim(SimpleNamespace(
+                host="here", pid=321, harness=recipient.get("harness"),
+                session=recipient.get("id"), json=as_json))
+        self.assertEqual(rc, 0)
+        return json.loads(output.getvalue()) if as_json else output.getvalue()
+
+    def test_claim_moves_end_notices_and_tells_the_previous_session_once(self):
+        (self.run_dir / "meta.json").chmod(0o640)
+        with mock.patch.object(self.module, "_observe_compute_experiment", return_value=None):
+            self.module._report_run_end(self.run_dir, 0, None, lambda: 100)
+            self.assertEqual(self.notify.call_args.args, ("claude", "old-session"))
+            self.notify.reset_mock()
+            moved = self.claim()["run_recipient"]
+            self.assertEqual(moved["status"], "moved")
+            self.assertIn("전에는 claude:old-session", moved["message"])
+            self.notify.assert_called_once()
+            self.assertEqual(self.notify.call_args.args, ("claude", "old-session"))
+            self.assertIn("codex:new-session로 옮겨짐", self.notify.call_args.kwargs["text"])
+            self.claim()
+            self.notify.assert_called_once()  # the same claim is not a second handover
+            self.notify.reset_mock()
+            self.module._report_run_end(self.run_dir, 0, None, lambda: 200)
+            self.notify.assert_called_once()
+            self.assertEqual(self.notify.call_args.args, ("codex", "new-session"))
+        provenance = self.read_meta()["provenance"]
+        self.assertEqual(provenance["session"], self.new)
+        self.assertEqual((self.run_dir / "meta.json").stat().st_mode & 0o777, 0o640)
+        self.assertEqual(provenance["notify"], self.new)
+        self.assertEqual(provenance["recipient_handovers"], [{
+            "from": self.old, "to": self.new, "notify_from": self.old,
+            "by": "compute-hosts claim", "at": "2026-11-14T01:02:03"}])
+
+    def test_dispatch_claim_uses_registered_parent_and_keeps_worker_gpu_label(self):
+        jobs = self.root / "jobs.log"
+        owner = {"attempt_id": "att-owner", "worker_type": "owner", "dispatch_depth": "1",
+                 "owner_route_id": "rt-claim", "owner_route_hash": "sha256:claim",
+                 "parent_sid": "parent-seat", "parent_harness": "claude"}
+        child = {"attempt_id": "att-child", "parent_attempt_id": "att-owner",
+                 "worker_type": "stage", "dispatch_depth": "2", "route_id": "rt-claim",
+                 "route_hash": "sha256:claim", "route_node": "execute"}
+        jobs.write_text("".join("\t".join(("2099-01-01T00:00:00Z", "open", "/work", "/work",
+                                           "fixture", ",".join(f"{k}={v}" for k, v in row.items()))) + "\n"
+                                for row in (owner, child)))
+        for depth, attempt in (("1", "att-owner"), ("2", "att-child")):
+            for harness, key in (("codex", "CODEX_THREAD_ID"), ("claude", "CLAUDE_CODE_SESSION_ID")):
+                with self.subTest(depth=depth, harness=harness):
+                    self.write_meta()
+                    env = {"HOME": str(self.root), "XDG_STATE_HOME": str(self.root / "state"),
+                           "HARNESS_STATE_ROOT": str(self.root / "state"),
+                           "FLEET_ROUTE_CHAIN_DIR": str(self.root / "chains"),
+                           "AGENT_DISPATCH_ATTEMPT_ID": attempt, "AGENT_DISPATCH_DEPTH": depth,
+                           "AGENT_DISPATCH_JOBS": str(jobs), key: "worker-thread"}
+                    with mock.patch.dict(os.environ, env, clear=True):
+                        result = self.claim({} if harness == "codex" else
+                                            {"harness": harness, "id": "worker-thread"})
+                    self.assertEqual(result["run_recipient"]["to"],
+                                     {"harness": "claude", "id": "parent-seat"})
+                    self.assertEqual(self.read_meta()["provenance"]["session"],
+                                     {"harness": "claude", "id": "parent-seat"})
+                    self.assertEqual(result["owner"]["id"], "worker-thread")
+                    self.assertEqual(result["owner"]["harness"], harness)
+
+    def test_dispatch_claim_without_parent_keeps_recipient_and_gpu_claim(self):
+        before = (self.run_dir / "meta.json").read_bytes()
+        for depth in ("1", "2"):
+            with self.subTest(depth=depth), mock.patch.dict(os.environ, {
+                    "HOME": str(self.root), "HARNESS_STATE_ROOT": str(self.root / "state"),
+                    "AGENT_DISPATCH_JOBS": str(self.root / "missing-jobs.log"),
+                    "AGENT_DISPATCH_ATTEMPT_ID": "att-missing", "AGENT_DISPATCH_DEPTH": depth,
+                    "CODEX_THREAD_ID": "worker-thread"}, clear=True):
+                result = self.claim({})
+                self.assertEqual(result["run_recipient"]["status"], "unchanged")
+                self.assertIn("dispatch 작업자 세션으로는 알림을 옮기지 않음",
+                              result["run_recipient"]["message"])
+                self.assertEqual((self.run_dir / "meta.json").read_bytes(), before)
+                self.assertEqual(self.module._load_claims(self.run_dir.parent)[0]["owner"]["id"],
+                                 "worker-thread")
+        self.notify.assert_not_called()
+        self.watch.assert_not_called()
+
+    def test_watch_reads_the_new_recipient_on_its_next_progress_and_end(self):
+        import resource_progress
+        records, clock = [], [100.0]
+
+        def sleep(seconds):
+            clock[0] += seconds
+            if len(records) == 1:
+                self.claim()
+            else:
+                (self.run_dir / "exit_code").write_text("0")
+
+        with mock.patch.object(resource_progress, "observe_experiment",
+                               side_effect=lambda record, *a, **kw: records.append(record)), \
+                mock.patch.object(self.module, "_run_quiet_since", return_value=None):
+            self.module._watch_run(SimpleNamespace(run_dir=self.run_dir), sleep=sleep, now=lambda: clock[0])
+        self.assertEqual([r["session"] for r in records], [self.old, self.new, self.new])
+        self.assertEqual([r["notify"] for r in records], [self.old, self.new, self.new])
+        for record, expected in zip(records, (self.old, self.new, self.new)):
+            self.assertEqual([(r["harness"], r["session_id"])
+                              for r in resource_progress._notice_targets(record)],
+                             [(expected["harness"], expected["id"])])
+        ended = [call for call in self.notify.call_args_list if call.kwargs["key"].startswith("compute-run:")]
+        self.assertEqual([call.args for call in ended], [("codex", "new-session")])
+
+    def test_successive_claims_keep_both_handovers_and_last_recipient(self):
+        self.claim()
+        last = {"harness": "opencode", "id": "last-session"}
+        self.claim(last)
+        provenance = self.read_meta()["provenance"]
+        self.assertEqual(provenance["session"], last)
+        self.assertEqual([(r["from"], r["to"]) for r in provenance["recipient_handovers"]],
+                         [(self.old, self.new), (self.new, last)])
+        self.assertEqual([call.args for call in self.notify.call_args_list],
+                         [("claude", "old-session"), ("codex", "new-session")])
+        self.assertNotEqual(*[call.kwargs["key"] for call in self.notify.call_args_list])
+
+    def test_old_seat_retirement_does_not_redirect_the_claim_but_new_seat_handoff_does(self):
+        import session_tidy as tidy
+        from peer_obligations import _ordinary_notice_target
+        from split_module_fixture import patch_split
+        from harness_capabilities import parent_completion
+        self.claim()
+        self.notify.reset_mock()
+        with mock.patch.object(self.module, "_observe_compute_experiment", return_value=None):
+            self.module._report_run_end(self.run_dir, 0, None, lambda: 100)
+        binding = {"jobs": str(self.root / "state" / "jobs.log"), "storage_recipient": "new-session",
+                   "lineage": self.notify.call_args.kwargs["lineage"]}
+        carrier = parent_completion("codex")["carrier"]
+        with patch_split(tidy, "state_root", return_value=self.root / "state"):
+            tidy._append_ledger_entry(tidy.Seat("pane", "old-successor"), {
+                "event": "handover", "from": {"harness": "claude", "sid": "old-session"},
+                "sid": "old-successor", "harness": "claude", "source": "retire", "bindings": [], "ts": 10.0})
+            self.assertEqual(_ordinary_notice_target(binding, carrier),
+                             ("codex", "new-session", "new-session"))
+            tidy._append_ledger_entry(tidy.Seat("pane", "new-successor"), {
+                "event": "handover", "from": {"harness": "codex", "sid": "new-session"},
+                "sid": "new-successor", "harness": "opencode", "source": "retire", "bindings": [], "ts": 20.0})
+            self.assertEqual(_ordinary_notice_target(binding, carrier),
+                             ("opencode", "new-successor", "new-session"))
+
+    def test_ineligible_runs_keep_recipients_and_still_record_gpu_claim(self):
+        for case in ("ended", "host", "run-id", "no-run-id", "resource", "owner-wait",
+                     "corrupt", "bad-provenance", "bad-history", "unreadable-env", "unsafe-id", "symlink"):
+            with self.subTest(case=case):
+                self.identity = {"pid": 321, "start": 42, "cmdline_sha256": "a" * 64, "run_id": "here-1"}
+                self.meta = {"host": "here", "run_id": "here-1", "provenance": {"session": self.old}}
+                if case == "host": self.meta["host"] = "elsewhere"
+                if case == "run-id": self.meta["run_id"] = "another-run"
+                if case == "no-run-id": self.identity.pop("run_id")
+                if case == "unsafe-id": self.identity["run_id"] = "../elsewhere"
+                if case == "unreadable-env": self.identity["run_id_error"] = "process environment unreadable"
+                if case == "resource": self.meta["provenance"]["resource"] = {"owner_wait": {"session_id": "owner"}}
+                if case == "owner-wait": self.meta["owner_wait"] = {"session_id": "owner"}
+                if case == "bad-provenance": self.meta["provenance"] = []
+                if case == "bad-history": self.meta["provenance"]["recipient_handovers"] = {}
+                self.write_meta()
+                path = self.run_dir / "meta.json"
+                if case == "corrupt": path.write_text("{broken")
+                if case == "ended": (self.run_dir / "exit_code").write_text("0")
+                if case == "symlink":
+                    target = self.root / "unrelated.json"
+                    target.write_bytes(path.read_bytes())
+                    path.unlink()
+                    path.symlink_to(target)
+                before = path.read_bytes()
+                result = self.claim()
+                self.assertEqual(result["run_recipient"]["status"], "unchanged")
+                expected = "등록 실행이 아니어서 옮길 알림 없음" if case == "no-run-id" else "옮기지 못함"
+                self.assertIn(expected, result["run_recipient"]["message"])
+                self.assertEqual(path.read_bytes(), before)
+                self.assertEqual(self.module._load_claims(self.run_dir.parent)[0]["owner"]["id"], "new-session")
+                self.notify.assert_not_called()
+                (self.run_dir / "exit_code").unlink(missing_ok=True)
+                path.unlink()
+
+    def test_failed_atomic_replace_leaves_original_meta_and_gpu_claim(self):
+        before = (self.run_dir / "meta.json").read_bytes()
+        replace = os.replace
+
+        def fail_meta(source, target):
+            if Path(target).name == "meta.json":
+                raise PermissionError("fixture")
+            return replace(source, target)
+
+        with mock.patch.object(self.module.os, "replace", side_effect=fail_meta):
+            result = self.claim()
+        self.assertIn("PermissionError", result["run_recipient"]["message"])
+        self.assertEqual((self.run_dir / "meta.json").read_bytes(), before)
+        self.assertEqual(len(self.module._load_claims(self.run_dir.parent)), 1)
+        self.assertEqual(list(self.run_dir.glob(".claim-*")), [])
+        self.notify.assert_not_called()
+
+    def test_explicit_or_unambiguous_session_is_used_without_guessing(self):
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "env-session"}, clear=True):
+            self.assertEqual(self.claim({})["run_recipient"]["to"],
+                             {"harness": "codex", "id": "env-session"})
+        before = (self.run_dir / "meta.json").read_bytes()
+        for env in ({}, {"CODEX_THREAD_ID": "a", "CLAUDE_SESSION_ID": "b"}):
+            with mock.patch.dict(os.environ, env, clear=True), self.assertRaises(self.module.ConfigError):
+                self.claim({})  # the existing GPU claim rejects unknown/ambiguous identity
+        # Existing explicit GPU labels allow controls; never use one as a notice recipient.
+        result = self.claim({"harness": "codex", "id": "unknown\nidentity"})
+        self.assertIn("신원을 확인할 수 없음", result["run_recipient"]["message"])
+        self.assertEqual((self.run_dir / "meta.json").read_bytes(), before)
+
+    def test_sessionless_claim_attaches_watch_once_without_rewriting_dispatch_meta(self):
+        self.meta["provenance"] = {"session": None, "route": None}
+        self.write_meta()
+        self.claim()
+        self.watch.assert_called_once()
+        args, kwargs = self.watch.call_args
+        self.assertEqual(args, (self.run_dir, self.read_meta()))
+        self.assertEqual(args[1]["provenance"]["session"], self.new)
+        self.assertEqual(kwargs["environ"]["AGENT_DISPATCH_DEPTH"], "0")
+        self.claim()
+        self.watch.assert_called_once()
+
+    def test_watch_start_failure_is_visible_after_recipient_moves(self):
+        self.watch.return_value = False
+        result = self.claim()["run_recipient"]
+        self.assertEqual(result["status"], "moved")
+        self.assertIn("감시자를 시작하지 못함", result["warnings"][0])
+        self.assertEqual(self.read_meta()["provenance"]["session"], self.new)
+
+    def test_blank_session_aliases_are_ignored_but_explicit_gpu_owner_still_wins(self):
+        env = {"CLAUDE_CODE_SESSION_ID": "claude-session", "CODEX_THREAD_ID": "",
+               "CODEX_SESSION_ID": "", "OPENCODE_SESSION_ID": ""}
+        with mock.patch.dict(os.environ, env, clear=True):
+            result = self.claim({})
+            self.assertEqual(result["owner"]["harness"], "claude")
+            self.assertEqual(result["owner"]["id"], "claude-session")
+            self.assertEqual(result["run_recipient"]["to"],
+                             {"harness": "claude", "id": "claude-session"})
+            result = self.claim()
+            self.assertEqual(result["owner"]["id"], self.new["id"])
+            self.assertEqual(result["run_recipient"]["to"], self.new)
+        with mock.patch.dict(os.environ, {**env, "CLAUDE_SESSION_ID": "other-session"}, clear=True):
+            with self.assertRaises(self.module.ConfigError):
+                self.claim({})
+
+    def test_notify_is_not_added_when_absent_and_distinct_old_targets_are_each_told(self):
+        self.meta["provenance"]["notify"] = {"harness": "opencode", "id": "old-supervisor"}
+        self.write_meta()
+        self.claim()
+        self.assertEqual({call.args for call in self.notify.call_args_list},
+                         {("claude", "old-session"), ("opencode", "old-supervisor")})
+        self.meta["provenance"].pop("notify")
+        self.write_meta()
+        self.claim()
+        self.assertNotIn("notify", self.read_meta()["provenance"])
+
+    def test_handover_notice_failure_is_visible_and_does_not_undo_claim(self):
+        self.notify.side_effect = OSError("fixture")
+        output = self.claim(as_json=False)
+        self.assertIn("claimed here pid 321 -> codex:new-sess", output)
+        self.assertIn("run here-1의 알림은 이제 이 세션으로 옴 (전에는 claude:old-session)", output)
+        self.assertIn("warning: claude:old-session에 인계 알림을 남기지 못함", output)
+        self.assertEqual(self.read_meta()["provenance"]["session"], self.new)
+
+    def test_identity_probe_reads_only_the_claimed_pid_environment(self):
+        proc = self.root / "proc"
+        for pid, run_id in ((321, "here-1"), (123, "parent-run")):
+            folder = proc / str(pid)
+            folder.mkdir(parents=True)
+            fields = ["S", "123"] + ["0"] * 18
+            fields[19] = "42"
+            (folder / "stat").write_text(f"{pid} (fixture) " + " ".join(fields))
+            uid = os.geteuid()
+            (folder / "status").write_text(f"Uid: {uid} {uid} {uid} {uid}\n")
+            (folder / "cmdline").write_bytes(b"fixture\0")
+            (folder / "environ").write_bytes(b"PRIVATE=never-export\0HEARTING_COMPUTE_RUN_ID=" + run_id.encode() + b"\0")
+        script = self.module.CLAIM_IDENTITY_SCRIPT.replace('Path("/proc")', f"Path({str(proc)!r})")
+        for content, expected in ((b"HEARTING_COMPUTE_RUN_ID=here-1\0", "here-1"), (b"", None)):
+            (proc / "321" / "environ").write_bytes(content)
+            result = subprocess.run(["sh"], input=script, text=True, capture_output=True,
+                                    env={**os.environ, "HEARTING_CLAIM_PID": "321"}, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            identity = json.loads(result.stdout)
+            self.assertEqual(identity["run_id"], expected)
+            self.assertNotIn("parent-run", result.stdout)
+            self.assertNotIn("PRIVATE", result.stdout)
+        (proc / "321" / "environ").unlink()
+        result = subprocess.run(["sh"], input=script, text=True, capture_output=True,
+                                env={**os.environ, "HEARTING_CLAIM_PID": "321"}, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("unreadable", json.loads(result.stdout)["run_id_error"])
 
 
 class CompletionWatchTest(unittest.TestCase):
@@ -3185,7 +3524,133 @@ class CompletionWatchTest(unittest.TestCase):
             parents, _ = sweep.sweep_deliver(state / "dispatch", "claude-parent-runtime", "sid-parent")
         self.assertEqual((len(mine), len(parents)), (0, 1))          # the parent, not the worker's own session
         self.assertIn("started by attempt att-worker-1 in route rt-0123456789abcdef",
+                      parents[0]["receipt"]["text"])
+        # A normal end with no metric is quiet: the parent reads it on the one routine line.
+        self.assertEqual(parents[0]["receipt"]["subject"], "compute run, quiet")
+        self.assertIn("Routine, nothing to do (1 run): 1 ended normally (1 short or without metrics) -- here-1",
                       sweep.delivery_context([(state / "dispatch", parents)]))
+
+    def _end_of_a_worker_run(self, harness, carrier, *, attempt_status="open", code=0, seconds=30,
+                             metric=False, claimed=False, with_session=True, token="1", then=None):
+        """One run end a registered worker started under a `harness` supervisor, as the supervisor's
+        carrier sees it: (subject, whether the notice waits for the supervisor's next delivery)."""
+        module = load_module()
+        attempt, supervisor = f"att-worker-{harness}-{token}", f"sid-supervisor-{harness}-{token}"
+        state = self.root / f"state-{harness}-{token}"
+        state.mkdir()
+        jobs = state / "jobs.log"
+        meta_row = ",".join(("attempt_schema_version=2", f"attempt_id={attempt}", "dispatch_depth=2",
+                             "worker_type=stage", "harness=claude", f"parent_sid={supervisor}",
+                             f"parent_completion_delivery={carrier}"))
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        jobs.write_text("\t".join((stamp, attempt_status, "/repo", "/wt", "worker", meta_row)) + "\n")
+        session = {"harness": harness, "id": supervisor} if with_session else None
+        provenance = {"attempt_id": attempt, "route": {"route_id": "rt-0123456789abcdef"},
+                      "session": session, "notify": session}
+        if claimed:
+            provenance["recipient_handovers"] = [{"from": session, "to": session, "by": "compute-hosts claim"}]
+        run_dir = self.root / f"run-{harness}-{token}"
+        run_dir.mkdir()
+        started = datetime.datetime.fromtimestamp(1000.0).isoformat(timespec="seconds")
+        (run_dir / "meta.json").write_text(json.dumps({
+            "run_id": f"here-{token}", "host": "here", "started_at": started, "provenance": provenance}))
+        observed = {"observation": {"summary": {"latest": {"value": 0.5}}}} if metric else None
+        with mock.patch.dict(os.environ, {"HARNESS_STATE_ROOT": str(state), "AGENT_DISPATCH_JOBS": str(jobs)}), \
+                mock.patch.object(module, "_observe_compute_experiment", return_value=observed):
+            sys.path.insert(0, str(Path(module.__file__).resolve().parent))
+            import dispatch_session_sweep as sweep
+            import session_notice
+            module._report_run_end(run_dir, code, None, lambda: 1000.0 + seconds)
+            if then:  # the worker is closed after the end was held back, before the supervisor's next delivery
+                jobs.write_text(jobs.read_text().replace("\topen\t", "\t" + then + "\t", 1))
+            records, _ = sweep.sweep_deliver(state, carrier, supervisor)
+        if not with_session:
+            self.assertEqual(records, [])
+            return None
+        self.assertEqual(len(records), 1)
+        return (records[0]["receipt"]["subject"],
+                session_notice.waits_for_next_delivery(records[0], harness, supervisor, jobs))
+
+    def test_a_quiet_normal_end_waits_for_the_supervisor_only_while_the_worker_is_open(self):
+        carriers = (("claude", "claude-parent-runtime"), ("codex", "codex-native-queue"),
+                    ("opencode", "opencode-turn"))
+        for harness, carrier in carriers:
+            with self.subTest(harness=harness):
+                end = lambda token, **kw: self._end_of_a_worker_run(harness, carrier, token=token, **kw)
+                # worker open: a short or metric-less normal end opens no turn of its own
+                self.assertEqual(end("quiet"), ("compute run, quiet", True))
+                self.assertEqual(end("nometric", seconds=9000), ("compute run, quiet", True))
+                # worker open: a failure and a long run that carries a metric are told at once
+                self.assertEqual(end("failed", code=6), ("compute run", False))
+                self.assertEqual(end("long", seconds=9000, metric=True), ("compute run", False))
+                # worker finished: nobody reads the end for the supervisor, so it is told at once
+                self.assertEqual(end("finished", attempt_status="done"), ("compute run, quiet", False))
+                # a session that took the notice with `claim` is waiting for exactly this end
+                self.assertEqual(end("claimed", claimed=True), ("compute run, quiet", False))
+                # no session at all: nothing is sent, as before
+                self.assertIsNone(end("sessionless", with_session=False))
+
+    def test_a_held_back_end_reaches_the_supervisor_however_the_worker_that_started_it_ended(self):
+        carriers = (("claude", "claude-parent-runtime"), ("codex", "codex-native-queue"),
+                    ("opencode", "opencode-turn"))
+        for harness, carrier in carriers:
+            for status in ("done", "killed", "cancelled"):
+                with self.subTest(harness=harness, worker=status):
+                    # held back while the worker was open, then the worker ended: still delivered, still not waking
+                    self.assertEqual(self._end_of_a_worker_run(harness, carrier, token="then-" + status, then=status),
+                                     ("compute run, quiet", True))
+
+    def test_a_notice_for_the_supervisor_of_a_worker_that_already_ended_is_delivered(self):
+        """Before the end was held back too: a run or an experiment a registered worker started reports
+        to that worker's supervisor by its attempt-parent lineage, which a killed or cancelled worker's
+        row used to cut."""
+        import dispatch_session_sweep as sweep
+        import resource_progress
+        import session_notice
+        from harness_capabilities import parent_completion
+        for harness in ("claude", "codex", "opencode"):
+            carrier = parent_completion(harness)["carrier"]
+            for status in ("done", "killed", "cancelled"):
+                with self.subTest(harness=harness, worker=status):
+                    token = f"{harness}-{status}"
+                    state = self.root / f"seen-{token}"
+                    state.mkdir()
+                    jobs, attempt, supervisor = state / "jobs.log", f"att-seen-{token}", f"sid-seen-{token}"
+                    meta = ",".join(("attempt_schema_version=2", f"attempt_id={attempt}", "dispatch_depth=2",
+                                     "worker_type=stage", "harness=claude", f"parent_sid={supervisor}",
+                                     f"parent_completion_delivery={carrier}"))
+                    jobs.write_text("\t".join(("2026-11-14T00:00:00Z", status, "/repo", "/wt", "worker", meta)) + "\n")
+                    targets = resource_progress._notice_targets({
+                        "jobs": str(jobs), "owner_wait": {"harness": "claude", "session_id": f"sid-worker-{token}",
+                                                         "parent_attempt_id": attempt}})
+                    mine, = [t for t in targets if t["session_id"] == supervisor]
+                    self.assertEqual(mine["lineage"]["kind"], "attempt-parent")
+                    for run, code, wakes in (("failed", 6, True), ("fine", 0, False)):
+                        session_notice.notify(
+                            harness, supervisor, key=f"compute-run:{run}-{token}",
+                            subject="compute run" if wakes else "compute run, quiet", lineage=mine["lineage"],
+                            text=f"run {run}-{token} on here ended with exit {code}; read it with: compute-hosts tail {run}-{token}",
+                            jobs=jobs)
+                    records, _ = sweep.sweep_deliver(state, carrier, supervisor)
+                    self.assertEqual(sorted(session_notice.wakes_resting_recipient(r) for r in records), [False, True])
+
+    def test_the_notice_to_a_worker_s_own_session_still_needs_the_worker_to_be_alive(self):
+        import dispatch_session_sweep as sweep
+        import session_notice
+        for status in ("killed", "cancelled"):
+            with self.subTest(worker=status):
+                state = self.root / f"own-{status}"
+                state.mkdir()
+                jobs, attempt, owner = state / "jobs.log", f"att-own-{status}", f"sid-own-{status}"
+                meta = ",".join(("attempt_schema_version=2", f"attempt_id={attempt}", "dispatch_depth=2",
+                                 "worker_type=stage", "harness=claude", "parent_sid=sid-up",
+                                 "parent_completion_delivery=claude-parent-runtime"))
+                jobs.write_text("\t".join(("2026-11-14T00:00:00Z", status, "/repo", "/wt", "worker", meta)) + "\n")
+                session_notice.notify("claude", owner, key=f"compute-run:own-{status}", subject="compute run",
+                    text=f"run own-{status} on here ended with exit 6; read it with: compute-hosts tail own-{status}",
+                    lineage={"kind": "owner-session", "harness": "claude", "session_id": owner,
+                             "attempt_id": attempt}, jobs=jobs)
+                self.assertEqual(sweep.sweep_deliver(state, "claude-parent-runtime", owner)[0], [])
 
     def _make_quiet(self, module):
         (self.run_dir / "log").write_text("epoch 1\n")
@@ -3280,6 +3745,119 @@ class CompletionWatchTest(unittest.TestCase):
         shutil.rmtree(self.run_dir)
         self.assertEqual(module.cmd_watch_run(SimpleNamespace(run_dir=str(self.run_dir)),
                                               sleep=lambda s: self.fail("slept"), now=lambda: 0.0), 0)
+
+
+class CatalogNameTest(unittest.TestCase):
+    """`runs` and the run-ended notice call a run by its experiment-catalog name when it has one."""
+    RUN = "here-20261110-101010-reverb"
+
+    def setUp(self):
+        import artifact_admission as admission
+        import experiment_catalog as catalog
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.artifact = self.root / "artifacts"
+        self.artifact.mkdir()
+        admission.ensure_root_identity(self.artifact)
+        spec = {"groups": [{"display_name": "소리 분리 개선", "goal": "g"}],
+                "conditions": [{"display_name": "잔향 줄임", "group": "소리 분리 개선",
+                                "refs": {"runs": [{"run_id": self.RUN}]}}]}
+        catalog.run_write(self.artifact, lambda ctx: catalog.op_register(ctx, spec), now=1_790_000_000.0)
+        self.catalog = catalog
+        self.run_root = self.root / "runs"
+        for name in (self.RUN, "here-20261110-101011-stray"):
+            run_dir = self.run_root / name
+            run_dir.mkdir(parents=True)
+            (run_dir / "exit_code").write_text("0\n")   # finished runs are listed without probing a host
+            (run_dir / "meta.json").write_text(json.dumps({
+                "run_id": name, "host": "here", "command": ["python", "train.py"], "artifact_root": str(self.artifact),
+                "provenance": {"session": {"harness": "claude", "id": "sid-7"},
+                               "route": {"route_id": "rt-0123456789abcdef"}}}))
+        env = mock.patch.dict(os.environ, {"HARNESS_STATE_ROOT": str(self.root / "state"), "FLEET_NOW_LANG": "Korean"})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def runs(self, as_json):
+        module = load_module()
+        config = {"run_root": self.run_root}
+        with mock.patch.object(module, "load_config", return_value=config), \
+                mock.patch.object(module, "_refuse_namespace_self"), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(module.cmd_runs(SimpleNamespace(limit=10, host=None, json=as_json)), 0)
+        return output.getvalue()
+
+    def test_runs_text_and_json_carry_the_catalog_name_and_read_the_catalog_once(self):
+        calls = []
+        real = self.catalog.load
+        with mock.patch.object(self.catalog, "load", side_effect=lambda root: calls.append(root) or real(root)):
+            rows = {row["run_id"]: row for row in json.loads(self.runs(True))}
+            text = self.runs(False)
+        self.assertEqual(rows[self.RUN]["experiment"]["name"], "잔향 줄임")
+        self.assertIsNone(rows["here-20261110-101011-stray"]["experiment"])
+        self.assertNotIn("artifact_root", rows[self.RUN])  # the listing keeps its old keys, plus `experiment`
+        self.assertEqual(len(calls), 2)  # one read per call, two runs in the same root
+        line = next(line for line in text.splitlines() if self.RUN in line)
+        self.assertIn("잔향 줄임", line)
+        stray = next(line for line in text.splitlines() if "stray" in line)
+        self.assertRegex(stray, r"exit 0\s+-\s")
+
+    def watch(self, name):
+        module = load_module()
+        notices = []
+        clock = [0.0]
+        run_dir = self.run_root / name
+        (run_dir / "exit_code").unlink()
+
+        def sleep(seconds):
+            clock[0] += seconds
+            (run_dir / "exit_code").write_text("0\n")
+        with mock.patch("session_notice.notify", side_effect=lambda *a, **kw: notices.append(kw) or {"state": "pending"}), \
+                mock.patch("peer_obligations.ensure_normal_runner", return_value=False), \
+                mock.patch("peer_obligations.request_dispatch_reconciliation", return_value=False):
+            module.cmd_watch_run(SimpleNamespace(run_dir=str(run_dir)), sleep=sleep, now=lambda: clock[0])
+        return notices
+
+    def test_the_ended_notice_leads_with_the_name_and_an_unnamed_run_keeps_its_text(self):
+        import dispatch_session_sweep as sweep
+        named = self.watch(self.RUN)[0]["text"]
+        stray = self.watch("here-20261110-101011-stray")[0]["text"]
+        self.assertTrue(named.startswith("잔향 줄임: run " + self.RUN + " on here ended with exit 0; "), named)
+        self.assertTrue(stray.startswith("run here-20261110-101011-stray on here ended with exit 0; "), stray)
+        self.assertEqual(named[len("잔향 줄임: "):].replace(self.RUN, "X"), stray.replace("here-20261110-101011-stray", "X"))
+
+        def record(name, text):
+            return {"receipt": {"kind": "notice", "key": f"compute-run:{name}", "subject": "compute run", "text": text}}
+        # `dispatch_session_sweep` matches the no-observation words of this notice literally and folds three
+        # exit-0 notices of one label into a summary.  The words are untouched, and the catalog name in front
+        # is an optional prefix of that pattern: a named notice is recognized the same way and keeps its name.
+        literal = (f"run {self.RUN} on here ended with exit 0; 지표 없음; 계획 시간 미상; run 기록 경로 없음; "
+                   f"read it with: compute-hosts tail {self.RUN}")
+        plain = sweep._compute_run_notice(record(self.RUN, literal))
+        self.assertIsNotNone(plain)
+        self.assertEqual(plain["name"], "")
+        prefixed = sweep._compute_run_notice(record(self.RUN, "잔향 줄임: " + literal))
+        self.assertIsNotNone(prefixed)
+        self.assertEqual((prefixed["name"], prefixed["run_id"], prefixed["exit"]), ("잔향 줄임", self.RUN, 0))
+
+    def test_named_ended_notices_fold_by_name_in_the_render_order(self):
+        import dispatch_session_sweep as sweep
+        runs = [f"here-20261110-10101{i}-sweep" for i in (1, 2, 3)]
+
+        def record(run_id, name):
+            text = f"{name}: run {run_id} on here ended with exit 0; read it with: compute-hosts tail {run_id}"
+            return {"receipt": {"schema_version": 1, "kind": "notice", "key": f"compute-run:{run_id}",
+                                "subject": "compute run", "text": text, "required_action": "report-to-user"}}
+        same = [record(run_id, "잔향 줄임") for run_id in runs]
+        keys = sweep._render_keys([("/r", same)])
+        self.assertEqual({keys[id(item)][:2] for item in same}, {(1, 2)})   # normal ends: the one routine line
+        mixed = [record(runs[0], "잔향 줄임"), record(runs[1], "잡음 줄임"), record(runs[2], "잔향 줄임")]
+        keys = sweep._render_keys([("/r", mixed)])
+        self.assertEqual({keys[id(item)][:2] for item in mixed}, {(1, 2)})  # whatever their names
+        # Within the line the order is by name: 잔향 줄임 twice, then 잡음 줄임.
+        self.assertEqual(sorted(mixed, key=lambda item: keys[id(item)]), [mixed[0], mixed[2], mixed[1]])
+        line = sweep._notice_layout([("/r", item) for item in mixed])["routine_line"]
+        self.assertEqual(line, "Routine, nothing to do (3 runs): 3 ended normally -- 잔향 줄임, 잡음 줄임")
 
 
 class ProbeCommandHashTest(unittest.TestCase):
@@ -3402,7 +3980,7 @@ class PathNamespaceInventoryTest(unittest.TestCase):
              mock.patch.object(self.module, "remote", return_value=launch_result) as remote, \
              mock.patch("sys.stdout", output):
             self.assertEqual(self.module.cmd_run(args), 0)
-        script = remote.call_args.args[1]
+        script = remote.call_args.kwargs["input"]
         self.assertIn("launch_compute_namespaced", script)
         self.assertIn("path_namespace", script)
         self.assertIn(str(run_root), script)
@@ -3450,8 +4028,8 @@ class PathNamespaceInventoryTest(unittest.TestCase):
         plain = {"ssh_host": "fixture.example"}
         mapped = {**plain, "path_namespace": {"/mnt/shared": "/mnt/shared_alt"}}
         captured = []
-        def capture(_host, script, **_kwargs):
-            captured.append(script)
+        def capture(_host, script, **kwargs):
+            captured.append(kwargs.get("input") or script)
             if "HEARTING_CLAIM_PID" in script:
                 return subprocess.CompletedProcess([], 0, json.dumps(
                     {"pid": 7, "start": 11, "cmdline_sha256": "fixture"}), "")
@@ -3493,6 +4071,34 @@ class PathNamespaceInventoryTest(unittest.TestCase):
         self.assertEqual(captured[0], captured[2])
         self.assertEqual(captured[1], captured[3])
 
+    def test_a_short_or_metric_less_normal_end_is_sent_as_quiet(self):
+        module = self.module
+        run_dir = Path(self.tmp.name) / "run"
+        run_dir.mkdir()
+        started = datetime.datetime.fromtimestamp(1000.0).isoformat(timespec="seconds")
+        config = {"run_root": Path(self.tmp.name), "hosts": {}}
+        observed = {"observation": {"summary": {"latest": {"value": 0.5, "epoch": 3}}}}
+        cases = [(0, 1030.0, None, "compute run, quiet"),       # under a minute, no metric
+                 (0, 9000.0, None, "compute run, quiet"),       # long, but no metric
+                 (0, 9000.0, observed, "compute run"),          # long, with a metric
+                 (0, 1030.0, observed, "compute run, quiet"),   # short, even with a metric
+                 (6, 1030.0, None, "compute run")]              # a failure is never quiet
+        for code, now, observation, subject in cases:
+            with self.subTest(code=code, now=now, observation=bool(observation)):
+                (run_dir / "exit_code").write_text(f"{code}\n")
+                (run_dir / "meta.json").write_text(json.dumps({
+                    "run_id": "fixture-run", "host": "gpu-c", "started_at": started,
+                    "provenance": {"notify": {"harness": "codex", "id": "session-1"}}}))
+                notice = mock.Mock()
+                fake = SimpleNamespace(notify=notice, QUIET_RUN_SECONDS=120)
+                with mock.patch.object(module, "load_config", return_value=config), \
+                     mock.patch.object(module, "_observe_compute_experiment", return_value=observation), \
+                     mock.patch.dict(sys.modules, {"session_notice": fake}):
+                    self.assertEqual(module.cmd_watch_run(SimpleNamespace(run_dir=str(run_dir)),
+                                                          now=lambda: now), 0)
+                notice.assert_called_once()
+                self.assertEqual(notice.call_args.kwargs["subject"], subject)
+
     def test_namespace_refusal_record_is_terminal_to_state_and_watch(self):
         module = self.module
         run_dir = Path(self.tmp.name) / "run"
@@ -3513,6 +4119,34 @@ class PathNamespaceInventoryTest(unittest.TestCase):
         notice.assert_called_once()
         self.assertIn("exit 125", notice.call_args.kwargs["text"])
 
+    def test_a_watcher_vouches_for_a_run_only_while_its_own_files_change(self):
+        module = self.module
+        run_dir = Path(self.tmp.name) / "run"
+        run_dir.mkdir()
+        log = run_dir / "log"
+        log.write_text("epoch 1\n")
+        os.utime(log, (5000.0, 5000.0))
+        # The evidence is the moment the run's own file changed, not the moment the watcher looked.
+        self.assertEqual(module._run_alive_at(run_dir, 5000.0 + 600), 5000.0)
+        self.assertEqual(module._run_alive_at(run_dir, 5000.0 + 900), 5000.0)
+        self.assertIsNone(module._run_alive_at(run_dir, 5000.0 + 901))
+        (run_dir / ".observation-watch.lock").write_text("")   # the observer's own file is not the run's
+        (run_dir / "meta.json").write_text("{}")               # nor is the launch record a claim rewrites
+        for name in (".observation-watch.lock", "meta.json"):
+            os.utime(run_dir / name, (5000.0 + 901, 5000.0 + 901))
+        self.assertIsNone(module._run_alive_at(run_dir, 5000.0 + 901))
+        self.assertIsNone(module._run_alive_at(Path(self.tmp.name) / "missing", 5000.0))
+
+    def test_a_launch_note_names_a_missing_declaration_once(self):
+        module = self.module
+        cwd = Path(self.tmp.name)
+        (cwd / "cfg.json").write_text(json.dumps({"output_dir": "out"}))
+        config = {"run_root": cwd / "runs"}
+        self.assertIn("--config", module._progress_declaration_note(["python", "train.py"], str(cwd), {}, config, None))
+        self.assertIsNone(module._progress_declaration_note(["python", "train.py", "--config", "./cfg.json"],
+                                                            str(cwd), {}, config, None))
+        self.assertIsNone(module._progress_declaration_note(["python", "train.py"], str(cwd), {}, config,
+                                                            {"output_dir": "/declared"}))
 
 if __name__ == "__main__":
     unittest.main()

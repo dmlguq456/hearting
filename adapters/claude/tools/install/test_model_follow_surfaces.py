@@ -1,0 +1,1 @@
+../../../../tools/install/test_model_follow_surfaces.py

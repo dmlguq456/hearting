@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Direct routes in an artifact root whose cutover is inactive with legacy content."""
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import json
 import os
@@ -12,6 +15,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import artifact_producer
 
 CLI = [sys.executable, str(ROOT / "utilities/capability-route.py")]
@@ -68,7 +73,8 @@ class LegacyRootDirectRouteTest(unittest.TestCase):
         prompt = base / "task.md"
         prompt.write_text("Fix the README.\n", encoding="utf-8")
         self.compose = CLI + ["compose", "--slug", "legacy-direct", "--campaign-key", "legacy-direct",
-                              "--shape", "direct", "--cwd", str(self.repo), "--artifact-root", str(self.root),
+                              "--shape", "direct", "--capability", "autopilot-code",
+                              "--cwd", str(self.repo), "--artifact-root", str(self.root),
                               "--prompt-file", str(prompt), "--spec-read", "fixture",
                               "--drift-verdict", "within-spec", "--artifact-guard", "fixture",
                               "--parent-harness", "codex"]
@@ -125,7 +131,7 @@ class LegacyRootDirectRouteTest(unittest.TestCase):
 
     def test_legacy_finish_preserves_registered_caller_and_route_refusals(self):
         command, route = self.finish_command()
-        self.env["AGENT_DISPATCH_ATTEMPT_ID"] = "att-" + "a" * 48
+        self.env["AGENT_DISPATCH_ATTEMPT_ID"] = unique_attempt_id("att-" + "a" * 48)
         denied = self.run_cli(command)
         self.assertEqual(denied.returncode, 64, denied.stderr)
         self.assertIn("finish-registered-caller-ineligible", denied.stderr)

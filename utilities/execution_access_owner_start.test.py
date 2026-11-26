@@ -5,6 +5,9 @@ The model payload, runtime bootstrap/observations and frame readiness are substi
 Route/request validation, registration, fencing, spawning and grant I/O are real.
 """
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 from contextlib import ExitStack, redirect_stdout, redirect_stderr
 import hashlib
@@ -30,9 +33,11 @@ from execution_access import (
 from split_module_fixture import patch_split
 
 ROOT = Path(__file__).resolve().parents[1]
-OWNER = "att-" + "a" * 32
-CHILD = "att-" + "b" * 32
-DEFAULT = "att-" + "c" * 32
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
+OWNER = unique_attempt_id("att-" + "a" * 32)
+CHILD = unique_attempt_id("att-" + "b" * 32)
+DEFAULT = unique_attempt_id("att-" + "c" * 32)
 
 
 def load_module(name, path):
@@ -473,8 +478,8 @@ class OwnerGrantStartTest(OwnerGrantStartFixture):
         for adapter in ("codex", "claude", "opencode"):
             with self.subTest(adapter=adapter):
                 route = self.route("claude", child_adapter=adapter)
-                owner = "att-" + hashlib.sha256(("parent-" + adapter).encode()).hexdigest()[:32]
-                child = "att-" + hashlib.sha256(("preview-" + adapter).encode()).hexdigest()[:32]
+                owner = unique_attempt_id("att-" + hashlib.sha256(("parent-" + adapter).encode()).hexdigest()[:32])
+                child = unique_attempt_id("att-" + hashlib.sha256(("preview-" + adapter).encode()).hexdigest()[:32])
                 result, output = self.start("claude", owner, self.request(owner), route=route)
                 self.assertEqual(0, result, output)
                 request = self.request(child, self.data / adapter)
@@ -584,7 +589,7 @@ class OwnerGrantStartTest(OwnerGrantStartFixture):
         for adapter in ("claude", "opencode"):
             with self.subTest(adapter=adapter):
                 route = self.route(adapter)
-                attempt = "att-" + hashlib.sha256(adapter.encode()).hexdigest()[:32]
+                attempt = unique_attempt_id("att-" + hashlib.sha256(adapter.encode()).hexdigest()[:32])
                 result, output = self.start(adapter, attempt, self.request(adapter), route=route)
                 self.assertEqual(0, result, output)
                 self.assertIn("started=1", output)
@@ -599,7 +604,7 @@ class OwnerGrantStartTest(OwnerGrantStartFixture):
     def test_exact_attempt_reentry_spawns_one_real_child_on_each_adapter(self):
         for adapter in ("codex", "claude", "opencode"):
             with self.subTest(adapter=adapter):
-                attempt = "att-" + hashlib.sha256(("single-spawn-" + adapter).encode()).hexdigest()[:32]
+                attempt = unique_attempt_id("att-" + hashlib.sha256(("single-spawn-" + adapter).encode()).hexdigest()[:32])
                 route = self.route(adapter)
                 first, output = self.start(adapter, attempt, self.request(attempt), route=route)
                 self.assertEqual(first, 0, output)

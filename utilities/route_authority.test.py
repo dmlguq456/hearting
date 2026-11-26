@@ -6,6 +6,9 @@ rows pin the current answers; a later stage that changes a meaning changes the
 matching row here on purpose (ROUTE-AUTHORITY-DESIGN-REVIEW-1006.md §2).
 """
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import importlib.util
 import json
@@ -1394,6 +1397,24 @@ class Case6UncappedAndEnvelopeTest(unittest.TestCase):
         self.assertIsNone(RA.pass_blocker_violation("FAIL", "G1 incomplete"))
         self.assertIsNone(RA.HANDOFF_RE.search("verdict: PASS\nblocker: none"))
 
+    def test_a_pass_memo_after_the_verdict_or_after_none_is_a_remark(self):
+        for verdict, blocker, memo, note in (
+                ("PASS (병합 가능)", "none", "(병합 가능)", ""),
+                ("PASS — 병합 가능", "none", "— 병합 가능", ""),
+                ("PASS: ok", "none — 필수 지적 2건", ": ok", "필수 지적 2건"),
+                ("PASS - ok", "none: 필수 지적 2건", "- ok", "필수 지적 2건")):
+            with self.subTest(verdict=verdict, blocker=blocker):
+                handoff = RA.HANDOFF_RE.search(f"artifact: -\nverdict: {verdict}\nblocker: {blocker}").groupdict()
+                self.assertEqual((handoff["verdict"], handoff["verdict_note"].lstrip()), ("PASS", memo))
+                self.assertIsNone(RA.pass_blocker_violation(handoff["verdict"], handoff["blocker"]))
+                self.assertEqual(RA.pass_blocker_note(blocker), note)
+        for verdict in ("not PASS", "FAIL (was PASS)", "BLOCKED — PASS pending", "PASSED", "PASS-ish", "PASS ("):
+            with self.subTest(verdict=verdict):
+                self.assertIsNone(RA.HANDOFF_RE.search(f"artifact: -\nverdict: {verdict}\nblocker: none"))
+        for blocker in ("none, but G1 skipped", "nonexistent: x", "none —", "none:", "none -x", "G1 skipped"):
+            with self.subTest(blocker=blocker):
+                self.assertEqual(RA.pass_blocker_violation("PASS", blocker), "pass-blocker-not-none")
+
     def test_a_fence_or_two_trailing_sentences_leave_the_verdict(self):
         # G1: the envelope plus a code fence and/or up to two sentences is
         # still that envelope. The captured fields never include the tail.
@@ -1415,7 +1436,7 @@ class Case6UncappedAndEnvelopeTest(unittest.TestCase):
                     self.assertIsNotNone(handoff)
                     self.assertEqual(
                         handoff.groupdict(),
-                        {"artifact": "-", "verdict": verdict, "blocker": blocker},
+                        {"artifact": "-", "verdict": verdict, "verdict_note": None, "blocker": blocker},
                     )
         # Three sentences, a verdict-mentioning tail, or no envelope still fail closed.
         for text in (
@@ -2693,12 +2714,16 @@ class U11CompletionStateTest(unittest.TestCase):
         self.assertEqual((decision.allowed, decision.state, decision.reason), (True, "complete", ""))
         self.assertNotIn("forward-recovery-not-proved", repr(decision))
 
-    def test_pending_publication_and_goal_still_hold_the_owner(self):
-        for fact, reason in (("publication_pending", "shared-spec-publication-pending"),
-                             ("goal_pending", "campaign-goal-close-pending")):
-            decision = RA.decide_continuation(action="completion-state", facts={
-                "commit_exists": True, "checkpoint": "owner-envelope-sealed", fact: True})
-            self.assertEqual((decision.state, decision.reason), ("pending", reason))
+    def test_pending_goal_still_holds_the_owner(self):
+        decision = RA.decide_continuation(action="completion-state", facts={
+            "commit_exists": True, "checkpoint": "owner-envelope-sealed", "goal_pending": True})
+        self.assertEqual((decision.state, decision.reason), ("pending", "campaign-goal-close-pending"))
+
+    def test_unpublished_shared_spec_does_not_hold_a_sealed_owner(self):
+        """Publication is not a terminal gate: a pending one rides on the completion."""
+        decision = RA.decide_continuation(action="completion-state", facts={
+            "commit_exists": True, "checkpoint": "owner-envelope-sealed", "publication_pending": True})
+        self.assertEqual((decision.allowed, decision.state, decision.reason), (True, "complete", ""))
 
     def test_terminal_conflict_stays_protected(self):
         choice = RA.decide_continuation(action="replacement", status="done",

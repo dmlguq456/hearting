@@ -3,6 +3,9 @@
 The source is the project's status document (core/ARTIFACT_META.md "The project status
 document"); without one the line is built from routes, questions and results Fleet holds.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import os
 import shutil
 import subprocess
@@ -12,6 +15,7 @@ import time
 import unicodedata
 import unittest
 from dataclasses import replace
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -66,6 +70,31 @@ Shipping the importer rewrite this week.
 ## Next steps
 - Land the parser
 """
+
+
+CAMPAIGN_DOC = """<!-- hearting:campaign-document v1 -->
+# 하팅 4.0 공개 준비와 닫힌 캠페인 사이클 이동 결함 수정
+
+갱신 2026-11-19 18:16
+
+**한 줄**: 하팅 4.0 공개를 위해 화면·절차·검사를 고쳤다.
+
+## 결정 기다리는 것
+{decisions}
+
+## 하는 중
+- 옛 판으로 도는 창이 만드는 캐시 (현장 결함)
+- 질문판 답 결함 수정 · #1757 · 기록 2
+
+## 끝난 일
+- 11-19 화면 후속 묶음 · #1758 · 기록 1
+
+## 예정
+- Codex·OpenCode 위주로 동작 parity 검증 · 사용량 한도가 풀린 뒤
+- 등록부 보관 검토의 후속 · 열림
+"""
+DECISIONS_NONE = "지금 없음."
+DECISIONS_TWO = "- 질문판에 열린 질문 4개 (질문판 기준 18:16)\n- 두 번째 결정"
 
 
 def _touch(path, text="", mtime=None):
@@ -144,6 +173,25 @@ class ArtifactRootTest(unittest.TestCase):
         self.assertEqual(project_status.artifact_root(child), os.path.realpath(child / ".agent_reports"))
 
 
+    def test_campaign_document_shape(self):
+        parsed = project_status.parse(CAMPAIGN_DOC.format(decisions=DECISIONS_NONE))
+        self.assertEqual(parsed["title"], "하팅 4.0 공개 준비와 닫힌 캠페인 사이클 이동 결함 수정")
+        self.assertEqual(parsed["line"], "하팅 4.0 공개를 위해 화면·절차·검사를 고쳤다.")
+        self.assertEqual(parsed["decisions"], [])                      # "지금 없음." is not a bullet
+        self.assertEqual(parsed["next"], ["Codex·OpenCode 위주로 동작 parity 검증 · 사용량 한도가 풀린 뒤",
+                                          "등록부 보관 검토의 후속 · 열림"])
+        # 11-22: a question stands on the question screens only. An older generated page (marker) that still has the
+        # section is read without it; the same words with no marker are a person's page and keep their decisions.
+        two = project_status.parse(CAMPAIGN_DOC.format(decisions=DECISIONS_TWO))
+        self.assertEqual(two["decisions"], [])
+        by_hand = project_status.parse(CAMPAIGN_DOC.split("\n", 1)[1].format(decisions=DECISIONS_TWO))
+        self.assertEqual(len(by_hand["decisions"]), 2)
+        self.assertEqual((by_hand["title"], by_hand["line"], by_hand["next"]), (two["title"], two["line"], two["next"]))
+        self.assertTrue(project_status._UPDATED.match("갱신 2026-11-19 18:16"))
+        for title in ("결정 기다리는 것", "하는 중", "끝난 일", "예정"):   # none reads as a record of decisions made
+            self.assertFalse(any(word in title.casefold() for word in project_status._RECORD_WORDS), title)
+
+
 class FindTest(unittest.TestCase):
     def setUp(self):
         project_status.clear_cache()
@@ -167,7 +215,11 @@ class FindTest(unittest.TestCase):
         self.assertEqual(len(record["decisions"]), 3)
         _touch(self.root / "research" / "2026-10-01_old" / "STATUS.md", STATUS_EN, self.now)
         self.assertEqual(project_status.newest(str(self.root), self.now)["relative"],
-                         "research/2026-10-01_old/STATUS.md")
+                         "campaigns/2026-11-02_v4/2026-11-02_status/artifacts/현황.md")
+
+    def test_research_log_is_not_a_status_page_without_campaign_or_cycle_pages(self):
+        _touch(self.root / "research" / "2026-10-01_old" / "STATUS.md", STATUS_EN, self.now)
+        self.assertIsNone(project_status.newest(str(self.root), self.now))
 
     def test_names_match_the_producer_rule_and_hangul_name_comes_first(self):
         campaign = self.root / "campaigns" / "2026-11-02_v4"
@@ -191,7 +243,7 @@ class FindTest(unittest.TestCase):
                          unicodedata.normalize("NFD", "현황.md"))]))
 
     def test_collect_scans_one_root_once_per_interval(self):
-        doc = self.root / "research" / "2026-11-02_x" / "STATUS.md"
+        doc = self.root / "campaigns" / "2026-11-02_x" / "STATUS.md"
         _touch(doc, STATUS_EN, self.now - 10)
         (self.project / "a").mkdir()
         cwds = [str(self.project), str(self.project / "a"), str(self.tmp)]
@@ -213,7 +265,7 @@ class FindTest(unittest.TestCase):
             _touch(campaign / "STATUS.md", "# Campaign " + str(index) + "\n\nSummary " + str(index),
                    self.now - index * 10)
             _touch(campaign / "2026-11-06_old" / "artifacts/STATUS.md", "# Cycle copy", self.now + 100)
-        _touch(self.root / "research/x/STATUS.md", "# Legacy copy", self.now + 100)
+        _touch(self.root / "research/x/STATUS.md", "# Chronological log", self.now + 100)
         record = project_status.newest(str(self.root), now=self.now)
         self.assertEqual(record["line"], "Summary 0")
         self.assertEqual([row["campaign"] for row in record["campaigns"]],
@@ -240,7 +292,197 @@ class FindTest(unittest.TestCase):
         self.assertEqual(record["campaigns"][0]["campaign"], "stream")
 
 
+    def test_campaign_md_beats_older_names_and_a_long_folder_and_is_not_read_when_too_large(self):
+        campaign = self.root / "campaigns/2026-11-06_stream"
+        page = campaign / "campaign.md"
+        _touch(page, CAMPAIGN_DOC.format(decisions=DECISIONS_TWO), self.now - 5)
+        _touch(campaign / "현황.md", "# Hand written", self.now)
+        _touch(campaign / "status.md", "# Another hand written", self.now)
+        _touch(campaign / "2026-11-06_old" / "artifacts/STATUS.md", "# Cycle copy", self.now + 100)
+        for number in range(1005):
+            (campaign / ("x%04d.txt" % number)).write_text("")
+        self.assertEqual(project_status.find_documents(str(self.root), now=self.now), [str(page)])
+        record = project_status.newest(str(self.root), now=self.now)
+        self.assertEqual((record["name"], record["campaign"]), ("campaign.md", "stream"))
+        self.assertEqual(record["title"], "하팅 4.0 공개 준비와 닫힌 캠페인 사이클 이동 결함 수정")
+        self.assertEqual(record["decisions"], [])                      # a generated page counts no question (11-22)
+        self.assertEqual(record["next"][0], "Codex·OpenCode 위주로 동작 parity 검증 · 사용량 한도가 풀린 뒤")
+        project_status.clear_cache()
+        _touch(page, "# Large\n" + "x" * 70000, self.now)
+        self.assertEqual(project_status.find_documents(str(self.root), now=self.now), [])  # no older name stands in
+
+    def test_no_campaign_md_is_remembered_with_the_folder_stamp_and_a_new_one_is_seen(self):
+        campaign = self.root / "campaigns/2026-11-06_stream"
+        _touch(campaign / "현황.md", "# Hand written", self.now)
+        _age(campaign, self.now - 60)
+        real, calls = project_status.campaign_documents.campaign_page, []
+
+        def counted(folder):
+            calls.append(folder)
+            return real(folder)
+        with mock.patch.object(project_status.campaign_documents, "campaign_page", counted):
+            for _ in range(3):
+                self.assertEqual(project_status.find_documents(str(self.root), now=self.now),
+                                 [str(campaign / "현황.md")])
+            self.assertEqual(len(calls), 1)      # the same stamp: the folder is not asked again
+            page = campaign / "campaign.md"
+            _touch(page, CAMPAIGN_DOC.format(decisions=DECISIONS_TWO), self.now)
+            _age(campaign, self.now - 30)        # adding the page moved the folder's stamp
+            self.assertEqual(project_status.find_documents(str(self.root), now=self.now), [str(page)])
+            self.assertEqual(project_status.find_documents(str(self.root), now=self.now), [str(page)])
+            self.assertEqual(len(calls), 3)      # a page that is there is read every time
+
+    def test_a_campaign_md_inside_a_cycle_folder_is_not_a_status_page(self):
+        campaign = self.root / "campaigns/2026-11-06_stream"
+        _touch(campaign / "2026-11-06_old" / "artifacts/campaign.md", "# Not a campaign page", self.now)
+        self.assertEqual(project_status.find_documents(str(self.root), now=self.now), [])
+
+
+GENERATED_NOW = 1_763_640_000.0
+
+
+def _generated(*, summary="한 줄 요약입니다.", done=1):
+    """A campaign document as the generator writes it."""
+    sys.path.insert(0, str(ROOT / "utilities"))
+    import campaign_document
+    from datetime import timezone
+    unit = {"key": "pr:7", "pr": 7, "v": "v4.1.0", "title": "무언가를 고침", "impl": {"slug": "x"}, "count": 3,
+            "closed_at": GENERATED_NOW - 3600, "routes": 2, "activity": GENERATED_NOW}
+    units = {"active": [unit], "active_folded": 2, "done": [unit] * done, "done_folded": 1354}
+    return campaign_document.render_document("캠페인", summary, units, now=GENERATED_NOW, tz=timezone.utc)
+
+
+class GeneratedDocumentTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="project-status-generated-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.root = self.tmp / ".agent_reports"
+        project_status.clear_cache()
+        self.addCleanup(project_status.clear_cache)
+
+    def test_the_four_headings_read_as_none_decisions_none_next_and_no_record_word_catches_them(self):
+        kinds = [project_status._section_kind(title) for title in
+                 ("하는 중", "기다리는 것", "최근에 끝난 것", "나중에 할 것")]
+        self.assertEqual(kinds, [None, "decisions", None, "next"])
+        for title in ("하는 중", "기다리는 것", "최근에 끝난 것", "나중에 할 것"):
+            self.assertFalse(any(word in title.casefold() for word in project_status._RECORD_WORDS), title)
+
+    def test_the_earlier_headings_still_read_the_same(self):
+        for title, kind in (("결정 기다리는 것", "decisions"), ("결정 필요", "decisions"), ("예정", "next"),
+                            ("다음", "next"), ("Decisions needed", "decisions"), ("Next", "next"),
+                            ("사용자 결정 기록", None), ("끝난 일", None)):
+            self.assertEqual(project_status._section_kind(title), kind, title)
+
+    def test_a_generated_document_gives_its_one_line_and_no_decision(self):
+        text = _generated()
+        parsed = project_status.parse(text)
+        self.assertEqual(parsed["title"], "캠페인")
+        self.assertEqual(parsed["line"], "한 줄 요약입니다.")
+        self.assertEqual(parsed["decisions"], [])      # 11-22: the document lists no question
+        self.assertNotIn("기다리는 것", text)
+        self.assertEqual(parsed["next"], [])           # no 나중에 할 것 section yet
+        later = text + "\n## 나중에 할 것\n- 다음 일\n"
+        self.assertEqual(project_status.parse(later)["next"], ["다음 일"])
+
+    def test_the_marker_here_is_the_generators_own(self):
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import campaign_document
+        self.assertEqual(project_status.CAMPAIGN_MARKER, campaign_document.MARKER)
+
+    def test_an_older_generated_page_with_the_waiting_section_counts_no_decision_and_a_hand_written_one_does(self):
+        older = _generated().replace("## 최근에 끝난 것", "## 기다리는 것\n- 첫째?\n- 둘째?\n\n## 최근에 끝난 것")
+        self.assertIn("- 첫째?", older)
+        self.assertEqual(project_status.parse(older)["decisions"], [])
+        for heading in ("기다리는 것", "결정 필요", "Decisions needed"):
+            by_hand = "# 제목\n\n**한 줄**: 줄\n\n## %s\n- 첫째?\n- 둘째?\n" % heading
+            self.assertEqual(project_status.parse(by_hand)["decisions"], ["첫째?", "둘째?"], heading)
+
+    ESCAPES = [
+        ("\\[4c\\] 산출물 논의 \\*중요\\* a\\_b\\_ \\<x\\> \\& \\\\ \\# \\!", "[4c] 산출물 논의 *중요* a_b_ <x> & \\ # !"),
+        ("코드 칸은 그대로: `a\\_b\\*c`", "코드 칸은 그대로: a\\_b\\*c"),
+        ("링크 \\[a\\](http://x) \\& \\<tag\\>", "링크 [a](http://x) & <tag>"),
+        ("경로 C:\\\\Users\\\\x 와 a\\\\b", "경로 C:\\Users\\x 와 a\\b"),
+        ("[진짜 링크](http://x) 와 **굵게**", "진짜 링크 와 굵게"),
+    ]
+
+    def test_a_backslash_escape_outside_code_is_the_bare_mark_on_the_line_and_in_the_decisions(self):
+        for written, shown in self.ESCAPES:
+            with self.subTest(written=written):
+                self.assertEqual(project_status._plain(written), shown)
+                parsed = project_status.parse("# 제목\n\n**한 줄**: %s\n\n## 기다리는 것\n- %s\n" % (written, written))
+                self.assertEqual(parsed["line"], shown)
+                self.assertEqual(parsed["decisions"], [shown])
+
+    def test_the_module_loads_by_its_file_path_outside_the_package(self):
+        # experiment_catalog.root_for_cwd loads this file without its package (the experiment guide and the
+        # session card ride on it): the load must work and read escapes the same way.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("standalone_project_status_test", project_status.__file__)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for written, shown in self.ESCAPES:
+            with self.subTest(written=written):
+                self.assertEqual(module._plain(written), shown)
+
+    def test_the_generators_own_escapes_come_back_as_the_titles_it_was_given(self):
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import campaign_document
+        from datetime import timezone
+        titles = ["[4c] 산출물 논의 *중요* a_b_ <x> & \\ # !", "링크 [a](http://x) & <tag>", "경로 C:\\Users\\x 와 a\\b",
+                  "_remove_empty_cycle 와 __init__ 정리", "`코드 a_b*c` 와 `짝 없는"]
+        text = campaign_document.render_document(titles[0], titles[1], {"active": [], "done": []},
+                                                 now=GENERATED_NOW, tz=timezone.utc)
+        parsed = project_status.parse(text)
+        shown = titles[:4]
+        self.assertEqual(parsed["title"], shown[0])
+        self.assertEqual(parsed["line"], shown[1])
+
+    def test_a_marker_never_becomes_the_one_line_even_without_a_summary(self):
+        parsed = project_status.parse(_generated(summary=""))
+        self.assertEqual(parsed["line"], "캠페인")
+
+    def test_a_campaign_with_campaign_md_is_not_walked_for_cycle_folders(self):
+        campaigns = self.root / "campaigns"
+        mine, plain = campaigns / "2026-11-06_mine", campaigns / "2026-11-06_plain"
+        _touch(mine / "campaign.md", _generated(), GENERATED_NOW)
+        for number in range(300):
+            (mine / ("2026-11-06_c%03d" % number)).mkdir()
+            (plain / ("2026-11-06_c%03d" % number)).mkdir(parents=True, exist_ok=True)
+        walked, listed = [], []
+        real_subdirs, real_candidates = project_status._subdirs, project_status.campaign_documents.status_candidates
+
+        def subdirs(path):
+            walked.append(os.path.basename(path))
+            return real_subdirs(path)
+
+        def candidates(folder):
+            listed.append(os.path.basename(str(folder)))
+            return real_candidates(folder)
+        with mock.patch.object(project_status, "_subdirs", subdirs), \
+                mock.patch.object(project_status.campaign_documents, "status_candidates", candidates):
+            found = project_status.find_documents(str(self.root), now=GENERATED_NOW)
+        self.assertEqual(found, [str(mine / "campaign.md")])
+        self.assertNotIn("2026-11-06_mine", walked + listed)    # the campaign with a document is not listed or walked
+        self.assertIn("2026-11-06_plain", walked)               # the one without is, as before
+        self.assertEqual(walked.count("campaigns"), 1)
+
+
 class ProjectionTest(unittest.TestCase):
+    def test_repo_page_gets_only_first_lines_from_existing_current_question_material(self):
+        now = time.time()
+        sessions = [Session(harness="claude", pid=10, session_tag="a1", session_id="sid-a", cwd="/w/alpha",
+                            title="t", liveness="idle")]
+        waits = {"complete": True, "total": 4, "older": 0, "ownerless": 0,
+                 "items": [{"id": f"q{index}", "source": "S2", "kind": "human gate",
+                            "since": now, "stale": "current", "harness": "claude",
+                            "session_id": "sid-a", "question": f"Decision {index}\nsecond line"}
+                           for index in range(4)]}
+        snapshot = {"sessions": sessions, "jobs": [], "resources": [], "answer_waits": waits,
+                    "project_of": lambda cwd: os.path.basename(cwd)}
+        repos = {repo["id"]: repo for repo in build_view_model(snapshot, now=now).repos}
+        status = repos["alpha"]["status"]
+        self.assertEqual(tuple(status["question_lines"]), ("Decision 0", "Decision 1", "Decision 2"))
+
     def test_document_and_derived_status_on_repo_records(self):
         now = time.time()
         sessions = [Session(harness="claude", pid=10, session_tag="a1", session_id="sid-a", cwd="/w/alpha",
@@ -266,7 +508,8 @@ class RenderTest(unittest.TestCase):
     DOC = {"routes": 0, "questions": 2, "done": "importer", "done_age": "41m ago",
            "line": "백로그를 묶어 v4.0.0 정식 공개까지 간다.", "decisions": 3,
            "decision": "케언 PR 병합", "next": "[50] 정리 뒤 계획 확정",
-           "doc": "research/x/현황.md", "doc_age": "12m ago", "stale": False, "changed": "12m ago"}
+           "doc": "campaigns/x/현황.md", "doc_age": "12m ago", "stale": False, "changed": "12m ago",
+           "question_lines": ["보관 기간을 정할까요?", "두 번째 질문", "세 번째 질문", "숨길 네 번째 질문"]}
     DERIVED = {"routes": 2, "questions": 0, "done": "csi bundle", "done_age": "53m ago", "changed": "53m ago"}
 
     def setUp(self):
@@ -285,18 +528,24 @@ class RenderTest(unittest.TestCase):
     def test_segments(self):
         segments = tables.repo_status_segments(self.DOC, 120)
         text = "".join(text for text, _key in segments)
-        self.assertEqual(text, "백로그를 묶어 v4.0.0 정식 공개까지 간다. │ 3 to decide │ ◑ to answer 2 │ 12m ago")
+        self.assertEqual(text, "◑ to answer 2 │ 3 to decide")
         self.assertIn(("3 to decide", "lvl_y"), segments)
-        self.assertEqual(tables.repo_status_segments(self.DOC, 120, narrow=True), [("3 to decide", "lvl_y")])
-        self.assertEqual("".join(text for text, _ in tables.repo_status_segments(self.DERIVED, 120)),
-                         "⏳ route 2 │ 53m ago ✓ csi bundle")
-        self.assertEqual(tables.repo_status_segments(dict(self.DOC, decisions=0), 120, narrow=True), [])
+        self.assertEqual("".join(text for text, _ in tables.repo_status_segments(self.DOC, 120, narrow=True)),
+                         "◑ to answer 2 │ 3 to decide")
+        self.assertEqual("".join(text for text, _ in tables.repo_status_segments(self.DERIVED, 120)), "route 2")
+        self.assertEqual(tables.repo_status_segments(dict(self.DOC, decisions=0), 120, narrow=True),
+                         [("◑ to answer 2", "blocked")])
+        # A narrow screen keeps what waits on the person; the route count gives way, not them.
+        busy = dict(self.DOC, routes=3, routes_running=1)
+        self.assertEqual("".join(text for text, _ in tables.repo_status_segments(busy, 120)),
+                         "route 3 ⠏1 │ ◑ to answer 2 │ 3 to decide")
+        self.assertEqual("".join(text for text, _ in tables.repo_status_segments(busy, 30, narrow=True)),
+                         "◑ to answer 2 │ 3 to decide")
+        self.assertEqual(tables.repo_status_segments(self.DERIVED, 120, narrow=True), [])
         stale = dict(self.DOC, stale=True, doc_age="5d ago", changed="5d ago", questions=0)
-        self.assertEqual("".join(text for text, _ in tables.repo_status_segments(stale, 200)),
-                         "5d ago · 백로그를 묶어 v4.0.0 정식 공개까지 간다. │ 3 to decide")
-        tight = tables.repo_status_segments(self.DOC, 50)
-        self.assertLessEqual(sum(tables._seg_width(text) for text, _ in tight), 50)
-        self.assertTrue(tight[0][0].endswith("…"))
+        self.assertEqual("".join(text for text, _ in tables.repo_status_segments(stale, 200)), "3 to decide")
+        tight = tables.repo_status_segments(self.DOC, 18)
+        self.assertLessEqual(sum(tables._seg_width(text) for text, _ in tight), 18)
 
     def test_status_rides_on_the_rule_without_adding_rows(self):
         plain = self._text(draw(self.vm, NavState(), 140, 45, beat=1))
@@ -304,9 +553,10 @@ class RenderTest(unittest.TestCase):
                                 NavState(), 140, 45, beat=1))
         changed = [y for y, (a, b) in enumerate(zip(plain, shown)) if a != b]
         self.assertEqual(len(changed), 2, changed)                     # exactly the two group rules
-        self.assertIn(self.first + "/ │ 백로그를 묶어", shown[changed[0]])
-        self.assertIn("3 to decide │ ◑ to answer 2 │ 12m ago ┈", shown[changed[0]])
-        self.assertIn(self.second + "/ │ ⏳ route 2 │ 53m ago ✓ csi bundle ┈", shown[changed[1]])
+        self.assertIn(self.first + "/ │ ◑ to answer 2 │ 3 to decide", shown[changed[0]])
+        self.assertNotIn("백로그를 묶어", shown[changed[0]])
+        self.assertIn(self.second + "/ │ route 2", shown[changed[1]])
+        self.assertNotIn("csi bundle", shown[changed[1]])
 
     def test_repo_page_opens_with_four_status_lines(self):
         state = NavState(scope="repo:" + self.first)
@@ -317,7 +567,9 @@ class RenderTest(unittest.TestCase):
         self.assertIn("3 · 케언 PR 병합 · +2 more", shown[top + 1])
         self.assertIn("◑ to answer 2", shown[top + 1])
         self.assertIn("[50] 정리 뒤 계획 확정", shown[top + 2])
-        self.assertIn("12m ago research/x/현황.md · 41m ago ✓ importer", shown[top + 3])
+        self.assertIn("12m ago campaigns/x/현황.md · 41m ago ✓ importer", shown[top + 3])
+        self.assertIn("? 보관 기간을 정할까요?", "\n".join(shown[top + 4:top + 8]))
+        self.assertNotIn("숨길 네 번째 질문", "\n".join(shown))
         header = next(y for y, row in enumerate(plain) if " ID " in row and "MODEL" in row)
         pane = 32                                                     # the sidebar left of the pane is unchanged
         new_header = next(y for y, row in enumerate(shown) if " ID " in row and "MODEL" in row)

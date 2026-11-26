@@ -64,8 +64,8 @@ python3 <agent-home>/tools/memory/mem.py <command>
 |---|---|
 | `add <tier> <type> "<body>" [--headline] [--alias] [--entity] [--topic] [--artifact-ref] …` | Add a record and bounded retrieval capsule after mechanical validation. Repeat capsule-list options as needed. |
 | `note "<body>" [--type] [--requires-consume]` | Shorthand for a working record. Use `--requires-consume` for delivery-bearing threads. |
-| `candidates "<prompt>" --session-id <id> [--turn-id <id>] [--hook]` | Main-prompt mechanical capsule lookup. By default exposes at most six active current-project/global headline-and-ID candidates within 1,200 UTF-8 bytes; the explicit `MEM_CANDIDATE_BODY=1` opt-in adds at most 600 characters for one clearly leading new candidate, paid for by half of the bytes the session already saved. A successful probe publishes a same-turn opportunity receipt. A session is shown each record once: the ranked top six is chosen as before and the ones already shown are dropped, so a repeat prompt can print nothing (the receipt is still written). The history is `<runtime-state>/candidate-seen/`, one 0600 file per session hash and project (512 ids, 24 hours), and every failure to read or write it lets the candidate through. `--session-id` empty or a bridge placeholder means no session and no de-duplication. Compact and `/clear` empty the history; resume and start keep it. |
-| `bootstrap-context --query <q>... --cwd <dir> [--limit 4] [--max-bytes 6144]` | Runtime-only; assembles the prompt of a worker whose unit declares `bootstrap.memory`. Prints at most four active global/current-project feedback, decision, convention, preference, and user-correction bodies within 6,144 UTF-8 bytes (query groups rank in order). It opens the database read-only and writes no access date, recall event, or receipt; a missing or unreadable store prints nothing and exits 0. |
+| `candidates "<prompt>" --session-id <id> [--turn-id <id>] [--hook]` | Main-prompt mechanical capsule lookup. By default exposes at most three active current-project/global headline-and-ID candidates within 600 UTF-8 bytes; the explicit `MEM_CANDIDATE_BODY=1` opt-in adds at most 600 characters for one clearly leading new candidate, paid for by half of the bytes the session already saved. A successful probe publishes a same-turn opportunity receipt. A session is shown each record once: the ranked top three is chosen as before and the ones already shown are dropped, so a repeat prompt can print nothing (the receipt is still written). The history is `<runtime-state>/candidate-seen/`, one 0600 file per session hash and project (512 ids, 24 hours), and every failure to read or write it lets the candidate through. `--session-id` empty or a bridge placeholder means no session and no de-duplication. Compact and `/clear` empty the history; resume and start keep it. |
+| `bootstrap-context --query <q>... [--topic <label>...] --cwd <dir> [--limit 4] [--max-bytes 6144]` | Runtime-only; read by the runtime while it assembles a worker prompt (the node's `unit:` and the route's `field:` labels, plus the query groups a unit declares in `bootstrap.memory`). Each `--topic` is an exact capsule label (see Work-style records): matching records print first, `unit:` before `field:`, then strength and update order; query groups fill the rest. Prints at most four active global/current-project feedback, decision, convention, preference, and user-correction bodies within 6,144 UTF-8 bytes (query groups rank in order). It opens the database read-only and writes no access date, recall event, or receipt, and leaves a pending sync-failure notice for the next foreground command; a missing or unreadable store prints nothing and exits 0. |
 | `recall-gate --decision recall\|skip --reason … [--query …]` | Record the work-start opportunity decision without raw prompts; recall executes immediately. Applied outcomes require `--gate-id` and at least one `--record-id`; miss has no record ID. |
 | `recall "<query>" [--topic] [--include-superseded] …` | Search active capsules first, then body/CJK/LIKE compatibility paths. Historical rows require explicit inclusion. |
 | `topics [topic] [--include-superseded]` | List normalized topics or visible records for one exact topic. |
@@ -257,6 +257,48 @@ supersession, merge removal, and pending consumption remain effective only when
 their operation causally covers the required complete frontier. First-release
 v2 operation/tombstone compaction and physical deletion are unsupported.
 
+## Work-style records and exact label lookup (D-82)
+
+One record is one way the user works, in one or two sentences. Schema is
+unchanged: `tier=durable`, `scope=global` (`project` when it holds only for that
+project), `type=preference`, and the main session's declared storage purpose is
+`user-correction` (a stated purpose, not a CLI flag). Labels live in the
+capsule `topics` field:
+
+- `field:<name>` with `<name>` one of `plan`, `design`, `code`, `lab`,
+  `research`, `docs`, `admin`, `other` (one English set; no per-language terms).
+- `unit:<family/name>`, for example `unit:qa/code-review`.
+
+```bash
+mem add durable preference "Keep review comments to blocking issues first." \
+  --topic field:code --topic unit:qa/code-review
+mem bootstrap-context --cwd . --topic unit:qa/code-review --topic field:code
+```
+
+Topic normalization only strips control characters, trims, and casefolds, so
+`:` and `/` are stored and matched as written (`record_topics.topic` holds the
+casefolded label). `bootstrap-context --topic` matches labels exactly, keeps the
+existing fences (active, global or current project, not flagged, type fence) and
+limits (four records, 1.6 KB each, 6 KB total, a three-second lookup), and
+prints nothing when no label matches or the lookup fails. Without `--topic` its
+output is unchanged. The runtime calls it with the node's `unit:` label and the route's `field:` label
+when it assembles a worker prompt (a route's one-shot owner: the field label only; an owner that runs stages: none); records tagged with those labels, attached read-only, are not automatic
+memory injection (2026-11-17 user direction).
+
+Nobody types the labels. `mem add durable preference …` from a main session adds
+them (`utilities/memory_work_labels.py`): the field is the sealed `field` of the
+session's one route, read from its route-chain ledger. A route that is still open
+counts however long it has run, unless a newer route followed it; one that ended
+counts for ten minutes. Several routes, none, any direct work (a change record with no route) after the route
+started or ended, a legacy route without a field, or a worker session add nothing.
+The unit is the stage the session's newest correction on that route was sent to
+(`capability-route correct` keeps it on the owner-input request and returns the
+same labels as `memory_labels`, a value only). Labels are only ever added: a new
+record gets the kinds the caller did not give; a record that already exists (the
+same body again, or a `--source` update) keeps every label it has and gains only a
+kind that neither it nor the caller had. Other types and tiers are never labelled. The record is written
+either way; workers and owners never write it.
+
 ## Curator safety invariant (D-18/D-35/D-40)
 
 There is no automatic distiller (D-78): the main session decides in the moment
@@ -363,7 +405,7 @@ store; `harness memory status` reports the recorded policy.
 - `MEM_WRITE_EVENTS`, `MEM_ACTOR`, and `MEM_SID` override telemetry metadata.
 - `mem-recall-inject.sh` is the fail-open prompt bridge for `mem candidates`.
   It exposes only active current-project/global capsule headlines and IDs (at
-  most six, at most 1,200 UTF-8 bytes), never record bodies. A successful
+  most three, at most 600 UTF-8 bytes), never record bodies. A successful
   probe writes a same-turn receipt under `MEM_RECALL_RECEIPTS`; raw prompts are
   not written to telemetry or receipts. The model must inspect a relevant
   record in full before applying it. Registered worker sessions stay silent.

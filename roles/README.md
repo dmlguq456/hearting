@@ -3,10 +3,12 @@
 This directory describes runtime-neutral delegation roles. It is not a native
 agent registry for any one tool.
 
-Claude Code realizes these profiles as native Agent files under
-`adapters/claude/agents/`. Codex and OpenCode read this directory for role
-meaning, then map each role to their own model, tool, and delegation mechanism
-through adapter-owned wrappers or native agent surfaces.
+Claude Code projects only the model-tier helper agents (`balanced`, `deep`,
+`light`, `general-purpose`) and `memory-scout` as native Agent files under
+`adapters/claude/agents/`; unit personas are read from `roles/units/`. Codex and
+OpenCode read this directory for role meaning, then map each role to their own
+model, tool, and delegation mechanism through adapter-owned wrappers or native
+agent surfaces.
 
 ## Role Catalog
 <!-- GENERATED: harness-manifest.json -->
@@ -24,6 +26,7 @@ through adapter-owned wrappers or native agent surfaces.
 | `editorial` | `editorial/report` | `deep editor` | `stage` | `low` | `roles/units/editorial/report.md` |
 | `editorial` | `editorial/review` | `fast reviewer` | `review` | `low` | `roles/units/editorial/review.md` |
 | `editorial` | `editorial/translate` | `deep editor` | `stage` | `low` | `roles/units/editorial/translate.md` |
+| `general` | `general/explore` | `fast tool worker` | `support` | `low` | `roles/units/general/explore.md` |
 | `material` | `material/browser-fetch` | `fast tool worker` | `support` | `near-zero` | `roles/units/material/browser-fetch.md` |
 | `material` | `material/data-script` | `deep maker` | `stage` | `low` | `roles/units/material/data-script.md` |
 | `material` | `material/figure-gen` | `deep maker` | `stage` | `low` | `roles/units/material/figure-gen.md` |

@@ -11,7 +11,7 @@ This holds the static half in one user-owned file and measures the rest:
     list    inventory plus reachability, GPU load/VRAM, and exact process owners
     probe   the live GPU/process measurement alone, for one host or all of them
     self    measure this machine without requiring an inventory
-    claim   bind a detached root PID to its exact launcher session identity
+    claim   bind a detached root PID and its live run notices to a session
     run     start a detached command on a host under a stable run id
     runs    what has been started, and which of those are still alive
     tail    read a run's log from any host that shares the run root
@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import contextlib
+import errno
 import datetime
 import fcntl
 import hashlib
@@ -51,6 +52,8 @@ CONNECT_TIMEOUT = 8
 PROBE_TIMEOUT = 40
 # Allow the SSH connection and both 5s NVIDIA queries before process attribution.
 GPU_PROBE_TIMEOUT = 20
+# Linux caps one argv word at 32 pages (131072 bytes); past it execve fails E2BIG.
+_MAX_ARG_BYTES = 131072
 LOCAL = "local"
 OWNER_CLAIMS = ".process-owners.json"
 OWNER_CLAIMS_LOCK = ".process-owners.lock"
@@ -122,6 +125,39 @@ def _path_contains(parent, child):
 
 def _paths_overlap(left, right):
     return left == right or _path_contains(left, right) or _path_contains(right, left)
+
+
+def run_raw_data_dir(host, value):
+    """The launcher's raw_data_dir as the run on `host` sees it, or "" when it cannot.
+
+    A `path_namespace` run sees each target at its launcher path, so a value
+    below exactly one target passes unchanged and any other value is not
+    visible there. A host without a namespace gets the value as is, like cwd.
+    """
+    if not _canonical_namespace_path(value):
+        return ""
+    mapping = host.get("path_namespace")
+    if not isinstance(mapping, dict):
+        return value
+    covers = [target for target in mapping
+              if isinstance(target, str) and (target == value or _path_contains(target, value))]
+    return value if len(covers) == 1 else ""
+
+
+def raw_data_dir_setup(host, environ=None):
+    """The run preamble line for AGENT_RAW_DATA_DIR; never an empty value.
+
+    A run is not given AGENT_RUNTIME_DIR, so the raw dir is passed only when it
+    is a separate place the run can see. Otherwise the key is unset, which also
+    clears a stale shell value; a script reading `$AGENT_RAW_DATA_DIR/...` then
+    fails loudly instead of writing to `/experiments/...`.
+    """
+    values = os.environ if environ is None else environ
+    raw = values.get("AGENT_RAW_DATA_DIR", "")
+    if raw == values.get("AGENT_RUNTIME_DIR", ""):
+        return "unset AGENT_RAW_DATA_DIR"
+    visible = run_raw_data_dir(host, raw)
+    return f"export AGENT_RAW_DATA_DIR={shlex.quote(visible)}" if visible else "unset AGENT_RAW_DATA_DIR"
 
 
 def _validate_path_namespace(name, host, run_root):
@@ -314,19 +350,44 @@ def ssh_prefix(host):
     return argv
 
 
-def remote(host, script, *, timeout=PROBE_TIMEOUT):
+def remote(host, script, *, timeout=PROBE_TIMEOUT, input=None):
     """Run one shell script on a host and return the completed process.
 
     ssh joins its command arguments and hands the result to a remote shell,
     which parses them a second time. The script therefore has to arrive as one
     already-quoted word, or any quoting inside it is re-interpreted and a
     command containing its own quotes silently falls apart.
+
+    One argument holds at most about 128 KiB (the kernel's per-argument
+    limit), so anything that grows with the host's state goes on standard
+    input instead: pass a short ``script`` that reads it (``python3 -`` or
+    ``bash -s``) and the body as ``input``.
     """
     prefix = ssh_prefix(host)
     argv = (prefix + [f"bash -lc {shlex.quote(script)}"] if prefix
             else ["bash", "-lc", script])
+    if input is None:
+        run = lambda: subprocess.run(argv, text=True, capture_output=True, timeout=timeout)  # noqa: E731
+    else:
+        def run():
+            done = subprocess.run(argv, input=input.encode("utf-8", "replace"),
+                                  capture_output=True, timeout=timeout)
+            return subprocess.CompletedProcess(
+                argv, done.returncode, done.stdout.decode("utf-8", "replace"),
+                done.stderr.decode("utf-8", "replace"))
     try:
-        return subprocess.run(argv, text=True, capture_output=True, timeout=timeout)
+        return run()
+    except OSError as exc:
+        if exc.errno != errno.E2BIG:
+            raise
+        # Say what is too big instead of a bare traceback: callers already
+        # print a failed launch's stderr as one line and record it.
+        size = max((len(word.encode("utf-8", "replace")) for word in argv), default=0)
+        return subprocess.CompletedProcess(
+            argv, 126, "",
+            f"argument too long: the remote command is {size} bytes in one argument "
+            f"(the limit is about {_MAX_ARG_BYTES} bytes); shorten the command "
+            f"or the values passed inside it")
     except subprocess.TimeoutExpired as exc:
         def output_text(value):
             if isinstance(value, bytes):
@@ -491,14 +552,17 @@ def _local_proc_identity(pid, proc_root=Path("/proc")):
 
 
 def _is_ssh_process(pid, proc_root=Path("/proc")):
-    root = Path(proc_root) / str(pid)
+    # Plain descriptors: this runs for every process on the host per probe.
+    root = os.path.join(os.fspath(proc_root), str(pid))
     try:
-        if (root / "comm").read_text(encoding="utf-8", errors="replace").strip() == "ssh":
-            return True
+        with open(os.path.join(root, "comm"), "rb") as handle:
+            if handle.read().decode("utf-8", errors="replace").strip() == "ssh":
+                return True
     except OSError:
         pass
     try:
-        argv0 = (root / "cmdline").read_bytes()[:4096].split(b"\0", 1)[0]
+        with open(os.path.join(root, "cmdline"), "rb") as handle:
+            argv0 = handle.read(4096).split(b"\0", 1)[0]
     except OSError:
         return False
     return os.path.basename(argv0.decode("utf-8", errors="ignore")) == "ssh"
@@ -1579,8 +1643,12 @@ def _socket_inodes(pid, proc_root=Path("/proc")):
 
 def _ssh_session_bridges_for_pid(pid, sockets, unix_listener_inodes,
                                  proc_root=Path("/proc")):
+    # The ssh test is the cheaper filter for the host's many other processes.
+    # Identity is read afterwards and re-verified, with the ssh test, below.
+    if not _is_ssh_process(pid, proc_root):
+        return []
     before = _local_proc_identity(pid, proc_root)
-    if before is None or not _is_ssh_process(pid, proc_root):
+    if before is None:
         return []
     owner = _unique_session_owner(_local_identity_env(pid, proc_root))
     if owner is None:
@@ -2522,7 +2590,8 @@ def probe_host(name, host, owner_claims=None, ssh_session_bridges=None):
               "export HEARTING_SSH_SESSION_BRIDGES_JSON=%s\n%s") % (
                   shlex.quote(claims_json), shlex.quote(bridges_json), probe_script)
     try:
-        result = remote(host, script, timeout=GPU_PROBE_TIMEOUT)
+        # Claims and bridges grow with the host's sessions: send on stdin.
+        result = remote(host, "bash -s", timeout=GPU_PROBE_TIMEOUT, input=script)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"host": name, "reachable": False, "detail": str(exc)[:120],
                 "gpus": [], "observed_at": observed_at}
@@ -2609,21 +2678,27 @@ def _select(config, names):
     return [(n, hosts[n]) for n in names]
 
 
-def cmd_list(args):
+def list_payload(hosts=(), *, static=False):
+    """The ``list --json`` document; in-process readers share it with the CLI."""
     config = load_config()
     run_root = None if _namespace_self(config) else config["run_root"]
-    selected = _select(config, args.hosts)
+    selected = _select(config, list(hosts or ()))
     live_rows = ({row["host"]: row
                   for row in _probe_selected(selected, run_root)}
-                 if not args.static else {})
+                 if not static else {})
     rows = []
     for name, host in selected:
         row = {"host": name, "ssh": host.get("ssh_host"),
                "port": host.get("ssh_port"), "conda": host.get("conda"),
                "note": host.get("note"), "self": is_self(host)}
-        row.update(live_rows[name] if not args.static
+        row.update(live_rows[name] if not static
                    else {"reachable": None, "gpus": []})
         rows.append(row)
+    return config, rows
+
+
+def cmd_list(args):
+    config, rows = list_payload(args.hosts, static=args.static)
     if args.json:
         print(json.dumps({"run_root": str(config["run_root"]), "hosts": rows},
                          ensure_ascii=False, sort_keys=True))
@@ -2759,12 +2834,136 @@ for line in status.splitlines():
         break
 if effective != os.geteuid():
     raise SystemExit("process belongs to another effective uid")
+run_id, run_id_error = None, None
+try:
+    # Only this PID's environment; a parent's run is not this process's claim.
+    raw = (root / "environ").read_bytes()
+    for item in raw.split(b"\0"):
+        key, separator, value = item.partition(b"=")
+        if separator and key == b"HEARTING_COMPUTE_RUN_ID":
+            run_id = value.decode("utf-8", errors="strict")
+            break
+except (OSError, UnicodeError) as exc:
+    run_id_error = "process environment unreadable: %s" % type(exc).__name__
 print(json.dumps({
     "pid": pid, "start": start,
     "cmdline_sha256": hashlib.sha256(cmdline).hexdigest(),
+    "run_id": run_id, "run_id_error": run_id_error,
 }, sort_keys=True))
 PY
 """
+
+
+def _claim_run_recipient(run_root, identity, claim):
+    """Move a live standalone run's notices, independently of its GPU claim."""
+    run_id = identity.get("run_id")
+
+    def unchanged(reason):
+        return {"status": "unchanged", "run_id": run_id,
+                "message": "run 알림 수신처를 옮기지 못함: " + reason}
+
+    if identity.get("run_id_error"):
+        return unchanged(identity["run_id_error"])
+    if not run_id:
+        return {"status": "unchanged", "run_id": run_id,
+                "message": "등록 실행이 아니어서 옮길 알림 없음"}
+    if (not isinstance(run_id, str) or len(run_id) > 255
+            or Path(run_id).name != run_id or run_id in {".", ".."}
+            or any(ord(char) < 32 or ord(char) == 127 for char in run_id)):
+        return unchanged("유효하지 않은 run id")
+    owner = claim["owner"]
+    registered_worker = (bool(os.environ.get("AGENT_DISPATCH_ATTEMPT_ID"))
+                         and os.environ.get("AGENT_DISPATCH_DEPTH") in {"1", "2"})
+    if registered_worker:
+        # A short-lived worker keeps its GPU label, but notices belong to its parent seat.
+        owner = _launcher_session_owner()
+        if owner is None:
+            return unchanged("dispatch 작업자 세션으로는 알림을 옮기지 않음: 담당 부모 세션을 확인할 수 없음")
+    # Explicit --harness/--session or the existing unambiguous launcher identity.
+    # Never copy attempt-parent authority from the run's previous recipient.
+    verified = _unique_session_owner({CANONICAL_SESSION_KEY[owner["harness"]]: owner["id"]})
+    if verified is None:
+        return unchanged("넘겨받는 세션 신원을 확인할 수 없음")
+    recipient = {"harness": verified["harness"], "id": verified["id"]}
+    recipient_label = (f"담당 부모 세션 {recipient['harness']}:{recipient['id']}"
+                       if registered_worker else "이 세션")
+    root = Path(run_root)
+    run_dir = root / run_id
+    meta_path = run_dir / "meta.json"
+    try:
+        # Reuse the claim lock so two claimers preserve both handover records.
+        with (root / OWNER_CLAIMS_LOCK).open("a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            if run_dir.is_symlink() or meta_path.is_symlink():
+                return unchanged("실행 폴더 또는 meta.json이 심볼릭 링크임")
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if not isinstance(meta, dict) or not isinstance(meta.get("provenance"), dict):
+                return unchanged("meta.json의 provenance를 읽을 수 없음")
+            if meta.get("host") != claim["host"] or meta.get("run_id") != run_id:
+                return unchanged("실행의 호스트 또는 run id가 다름")
+            if (run_dir / "exit_code").exists():
+                return unchanged("이미 끝난 실행")
+            provenance = meta["provenance"]
+            if provenance.get("resource") is not None or meta.get("owner_wait") is not None:
+                return unchanged("route 자원 알림은 담당 계보를 따름")
+            previous = {key: provenance.get(key) for key in ("session", "notify")}
+            import resource_progress
+            targets = resource_progress._notice_targets(previous)
+            if (previous["session"] == recipient
+                    and ("notify" not in provenance or previous["notify"] == recipient)):
+                return {"status": "unchanged", "run_id": run_id,
+                        "message": f"run {run_id}의 알림은 이미 {recipient_label}으로 옴"}
+            history = provenance.setdefault("recipient_handovers", [])
+            if not isinstance(history, list):
+                return unchanged("meta.json의 인계 이력을 읽을 수 없음")
+            handover = {"from": previous["session"], "to": recipient,
+                        "by": "compute-hosts claim", "at": claim["recorded_at"]}
+            if "notify" in provenance:
+                handover["notify_from"] = previous["notify"]
+                provenance["notify"] = recipient
+            provenance["session"] = recipient
+            history.append(handover)
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=run_dir,
+                                                 prefix=".claim-", delete=False) as handle:
+                    temporary = Path(handle.name)
+                    os.fchmod(handle.fileno(), stat.S_IMODE(meta_path.stat().st_mode))
+                    json.dump(meta, handle, ensure_ascii=False, indent=1, sort_keys=True)
+                    handle.write("\n")
+                os.replace(temporary, meta_path)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+    except (OSError, ValueError, TypeError) as exc:
+        return unchanged(f"meta.json 읽기·교체 실패 ({type(exc).__name__})")
+
+    old_labels = ", ".join(f"{row['harness']}:{row['session_id']}" for row in targets) or "미확인"
+    result = {"status": "moved", "run_id": run_id, "from": previous, "to": recipient,
+              "message": f"run {run_id}의 알림은 이제 {recipient_label}으로 옴 (전에는 {old_labels})"}
+    warnings = []
+    # Reuse an existing watcher, or attach one to a previously sessionless run.
+    # Like reattachment, depth zero avoids rewriting meta from this in-memory snapshot.
+    if not _spawn_completion_watch(run_dir, meta, environ={**os.environ, "AGENT_DISPATCH_DEPTH": "0"}):
+        warnings.append("수신처는 옮겼지만 실행 감시자를 시작하지 못함")
+    for target in targets:
+        harness, session_id = target["harness"], target["session_id"]
+        if (harness, session_id) == (recipient["harness"], recipient["id"]):
+            continue
+        try:
+            from session_notice import notify
+            notice = notify(harness, session_id,
+                key=f"compute-run-claim:{run_id}:{len(history)}:{harness}:{session_id}",
+                subject="compute run recipient",
+                text=f"run {run_id}의 알림이 {recipient['harness']}:{recipient['id']}로 옮겨짐 (compute-hosts claim)",
+                lineage=target["lineage"])
+            if notice is None:
+                warnings.append(f"{harness}:{session_id}에 인계 알림을 남기지 못함")
+        except Exception:  # noqa: BLE001 -- the recipient and GPU claim are already recorded
+            warnings.append(f"{harness}:{session_id}에 인계 알림을 남기지 못함")
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 def cmd_claim(args):
@@ -2772,8 +2971,9 @@ def cmd_claim(args):
     _refuse_namespace_self(config, "claim")
     (name, host), = _select(config, [args.host])
     if not args.session:
-        # The launcher's own session, read the way `run` exports it.
-        owner = _unique_session_owner(os.environ)
+        # Session keys come from session_identity; installed blank aliases are unset.
+        # Keep claim's strict ambiguity checks and its own GPU identity (not the parent).
+        owner = _unique_session_owner({key: value for key, value in os.environ.items() if value != ""})
         if owner is None or (args.harness and args.harness != owner["harness"]):
             raise ConfigError("claim needs --session (and --harness) outside one harness session")
         args.harness, args.session = owner["harness"], owner["id"]
@@ -2808,10 +3008,14 @@ def cmd_claim(args):
         "recorded_at": datetime.datetime.now().isoformat(timespec="seconds"),
     }
     _record_claim(config["run_root"], claim)
+    claim["run_recipient"] = _claim_run_recipient(config["run_root"], identity, claim)
     if args.json:
         print(json.dumps(claim, ensure_ascii=False, sort_keys=True))
     else:
         print("claimed %s pid %d -> %s" % (name, args.pid, claim["owner"]["label"]))
+        print(claim["run_recipient"]["message"])
+        for warning in claim["run_recipient"].get("warnings", []):
+            print("warning: " + warning)
     return 0
 
 
@@ -2889,6 +3093,24 @@ def _print_run_gpu_observation(observation):
               "(idle at probe time)")
 
 
+def _progress_declaration_note(command, workdir, host, config, resource_parent):
+    """One line when this launch declares no progress file or output folder; None otherwise.
+    It never stops the launch (resource_progress.declaration_note)."""
+    try:
+        here = str(Path(__file__).resolve().parent)
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import resource_progress
+        resource = resource_parent if isinstance(resource_parent, dict) else {}
+        route = resource.get("route_file") or None
+        return resource_progress.declaration_note({
+            "command": list(command), "cwd": workdir, "path_namespace": host.get("path_namespace"),
+            "run_root": str(config["run_root"]), "output_dir": resource.get("output_dir"),
+            "observation": resource.get("observation"), "route": route, "node": resource.get("node")})
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def cmd_run(args):
     config = load_config()
     _refuse_namespace_self(config, "run")
@@ -2936,6 +3158,7 @@ def cmd_run(args):
              + [
                  f"export HEARTING_COMPUTE_RUN_ID={shlex.quote(run_id)}",
                  f"export HEARTING_COMPUTE_HOST={shlex.quote(name)}",
+                 raw_data_dir_setup(host),
              ])
     workdir = args.cwd or host.get("workdir")
     if workdir:
@@ -2995,6 +3218,7 @@ def cmd_run(args):
         "HEARTING_COMPUTE_HOST": name,
         "HEARTING_GPU_LEASE_RELEASE": "",
     })
+    declaration_note = _progress_declaration_note(command, workdir, host, config, resource_parent)
     options = {"state_path": str(gpu_leases.state_path()), "observation": gpu_observation,
                "requested": requested, "share": share, "owner": lease_owner,
                "task": args.name or rendered, "run_id": run_id, "run_dir": str(run_dir),
@@ -3012,6 +3236,8 @@ def cmd_run(args):
               f"agent_home_reason: {agent_home_reason}\n"
               f"would run: {rendered}\nsetup: {preamble}")
         _print_run_gpu_observation(gpu_observation)
+        if declaration_note:
+            print(declaration_note, file=sys.stderr)
         return 0
 
     namespaced = "path_namespace" in host
@@ -3024,8 +3250,9 @@ def cmd_run(args):
     script = source + ("\ntry:\n    print(json.dumps(%s(%%r, %%r)))\n"
                        "except Exception as exc:\n    print(str(exc), file=sys.stderr)\n    raise SystemExit(2)\n") % (
                            launch_function) % (options, payload_source)
-    launch = "python3 -c " + shlex.quote(script)
-    result = remote(host, launch)
+    # The script grows with the host's GPU observation, so it rides standard
+    # input rather than the one-argument limit of the remote command line.
+    result = remote(host, "python3 -", input=script)
     if agent_home_status in {"unmanaged-forwarded", "publish-failed", "unknown"}:
         print(f"note: AGENT_HOME {agent_home_status}: {agent_home_reason}", file=sys.stderr)
 
@@ -3081,6 +3308,8 @@ def cmd_run(args):
     except OSError as exc:
         print(f"note: could not record run metadata: {exc}", file=sys.stderr)
     watching = _spawn_completion_watch(run_dir, meta)
+    if declaration_note:
+        print(declaration_note, file=sys.stderr)
     if args.json:
         print(json.dumps(meta, ensure_ascii=False, sort_keys=True))
     else:
@@ -3109,15 +3338,15 @@ QUIET_RUN_MARKER = ".observation-unknown"
 QUIET_PROBE_SECONDS = 3600
 
 
-def _run_last_activity(run_dir):
-    """Newest change among the run's own top-level files, never the observer's."""
+def _run_last_activity(run_dir, exclude=frozenset()):
+    """Newest change among the run's own top-level files, never the observer's (nor `exclude`)."""
     newest = None
     try:
         entries = list(os.scandir(run_dir))
     except OSError:
         return None
     for entry in entries:
-        if entry.name.startswith(".observation-"):
+        if entry.name.startswith(".observation-") or entry.name in exclude:
             continue
         try:
             changed = entry.stat(follow_symlinks=False).st_mtime
@@ -3125,6 +3354,29 @@ def _run_last_activity(run_dir):
             continue
         newest = changed if newest is None else max(newest, changed)
     return newest
+
+
+# Files in a run directory that Hearting itself writes (the launch record, which a later claim or
+# completion rewrites): their change is not the run's own sign of life.
+_RUN_METADATA_FILES = frozenset({"meta.json"})
+
+
+def _run_alive_at(run_dir, now):
+    """When the run's own files (its log, under the shared run root) last changed, if within the
+    window the LAB board allows an observation (`experiment_catalog.STALE_OBSERVATION_SECONDS`),
+    else None. This is the evidence the watcher vouches with: the public record is refreshed up to
+    this moment, never to "now", so a host that stopped writing turns stale 900 s after its last
+    write, as it did before refreshing existed (RV-PR1619-1114). Hearting's own files (the
+    observer's `.observation-*`, the launch record `meta.json`) are not the run's."""
+    newest = _run_last_activity(run_dir, exclude=_RUN_METADATA_FILES)
+    try:
+        import experiment_catalog
+        window = experiment_catalog.STALE_OBSERVATION_SECONDS
+    except Exception:  # noqa: BLE001 -- without the window nothing is vouched for
+        return None
+    if newest is None or not 0 <= float(now) - float(newest) <= window:
+        return None
+    return float(newest)
 
 
 def _run_quiet_since(run_dir, now):
@@ -3250,15 +3502,67 @@ def _observe_compute_experiment(meta, run_dir, now, *, final=False):
     }
     if not artifact_root:
         return None
+    alive_at = None if final else _run_alive_at(run_dir, now)
     try:
         import resource_progress
         return resource_progress.observe_experiment(record, Path(run_dir) / "meta.json", now,
             root=output_dir, row_key=record.get("row_id") or record["run_id"],
             row_scoped=bool(record.get("row_id")), started_at=started,
             planned_seconds=record["planned_seconds"], final=final,
-            status=record["status"], notify_events=not final)
+            status=record["status"], notify_events=not final,
+            alive=alive_at is not None, alive_at=alive_at)
     except Exception:  # noqa: BLE001 -- observation must never change run completion
         return None
+
+
+def _meta_artifact_root(meta):
+    """The artifact root a run's metadata names (the run's own record, then its route's), without a subprocess."""
+    provenance = meta.get("provenance") if isinstance(meta.get("provenance"), dict) else {}
+    route = provenance.get("route") if isinstance(provenance.get("route"), dict) else {}
+    resource = provenance.get("resource") if isinstance(provenance.get("resource"), dict) else {}
+    artifact_root = resource.get("artifact_root") or meta.get("artifact_root")
+    if not artifact_root and isinstance(route.get("route_file"), str):
+        try:
+            route_path = Path(route["route_file"])
+            if route_path.is_absolute() and not route_path.is_symlink():
+                route_doc = json.loads(route_path.read_text(encoding="utf-8"))
+                if not route.get("route_id") or route_doc.get("route_id") == route.get("route_id"):
+                    artifact_root = route_doc.get("artifact_root")
+        except (OSError, ValueError, TypeError):
+            pass
+    return artifact_root
+
+
+def _meta_row_id(meta):
+    provenance = meta.get("provenance") if isinstance(meta.get("provenance"), dict) else {}
+    resource = provenance.get("resource") if isinstance(provenance.get("resource"), dict) else {}
+    return resource.get("row_id") or meta.get("row_id")
+
+
+def _catalog_identity(artifact_root, run_id, row_id=None, cache=None):
+    """`{name, condition_id, goal}` the project's experiment catalog gives this run, or None.
+
+    One read of the catalog per root when `cache` is shared; None when there is no catalog, the run is
+    not linked, two conditions claim it, or the condition has no name.  Never raises: a listing or a
+    run-ended notice is not held back for a name."""
+    if not artifact_root:
+        return None
+    try:
+        here = str(Path(__file__).resolve().parent)
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import experiment_catalog
+        key = str(artifact_root)
+        cache = {} if cache is None else cache
+        if key not in cache:
+            read = experiment_catalog.load(Path(key))
+            cache[key] = read.doc if read.status == "ok" else None
+        info = experiment_catalog.describe_run(cache[key], run_id, row_id)
+        if info and info.get("name"):
+            return {"name": info["name"], "condition_id": info["condition_id"], "goal": info.get("goal")}
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 
 
 def _compute_observation_summary(result):
@@ -3431,17 +3735,39 @@ def _report_run_end(run_dir, code, last_observation, now):
     provenance = meta.get("provenance") or {}
     route = provenance.get("route") or {}
     run_id = meta.get("run_id") or run_dir.name
+    # A normal end that took under about a minute or reported no metric is quiet: the delivered text
+    # counts it on the one routine line instead of giving it its own.
+    quiet = False
+    try:
+        import session_notice
+        quiet_seconds = getattr(session_notice, "QUIET_RUN_SECONDS", None)
+        quiet = bool(code == 0 and quiet_seconds and (not _observation_has_metric(final_observation)
+                                                      or _run_seconds(meta, now()) < quiet_seconds))
+    except Exception:  # noqa: BLE001 -- without the notice module the end is simply not quiet
+        pass
     notice_targets = []
     try:
         import resource_progress
+        # While the worker that started the run is still open it reads and reports this end itself, so
+        # its supervisor takes a quiet end by the same attempt-parent lineage as any other child's: it
+        # waits for the supervisor's next delivery (session_notice). A finished worker, or any end that
+        # is not quiet, leaves the lineage off and the supervisor hears it at once.
+        attempt = provenance.get("attempt_id") if quiet and _worker_attempt_open(provenance) else None
         notice_targets = resource_progress._notice_targets({
-            "session": provenance.get("session"), "notify": provenance.get("notify")})
+            key: ({**provenance[key], "attempt_id": attempt}
+                  if attempt and isinstance(provenance.get(key), dict) else provenance.get(key))
+            for key in ("session", "notify")})
     except Exception:
         pass
     if not notice_targets:
         return 0
     stop = _read_stop_reason(run_dir)
-    text = (f"run {run_id} on {meta.get('host', '-')} ended with exit {code}"
+    # The catalog name leads the notice (`{name}: run …`).  `dispatch_session_sweep` accepts that optional
+    # prefix (`_COMPUTE_RUN_NOTICE_RE`), so a named notice is recognized and folded like an unnamed one and
+    # the folded summary carries the name.  An unnamed run's text is unchanged.
+    experiment = _catalog_identity(_meta_artifact_root(meta), run_id, _meta_row_id(meta))
+    text = ((f"{experiment['name']}: " if experiment else "")
+            + f"run {run_id} on {meta.get('host', '-')} ended with exit {code}"
             + (f" ({stop})" if stop else "")
             + (f"; started by attempt {provenance.get('attempt_id')} in route {route.get('route_id')}"
                if provenance.get("notify") else "")
@@ -3451,7 +3777,9 @@ def _report_run_end(run_dir, code, last_observation, now):
     if here not in sys.path:
         sys.path.insert(0, here)
     try:
-        from session_notice import notify
+        import session_notice
+        notify = session_notice.notify
+        subject = "compute run, quiet" if quiet else "compute run"
         for target in notice_targets:
             if isinstance(target, dict):
                 harness, session_id = target.get("harness"), target.get("session_id")
@@ -3461,11 +3789,42 @@ def _report_run_end(run_dir, code, last_observation, now):
                 lineage = None
             notify(harness, session_id,
                    key=f"compute-run:{run_id}:{harness}:{session_id}",
-                   subject="compute run", text=text, route_id=route.get("route_id") or "route-free",
+                   subject=subject, text=text, route_id=route.get("route_id") or "route-free",
                    required_action="report-to-user", lineage=lineage)
     except Exception:  # noqa: BLE001 -- the run and its exit code are already recorded
         return 0
     return 0
+
+
+def _worker_attempt_open(provenance):
+    """Whether the registered worker that started this run still has its attempt open.
+
+    The registry's own row decides. A run whose notice was handed over by `claim` belongs to the
+    session that took it (a waiting owner), not to the worker's supervisor, and a registry that
+    cannot be read counts as not open: both leave the notice immediate."""
+    attempt, jobs = provenance.get("attempt_id"), os.environ.get("AGENT_DISPATCH_JOBS")
+    if not (provenance.get("notify") and attempt and jobs) or provenance.get("recipient_handovers"):
+        return False
+    try:
+        from dispatch_completion_join import OPEN_STATES, exact_attempt_row
+        return exact_attempt_row(Path(jobs), str(attempt)).status in OPEN_STATES
+    except Exception:  # noqa: BLE001 -- unknown means the supervisor is told at once, as before
+        return False
+
+
+def _observation_has_metric(result):
+    observation = result.get("observation") if isinstance(result, dict) else None
+    summary = observation.get("summary") if isinstance(observation, dict) else None
+    return isinstance(summary, dict) and bool(summary.get("latest") or summary.get("latest_metrics"))
+
+
+def _run_seconds(meta, now):
+    """How long the run took by its recorded start, or infinity when that is unknown."""
+    try:
+        started = datetime.datetime.fromisoformat(str(meta.get("started_at"))).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return float("inf")
+    return max(0.0, float(now) - started)
 
 
 def _run_state(config, run_id):
@@ -3513,16 +3872,7 @@ def _run_state(config, run_id):
     provenance = meta.get("provenance") if isinstance(meta.get("provenance"), dict) else {}
     route = provenance.get("route") if isinstance(provenance.get("route"), dict) else {}
     resource = provenance.get("resource") if isinstance(provenance.get("resource"), dict) else {}
-    artifact_root = resource.get("artifact_root") or meta.get("artifact_root")
-    if not artifact_root and isinstance(route.get("route_file"), str):
-        try:
-            route_path = Path(route["route_file"])
-            if route_path.is_absolute() and not route_path.is_symlink():
-                route_doc = json.loads(route_path.read_text(encoding="utf-8"))
-                if not route.get("route_id") or route_doc.get("route_id") == route.get("route_id"):
-                    artifact_root = route_doc.get("artifact_root")
-        except (OSError, ValueError, TypeError):
-            pass
+    artifact_root = _meta_artifact_root(meta)
     if artifact_root:
         try:
             import resource_progress
@@ -3535,6 +3885,7 @@ def _run_state(config, run_id):
             "launch_receipt": receipt,
             "experiment_observation": experiment_record,
             "experiment_record_path": str(experiment_record_path) if experiment_record_path else None,
+            "artifact_root": str(artifact_root) if artifact_root else None,
             "quiet_since": _iso_time(quiet_since) if quiet_since is not None else None,
             "state": state}
 
@@ -4101,6 +4452,19 @@ def _tmux_session_alive(
     return None
 
 
+def _pad_cells(text, width):
+    """`text` cut or padded to `width` terminal cells (Korean names are two cells a character)."""
+    import unicodedata
+    out, used = [], 0
+    for char in text:
+        cells = 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+        if used + cells > width:
+            break
+        out.append(char)
+        used += cells
+    return "".join(out) + " " * (width - used)
+
+
 def cmd_runs(args):
     config = load_config()
     _refuse_namespace_self(config, "runs")
@@ -4118,7 +4482,10 @@ def cmd_runs(args):
         rows.append(state)
         if len(rows) >= args.limit:
             break
+    catalogs = {}
     for row in rows:
+        row["experiment"] = _catalog_identity(row.get("artifact_root"), row["run_id"],
+                                              _meta_row_id(row["meta"]), catalogs)
         if row["state"] == "running":
             host_name = row["meta"].get("host")
             alive = None
@@ -4142,7 +4509,7 @@ def cmd_runs(args):
             row["stale"] = False
     if args.json:
         print(json.dumps([{k: (str(v) if k == "dir" else v)
-                           for k, v in row.items() if k != "session_alive"}
+                           for k, v in row.items() if k not in ("session_alive", "artifact_root")}
                           for row in rows],
                          ensure_ascii=False, sort_keys=True))
         return 0
@@ -4160,7 +4527,8 @@ def cmd_runs(args):
         else:
             tail = row["state"]
         command = " ".join(row["meta"].get("command") or [])
-        print(f"  {row['run_id']:<34} {tail:<20} {command[:60]}")
+        name = (row.get("experiment") or {}).get("name") or "-"
+        print(f"  {row['run_id']:<34} {tail:<20} {_pad_cells(name, 24)} {command[:60]}")
     if not rows:
         print("  (none)")
     return 0
@@ -4251,7 +4619,7 @@ def build_parser():
     p_self.set_defaults(func=cmd_self)
 
     p_claim = sub.add_parser(
-        "claim", help="Bind a detached root PID to its exact launcher session")
+        "claim", help="Bind a detached root PID and its live run notices to a session")
     p_claim.add_argument("host")
     p_claim.add_argument("pid", type=int)
     p_claim.add_argument("--harness", choices=("claude", "codex", "opencode"),

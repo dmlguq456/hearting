@@ -4,6 +4,9 @@ Hermetic: real fs access is confined to tempfile dirs; title state and Claude co
 pointed at tmp roots. No live provider is invoked — run_worker() is monkeypatched for
 security/behavior assertions.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import io
 import json
 import os
@@ -334,6 +337,22 @@ class ValidateTitleTest(unittest.TestCase):
     def test_validate_len_cap(self):
         out = rt.validate_title("alpha bravo " + "x" * 120)
         self.assertEqual(len(out), rt.TITLE_MAXLEN)
+        self.assertTrue(out.endswith("…"))      # (cut with the mark, never silently)
+
+    def test_a_long_title_ends_at_a_word_boundary_with_the_mark(self):
+        self.assertEqual(rt.clip_title("short title", 40), "short title")
+        self.assertEqual(rt.clip_title("alpha bravo charlie delta echo foxtrot golf hotel", 40), "alpha bravo charlie delta echo foxtrot…")
+        self.assertEqual(rt.clip_title("alpha bravo charlie delta echo foxtrot", 38), "alpha bravo charlie delta echo foxtrot")
+        self.assertEqual(rt.clip_title("alpha bravo, charlie delta", 15), "alpha bravo…")   # (no stray punctuation before the mark)
+        self.assertEqual(rt.clip_title("x" * 50, 10), "x" * 9 + "…")                        # (one long word: cut by characters, marked)
+        for text in ("alpha bravo charlie delta echo foxtrot golf hotel india", "가나다 라마바 사아자 차카타 파하 거너더 러머버 서어저"):
+            for limit in (12, 20, 30, 40):
+                out = rt.clip_title(text, limit)
+                self.assertLessEqual(len(out), limit)
+                if len(out) < len(text):
+                    self.assertTrue(out.endswith("…"))
+                    self.assertTrue(text.startswith(out[:-1]))
+                    self.assertFalse(text[len(out) - 1:len(out)].strip(" ,;:·-"))    # (what follows the cut is a space: the cut is between words)
 
     def test_validate_newline_strip_takes_first_line(self):
         out = rt.validate_title("\n\n  Fix login flow  \nsecond line")
@@ -557,6 +576,22 @@ class StormGuardTest(_ConfigHomeMixin, unittest.TestCase):
         result, probes, spawns = self._spawn_counting_probes("peer-only")
         self.assertTrue(result)
         self.assertEqual((len(probes), len(spawns)), (1, 1))
+
+    def test_the_short_forms_are_never_the_persons_input_and_tiny_ones_skip_the_probe(self):
+        # three shapes another session or the runtime puts in a window: the trailer without its
+        # decoration, a peer body with only the Fleet tag, and the runtime's one `↳` line
+        for text in ("확인했습니다\n\n— [81]", "확인했습니다\n\n— [81] 릴리즈 점검", "확인했습니다\n\n— codex",
+                     "↳ 질문에 답함: 네", "↳ 작업 끝: 설계 — 완료 (3분)\n↳ 질문에 답함: 네",
+                     "확인했습니다\n\n(peer-from: codex [81] ; ref=0123456789abcdef)"):
+            self.assertEqual(rt._human_language_text(text), "", text)
+        for text in ("사람이 쓴 글 — 줄표가 들어간다", "글\n— [zz]", "— 시작하는 글\n계속", "그냥 입력"):
+            self.assertEqual(rt._human_language_text(text), text, text)
+        tail = "ACK\n\n— [81]\nReceived\n\n— [82] 이름"
+        self.assertTrue(rt._minor_peer_delta(tail))
+        self.assertTrue(rt._minor_peer_delta("ACK\n\n(peer-from: codex [81] ; ref=0123456789abcdef)\nOK\n\n— [81]"))
+        for not_minor in ("Short user request\nACK\n\n— [81]", "ACK\n\n— [81]\n사람이 이어 쓴 말",
+                          "한 줄\n둘째 줄\n\n— [81]", "ACK\n\n— [81]\n— [82]"):
+            self.assertFalse(rt._minor_peer_delta(not_minor), not_minor)
 
     def test_periodic_worker_skips_two_tiny_peer_updates_but_refreshes_new_work(self):
         offset = os.path.getsize(self.transcript)

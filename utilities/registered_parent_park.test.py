@@ -2,6 +2,9 @@
 """Claude hook parity tests for runtime-supervised registered parents."""
 
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import importlib.util
 import json
@@ -16,11 +19,14 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "hooks" / "registered-parent-park.py"
-PARENT = "att-claude-owner"
+sys.path.insert(0, str(ROOT / "utilities"))
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
+
+PARENT = unique_attempt_id("att-claude-owner")
 CHILD = "att-claude-child-a"
 SLUG = "owner"
 
-sys.path.insert(0, str(ROOT / "utilities"))
 _JOIN_SPEC = importlib.util.spec_from_file_location(
     "dispatch_completion_join_park_parity", ROOT / "utilities" / "dispatch_completion_join.py"
 )

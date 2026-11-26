@@ -1,4 +1,7 @@
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import json
 import os
@@ -93,7 +96,7 @@ class HumanWaitPerformanceTests(unittest.TestCase):
             # a moving HEAD that changes meaning as soon as we commit.
             statusline = ROOT / "adapters/claude/statusline.sh"
             cold = render(statusline, "cold", 1)
-            self.assertIn("unknown", cold)
+            self.assertIn("🚧 ?", cold)  # Git not observed yet stays unknown, never no-git.
             with mock.patch.dict(os.environ, env):
                 request = gitinfo._display_request(str(repo))
                 deadline = time.monotonic() + 10
@@ -188,8 +191,11 @@ class HumanWaitPerformanceTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(cold_state)}):
                 cold_cache = wait_state._read_cache()
             self.assertIsNotNone(cold_cache)
-            result = {"total": cold_cache["total"]}
-            self.assertEqual(result["total"], 1)
+            # The blocked owner is listed for its parent agent and counted by no person surface
+            # (11-14): the producer still finds exactly it.
+            result = {"total": sum(1 for item in cold_cache["items"]
+                                   if item["source"] == "S3" and not item["stale"])}
+            self.assertEqual((result["total"], cold_cache["total"]), (1, 0))
 
             def projection():
                 # Exercise the same read + private atomic publish as each loop pass.

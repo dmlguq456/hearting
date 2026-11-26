@@ -7,6 +7,9 @@ boundary is captured.
 """
 
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import importlib.util
 import io
@@ -573,7 +576,9 @@ class SupervisorEdgeAcceptanceTest(unittest.TestCase):
                     process.stdin.write("initial assignment")
                     process.stdin.close()
                     process.stdin = None
-                    time.sleep(1.5)
+                    # The 2-second join wait runs in correction checkpoints first; the
+                    # repark comes once that whole wait has timed out.
+                    time.sleep(4.0)
                     self.assertIsNone(process.poll(), runtime)
                 finally:
                     process.terminate()

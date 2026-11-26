@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
+import errno
 import importlib.util
 import hashlib
 import json
@@ -9,7 +13,10 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -31,6 +38,19 @@ _OPA_SPEC.loader.exec_module(OPA)
 
 
 class WorkerBootstrapTest(unittest.TestCase):
+    def test_printed_stage_commands_follow_current_after_release_retirement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "current/core").mkdir(parents=True)
+            (root / "current/core/CORE.md").touch()
+            old = root / "releases/old"
+            with mock.patch.object(W, "_REPO_ROOT", old):
+                commands = [W.route_start_command("/route with spaces", "execute"),
+                            W.inline_complete_command("execute", "/evidence with spaces")]
+            for command in commands:
+                self.assertNotIn(str(old), command)
+                self.assertTrue(shlex.split(command)[1].startswith(str(root / "current/utilities")))
+
     def test_review_followup_uses_bound_result_and_quoted_same_start(self):
         import review_input
         import review_source_subject
@@ -196,7 +216,172 @@ class WorkerBootstrapTest(unittest.TestCase):
             prompt = W.artifact_context_prompt({"AGENT_ARTIFACT_OUTPUT_DIR": "/out",
                                                "AGENT_RUNTIME_DIR": str(explicit)})
             self.assertIn(f"- runtime_dir: {explicit}", prompt)
-            self.assertIn("checkpoints under runtime_dir", prompt)
+            # No separate raw_data_dir: the old runtime line, letter for letter.
+            self.assertIn("- Put environments, caches, external checkouts, and checkpoints under runtime_dir; "
+                          "keep reports and provenance in artifacts.\n", prompt)
+            prompt = W.artifact_context_prompt({"AGENT_ARTIFACT_OUTPUT_DIR": "/out",
+                                               "AGENT_RUNTIME_DIR": str(explicit),
+                                               "AGENT_RAW_DATA_DIR": "/raw/proj"})
+            self.assertIn("- Put environments, caches, external checkouts under runtime_dir; "
+                          "checkpoints and raw results under raw_data_dir (/raw/proj); "
+                          "reports and summaries in artifacts.\n", prompt)
+
+    def test_runtime_root_survives_a_launcher_preparing_it_mid_write(self):
+        # Two starts prepare one new root. The second ran while the first had
+        # created the marker but not yet filled it, read it empty, and launched
+        # without runtime_dir (CI run 43419406229: duplicate codex start sealed
+        # a different launch input and exited 73 attempt-identity-conflict).
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp) / "project" / ".agent_runtime"
+            real_write = Path.write_bytes
+            concurrent = []
+
+            def write_in_two_steps(self, data):
+                if self.parent == runtime and not concurrent:
+                    concurrent.append(None)
+                    with open(self, "wb"):
+                        pass  # created, not yet filled
+                    concurrent[0] = W.prepare_runtime_dir(str(runtime))
+                return real_write(self, data)
+
+            with mock.patch.object(Path, "write_bytes", write_in_two_steps):
+                first = W.prepare_runtime_dir(str(runtime))
+            self.assertEqual([first, *concurrent], [str(runtime), str(runtime)])
+            self.assertEqual((runtime / ".gitignore").read_bytes(), b"*\n")
+            self.assertEqual(sorted(p.name for p in runtime.iterdir()), [".gitignore"])
+
+    def test_runtime_root_survives_a_launcher_preparing_it_without_hard_links(self):
+        # PR #1605 review: where `link` fails (EXDEV, EPERM, ENOTSUP), the
+        # fallback created the marker and then filled it; a second start
+        # arriving the moment it appeared still read it empty and got "".
+        # The second start runs at the first instant the marker exists, and
+        # the first goes on filling it only after the second has read it.
+        for code in (errno.EXDEV, errno.EPERM, errno.ENOTSUP):
+            with self.subTest(errno=errno.errorcode[code]), tempfile.TemporaryDirectory() as tmp:
+                runtime = Path(tmp) / "project" / ".agent_runtime"
+                marker = runtime / ".gitignore"
+                concurrent, second_read = [], threading.Event()
+                real_read = Path.read_bytes
+
+                def read_and_tell(self):
+                    content = real_read(self)
+                    if self == marker and threading.current_thread() is not threading.main_thread():
+                        second_read.set()
+                    return content
+
+                def then_second_start(call):
+                    def wrapper(*args, **kwargs):
+                        result = call(*args, **kwargs)
+                        if not concurrent and (marker.exists() or marker.is_symlink()):
+                            second = threading.Thread(target=lambda: concurrent.append(
+                                W.prepare_runtime_dir(str(runtime))))
+                            concurrent.append(second)
+                            second.start()
+                            second_read.wait(5)
+                        return result
+                    return wrapper
+
+                with mock.patch.object(W.os, "link", side_effect=OSError(code, os.strerror(code))), \
+                     mock.patch.object(Path, "read_bytes", read_and_tell), \
+                     mock.patch.object(Path, "open", then_second_start(Path.open)), \
+                     mock.patch.object(W.os, "open", then_second_start(os.open)), \
+                     mock.patch.object(W.os, "rename", then_second_start(os.rename)), \
+                     mock.patch.object(W.os, "replace", then_second_start(os.replace)):
+                    first = W.prepare_runtime_dir(str(runtime))
+                    concurrent[0].join(10)
+                self.assertTrue(second_read.is_set())
+                self.assertEqual([first, *concurrent[1:]], [str(runtime), str(runtime)])
+                self.assertEqual(marker.read_bytes(), b"*\n")
+                self.assertEqual(sorted(p.name for p in runtime.iterdir()), [".gitignore"])
+
+    def test_runtime_marker_fallback_never_replaces_a_marker_published_at_the_last_instant(self):
+        # PR #1605 review r2: without hard links, another launcher completes a
+        # different marker after the last look and right before this one
+        # publishes. The publication must not replace it (a rename did, and
+        # the root was then taken as this launcher's own).
+        for code in (errno.EXDEV, errno.EPERM, errno.ENOTSUP):
+            with self.subTest(errno=errno.errorcode[code]), tempfile.TemporaryDirectory() as tmp:
+                runtime = Path(tmp) / ".agent_runtime"
+                marker = runtime / ".gitignore"
+                real_open, inserted = os.open, []
+
+                def foreign_first(call, target_of):
+                    def wrapper(*args, **kwargs):
+                        if not inserted and target_of(*args, **kwargs) == marker:
+                            inserted.append(True)
+                            descriptor = real_open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                            try:
+                                os.write(descriptor, b"foreign-owner\n")
+                            finally:
+                                os.close(descriptor)
+                        return call(*args, **kwargs)
+                    return wrapper
+
+                def path_open_target(path, mode="r", *_args, **_kwargs):
+                    return Path(path) if any(flag in mode for flag in "wxa") else None
+
+                def os_open_target(path, flags, *_args, **_kwargs):
+                    return Path(path) if flags & os.O_CREAT else None
+
+                with mock.patch.object(W.os, "link", side_effect=OSError(code, os.strerror(code))), \
+                     mock.patch.object(Path, "open", foreign_first(Path.open, path_open_target)), \
+                     mock.patch.object(W.os, "open", foreign_first(os.open, os_open_target)), \
+                     mock.patch.object(W.os, "rename", foreign_first(os.rename, lambda _a, b: Path(b))), \
+                     mock.patch.object(W.os, "replace", foreign_first(os.replace, lambda _a, b: Path(b))):
+                    prepared = W.prepare_runtime_dir(str(runtime))
+                self.assertEqual(inserted, [True])
+                self.assertEqual(marker.read_bytes(), b"foreign-owner\n")
+                self.assertEqual(prepared, "")
+                self.assertEqual(sorted(p.name for p in runtime.iterdir()), [".gitignore"])
+
+    def test_runtime_marker_left_unfilled_is_refused_in_bounded_time_and_kept(self):
+        # A launcher that died between creating the marker and filling it
+        # leaves it empty (or `*`). Later starts re-read it only briefly, then
+        # launch without the root; nobody rewrites a marker they did not create.
+        for left in (b"", b"*"):
+            with self.subTest(left=left), tempfile.TemporaryDirectory() as tmp:
+                runtime = Path(tmp) / ".agent_runtime"
+                runtime.mkdir()
+                (runtime / ".gitignore").write_bytes(left)
+                started = time.monotonic()
+                with mock.patch.object(W, "_RUNTIME_MARKER_SETTLE_SECONDS", 0.05):
+                    self.assertEqual(W.prepare_runtime_dir(str(runtime)), "")
+                self.assertLess(time.monotonic() - started, 5)
+                self.assertEqual((runtime / ".gitignore").read_bytes(), left)
+
+    def test_concurrent_launchers_without_hard_links_all_get_the_runtime_root(self):
+        for code in (errno.EXDEV, errno.EPERM, errno.ENOTSUP):
+            for count in (3, 8):
+                with self.subTest(errno=errno.errorcode[code], count=count), \
+                     tempfile.TemporaryDirectory() as tmp:
+                    runtime = Path(tmp) / ".agent_runtime"
+                    together = threading.Barrier(count)
+
+                    def start(_index):
+                        together.wait(5)
+                        return W.prepare_runtime_dir(str(runtime))
+
+                    with mock.patch.object(W.os, "link", side_effect=OSError(code, os.strerror(code))), \
+                         ThreadPoolExecutor(count) as pool:
+                        prepared = list(pool.map(start, range(count)))
+                    self.assertEqual(prepared, [str(runtime)] * count)
+                    self.assertEqual((runtime / ".gitignore").read_bytes(), b"*\n")
+                    self.assertEqual(sorted(p.name for p in runtime.iterdir()), [".gitignore"])
+
+    def test_runtime_marker_fallback_never_replaces_a_marker_that_appeared(self):
+        # The fallback rename would replace a name; a foreign marker that
+        # appears after the first look stays, and the root is refused.
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp) / ".agent_runtime"
+
+            def foreign_appears_then_no_links(*_args):
+                (runtime / ".gitignore").write_bytes(b"foreign\n")
+                raise OSError(errno.EPERM, "no links")
+
+            with mock.patch.object(W.os, "link", side_effect=foreign_appears_then_no_links):
+                self.assertEqual(W.prepare_runtime_dir(str(runtime)), "")
+            self.assertEqual((runtime / ".gitignore").read_bytes(), b"foreign\n")
+            self.assertEqual(sorted(p.name for p in runtime.iterdir()), [".gitignore"])
 
     def test_non_git_runtime_uses_stable_state_and_exact_inheritance(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -622,6 +807,43 @@ class WorkerBootstrapTest(unittest.TestCase):
         self.assertEqual(rendered.count("# Portable Worker Kernel"), 1)
         self.assertEqual(rendered.count("# Worker Type:"), 1)
 
+    def test_review_stance_is_carried_once_just_before_the_unit_body(self):
+        rendered = W.render_worker_bootstrap(ROOT, "review", unit="qa/code-review")
+        self.assertEqual(rendered.count("Refute first"), 1)
+        self.assertNotIn("# Shared Fragment: Review Stance", rendered)
+        self.assertNotIn("> Referenced by every review", rendered)
+        stance_at = rendered.index("Review adversarially by default")
+        self.assertLess(stance_at, rendered.index("# Unit: qa/code-review"))
+        self.assertLess(rendered.index("# Worker Type:"), stance_at)
+
+    def test_review_stance_reaches_the_five_auxiliary_checks(self):
+        for unit in ("assumption-check", "edge-case-check", "failure-mode-check",
+                     "simplicity-check", "test-gap-check"):
+            with self.subTest(unit=unit):
+                text = W.render_worker_bootstrap(ROOT, "review", unit=f"qa/{unit}")
+                self.assertEqual(text.count("Refute first"), 1)
+
+    def test_unit_without_stance_renders_its_body_only(self):
+        body = W.unit_persona_body(ROOT, "dev/backend")
+        bare = W.render_worker_bootstrap(ROOT, "stage")
+        self.assertEqual(W.render_worker_bootstrap(ROOT, "stage", unit="dev/backend"),
+                         bare + "\n" + body + "\n")
+        self.assertNotIn("Refute first", bare + body)
+
+    def test_unresolvable_stance_ref_renders_body_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "roles" / "worker-types").mkdir(parents=True)
+            (root / "roles" / "units" / "qa").mkdir(parents=True)
+            (root / "roles" / "worker-bootstrap.md").write_text("kernel\n")
+            (root / "roles" / "worker-types" / "review.md").write_text("type\n")
+            for name, ref in (("a", "_shared/missing.md"), ("b", "../../../outside.md")):
+                (root / "roles" / "units" / "qa" / f"{name}.md").write_text(
+                    f"---\nunit: qa/{name}\nstance: {ref}\n---\n\n# Unit: qa/{name}\nbody\n")
+                (root / "outside.md").write_text("# T\n\nleaked stance\n")
+                self.assertEqual(W.render_worker_bootstrap(root, "review", unit=f"qa/{name}"),
+                                 f"kernel\n\ntype\n\n# Unit: qa/{name}\nbody\n")
+
     def test_reserved_and_absent_units_render_unchanged(self):
         bare = W.render_worker_bootstrap(ROOT, "owner")
         self.assertEqual(W.render_worker_bootstrap(ROOT, "owner", unit="_kernel/owner"), bare)
@@ -956,9 +1178,16 @@ class NodeScopeTest(unittest.TestCase):
         self.assertEqual(source, ["/task/worktree/**"])
         self.assertIn("approved task", W.node_scope_prompt(scope))
         self.assertEqual(json.dumps(route, sort_keys=True), before)
-        for changed in ({"capability": "autopilot-lab"}, {"effective_intensity": "standard"}):
+        for changed in ({"capability": "autopilot-lab"},):
             narrow = W.resolve_node_scope({**route, **changed}, "one-shot", env)
             self.assertEqual(W._resolved_write_scopes(narrow)[0], ["/primary/cycle/artifacts/plans/<cycle>/**"])
+        # the owner is the one that makes the work (a `one-shot` node), at any intensity: the middle cell's
+        # owner (standard) holds the same wide scope; a team owner (no `one-shot` node) keeps the narrow one
+        wide = W.resolve_node_scope({**route, "effective_intensity": "standard"}, "one-shot", env)
+        self.assertEqual(W._resolved_write_scopes(wide)[0], ["/primary/cycle/artifacts/**"])
+        team = {**route, "effective_intensity": "standard", "nodes": [{**node, "id": "execute"}]}
+        narrow = W.resolve_node_scope(team, "execute", env)
+        self.assertEqual(W._resolved_write_scopes(narrow)[0], ["/primary/cycle/artifacts/plans/<cycle>/**"])
         unbound = W.resolve_node_scope(route, "one-shot", {})
         self.assertIn("do not write durable artifacts", W.node_scope_prompt(unbound))
 
@@ -1431,6 +1660,9 @@ class OwnerRouteStepsPromptTest(unittest.TestCase):
             owner = W.contract_read_prompt(SimpleNamespace(worker_type="owner", assigned_contract="autopilot-code"), harness)
             owners.append(owner)
             self.assertIn("capabilities/autopilot-code/references/owner-execution.md", owner)
+            # An owner in another project must not miss its contract on a relative path.
+            path = Path(owner.split("`")[1])
+            self.assertTrue(path.is_absolute() and path.is_file(), owner)
             self.assertIn("Route steps and the latest receipt print", owner)
             self.assertIn("never assemble a runtime command yourself", owner)
             self.assertNotIn("SKILL.md", owner)
@@ -2083,31 +2315,135 @@ class UnitBootstrapDeclarationTest(unittest.TestCase):
         base.update(kw)
         return SimpleNamespace(**base)
 
-    def test_undeclared_unit_gets_nothing_and_spawns_nothing(self):
-        root = _fake_unit_root(self.tmp, "")
+    def _route(self, **kw):
+        route = {"field": "code", "nodes": [{"id": "n", "dispatch_depth": 2}]}
+        route.update(kw)
+        path = self.tmp / f"route-{len(list(self.tmp.glob('route-*.json')))}.json"
+        path.write_text(json.dumps(route), encoding="utf-8")
+        return str(path)
+
+    def _cmds(self, args, stdout="", root=None):
+        """The ``mem`` commands one prompt assembly runs, and its section."""
+        root = root or _fake_unit_root(self.tmp, "")
+        seen = []
+
+        def fake_run(cmd, **kw):
+            seen.append(cmd)
+            return SimpleNamespace(returncode=0, stdout=stdout)
+
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            section = W.unit_bootstrap_prompt(args, "t", {}, root=root)
+        return seen, section
+
+    @staticmethod
+    def _labels(cmd):
+        return [cmd[i + 1] for i, v in enumerate(cmd) if v == "--topic"]
+
+    def test_unit_without_a_record_gets_nothing(self):
+        for args in (self._args(), self._args(route_file=self._route())):
+            cmds, section = self._cmds(args)
+            self.assertEqual(len(cmds), 1)
+            self.assertEqual(section, "")
         with mock.patch("subprocess.run") as run, mock.patch.object(W, "_deliverable_exemplars") as scan:
-            self.assertEqual(W.unit_bootstrap_prompt(self._args(), "task", {}, root=root), "")
-            self.assertEqual(W.unit_bootstrap_prompt(self._args(unit="_kernel/owner", worker_type="owner"), "t", {}, root=root), "")
-            self.assertEqual(W.unit_bootstrap_prompt(self._args(unit=None), "t", {}, root=root), "")
-            self.assertEqual(W.unit_bootstrap_prompt(self._args(worker_type="frame", unit="plan/frame"), "t", {}, root=root), "")
+            root = _fake_unit_root(self.tmp, "")
+            for args in (self._args(unit=None), self._args(unit="_kernel/owner", worker_type="owner"),
+                         self._args(unit=None, worker_type="stage")):
+                self.assertEqual(W.unit_bootstrap_prompt(args, "t", {}, root=root), "")
         run.assert_not_called()
         scan.assert_not_called()
 
-    def test_owner_and_frame_ignore_a_declaration(self):
+    def test_every_unit_asks_for_its_unit_and_field_labels(self):
+        body = "## [durable/preference] id1 (global)\nshort review comments\n"
+        for worker_type, unit in (("stage", "editorial/report"), ("review", "qa/code-review"),
+                                  ("support", "ops/session-tidy-memory"), ("frame", None)):
+            args = self._args(unit=unit, worker_type=worker_type, route_file=self._route())
+            cmds, section = self._cmds(args, body)
+            want = ["unit:" + (unit or "plan/frame"), "field:code"]
+            self.assertEqual(self._labels(cmds[0]), want)
+            self.assertNotIn("--query", cmds[0])
+            self.assertIn("short review comments", section)
+            self.assertIn("Your user's working style for this work, from records tagged with its unit or field ("
+                          "after this turn's instruction and the project's conventions, before the unit's defaults; "
+                          "reference only; apply only what fits your assignment; "
+                          "do not write, curate, or sync memory):\n", section)
+            self.assertEqual(section.count("working style"), 1)
+            self.assertNotIn("come first", section)
+            self.assertNotIn("format follows", section)
+
+    def test_labels_without_a_route_field_are_the_unit_only(self):
+        for route in (self._route(field=None), self._route(field="Bad Value"), None):
+            cmds, _ = self._cmds(self._args(route_file=route))
+            self.assertEqual(self._labels(cmds[0]), ["unit:editorial/report"])
+
+    def test_an_unreadable_route_costs_only_its_field_label(self):
+        broken = self.tmp / "route-broken.json"
+        broken.write_text("{not json", encoding="utf-8")
+        listlike = self.tmp / "route-list.json"
+        listlike.write_text("[1, 2]", encoding="utf-8")
+        for route in (str(broken), str(listlike), str(self.tmp / "no-such-route.json")):
+            cmds, _ = self._cmds(self._args(route_file=route))
+            self.assertEqual(self._labels(cmds[0]), ["unit:editorial/report"], route)
+        cmds, _ = self._cmds(self._args(unit=None, worker_type="owner", route_file=str(broken)))
+        self.assertEqual(cmds, [])
+
+    def test_a_declared_unit_root_still_gives_frame_and_one_shot_owner_no_query_group(self):
         root = _fake_unit_root(self.tmp, "bootstrap:\n  memory: [report-format]\n")
-        with mock.patch("subprocess.run") as run:
-            for kind in ("owner", "frame"):
-                self.assertEqual(W.unit_bootstrap_prompt(self._args(worker_type=kind), "t", {}, root=root), "")
-        run.assert_not_called()
+        one_shot = self._route(nodes=[{"id": "one-shot", "dispatch_depth": 1, "unit": "_kernel/owner"}])
+        body = "## [durable/preference] i (global)\nb\n"
+        scenes = (
+            (self._args(worker_type="frame", route_file=self._route()), ["unit:editorial/report", "field:code"]),
+            (self._args(worker_type="owner", route_file=one_shot), ["field:code"]),
+        )
+        for args, want in scenes:
+            cmds, section = self._cmds(args, body, root=root)
+            self.assertEqual(len(cmds), 1)
+            self.assertEqual(self._labels(cmds[0]), want)
+            self.assertNotIn("--query", cmds[0])
+            self.assertNotIn("format follows", section)
+            self.assertNotIn("come first", section)
+
+    def test_one_shot_owner_gets_the_field_label_and_a_conductor_none(self):
+        one_shot = self._route(nodes=[{"id": "one-shot", "dispatch_depth": 1, "unit": "_kernel/owner"}])
+        args = self._args(unit="_kernel/owner", worker_type="owner", route_file=one_shot)
+        cmds, section = self._cmds(args, "## [durable/preference] i (global)\nb\n")
+        self.assertEqual(self._labels(cmds[0]), ["field:code"])
+        self.assertIn("Unit bootstrap material", section)
+        for route_file in (self._route(), None):
+            cmds, section = self._cmds(self._args(unit=None, worker_type="owner", route_file=route_file))
+            self.assertEqual((cmds, section), ([], ""))
+
+    def test_declared_and_labelled_records_share_one_call(self):
+        root = _fake_unit_root(self.tmp, "bootstrap:\n  memory: [report-format]\n")
+        cmds, section = self._cmds(self._args(route_file=self._route()), "## [durable/preference] i (global)\nb\n",
+                                   root=root)
+        self.assertEqual(len(cmds), 1)
+        self.assertEqual(self._labels(cmds[0]), ["unit:editorial/report", "field:code"])
+        self.assertEqual(cmds[0].count("--query"), 2)
+        self.assertEqual(section.count("## [durable/preference] i"), 1)
+        self.assertIn("format follows", section)
+        self.assertIn("Your user's working style and saved preferences from memory (after this turn's "
+                      "instruction and the project's conventions, before the unit's defaults; those tagged for "
+                      "this unit or field come first; reference only; apply only what fits your assignment; "
+                      "do not write, curate, or sync memory):\n", section)
+
+    def test_failures_and_no_records_leave_the_prompt_unchanged(self):
+        root = _fake_unit_root(self.tmp, "")
+        args = self._args(route_file=self._route())
+        for body in ("import sys; sys.exit(1)\n", "import time; time.sleep(10)\n", "print('')\n"):
+            _fake_mem(root, body)
+            started = time.monotonic()
+            self.assertEqual(W.unit_bootstrap_prompt(args, "t", {}, root=root), "", body)
+            self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(W.unit_bootstrap_prompt(self._args(route_file="/nonexistent"), "t", {}, root=root), "")
 
     def test_gate_limited_unit_skips_other_gates(self):
         root = _fake_unit_root(self.tmp, "bootstrap:\n  memory: [report-format]\n  gates: [research-report]\n",
                                unit="research/research-survey")
         _fake_mem(root, "print('# Saved preferences\\n## [durable/feedback] id (global)\\nbody')\n")
         args = self._args(unit="research/research-survey", completion_gate="research-retrieval")
-        with mock.patch("subprocess.run") as run:
-            self.assertEqual(W.unit_bootstrap_prompt(args, "t", {}, root=root), "")
-            run.assert_not_called()
+        cmds, section = self._cmds(args, root=root)
+        self.assertEqual(section, "")
+        self.assertNotIn("--query", cmds[0])
         args = self._args(unit="research/research-survey", completion_gate="research-report")
         section = W.unit_bootstrap_prompt(args, "t", {}, root=root)
         self.assertIn("Unit bootstrap material", section)
@@ -2150,9 +2486,9 @@ class UnitBootstrapDeclarationTest(unittest.TestCase):
 
     def test_unknown_topic_and_kind_are_ignored(self):
         root = _fake_unit_root(self.tmp, "bootstrap:\n  memory: [nope]\n  exemplar: nothing\n")
-        with mock.patch("subprocess.run") as run:
-            self.assertEqual(W.unit_bootstrap_prompt(self._args(), "t", {}, root=root), "")
-        run.assert_not_called()
+        cmds, section = self._cmds(self._args(), root=root)
+        self.assertEqual(section, "")
+        self.assertNotIn("--query", cmds[0])
 
     def test_memory_query_carries_topic_project_and_task_words(self):
         root = _fake_unit_root(self.tmp, "bootstrap:\n  memory: [report-format]\n")

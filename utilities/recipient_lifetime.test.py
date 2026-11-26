@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import contextlib
 import unittest
@@ -9,12 +12,17 @@ import tempfile
 from types import SimpleNamespace
 from unittest import mock
 
+import recipient_lifetime
 from recipient_lifetime import RecipientCensus, recipient_state
 import claude_process_identity
 from claude_process_identity import claude_session_census, invocation_kind
 
 
 class RecipientLifetimeTest(unittest.TestCase):
+    def setUp(self):
+        recipient_lifetime._HISTORY_IDS.clear()
+        self.addCleanup(recipient_lifetime._HISTORY_IDS.clear)
+
     def _fake_runtime(self, root, number, *, exe="/claude/versions/2.1.30x",
                       argv=("claude",), uid=None, home=None):
         proc = root / str(number)
@@ -164,6 +172,71 @@ class RecipientLifetimeTest(unittest.TestCase):
                 for unsafe in ("../wanted-session", "wanted*session"):
                     with self.subTest(unsafe=unsafe):
                         self.assertEqual(RecipientCensus().state("claude", unsafe), "unknown")
+
+    def test_unchanged_history_is_read_once_across_passes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, home = self._recipient_fixture(Path(temp))
+            history = home / "history.jsonl"
+            history.write_text(
+                json.dumps({"sessionId": "cached-session"}) + "\n", encoding="utf-8")
+            real_open = os.open
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(home)}), \
+                    self._real_census_at(root), \
+                    mock.patch("recipient_lifetime.os.open", wraps=real_open) as opened:
+                self.assertEqual(RecipientCensus().state("claude", "cached-session"), "ended")
+                first = [c for c in opened.call_args_list if Path(c.args[0]) == history]
+                self.assertEqual(len(first), 1)
+                self.assertEqual(RecipientCensus().state("claude", "cached-session"), "ended")
+                second = [c for c in opened.call_args_list if Path(c.args[0]) == history]
+                self.assertEqual(len(second), 1, "unchanged history must not be opened again")
+
+    def test_appended_history_is_read_again(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, home = self._recipient_fixture(Path(temp))
+            history = home / "history.jsonl"
+            history.write_text(
+                json.dumps({"sessionId": "first-session"}) + "\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(home)}), self._real_census_at(root):
+                self.assertEqual(RecipientCensus().state("claude", "first-session"), "ended")
+                self.assertEqual(RecipientCensus().state("claude", "second-session"), "unknown")
+                with history.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps({"sessionId": "second-session"}) + "\n")
+                self.assertEqual(RecipientCensus().state("claude", "second-session"), "ended")
+                self.assertEqual(RecipientCensus().state("claude", "first-session"), "ended")
+
+    def test_rejected_history_is_not_cached(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, home = self._recipient_fixture(Path(temp))
+            history = home / "history.jsonl"
+            history.write_text(
+                json.dumps({"sessionId": "slow-session"}) + "\n", encoding="utf-8")
+            real_open = os.open
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(home)}), \
+                    self._real_census_at(root):
+                with mock.patch("recipient_lifetime._HISTORY_BUDGET_SECONDS", -1.0):
+                    self.assertIsNone(recipient_lifetime._read_history_session_ids(home))
+                self.assertNotIn(str(history), recipient_lifetime._HISTORY_IDS)
+                with mock.patch("recipient_lifetime.os.open", wraps=real_open) as opened:
+                    self.assertEqual(RecipientCensus().state("claude", "slow-session"), "ended")
+                self.assertTrue(any(Path(c.args[0]) == history for c in opened.call_args_list),
+                                "a rejected read must be retried, not remembered")
+
+    def test_missing_history_clears_cache_and_cache_is_bounded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            homes = []
+            for index in range(recipient_lifetime._HISTORY_CACHE_LIMIT + 2):
+                home = Path(temp) / f"home-{index}" / ".claude"
+                home.mkdir(parents=True)
+                (home / "history.jsonl").write_text(
+                    json.dumps({"sessionId": f"s{index}"}) + "\n", encoding="utf-8")
+                self.assertEqual(recipient_lifetime._read_history_session_ids(home), {f"s{index}"})
+                homes.append(home)
+            self.assertEqual(len(recipient_lifetime._HISTORY_IDS),
+                             recipient_lifetime._HISTORY_CACHE_LIMIT)
+            self.assertNotIn(str(homes[0] / "history.jsonl"), recipient_lifetime._HISTORY_IDS)
+            (homes[-1] / "history.jsonl").unlink()
+            self.assertEqual(recipient_lifetime._read_history_session_ids(homes[-1]), set())
+            self.assertNotIn(str(homes[-1] / "history.jsonl"), recipient_lifetime._HISTORY_IDS)
 
     def test_untrusted_native_evidence_never_proves_existence(self):
         for kind in ("symlink", "transcript-symlink", "remote", "foreign-owner", "replaced"):

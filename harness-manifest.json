@@ -56,19 +56,6 @@
     ]
    }
   },
-  "artifact-projection-read": {
-   "group": "support",
-   "family": "support",
-   "modes": [],
-   "summary": "Read-only lookup of Cairn artifact projections through the canonical W3a contract.",
-   "invocation": {
-    "class": "model-support",
-    "use_when": "Use when an agent or operator needs to browse or query an existing Cairn artifact projection without changing artifacts or runtime state.",
-    "not_for": "Not for primary task routing, ingest, mutation, activation, deactivation, apply, migration, namespace switching, or flat-browse fallback ownership."
-   },
-   "argument_shape": "one JSON read request on stdin",
-   "requires": {"capabilities": [], "units": []}
-  },
   "audit": {
    "group": "ops",
    "family": "ops",
@@ -607,6 +594,22 @@
      "ops/session-tidy-memory"
     ]
    }
+  },
+  "unit": {
+   "group": "sub",
+   "family": "sub",
+   "modes": [],
+   "summary": "Compiler-internal one-unit route: one read-only unit runs as a single leg the depth-0 session launches itself, with no owner; its kind is `unit`, its field comes from the unit head or --field.",
+   "invocation": {
+    "class": "compiler-internal",
+    "use_when": "Use only through compose --unit <family/name>; no person or model invokes it by name.",
+    "not_for": "Not for direct invocation, a user-facing Skill, a native command, or any owner persona."
+   },
+   "argument_shape": "compose --unit <family/name> [--field <field>] --prompt-file <brief>",
+   "requires": {
+    "capabilities": [],
+    "units": []
+   }
   }
  },
  "units": {
@@ -674,6 +677,12 @@
    "family": "editorial",
    "role": "deep editor",
    "worker_type": "stage",
+   "floor": "low"
+  },
+  "general/explore": {
+   "family": "general",
+   "role": "fast tool worker",
+   "worker_type": "support",
    "floor": "low"
   },
   "material/browser-fetch": {
@@ -862,6 +871,10 @@
   },
   "editorial/translate": {
    "unit": "editorial/translate",
+   "status": "portable-persona"
+  },
+  "general/explore": {
+   "unit": "general/explore",
    "status": "portable-persona"
   },
   "material/browser-fetch": {

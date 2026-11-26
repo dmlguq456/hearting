@@ -10,6 +10,7 @@ never used for sorting or identity).
 """
 
 import hashlib
+import io
 import json
 import re
 from dataclasses import dataclass
@@ -45,6 +46,22 @@ _MAX_LOCATOR_COMPONENTS = 32
 _MAX_LOCATOR_LENGTH = 1024
 _MAX_PAYLOAD_DEPTH = 16
 _MAX_PAYLOAD_BYTES = 64 * 1024
+# A campaign's closing event carries one row for each cycle that belongs to it (about 330 bytes each, and the
+# campaign record's own list of cycle IDs, about 40), so its size follows the member count and no fixed limit can
+# be right for it.  The 64 KiB limit stays what it was for everything else in the event (the record's text, the
+# closure, the identity); the member rows have 1 KiB each, three times what one takes.  The writer and every reader
+# apply this one rule (`_v_event_row`), and the whole event is also bound by the one read limit of a record
+# (`artifact_campaign.MAX_JSON`), which the writer checks before it publishes anything.
+_MEMBER_ROW_ALLOWANCE_BYTES = 1024
+
+# The most a reader parses of one `manifest.json` when it has to read the document itself.  A cycle
+# seals one manifest whatever its file count (about 1.7 KB per file; 150,000 files made 255 MB), so
+# the writer has no cap of its own and the reader must not be the one that stops such a cycle.  A
+# reader that can show the bytes are the ones the producer sealed and recorded (see
+# `artifact_campaign._sealed_as_recorded`) reads the few top-level values it needs as a stream
+# (`scan_top_fields`) and parses no document, whatever the size.  Only bytes that changed since the
+# seal, or a legacy file, are parsed, and then under this one limit.
+MAX_MANIFEST_BYTES = 512 * 1024 * 1024
 
 _EVENT_TYPES = frozenset(
     {
@@ -341,6 +358,252 @@ def digest_bytes(data: bytes) -> str:
 
 def manifest_digest(document: Mapping[str, Any]) -> str:
     return digest_bytes(canonical_bytes(document))
+
+
+# ---------------------------------------------------------------------------
+# A few top-level values of a canonical document, read as a stream
+# ---------------------------------------------------------------------------
+#
+# A manifest grows with its file count (255 MB at 150,000 files) and nearly all of it is
+# `artifact_revisions` and `events`, which a caller that only wants `cycle`, `producer` or `routes`
+# has no use for.  `scan_top_fields` walks the compact, sorted-key form `canonical_bytes` writes, one
+# chunk at a time, and parses only the named top-level values: memory does not grow with the size.
+# It costs about 13 times a hash per byte and, on a small file, 5 to 8 times `json.loads`, so a file
+# of at most `TOP_FIELDS_PARSE_LIMIT` bytes is parsed whole instead (`top_fields`): the same values,
+# a few MiB at most in memory, and a root of thousands of small cycles is read as fast as before.
+#
+# What the scanner does and does not check: it reads keys in order and stops as soon as every
+# wanted key is found (or a later key shows it cannot be there), so what follows is never looked at:
+# a key out of order or repeated after that point, a bracket of the wrong kind inside a value it
+# skips, a document that is broken further on.  It answers `None` when what it did read is not
+# the compact sorted-key form (spaces, a key out of order or repeated before that point, a truncated
+# value).  So its values are as trustworthy as the bytes: use them only when the bytes are already
+# known to be the canonical document (their digest is the recorded one), never to learn what a
+# file that has not been checked contains.
+
+TOP_FIELDS_PARSE_LIMIT = 4 << 20  # see `top_fields`: below this a whole parse is cheaper than the scanner
+_SCAN_CHUNK = 256 << 10
+_SCAN_MAX_VALUE = 4 << 20  # the most one wanted value may take (routes, cycle, producer are a few KB)
+_SCAN_MAX_STRING = 64 << 20
+_SCAN_MAX_KEY = 1 << 20
+_JSON_STRING = re.compile(rb'"[^"\\]*(?:\\.[^"\\]*)*"', re.S)
+_JSON_BRACKETS = re.compile(rb"[\[\]{}]")
+_JSON_TOKENS = re.compile(rb'"[^"\\]*(?:\\.[^"\\]*)*"|[\[\]{}]', re.S)
+_JSON_SCALAR = re.compile(rb"[-+.0-9A-Za-z]+")
+
+
+def _open_string_start(data: bytes) -> int:
+    """Where a string that `data` ends inside begins, or `len(data)` when it ends outside any string."""
+    unescaped = data.replace(b"\\\\", b"").replace(b'\\"', b"").count(b'"')
+    if not unescaped & 1:
+        return len(data)
+    at = len(data)
+    while True:
+        at = data.rfind(b'"', 0, at)
+        if at < 0:
+            return len(data)
+        back = at
+        while back > 0 and data[back - 1] == 92:
+            back -= 1
+        if (at - back) % 2 == 0:
+            return at
+
+
+class _TopScan:
+    def __init__(self, stream: Any, hasher: Any, max_value: int) -> None:
+        self.stream, self.hasher, self.max_value = stream, hasher, max_value
+        self.buf, self.pos, self.eof = b"", 0, False
+
+    def more(self) -> bool:
+        if self.eof:
+            return False
+        chunk = self.stream.read(_SCAN_CHUNK)
+        if not chunk:
+            self.eof = True
+            return False
+        if self.hasher is not None:
+            self.hasher.update(chunk)
+        self.buf = self.buf[self.pos:] + chunk
+        self.pos = 0
+        return True
+
+    def need(self, count: int) -> bool:
+        while len(self.buf) - self.pos < count:
+            if not self.more():
+                return False
+        return True
+
+    def take(self, expected: bytes) -> bool:
+        if not self.need(1) or self.buf[self.pos:self.pos + 1] != expected:
+            return False
+        self.pos += 1
+        return True
+
+    def key(self) -> Optional[str]:
+        if not self.need(1) or self.buf[self.pos] != 34:
+            return None
+        while True:
+            found = _JSON_STRING.match(self.buf, self.pos)
+            if found is not None:
+                break
+            if len(self.buf) - self.pos > _SCAN_MAX_KEY or not self.more():
+                return None
+        self.pos = found.end()
+        try:
+            value = json.loads(found.group())
+        except ValueError:
+            return None
+        return value if isinstance(value, str) else None
+
+    def value(self, capture: bool) -> Optional[bytes]:
+        """Skip (or, with `capture`, return) the value at the cursor; `None` when it cannot be taken."""
+        if not self.need(1):
+            return None
+        first = self.buf[self.pos]
+        if first == 34:
+            while True:
+                found = _JSON_STRING.match(self.buf, self.pos)
+                if found is not None:
+                    break
+                if len(self.buf) - self.pos > _SCAN_MAX_STRING or not self.more():
+                    return None
+            raw = self.buf[self.pos:found.end()]
+            self.pos = found.end()
+            return raw if not capture or len(raw) <= self.max_value else None
+        if first in b"{[":
+            return self.container(capture)
+        while True:
+            found = _JSON_SCALAR.match(self.buf, self.pos)
+            if found is not None and (found.end() < len(self.buf) or self.eof):
+                break
+            if found is None and self.pos < len(self.buf):
+                return None
+            if not self.more():
+                if found is None:
+                    return None
+                break
+        raw = self.buf[self.pos:found.end()]
+        self.pos = found.end()
+        return raw
+
+    def container(self, capture: bool) -> Optional[bytes]:
+        parts: List[bytes] = []
+        taken = 0
+        depth = 0
+        while True:
+            if self.pos >= len(self.buf) and not self.more():
+                return None
+            data = self.buf[self.pos:]
+            safe = _open_string_start(data)
+            body = _JSON_STRING.sub(b"0", data[:safe])
+            if safe < len(data) and len(data) - safe > _SCAN_MAX_STRING:
+                return None
+            reached = False
+            level = depth
+            for found in _JSON_BRACKETS.finditer(body):
+                if body[found.start()] in b"{[":
+                    level += 1
+                else:
+                    level -= 1
+                    if level == 0:
+                        reached = True
+                        break
+            if not reached:
+                if capture:
+                    taken += safe
+                    if taken > self.max_value:
+                        return None
+                    parts.append(data[:safe])
+                self.pos += safe
+                depth = level
+                if not self.more():
+                    return None
+                continue
+            level = depth
+            end = None
+            for found in _JSON_TOKENS.finditer(data, 0, safe):
+                token = found.group()
+                if token[0] == 34:
+                    continue
+                if token in (b"{", b"["):
+                    level += 1
+                else:
+                    level -= 1
+                    if level == 0:
+                        end = found.end()
+                        break
+            if end is None:
+                return None
+            if capture:
+                taken += end
+                if taken > self.max_value:
+                    return None
+                parts.append(data[:end])
+            self.pos += end
+            return b"".join(parts) if capture else b""
+
+
+def scan_top_fields(stream: Any, names: Iterable[str], *, hasher: Any = None,
+                    max_value: int = _SCAN_MAX_VALUE) -> Optional[Dict[str, Any]]:
+    """The named top-level values of a canonical document read from `stream`, or `None`.
+
+    Only values that are present are returned (a name the document lacks is absent from the answer).
+    Reading stops once every name is found or a later key shows it cannot be there (the keys are
+    sorted); with a `hasher` the rest is not read, so the caller finishes the stream itself.  What lies
+    after the point it stops at is not looked at (order, repeated keys, brackets), and the brackets of the
+    values it skips are counted, not matched by kind: the answer is right for the canonical document and
+    for nothing else, so use it only for bytes whose digest is the recorded one (see the note above)."""
+    wanted = set(names)
+    last_wanted = max(wanted) if wanted else ""
+    scan = _TopScan(stream, hasher, max_value)
+    if not scan.take(b"{"):
+        return None
+    found: Dict[str, Any] = {}
+    previous: Optional[str] = None
+    if scan.need(1) and scan.buf[scan.pos:scan.pos + 1] == b"}":
+        return found
+    decoder = json.JSONDecoder()
+    while True:
+        key = scan.key()
+        if key is None or (previous is not None and key <= previous) or not scan.take(b":"):
+            return None
+        previous = key
+        taken = scan.value(key in wanted)
+        if taken is None:
+            return None
+        if key in wanted:
+            try:
+                text = taken.decode("utf-8")
+                value, end = decoder.raw_decode(text)
+            except (ValueError, UnicodeError, RecursionError):
+                return None
+            if end != len(text):
+                return None
+            found[key] = value
+        if len(found) == len(wanted) or key >= last_wanted:
+            return found
+        if scan.take(b"}"):
+            return found
+        if not scan.take(b","):
+            return None
+
+
+def top_fields(data: bytes, names: Iterable[str]) -> Optional[Dict[str, Any]]:
+    """The named top-level values of the document in `data` (those present), or `None` when it is not a JSON object.
+
+    A document of at most `TOP_FIELDS_PARSE_LIMIT` bytes is parsed whole (`json.loads`); a larger one goes through
+    `scan_top_fields`, which parses only the wanted values.  For the canonical document the two answer the same
+    values; for bytes that are not that form a whole parse answers what the document says and the scanner may answer
+    `None` or stop early, which is why a caller trusts either only after the digest of the bytes is the recorded one."""
+    if len(data) > TOP_FIELDS_PARSE_LIMIT:
+        return scan_top_fields(io.BytesIO(data), names)
+    try:
+        document = json.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeError, RecursionError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    return {name: document[name] for name in set(names) if name in document}
 
 
 # ---------------------------------------------------------------------------
@@ -727,7 +990,36 @@ def _v_event_actor(value: Any, path: str, violations: List[Violation]) -> None:
     )
 
 
-def _v_event_payload(value: Any, path: str, violations: List[Violation]) -> None:
+def _json_size(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+
+
+def _member_lists(row: Any) -> List[Any]:
+    """The lists of a campaign closing event that grow with its members: the cycle rows of the snapshot and the
+    campaign record's list of cycle IDs.  Only that event, and only those two lists."""
+    if not isinstance(row, dict) or row.get("event_type") != "campaign.satisfied":
+        return []
+    payload = row.get("payload")
+    snapshot = payload.get("snapshot") if isinstance(payload, dict) else None
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("cycles"), list):
+        return []
+    lists = [snapshot["cycles"]]
+    campaign = snapshot.get("campaign")
+    if isinstance(campaign, dict) and isinstance(campaign.get("cycles"), list):
+        lists.append(campaign["cycles"])
+    return lists
+
+
+def _v_event_payload_of(row: Any):
+    members = _member_lists(row)
+
+    def validator(value: Any, path: str, violations: List[Violation]) -> None:
+        _v_event_payload(value, path, violations, members)
+
+    return validator
+
+
+def _v_event_payload(value: Any, path: str, violations: List[Violation], members: Sequence[Any] = ()) -> None:
     if not isinstance(value, dict):
         violations.append(Violation("wrong-type", path, "expected object"))
         return
@@ -740,16 +1032,27 @@ def _v_event_payload(value: Any, path: str, violations: List[Violation]) -> None
     if not _all_keys_str(value):
         violations.append(Violation("wrong-type", path, "all payload keys must be strings"))
     try:
-        size = len(
-            json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            .encode("utf-8")
-        )
+        size = _json_size(value)
+        member_size = sum(_json_size(rows) for rows in members)
     except (TypeError, ValueError):
-        size = _MAX_PAYLOAD_BYTES + 1
+        size, member_size = _MAX_PAYLOAD_BYTES + 1, 0
+    # The one rule a payload ever had is the floor: a payload of 64 KiB or less is as valid as it always was.
+    # Only one that is larger is looked at in parts: what is not a member row stays within 64 KiB, and the
+    # member rows within their allowance for each member.
     if size > _MAX_PAYLOAD_BYTES:
-        violations.append(
-            Violation("oversized-payload", path, "serialized payload exceeds 64 KiB")
-        )
+        if size - member_size > _MAX_PAYLOAD_BYTES:
+            violations.append(
+                Violation("oversized-payload", path,
+                          "serialized payload exceeds 64 KiB" + (
+                              " apart from its member rows: the event's own text is what is large"
+                              if members else ""))
+            )
+        if members and member_size > _MEMBER_ROW_ALLOWANCE_BYTES * len(members[0]):
+            violations.append(
+                Violation("oversized-payload", path,
+                          "member rows take {0} bytes for {1} members, more than {2} bytes each".format(
+                              member_size, len(members[0]), _MEMBER_ROW_ALLOWANCE_BYTES))
+            )
 
 
 def _max_depth(value: Any) -> int:
@@ -805,7 +1108,7 @@ def _v_event_row(value: Any, path: str, violations: List[Violation]) -> None:
                            and value["payload"].get("contract") == "artifact-campaign-closure/v2"
                            else _v_provenance),
             "evidence_ids": _v_list_of_str,
-            "payload": _v_event_payload,
+            "payload": _v_event_payload_of(value),
         },
         {
             "supersedes_event_id": _v_typed_id("event"),

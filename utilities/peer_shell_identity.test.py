@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Independent attachment inner-SID conflict probe, at discovery and carrier admission."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 from pathlib import Path
 import importlib.util, sys, contextlib, io, unittest, json
 from unittest import mock
@@ -17,7 +20,7 @@ class InnerConflict(f.WrappedPaneResolutionTest):
   def prepared(ref):
    if effect_change:current[0]=other
   args=SimpleNamespace(target=self.pane,body_file=None,body_stdin=False,text='private exact inner SID conflict '+harness+str(effect_change),ref=[],no_trailer=False)
-  with self.observed(harness),mock.patch('fleet.process_identity.process_identity',side_effect=identity),mock.patch.object(f.peer.peer_message,'deliver_pending_codex',return_value={'status':'queued'}) as queue,mock.patch.object(f.session_shell,'deliver_pending',return_value={'ok':True}) as shell,contextlib.redirect_stdout(io.StringIO()) as out:
+  with self.observed(harness),self.live(harness),mock.patch('fleet.process_identity.process_identity',side_effect=identity),mock.patch.object(f.peer.peer_message,'deliver_pending_codex',return_value={'status':'queued'}) as queue,mock.patch.object(f.session_shell,'deliver_pending',return_value={'ok':True}) as shell,contextlib.redirect_stdout(io.StringIO()) as out:
    f.peer.cmd_prompt(args,on_prepared=prepared)
   calls=queue.call_args_list+shell.call_args_list;recipient=None
   if calls:recipient=f.peer.peer_message._read_pending(calls[0].args[0])['to']
@@ -51,7 +54,7 @@ class InnerConflict(f.WrappedPaneResolutionTest):
        session_id=self.sid if confidence=='proven' else 'unproven-other-session')
      args=SimpleNamespace(target=self.pane,body_file=None,body_stdin=False,
       text='synthetic unchanged policy '+harness+confidence,ref=[],no_trailer=False)
-     with self.observed(harness),mock.patch('fleet.process_identity.process_identity',side_effect=identity),mock.patch.object(f.peer.peer_message,'deliver_pending_codex',return_value={'status':'queued'}) as queue,mock.patch.object(f.session_shell,'deliver_pending',return_value={'ok':True}) as shell,contextlib.redirect_stdout(io.StringIO()):
+     with self.observed(harness),self.live(harness),mock.patch('fleet.process_identity.process_identity',side_effect=identity),mock.patch.object(f.peer.peer_message,'deliver_pending_codex',return_value={'status':'queued'}) as queue,mock.patch.object(f.session_shell,'deliver_pending',return_value={'ok':True}) as shell,contextlib.redirect_stdout(io.StringIO()):
       f.peer.cmd_prompt(args)
      calls=queue.call_args_list+shell.call_args_list
      self.assertEqual(len(calls),1)

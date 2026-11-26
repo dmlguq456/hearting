@@ -1,4 +1,6 @@
 #!/usr/bin/env sh
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/../../../tools/run-tests.py" --direct-run bash "$0" "$@"
 # Regression: the Codex projection installer must not overwrite user-owned
 # skill/agent entries, and must still refresh absent, owned and dangling ones.
 set -eu

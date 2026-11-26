@@ -3,6 +3,9 @@
 ContractProjectionTests uses synthetic native facts. It does not claim native
 response consumption or resumed provider work; those belong to convergence.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -212,6 +215,39 @@ class ContractProjectionTests(unittest.TestCase):
         self.assertIn("opencode" + model + "high", flat(opened[model_at:model_at + 3]))
         self.assertFalse([line for line in opened[model_at:model_at + 3] if "…" in line])
 
+    def test_route_doer_now_and_last_finished_call_come_from_its_own_stream_and_unfold(self):
+        # A one-shot owner is its route's doer: its open call's summary and native age and
+        # the call it just finished ride the route record and unfold, each on one row.
+        now = 1_800_000_000.0
+        vm = build_view_model(self.route_snapshot(
+            exec_tool={"name": "Bash", "target": "python3 tools/run-tests.py", "since": now - 185},
+            last_tool={"name": "Edit", "target": "utilities/session-shell/host.cjs"},
+            _tool_observed=True), now=now)
+        doer = vm.routes[0]["doer"]
+        self.assertEqual((doer["tool"], doer["target"], doer["tool_age"], doer["after_tool"]),
+                         ("Bash", "python3 tools/run-tests.py", "3m",
+                          "Edit · utilities/session-shell/host.cjs"))
+        for width in (120, 150):
+            text = "\n".join(unfolded_rows(draw(vm, OPENED, width, 60)))
+            self.assertIn(">_ Bash · python3 tools/run-tests.py  3m", text)
+            self.assertIn("after Edit · utilities/session-shell/host.cjs", text)
+        # No native start time: the age is left out (another process is no evidence).
+        timeless = build_view_model(self.route_snapshot(
+            exec_tool={"name": "Bash", "target": "sleep"},
+            exec_child={"comm": "python3", "etime_s": 180.0}), now=now)
+        self.assertNotIn("tool_age", timeless.routes[0]["doer"])
+        # "No tool" only when its own native activity was read and showed none open.
+        idle = build_view_model(self.route_snapshot(_tool_observed=True), now=now)
+        self.assertTrue(idle.routes[0]["doer"]["idle_tool"])
+        self.assertIn(">_ no tool", "\n".join(unfolded_rows(draw(idle, OPENED, 120, 60))))
+        unread = build_view_model(self.route_snapshot(), now=now)
+        self.assertNotIn("idle_tool", unread.routes[0]["doer"])
+        self.assertNotIn(">_ no tool", "\n".join(unfolded_rows(draw(unread, OPENED, 120, 60))))
+        snapshot = self.route_snapshot(_tool_observed=True)
+        snapshot["jobs"][0].liveness = "idle"
+        quiet = build_view_model(snapshot, now=now)
+        self.assertFalse({"target", "tool_age", "after_tool", "idle_tool"} & set(quiet.routes[0]["doer"]))
+
     def test_session_page_and_route_owner_use_the_model_cell_words(self):
         vm = build_view_model(self.route_snapshot())
         session = dict(vm.sessions[0], model=["Opus 5.5", "dim"], effort="xhigh")
@@ -250,6 +286,8 @@ class ContractProjectionTests(unittest.TestCase):
         contexts = build_view_model(snapshot).routes[0]["worker_contexts"]
         expected = [render._native_context_gauge(job)[0] for job in snapshot["jobs"][1:3]]
         self.assertEqual([row["context"] for row in contexts], expected)
+        # Each row names the attempt Fleet chose, so the shell finds that very job again (spec E9 rule 43).
+        self.assertEqual([row["attempt"] for row in contexts], [job.attempt_id for job in snapshot["jobs"][1:3]])
 
     def selected_worker_snapshot(self, count=1):
         """Use the production route resolver, which supplies node.job, not node.attempt_id."""
@@ -466,12 +504,12 @@ class ContractProjectionTests(unittest.TestCase):
             with self.subTest(cols=cols):
                 state = NavState(view="OVERVIEW")
                 frame = draw(vm, state, cols, 45)
-                self.assertIn("⏳ 1", "\n".join(frame.text_rows()))
+                self.assertIn("route 1", "\n".join(row for row in frame.text_rows() if "[p1]" in row))
                 hit = next(h for h in frame.hits if h.action == ("fold", "sopen:OVERVIEW", "p1"))
                 opened, _ = reduce(state, {"type": "click", "action": hit.action}, frame)
                 self.assertEqual(opened.opened, "p1")
         history = replace(vm, routes=tuple(dict(row, current=False, state="done") for row in vm.routes))
-        self.assertNotIn("⏳ 1", "\n".join(draw(history, NavState(), 180, 45).text_rows()))
+        self.assertNotIn("route 1", "\n".join(row for row in draw(history, NavState(), 180, 45).text_rows() if "[p1]" in row))
 
     def test_older_questions_never_light_current_session_marker(self):
         snapshot = self.route_snapshot()
@@ -580,6 +618,12 @@ class NativeResponseIntegrationTests(unittest.TestCase):
         from tools.fleet.explorer.view_model import persistable_view_model
         from tools.fleet.refresh import fleet_answer_wait_view
         backend, observation = self.backend_tests.state, self.backend_tests.observation
+        # This managed-gateway fixture has no live rollout processes. A host-wide
+        # /proc crawl can report an incomplete census for unrelated sessions.
+        rollout = mock.patch.object(observation, "_codex_rollout_waits",
+                                    return_value={"complete": True, "pending": {}})
+        rollout.start()
+        self.addCleanup(rollout.stop)
         fixture = self.fixture.gateway_fixture
         request_id = "approval-exact" if approval else 502
         turn_id, item_id = "turn-original", "item-original"

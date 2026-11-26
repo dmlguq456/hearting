@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/../tools/run-tests.py" --direct-run bash "$0" "$@"
 # Session card delivery on the three harness bridges (Claude hook, Codex
 # SessionStart/UserPromptSubmit hooks, OpenCode plugin). The card path must not
 # depend on the memory candidate probe: short/empty prompts, no memory tool and
@@ -18,17 +20,23 @@ FIXTURE_MARKER=
 cleanup_fixture() {
   local fixture_status=$? cleanup_status=0
   trap - EXIT INT TERM
-  if [ -n "$FIXTURE_MARKER" ]; then
-    if python3 - "$ROOT" "$FIXTURE_MARKER" <<'PY'
+  # The fixture owns every detached helper it caused: the obligation runner (marker) and
+  # whatever the hooks/plugin spawned with this private root in their environment (the
+  # OpenCode plugin starts session_summary_trigger.py detached, and its --wait outlives
+  # the case). Reap both by marker or by the fixture root before the root is removed.
+  if [ -n "$FIXTURE_MARKER" ] || [ -n "$TMP" ]; then
+    if python3 - "$ROOT" "$FIXTURE_MARKER" "$TMP" <<'PY'
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[1]) / "tools"))
 import fixture_processes
-marker = sys.argv[2]
-fixture_processes.reap(marker, timeout=10)
-left = fixture_processes.marked_processes(marker)
+markers = [m for m in sys.argv[2:4] if m]
+left = {}
+for marker in markers:
+    fixture_processes.reap(marker, timeout=10)
+    left.update(fixture_processes.marked_processes(marker))
 if left:
-    raise SystemExit("fixture runner survived cleanup: %s" % sorted(left))
+    raise SystemExit("fixture helper survived cleanup: %s" % sorted(left))
 PY
     then
       :
@@ -492,6 +500,67 @@ else bad "opencode worker scenario failed [err=$(head -c 400 "$TMP/o3.err")]"; f
 if [ ! -e "$XDG_STATE_HOME/hearting/session-tidy/sessions" ] || ! grep -Rqs '"sid": "op-W"' "$XDG_STATE_HOME/hearting/session-tidy/sessions"; then
   ok "opencode: a worker leaves no ledger row"
 else bad "opencode: worker must leave no ledger row"; fi
+
+# ---- The experiment catalog's names reach the same block on all three bridges --------------------
+lab_catalog() { # project name [rename-to]: write the catalog, or rename the condition
+  python3 - "$ROOT" "$1" "$2" "${3:-}" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "utilities"))
+import artifact_admission as admission
+import experiment_catalog as E
+cwd, name, new = Path(sys.argv[2]), sys.argv[3], sys.argv[4]
+root = cwd / ".agent_reports"
+if new:
+    E.run_write(root, lambda ctx: E.op_rename(ctx, name, new), now=1_790_000_100.0)
+else:
+    root.mkdir(exist_ok=True)
+    admission.ensure_root_identity(root)
+    E.run_write(root, lambda ctx: E.op_register(ctx, {
+        "groups": [{"display_name": "소리 분리 개선", "goal": "잔향 제거가 기준보다 높은가"}],
+        "conditions": [{"display_name": name, "group": "소리 분리 개선"}]}), now=1_790_000_000.0)
+PY
+}
+lab_block() { sed -n '/^results table/,$p'; }
+
+P=$(proj lab-names)
+lab_catalog "$P" "잔향 줄임"
+claude_hook UserPromptSubmit lab-C1 "$P" > "$TMP/l1.out"
+codex_run "$CODEX_PROMPT" UserPromptSubmit lab-X1 "$P" "" "hi" > "$TMP/l2.out"
+context_of "$TMP/l1.out" | lab_block > "$TMP/l1.block"
+context_of "$TMP/l2.out" | lab_block > "$TMP/l2.block"
+if grep -Fq "잔향 줄임" "$TMP/l1.block" && grep -Fq "call each condition by this catalog name" "$TMP/l1.block" \
+    && cmp -s "$TMP/l1.block" "$TMP/l2.block"; then
+  ok "claude and codex: the first prompt carries the same catalog block"
+else bad "claude/codex catalog block differs [claude=$(tr '\n' '|' < "$TMP/l1.block")] [codex=$(tr '\n' '|' < "$TMP/l2.block")]"; fi
+lab_catalog "$P" "잔향 줄임" "잔향 제거 켬"
+claude_hook UserPromptSubmit lab-C2 "$P" > "$TMP/l3.out"
+codex_run "$CODEX_PROMPT" UserPromptSubmit lab-X2 "$P" "" "hi" > "$TMP/l4.out"
+# The former name appears only as the way to the current one (`잔향 줄임 → 잔향 제거 켬` in the words line).
+if context_of "$TMP/l3.out" | grep -Fq "잔향 제거 켬" && ! context_of "$TMP/l3.out" | sed 's/잔향 줄임 → 잔향 제거 켬//g' | grep -Fq "잔향 줄임" \
+    && context_of "$TMP/l4.out" | grep -Fq "잔향 제거 켬" && ! context_of "$TMP/l4.out" | sed 's/잔향 줄임 → 잔향 제거 켬//g' | grep -Fq "잔향 줄임"; then
+  ok "claude and codex: a renamed condition shows its new name on the next session"
+else bad "renamed catalog name must reach the next claude/codex session"; fi
+if [ "${OPENCODE_NODE_CHILD_BLOCKED:-0}" = 1 ]; then
+  ok "opencode: catalog block Node check skipped (sandbox returned EPERM)"
+elif node --input-type=module > "$TMP/l5.out" 2> "$TMP/l5.err" <<EOF
+import { AgentHarnessGuards } from "$PLUGIN"
+const plugin = await AgentHarnessGuards({ directory: "$P", worktree: "$P" })
+await plugin["chat.message"]({ sessionID: "lab-O1", messageID: "o1" }, { parts: [{ type: "text", text: "hi" }] })
+const output = { system: [] }
+await plugin["experimental.chat.system.transform"]({ sessionID: "lab-O1", model: {} }, output)
+const text = output.system.join("\n")
+console.log("new=" + text.includes("잔향 제거 켬"))
+console.log("old=" + text.split("잔향 줄임 → 잔향 제거 켬").join("").includes("잔향 줄임"))
+console.log("rule=" + text.includes("call each condition by this catalog name"))
+EOF
+then
+  if grep -Fxq new=true "$TMP/l5.out" && grep -Fxq old=false "$TMP/l5.out" && grep -Fxq rule=true "$TMP/l5.out"; then
+    ok "opencode: the first prompt carries the catalog block with the current name"
+  else bad "opencode catalog block [got: $(tr '\n' ' ' < "$TMP/l5.out")]"; fi
+elif grep -Fq 'spawnSync python3 EPERM' "$TMP/l5.err"; then
+  ok "opencode: catalog block Node check skipped (sandbox returned EPERM)"
+else bad "opencode catalog block scenario failed [err=$(head -c 400 "$TMP/l5.err")]"; fi
 
 if [ "$FAILS" -ne 0 ]; then
   printf 'FAIL: %s case(s)\n' "$FAILS"

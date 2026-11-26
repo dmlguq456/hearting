@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Read-only lifecycle projection fixtures for Fleet human-gate waits."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 from pathlib import Path
 import sys
@@ -80,6 +83,96 @@ class PendingWaitTest(unittest.TestCase):
         self.assertEqual((waits[0]["kind"], waits[0]["source"]), ("decision", "hearting-ledger"))
         self.assertEqual(set(waits[0]), {"gate_id", "kind", "source", "waiting_since", "route_id"})
 
+    def test_a_kept_wait_judgment_names_every_gate_file_it_read(self):
+        """The judgment of a route is reused only while the journal, the interview artifact and both
+        answer files are the same files: an answer that appears or changes next to the artifact is an input."""
+        key = (self.route["route_id"], self.route["route_hash"], str(self.root / "route.json"))
+        args = (key, self.route, dict(self.route), None, self.jobs, self.root / "workflow")
+        H._WAIT_MEMO.clear()
+        start = H.metrics_snapshot()
+
+        def moved():
+            now = H.metrics_snapshot()
+            return (now["route_wait_recomputes"] - start["route_wait_recomputes"],
+                    now["route_wait_reuses"] - start["route_wait_reuses"])
+
+        first = H._waits_for(*args)
+        self.assertEqual(len(first), 1)
+        self.assertEqual(H._waits_for(*args), first)
+        self.assertEqual(moved(), (1, 1))
+        answers = self.artifacts / "answers.json"
+        answers.write_text("{}\n", encoding="utf-8")                       # an answer file appears
+        H._waits_for(*args)
+        self.assertEqual(moved(), (2, 1))
+        answers.write_text('{"answers": {}}\n', encoding="utf-8")          # and changes
+        H._waits_for(*args)
+        self.assertEqual(moved(), (3, 1))
+        H._waits_for(*args)
+        self.assertEqual(moved(), (3, 2))
+        journal = self.root / "workflow" / self.route["route_id"] / "journal.jsonl"
+        journal.write_text(journal.read_text(encoding="utf-8").replace("frame-review", "other-gate"),
+                           encoding="utf-8")                                  # the journal changes
+        self.assertEqual(H._waits_for(*args)[0]["gate_id"], "other-gate")
+        self.assertEqual(moved(), (4, 2))
+        self.assertEqual(H._waits_for(*args)[0]["gate_id"], "other-gate")
+        self.assertEqual(moved(), (4, 3))
+        # A caller that changes what it was given gets its own copy of a kept answer.
+        first = H._waits_for(*args)
+        first[0]["gate_id"] = "tampered"
+        self.assertEqual(H._waits_for(*args)[0]["gate_id"], "other-gate")
+
+    def test_a_kept_wait_judgment_sees_an_archived_interview_restored(self):
+        """2026-11-13 (PR #1595 review): an interview that was missing when the judgment was made is
+        an input too. Archived for a while, the answered question waited; restored next to its valid
+        answer, the kept judgment must not keep the question waiting."""
+        import frame_interview as FI
+        doc = {"schema": FI.SCHEMA, "route_id": self.route["route_id"], "round": 1, "questions": []}
+        answer = FI.answers_template(doc)
+        answer.update(actor_kind="user", understanding_confirmed=True)
+        self.interview.write_text(json.dumps(doc), encoding="utf-8")
+        (self.artifacts / "answers.json").write_text(json.dumps(answer), encoding="utf-8")
+        key = (self.route["route_id"], self.route["route_hash"], str(self.root / "route.json"))
+        args = (key, self.route, dict(self.route), None, self.jobs, self.root / "workflow")
+        H._WAIT_MEMO.clear()
+        self.assertEqual(H._waits_for(*args), [])                   # answered: nothing waits
+        archive = self.root / "archive"
+        archive.mkdir()
+        self.interview.rename(archive / "interview.json")           # the interview is archived
+        self.assertEqual(len(H._waits_for(*args)), 1)               # missing evidence clears nothing
+        self.assertEqual(len(H._waits_for(*args)), 1)
+        (archive / "interview.json").rename(self.interview)         # and restored
+        self.assertEqual(H._waits_for(*args), [])
+        self.assertEqual(H._waits_for(*args), [])
+
+    def test_a_kept_wait_judgment_follows_the_ledger_the_registry_now_selects(self):
+        """2026-11-13 (PR #1595 review): the same registry path can select another ledger when a
+        directory on it now links elsewhere; a wait raised only in the new ledger must be seen."""
+        import workflow_state as WS
+        for name in ("old", "new"):
+            (self.root / name).mkdir()
+            (self.root / name / "jobs.log").write_text("", encoding="utf-8")
+        journal = self.root / "new" / "workflow" / self.route["route_id"] / "journal.jsonl"
+        journal.parent.mkdir(parents=True)
+        journal.write_text(json.dumps({
+            "at": "2026-10-14T01:02:03Z", "route_id": self.route["route_id"],
+            "route_hash": self.route["route_hash"], "workflow_state": "BLOCKED_HUMAN_GATE",
+            "evidence": {"gate": "review"}}) + "\n", encoding="utf-8")
+        current = self.root / "current"
+        current.symlink_to(self.root / "old", target_is_directory=True)
+        jobs = current / "jobs.log"
+        key = (self.route["route_id"], self.route["route_hash"], str(self.root / "route.json"))
+        H._WAIT_MEMO.clear()
+
+        def waits():
+            return H._waits_for(key, self.route, dict(self.route), None, jobs, WS.ledger_root_for(jobs)[0])
+
+        self.assertEqual(waits(), [])
+        self.assertEqual(waits(), [])
+        current.unlink()
+        current.symlink_to(self.root / "new", target_is_directory=True)
+        self.assertEqual([wait["gate_id"] for wait in waits()], ["review"])
+        self.assertEqual([wait["gate_id"] for wait in waits()], ["review"])
+
     def test_mismatched_route_identity_has_no_observation(self):
         route = dict(self.route, route_id="rt-unrelated")
         self.assertEqual(H.pending_human_waits(route, jobs=self.jobs), [])
@@ -98,6 +191,14 @@ class PendingWaitTest(unittest.TestCase):
             parsed = H._journal(ledger)
             self.assertEqual(loads.call_count, 1)
             self.assertEqual(parsed[0]["workflow_state"], "CANCELLED_________")
+
+    @staticmethod
+    def _s3(result):
+        """(current, folded, ownerless) blocked owners in the list. A blocked owner is listed for its
+        parent agent but counted by no person surface (11-14): ``total`` never includes it."""
+        rows = [item for item in result["items"] if item["source"] == "S3"]
+        return (sum(not item["stale"] for item in rows), sum(bool(item["stale"]) for item in rows),
+                sum(item.get("fold") == "ownerless" for item in rows))
 
     def _blocked_owner_fixture(self):
         route = {"artifact_root": str(self.artifacts), "nodes": []}
@@ -153,6 +254,85 @@ class PendingWaitTest(unittest.TestCase):
         successor = H.read_answer_waits(jobs_paths=[self.jobs], now=302)
         self.assertEqual(successor["total"], 0)
 
+    def test_one_selected_wait_reads_only_its_own_route(self):
+        """2026-11-11: opening one Fleet question re-observed every older wait.
+
+        With 13 older blocked owners each selected read verified every owner's
+        route on the shared artifact root (2,295 NAS reads per S3 row).
+        """
+        route, attempt, _lease, metadata = self._blocked_owner_fixture()
+        rows = []
+        for index, name in enumerate(("att-owner", "att-other-a", "att-other-b")):
+            route_file = self.root / (name + ".route.json")
+            route_file.write_text(json.dumps(route), encoding="utf-8")
+            row = (metadata.replace("attempt_id=" + attempt, "attempt_id=" + name)
+                   .replace("route_file=" + str(self.root / "owner.route.json"),
+                            "route_file=" + str(route_file)))
+            rows.append("%d\tdone\t/repo\t/wt\towner\t%s,note=dead-worker-blocked,"
+                        "failure_class=blocked\n" % (300 + index, row))
+        self.jobs.write_text("".join(rows), encoding="utf-8")
+        full = H.read_answer_waits(jobs_paths=[self.jobs], now=400)
+        self.assertEqual(sorted(item["id"] for item in full["items"]),
+                         ["S3:att-other-a", "S3:att-other-b", "S3:att-owner"])
+        with mock.patch.object(H, "_route_outcome", wraps=H._route_outcome) as outcome, \
+             mock.patch.object(H, "_codex_rollout_waits") as rollouts:
+            one = H.read_answer_waits(jobs_paths=[self.jobs], now=400,
+                                      only_id="S3:att-other-a")
+        self.assertEqual([item["id"] for item in one["items"]], ["S3:att-other-a"])
+        self.assertEqual(outcome.call_count, 1)
+        rollouts.assert_not_called()
+        self.assertTrue(one["complete"])
+        selected = next(item for item in full["items"] if item["id"] == "S3:att-other-a")
+        self.assertEqual({key: one["items"][0][key] for key in ("route_id", "since", "owner")},
+                         {key: selected[key] for key in ("route_id", "since", "owner")})
+
+    def test_last_pass_route_paths_follow_the_latest_full_pass_only(self):
+        """The wake list is built from the routes the latest full pass saw, not from ``_WAIT_MEMO``."""
+        route, _attempt, _lease, metadata = self._blocked_owner_fixture()
+        files = []
+        rows = []
+        for name in ("att-a", "att-b"):
+            route_file = self.root / (name + ".route.json")
+            route_file.write_text(json.dumps(route), encoding="utf-8")
+            files.append(str(route_file))
+            row = (metadata.replace("attempt_id=att-owner", "attempt_id=" + name)
+                   .replace("route_file=" + str(self.root / "owner.route.json"),
+                            "route_file=" + str(route_file)))
+            rows.append("300\tdone\t/repo\t/wt\towner\t%s,note=dead-worker-blocked,"
+                        "failure_class=blocked\n" % row)
+        self.jobs.write_text("".join(rows), encoding="utf-8")
+        H._WAIT_MEMO.clear()
+        H.read_answer_waits(jobs_paths=[self.jobs], now=400)
+        both = H.last_pass_route_paths()
+        self.assertEqual(both, tuple(sorted(both)))
+        self.assertTrue(set(files) <= set(both))
+        # The second full pass sees route B only: A is no longer a wake source.
+        self.jobs.write_text(rows[1], encoding="utf-8")
+        H.read_answer_waits(jobs_paths=[self.jobs], now=401)
+        only_b = H.last_pass_route_paths()
+        self.assertIn(files[1], only_b)
+        self.assertNotIn(files[0], only_b)
+        # An ``only_id`` pass never replaces the list, even though it reads route B.
+        self.jobs.write_text("".join(rows), encoding="utf-8")
+        H.read_answer_waits(jobs_paths=[self.jobs], now=402, only_id="S3:att-a")
+        self.assertEqual(H.last_pass_route_paths(), only_b)
+        # A full pass over another registry that cannot be read names nothing (the first one is
+        # no longer listed), while the memo keeps its old entries.
+        H.read_answer_waits(jobs_paths=[self.jobs], now=403)
+        self.assertTrue(set(files) <= set(H.last_pass_route_paths()))
+        self.assertTrue(H._WAIT_MEMO)
+        H.read_answer_waits(jobs_paths=[self.root / "missing" / "jobs.log"], now=404)
+        self.assertEqual(H.last_pass_route_paths(), ())
+        self.assertTrue(H._WAIT_MEMO, "the accessor must not mirror the memo")
+        # A listed registry this pass cannot read confirms none of its routes settled: the paths
+        # it named last stay.
+        H.read_answer_waits(jobs_paths=[self.jobs], now=405)
+        named = H.last_pass_route_paths()
+        self.assertTrue(set(files) <= set(named))
+        with mock.patch("dispatch_registry_cache.registry_snapshot", side_effect=OSError("synthetic")):
+            H.read_answer_waits(jobs_paths=[self.jobs], now=406)
+        self.assertEqual(H.last_pass_route_paths(), named)
+
     def test_later_owner_on_different_route_file_does_not_close_wait(self):
         route, _attempt, _lease, metadata = self._blocked_owner_fixture()
         route_file = self.root / "same-route-other-file.json"
@@ -176,15 +356,15 @@ class PendingWaitTest(unittest.TestCase):
         from tools.fleet import route as routes
         with mock.patch.object(routes, "load", wraps=routes.load) as route_load, \
              mock.patch.object(routes, "load_outcome", wraps=routes.load_outcome) as outcome_load:
-            self.assertEqual(H.read_answer_waits(jobs_paths=[self.jobs], now=301)["total"], 1)
+            self.assertEqual(self._s3(H.read_answer_waits(jobs_paths=[self.jobs], now=301))[0], 1)
             first_counts = (route_load.call_count, outcome_load.call_count)
-            self.assertEqual(H.read_answer_waits(jobs_paths=[self.jobs], now=302)["total"], 1)
+            self.assertEqual(self._s3(H.read_answer_waits(jobs_paths=[self.jobs], now=302))[0], 1)
             self.assertEqual((route_load.call_count, outcome_load.call_count), first_counts)
             outcome_file = Path(self.root / "owner.route.outcome.json")
             outcome_file.write_text(json.dumps({"route_id": route["route_id"],
                 "route_hash": route["route_hash"], "closed_at": "fixture", "match": True}),
                 encoding="utf-8")
-            self.assertEqual(H.read_answer_waits(jobs_paths=[self.jobs], now=303)["total"], 0)
+            self.assertEqual(self._s3(H.read_answer_waits(jobs_paths=[self.jobs], now=303))[0], 0)
             self.assertEqual((route_load.call_count, outcome_load.call_count),
                              (first_counts[0] + 1, first_counts[1] + 1))
 
@@ -295,8 +475,31 @@ class PendingWaitTest(unittest.TestCase):
                              ",note=dead-worker-blocked,failure_class=blocked\n", encoding="utf-8")
         result = H.read_answer_waits(jobs_paths=[self.jobs], now=300)
         self.assertTrue(result["complete"])
-        self.assertEqual(result["total"], 1)
+        self.assertEqual((self._s3(result)[0], result["total"]), (1, 0))
         self.assertEqual(result["items"][0]["source"], "S3")
+
+    def test_a_blocked_owner_whose_parent_took_its_result_waits_for_no_one(self):
+        # 11-14: a finished owner whose parent already holds its exact ACKed completion receipt
+        # (BLOCKED included) closes like a closed route; an unproven delivery keeps the wait.
+        _route, attempt, _lease, metadata = self._blocked_owner_fixture()
+        self.jobs.write_text("300\tdone\t/repo\t/wt\towner\t" + metadata +
+                             ",note=dead-worker-blocked,failure_class=blocked\n", encoding="utf-8")
+        import dispatch_completion_join
+        with mock.patch.object(dispatch_completion_join, "acknowledged_attempt_receipt",
+                               return_value=None) as unproven:
+            kept = H.read_answer_waits(jobs_paths=[self.jobs], now=301)
+        self.assertEqual(self._s3(kept)[0], 1)
+        self.assertEqual((unproven.call_args.args[1], unproven.call_args.kwargs["recipient_sid"],
+                          unproven.call_args.kwargs["parent_completion_delivery"]),
+                         (attempt, "old-parent", "opencode-turn"))
+        with mock.patch.object(dispatch_completion_join, "acknowledged_attempt_receipt",
+                               return_value={"verdict": "BLOCKED"}):
+            taken = H.read_answer_waits(jobs_paths=[self.jobs], now=302)
+        self.assertEqual([item for item in taken["items"] if item["source"] == "S3"], [])
+        with mock.patch.object(dispatch_completion_join, "acknowledged_attempt_receipt",
+                               side_effect=OSError("unreadable")):
+            unreadable = H.read_answer_waits(jobs_paths=[self.jobs], now=303)
+        self.assertEqual(self._s3(unreadable)[0], 1)
 
     def test_blocked_owner_folds_at_72_hours_and_age_never_drops_it(self):
         self._blocked_owner_fixture()
@@ -304,12 +507,13 @@ class PendingWaitTest(unittest.TestCase):
         terminal += ",note=dead-worker-blocked,failure_class=blocked"
         self.jobs.write_text("300\tdone\t/repo\t/wt\towner\t" + terminal + "\n", encoding="utf-8")
         current = H.read_answer_waits(jobs_paths=[self.jobs], now=300 + 72 * 3600 - 1)
-        self.assertEqual((current["total"], current["stale_total"]), (1, 0))
+        self.assertEqual(self._s3(current)[:2], (1, 0))
 
         self.jobs.write_text("299\tdone\t/repo\t/wt\towner\t" +
                              terminal + "\n", encoding="utf-8")
         folded = H.read_answer_waits(jobs_paths=[self.jobs], now=300 + 72 * 3600)
-        self.assertEqual((folded["total"], folded["stale_total"]), (0, 1))
+        self.assertEqual(self._s3(folded)[:2], (0, 1))
+        self.assertEqual((folded["total"], folded["stale_total"]), (0, 0))
         self.assertTrue(folded["items"][0]["stale"])
         self.assertEqual(folded["items"][0]["fold"], "older")
 
@@ -320,7 +524,7 @@ class PendingWaitTest(unittest.TestCase):
         for days in (7, 30):
             kept = H.read_answer_waits(jobs_paths=[self.jobs], now=300 + days * 86400)
             self.assertEqual([item["source"] for item in kept["items"]], ["S3"])
-            self.assertEqual((kept["total"], kept["stale_total"]), (0, 1))
+            self.assertEqual(self._s3(kept)[:2], (0, 1))
             self.assertEqual(kept["items"][0]["fold"], "older")
 
     def test_proven_owner_exit_folds_as_ownerless_and_unobserved_owner_stays_current(self):
@@ -340,7 +544,7 @@ class PendingWaitTest(unittest.TestCase):
         item = ended["items"][0]
         self.assertEqual((item["owner_state"], item["fold"], item["stale"]),
                          ("none", "ownerless", True))
-        self.assertEqual((ended["total"], ended["stale_total"], ended["ownerless"]), (0, 1, 1))
+        self.assertEqual(self._s3(ended), (0, 1, 1))
         self.assertEqual(ended["by_session"], {})
         self.assertIn(("codex", "old-parent"), seen)
 
@@ -348,12 +552,13 @@ class PendingWaitTest(unittest.TestCase):
                                       owner_liveness=probe("unknown"))
         self.assertEqual((unknown["items"][0]["owner_state"], unknown["items"][0]["fold"]),
                          ("unknown", None))
-        self.assertEqual((unknown["total"], unknown["ownerless"]), (1, 0))
+        self.assertEqual(self._s3(unknown)[::2], (1, 0))
 
         live = H.read_answer_waits(jobs_paths=[self.jobs], now=400, owner_liveness=probe("live"))
         self.assertEqual(live["items"][0]["owner_state"], "live")
         self.assertNotIn("registered_owner", live["items"][0])
-        self.assertEqual(live["by_session"], {("codex", "old-parent"): ["S3:" + attempt]})
+        # Listed for its parent agent, in no session's question index (11-14).
+        self.assertEqual(live["by_session"], {})
 
     def test_handover_successor_answers_and_keeps_the_registered_parent_visible(self):
         _route, attempt, _lease, metadata = self._blocked_owner_fixture()
@@ -369,7 +574,7 @@ class PendingWaitTest(unittest.TestCase):
         item = result["items"][0]
         self.assertEqual(item["owner"]["session_id"], "new-parent")
         self.assertEqual(item["registered_owner"], {"harness": "codex", "session_id": "old-parent"})
-        self.assertEqual((item["owner_state"], item["fold"], result["total"]), ("successor", None, 1))
+        self.assertEqual((item["owner_state"], item["fold"], self._s3(result)[0]), ("successor", None, 1))
         self.assertEqual(item["id"], "S3:" + attempt)
 
     def test_codex_question_only_in_its_rollout_is_kept_and_sidecar_wins(self):
@@ -429,7 +634,7 @@ class PendingWaitTest(unittest.TestCase):
                                          owner_liveness=lambda harness, sid: "ended")
         item = result["items"][0]
         self.assertEqual(item["owner"]["session_id"], "old-parent")
-        self.assertEqual((item["owner_state"], item["fold"], result["total"]), ("unknown", None, 1))
+        self.assertEqual((item["owner_state"], item["fold"], self._s3(result)[0]), ("unknown", None, 1))
 
     def test_owner_probe_outside_the_initial_pid_namespace_proves_no_exit(self):
         project_root = str(Path(__file__).resolve().parents[1])
@@ -458,12 +663,17 @@ class PendingWaitTest(unittest.TestCase):
                      "waiting_since": pending.since, "route_id": route["route_id"]}]
 
         with mock.patch.object(H, "pending_human_waits", side_effect=pending):
+            # The judgment is replaced by one that answers differently for the same inputs, so
+            # what the pass kept of its answer for those inputs is dropped between the passes.
+            H._WAIT_MEMO.clear()
             pending.since = instant - 72 * 3600 + 1
             current = H.read_answer_waits(jobs_paths=[self.jobs], now=instant)
             self.assertEqual((current["total"], current["stale_total"]), (1, 0))
+            H._WAIT_MEMO.clear()
             pending.since = instant - 72 * 3600
             older = H.read_answer_waits(jobs_paths=[self.jobs], now=instant)
             self.assertEqual((older["total"], older["stale_total"]), (0, 1))
+            H._WAIT_MEMO.clear()
             pending.since = instant - 7 * 86400 - 1
             older = H.read_answer_waits(jobs_paths=[self.jobs], now=instant)
             self.assertEqual((older["total"], older["stale_total"],
@@ -519,6 +729,8 @@ class PendingWaitTest(unittest.TestCase):
             result = H.read_answer_waits(jobs_paths=[self.jobs], now=now)
             self.assertEqual({item["source"] for item in result["items"]}, {"S1", "S2", "S4"},
                              repr(result))
+            # The marker question (S4 without a reply surface), answered in its own session's
+            # input, still waits for a person: it is counted with the rest (11-14).
             self.assertEqual((result["total"], result["stale_total"], result["by_session"]),
                              (0, 3, {}))
             self.assertTrue(all(item["stale"] for item in result["items"]))

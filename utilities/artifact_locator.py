@@ -7,6 +7,7 @@ producer side record), never by parsing a locator name.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -21,6 +22,7 @@ INDEX_JSON = "INDEX.json"
 INDEX_MD = "INDEX.md"
 CYCLE_BINDING = ".cycle.json"
 CAMPAIGN_EVENTS_DIR = "campaign.events"
+CAMPAIGN_RECORDS_DIR = "records"   # the generated record pages beside `campaign.md`: not a cycle folder
 MAX_SLUG_LENGTH = 48
 
 # id -> {title, started, status, campaign, path}, the row shape both the full
@@ -44,8 +46,8 @@ _BINDING_REQUIRED = frozenset({"schema_version", "kind", "campaign_id", "cycle_i
 _BINDING_OPTIONAL = frozenset({"started_on"})
 
 
-def _exact_cycle_manifest(root: Path, campaign: Path, cycle: Path) -> Optional[Dict[str, Any]]:
-    """Read only the exact, regular `<cycle>/manifest.json` control record."""
+def _exact_cycle_manifest_path(root: Path, campaign: Path, cycle: Path) -> Optional[Path]:
+    """`<cycle>/manifest.json` when it is the exact, regular control record, else None."""
     import artifact_manifest
 
     path = Path(cycle) / "manifest.json"
@@ -61,7 +63,55 @@ def _exact_cycle_manifest(root: Path, campaign: Path, cycle: Path) -> Optional[D
     result = artifact_manifest.classify_artifact_path(
         str(root), campaign_rel, cycle_rel, "control", path_rel, "regular",
     )
-    return _read_json(path) if result.allowed else None
+    return path if result.allowed else None
+
+
+def _exact_cycle_manifest(root: Path, campaign: Path, cycle: Path) -> Optional[Dict[str, Any]]:
+    """Read only the exact, regular `<cycle>/manifest.json` control record."""
+    path = _exact_cycle_manifest_path(root, campaign, cycle)
+    return _read_json(path) if path is not None else None
+
+
+class NotRegularFile(Exception):
+    """`read_sealed_head` was pointed at something that is not a regular file."""
+
+
+def read_sealed_head(path: Path, names: Sequence[str] = ()) -> Tuple[Optional[str], Optional[Dict[str, Any]], int]:
+    """`(digest, fields, size)` of a regular file read once (never followed through a link).
+
+    `digest` is `sha256:<hex>` of the bytes, or None when the file changed while it was read.  `fields` are the
+    named top-level values of the document (see `artifact_manifest.top_fields`): a file of at most
+    `TOP_FIELDS_PARSE_LIMIT` bytes is read whole and parsed, a larger one is read a chunk at a time and only the
+    wanted values are parsed, so no more than the limit and the wanted values are in memory, however large the file
+    is.  With no names `fields` is None and the file is only hashed.  The fields are only as trustworthy as the
+    bytes: a caller that has not already shown the digest is the recorded one must be ready for a file that is not
+    what it looks like."""
+    import artifact_manifest
+
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise NotRegularFile(str(path))
+        hasher = hashlib.sha256()
+        fields = None
+        whole = names and before.st_size <= artifact_manifest.TOP_FIELDS_PARSE_LIMIT
+        if whole:
+            data = stream.read(before.st_size + 1)  # not a buffer the size of the limit for a small file
+            if len(data) > before.st_size or len(data) > artifact_manifest.TOP_FIELDS_PARSE_LIMIT:  # it grew since: the long way
+                whole = False
+                stream.seek(0)
+            else:
+                hasher.update(data)
+                fields = artifact_manifest.top_fields(data, names)
+        if names and not whole:
+            fields = artifact_manifest.scan_top_fields(stream, names, hasher=hasher)
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            hasher.update(chunk)
+        after = os.fstat(stream.fileno())
+    if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
+        return None, None, after.st_size
+    return "sha256:" + hasher.hexdigest(), fields, after.st_size
 
 
 def started_on_is_valid(value: Any) -> bool:
@@ -235,7 +285,7 @@ def iter_cycle_dirs(campaign: Path) -> Iterator[Tuple[Path, str]]:
     if not campaign.is_dir() or campaign.is_symlink():
         return
     for entry in campaign.iterdir():
-        if entry.name.startswith(".") or entry.name in {"cycles", "journals", CAMPAIGN_EVENTS_DIR}:
+        if entry.name.startswith(".") or entry.name in {"cycles", "journals", CAMPAIGN_EVENTS_DIR, CAMPAIGN_RECORDS_DIR}:
             continue
         if entry.is_dir() and not entry.is_symlink():
             rows.append((entry, "readable"))
@@ -267,15 +317,46 @@ def read_cycle_record(root: Path, cycle_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _manifest_cycle_id(root: Path, campaign: Path, path: Path) -> Optional[str]:
-    manifest = _exact_cycle_manifest(root, campaign, path)
-    cycle = manifest.get("cycle") if manifest else None
-    value = cycle.get("cycle_id") if isinstance(cycle, dict) else None
+def _manifest_cycle_id(root: Path, campaign: Path, path: Path,
+                       binding: Optional[Mapping[str, Any]] = None) -> Optional[str]:
+    manifest_path = _exact_cycle_manifest_path(root, campaign, path)
+    if manifest_path is None:
+        return None
+    value: Any = None
+    head = _sealed_cycle_head(root, binding, manifest_path)
+    if head is not None:
+        value = head.get("cycle_id")
+    else:
+        manifest = _read_json(manifest_path)
+        cycle = manifest.get("cycle") if manifest else None
+        value = cycle.get("cycle_id") if isinstance(cycle, dict) else None
     if value is None:
         return None
     if not isinstance(value, str) or _CYCLE_ID.fullmatch(value) is None:
         raise LocatorError("locator-cycle-id-invalid", str(value))
     return value
+
+
+def _sealed_cycle_head(root: Path, binding: Optional[Mapping[str, Any]], manifest_path: Path) -> Optional[Dict[str, Any]]:
+    """The manifest's `cycle` value read as a stream, when the bytes are the ones the folder's record sealed
+    (their digest is the record's `manifest_digest`), else None and the caller reads the document: a big sealed
+    manifest costs a hash here, not a parse.  A manifest small enough to parse whole (`TOP_FIELDS_PARSE_LIMIT`) is
+    not read here at all: the caller reads the document as it always did, which costs less than the record and the
+    hash this would ask for, and a root of thousands of small cycles is scanned as fast as before."""
+    try:
+        import artifact_manifest
+        if os.lstat(manifest_path).st_size <= artifact_manifest.TOP_FIELDS_PARSE_LIMIT:
+            return None
+        record = read_cycle_record(root, binding["cycle_id"]) if binding else None
+        recorded = record.get("manifest_digest") if record else None
+        if not isinstance(recorded, str):
+            return None
+        digest, fields, _size = read_sealed_head(manifest_path, ("cycle",))
+    except (OSError, NotRegularFile, ValueError, KeyError, LocatorError):
+        return None
+    if digest != recorded or not fields or not isinstance(fields.get("cycle"), dict):
+        return None
+    return fields["cycle"]
 
 
 def cycle_binding_bytes(campaign_id: str, cycle_id: str, *, started_on: Optional[str] = None) -> bytes:
@@ -411,7 +492,7 @@ def _cycle_entry_id(root: Path, campaign: Mapping[str, Any], campaign_id: str,
     # is the current location; the stable cycle ID still has to agree.
     campaign_path = (cycle_path.parents[3] if layout == "request-execution" else
                      cycle_path.parent.parent if cycle_path.parent.name == "cycles" else cycle_path.parent)
-    cycle_id = _manifest_cycle_id(root, campaign_path, cycle_path)
+    cycle_id = _manifest_cycle_id(root, campaign_path, cycle_path, binding)
     if binding is not None and binding.get("campaign_id") != campaign_id:
         record = read_cycle_record(root, binding["cycle_id"]) or {}
         manifest = _exact_cycle_manifest(root, campaign_path, cycle_path) or {}

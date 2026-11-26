@@ -108,6 +108,11 @@ Extract the project's actual structure:
 
 Use `ls model/*/`, one representative model and config, `_ft` pattern search, and import analysis.
 
+When the existing experiment conditions are confirmed from the project's own records (a run log, a
+results table, configs), the same step may fill the project catalog once with
+`python3 utilities/experiment_catalog.py register --file <spec.json>`. Leave the meaning of a name
+that is not confirmed empty instead of inventing one.
+
 ### 3.5.2 `experiment_readiness.md`
 
 Check each item as ✅, ⚠️, or ❌ and add one autopilot-code cleanup recommendation for gaps.

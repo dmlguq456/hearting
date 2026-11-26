@@ -18,6 +18,9 @@ no-progress, capacity, orphan) are already covered by dispatch_lifecycle.test.py
 dispatch_registry.test.py, stage_dispatch_*.test.py and the fleet suite; this file
 does not duplicate them — it fills the untested boundary column.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import hashlib
 import importlib.util
 import json

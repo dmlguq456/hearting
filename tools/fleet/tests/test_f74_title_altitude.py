@@ -12,6 +12,9 @@ Contract under test (input assembly + validation only — no provider is ever ca
   * a status-shaped title fails validation, which makes ``main`` keep the prior title while
     the NOW line still updates.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 import os
 import sys
@@ -41,10 +44,11 @@ class PromptAltitudeTest(unittest.TestCase):
             self.assertIn(word, prompt)
         self.assertIn("must not appear in the title", prompt)
 
-    def test_now_line_keeps_its_right_now_job(self):
-        prompt = rt._prompt("hello")
+    def test_now_line_names_the_latest_change_and_not_the_title_job(self):
+        prompt = " ".join(rt._prompt("hello").split())
         self.assertIn("NOW:", prompt)
-        self.assertIn("RIGHT NOW", prompt)
+        self.assertIn("saying what changed in the CONVERSATION block", prompt)
+        self.assertIn("do not restate the user's request", prompt)
 
     def test_existing_length_contract_is_unchanged(self):
         self.assertIn("3-6 words", rt.PROMPT_TEMPLATE)

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Same worker result, same close: the foreground tail decides once for every harness."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 import os
 import subprocess
@@ -79,6 +82,30 @@ class SameResultSameCloseTest(unittest.TestCase):
                     self.assertEqual((note, closed, detected_by), ("dead-nonzero-exit", True, "foreground-process-exit"))
                 if name == "quiet-no-progress":
                     self.assertEqual((note, closed, detected_by), ("dead-no-progress", True, "foreground-process-exit"))
+
+
+class UnitCapacityExitTest(unittest.TestCase):
+    def test_irrecoverable_process_exit_does_not_discard_exact_unit_capacity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            log = root / "unit.att-unit.opencode.jsonl"
+            log.write_text(json.dumps({"type": "result", "runtime": "opencode", "is_error": True,
+                                       "error": {"status": 429, "message": "usage limit"}}) + "\n")
+            row = SimpleNamespace(metadata={
+                "attempt_id": "att-unit", "worker_type": "review", "capability": "unit", "harness": "opencode",
+                "artifact_root": str(root), "log_file": str(log), "dispatch_depth": "1", "route_node": "unit",
+                "workflow_completion": "runtime-v1"})
+            with mock.patch("dispatch_completion_join.exact_attempt_row", return_value=row), \
+                    mock.patch("dispatch_completion_join.materialize_after_terminal_close"), \
+                    mock.patch.object(F, "close_attempt_row", return_value=True) as close:
+                for failure, note in (("exit-1", "dead-capacity"), ("signal-1", "dead-signal-1")):
+                    F.settle_foreground_exit(root / "jobs.log", "att-unit", log,
+                                             SimpleNamespace(failure=failure, exit_code=1),
+                                             worktree=root, artifact_root=root, worker_type="review",
+                                             legacy_close=mock.Mock())
+                    self.assertEqual(close.call_args.args[2], note)
+                    evidence = close.call_args.kwargs["evidence"]
+                    self.assertEqual(evidence["failure_class"], "capacity" if failure == "exit-1" else "runtime")
 
 
 class EveryWrapperUsesItTest(unittest.TestCase):

@@ -17,17 +17,20 @@ def _shared():
     return resource_run_registry
 
 
-def collect(index_path=None):
+def collect(index_path=None, *, keep=None):
     global _READ_CACHE
     rows = []
     diagnostics = []
+    collect.last_skipped = 0
     try:
         shared = _shared()
         scope = getattr(shared, 'passive_read_scope', None)
         if callable(scope) and _READ_CACHE is None:
             _READ_CACHE = shared.ResourceReadCache()
         with scope(_READ_CACHE) if callable(scope) else nullcontext():
-            raw, diagnostics = shared.scan(index_path=index_path)
+            raw, diagnostics = shared.scan(index_path=index_path,
+                                           **({"keep": keep} if keep is not None else {}))
+            collect.last_skipped = getattr(shared.scan, "last_skipped", 0) if keep is not None else 0
         for item in raw:
             try:
                 item["project"] = project_of(item.get("cwd"))
@@ -46,3 +49,4 @@ def collect(index_path=None):
 
 
 collect.last_diagnostics = []
+collect.last_skipped = 0

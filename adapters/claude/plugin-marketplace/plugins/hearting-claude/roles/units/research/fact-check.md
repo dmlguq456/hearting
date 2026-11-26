@@ -16,6 +16,10 @@ aliases: {}
 
 # Unit: research/fact-check
 
+## 지킬 것
+
+Always carried with the worker text. Every line in this section is a must.
+
 Narrow verbatim matching only — no creative judgment. This is the selected
 source-check gate for research, draft, refinement, and their strategy stages
 when claims, citations, or cards are actually in scope. Internal provenance
@@ -23,7 +27,7 @@ only: whether a claim matches the local cards. Adversarial external truth
 verification is research/claim-verify's layer — a claim can match a card while
 the card itself is wrong.
 
-## Classification rule (single source of truth)
+### Classification rule (single source of truth)
 
 | Source type | Meaning | Verdict |
 |---|---|---|
@@ -36,7 +40,7 @@ the card itself is wrong.
 | `ambiguous` | Several candidate cards, no single best match | 🟡 caution |
 | `circular-ref` | Draft and strategy cite each other rather than cards | 🔴 fail (architecture violation) |
 
-## Verification rules (CRITICAL)
+### Verification rules (CRITICAL)
 
 1. **Name-only match is never sufficient.** If a card has only the name and
    the venue/year/metric is not verbatim, the result is 🟡 — card *existence*
@@ -62,7 +66,7 @@ the card itself is wrong.
    recommend an explicit `[?]` placeholder instead of inventing venue, year,
    task, or metric — hallucinated values accumulate across refinement cycles.
 
-## Output — single table, no narrative
+### Output — single table, no narrative
 
 | Section | Claim in artifact | Source (file:line or section) | Match (✅/🟡/❌) | Source type | Severity (🔴/🟡/🟢) |
 |---|---|---|---|---|---|
@@ -77,7 +81,13 @@ says so.
 Return per `_shared/dual-io.md`; verdict semantics: `no-issues`,
 `memos-added` (count), `conflicts-found` (count).
 
-## Memory
+## 참고
+
+Always carried with the worker text. These are defaults you may override: a better method
+is fine. Precedence: this turn's instruction > project conventions > the person's profile >
+the defaults below.
+
+### Memory
 
 Per `_shared/memory-flow.md`. Retention targets: common false-positive
 patterns (name-only matches that look verbatim); project-specific circular-ref

@@ -1,3 +1,6 @@
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import copy
 import importlib.util
 import io
@@ -656,11 +659,11 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
                 mock.patch.object(render.curses, "COLORS", 256, create=True):
             render._init_colors()
 
-        self.assertEqual(render._COLOR["gpu_ada"], render._COLOR["h_claude"])
-        self.assertEqual(render._COLOR["gpu_hopper"], render._COLOR["h_codex"])
-        self.assertEqual(render._COLOR["gpu_ampere"], render._COLOR["h_opencode"])
-        self.assertEqual(render._COLOR["gpu_rtx6000"], render._COLOR["h_opencode"])
-        self.assertEqual(render._COLOR["gpu_rtx4090"], render._COLOR["h_claude"])
+        self.assertEqual(render._COLOR["gpu_ada"], render._COLOR["famd_opus"])      # the GPU teal is not the Claude orange
+        self.assertEqual(render._COLOR["gpu_hopper"], render._COLOR["fam_fable"] | render.curses.A_DIM)
+        self.assertEqual(render._COLOR["gpu_ampere"], render._COLOR["fam_sonnet"] | render.curses.A_DIM)
+        self.assertEqual(render._COLOR["gpu_rtx6000"], render._COLOR["fam_sonnet"] | render.curses.A_DIM)
+        self.assertEqual(render._COLOR["gpu_rtx4090"], render._COLOR["famd_opus"])
         self.assertNotEqual(render._COLOR["gpu_rtx6000"], render._COLOR["gpu_rtx4090"])
         for family in ("gpu_rtx6000", "gpu_rtx4090", "gpu_rtx5090",
                        "gpu_blackwell", "gpu_hopper", "gpu_ada", "gpu_ampere", "gpu_turing"):

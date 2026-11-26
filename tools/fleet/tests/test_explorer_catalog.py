@@ -1,11 +1,18 @@
 """Catalog reads use the installed runtime and never invoke model providers."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 from contextlib import chdir
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import socket
+import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -491,6 +498,576 @@ class ModelCatalogTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {**env, "OPENCODE_CONFIG": config_path}, clear=False):
                 overridden = model_catalog._opencode_configured_providers()
             self.assertEqual(overridden, {"file-provider", "inline-provider"})
+
+
+    # --- chosen-shape rows for the model-follow rule: vendor patterns live in each reader ---
+
+    def _codex_cache(self, models, client_version="0.163.0"):
+        path = self.root / "codex" / "models_cache.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"client_version": client_version, "models": models}))
+
+    def test_codex_rows_carry_family_version_visibility_mark_levels_and_upgrade(self):
+        self._codex_cache([
+            {"slug": "gpt-6.1-sol", "visibility": "list", "supported_in_api": True,
+             "description": "Previous generation coding model",
+             "supported_reasoning_levels": [{"effort": "high"}, {"effort": "xhigh"}],
+             "upgrade": {"model": "gpt-6.2-sol"}},
+            {"slug": "gpt-6.2-sol", "visibility": "list", "description": "Newest",
+             "supported_reasoning_levels": ["low", "high"]},
+            {"slug": "gpt-6-luna", "visibility": "hide", "description": "Legacy small model"},
+            {"slug": "gpt-6.1-terra", "visibility": "list", "supported_in_api": False},
+            {"slug": "gpt-6.2-sol-codex", "visibility": "list"},
+            {"slug": "o9-mini", "visibility": "list"}])
+        catalog = model_catalog.read_catalog("codex")
+        self.assertEqual(catalog.client_version, "0.163.0")
+        rows = {row["id"]: row for row in catalog.rows}
+        self.assertEqual((rows["gpt-6.1-sol"]["family"], rows["gpt-6.1-sol"]["version"]), ("sol", (6, 1)))
+        self.assertEqual((rows["gpt-6.2-sol"]["family"], rows["gpt-6.2-sol"]["version"]), ("sol", (6, 2)))
+        self.assertEqual(rows["gpt-6.1-sol"]["efforts"], ("high", "xhigh"))
+        self.assertEqual(rows["gpt-6.2-sol"]["efforts"], ("low", "high"))
+        self.assertEqual(rows["gpt-6.1-sol"]["upgrade"], "gpt-6.2-sol")
+        self.assertTrue(rows["gpt-6.1-sol"]["deprecated"])
+        self.assertFalse(rows["gpt-6.2-sol"]["deprecated"])
+        self.assertEqual((rows["gpt-6-luna"]["visible"], rows["gpt-6-luna"]["deprecated"],
+                          rows["gpt-6-luna"]["version"]), (False, True, (6,)))
+        self.assertFalse(rows["gpt-6.1-terra"]["visible"])
+        # names off the gpt-<version>-<name> pattern get no family and are never followed
+        for odd in ("gpt-6.2-sol-codex", "o9-mini"):
+            self.assertEqual((rows[odd]["family"], rows[odd]["version"]), (None, None))
+
+    def test_claude_rows_carry_family_version_section_levels_and_cli_floor(self):
+        document = self._claude_v2([("claude-opus-5-5", "opus", "main"),
+                                    ("claude-haiku-5-5", "haiku", "main"),
+                                    ("claude-opus-4-6", "opus", "overflow"),
+                                    ("claude-sonnet-4-5-20250929", "sonnet", "main"),
+                                    ("odd-name", "opus", "main")])
+        records = document["catalog"]["config"]["models"]
+        records[0]["effort_levels"] = ["low", {"id": "high"}, "max"]
+        records[0]["min_claude_code_version"] = "2.1.280"
+        records[1]["runtime"]["min_claude_code_version"] = "2.1.293"
+        self._claude_cache("one.json", document)
+        catalog = model_catalog.read_catalog("claude")
+        rows = {row["id"]: row for row in catalog.rows}
+        self.assertEqual((rows["claude-opus-5-5"]["family"], rows["claude-opus-5-5"]["version"],
+                          rows["claude-opus-5-5"]["visible"]), ("opus", (5, 5), True))
+        self.assertEqual(rows["claude-opus-5-5"]["efforts"], ("low", "high", "max"))
+        self.assertEqual(rows["claude-opus-5-5"]["min_cli"], "2.1.280")
+        self.assertEqual(rows["claude-haiku-5-5"]["min_cli"], "2.1.293")
+        self.assertEqual((rows["claude-opus-4-6"]["visible"], rows["claude-opus-4-6"]["deprecated"]),
+                         (False, True))
+        self.assertEqual(rows["claude-sonnet-4-5-20250929"]["version"], (4, 5))
+        self.assertEqual((rows["odd-name"]["family"], rows["odd-name"]["version"]), (None, None))
+        # the aliases the runtime accepts are choices, not rows: they follow the runtime themselves
+        self.assertNotIn("opus", rows)
+
+    def test_opencode_cache_rows_group_by_provider_family_and_name_stem(self):
+        cache = self.root / "cache/opencode/models.json"
+        cache.parent.mkdir(parents=True)
+        cache.write_text(json.dumps({"ready": {"models": {
+            "muse-spark-1.3-contributor": {"family": "muse", "status": "active",
+                                           "cost": {"input": 0.1, "output": 0.4}},
+            "muse-spark-1.2-contributor": {"family": "muse", "status": "deprecated", "cost": {"input": 0.1}},
+            "deepseek-v4.1-flash": {"family": "deepseek"}, "unversioned": {"family": "muse"},
+            "no-family-2": {}}}, "unused": {"models": {"hidden-3": {"family": "x"}}}}))
+        auth = self.root / "data/opencode/auth.json"
+        auth.parent.mkdir(parents=True)
+        auth.write_text(json.dumps({"ready": {}}))
+        rows = {row["id"]: row for row in model_catalog.read_catalog("opencode").rows}
+        self.assertEqual(set(rows), {"ready/muse-spark-1.3-contributor", "ready/muse-spark-1.2-contributor",
+                                     "ready/deepseek-v4.1-flash", "ready/unversioned", "ready/no-family-2"})
+        new, old = rows["ready/muse-spark-1.3-contributor"], rows["ready/muse-spark-1.2-contributor"]
+        self.assertEqual(new["family"], old["family"])  # the same product line, only the version differs
+        self.assertEqual((new["version"], old["version"]), ((1, 3), (1, 2)))
+        self.assertEqual((new["cost"], old["deprecated"], old["visible"]), (0.1, True, False))
+        self.assertNotEqual(rows["ready/deepseek-v4.1-flash"]["family"], new["family"])
+        for odd in ("ready/unversioned", "ready/no-family-2"):
+            self.assertEqual((rows[odd]["family"], rows[odd]["version"]), (None, None))
+
+    def test_opencode_service_rows_carry_family_status_price_and_variants(self):
+        self._native_service({"location": {"directory": str(self.root)}, "data": [
+            {"providerID": "ready", "id": "muse-spark-1.3-contributor", "enabled": True,
+             "status": "active", "family": "muse", "cost": {"input": 0.1},
+             "variants": [{"id": "low"}, {"id": "high"}]},
+            {"providerID": "ready", "id": "muse-spark-1.2-contributor", "enabled": True,
+             "status": "deprecated", "family": "muse", "cost": 0.5},
+            {"providerID": "ready", "id": "disabled-9", "enabled": False, "status": "active", "family": "x"},
+        ]})
+        catalog = model_catalog.read_catalog("opencode")
+        rows = {row["id"]: row for row in catalog.rows}
+        self.assertEqual(set(rows), {"ready/muse-spark-1.3-contributor", "ready/muse-spark-1.2-contributor"})
+        self.assertEqual(rows["ready/muse-spark-1.3-contributor"]["efforts"], ("low", "high"))
+        self.assertEqual((rows["ready/muse-spark-1.3-contributor"]["cost"], rows["ready/muse-spark-1.2-contributor"]["cost"]),
+                         (0.1, 0.5))
+        self.assertEqual((rows["ready/muse-spark-1.2-contributor"]["deprecated"],
+                          rows["ready/muse-spark-1.2-contributor"]["visible"]), (True, False))
+        self.assertNotIn("fixture-private-password", repr(catalog))
+
+    def test_rows_are_empty_when_the_cache_names_models_only(self):
+        self._claude_cache("flat.json", {"models": [{"id": "claude-opus-5-5"}]})
+        self.assertEqual(model_catalog.read_catalog("claude").rows, ())
+        self._codex_cache([])
+        self.assertEqual(model_catalog.read_catalog("codex").rows, ())
+
+    # --- a list that cannot make follow rows still reads as it always did ---
+
+    def _broken_list_cases(self):
+        digits, price = "9" * 5000, int("9" * 401)  # a version past the integer-string limit; a price past float
+        cache = lambda models: {"p": {"models": models}}  # noqa: E731
+        return {
+            "codex-normal": ("codex", {"models": [{"slug": "gpt-6-astra", "visibility": "list"}]},
+                             ("gpt-6-astra",), True),
+            "codex-long-version": ("codex", {"models": [{"slug": f"gpt-{digits}-astra", "visibility": "list"}]},
+                                   (f"gpt-{digits}-astra",), False),
+            "claude-normal": ("claude", {"catalog": {"config": {"models": [{"id": "claude-opus-5-5"}]}}},
+                              ("claude-opus-5-5",), True),
+            "claude-long-version": ("claude", {"catalog": {"config": {"models": [{"id": f"claude-opus-{digits}"}]}}},
+                                    (f"claude-opus-{digits}",), False),
+            "opencode-normal": ("opencode", cache({"elm-1": {"id": "elm-1", "family": "elm", "cost": {"input": 1.5}}}),
+                                ("p/elm-1",), True),
+            "opencode-long-version": ("opencode", cache({f"elm-{digits}": {"id": f"elm-{digits}", "family": "elm"}}),
+                                      (f"p/elm-{digits}",), False),
+            "opencode-big-input-price": ("opencode", cache({"elm-1": {"id": "elm-1", "family": "elm",
+                                                                      "cost": {"input": price}}}),
+                                         ("p/elm-1",), False),
+            "opencode-big-flat-price": ("opencode", cache({"elm-1": {"id": "elm-1", "family": "elm", "cost": price}}),
+                                        ("p/elm-1",), False),
+        }
+
+    def _write_list(self, harness, document):
+        path = {"codex": self.root / "codex/models_cache.json",
+                "claude": self.root / "claude/cache/model-catalog/one.json",
+                "opencode": self.root / "cache/opencode/models.json"}[harness]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(document))
+        if harness == "opencode":
+            auth = self.root / "data/opencode/auth.json"
+            auth.parent.mkdir(parents=True, exist_ok=True)
+            auth.write_text(json.dumps({"p": {"type": "api"}}))
+
+    def test_a_list_whose_rows_cannot_be_made_reads_as_before_and_follows_nothing(self):
+        for name, (harness, document, models, has_rows) in self._broken_list_cases().items():
+            with self.subTest(case=name):
+                for stale in self.root.rglob("*.json"):
+                    stale.unlink()
+                self._write_list(harness, document)
+                for catalog in (model_catalog.read_catalog(harness), model_catalog.read_catalogs()[harness]):
+                    self.assertEqual((catalog.state, catalog.models), ("available", models))
+                    self.assertEqual(bool(catalog.rows), has_rows)
+                # the other harnesses' lists are not lost with it
+                self.assertEqual({h: c.state for h, c in model_catalog.read_catalogs().items()},
+                                 {h: ("available" if h == harness else "unknown")
+                                  for h in ("claude", "codex", "opencode")})
+
+    def test_a_broken_list_gives_the_survey_no_line_and_no_error(self):
+        utilities = str(ROOT / "utilities")
+        if utilities not in sys.path:
+            sys.path.insert(0, utilities)
+        for name, (harness, document, _models, has_rows) in self._broken_list_cases().items():
+            if has_rows:
+                continue
+            with self.subTest(case=name):
+                for stale in self.root.rglob("*.json"):
+                    stale.unlink()
+                self._write_list(harness, document)
+                self._user_conf(harness)
+                result, lines = self._follow(harness)
+                # the cells and their states are the table's own, so they are there; none follows
+                self.assertEqual((result["status"], result["reason"], lines), ("skipped", "no-catalog", []))
+                self.assertTrue(result["entries"])
+                self.assertEqual({entry["branch"] for entry in result["entries"]}, {"none"})
+
+    def test_a_service_list_whose_rows_cannot_be_made_reads_as_before_and_follows_nothing(self):
+        name = "elm-" + "9" * 5000
+        self._native_service({"location": {"directory": str(self.root)}, "data": [
+            {"providerID": "ready", "id": name, "enabled": True, "status": "active", "family": "elm"}]})
+        catalog = model_catalog.read_catalog("opencode")
+        self.assertEqual((catalog.state, catalog.models, catalog.rows), ("available", (f"ready/{name}",), ()))
+
+
+    # --- harness files -> rows -> model-follow lines, on a fixture home, nothing written ---
+
+    SHIPPED = Path(__file__).resolve().parents[3] / "adapters"
+
+    def _user_conf(self, harness, *replacements):
+        base = {"claude": self.root / "claude", "codex": self.root / "codex",
+                "opencode": self.root / "config" / "opencode"}[harness]
+        text = (self.SHIPPED / harness / "config" / "models.conf").read_text()
+        for old, new in replacements:
+            self.assertIn(old, text)
+            text = text.replace(old, new)
+        path = base / "agent-config" / "models.conf"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return path
+
+    def _follow(self, harness, installed=(None, None)):
+        utilities = str(Path(__file__).resolve().parents[3] / "utilities")
+        if utilities not in sys.path:
+            sys.path.insert(0, utilities)
+        import model_follow
+        tree = sorted(p for p in self.root.rglob("*"))
+        sizes = {p: p.stat().st_size for p in tree if p.is_file()}
+        # A worker's masked home pins every harness's model config to one directory;
+        # this fixture is an ordinary user home, where each harness has its own.
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.root / "claude")}):
+            os.environ.pop("HEARTING_MODEL_CONFIG_HOME", None)
+            result = model_follow.survey_harness(harness, probe=lambda _h: installed)
+        self.assertEqual(sorted(self.root.rglob("*")), tree)  # nothing created, not even a backup
+        self.assertEqual({p: p.stat().st_size for p in tree if p.is_file()}, sizes)
+        return result, model_follow.lines([result])
+
+    def test_codex_files_give_newer_proposal_and_cli_lines(self):
+        path = self._user_conf("codex",
+                               ("CFG_MODEL_PROFILE_DEEP=deep:xhigh", "CFG_MODEL_PROFILE_DEEP=model/gpt-6-astra:high"))
+        before = path.read_bytes()
+        self._codex_cache([
+            {"slug": "gpt-6-astra", "visibility": "list", "upgrade": {"model": "gpt-6.2-sol"},
+             "description": "Previous generation"},
+            {"slug": "gpt-6.1-sol", "visibility": "list", "description": "Previous generation"},
+            {"slug": "gpt-6.2-sol", "visibility": "list", "description": "Newest",
+             "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}]},
+            {"slug": "gpt-6-luna", "visibility": "list", "description": "Previous generation"}])
+        result, lines = self._follow("codex", installed=((0, 163, 0), "/opt/bin/codex"))
+        self.assertEqual(lines, [
+            "model follow: proposal codex tier/top gpt-6-astra -> gpt-6.2-sol (other family)"
+            " · hearting model set codex tier/top gpt-6.2-sol@high",
+            "model follow: proposal codex profile/deep gpt-6-astra -> gpt-6.2-sol (other family)"
+            " · hearting model set codex profile/deep gpt-6.2-sol@high",
+            "model follow: codex CLI 0.163.0 lists gpt-6-luna as previous generation with no"
+            " successor · update the Codex CLI yourself"])
+        # what an update would write is the plan; the survey itself says nothing about it
+        plan = {item["target"]: item for item in result["plan"]}
+        self.assertEqual((plan["tier/deep"]["to"], plan["tier/deep"]["effort"], plan["tier/deep"]["effort_was"]),
+                         ("gpt-6.2-sol", "high", "xhigh"))
+        cascade = {e["target"]: e["companions"] for e in result["entries"]}["tier/deep"]
+        self.assertEqual([c["key"] for c in cascade], ["CFG_TIER_DEEP_FAILOVER_CASCADE"])
+        import model_follow
+        final = model_follow.final_lines([e for e in result["entries"] if e["target"] == "tier/deep"])
+        self.assertTrue(final["CFG_TIER_DEEP_FAILOVER_CASCADE"]["to"].startswith("gpt-6.2-sol:high "))
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_claude_files_give_newer_and_cli_lines_and_leave_aliases_alone(self):
+        self._user_conf("claude",
+                        ("CFG_TIER_LIGHT_MODEL=sonnet", "CFG_TIER_LIGHT_MODEL=claude-sonnet-4-5"),
+                        ("CFG_MODEL_PROFILE_DEEP=deep:xhigh", "CFG_MODEL_PROFILE_DEEP=model/claude-opus-4-6:xhigh"))
+        document = self._claude_v2(
+            [("claude-sonnet-4-5", "sonnet", "main"), ("claude-sonnet-5-5", "sonnet", "main"),
+             ("claude-opus-4-6", "opus", "main"), ("claude-opus-5-5", "opus", "main"),
+             ("claude-fable-9-0", "fable", "main")],
+            {"opus": {"default": "claude-opus-5-5"}})
+        records = {r["id"]: r for r in document["catalog"]["config"]["models"]}
+        records["claude-opus-5-5"]["effort_levels"] = ["low", "medium", "high"]
+        records["claude-fable-9-0"]["min_claude_code_version"] = "9.0.0"
+        self._claude_cache("one.json", document)
+        result, lines = self._follow("claude", installed=((2, 1, 5), "/h/.local/share/claude/versions/2.1.5"))
+        self.assertEqual(lines, [
+            "model follow: claude CLI 2.1.5 is older than claude-fable-9-0 (needs 9.0.0) · claude update"])
+        plan = {item["target"]: (item["to"], item["effort"], item["effort_was"]) for item in result["plan"]}
+        self.assertEqual(plan, {"tier/light": ("claude-sonnet-5-5", "medium", None),
+                                "profile/deep": ("claude-opus-5-5", "high", "xhigh")})
+        # the alias cells name no listed id: nothing to do for them
+        aliases = [e for e in result["entries"] if e["current"]["model"] in ("opus", "sonnet", "fable")]
+        self.assertTrue(aliases and {e["kind"] for e in aliases} == {"none"})
+
+    def test_opencode_files_give_newer_and_price_proposal_lines(self):
+        self._user_conf("opencode",
+                        ("CFG_MODEL_PROFILE_DEEP=balanced-deep:xhigh",
+                         "CFG_MODEL_PROFILE_DEEP=model/opencode-go/muse-spark-1.2-contributor:high"))
+        cache = self.root / "cache/opencode/models.json"
+        cache.parent.mkdir(parents=True)
+        cache.write_text(json.dumps({"opencode-go": {"models": {
+            "muse-spark-1.2-contributor": {"family": "muse", "cost": {"input": 0.1}},
+            "muse-spark-1.3-contributor": {"family": "muse", "cost": {"input": 0.1}},
+            "deepseek-v4.1-flash": {"family": "deepseek", "cost": {"input": 0.1}},
+            "deepseek-v4.2-flash": {"family": "deepseek", "cost": {"input": 0.5}}}}}))
+        auth = self.root / "data/opencode/auth.json"
+        auth.parent.mkdir(parents=True)
+        auth.write_text(json.dumps({"opencode-go": {}}))
+        result, lines = self._follow("opencode", installed=((2, 0, 32), None))
+        self.assertEqual([line.split(" · ")[0] for line in lines], [
+            "model follow: proposal opencode tier/light opencode-go/deepseek-v4.1-flash -> "
+            "opencode-go/deepseek-v4.2-flash (price x5.00)",
+            "model follow: proposal opencode tier/mini opencode-go/deepseek-v4.1-flash -> "
+            "opencode-go/deepseek-v4.2-flash (price x5.00)"])
+        plan = {item["target"]: (item["to"], item["effort"]) for item in result["plan"]}
+        self.assertEqual(plan, {"profile/deep": ("opencode-go/muse-spark-1.3-contributor", "high")})
+        self.assertIsNone(result["cli"])  # OpenCode never gets the CLI note
+
+
+ROOT = Path(__file__).resolve().parents[3]
+
+
+def _fixture_env(root):
+    return {"HOME": str(root), "PATH": "", "XDG_STATE_HOME": str(root / "state"),
+            "XDG_CONFIG_HOME": str(root / "config"), "XDG_DATA_HOME": str(root / "data"),
+            "XDG_CACHE_HOME": str(root / "cache"), "CODEX_HOME": str(root / "codex"),
+            "HEARTING_MODEL_CONFIG_HOME": str(root / "claude"), "OPENCODE_RUNTIME_VERSION": "1.19.0"}
+
+
+class ListPlaceTests(unittest.TestCase):
+    """A list's place that is not a regular file is skipped at once, never waited on."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="fleet-place-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.env = _fixture_env(self.root)
+
+    def places(self):
+        return {"claude": self.root / "claude/cache/model-catalog/one.json",
+                "codex": self.root / "codex/models_cache.json",
+                "opencode": self.root / "cache/opencode/models.json"}
+
+    def read_in_child(self, harness):
+        """The catalog state a fresh process reads, with a time limit (a wait would be a failure)."""
+        code = ("import sys; sys.path.insert(0, sys.argv[1]);"
+                "from tools.fleet.explorer import model_catalog;"
+                "print(model_catalog.read_catalog(sys.argv[2]).state)")
+        done = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(ROOT), harness],
+                              env=self.env, capture_output=True, text=True, timeout=10)
+        return done.stdout.strip()
+
+    def test_a_pipe_in_each_harnesss_list_place_is_unknown_and_returns_at_once(self):
+        for harness, place in self.places().items():
+            with self.subTest(harness=harness):
+                place.parent.mkdir(parents=True, exist_ok=True)
+                os.mkfifo(place)
+                started = time.monotonic()
+                self.assertEqual(self.read_in_child(harness), "unknown")
+                self.assertLess(time.monotonic() - started, 5)
+
+    def test_a_socket_or_a_directory_is_skipped_too(self):
+        place = self.places()["codex"]
+        place.parent.mkdir(parents=True)
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(str(place))
+            self.assertEqual(self.read_in_child("codex"), "unknown")
+        place.unlink()
+        place.mkdir()
+        self.assertEqual(self.read_in_child("codex"), "unknown")
+
+    def test_a_regular_file_and_a_link_to_one_read_as_before(self):
+        document = {"models": [{"slug": "gpt-6-elm", "visibility": "list"}]}
+        place = self.places()["codex"]
+        place.parent.mkdir(parents=True)
+        real = self.root / "real.json"
+        real.write_text(json.dumps(document))
+        place.symlink_to(real)
+        self.assertEqual(model_catalog._json(place), document)
+        self.assertEqual(self.read_in_child("codex"), "available")
+        place.unlink()
+        place.write_text("{broken")
+        self.assertIsNone(model_catalog._json(place))
+        place.write_text(json.dumps(document) + " " * (model_catalog._MAX_BYTES))
+        self.assertIsNone(model_catalog._json(place))
+        self.assertIsNone(model_catalog._json(self.root / "absent.json"))
+
+    def test_a_link_to_a_pipe_is_skipped(self):
+        place = self.places()["codex"]
+        place.parent.mkdir(parents=True)
+        pipe = self.root / "pipe"
+        os.mkfifo(pipe)
+        place.symlink_to(pipe)
+        self.assertEqual(self.read_in_child("codex"), "unknown")
+
+    def test_what_is_opened_is_what_is_judged_even_if_the_place_changed_since(self):
+        place = self.root / "list.json"
+        place.write_text("{}")  # a regular file when anyone looked
+        read, write = os.pipe()  # but a pipe when it is opened
+        self.addCleanup(os.close, write)
+        flags = []
+        real_open = os.open
+
+        def swapped(path, flag, *args):
+            flags.append(flag)
+            return read if str(path) == str(place) else real_open(path, flag, *args)
+
+        with mock.patch.object(model_catalog.os, "open", side_effect=swapped):
+            self.assertIsNone(model_catalog._json(place))
+        self.assertTrue(flags and flags[0] & os.O_NONBLOCK)
+        with self.assertRaises(OSError):  # the descriptor was released by the reader
+            os.fstat(read)
+
+
+class ServiceDeadlineTests(unittest.TestCase):
+    """A service that stops answering never holds a caller that asked for a total time
+    past it; a caller that did not ask keeps the per-read wait."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="fleet-svc-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        patch = mock.patch.dict(os.environ, _fixture_env(self.root))
+        patch.start()
+        self.addCleanup(patch.stop)
+        patch = mock.patch.object(model_catalog, "_candidates", return_value=())
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def serve(self, handler):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.service(server.server_port)
+        return server
+
+    def service(self, port):
+        path = self.root / "state/opencode/service.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"version": "2.0.32", "url": f"http://127.0.0.1:{port}"}))
+        path.chmod(0o600)
+
+    def timed(self, seconds=1.0):
+        started = time.monotonic()
+        catalog = model_catalog.read_catalog("opencode", deadline=seconds)
+        return catalog, time.monotonic() - started
+
+    def test_a_service_that_accepts_and_never_answers_ends_in_the_total_time(self):
+        held = []
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        self.addCleanup(listener.close)
+        self.service(listener.getsockname()[1])
+        threading.Thread(target=lambda: held.append(listener.accept()[0]), daemon=True).start()
+        catalog, elapsed = self.timed(1.0)
+        self.assertEqual((catalog.state, catalog.models, catalog.rows), ("unknown", (), ()))
+        self.assertLess(elapsed, 2.5)
+        for conn in held:
+            conn.close()
+
+    def test_a_body_sent_a_few_bytes_at_a_time_ends_in_the_total_time(self):
+        body = json.dumps({"data": []}).encode()
+
+        class Slow(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                try:
+                    for byte in body:
+                        self.wfile.write(bytes([byte]))
+                        self.wfile.flush()
+                        time.sleep(0.4)
+                except OSError:
+                    pass
+
+            def log_message(self, *_args):
+                pass
+
+        self.serve(Slow)
+        catalog, elapsed = self.timed(1.0)
+        self.assertEqual((catalog.state, catalog.models), ("unknown", ()))
+        self.assertLess(elapsed, 2.5)
+
+    def test_headers_sent_a_few_bytes_at_a_time_end_in_the_total_time(self):
+        class SlowHeaders(BaseHTTPRequestHandler):
+            def do_GET(self):
+                try:
+                    for byte in b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}":
+                        self.wfile.write(bytes([byte]))
+                        self.wfile.flush()
+                        time.sleep(0.2)
+                except OSError:
+                    pass
+
+            def log_message(self, *_args):
+                pass
+
+        self.serve(SlowHeaders)
+        catalog, elapsed = self.timed(1.0)
+        self.assertEqual((catalog.state, catalog.models), ("unknown", ()))
+        self.assertLess(elapsed, 2.5)
+
+    def test_a_prompt_answer_still_reads_and_the_survey_asks_for_a_few_seconds(self):
+        import model_follow
+
+        class Prompt(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = json.dumps({"data": [{"providerID": "p", "id": "m-1", "enabled": True,
+                                             "status": "active"}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                pass
+
+        self.serve(Prompt)
+        catalog, _elapsed = self.timed(model_follow._SERVICE_SECONDS)
+        self.assertEqual((catalog.state, catalog.models), ("available", ("p/m-1",)))
+        self.assertLessEqual(model_follow._SERVICE_SECONDS, 5)
+
+    def test_the_total_time_also_bounds_the_connection_and_leaves_no_descriptor_behind(self):
+        import opencode_runtime
+        waits = []
+        real = socket.create_connection
+
+        def watching(address, timeout=None, *args, **kwargs):
+            waits.append(timeout)
+            return real(address, timeout, *args, **kwargs)
+
+        held = []
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        self.addCleanup(listener.close)
+        self.service(listener.getsockname()[1])
+
+        def accept():
+            while True:
+                try:
+                    held.append(listener.accept()[0])
+                except OSError:
+                    return
+
+        threading.Thread(target=accept, daemon=True).start()
+
+        def open_fds():
+            return len(os.listdir("/proc/self/fd"))
+
+        with mock.patch.object(socket, "create_connection", watching):
+            self.timed(0.5)  # a first round settles lazily opened descriptors
+            for conn in list(held):
+                conn.close()
+            held.clear()
+            before = open_fds()
+            for _ in range(5):
+                self.assertEqual(self.timed(0.5)[0].state, "unknown")
+            deadline = time.monotonic() + 2
+            while len(held) < 5 and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(len(held), 5)
+            self.assertEqual(open_fds() - before - len(held), 0)
+        for conn in held:
+            conn.close()
+        self.assertTrue(waits and all(wait <= 0.5 for wait in waits), waits)
+        waits.clear()
+        with mock.patch.object(socket, "create_connection", watching):
+            opencode_runtime.read_model_catalog(directory=self.root)  # asking for no total time
+        self.assertEqual(waits, [2.0])
+
+    def test_no_way_exists_to_start_the_service_from_a_read(self):
+        starts = [mock.patch.object(subprocess, name) for name in ("Popen", "run", "call", "check_call",
+                                                                  "check_output")]
+        starts += [mock.patch.object(os, name) for name in ("system", "fork", "posix_spawn", "posix_spawnp",
+                                                           "execv", "execve", "spawnv")]
+        mocks = []
+        for patch in starts:
+            mocks.append(patch.start())
+            self.addCleanup(patch.stop)
+        closed = socket.socket()
+        closed.bind(("127.0.0.1", 0))
+        port = closed.getsockname()[1]
+        closed.close()  # nothing listens there
+        self.service(port)
+        self.assertEqual(self.timed(1.0)[0].state, "unknown")
+        (self.root / "state/opencode/service.json").unlink()
+        self.assertEqual(model_catalog.read_catalog("opencode").state, "unknown")  # no record, a v1 runtime, no cache
+        self.assertEqual([m.call_count for m in mocks], [0] * len(mocks))
 
 
 if __name__ == "__main__":

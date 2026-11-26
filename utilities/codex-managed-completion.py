@@ -61,6 +61,10 @@ class ObserverOwnershipLost(StopWaiting):
     """This observer no longer owns the exact duty lease and durable row."""
 
 
+class ObserverExpired(StopWaiting):
+    """The duty is past retention with no Codex-side execution left and is now closed."""
+
+
 class ObserverReleaseMoved(StopWaiting):
     """A newer installed release exists; the lease-holding observer hands over to it."""
 
@@ -78,6 +82,41 @@ def _observer_ownership_lost(args) -> bool:
     fd = getattr(args, "obligation_lock_fd", None)
     return bool(duty_id and fd is not None
                 and not batch_obligations.observer_owns_current(args.jobs, duty_id, fd))
+
+
+def _observer_expired(args) -> bool:
+    """Run the runner's expiry judgment from this observer, which holds the lease."""
+    duty_id = getattr(args, "_obligation_id", None)
+    fd = getattr(args, "obligation_lock_fd", None)
+    if not duty_id or fd is None:
+        return False
+    owner = {"pid": os.getpid(), "pid_start": batch_obligations._pid_start(os.getpid())}
+    return batch_obligations.expire_if_due(args.jobs, duty_id, fd, observer=owner)
+
+
+_OBSERVER_ERROR_TEXT_LIMIT = 300
+
+
+def _observer_error_round(args, exc):
+    """A round whose join or checkpoint raised: keep the cause and the expiry judgment.
+
+    Such a round skips the stop checks, so an observer whose join fails every round
+    would never reach the expiry judgment. This runs that one judgment (an unproven
+    judgment leaves the batch pending, as before) and leaves the cause in the batch
+    record, written only when it changes, so a repeating failure is written once.
+    """
+    duty_id = getattr(args, "_obligation_id", None)
+    if duty_id:
+        cause = {"type": type(exc).__name__, "text": str(exc)[:_OBSERVER_ERROR_TEXT_LIMIT]}
+        if getattr(args, "_observer_error_cause", None) != cause:
+            try:
+                _update_duty(args, duty_id, observer_error={**cause, "at": time.time()})
+            except Exception:  # noqa: BLE001 -- the cause is a diagnostic, never a stop
+                pass
+            else:
+                args._observer_error_cause = cause
+    if _observer_expired(args):
+        raise ObserverExpired("completion-observer-expired")
 
 
 def _update_duty(args, duty_id, **changes):
@@ -341,19 +380,10 @@ class NoticeWatcher:
 
     def _native_notice_text(self, record, storage_key):
         from dispatch_recipient_receipt import receipt_marker
-        receipt = record["receipt"]
-        if receipt.get("kind") == "notice":
-            import session_notice
-            text = session_notice.render_text(receipt)
-        else:
-            context = notice_receipt.context(receipt, notice_receipt.gateway_delivery_id(receipt))
-            additional = context.get("additionalContext")
-            values = [value.get("value") for value in additional.values()
-                      if isinstance(value, dict) and isinstance(value.get("value"), str)] \
-                if isinstance(additional, dict) else []
-            if len(values) != 1:
-                raise CompletionError("native-queue-notice-context-invalid")
-            text = values[0]
+        try:
+            text = notice_receipt.native_text(record["receipt"])
+        except notice_receipt.NativeTextError as exc:
+            raise CompletionError(str(exc)) from None
         return text + "\n" + receipt_marker(record, storage_key), text
 
     def _historical_notice_receipt(self, record, storage_key):
@@ -1137,7 +1167,7 @@ def _queue_target_from_rows(jobs: Path, rows, registered: str, *, read_context=N
 
 
 _PRIOR_SUCCESS_FOLLOWUP = codex_queue_delivery._PRIOR_SUCCESS_FOLLOWUP
-_CURRENT_SUCCESS_FOLLOWUP_START = codex_queue_delivery._CURRENT_SUCCESS_FOLLOWUP_START
+_SHIPPED_SUCCESS_FOLLOWUP_START = codex_queue_delivery._SHIPPED_SUCCESS_FOLLOWUP_START
 _LEGACY_HISTORY_MISMATCH = {"queue-peer-history-mismatch", "queue-peer-history-conflict",
                             "queue-peer-pending-mismatch"}
 _IMMEDIATE_RECEIPT_KINDS = {"human-gate", "supervision", "notice"}
@@ -1225,11 +1255,7 @@ def _native_queue_delivery_once(
         raise CompletionError("native-queue-thread-identity-invalid")
     if thread.get("cwd") and not isinstance(thread.get("cwd"), str):
         raise CompletionError("native-queue-thread-cwd-invalid")
-    followup = completion_followup_text(
-        receipt,
-        jobs=str(args.jobs),
-        surface=str(ROOT / "adapters" / "codex" / "bin" / "preflight.sh"),
-    )
+    followup = completion_followup_text(receipt, jobs=str(args.jobs))
     prior_followup = _prior_followup_text(followup)
     client_message_id = codex_queue_delivery.native_client_message_id(
         args.thread_id, [row.metadata.get("delivery_id", "") for row in rows])
@@ -1988,6 +2014,8 @@ def _execute_once(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 nonlocal previous_parent_lifetime
                 if _observer_ownership_lost(args):
                     raise ObserverOwnershipLost("completion-observer-ownership-lost")
+                if _observer_expired(args):
+                    raise ObserverExpired("completion-observer-expired")
                 reason = parent_session_stop_reason(args, monitored)
                 if reason:
                     return reason
@@ -2006,6 +2034,7 @@ def _execute_once(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 deadline=deadline,
                 stop_check=supervision_stop_check,
                 replacement_checkpoint=replacement_checkpoint,
+                on_observer_error=lambda exc: _observer_error_round(args, exc),
             )
             from dispatch_replacement import adopt_receipt
             attempts, _replaced_attempts = adopt_receipt(args.jobs, attempts, receipt)
@@ -2053,6 +2082,8 @@ def _execute_once(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         def projection_stop_check():
             if _observer_ownership_lost(args):
                 raise ObserverOwnershipLost("completion-observer-ownership-lost")
+            if _observer_expired(args):
+                raise ObserverExpired("completion-observer-expired")
             reason = parent_session_stop_reason(args, attempts)
             if reason:
                 return reason
@@ -2060,7 +2091,8 @@ def _execute_once(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 
         normalized = wait_for_batch(join=project, attempts=attempts, jobs=args.jobs,
             parent_attempt_id=delivery_parent, deadline=deadline,
-            stop_check=projection_stop_check)
+            stop_check=projection_stop_check,
+            on_observer_error=lambda exc: _observer_error_round(args, exc))
         if normalization_error:
             raise normalization_error[0]
         if normalized.get("state") == "watch-expired":
@@ -2093,6 +2125,8 @@ def _execute_once(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     def delivery_stop_check():
         if _observer_ownership_lost(args):
             raise ObserverOwnershipLost("completion-observer-ownership-lost")
+        if _observer_expired(args):
+            raise ObserverExpired("completion-observer-expired")
         reason = parent_session_stop_reason(args, attempts)
         if reason:
             _record_parent_session_ended(args, attempts, duty_id, normalized)
@@ -2266,6 +2300,9 @@ def execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         ownership_lost = True
         return {"schema_version": 1, "status": "retryable",
                 "reason": "completion-observer-ownership-lost"}, 75
+    except ObserverExpired:
+        return {"schema_version": 1, "status": "expired",
+                "reason": batch_obligations._EXPIRY_REASON}, 0
     except ObserverReleaseMoved as moved:
         args._successor_binding = moved.binding
         _update_duty(args, args._obligation_id,

@@ -1,5 +1,5 @@
 """Fleet's shared semantic palette, usable without initializing a screen."""
-from .render_cells import _A_B, _A_D, _A_REVERSE, _NAME_HUE, _MUTED_256
+from .render_cells import _A_B, _A_D, _A_REVERSE, _NAME_HUE, _MUTED_256, _HARNESS_256
 
 _HUE_OF = {
     None: ("d", 0), "dim": ("d", _A_D), "head": ("d", _A_D),
@@ -35,6 +35,13 @@ _HUE_OF = {
     # F-100c: a STEWARD session (depth −1: `steward on`, or it watched/started a session) wears
     # bright pink text: distinct from white/yellow, without a special background.
     "tag_steward": ("p", _A_B),
+    # 11-17 (route zones): the ROUTE box's three zone names and their marks, each its own color, none a status color
+    # (green, yellow, red), a harness hue (Claude orange 173, Codex 147, OpenCode 153) or the steward pink: direct orange (208), dispatch violet,
+    # request aqua. (An 8-color terminal has no color left over: there the zones read in the default color and the white,
+    # still apart from every status and harness color; the names say which zone it is.)
+    "zone_direct": ("zd", 0), "zone_dispatch": ("zv", 0), "zone_request": ("zq", 0),
+    # This window's own number on the PEERS line: its harness hue, bold.
+    "hbb_claude": ("cl", _A_B), "hbb_codex": ("cx", _A_B), "hbb_opencode": ("oc", _A_B), "hbb_other": ("d", _A_B),
     "tag_steward_dim": ("p", _A_D),
     # Badge text, NOT the glyph: plain yellow, distinct from the dim g_unused glyph so the
     # ●>○>◌ ink-weight gradient still reads.
@@ -54,8 +61,8 @@ _HUE_OF = {
     "eff_xhigh": ("m", _A_B), "eff_max": ("r", _A_B),
     "effd_low": ("d", _A_D), "effd_medium": ("d", _A_D), "effd_high": ("l", _A_D),
     "effd_xhigh": ("m", _A_D), "effd_max": ("r", _A_D),
-    "h_claude": ("c", _A_D), "h_codex": ("m", _A_D), "h_opencode": ("l", _A_D),
-    "hb_claude": ("c", 0), "hb_codex": ("m", 0), "hb_opencode": ("l", 0), "hb_other": ("d", 0),
+    "h_claude": ("cl", _A_D), "h_codex": ("cx", _A_D), "h_opencode": ("oc", _A_D),
+    "hb_claude": ("cl", 0), "hb_codex": ("cx", 0), "hb_opencode": ("oc", 0), "hb_other": ("d", 0),
     "fam_opus": ("c", 0), "fam_sonnet": ("l", 0), "fam_haiku": ("g", 0),
     "fam_fable": ("m", 0), "fam_sol": ("y", 0), "fam_astra": ("o", 0),
     "fam_luna": ("w", 0), "fam_gpt": ("y", 0), "fam_other": ("d", 0),
@@ -101,7 +108,7 @@ _HUE_OF = {
     # from prose and WEIGHT separates main (bold-dim `now_main`) from spawned.
     "now_sub": ("w", _A_D),
     # F-77: the product name. The palette reserves its hues by MEANING —
-    # green/yellow/red are status, cyan/magenta/blue are harness identity, soft-white
+    # green/yellow/red are status, Claude's orange, Codex's lavender and OpenCode's sky are harness identity (cyan is the Opus family), soft-white
     # bold is a row's focal point — so the board's own name takes `v` (vanilla), the one
     # hue on no such axis. It shares that hue with the working spinner, which is a
     # per-row glyph and can never be confused with a word on the first line.
@@ -110,6 +117,21 @@ _HUE_OF = {
 for _h, _hue_ch in _NAME_HUE.items():
     _HUE_OF["nm_" + _h] = (_hue_ch, 0)
     _HUE_OF["nmd_" + _h] = (_hue_ch, _A_D)
+    # 11-18 (the person asked for it): a working spinner on a line that names its harness turns in that harness's
+    # color (`spin_<harness>`; `spind_<harness>` on a receded row). Any other spinner keeps the vanilla `g_spin`.
+    _HUE_OF["spin_" + _h] = (_hue_ch, 0)
+    _HUE_OF["spind_" + _h] = (_hue_ch, _A_D)
+# 11-18 (route kind color): a route's kind word (`kind_<field>`, bold) wears the hue of its field, and the intensity in
+# brackets the same hue stepped by weight: `kindq_<field>` dim (quick), `kinds_<field>` plain (standard), `kindb_<field>`
+# bold (strong, thorough, adversarial). Only the five fields below have a hue; any other route keeps the body color.
+KIND_FIELDS = ("code", "lab", "design", "docs", "research")
+# The fields a route may record (the five above hold a hue; the rest read in the body color): a unit route's first word.
+ROUTE_FIELDS = ("code", "docs", "research", "lab", "design", "plan", "admin", "other")
+for _f in KIND_FIELDS:
+    _HUE_OF["kind_" + _f] = ("k" + _f, _A_B)
+    _HUE_OF["kindq_" + _f] = ("k" + _f, _A_D)
+    _HUE_OF["kinds_" + _f] = ("k" + _f, 0)
+    _HUE_OF["kindb_" + _f] = ("k" + _f, _A_B)
 _HUE_OF["nm_other"] = ("w", _A_B)      # unknown harness keeps the historical white name
 _HUE_OF["nmd_other"] = ("w", _A_D)
 
@@ -118,13 +140,82 @@ _HUE_OF["nmd_other"] = ("w", _A_D)
 _HUE_PALETTE = {
     "d": (None, -1), "w": ("soft", 7), "g": ("green", 2),
     "y": ("yellow", 3), "v": ("vanilla", 3), "r": ("red", 1),
-    "c": ("cyan", 6), "m": ("magenta", 5), "o": ("orange", 3),
+    "c": ("cyan", 6), "cl": ("claude", 6), "cx": ("codex", 5), "oc": ("opencode", 4), "m": ("magenta", 5), "o": ("orange", 3),
     "p": ("steward_pink", 5), "l": ("blue", 4),
+    "zd": ("zone_direct", -1), "zv": ("zone_dispatch", 7), "zq": ("zone_request", 7),
+    **{"k" + _f: ("kind_" + _f, -1) for _f in KIND_FIELDS},
 }
 
 
+# 11-17 (route zones): the ROUTE box's three zone names. They are the one place the board needs hues that are none of its
+# status colors (green, yellow, red, vanilla), harness colors (cyan, magenta, blue), the steward pink or the body white, so
+# they stand outside the muted set above and are more saturated than it is: orange, violet and aqua.
+_ZONE_256 = {"zone_direct": 208, "zone_dispatch": 99, "zone_request": 43}
+
+# 11-18 (route kind color): the five fields' hues, in the same place and way as the zones' (more saturated than the muted
+# set; none a status, harness, zone or steward number): code blue, lab amber, design rose, docs sand, research sky.
+# Under 256 colors they have none (-1: the word keeps its plain weight).
+_KIND_256 = {"kind_code": 69, "kind_lab": 214, "kind_design": 205, "kind_docs": 180, "kind_research": 38}
+
+# The intensity words by weight (`light` is `quick`'s rung, as `qa_light`): dim, plain, bold. Fleet's short forms too.
+_INTENSITY_WEIGHT = {"quick": "q", "q": "q", "light": "q", "lt": "q", "standard": "s", "std": "s",
+                     "strong": "b", "thorough": "b", "thr": "b", "adversarial": "b", "adv": "b"}
+
+
+def route_field(field, kind):
+    """The one of the five fields a route's kind word takes its hue from, else None (the body color).
+
+    The route's recorded field when it is one of the five; a route that records none (an older one) by its kind's name
+    when that is a field's own name (``code``, ``lab``, ``design``, ``research``)."""
+    field = str(field or "").strip()
+    if field:
+        return field if field in KIND_FIELDS else None
+    kind = str(kind or "").strip()
+    return kind if kind in KIND_FIELDS and kind != "docs" else None
+
+
+def kind_word_key(field):
+    return "kind_" + field if field in KIND_FIELDS else None
+
+
+def route_form(capability, shape, field=None):
+    """The word for HOW a route in the dispatch zone runs, the one place that decides it (the panel carries it as ``kind_form``,
+    Fleet's tables and the panel's first popup page read it; to rename a form, change it here). ``shape`` is the route's
+    ``execution_topology`` (never ``selection.shape``: ``compose --shape solo --signal …`` seals a team node under a ``solo``
+    selection, and its topology says ``staged``). The forms read as who makes the work: ``unit`` (a unit route: one unit called, no
+    owner; its field recorded), ``solo`` (``one-shot-owner``/``solo``: the owner alone does the whole procedure), ``team``
+    (``staged``, ``staged+resource``, ``transactional-owner``, ``map-reduce``: the owner and a worker for each stage). English in
+    every language; ``direct`` is the zone that has no bracket. Any other shape (a frame, an older record) has none: ``""``."""
+    if str(capability or "").strip() == "unit":
+        return "unit" if str(field or "").strip() in ROUTE_FIELDS else ""
+    shape = str(shape or "").strip()
+    if shape in ("one-shot-owner", "solo"):
+        return "solo"
+    return "team" if shape in ("staged", "staged+resource", "transactional-owner", "map-reduce") else ""
+
+
+def kind_intensity_key(field, word):
+    """The key of the whole bracket after a kind word (``(standard)``, ``(dev·q)``): the field's hue at the weight of the
+    intensity it holds (the last of its ``·``-joined words that names one); a bracket with none (a mode alone) is plain."""
+    if field not in KIND_FIELDS:
+        return None
+    weight = "s"
+    for piece in str(word or "").strip("() ").split("·"):
+        weight = _INTENSITY_WEIGHT.get(piece.strip().casefold(), weight)
+    return {"q": "kindq_", "s": "kinds_", "b": "kindb_"}[weight] + field
+
+
+def harness_spin(key, harness):
+    """The key a working spinner is drawn with on a line of ``harness``: its harness color for a vanilla ``g_spin`` (``spin``,
+    ``g_spin_dim`` at the receded weight), else ``key`` itself (a harness Fleet does not name, or a glyph that is not the spinner)."""
+    if harness in _HARNESS_256 and key in ("spin", "g_spin", "g_spin_dim"):
+        return ("spind_" if key == "g_spin_dim" else "spin_") + harness
+    return key
+
+
 def hue_colors(colors=256):
-    return {hue: (_MUTED_256[name] if colors >= 256 and name else fallback)
+    named = {**_MUTED_256, **_HARNESS_256, **_ZONE_256, **_KIND_256}
+    return {hue: (named[name] if colors >= 256 and name else fallback)
             for hue, (name, fallback) in _HUE_PALETTE.items()}
 
 

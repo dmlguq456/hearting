@@ -44,15 +44,18 @@ def intent(route, jobs=None):
     return ledger_intent(route, ledger)
 
 
-def ledger_intent(route, ledger):
-    return next((e["evidence"]["parent_close"] for e in ledger.journal()
+def ledger_intent(route, ledger, *, journal=None):
+    # ``journal``: entries the caller already read from this ledger, checked as that one read.
+    entries = ledger.journal() if journal is None else journal
+    return next((e["evidence"]["parent_close"] for e in entries
                  if e.get("route_hash") == route["route_hash"]
                  and isinstance(e.get("evidence"), dict)
                  and isinstance(e["evidence"].get("parent_close"), dict)), None)
 
 
-def settled_result(route, ledger):
-    return next((entry["evidence"]["parent_close_result"] for entry in reversed(ledger.journal())
+def settled_result(route, ledger, *, journal=None):
+    entries = ledger.journal() if journal is None else journal
+    return next((entry["evidence"]["parent_close_result"] for entry in reversed(entries)
                  if entry.get("route_hash") == route["route_hash"]
                  and isinstance(entry.get("evidence"), dict)
                  and isinstance(entry["evidence"].get("parent_close_result"), dict)), None)
@@ -249,9 +252,11 @@ def _owned_attempts(route, rows, owner):
     selected = {owner} if owner else set()
     while True:
         children = {aid for aid, (fields, meta) in rows.items()
-                    if meta.get("parent_attempt_id") in selected
-                    and fields[2] == rows[owner][0][2]
-                    and (fields[3] == rows[owner][0][3] or DC.is_linked_worktree_slice(meta))}
+                    if (meta.get("parent_attempt_id") in selected
+                        and fields[2] == rows[owner][0][2]
+                        and (fields[3] == rows[owner][0][3] or DC.is_linked_worktree_slice(meta)))
+                    # A unit leg a worker started is below that worker wherever its route reads.
+                    or meta.get("caller_attempt_id") in selected}
         if children <= selected:
             return selected
         selected |= children
@@ -363,7 +368,7 @@ def _settle_stopped(jobs, aid):
     materialize_after_terminal_close(jobs, aid)
 
 
-def _execute(jobs, work, settle, grace, kill_wait):
+def _execute(jobs, work, settle, grace, kill_wait, evidence=None):
     stopped, pending = [], []
     for current, fields, meta, resources in work:
         if fields[1] in OPEN:
@@ -375,7 +380,7 @@ def _execute(jobs, work, settle, grace, kill_wait):
                 jobs, current, STOP_NOTE,
                 lambda fresh, meta=meta: all(DC.parse_registry_metadata(fresh[5]).get(key, "")
                                              == meta.get(key, "") for key in identity),
-                evidence=dict(STOP_EVIDENCE))
+                evidence=dict(evidence or STOP_EVIDENCE))
             if not closed:
                 fresh = _rows(jobs, {current}).get(current)
                 if fresh and fresh[0][1] in OPEN:
@@ -415,6 +420,35 @@ def stop_attempt(attempt_id, *, jobs=None, grace=0.3, kill_wait=0.5):
             "state": "termination-pending" if pending else "cancelled" if _user_stopped(meta) else "terminal",
             "status": fields[1], "note": meta.get("note", ""), "stopped_attempts": stopped,
             "pending_attempts": pending}
+
+
+# A worker that ends leaves nothing running that it started: the called worker's result would reach no one.
+CALLER_ENDED_EVIDENCE = {**STOP_EVIDENCE, "reconcile_reason": "caller-ended"}
+
+
+def stop_called_workers(jobs, caller_attempt_id, *, grace=0.3, kill_wait=0.5):
+    """The worker `caller_attempt_id` has ended: stop the unit workers it started that still run.
+
+    Their results would reach no one, and a worker with no caller above it is left running by
+    nothing else. Each is closed as the same typed cancellation a stop makes, with everything
+    below it. A called worker that already ended stands; nothing here waits for a stopped one.
+    Returns the attempts stopped (empty when it started none, or none still runs)."""
+    try:
+        jobs = jobs_path(jobs)
+        rows = _rows(jobs)
+        called = [aid for aid, (fields, meta) in rows.items()
+                  if meta.get("caller_attempt_id") == caller_attempt_id and fields[1] in OPEN]
+        if not called:
+            return []
+        work, settle = [], []
+        for aid in called:
+            planned, settled, _unknown = _plan(jobs, rows, aid)
+            work += [item for item in planned if item[0] not in {w[0] for w in work}]
+            settle += settled
+        stopped, _pending = _execute(jobs, work, settle, grace, kill_wait, evidence=CALLER_ENDED_EVIDENCE)
+        return stopped
+    except (OSError, ValueError, DC.DispatchContractError):
+        return []   # a result already committed, or a registry that cannot be read, is left as it is
 
 
 def explain_stop(receipt, translate):
@@ -1328,6 +1362,12 @@ def _finish_existing_cycle(route, *, jobs=None):
         pass
 
 
+def _file_version(path):
+    """File identity and version: a replace, truncation, rewrite or append changes it."""
+    stat = os.stat(path)
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
 def verified_owner_pin_handoff_close(route, *, jobs=None):
     """Return durable owner-pin handoff evidence, including its successor when prepared.
 
@@ -1357,9 +1397,13 @@ def verified_owner_pin_handoff_close(route, *, jobs=None):
 
         jobs = jobs_path(jobs)
         ledger = WS.WorkflowLedger(route_id, route_hash, jobs=jobs)
-        close_intent = ledger_intent(sealed, ledger)
-        result = settled_result(sealed, ledger)
+        # One read of the journal answers every journal check below (intent, result,
+        # their parent-close entries, workflow state) instead of one read per check.
+        # Its file version is taken first and compared again before the proof stands.
+        journal_version = _file_version(ledger.journal_path)
         journal = ledger.journal()
+        close_intent = ledger_intent(sealed, ledger, journal=journal)
+        result = settled_result(sealed, ledger, journal=journal)
         if (not isinstance(close_intent, dict) or not isinstance(result, dict)
                 or close_intent.get("summary") != "owner-pin-handoff"
                 or close_intent.get("route_file") != str(path)
@@ -1410,7 +1454,7 @@ def verified_owner_pin_handoff_close(route, *, jobs=None):
                 or metadata.get("harness") not in AUTH.PIN_HARNESSES):
             return None
 
-        workflow = ledger.read_only_state()
+        workflow = ledger.read_only_state(entries=journal)
         if workflow.get("journal_unreadable") or workflow.get("workflow_state") != "CANCELLED":
             return None
 
@@ -1462,6 +1506,11 @@ def verified_owner_pin_handoff_close(route, *, jobs=None):
                    and row["by"].get("harness") in AUTH.PIN_HARNESSES
                    and datetime.fromisoformat(str(row.get("at", "")).replace("Z", "+00:00")) <= close_at]
         if not target_harness or not changes:
+            return None
+        # The checks above judged the one journal read. A journal replaced, emptied or
+        # appended to since then is not what they judged, so this pass proves nothing;
+        # the next pass reads it afresh.
+        if _file_version(ledger.journal_path) != journal_version:
             return None
         return {"route": sealed, "route_file": str(path), "owner_attempt_id": owner_attempt,
                 "launch_harness": launch_harness, "target_harness": target_harness,

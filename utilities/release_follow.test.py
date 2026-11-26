@@ -7,6 +7,9 @@ moves to B, then continues as the same process on B's code. Nothing here
 signals or replaces a process from outside.
 """
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import fcntl
 import json
@@ -378,6 +381,104 @@ class FollowDecisionTest(unittest.TestCase):
                 self.assertFalse(os.get_inheritable(fd))
         finally:
             os.chdir(here)
+
+
+class SharedWaitProducerFollowTest(unittest.TestCase):
+    """The shared wait-display producer runs the installed release's code, never its starter's."""
+
+    LAUNCH = ("import sys; sys.path.insert(0, {utilities!r}); import human_wait_state as h; "
+              "raise SystemExit(0 if h._ensure_producer() else 1)")
+
+    def setUp(self):
+        # A short path: the producer's own state lives under this fixture only.
+        self.temp = Path(tempfile.mkdtemp(prefix="wp-", dir="/tmp"))
+        self.addCleanup(shutil.rmtree, self.temp, ignore_errors=True)
+        self.install = FakeInstall(self.temp, full_utilities=True)
+        (self.temp / "empty-bin").mkdir()
+        (self.temp / "jobs.log").write_text("", encoding="utf-8")
+        self.lock = self.install.base / "xdg-state/hearting/human-waits/.projection.lock"
+        # A display asked for the board just now, so the producer stays up between passes.
+        self.lock.parent.mkdir(parents=True, mode=0o700)
+        (self.lock.parent / ".demand").touch()
+
+    def producers(self):
+        """Only this fixture's own producers: the script lies beneath the fixture base."""
+        found = {}
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            argv = cmdline(entry.name)
+            if (len(argv) >= 3 and argv[1].startswith(str(self.install.base) + "/")
+                    and argv[1].endswith("/utilities/human_wait_state.py")
+                    and argv[2] == "--refresh-cache"):
+                found[int(entry.name)] = argv
+        return found
+
+    def launch_from(self, release):
+        environment = self.install.environment(
+            release, PATH=str(self.temp / "empty-bin"),
+            AGENT_DISPATCH_JOBS=str(self.temp / "jobs.log"))
+        starter = subprocess.run(
+            [sys.executable, "-c", self.LAUNCH.format(utilities=str(release / "utilities"))],
+            env=environment, cwd="/", stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
+        self.assertEqual(starter.returncode, 0, starter.stderr.decode(errors="replace"))
+        started = wait_until(self.producers)
+        self.assertEqual(len(started), 1, started)
+        pid = next(iter(started))
+        self.addCleanup(self.stop, pid)
+        return pid
+
+    def stop(self, pid):
+        import signal
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            if not cmdline(pid):
+                return
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                return
+            wait_until(lambda: not cmdline(pid), timeout=5.0)
+
+    def holds_lock(self):
+        with open(self.lock, "rb") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            return False
+
+    def test_a_producer_started_from_the_old_release_becomes_the_installed_one_and_keeps_its_lock(self):
+        self.install.point(self.install.b)
+        pid = self.launch_from(self.install.a)
+        target = str(self.install.b / "utilities/human_wait_state.py")
+        moved = wait_until(lambda: cmdline(pid)[1:3] == [target, "--refresh-cache"])
+        self.assertTrue(moved, cmdline(pid))
+        argv = cmdline(pid)
+        self.assertEqual(argv[3], "--lock-fd")
+        self.assertEqual(len(argv), 5, argv)
+        self.assertTrue(self.holds_lock(), "the single-flight lock stays held across the move")
+        time.sleep(0.5)
+        self.assertEqual(cmdline(pid), argv, "the installed release does not move again")
+        self.assertTrue(self.holds_lock())
+        self.assertEqual(list(self.producers()), [pid], "exactly one producer")
+
+    def test_a_producer_stays_on_its_own_code_when_the_installed_release_is_the_same(self):
+        pid = self.launch_from(self.install.a)
+        own = str(self.install.a / "utilities/human_wait_state.py")
+        time.sleep(1.0)
+        self.assertEqual(cmdline(pid)[1:3], [own, "--refresh-cache"])
+        self.assertTrue(self.holds_lock())
+
+    def test_a_running_producer_follows_when_the_install_lands_later(self):
+        pid = self.launch_from(self.install.a)
+        own = str(self.install.a / "utilities/human_wait_state.py")
+        self.assertEqual(cmdline(pid)[1:3], [own, "--refresh-cache"])
+        self.install.point(self.install.b)
+        target = str(self.install.b / "utilities/human_wait_state.py")
+        # The next pass ends within its 30 s cadence; a display wake shortens that.
+        moved = wait_until(lambda: cmdline(pid)[1:2] == [target], timeout=45.0)
+        self.assertTrue(moved, cmdline(pid))
+        self.assertTrue(self.holds_lock())
 
 
 class RealHelpersFollowTest(HelperProcesses, unittest.TestCase):

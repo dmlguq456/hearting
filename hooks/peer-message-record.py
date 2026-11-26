@@ -4,15 +4,17 @@
 Two subcommands, dispatched by argv[1]:
   post-tool  -- PostToolUse / PostToolUseFailure hook. Records one
                 peer_message_v1 for each SendMessage tool call (not a failed
-                one), and hands the running turn the records
-                owed to this session (a completion receipt, a due steward
-                check, a report notice) through the same shared sweep as the
-                prompt carrier, as Codex's in-turn carrier does at the same
-                boundary. A record the asyncRewake hook already claimed or
-                ACKed stays with it; whichever carrier claims first shows it.
-  stop       -- Stop hook. Records still owed to this session when the turn
-                would end (the rest a prompt boundary could not show whole)
-                continue the same turn through Claude's documented
+                one), and hands the running turn the notices owed to this
+                session (a due steward check, a report notice) through the
+                same shared sweep as the prompt carrier, as Codex's in-turn
+                carrier does at the same boundary. It carries no completion:
+                the asyncRewake hook sends it, and a completion the transcript
+                shows received is only settled and counted for the turn's
+                follow-through.
+  stop       -- Stop hook. The supplement to the rewake: records still owed
+                to this session when the turn would end (a completion the
+                transcript does not show received, the rest a prompt boundary
+                could not show whole) continue the same turn through Claude's documented
                 ``{"decision": "block", "reason": ...}``, as Codex's in-turn
                 carrier does at its Stop. Only what the reason shows whole is
                 held, so each continuation removes what it showed and the
@@ -108,6 +110,20 @@ _RECORD_TIMEOUT_S = 2.5
 _MODULES = {}
 
 
+# A trailer-form text, or a display-form one (`— [d4]` as the last line, `↳ ` first): the same
+# gate as `peer-message.looks_like_peer_text` (a test keeps them equal), checked before the
+# reader is consulted.
+_PEER_DISPLAY_TAIL = re.compile(
+    r"(?m)^— (?:\[(?:[0-9a-f]{2}|\?)\]|claude|codex|opencode)(?: [^\n]{1,80})?[ \t]*$")
+_PEER_DISPLAY_LINE = re.compile(r"\A\s*(?:<pasted_content[^>]*>\s*)?↳ ")
+
+
+def _looks_like_peer_prompt(text):
+    return bool(text) and ("peer-from:" in text or "runtime-from:" in text
+                           or _PEER_DISPLAY_LINE.match(text[:300]) is not None
+                           or _PEER_DISPLAY_TAIL.search(text[-400:]) is not None)
+
+
 def _deadline():
     return _STARTED + _HOOK_BUDGET_S
 
@@ -130,17 +146,15 @@ def _peer_message_module():
     return _load_module("peer-message", _PEER_MESSAGE_PY, "_peer_message")
 
 
+def _peer_request_module():
+    """`peer_request` (the message-kind table), loaded like the other tools."""
+    return _load_module("peer_request", _UTILITIES_DIR / "peer_request.py", "_peer_request")
+
+
 def _steward_module():
     """`peer-steward.py` in this process: a second interpreter and import per
     prompt cost more than the sweep itself once the machine was loaded."""
     return _load_module("peer-steward", _PEER_STEWARD_PY, "_peer_record_steward")
-
-_PREFIX_KIND = {
-    "[steer]": "steer",
-    "[handoff]": "handoff",
-    "[gate]": "gate-relay",
-}
-
 
 def _read_stdin_json():
     data = sys.stdin.read()
@@ -168,11 +182,9 @@ def _address_session_id(mod, address):
 def _kind_for_body(body, notify_when_idle):
     if notify_when_idle:
         return "watch"
-    first_line = (body or "").splitlines()[0].strip() if body else ""
-    for prefix, kind in _PREFIX_KIND.items():
-        if first_line.startswith(prefix):
-            return kind
-    return "steer"
+    # One table for the ledger kind, the Codex follow-through pass and this hook.
+    table = _peer_request_module()
+    return table.message_kind(body or "")[0] if table else "steer"
 
 
 def handle_post_tool(payload):
@@ -236,7 +248,8 @@ _CROSS_SESSION_RE = re.compile(r"<cross-session-message\s+from=\"([^\"]*)\"")
 _CROSS_SESSION_NAME_RE = re.compile(r"<cross-session-message\s[^>]*?from-name=\"([^\"]*)\"")
 
 
-def tool_boundary_records(session_id, deadline, max_chars=_RECORD_MAX_CHARS):
+def tool_boundary_records(session_id, deadline, max_chars=_RECORD_MAX_CHARS, payload=None,
+                          completions=True):
     """Claim this session's owed records for the running turn: ``(text, batches)``.
 
     The same records and claim as the prompt sweep (``dispatch-session-sweep.py``):
@@ -244,7 +257,11 @@ def tool_boundary_records(session_id, deadline, max_chars=_RECORD_MAX_CHARS):
     waiting for the next prompt. ``deadline`` is ``time.monotonic()``. Only
     records whose text fits ``max_chars`` whole are returned for ACK (one over
     it alone as its head plus a whole copy's path, or, without that copy,
-    left pending); the rest are handed back pending.
+    left pending); the rest are handed back pending. With the hook ``payload``
+    the transcript settles what the async rewake already showed, and a completion it
+    shows received counts as received for the turn's follow-through (PG-44).
+    ``completions=False`` (a tool boundary) carries no completion: the asyncRewake
+    sends it, and the turn's Stop carries what it did not deliver.
     """
     if not session_id or time.monotonic() >= deadline:
         return "", []
@@ -252,10 +269,12 @@ def tool_boundary_records(session_id, deadline, max_chars=_RECORD_MAX_CHARS):
         sys.path.insert(0, str(_UTILITIES_DIR))
     from dispatch_contract import dispatch_state_roots, resolve_agent_home
     from dispatch_notice_state import NoticeReadContext
-    from dispatch_session_sweep import fit_inline, release_claims, sweep_deliver
+    from dispatch_session_sweep import claude_receipt_observer, fit_inline, release_claims, sweep_deliver
     deadline_ns = time.monotonic_ns() + int(max(0.0, deadline - time.monotonic()) * 1e9)
     context = NoticeReadContext()
     batches = []
+    observer = claude_receipt_observer(payload, session_id)
+    received = []
 
     for root in dict.fromkeys(dispatch_state_roots(resolve_agent_home())):
         if time.monotonic_ns() >= deadline_ns:
@@ -264,11 +283,16 @@ def tool_boundary_records(session_id, deadline, max_chars=_RECORD_MAX_CHARS):
             continue  # a missing fallback root holds nothing; touching it would create it
         try:
             records, _count = sweep_deliver(root, _CLAUDE_RECIPIENT_KIND, session_id,
-                                           notice_context=context, deadline_ns=deadline_ns)
+                                           notice_context=context, deadline_ns=deadline_ns,
+                                           defer_completions=not completions,
+                                           received_out=received,
+                                           **({"receipt_observer": observer} if observer else {}))
         except Exception:  # noqa: BLE001 - left for the prompt sweep
             continue
         if records:
             batches.append((root, records))
+    if payload is not None and received:
+        note_transcript_received(payload, received)
     if not batches:
         return "", []
     text, chosen, over = fit_inline(batches, max_chars)
@@ -278,6 +302,30 @@ def tool_boundary_records(session_id, deadline, max_chars=_RECORD_MAX_CHARS):
 
 
 _STOP_HEADER = "[hearting] Arrived before this turn ended:"
+
+
+def note_transcript_received(payload, records):
+    """Count completions the transcript shows this turn received (fail-soft).
+
+    The asyncRewake's notification reaches the model through Claude's own queue, and
+    only the transcript tells that it did. The same per-turn state as a carried
+    record, so the follow-through pass (PG-44) applies to a woken turn as well. A
+    tool this boundary's command names meets an owed action as it does elsewhere.
+    """
+    with contextlib.suppress(Exception):
+        turn = _turn(payload)
+        if not turn:
+            return
+        carrier = _carrier()
+        known = set(carrier.read_state(*turn).get("rendered") or [])
+        fresh = [record for record in records if str(record.get("delivery_id")) not in known]
+        items = carrier.owed_items(fresh)
+        command = carrier.tool_command(payload)
+        items = [item for item in items
+                 if not (item.get("handles") and any(h in command for h in item["handles"]))]
+        if fresh:
+            carrier.note_received(*turn, items, rendered=[
+                str(record.get("delivery_id")) for record in fresh])
 
 
 def _turn(payload):
@@ -337,8 +385,11 @@ def note_turn_received(payload, batches, extra=()):
 def handle_stop(payload, out):
     """Continue the turn once more with the records owed to this session, if any.
 
-    Same claim, fit and settlement as a tool boundary; nothing is owed, nothing
-    is printed and the turn ends. A record not shown whole stays pending.
+    Same claim, fit and settlement as a tool boundary, and it also carries every
+    completion the transcript does not show received: the asyncRewake sends a
+    completion, and this turn's end is where one it did not deliver is made up.
+    Nothing is owed, nothing is printed and the turn ends. A record not shown whole
+    stays pending.
     """
     session_id = payload.get("session_id")
     if not session_id or str(payload.get("agent_id") or "").strip():
@@ -349,7 +400,8 @@ def handle_stop(payload, out):
     # An earlier block's records are ACKed only from the native transcript.
     settle_stop_records(payload)
     text, batches = tool_boundary_records(
-        session_id, _deadline(), max_chars=CLAUDE_CONTEXT_CHARS - len(_STOP_HEADER) - 2)
+        session_id, _deadline(), max_chars=CLAUDE_CONTEXT_CHARS - len(_STOP_HEADER) - 2,
+        payload=payload)
     try:
         if text:
             out.write(json.dumps({"decision": "block", "reason": _STOP_HEADER + "\n\n" + text},
@@ -649,7 +701,8 @@ def main(exit_guard=False):
                     # After the exact peer-body claims, within what they left.
                     try:
                         text, batches = tool_boundary_records(
-                            session_id, min(_deadline(), time.monotonic() + _RECORD_SHARE_S))
+                            session_id, min(_deadline(), time.monotonic() + _RECORD_SHARE_S),
+                            payload=payload, completions=False)
                     except Exception:  # noqa: BLE001 - the prompt sweep still carries them
                         return ""
                     owed.extend(batches)
@@ -683,11 +736,11 @@ def main(exit_guard=False):
                 note_turn_received(payload, [], [peer])
         mod = _peer_message_module()
         guidance = ""
-        if mod and ("peer-from:" in prompt or "runtime-from:" in prompt
-                    or "cross-session-message" in prompt):
-            guidance = mod.receiver_guidance(
+        guidance_seen = []
+        if mod and (_looks_like_peer_prompt(prompt) or "cross-session-message" in prompt):
+            guidance = mod.receiver_guidance_once(
                 prompt, {"harness": "claude", "session_id": payload.get("session_id")},
-                cwd=payload.get("cwd") or os.getcwd())
+                cwd=payload.get("cwd") or os.getcwd(), deferred=guidance_seen)
         rows = []
 
         def extra_context():
@@ -711,6 +764,8 @@ def main(exit_guard=False):
                 "UserPromptSubmit", extra_context=extra_context,
                 native_delivery=True, deadline=_deadline(), stream=out)
             if out.flushed:
+                if guidance_seen:        # the fixed guidance counts as delivered only now
+                    mod.commit_receiver_guidance(guidance_seen)
                 note_turn_received(payload, [], _peer_items(shown))
         else:
             extra = extra_context()

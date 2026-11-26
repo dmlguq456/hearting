@@ -326,7 +326,10 @@ def owed_items(records: list[dict]) -> list[dict]:
 # reported, as a ``read-notice`` receipt does (PG-46). The same first-line
 # reading as the ledger's ``[steer]``/``[handoff]``/``[gate]`` kinds; a body
 # without one keeps the pass.
-READ_ONLY_PEER_PREFIXES = ("[report]", "[notice]")
+try:  # the one message-kind table (also the ledger's and the Claude record hook's)
+    from peer_request import READ_ONLY_PEER_PREFIXES
+except ImportError:  # a partial tree without it keeps the two original prefixes
+    READ_ONLY_PEER_PREFIXES = ("[report]", "[notice]")
 
 
 def _peer_body(text: str) -> str:
@@ -349,6 +352,18 @@ def _peer_body_first_line(text: str, origin: dict | None = None) -> str:
     return session_tidy._received_prompt_line(_peer_body(text), origin or {})
 
 
+_PEER_DISPLAY_TAIL = re.compile(
+    r"(?m)^— (?:\[(?:[0-9a-f]{2}|\?)\]|claude|codex|opencode)(?: [^\n]{1,80})?[ \t]*$")
+_PEER_DISPLAY_LINE = re.compile(r"\A\s*(?:<pasted_content[^>]*>\s*)?↳ ")
+
+
+def _looks_like_peer_prompt(text: str) -> bool:
+    """Same gate as `peer-message.looks_like_peer_text` (a test keeps them equal)."""
+    return bool(text) and ("peer-from:" in text or "runtime-from:" in text
+                           or _PEER_DISPLAY_LINE.match(text[:300]) is not None
+                           or _PEER_DISPLAY_TAIL.search(text[-400:]) is not None)
+
+
 def peer_report_item(prompt: str, sid: str = "", harness: str = "codex") -> dict | None:
     """A verified peer report that arrived as this turn's prompt.
 
@@ -361,8 +376,7 @@ def peer_report_item(prompt: str, sid: str = "", harness: str = "codex") -> dict
     with ``[report]`` or ``[notice]``) adds none either. The kind is read
     from the verified body after origin, never from a transport wrapper's line.
     """
-    if not prompt or not sid or ("peer-from:" not in prompt and "runtime-from:" not in prompt
-                                 and "cross-session-message" not in prompt):
+    if not prompt or not sid or not (_looks_like_peer_prompt(prompt) or "cross-session-message" in prompt):
         return None
     try:
         import session_tidy
@@ -377,7 +391,24 @@ def peer_report_item(prompt: str, sid: str = "", harness: str = "codex") -> dict
 def peer_body_item(text: str, origin: dict | None = None) -> dict | None:
     """The owed item for a verified peer body this turn was shown, or ``None``
     when it only needs reading. Claude shows sealed peer bodies as hook context
-    (``peer-message.emit_peer_context``) where Codex gets them as the prompt."""
+    (``peer-message.emit_peer_context``) where Codex gets them as the prompt.
+
+    A sealed request role (``peer_request``) decides first: a request is owed a
+    follow-through, a report or cancel notice only needs reading. Otherwise the
+    first line decides, through the same table."""
+    ref = (origin or {}).get("transfer_ref")
+    transfer = _sealed_transfer(ref) if isinstance(ref, str) and ref else None
+    if transfer is not None:
+        try:
+            import peer_request
+            if peer_request.valid_seal(transfer.get("request")):
+                if transfer["request"]["role"] in ("request", "followup"):
+                    return {"kind": "peer-report", "required_action": "follow-through",
+                            "request": transfer["request"]["id"],
+                            "revision": transfer["request"]["revision"]}
+                return None
+        except Exception:  # noqa: BLE001 - an unreadable seal falls back to the first line
+            pass
     try:
         line = _peer_body_first_line(text or "", origin)
     except Exception:  # noqa: BLE001 - an unreadable body keeps the pass
@@ -385,6 +416,26 @@ def peer_body_item(text: str, origin: dict | None = None) -> dict | None:
     if line.startswith(READ_ONLY_PEER_PREFIXES):
         return None
     return {"kind": "peer-report", "required_action": "follow-through"}
+
+
+_PEER_MESSAGE = None  # loaded once, only when a transfer ref must be read
+
+
+def _sealed_transfer(ref: str) -> dict | None:
+    """The transfer record for ``ref`` (its sealed request role), or None."""
+    global _PEER_MESSAGE
+    try:
+        if _PEER_MESSAGE is None:
+            import importlib.util
+            path = Path(__file__).resolve().with_name("peer-message.py")
+            spec = importlib.util.spec_from_file_location("_carrier_peer_message", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _PEER_MESSAGE = module
+        record = _PEER_MESSAGE._read_transfer_record(ref)
+    except Exception:  # noqa: BLE001 - no readable seal: the first line decides
+        return None
+    return record if isinstance(record, dict) else None
 
 
 def follow_through(sid: str, tid: str, root: Path | None = None) -> str:
@@ -409,6 +460,16 @@ def nudge_text(items: list[dict]) -> str:
         if item.get("kind") == "completion":
             lines.append(f"- completion attempt={item.get('attempt_id')} "
                          f"required_action={item.get('required_action')}")
+        elif item.get("kind") == "peer-report" and item.get("request"):
+            # A sealed request (or follow-up) is owed an answer; its notice line is not the body.
+            import peer_request
+            rev = item.get("revision")
+            report = ("%s %s --rev %d --result \"<one line>\"" % (peer_request.REPORT_COMMAND, item["request"], rev)
+                      if isinstance(rev, int) else "%s %s --result \"<one line>\"" % (
+                          peer_request.REPORT_COMMAND, item["request"]))
+            lines.append("- another session's request %s arrived as this turn's prompt: open it with `%s %s`, "
+                         "then report with `%s` (or add `--partial`, or use `--reject \"<reason>\"` instead of "
+                         "`--result`)" % (item["request"], peer_request.SHOW_COMMAND, item["request"], report))
         elif item.get("kind") == "peer-report":
             lines.append("- another session's report arrived as this turn's prompt")
         else:

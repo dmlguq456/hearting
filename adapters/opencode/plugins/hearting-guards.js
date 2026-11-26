@@ -119,7 +119,7 @@ const nativeContextPolicyVersion = "1.19.0"
 let resolvedRuntimeConfig = null
 let contextPolicyRuntimeVersion = null
 let contextPolicyRequestedWindow = null
-const frameNativeAnswer = path.join(root, "utilities", "frame_native_answer.py")
+const nativeQuestionRedirect = path.join(root, "utilities", "native_question_redirect.py")
 const startReceipt = path.join(root, "utilities", "start_receipt.py")
 // V2 names its shell tool `shell` (V1: `bash`); both reach the gate's one shell branch.
 const routeGateTools = new Set(["write", "edit", "multiedit", "patch", "apply_patch", "bash", "shell"])
@@ -147,15 +147,10 @@ const runtimeStatusBySession = new Map()
 //   * memoryBySession — session memory briefing, computed once per session and
 //     re-emitted on every call so it persists the way Claude's SessionStart
 //     additionalContext does.
-//   * localEvidenceBySession — artifact-root presence probe, computed at the
-//     first chat.message, then replayed: the block is byte-identical between turns
-//     because only a newly written artifact changes it, so recomputing it per
-//     turn bought nothing and spent ~360 tokens a turn.
 //   * turnContextBySession — { turn, blocks } for the capsule candidate probe
 //     and the per-turn signals: recomputed when a new user turn arrives, then
 //     re-emitted on every model call of that turn.
 const memoryBySession = new Map()
-const localEvidenceBySession = new Map()
 const turnContextBySession = new Map()
 //   * cardBySession — { turn, text } for the session card / tidy notice. The
 //     card is consumed once per user turn in chat.message (independent of the
@@ -714,7 +709,8 @@ function observeCompactRuntimeStatus(ctx, sid, status) {
 }
 
 function recordNativeTurnStatus(ctx, sid, status) {
-  const pane = process.env.HERDR_PANE_ID || ""
+  // The reader keys the record by the same pane hint: Herdr's pane, else this TUI's tmux pane.
+  const pane = paneHint()
   const endpoint = process.env.AGENT_HERDR_SESSION || "default"
   const origin = paneNativeOrigin
   const binding = paneContexts.get(ctx)
@@ -1429,6 +1425,7 @@ async function setupOpenCodeV2(ctx) {
       if (v2WorkerSessions.has(sessionID)) {
         for (const key of inheritedIdentityEnv) env[key] = ""
         env[CARRIER_ENV] = ""
+        env[WATCH_WAKE_ENV] = ""
         env[ROOT_SESSION_ENV] = ""
         if (sessionID) env.OPENCODE_SESSION_ID = sessionID
         return
@@ -2012,6 +2009,9 @@ function commitDeferred(helper, command, pending) {
 // a runtime that has this carrier from one that predates it. Fail-open: a carrier
 // problem never blocks or throws into a turn.
 const CARRIER_ENV = "AGENT_PARENT_COMPLETION_CARRIER"
+// Said only by a plugin that can wake an idle session with its steward watch receipts: an
+// older plugin puts CARRIER_ENV on its commands too, but has no such wake.
+const WATCH_WAKE_ENV = "AGENT_STEWARD_WATCH_WAKE"
 const CARRIER_KIND = "opencode-turn"
 const CARRIER_INTERVAL_MS = 5000
 const CARRIER_ROOTS_RETRY_MS = 60000
@@ -2030,6 +2030,84 @@ const v2ForeignSessions = new WeakMap()
 function v2ForeignSession(ctx, sid) { return !!v2ForeignSessions.get(ctx)?.has(sid) }
 function knownChildSession(sid) {
   return !!(sid && (sessionInfoById.get(sid)?.parentID || v2SessionInfo.get(sid)?.parentID))
+}
+
+// Steward watch receipts (Codex's `codex_turn_carrier` WATCH_HEADER meaning). A session that
+// armed `peer-steward watch` with `wake=opencode` ends its turn; when the watch writes its
+// receipt, this plugin (not the model) finds it and starts the idle session's next turn with
+// it through promptAsync, then acknowledges it with the same exact-recipient ACK once the sent
+// text shows in the session's native history (an accepted prompt alone is not receipt: it
+// may never be stored, and then the receipt stays and is sent again, WATCH_SEND_LIMIT times
+// at most per receipt, whether or not the ACK itself succeeds). Only the
+// helper's own bounded read decides what is undelivered; the file look here just keeps an idle
+// tick from spawning anything when this session has no receipt waiting. Fail-open.
+const WATCH_HEADER = "[peer-steward] undelivered watch receipts:"
+const WATCH_SEND_LIMIT = 2
+const WATCH_MAX_ROWS = 5
+const WATCH_MAX_NAMES = 256
+
+function stewardCommand(args, sid, timeoutMs = 8000) {
+  return new Promise((resolve) => {
+    let out = ""
+    let child
+    let finished = false
+    const target = resolveRuntimeTarget(path.join("utilities", "peer-steward.py"))
+    const finish = (value) => { if (finished) return; finished = true; clearTimeout(timer); resolve(value) }
+    const timer = setTimeout(() => { try { child?.kill("SIGKILL") } catch {} finish(null) }, timeoutMs)
+    if (!existsSync(target.helper)) { finish(null); return }
+    try {
+      child = spawn("python3", [target.helper, ...args], {
+        cwd: target.root, stdio: ["ignore", "pipe", "ignore"],
+        env: { ...process.env, AGENT_HOME: target.root, OPENCODE_SESSION_ID: sid,
+          AGENT_DISPATCH_CALLER_HARNESS: "opencode" },
+      })
+    } catch { finish(null); return }
+    child.on("error", () => finish(null))
+    child.stdout.on("data", (chunk) => { out += chunk })
+    child.on("close", (code) => finish(code === 0 ? out : null))
+  })
+}
+
+// Does this session's own steward watch hold a receipt nobody acknowledged? A bounded look at
+// the watch files under the known state roots; the helper confirms before anything is sent.
+function watchReceiptWaiting(roots, sid) {
+  for (const base of roots || []) {
+    let names = []
+    try { names = readdirSync(path.join(base, "peer-watches")) } catch { continue }
+    const acked = new Set(names.filter(name => name.endsWith(".ack.json")))
+    let looked = 0
+    for (const name of names) {
+      if (!name.endsWith(".receipt.json")) continue
+      const id = name.slice(0, -".receipt.json".length)
+      if (acked.has(`${id}.ack.json`)) continue
+      if (++looked > WATCH_MAX_NAMES) break
+      try {
+        const arm = JSON.parse(readFileSync(path.join(base, "peer-watches", `${id}.json`), "utf8"))
+        if (arm?.steward?.session_id === sid && arm?.steward?.harness === "opencode") return true
+      } catch {}
+    }
+  }
+  return false
+}
+
+// Is this exact text one of the session's own user messages in its native history?
+function userTextShown(messages, sid, text) {
+  if (!Array.isArray(messages)) return false
+  return messages.some((row) => {
+    if (row?.info?.sessionID !== sid || row?.info?.role !== "user") return false
+    const content = row?.message && typeof row.message === "object" ? row.message.content : row?.parts
+    const body = typeof content === "string" ? content
+      : Array.isArray(content) ? content.filter(item => item && (item.type === "text" || item.type === "input_text")
+        && typeof item.text === "string").map(item => item.text).join("\n") : ""
+    return body === text
+  })
+}
+
+function watchReceiptLine(row) {
+  const agent = row?.agent && typeof row.agent === "object" ? row.agent : {}
+  return `state=${row?.receipt_state || row?.state || "unknown"} agent=${agent.harness || "-"} `
+    + `session_id=${agent.session_id || "-"} name=${agent.name || row?.target || "-"} `
+    + `pane=${agent.pane || "-"} watch_id=${row?.watch_id || "-"} receipt=${row?.receipt || "-"}`
 }
 
 // One bounded sweep step; any failure is null. Ordinary steps are asynchronous;
@@ -2125,13 +2203,69 @@ function createCompletionCarrier(ctx) {
   }
 
   // A cheap look at this session's own records, so an idle tick spawns nothing.
-  async function owed(sid) {
+  async function loadRoots(sid) {
     // Known roots are kept; none known yet (no state root, or the lookup failed) is asked again later.
     if (!roots?.length && Date.now() - rootsAt >= CARRIER_ROOTS_RETRY_MS) {
       rootsAt = Date.now()
       roots = (await command("roots", sid)) || []
       log("roots", sid, roots.length ? "resolved" : "unavailable", { roots })
     }
+  }
+
+  // Watch receipts waiting for this idle session: send them once as its next turn, then ACK.
+  const watchSent = new Map()
+  // Sessions whose completion carrier opened a turn; the timer's watch pass leaves those to it.
+  const opened = new Set()
+  async function watchWake(sid) {
+    if (!sid || busy.has(sid) || !available() || knownChildSession(sid)) return
+    if (["busy", "retry", "blocked", "working"].includes(status.get(sid))) return
+    await loadRoots(sid)
+    if (!watchReceiptWaiting(roots, sid)) return
+    busy.add(sid)
+    let timeout
+    try {
+      const listed = await stewardCommand(["status", "--undelivered", "--json"], sid)
+      let rows = []
+      try { rows = JSON.parse(listed || "null")?.watches || [] } catch {}
+      rows = rows.filter(row => row && typeof row.watch_id === "string"
+        && /^[0-9a-f]{16}$/.test(row.watch_id) && (watchSent.get(row.watch_id) || 0) < WATCH_SEND_LIMIT)
+        .slice(0, WATCH_MAX_ROWS)
+      if (!rows.length) { log("skip", sid, "no-undelivered-watch"); return }
+      // Read at the last moment: a turn the user started meanwhile carries it instead.
+      if (["busy", "retry", "blocked", "working"].includes(status.get(sid))) return
+      const text = [WATCH_HEADER, ...rows.map(watchReceiptLine)].join("\n")
+      for (const row of rows) watchSent.set(row.watch_id, (watchSent.get(row.watch_id) || 0) + 1)
+      let taken = false
+      let promptReason = "not-accepted"
+      try {
+        const result = await Promise.race([
+          ctx.client.session.promptAsync({ path: { id: sid }, body: { parts: [{ type: "text", text }] } }),
+          new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error("carrier-timeout")), 5000) }),
+        ])
+        taken = Boolean(result) && result.error == null && result.response?.ok !== false
+        promptReason = taken ? "accepted" : "not-accepted"
+      } catch (error) { promptReason = error?.message === "carrier-timeout" ? "timeout" : "error" }
+      log("watch-prompt", sid, promptReason, { watches: rows.map(row => row.watch_id) })
+      if (!taken) return
+      // OpenCode 2 accepts the prompt before its user message is stored: look again briefly,
+      // as the completion carrier does, before taking it as never stored.
+      let shown = false
+      for (let look = 0; look < 7 && !shown; look++) {
+        if (look) await new Promise((resolve) => setTimeout(resolve, 500))
+        shown = userTextShown(await compactMessages(ctx, sid), sid, text)
+      }
+      if (!shown) { log("watch-prompt", sid, "sent-unobserved", { watches: rows.map(row => row.watch_id) }); return }
+      for (const row of rows) {
+        const acked = await stewardCommand(["ack", row.watch_id, "--carrier", CARRIER_KIND], sid)
+        // Only a recorded ACK ends the send count's use; a refused one keeps counting, so a
+        // receipt that cannot be acknowledged opens no more than WATCH_SEND_LIMIT turns.
+        if (/\back=(created|already)\b/.test(acked || "")) watchSent.delete(row.watch_id)
+      }
+    } finally { clearTimeout(timeout); busy.delete(sid) }
+  }
+
+  async function owed(sid) {
+    await loadRoots(sid)
     if (!sid) return false
     const now = Date.now()
     const current = await command("recipients", sid)
@@ -2263,6 +2397,15 @@ function createCompletionCarrier(ctx) {
         log("skip", sid, "resend-limit-deferred", { deliveries: [...held] })
         return
       }
+      if (claimed.records.every(record => record.waits === true)) {
+        // Only quiet notices to a supervising session (a short or metric-less normal end):
+        // no turn of their own; they ride the next natural turn (session_notice).
+        if (!deferred.has(sid)) deferred.set(sid, new Set())
+        for (const record of claimed.records) deferred.get(sid).add(record.delivery_id)
+        await command("release", sid, { records: claimed.records })
+        log("skip", sid, "quiet-waits-for-next-turn", { deliveries: claimed.records.map(record => record.delivery_id) })
+        return
+      }
       const canSend = await nativeIdle()
       // A second native read is the final output/send recheck. If another
       // carrier's exact receipt appeared after our first read, settle it here
@@ -2317,6 +2460,7 @@ function createCompletionCarrier(ctx) {
         log("skip", sid, "final-admission-withheld-released")
         return
       }
+      opened.add(sid)
       let taken = false
       let promptReason = "not-accepted"
       let httpStatus
@@ -2412,7 +2556,13 @@ function createCompletionCarrier(ctx) {
             // OpenCode 2: every plugin instance of the shared service sees every
             // session; one known to be another directory's or a child spawns nothing.
             if (v2 && v2ForeignSession(ctx, id)) continue
-            deliver(id).catch(() => {})
+            // The watch pass runs after the completion carrier has settled (deliver holds `busy`
+            // until then, so a pass started beside it would always turn back), and not at all
+            // when the carrier just opened this session's turn.
+            opened.delete(id)
+            deliver(id).catch(() => {}).finally(() => {
+              if (status.get(id) === "idle" && !opened.has(id)) watchWake(id).catch(() => {})
+            })
             if (status.get(id) === "idle") idlePeers.push(id)
           }
           if (!v2) {
@@ -2470,7 +2620,13 @@ function createCompletionCarrier(ctx) {
     },
     status(sid, type) { if (sid && type) status.set(sid, type) },
     // A finished turn also looks past its own records (a seat handover stores them elsewhere).
-    async idle(sid) { if (!sid) return; status.set(sid, "idle"); if (sessions.has(sid)) await deliver(sid, false) },
+    async idle(sid) {
+      if (!sid) return
+      status.set(sid, "idle")
+      if (!sessions.has(sid)) return
+      await deliver(sid, false)
+      await watchWake(sid)
+    },
     forget(sid) { sessions.delete(sid); status.delete(sid); forgetDeferred(sid, [...deferredIds(sid)]) },
     dispose(silent = false) { if (!silent) log("dispose", "", "context-disposed", { sessions: [...sessions] }); if (timer) clearInterval(timer); timer = null; sessions.clear() },
   }
@@ -2478,13 +2634,13 @@ function createCompletionCarrier(ctx) {
 
 // Session card / tidy notice: `session_tidy.py hook` records the event and prints
 // what this session is due, once. Every failure is empty (no card, no throw).
-function collectCard(event, sid, cwd, prompt = "") {
+function collectCard(event, sid, cwd, prompt = "", promptMeta = null) {
   if (!sid || isWorkerSession()) return { text: "", pending: null }
   const result = spawnSync("python3", [sessionTidy, "hook", "--harness", "opencode",
     "--event", event, "--session-id", sid, "--cwd", cwd, "--format", "json"], {
     cwd: root,
     env: { ...process.env, AGENT_HOME: root },
-    input: JSON.stringify({ prompt }),
+    input: JSON.stringify(promptMeta ? { prompt, prompt_meta: promptMeta } : { prompt }),
     encoding: "utf8",
     timeout: 4000,
     killSignal: "SIGKILL",
@@ -2537,7 +2693,7 @@ function appendContext(output, text) {
 // own `notice` peer_message_v1 under its exact session id (same record the Claude
 // hook and the Codex hook write). Detached, fail-soft, never blocks the turn.
 function spawnPeerNotice(sid, prompt, cwd) {
-  if (!sid || !prompt || (!prompt.includes("peer-from:") && !prompt.includes("runtime-from:"))) return
+  if (!sid || !prompt || !looksLikePeerPrompt(prompt)) return
   const tool = path.join(root, "utilities", "peer-message.py")
   const args = [tool, "receive",
     "--from-project", path.basename(cwd || ""),
@@ -2556,6 +2712,22 @@ function spawnPeerNotice(sid, prompt, cwd) {
   } catch {}
 }
 
+// A trailer-form text, or a display-form one (`— [d4]` as the last line, `↳ ` first). The same
+// gate as `peer-message.looks_like_peer_text`; a test keeps the two equal.
+const PEER_DISPLAY_TAIL = /^— (?:\[(?:[0-9a-f]{2}|\?)\]|claude|codex|opencode)(?: [^\n]{1,80})?[ \t]*$/m
+const PEER_DISPLAY_LINE = /^\s*(?:<pasted_content[^>]*>\s*)?↳ /
+function looksLikePeerPrompt(prompt) {
+  return typeof prompt === "string" && prompt !== ""
+    && (prompt.includes("peer-from:") || prompt.includes("runtime-from:")
+      || PEER_DISPLAY_LINE.test(prompt.slice(0, 300)) || PEER_DISPLAY_TAIL.test(prompt.slice(-400)))
+}
+
+// The `pending` and `context` commands below pass `HEARTING_PEER_DISPLAY_GATE: "2"`: this plugin's
+// own gate (above) reads the display forms, and only then does the Python side leave the sign a
+// sender looks for. `AGENT_HOME` may name a `current` link, so a plugin loaded before the forms
+// existed (its gate cannot read them) can run beside a release whose Python would otherwise leave
+// it. Receiving a text (`spawnPeerNotice`) leaves no sign.
+//
 // Pending transport uses the current plugin client and exact callback SID. It
 // never touches the TUI draft or system-transform output. Acceptance is queued;
 // only persisted exact text followed by a completed assistant turn acknowledges.
@@ -2563,7 +2735,7 @@ function pendingPeerCommand(sid, options = []) {
   if (!sid) return null
   const result = spawnSync("python3", [path.join(root, "utilities", "peer-message.py"),
     "pending", "--to-harness", "opencode", "--to-session-id", sid, ...options], {
-    cwd: root, env: { ...process.env, AGENT_HOME: root }, encoding: "utf8", timeout: 1500,
+    cwd: root, env: { ...process.env, AGENT_HOME: root, HEARTING_PEER_DISPLAY_GATE: "2" }, encoding: "utf8", timeout: 1500,
   })
   if (result.status !== 0) return null
   try { return JSON.parse(result.stdout || "null") } catch { return null }
@@ -2573,7 +2745,7 @@ function pendingPeerTransition(sid, options) {
   if (!sid) return false
   const result = spawnSync("python3", [path.join(root, "utilities", "peer-message.py"),
     "pending", "--to-harness", "opencode", "--to-session-id", sid, ...options], {
-    cwd: root, env: { ...process.env, AGENT_HOME: root }, encoding: "utf8", timeout: 1500,
+    cwd: root, env: { ...process.env, AGENT_HOME: root, HEARTING_PEER_DISPLAY_GATE: "2" }, encoding: "utf8", timeout: 1500,
   })
   return result.status === 0
 }
@@ -2593,7 +2765,7 @@ function pendingPeerSpawn(sid, options, timeoutMs) {
     try {
       child = spawn("python3", [path.join(root, "utilities", "peer-message.py"),
         "pending", "--to-harness", "opencode", "--to-session-id", sid, ...options], {
-        cwd: root, env: { ...process.env, AGENT_HOME: root }, stdio: ["ignore", "pipe", "ignore"],
+        cwd: root, env: { ...process.env, AGENT_HOME: root, HEARTING_PEER_DISPLAY_GATE: "2" }, stdio: ["ignore", "pipe", "ignore"],
       })
     } catch { finish(null); return }
     child.on("error", () => finish(null))
@@ -2648,7 +2820,7 @@ function peerToolContextAsync(sid, timeoutMs = 2500, drainMs = 1000) {
       child = spawn("python3", [path.join(root, "utilities", "peer-message.py"),
         "context", "--to-harness", "opencode", "--to-session-id", sid,
         "--event", "PostToolUse", "--native-delivery"], {
-        cwd: root, env: { ...process.env, AGENT_HOME: root }, stdio: ["ignore", "pipe", "ignore"],
+        cwd: root, env: { ...process.env, AGENT_HOME: root, HEARTING_PEER_DISPLAY_GATE: "2" }, stdio: ["ignore", "pipe", "ignore"],
       })
     } catch { finish(); return }
     child.on("error", () => finish())
@@ -3243,6 +3415,23 @@ async function pendingPeerDeliveryV2(ctx, sid) {
   } finally { pendingPeerBusy.delete(sid) }
 }
 
+// What the prompt hook may know of a prompt beyond its text, for its timeline row only: a task
+// session's prompt is its parent agent's (no row), and the person's own lines leave out the
+// synthetic parts (attached files' text) that `promptText` joins in.
+function promptMeta(sid, output) {
+  const meta = {}
+  if (knownChildSession(sid)) meta.child = true
+  if (Array.isArray(output?.parts)) {
+    const own = output.parts
+      .filter((part) => part && part.type === "text" && typeof part.text === "string" && !part.synthetic)
+      .map((part) => part.text)
+      .join("\n")
+      .trim()
+    if (own) meta.lines = own.split("\n").length
+  }
+  return meta
+}
+
 function promptText(output) {
   if (typeof output?.message?.content === "string") return output.message.content
   if (!Array.isArray(output?.parts)) return ""
@@ -3539,7 +3728,8 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       observeCompactRuntimeStatus(ctx, sid, "working")
       if (sid) noteInteractionRequest(sid, event.properties?.requestID, "closed")
       if (sid && !isWorkerSession()) {
-        publishInteraction("clear", sid, { request_id: event.properties?.requestID })
+        publishInteraction("clear", sid, { request_id: event.properties?.requestID,
+          closure_reason: event.type === "question.rejected" ? "cancelled" : "answered" })
       }
     }
     if (event && event.type === "session.idle") {
@@ -3579,21 +3769,17 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       touchHeartbeat(dispatchSlug())
     }
     if (event && event.type === "session.deleted") {
-      const sid = (event.properties && event.properties.sessionID) || ""
+      const sid = event.properties?.sessionID || event.properties?.info?.id || ""
       if (sid) {
         if (!isWorkerSession()) {
-          const child = spawn("python3", [fleetInteractionState, "clear", "--harness", "opencode"], {
-            stdio: ["pipe", "ignore", "ignore"], detached: true })
-          child.on("error", () => {})
-          child.unref()
-          child.stdin?.end(JSON.stringify({ session_id: sid }))
+          await publishInteraction("clear", sid, { scope: "session", hook_event_name: "SessionEnd",
+            reason: "session.deleted" })
         }
         spawnSummary(sid, "final")
         completionCarrier.forget(sid)
         promptBySession.delete(sid)
         turnBySession.delete(sid)
         memoryBySession.delete(sid)
-        localEvidenceBySession.delete(sid)
         turnContextBySession.delete(sid)
         cardBySession.delete(sid)
         historyNoticeSettledBySession.delete(sid)
@@ -3617,17 +3803,14 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     spawnSummary(eventSid, "initial")
     await projectPane(eventSid, ctx)
     const prompt = promptText(output)
-    if (eventSid && !localEvidenceBySession.has(sid)) {
-      localEvidenceBySession.set(sid, collectPreflight("local-evidence", [baseDir(ctx)]))
-    }
     const turn = input.messageID || output?.message?.id || ""
     if (prompt) promptBySession.set(sid, prompt)
     peerGuidanceBySession.delete(sid)
     // Actual peer receipt is observed after persistence, not callback rendering.
-    if (prompt && eventSid && (prompt.includes("peer-from:") || prompt.includes("runtime-from:"))) {
+    if (prompt && eventSid && looksLikePeerPrompt(prompt)) {
       const guidance = spawnSync(
         "python3",
-        ["-c", "import importlib.util, json, sys; s=importlib.util.spec_from_file_location('peer', 'utilities/peer-message.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); d=json.load(sys.stdin); print(m.receiver_guidance(d.get('prompt', ''), d.get('recipient'), cwd=d.get('cwd')))"],
+        ["-c", "import importlib.util, json, sys; s=importlib.util.spec_from_file_location('peer', 'utilities/peer-message.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); d=json.load(sys.stdin); print(m.receiver_guidance_once(d.get('prompt', ''), d.get('recipient'), cwd=d.get('cwd')))"],
         { cwd: root, env: { ...process.env, AGENT_HOME: root }, encoding: "utf8", timeout: 4000,
           input: JSON.stringify({ prompt, recipient: { harness: "opencode", session_id: eventSid }, cwd: baseDir(ctx) }) })
       if (guidance.status === 0) peerGuidanceBySession.set(sid, (guidance.stdout || "").trim())
@@ -3661,7 +3844,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       else carriedCompletionBySession.delete(sid)
     }
     if (eventSid && (!cardTurn || cardBySession.get(sid)?.turn !== cardTurn)) {
-      const cardResult = collectCard("prompt", eventSid, baseDir(ctx), prompt)
+      const cardResult = collectCard("prompt", eventSid, baseDir(ctx), prompt, promptMeta(eventSid, output))
       collectHistoryNotice(ctx, eventSid, baseDir(ctx), prompt, true)
       cardBySession.set(sid, { turn: cardTurn, text: cardResult.text,
                                pending: cardResult.pending })
@@ -3691,7 +3874,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       return
     }
     // Every model call re-emits the same blocks. The probe/preflight work still
-    // runs once per session (memory, local evidence) or once per user turn
+    // runs once per session (memory) or once per user turn
     // (candidates, prompt-signal, briefing) — only the emission repeats, so the
     // caps in core/MEMORY.md are unchanged and no extra process is spawned per
     // tool-loop continuation.
@@ -3700,7 +3883,6 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     }
     appendContext(output, memoryBySession.get(sid))
 
-    appendContext(output, localEvidenceBySession.get(sid))
     appendContext(output, cardBySession.get(sid)?.text)
     appendContext(output, peerGuidanceBySession.get(sid))
     appendContext(output, contextAlertBySession.get(sid)?.text)
@@ -3768,6 +3950,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     const rootSid = sid ? await rootSessionId(ctx, sid) : ""
     output.env[ROOT_SESSION_ENV] = rootSid && rootSid !== sid ? rootSid : ""
     output.env[CARRIER_ENV] = completionCarrier.env(sid) || ""
+    output.env[WATCH_WAKE_ENV] = output.env[CARRIER_ENV] ? "opencode" : ""
   },
   // The two kept write gates (hooks/core-write-guard.py): installed release copies
   // and the shared checkout seen from a linked worktree. Anything else is allowed.
@@ -3787,6 +3970,18 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
         encoding: "utf8",
       })
       if (result.status === 1) throw new Error((result.stdout || "").trim())
+    }
+    // A native question becomes this session's Hearting question (utilities/native_question_redirect.py):
+    // the call is refused with the short reason; any failure there lets the native question through.
+    // A child (task) session's question is its own: it is not the person's session, so it stays native.
+    if (toolName === "question" && !knownChildSession(input.sessionID)
+        && (await rootSessionId(ctx, input.sessionID || "")) === (input.sessionID || "")) {
+      const result = spawnSync("python3", [nativeQuestionRedirect, "--opencode"], {
+        input: JSON.stringify({ tool: toolName, args: output.args || {}, sessionID: input.sessionID || "", cwd: baseDir(ctx) }),
+        encoding: "utf8",
+        timeout: 8000,
+      })
+      if (result.status === 1 && (result.stdout || "").trim()) throw new Error((result.stdout || "").trim())
     }
     // SD-11 stage-dispatch reminder (Claude PreToolUse[Skill]); delivered with the skill's result.
     const skill = skillToolID(toolName, output.args || {})
@@ -3868,15 +4063,6 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     if (toolName === "read") {
       const readFile = normalizeFile(ctx, args.filePath || args.path || args.file)
       if (readFile) collectPreflight("read", [readFile, input.sessionID || "opencode-plugin"])
-    }
-    // The person's reply to a registered frame question is kept for the next start
-    // (utilities/frame_native_answer.py). Non-blocking, like the read marker.
-    if (toolName === "question") {
-      spawnSync("python3", [frameNativeAnswer, "--opencode"], {
-        input: JSON.stringify({ tool: toolName, sessionID: input.sessionID || "", args,
-                                answers: output?.metadata?.answers || [] }),
-        encoding: "utf8",
-      })
     }
     afterSkillTool({ ...input, args }, output, baseDir(ctx),
       promptBySession.get(input.sessionID || "opencode-plugin") || "")

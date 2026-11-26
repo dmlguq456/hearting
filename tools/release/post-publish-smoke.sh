@@ -126,7 +126,7 @@ PY
 # Lifecycle context reaches OpenCode only through plugin hooks, which an
 # OpenCode update can rename without an error. Boot the published tree in a
 # pinned real OpenCode against the loopback fixture model; the scenario fails
-# when the hook-injected local-evidence block is missing from the first request.
+# when the hook-injected memory-candidate block is missing from the first request.
 OPENCODE_VERSION=2.2.7
 OPENCODE_SHA256=89a6cee227b54bc011179c528a5e63176032462b1a5e21723b616801cddc2ca7
 mkdir -p "$SMOKE/opencode" "$SMOKE/boot-home"

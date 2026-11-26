@@ -351,7 +351,8 @@ def _receipt_watch_entries(root, sid, harness, seat_holders):
     return entries
 
 _PROMPT_VERIFY_TIMEOUT_MS = 8000      # bounded native /clear command invocation
-_PROMPT_EXIT = {"true": 0, "failed": 1, "queued": 3, "unverified": 5}
+# Queued is ordinary acceptance (exit 0); the printed `prompted=` word tells it from receipt.
+_PROMPT_EXIT = {"true": 0, "failed": 1, "queued": 0, "unverified": 5}
 _PROMPT_LEDGER_STATUS = {"true": "sent", "failed": "failed", "queued": "unknown", "unverified": "unknown"}
 
 
@@ -557,7 +558,7 @@ def _watch_transition_authority_lock(identity, server, *, deadline=None):
             raise _WatchTransitionLockBusy("jobs-lock-budget-expired")
         endpoint = identity.get("endpoint") if isinstance(identity, dict) else None
         socket_path = (None if isinstance(endpoint, str)
-                       and endpoint.startswith(_WATCH_SERVER_ENDPOINT_PREFIX)
+                       and endpoint.startswith((_WATCH_SERVER_ENDPOINT_PREFIX, "native:"))
                        else endpoint if isinstance(endpoint, str) and endpoint
                        else herdr_observation.socket_path_for_endpoint(server))
         now = time.monotonic()

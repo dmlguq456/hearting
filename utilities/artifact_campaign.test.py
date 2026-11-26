@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Campaign closure/reopen stream tests on isolated fixture roots."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import concurrent.futures
 import io
 import json
@@ -192,7 +195,11 @@ class CampaignTest(F.ProducerTestBase):
         P._write_campaign(self.root, record, exclusive=False)
         refusal = C.status(self.root, self.path)["close_refusal"]
         self.assertEqual(refusal["reason"], "campaign-membership-drift")
-        self.assertIn("reconcile-campaign-membership-with-producer-records", refusal["detail"])
+        # An id with no producer record is not something a command settles; the refusal says so
+        # instead of naming a step that does not exist.
+        self.assertIn("cyc_" + "f" * 32, refusal["detail"])
+        self.assertNotIn("reconcile-campaign-membership-with-producer-records", refusal["detail"])
+        self.assertIn("no command settles it", refusal["detail"])
         record["cycles"].remove("cyc_" + "f" * 32)
         P._write_campaign(self.root, record, exclusive=False)
 

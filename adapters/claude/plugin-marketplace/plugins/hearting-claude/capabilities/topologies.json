@@ -67,9 +67,63 @@
       "unavailable_reason": "extension-unavailable"
     }
   },
+  "fields": [
+    "plan",
+    "design",
+    "code",
+    "lab",
+    "research",
+    "docs",
+    "admin",
+    "other"
+  ],
+  "field_default_recipes": {
+    "plan": {
+      "capability": "autopilot-spec"
+    },
+    "design": {
+      "capability": "autopilot-design"
+    },
+    "code": {
+      "capability": "autopilot-code"
+    },
+    "lab": {
+      "capability": "autopilot-lab",
+      "mode": "setup"
+    },
+    "research": {
+      "capability": "autopilot-research"
+    },
+    "docs": {
+      "capability": "autopilot-draft"
+    },
+    "admin": null,
+    "other": null
+  },
+  "field_harness_weights": {
+    "checked_on": "2026-11-20",
+    "rule": "keep-some v1: comparative advantage only, no cell below 0.6, a field without a row (admin, other) is 1.0",
+    "basis": {
+      "models": "the shipped adapters/<harness>/config/models.conf tier table",
+      "profiles": {
+        "claude": ["deep", "balanced-deep", "balanced", "light", "mini"],
+        "codex": ["deep", "balanced-deep", "balanced", "light", "mini"],
+        "opencode": ["light", "mini"]
+      }
+    },
+    "weights": {
+      "code": {"claude": 0.95, "codex": 0.85, "opencode": 1.0},
+      "design": {"claude": 1.0, "codex": 0.95, "opencode": 0.85},
+      "docs": {"claude": 0.95, "codex": 1.0, "opencode": 0.95},
+      "research": {"claude": 0.9, "codex": 1.0, "opencode": 1.0},
+      "lab": {"claude": 1.0, "codex": 1.0, "opencode": 0.9},
+      "plan": {"claude": 0.9, "codex": 0.8, "opencode": 1.0}
+    }
+  },
   "recipes": [
     {
       "capability": "autopilot-apply",
+      "field": "docs",
       "modes": [
         "default"
       ],
@@ -261,6 +315,7 @@
     },
     {
       "capability": "autopilot-code",
+      "field": "code",
       "modes": [
         "audit",
         "debug",
@@ -299,6 +354,18 @@
         "owner_dispatch_depth": 1,
         "max_dispatch_depth": 1,
         "model_profile": "balanced-deep"
+      },
+      "one_shot_review": {
+        "node": "impl-review",
+        "inputs": [
+          "source-diff"
+        ],
+        "fallback_hops": [
+          "same-harness-headless",
+          "cross-harness-headless"
+        ],
+        "model_profile": "deep",
+        "owner_model_profile": "balanced"
       },
       "standard_plus": {
         "topology": "staged",
@@ -799,6 +866,7 @@
     },
     {
       "capability": "autopilot-design",
+      "field": "design",
       "modes": [
         "default"
       ],
@@ -1213,6 +1281,7 @@
     },
     {
       "capability": "autopilot-draft",
+      "field": "docs",
       "modes": [
         "doc",
         "paper",
@@ -1717,6 +1786,7 @@
     },
     {
       "capability": "autopilot-lab",
+      "field": "lab",
       "modes": [
         "setup"
       ],
@@ -2033,6 +2103,7 @@
     },
     {
       "capability": "autopilot-lab",
+      "field": "lab",
       "modes": [
         "eval"
       ],
@@ -2392,6 +2463,7 @@
     },
     {
       "capability": "autopilot-refine",
+      "field": "docs",
       "modes": [
         "default"
       ],
@@ -2660,6 +2732,7 @@
     },
     {
       "capability": "autopilot-research",
+      "field": "research",
       "modes": [
         "academic",
         "market",
@@ -2945,6 +3018,7 @@
     },
     {
       "capability": "autopilot-ship",
+      "field": "code",
       "modes": [
         "default"
       ],
@@ -3255,6 +3329,7 @@
     },
     {
       "capability": "autopilot-ship",
+      "field": "code",
       "modes": [
         "package"
       ],
@@ -3340,6 +3415,7 @@
     },
     {
       "capability": "autopilot-spec",
+      "field": "plan",
       "modes": [
         "api",
         "app",
@@ -3685,6 +3761,11 @@
     },
     {
       "capability": "analyze-project",
+      "field": {
+        "code": "code",
+        "doc": "docs",
+        "paper": "docs"
+      },
       "modes": [
         "code",
         "doc",
@@ -3804,6 +3885,7 @@
     },
     {
       "capability": "analyze-user",
+      "field": "other",
       "modes": [
         "init",
         "update"
@@ -3921,6 +4003,7 @@
     },
     {
       "capability": "audit",
+      "field": "code",
       "modes": [
         "default"
       ],
@@ -4169,6 +4252,73 @@
           "campaigns/<campaign-locator>/<cycle-locator>/artifacts"
         ],
         "map_anchor": "shards"
+      }
+    },
+    {
+      "capability": "unit",
+      "modes": [
+        "default"
+      ],
+      "topology_class": "staged",
+      "direct_predicates": [
+        "atomic-outcome"
+      ],
+      "promotion_signals": [],
+      "quick": {
+        "topology": "one-shot-owner",
+        "worker_kind": "map-worker",
+        "write_scope": [
+          "units/unit/**"
+        ],
+        "owner_dispatch_depth": 1,
+        "max_dispatch_depth": 1,
+        "model_profile": "balanced-deep"
+      },
+      "standard_plus": {
+        "topology": "staged",
+        "nodes": [
+          {
+            "id": "unit",
+            "kind": "map-worker",
+            "depends_on": [],
+            "inputs": [
+              "task"
+            ],
+            "outputs": [
+              "units/unit/report.md"
+            ],
+            "write_scope": [
+              "units/unit/**"
+            ],
+            "resource_class": "normal",
+            "completion_gate": "unit-complete",
+            "dispatch_depth": 1,
+            "launch_authority": "depth-0",
+            "model_profile": "light",
+            "execution_surface": "registered-headless",
+            "registered_worker": true,
+            "terminal": true,
+            "terminal_gate": "unit-complete",
+            "advance_class": "runtime-eligible",
+            "commit_expected": false
+          }
+        ],
+        "owner_dispatch_depth": 1,
+        "max_dispatch_depth": 1
+      },
+      "completion_gates": [
+        "unit-complete"
+      ],
+      "human_gates": [],
+      "human_gate_bindings": [],
+      "resume_retry_boundaries": [
+        "unit"
+      ],
+      "artifact_scope": {
+        "cycle_anchors": [
+          "campaigns/<campaign-locator>/<cycle-locator>/artifacts"
+        ],
+        "map_anchor": "units"
       }
     }
   ],
@@ -4480,6 +4630,10 @@
     "route-decision": {
       "kind": "custom",
       "doc": "capabilities/route-frame.md: runtime terminal record route_decision_v1, fixed by the runtime after the single frame interview; no model attempt"
+    },
+    "unit-complete": {
+      "kind": "custom",
+      "doc": "capabilities/unit.md: the one unit leg ends with its unit-io verdict and a report under units/unit/"
     },
     "resource-exit": {
       "kind": "custom",

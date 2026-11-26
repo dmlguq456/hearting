@@ -1,4 +1,7 @@
 """Hermetic coverage for today's parity capture primitives."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import copy
 import json
 import tempfile
@@ -235,7 +238,7 @@ def _r14_residual_record(state, width, row, *, hits=None):
                              "    weights:         codex ▮▮▮▮▮▮▮▮▮▮ 1.0    o"),
         ("MODELS", 80, 32): (" ── CONTEXT & TIDY  input tokens · new sessions",
                              " ── CONTEXT & TIDY  input tokens · new sessio"),
-        ("MODELS", 100, 22): ("  └─ models.conf → .bak backup · new sessions and launches only · s",
+        ("MODELS", 100, 22): ("  └─ models.conf → .bak backup · new sessions and launches only · r",
                               "  └─ models.conf → .bak backup · new sessions and launches only  ┘"),
         ("MODELS", 100, 26): ("    weights:         codex ▮▮▮▮▮▮▮▮▮▮ 1.0    opencode ▮▮▮▮ 0.4    c",
                               "    weights:         codex ▮▮▮▮▮▮▮▮▮▮ 1.0    opencode ▮▮▮▮ 0.4"),

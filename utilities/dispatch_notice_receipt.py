@@ -31,3 +31,25 @@ def gateway_delivery_id(receipt: dict) -> str:
 
 def context(receipt: dict, delivery_id: str) -> dict:
     return codec(receipt).context(receipt, delivery_id)
+
+
+class NativeTextError(ValueError):
+    """The notice codec's native context does not name exactly one text value."""
+
+
+def native_text(receipt: dict) -> str:
+    """The text a native queue carries for one notice, before its receipt marker.
+
+    One rendering for the producer and for a reader that asks whether a prompt is
+    exactly that notice; it depends only on the stored receipt.
+    """
+    if receipt.get("kind") == "notice":
+        import session_notice
+        return session_notice.render_text(receipt)
+    additional = context(receipt, gateway_delivery_id(receipt)).get("additionalContext")
+    values = [value.get("value") for value in additional.values()
+              if isinstance(value, dict) and isinstance(value.get("value"), str)] \
+        if isinstance(additional, dict) else []
+    if len(values) != 1:
+        raise NativeTextError("native-queue-notice-context-invalid")
+    return values[0]

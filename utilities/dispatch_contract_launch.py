@@ -515,7 +515,7 @@ def _launch_dependencies(lines, fields, callbacks=(), reads=None, parsed=None):
            for callback in callbacks):
         return tuple(lines)
     metadata = parse_registry_metadata(fields[5])
-    relation_keys = ("attempt_id", "parent_attempt_id", "automatic_retry_of", "prior_attempt_id",
+    relation_keys = ("attempt_id", "parent_attempt_id", "caller_attempt_id", "automatic_retry_of", "prior_attempt_id",
                      "replacement_original_attempt_id", "replacement_attempt_id")
     group_keys = ("session_chain_id", "replacement_family_id")
     attempts = {metadata[k] for k in relation_keys if metadata.get(k)}

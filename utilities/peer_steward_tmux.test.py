@@ -9,6 +9,9 @@ bracketed paste, logs every byte it receives, and on ``/clear`` moves its regist
 a new session id.
 """
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import contextlib
 import importlib.util
@@ -166,20 +169,37 @@ class TmuxPeerStewardTest(unittest.TestCase):
             time.sleep(.05)
         self.fail("the fake Claude never took the pane")
 
-    def book(self):
+    def book(self, harness="claude"):
         import session_tidy as st
         import session_tidy_clear as clear
-        seat = st.Seat("pane", st._digest("pane", self.address), self.address, "claude", "")
+        seat = st.Seat("pane", st._digest("pane", self.address), self.address, harness, "")
         now = time.time()
         with st.seat_lock(seat.key):
-            card = st.write_card(seat, "claude", OLD, "card body", prompt_seq=0)
+            card = st.write_card(seat, harness, OLD, "card body", prompt_seq=0)
             clear._write_reservation({
                 "schema": 1, "nonce": "n0nce", "status": "reserved", "created": now, "deadline": now + 600,
-                "seat": {"kind": "pane", "key": seat.key, "pane": self.address, "harness": "claude",
+                "seat": {"kind": "pane", "key": seat.key, "pane": self.address, "harness": harness,
                          "project_key": ""},
-                "harness": "claude", "sid": OLD, "cwd": str(self.root),
+                "harness": harness, "sid": OLD, "cwd": str(self.root),
                 "card_generation": card["generation"], "prompt_seq": 0})
         return clear.reservation_path(seat.key)
+
+    def rollout(self, *rows):
+        """Append Codex rollout rows (a turn start, a turn's input, a compaction) to its file."""
+        path = self.root / "codex-rollout.jsonl"
+        shapes = {"turn": {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t2"}},
+                  "input": {"type": "response_item", "payload": {
+                      "type": "message", "role": "user",
+                      "content": [{"type": "input_text", "text": "Hearting supervision needs attention."}]}},
+                  "developer": {"type": "response_item", "payload": {
+                      "type": "message", "role": "developer", "content": []}},
+                  "compacted": {"type": "compacted", "payload": {
+                      "message": "summary", "replacement_history": [{"role": "user"}]}},
+                  "end": {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "t2"}}}
+        with path.open("a", encoding="utf-8") as stream:
+            for row in rows:
+                stream.write(json.dumps({"timestamp": "2026-11-13T00:00:00.000Z", **shapes[row]}) + "\n")
+        return path
 
     def steward(self, *argv):
         out = io.StringIO()
@@ -227,7 +247,124 @@ class TmuxPeerStewardTest(unittest.TestCase):
                 rc, line = self.steward("clear", self.address, "--request", str(path), "--nonce", "n0nce")
                 self.assertNotEqual(rc, 0, line)
                 self.assertIn(reason, line)
+                # A running turn holds the booking for its end; the others are final here.
+                self.assertIn("cleared=queued" if status == "busy" else "cleared=skipped", line)
                 self.assertEqual(self.typed(), b"")
+
+    def test_a_turn_that_starts_after_the_idle_wait_holds_the_booking_until_it_ends(self):
+        # PG-9: a Codex queue item starts right at the tidy turn's end, before the look.
+        import session_tidy_clear as clear
+        path = self.book()
+        key = json.loads(path.read_text())["seat"]["key"]
+        for second_wait, outcome, status in (("idle", ("continued", "cleared"), "cleared"),
+                                             ("timeout", ("skipped",), "skipped")):
+            with self.subTest(second_wait=second_wait):
+                if second_wait == "timeout":
+                    path = self.book()
+                waits = iter(("idle", second_wait))
+                wait = mock.Mock(side_effect=lambda *_a: next(waits))
+                steward = mock.Mock(side_effect=[{"cleared": "queued", "reason": "not-idle-working"},
+                                                 {"cleared": "true"}])
+                result = clear.run_helper(key, "n0nce", wait=wait, steward=steward,
+                                          continuer=mock.Mock(return_value={"continued": "true"}),
+                                          sleep=lambda _s: None)
+                held = clear.read_reservation(key)
+                self.assertIn(result, outcome)
+                self.assertEqual(held["status"], status)
+                self.assertEqual(wait.call_count, 2)
+                self.assertEqual(steward.call_count, 2 if second_wait == "idle" else 1)
+                if second_wait == "timeout":
+                    self.assertEqual(held["reason"], "timeout")
+
+    def test_a_compact_codex_dropped_for_a_queued_turn_is_typed_again_after_that_turn(self):
+        # PG-9: a queued notice turn starts between the helper's last look and its keys; Codex
+        # disables /compact while that task runs, so the first keys never compact anything.
+        import session_tidy_clear as clear
+        path = self.book("codex")
+        key = json.loads(path.read_text())["seat"]["key"]
+        rollout = self.rollout("end")
+        claims = []
+
+        def steward(*_args):
+            claim, why = clear.claim_clear(path, "n0nce")
+            self.assertEqual(why, "")
+            claims.append(claim["clear_claim"])
+            # First keys: the queued turn had started (its input row lands after the claim).
+            # Second keys: typed at idle, the session compacts.
+            self.rollout(*(("turn", "input", "developer", "end") if len(claims) == 1 else ("compacted",)))
+            return {"cleared": "unverified", "reason": "compact-pending"}
+
+        steward = mock.Mock(side_effect=steward)
+        wait = mock.Mock(return_value="idle")
+        with mock.patch("tidy_transcripts.locate_transcript", return_value=rollout), \
+                mock.patch.object(clear, "COMPACT_CONFIRM_SEC", 1.0):
+            result = clear.run_helper(key, "n0nce", wait=wait, steward=steward,
+                                      continuer=mock.Mock(return_value={"continued": "true"}),
+                                      sleep=lambda _s: None)
+        held = clear.read_reservation(key)
+        self.assertIn(result, ("continued", "cleared"))
+        self.assertEqual(held["status"], "cleared")
+        self.assertEqual(steward.call_count, 2)          # typed again once, after that turn ended
+        self.assertEqual(wait.call_count, 2)
+        self.assertEqual(held["compact_typed"]["dropped"], 1)
+        # The second claim reads a compaction from the first typing on, so none is typed twice.
+        self.assertEqual(claims[1]["first_offset"], claims[0]["offset"])
+        self.assertGreater(claims[1]["offset"], claims[0]["offset"])
+
+    def test_only_a_codex_turn_input_before_any_compaction_means_the_keys_were_dropped(self):
+        import session_tidy_clear as clear
+        path = self.book("codex")
+        rollout = self.rollout("end")
+        with mock.patch("tidy_transcripts.locate_transcript", return_value=rollout):
+            claim, _why = clear.claim_clear(path, "n0nce")
+        self.assertFalse(clear.compact_preempted(claim))                 # nothing after the keys yet
+        self.rollout("turn", "developer")
+        self.assertFalse(clear.compact_preempted(claim))                 # no turn input yet
+        self.rollout("compacted", "turn", "input")
+        self.assertFalse(clear.compact_preempted(claim))                 # the keys compacted first
+        later = {**claim, "clear_claim": {**claim["clear_claim"], "offset": rollout.stat().st_size}}
+        self.rollout("turn", "input")
+        self.assertTrue(clear.compact_preempted(later))
+        for changed in ({"harness": "claude"}, {"harness": "opencode"},
+                        {"seat": {**claim["seat"], "pane": "w1:p1"}},       # a Herdr pane
+                        {"seat": {**claim["seat"], "kind": "native"}},
+                        {"clear_claim": {**later["clear_claim"], "state": "sent"}}):
+            with self.subTest(changed=sorted(changed)):
+                self.assertFalse(clear.compact_preempted({**later, **changed}))
+
+    def test_typing_again_is_skipped_when_the_dropped_looking_compact_compacted_after_all(self):
+        import session_tidy_clear as clear
+        path = self.book("codex")
+        key = json.loads(path.read_text())["seat"]["key"]
+        rollout = self.rollout("end")
+        with mock.patch("tidy_transcripts.locate_transcript", return_value=rollout):
+            claim, _why = clear.claim_clear(path, "n0nce")
+            self.rollout("turn", "input", "end", "compacted")
+            self.assertTrue(clear.compact_preempted(claim))
+            self.assertTrue(clear.release_unsent_compact(key, "n0nce", claim["clear_claim"]))
+            self.assertNotIn("clear_claim", clear.read_reservation(key))
+            with mock.patch.object(peer_steward, "_surface_missing", return_value=False), \
+                    mock.patch.object(peer_steward, "_clear_look",
+                                      return_value=(None, {"pane": self.address}, [])), \
+                    mock.patch.object(peer_steward, "_herdr_prompt") as keys:
+                rc, line = self.steward("clear", self.address, "--request", str(path), "--nonce", "n0nce")
+        self.assertEqual(rc, 0, line)
+        self.assertIn("cleared=true", line)
+        keys.assert_not_called()
+
+    def test_the_continue_reads_a_shell_seats_codex_thread_like_the_clear_looks(self):
+        foreground = {"pid": 4242, "start": "77", "group": 4242, "argv": ["codex"],
+                      "attachment": {"harness": "codex", "sid": OLD, "native_pid": 4242}}
+        with mock.patch.object(peer_steward, "_retire_foreground", return_value=foreground), \
+                mock.patch.object(peer_steward, "_process_session", return_value=OLD) as reader, \
+                mock.patch.object(peer_steward, "_retire_process_record",
+                                  return_value={"start": "77"}), \
+                mock.patch("pane_ownership.current_codex_thread", return_value="") as bare:
+            found = peer_steward._continue_native_session(
+                self.address, "codex", process_info={"pane_id": self.address})
+        self.assertEqual(found, OLD)
+        reader.assert_called_once_with(self.address, "codex")
+        bare.assert_not_called()
 
     def test_a_pane_that_is_not_the_booked_session_is_not_cleared(self):
         self.start_claude()
@@ -239,37 +376,15 @@ class TmuxPeerStewardTest(unittest.TestCase):
         self.assertNotEqual(rc, 0, line)
         self.assertEqual(self.typed(), b"")
 
-    def test_a_prompt_to_an_idle_claude_pane_is_typed_once_through_its_guards(self):
-        self.start_claude()
-        rc, line = self.steward("prompt", self.pane, "hello from a peer")
-        self.assertIn("to_harness=claude", line)
-        self.assertNotIn("reason=herdr-not-found", line)
-        typed = self.typed()
-        self.assertEqual(typed.count(b"\x1b[200~"), 1, typed)
-        self.assertIn(b"hello from a peer", typed)
-        self.assertTrue(typed.endswith(b"\x1b[201~\r"), typed)
-
-    def test_a_prompt_reaches_a_claude_that_is_the_panes_root_process(self):
-        pid = self.start_claude_as_pane_root()
-        self.assertEqual(str(pid), self.tmux("display-message", "-p", "-t", self.pane, "#{pane_pid}").stdout.strip())
-        rc, line = self.steward("prompt", self.pane, "hello from a peer")
-        self.assertNotIn("pane-identity-unverified", line)
-        typed = self.typed()
-        self.assertEqual(typed.count(b"\x1b[200~"), 1, typed)
-        self.assertIn(b"hello from a peer", typed)
-
     def test_a_prompt_to_a_busy_claude_pane_types_nothing_and_stays_queued(self):
         self.start_claude(status="busy")
         rc, line = self.steward("prompt", self.pane, "hello from a peer")
         self.assertIn("prompted=queued", line)
         self.assertEqual(self.typed(), b"")
 
-    def test_a_pane_in_copy_mode_is_neither_prompted_nor_cleared(self):
+    def test_a_pane_in_copy_mode_is_not_cleared(self):
         self.start_claude()
         self.tmux("copy-mode", "-t", self.pane)
-        rc, line = self.steward("prompt", self.pane, "first line\nsecond line")
-        self.assertIn("prompted=queued", line)
-        self.assertIn("reason=pane-in-mode", line)
         path = self.book()
         rc, line = self.steward("clear", self.address, "--request", str(path), "--nonce", "n0nce")
         self.assertIn("cleared=skipped", line)
@@ -285,8 +400,6 @@ class TmuxPeerStewardTest(unittest.TestCase):
                            "00000000-0000-4000-8000-000000000000", "idle", NEW, ""])
         self.tmux("split-window", "-d", "-t", self.pane, line)
         self.tmux("set-option", "-w", "-t", self.pane, "synchronize-panes", "on")
-        rc, line = self.steward("prompt", self.pane, "hello from a peer")
-        self.assertIn("reason=pane-synchronized", line)
         path = self.book()
         rc, line = self.steward("clear", self.address, "--request", str(path), "--nonce", "n0nce")
         self.assertIn("reason=pane-synchronized", line)
@@ -304,18 +417,26 @@ class TmuxPeerStewardTest(unittest.TestCase):
                          self.pane)
         other_log = self.root / "other.log"
         other_log.touch()
-        self.start_claude()
-        self.start_claude(socket=other, log=other_log, sid="2b2b2b2b-3c3c-4d4d-8e8e-5f5f5f5f5f5f")
-        rc, line = self.steward("prompt", self.pane, "to this server")
-        self.assertIn(f"target={self.address}", line)
-        rc, line = self.steward("prompt", f"{self.pane}@{os.path.realpath(other)}", "to the other server")
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and not other_log.read_bytes():
-            time.sleep(.05)
-        self.assertIn(b"to this server", self.typed())
-        self.assertNotIn(b"to the other server", self.typed())
-        self.assertIn(b"to the other server", other_log.read_bytes())
-        self.assertNotIn(b"to this server", other_log.read_bytes())
+        other_sid = "2b2b2b2b-3c3c-4d4d-8e8e-5f5f5f5f5f5f"
+        pids = [self.start_claude(),
+                self.start_claude(socket=other, log=other_log, sid=other_sid)]
+        # The address resolves from the TMUX_PANE/TMUX each runtime process received;
+        # only this test's two runtimes are observed.
+        import peer_address
+        listdir = os.listdir
+        only_ours = mock.patch.object(peer_address.os, "listdir", side_effect=lambda path: (
+            [str(pid) for pid in pids] if path == "/proc" else listdir(path)))
+        with only_ours:
+            here = peer_address.resolve(self.pane)
+            named_here = peer_address.resolve(self.address)
+            there = peer_address.resolve(f"{self.pane}@{os.path.realpath(other)}")
+        self.assertEqual((here[0] or {}).get("session_id"), OLD, here)
+        self.assertEqual((named_here[0] or {}).get("session_id"), OLD, named_here)
+        self.assertEqual((there[0] or {}).get("session_id"), other_sid, there)
+        self.assertEqual((here[0]["harness"], there[0]["harness"]), ("claude", "claude"))
+        # Resolution types into neither window.
+        self.assertEqual(self.typed(), b"")
+        self.assertEqual(other_log.read_bytes(), b"")
 
     def test_the_clear_helper_waits_for_the_runtime_turn_record_on_tmux(self):
         import session_tidy_clear as clear
