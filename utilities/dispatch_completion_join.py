@@ -2069,7 +2069,7 @@ def receipt_with_delivery_observability(
         child.pop("provider_failure_kind", None)
         if classification == "attention":
             child["reason"] = choice.reason or "terminal-failure-or-unclosed"
-            if state.provider_failure_kind:
+            if choice.next_action == "inspect-done-failure" and state.provider_failure_kind:
                 child["provider_failure_kind"] = state.provider_failure_kind
         elif state.advanced:
             child["reason"] = "row-advanced"

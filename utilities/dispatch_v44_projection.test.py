@@ -418,12 +418,11 @@ class DispatchV44ProjectionTest(unittest.TestCase):
                 self.assertEqual(canonical[key], value)
                 self.assertEqual(JOIN.unseal_delivery_receipt(JOIN.seal_delivery_receipt(canonical)), canonical)
                 self.assertTrue(set(canonical) <= MANAGED_GATEWAY.ALLOWED_RECEIPT_KEYS)
-        # `next_leg` is the one optional child key: the route plan's next leg on a completed owner
-        # (information only). The native decoders above still keep the base shape; the delivery
-        # observability pass adds it fresh from the route, and the gateway passes it through.
+        # The delivery projection adds optional route-plan and provider diagnostics
+        # from the current records. The gateway carries them in the checked receipt.
         self.assertEqual(MANAGED_GATEWAY.ALLOWED_CHILD_KEYS, {
             "attempt_id", "status", "readiness", "reason", "required_action",
-            "harness", "delivery_classification", "next_leg",
+            "harness", "delivery_classification", "next_leg", "provider_failure_kind",
         })
         timing = JOIN.delivery_timing_fields(join_completed_ns=17)
         self.assertEqual(set(timing), {
