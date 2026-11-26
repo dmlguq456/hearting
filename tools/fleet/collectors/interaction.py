@@ -27,20 +27,27 @@ def enrich(sess, now=None):
     }
     candidate.update({key: record[key] for key in ("request_id", "turn_id", "item_id")
                       if key in record})
-    existing = getattr(sess, "interaction_state", None)
+    sess.interaction_state = prefer(getattr(sess, "interaction_state", None), candidate)
+
+
+def prefer(existing, candidate):
+    """The interaction wait a row keeps of two: the stronger source, else the later wait."""
+    if not isinstance(candidate, dict):
+        return existing
     priorities = {"codex-appserver": 2, "codex-rollout": 1}
     if isinstance(existing, dict):
         existing_priority = priorities.get(existing.get("source"), 0)
         candidate_priority = priorities.get(candidate.get("source"), 0)
         if existing_priority > candidate_priority:
-            return
+            return existing
         if (
             existing_priority == candidate_priority
             and isinstance(existing.get("waiting_since"), (int, float))
+            and isinstance(candidate.get("waiting_since"), (int, float))
             and existing["waiting_since"] > candidate["waiting_since"]
         ):
-            return
-    sess.interaction_state = candidate
+            return existing
+    return candidate
 
 
 def enrich_human_gates(sessions, *, jobs_path=None, now=None):
