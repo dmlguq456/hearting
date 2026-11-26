@@ -5909,10 +5909,13 @@ def _resume_registered_obligation(duty, store, *, read_context=None,
                         # session id, and the record would otherwise vanish unseen. Only a runtime
                         # with no PID/start evidence, or one this host cannot observe, keeps the
                         # route-closed settlement. A dead runtime expires the record below first.
-                        # Only the owner's completion record is held open: a supervision or gate
-                        # notice (`notice_id`) has no hook that shows or expires it, so it keeps
-                        # settling as route-closed.
-                        open_record = (not notice_id and isinstance(record, dict)
+                        # Only the owner's completion record is held open, and only for a Claude
+                        # recipient: its next session's prompt hook is the one path that shows and
+                        # settles it. A supervision or gate notice (`notice_id`), and a Codex or
+                        # OpenCode recipient, have no such path, so they keep settling as
+                        # route-closed.
+                        open_record = (not notice_id and recipient_harness == "claude"
+                                       and isinstance(record, dict)
                                        and record.get("state") in pending.OPEN_STATES)
                         runtime = _registered_runtime_disposition(final_row.metadata) if open_record else None
                         if open_record and runtime == "live":
