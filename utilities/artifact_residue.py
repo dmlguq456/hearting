@@ -49,8 +49,8 @@ spec-impact where D-23 has no row):
                      is begun and no sealed manifest is rewritten: the compat
                      row (`kind: symlink`, `link_target`, `relocated_from`)
                      is the record (spec-impact, D-23-b symlink row).
-  deferred           `spec/` (consumers still read the legacy PRD: cairn's
-                     nightly backfill, `spec-skill-gate` `find_prd`; opt in
+  deferred           `spec/` (an outside viewer's nightly backfill may still
+                     fall back to the legacy PRD; opt in
                      with `--include-spec-top` to dispose of it as root
                      support residue), a live symlink with no mapped ancestor
                      or whose relative target would not resolve after the
@@ -679,8 +679,8 @@ def build_plan(root: Path, *, include_spec_top: bool = False) -> Dict[str, Any]:
         if inside in moving or any(m.startswith(inside + "/") for m in moving):
             row.update(disposition="deferred", reason="symlink-target-moving", rejoin_target=row["target"], target=None)
     if include_spec_top and any(r.get("spec_top") for r in rows) and C.latest_shared_revision(root, "spec") is None:
-        # `spec/` is the only PRD this root has: the spec gate and `find_prd`
-        # would resolve nothing once it moves. Refuse, typed.
+        # `spec/` is the only PRD this root has: a reader that falls back to the
+        # legacy PRD would resolve nothing once it moves. Refuse, typed.
         raise ResidueError("spec-top-no-shared-fallback", str(root / "spec"))
     by_disposition: collections.Counter = collections.Counter(r["disposition"] for r in rows)
     by_shape: collections.Counter = collections.Counter(r["shape"] for r in rows)

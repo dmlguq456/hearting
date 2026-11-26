@@ -5651,6 +5651,22 @@ def _pass_native_sessions(read_context):
         return None
 
 
+def _registered_runtime_disposition(metadata):
+    """`live`, `dead` or `unresolved` for the parent runtime an owner row names; None without PID/start."""
+    try:
+        pid = int(metadata.get("parent_runtime_pid", ""))
+    except (TypeError, ValueError):
+        return None
+    start = metadata.get("parent_runtime_pid_start", "")
+    if pid <= 0 or not start:
+        return None
+    from dispatch_contract import process_identity_disposition
+    try:
+        return process_identity_disposition(pid, start)
+    except (ValueError, OSError):
+        return None
+
+
 def _resume_registered_obligation(duty, store, *, read_context=None,
                                   settlement_context=None):
     """Wake an exact restored recipient through the existing durable peer courier."""
@@ -5888,14 +5904,38 @@ def _resume_registered_obligation(duty, store, *, read_context=None,
                         return
                     closed = _closed_registered_route_outcome(final_row, jobs)
                     if closed is not None:
-                        # Dropping the notice rests on the parent's absence alone, and the
-                        # pass's session table can be a pass old: re-read it fresh here.
+                        # A closed route alone does not settle a completion that is still open:
+                        # a plain `/clear` leaves the registered parent runtime alive under a new
+                        # session id, and the record would otherwise vanish unseen. Only a runtime
+                        # with no PID/start evidence, or one this host cannot observe, keeps the
+                        # route-closed settlement. A dead runtime expires the record below first.
+                        # Only the owner's completion record is held open, and only for a Claude
+                        # recipient: its next session's prompt hook is the one path that shows and
+                        # settles it. A supervision or gate notice (`notice_id`), and a Codex or
+                        # OpenCode recipient, have no such path, so they keep settling as
+                        # route-closed.
+                        open_record = (not notice_id and recipient_harness == "claude"
+                                       and isinstance(record, dict)
+                                       and record.get("state") in pending.OPEN_STATES)
+                        runtime = _registered_runtime_disposition(final_row.metadata) if open_record else None
+                        if open_record and runtime == "live":
+                            store.update(duty["id"], observation={**observation,
+                                "reason": "completion-undelivered", **closed,
+                                "recipient_sid": recipient_sid,
+                                "recipient_pid": final_row.metadata.get("parent_runtime_pid", ""),
+                                "recipient_pid_start": final_row.metadata.get(
+                                    "parent_runtime_pid_start", "")}, skip_unchanged=True)
+                            return
+                        # Dropping or expiring the notice rests on the parent's absence alone,
+                        # and the pass's session table can be a pass old: re-read it fresh here.
+                        # A held duty returned above, so it never pays for this fresh read.
                         if peer_address.presence(recipient_harness, recipient_sid) != "absent":
                             return
-                        store.update(duty["id"], state="complete", delivery="not-required",
-                            cleanup="complete", observation={**observation, "reason": "route-closed",
-                                **closed, "recipient_sid": recipient_sid}, skip_unchanged=True)
-                        return
+                        if not (open_record and runtime == "dead"):
+                            store.update(duty["id"], state="complete", delivery="not-required",
+                                cleanup="complete", observation={**observation, "reason": "route-closed",
+                                    **closed, "recipient_sid": recipient_sid}, skip_unchanged=True)
+                            return
                 if isinstance(record, dict):
                     from dispatch_completion_join import expire_pending_for_dead_recipient
                     expiry = expire_pending_for_dead_recipient(
@@ -6785,7 +6825,8 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
     import dispatch_pending_delivery as pending
     from dispatch_notice_state import keep_claim
     from dispatch_seat_handover import record_recipient_binding
-    from dispatch_session_sweep import STORAGE_KEY, IDENTITY_KEY, delivery_context, delivery_display_text
+    from dispatch_session_sweep import (STORAGE_KEY, IDENTITY_KEY, delivery_context, delivery_display_text,
+                                        delivery_holds_secret_answer)
     from dispatch_recipient_receipt import claimed_send_current, release_unsubmitted_claim
     from peer_read_context import PeerReadContext
     import session_notice
@@ -7169,6 +7210,9 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
             return
         body = delivery_context([(root, [entry[5] for entry in claimed])])
         display_line = None if folded else delivery_display_text([(root, [entry[5] for entry in claimed])])
+        # A secret answer's body never reaches the window: without its sealed `•••` line the
+        # window gets a pointer to the private copy instead (peer-message `private_body`).
+        private_body = delivery_holds_secret_answer([(root, [entry[5] for entry in claimed])])
         if folded:
             body += ("\n\nfolded run notices (parent completion already received):\n"
                      + "\n".join(f"- {line}" for line in folded))
@@ -7214,7 +7258,8 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                     return
             code = cmd_prompt(args, expected_recipient=(harness, recipient_sid),
                               on_prepared=bind_transfer, producer_binding=producer,
-                              **({"display_line": display_line} if display_line else {}))
+                              **({"display_line": display_line} if display_line else {}),
+                              **({"private_body": True} if private_body else {}))
             submitted = code in {0, 3}
     finally:
         globals()["_HERDR_SESSION"] = old_server
@@ -8131,7 +8176,7 @@ def _codex_shell_start_gate(binding):
 def _cmd_prompt_native(args, body, harness, sid, *, from_identity, from_name,
                        expected_recipient=None, on_prepared=None, producer_binding=None, handoff=None,
                        binding=None, pane=None, native_owner=None, sender_row=None, request=None,
-                       display_line=None):
+                       display_line=None, private_body=False):
     """Native-session address using the existing sealed message and carrier.
 
     Delivery never types into a window: a shell attachment takes it through its host
@@ -8157,7 +8202,8 @@ def _cmd_prompt_native(args, body, harness, sid, *, from_identity, from_name,
             reference_evidence=reference_evidence,
             producer_binding=producer_binding, handoff=handoff,
             original_target=args.target, server=_HERDR_SESSION or "default", prepared=prepared,
-            namespace=_PEER_NAMESPACE, request=request, display_line=display_line)
+            namespace=_PEER_NAMESPACE, request=request, display_line=display_line,
+            private_body=private_body)
         if on_prepared is not None:
             on_prepared(ref)
     except (OSError, ValueError):
@@ -8254,7 +8300,7 @@ def _prompt_sealed_unread(args, sealed, producer_binding, target, *, ref=None):
 
 
 def _prompt_unresolved(args, body, reason, *, from_identity, from_name, from_harness, from_sid,
-                       on_prepared=None, producer_binding=None, handoff=None):
+                       on_prepared=None, producer_binding=None, handoff=None, private_body=False):
     """An address Hearting's records cannot resolve: a named, retained refusal."""
     _prompt_failure_ledger(args.target, reason, [], kind=_prompt_message_kind(body), ref=args.ref,
                            from_identity=from_identity, from_name=from_name)
@@ -8266,7 +8312,7 @@ def _prompt_unresolved(args, body, reason, *, from_identity, from_name, from_har
             defer=True, refs=args.ref, receipt=reason, with_trailer=not args.no_trailer,
             producer_binding=producer_binding, handoff=handoff,
             original_target=args.target, server=_HERDR_SESSION or "default", prepared=prepared,
-            namespace=_PEER_NAMESPACE)
+            namespace=_PEER_NAMESPACE, private_body=private_body)
         if on_prepared is not None:
             on_prepared(ref)
         row = peer_message._read_pending(ref)
@@ -8284,7 +8330,8 @@ def _prompt_unresolved(args, body, reason, *, from_identity, from_name, from_har
 
 
 def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_binding=None,
-               handoff=None, resolved_recipient=None, sender=None, request=None, display_line=None):
+               handoff=None, resolved_recipient=None, sender=None, request=None, display_line=None,
+               private_body=False):
     """Seal a peer message and route it through the recipient's native carrier.
 
     ``sender`` is the observed predecessor identity for a supervisor-issued
@@ -8337,7 +8384,7 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
         sender_row["pane_id"] = relay_pane
     unresolved = dict(from_identity=from_identity, from_name=from_name, from_harness=from_harness,
                       from_sid=from_sid, on_prepared=on_prepared,
-                      producer_binding=producer_binding, handoff=handoff)
+                      producer_binding=producer_binding, handoff=handoff, private_body=private_body)
     unresolved_reply = _prompt_unresolved
     if request is not None:
         # A request is bound to one exact session; an unresolved address is
@@ -8375,7 +8422,7 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
         native_owner=native_owner, from_identity=from_identity, from_name=from_name,
         expected_recipient=expected_recipient, on_prepared=on_prepared,
         producer_binding=producer_binding, handoff=handoff, sender_row=sender_row,
-        request=request, display_line=display_line)
+        request=request, display_line=display_line, private_body=private_body)
 
 
 def cmd_request(args):

@@ -179,9 +179,22 @@ def peer_trailer(harness, session_id, name=None, *, transfer_ref=None, pane_id=N
 # holds at most one unreceived message per visible text: a message sealed while another
 # is waiting goes in the old form (`_prepare_peer_message`), and the arrival that finds
 # one waiting is that message's arrival.
+#
+# The old form shows the whole text. A runtime body holding a secret question's answer
+# (`private_body`) that is not sealed in a display form shows a pointer instead: its body
+# is the transfer's private payload (`body_ref` with `presentation_mode: private-answer`, the
+# one the receive checks already read), the window gets one header line, the payload's path
+# and the receipt lines, and the agent gets the body through the same hook/plugin context
+# (`_private_answer_guidance`). Every carrier that takes the row puts that text in an agent-only
+# place before the row settles (`_secret_answer_agent_text`): Claude's hook context beside the
+# pointer, OpenCode's system context while its tool result (which its TUI may draw) keeps the
+# pointer alone; a secret answer to OpenCode always takes the pointer form.
 # ---------------------------------------------------------------------------
 _DISPLAY_FORM = 2
 _DISPLAY_AGENT_MAX_CHARS = 12000
+# A secret answer's one-line form is sealed only when its agent text fits one Claude hook context
+# whole (`_fit_claude_context` never makes an overflow copy of a secret answer).
+_PRIVATE_DISPLAY_AGENT_MAX = 8000
 _DISPLAY_NAME_MAX = 60
 _DISPLAY_LINE_MAX = 400
 _DISPLAY_LINES_MAX = 12
@@ -497,7 +510,7 @@ def _display_agent_block(resolved):
     entry, transfer = resolved["entry"], resolved["transfer"]
     if entry["kind"] == "runtime":
         return ("Hearting delivery (the person sees only the one `↳` line above); the full text:\n"
-                + entry["agent"])
+                + entry["agent"] + ("\n\n" + _SECRET_ANSWER_NOTE if entry.get("private") is True else ""))
     return _sender_sentence(" (the person sees only `%s`)" % entry["tail"], entry["agent"],
                             transfer.get("from"), always=True)
 
@@ -860,8 +873,12 @@ def _reference_access_evidence_valid(evidence, recipient):
 
 def _prepare_peer_message(body, sender, recipient, *, include_trailer=True,
                           reference_evidence=None, refs=(), producer_binding=None, handoff=None,
-                          request=None, display=None):
+                          request=None, display=None, private_body=False):
     """Seal a transmission intent before delivery (the receiver may run immediately).
+
+    ``private_body``: a runtime body the person's window must not show (it holds the answer to a
+    secret question). When no one-line display form is sealed for it, the body is published as
+    the transfer's private payload and the window gets only `_private_body_envelope`.
 
     This immutable record shares the ledger's local write trust boundary; it is
     not an authorization token. The final ledger row refers to this message_id.
@@ -939,6 +956,8 @@ def _prepare_peer_message(body, sender, recipient, *, include_trailer=True,
             # one without a transfer proves nothing, a transfer without it would strand the text.
             display_entry = _display_entry(
                 display.get("kind"), text, trailer, sender, line=display.get("line"))
+            if display_entry is not None and private_body and len(text) > _PRIVATE_DISPLAY_AGENT_MAX:
+                display_entry = None   # too long for one hook context whole: the pointer form
             if display_entry is not None:
                 # A receiver finds the record a visible text stands for by that text alone, so a
                 # recipient holds at most one unreceived message per visible text: when one is
@@ -954,7 +973,21 @@ def _prepare_peer_message(body, sender, recipient, *, include_trailer=True,
                         _publish_display_pointer(display_entry, ref)
                 except (OSError, ValueError):
                     display_entry = None
+        if (display_entry is None and private_body and producer_binding is not None
+                and include_trailer and body_ref is None and request is None and handoff is None):
+            # No one-line form carries it (Codex, an unsigned window, the same line still waiting,
+            # a delivery with no short form): the body goes to the private payload the existing
+            # checks read, and the window shows the pointer and receipt lines. Each receiver's own
+            # callback gives the agent the body from that payload (`_private_answer_guidance`), so
+            # no file read is needed. A payload that cannot be published fails the seal, as a
+            # request's does; nothing is sent in full.
+            body_ref, payload_path = _write_body_payload(ref, raw_body, source_sha256,
+                                                         presentation_mode="private-answer")
+            text = _private_body_envelope(body, payload_path) + "\n\n" + trailer
+            record["body_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
         if display_entry is not None:
+            if private_body and display_entry["kind"] == "runtime":
+                display_entry["private"] = True   # its agent text holds a secret answer
             record["display"] = display_entry
         if handoff is not None:
             record["handoff"] = handoff
@@ -1087,6 +1120,21 @@ def _body_reference_envelope(body, payload_path, raw_size, sender, ref, *, comma
     return None
 
 
+_PRIVATE_BODY_HEADER = ("Hearting delivery holding a private answer: the person's window shows only "
+                        "this pointer. Its full text comes to you as context with this message; the same "
+                        "text is in the file below.")
+# Said with a secret question's answer, in either agent-only text (the one-line form's, the pointer's).
+_SECRET_ANSWER_NOTE = ("It answers a question asked as secret: use it, but do not repeat it in your "
+                       "replies or reports.")
+
+
+def _private_body_envelope(body, payload_path):
+    """The window text for a ``private_body`` delivery: the header, the private payload's path and
+    the body's receipt lines (``HEARTING_RECEIPT_V1``, read by its carriers and Codex's recovery)."""
+    markers = [line for line in body.splitlines() if line.startswith("HEARTING_RECEIPT_V1 ")]
+    return "\n".join([_PRIVATE_BODY_HEADER, f"`{payload_path}`", *markers])
+
+
 def _body_reference_descriptor_valid(descriptor, ref):
     return (
         isinstance(descriptor, dict) and set(descriptor) == _BODY_REFERENCE_FIELDS
@@ -1096,7 +1144,7 @@ def _body_reference_descriptor_valid(descriptor, ref):
         and all(isinstance(descriptor.get(key), str)
                 and re.fullmatch(r"[0-9a-f]{64}", descriptor[key])
                 for key in ("payload_sha256", "source_sha256"))
-        and descriptor.get("presentation_mode") in ("file-reference", "request-body")
+        and descriptor.get("presentation_mode") in ("file-reference", "request-body", "private-answer")
     )
 
 
@@ -2749,12 +2797,14 @@ def pending_messages(recipient, *, deadline=None):
 def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), receipt="target-form-open",
                          with_trailer=True, reference_evidence=None, first_input_process=None,
                          producer_binding=None, handoff=None, original_target=None, server=None,
-                         prepared=None, namespace=None, request=None, display_line=None):
+                         prepared=None, namespace=None, request=None, display_line=None,
+                         private_body=False):
     """A retry reuses a pending intent; ordinary sends need no preparation lock.
 
     A display form (see the block above ``_transfer_path``) is sealed only for a recipient
     session that has shown its code reads it: a peer message always, a runtime message when
-    its producer supplies ``display_line`` (not to Codex, see below).
+    its producer supplies ``display_line`` (not to Codex, see below). A runtime body marked
+    ``private_body`` that gets no display form is sealed as a pointer to its private payload.
 
     ``prepared`` (a list) receives the authoritative sealed row, stored or reused, so a
     caller can keep its courier even when a later read of that row fails.
@@ -2770,10 +2820,13 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
             and receiver_reads_display(recipient)):
         if producer_binding is None and sender.get("harness") in _DISPLAY_HARNESSES:
             display = {"kind": "peer"}
-        elif producer_binding is not None and display_line and recipient.get("harness") != "codex":
+        elif (producer_binding is not None and display_line and recipient.get("harness") != "codex"
+              and not (private_body and recipient.get("harness") == "opencode")):
             # Codex keeps the full runtime text in its own queue: its delivery recovery reads the
             # receipt marker lines from the thread's input history (`codex_queue_delivery`), and
             # the one-line form has none. A person's window there still reads the full text.
+            # OpenCode's idle plugin delivery pastes a row's sealed text, which for the one-line
+            # form is the whole old text: a secret answer to OpenCode takes the pointer form.
             display = {"kind": "runtime", "line": display_line}
     body_hash = hashlib.sha256(body.rstrip("\n").encode("utf-8")).hexdigest()
     request_seal = dict(request["seal"]) if request is not None else None
@@ -2913,7 +2966,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
         return found or _prepare_peer_message(body, sender, recipient, include_trailer=with_trailer,
                                               reference_evidence=reference_evidence, refs=refs,
                                               producer_binding=producer_binding, handoff=handoff,
-                                              request=request, display=display)
+                                              request=request, display=display,
+                                              private_body=private_body)
     key_parts = [[e.get("harness"), e.get("session_id"),
                   e.get("name") if e.get("session_id") is None else None, e.get("pane_id")]
                  for e in (sender, recipient)]
@@ -2946,7 +3000,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
         text, ref = _prepare_peer_message(body, sender, recipient, include_trailer=with_trailer,
                                           reference_evidence=reference_evidence, refs=refs,
                                           producer_binding=producer_binding, handoff=handoff,
-                                          request=request, display=display)
+                                          request=request, display=display,
+                                          private_body=private_body)
         if len(text.encode("utf-8")) > _PENDING_BYTES:
             raise ValueError("peer-pending-body-oversized")
         pending = {"schema_version": 2 if _unresolved_target(recipient) else 1,
@@ -4487,8 +4542,10 @@ def _body_reference_guidance(text, recipient):
                     "Do not act on this preview; leave the request unprocessed for its existing continuation.")
         return ""
     ref, transfer = found
-    if (transfer.get("body_ref") or {}).get("presentation_mode") == "request-body":
-        return ""  # a request's body is opened through `show`, never pasted
+    if (transfer.get("body_ref") or {}).get("presentation_mode") in ("request-body", "private-answer"):
+        # A request's body is opened through `show`, never pasted; a private answer reaches only
+        # its recipient (`_private_answer_guidance`), and its recovery is the courier's.
+        return ""
     identity_matches = _reference_target_matches(transfer, recipient, ref)
     fallback_required = False
     if identity_matches:
@@ -4559,12 +4616,64 @@ def receiver_guidance(text="", recipient=None, *, cwd=None):
     return _plain_receiver_guidance(text, recipient, cwd=cwd, name_sender=True)
 
 
+_PRIVATE_ANSWER_TOO_LONG = ("Its full text is too long for this context: read it from the file named in the "
+                            "pointer above. It answers a question asked as secret: use it, but do not "
+                            "repeat it in your replies or reports.")
+
+
+def _secret_answer_form(ref):
+    """``"pointer"`` or ``"sealed"`` for a transfer carrying a secret question's answer
+    (``private_body``: its private payload, or its one-line form marked private), else None."""
+    try:
+        transfer = _read_transfer_record(ref) or {}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if ((transfer.get("body_ref") or {}).get("presentation_mode")) == "private-answer":
+        return "pointer"
+    display = transfer.get("display")
+    return "sealed" if isinstance(display, dict) and display.get("private") is True else None
+
+
+def _secret_answer_agent_text(form, ref):
+    """What only the recipient's agent may read for a secret answer's row, at every carrier that
+    takes the row (prompt hooks, Claude's hook context, OpenCode's system context): a pointer's
+    full text (``_private_answer_guidance``), or for a one-line form row, whose own text is the
+    whole old text, the sentence that comes with every secret answer."""
+    if form == "pointer":
+        return _private_answer_guidance(ref)
+    return _SECRET_ANSWER_NOTE if form == "sealed" else ""
+
+
+def _private_answer_guidance(ref):
+    """The agent-only full text of a runtime delivery sealed as a private answer's pointer
+    (``private_body``), read from its verified payload; ``""`` for any other runtime text.
+
+    ``ref`` comes from ``parse_peer_trailer``, which has already bound the arrived text to its
+    sealed transfer and to this recipient. Claude's and Codex's prompt hooks and the OpenCode
+    plugin all add this guidance to the agent's context, so the answer needs no file read."""
+    try:
+        transfer = _read_transfer_record(ref) if isinstance(ref, str) else None
+        if ((transfer or {}).get("body_ref") or {}).get("presentation_mode") != "private-answer":
+            return ""   # any other runtime text keeps its empty guidance
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return ""
+    try:
+        payload = read_peer_payload(ref)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        payload = None
+    if not payload:
+        return ("The private answer this pointer stands for could not be verified or read by the "
+                "trusted receiver. Do not act on a guess; leave it for its existing continuation.")
+    return ("Hearting delivery (the person sees only the pointer above); the full text:\n"
+            + payload["body"] + "\n\n" + _SECRET_ANSWER_NOTE)
+
+
 def _plain_receiver_guidance(text, recipient, *, cwd=None, name_sender=False):
     """The guidance for a text that is not a display form; ``name_sender`` leads the ordinary
     guidance with the sealed sender's reply address when the text shows only a trailer tag."""
     current_origin = parse_peer_trailer(text, recipient, include_ref=True)
     if isinstance(current_origin, dict) and current_origin.get("source") == "runtime-completion":
-        return ""
+        return _private_answer_guidance(current_origin.get("transfer_ref"))
     requested = _request_receiver_guidance(text, recipient)
     if requested:
         return requested
@@ -4688,6 +4797,27 @@ def receiver_guidance_once(text="", recipient=None, *, cwd=None, deferred=None):
         return blocks[0] if blocks else ""
     except Exception:
         return guidance
+
+
+def receiver_guidance_parts(text="", recipient=None, *, cwd=None):
+    """``receiver_guidance_once`` split for a carrier that keeps a secret answer apart (the OpenCode
+    plugin): ``{"guidance": ..., "secret": ...}``. ``secret`` is the guidance when it is the agent-only
+    text of a secret answer's row (``_secret_answer_agent_text``: a pointer's full text, or a one-line
+    form's whole old text), which that carrier holds until a model call has read it; ``guidance`` is
+    any other guidance, kept as before. One of the two is always empty."""
+    guidance = receiver_guidance_once(text, recipient, cwd=cwd)
+    try:
+        resolved = _display_resolve(text, recipient)
+        if resolved is not None:
+            ref = resolved["ref"]
+        else:
+            trailer = parse_peer_trailer(text, recipient, include_ref=True)
+            ref = trailer.get("transfer_ref") if isinstance(trailer, dict) else None
+        secret = (bool(guidance) and isinstance(ref, str) and _secret_answer_form(ref) is not None
+                  and _SECRET_ANSWER_NOTE in guidance)
+    except Exception:  # noqa: BLE001 - unreadable: the guidance keeps its ordinary life
+        secret = False
+    return {"guidance": "" if secret else guidance, "secret": guidance if secret else ""}
 
 
 def commit_receiver_guidance(entries):
@@ -5013,19 +5143,35 @@ def _fit_claude_context(claims, context):
         return
     from dispatch_session_sweep import CLAUDE_CONTEXT_CHARS, overflow_pointer
     while len(claims) > 1 and len("\n\n".join(context)) > CLAUDE_CONTEXT_CHARS:
-        row = claims.pop()
+        ordinary = [claim for claim in claims if not claim.get("secret_answer")]
+        row = ordinary[-1] if ordinary else claims[-1]   # a secret answer is the last to wait
+        claims.remove(row)
         release_pending_herdr_claim(row)
         try:
-            context.remove(row["text"])
+            context.remove(row.get("shown_text", row["text"]))
         except ValueError:
             pass
     if len(claims) == 1 and len("\n\n".join(context)) > CLAUDE_CONTEXT_CHARS:
         row = claims[0]
         try:
-            index = context.index(row["text"])
+            index = context.index(row.get("shown_text", row["text"]))
         except ValueError:
             return
         others = sum(len(part) + 2 for i, part in enumerate(context) if i != index)
+        if row.get("secret_answer"):
+            # A secret answer gets no overflow copy. One that fits a context alone waits for a
+            # boundary with room, where it goes whole; only a pointer too long even alone names
+            # its own private payload instead.
+            shown = row["text"] + "\n\n" + _PRIVATE_ANSWER_TOO_LONG
+            alone = len(row.get("shown_text", row["text"])) <= CLAUDE_CONTEXT_CHARS
+            if (not alone and _secret_answer_form(row["ref"]) == "pointer"
+                    and others + len(shown) <= CLAUDE_CONTEXT_CHARS):
+                context[index] = row["shown_text"] = shown
+                return
+            claims.pop()
+            release_pending_herdr_claim(row)
+            del context[index]
+            return
         shown = overflow_pointer(row["text"], _pending_dir().parent,
                                  max(1_000, CLAUDE_CONTEXT_CHARS - others), keep_last_lines=1)
         if shown == row["text"] or others + len(shown) > CLAUDE_CONTEXT_CHARS:
@@ -5095,6 +5241,7 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
         note_display_ready(recipient)  # this code reads the display forms (once a day per session)
     stream = sys.stdout if stream is None else stream
     claims, warnings, context = [], [], []
+    system = []   # the agent-only part a carrier puts outside what it shows (OpenCode: system context)
 
     def expired():
         return deadline is not None and time.monotonic() >= deadline
@@ -5130,6 +5277,11 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
                 parsed = parse_peer_trailer(row.get("text"), recipient, include_ref=True)
                 if not parsed or parsed.get("transfer_ref") != row["ref"]:
                     continue
+            secret = None if row.get("no_trailer") else _secret_answer_form(row["ref"])
+            if secret == "sealed" and recipient["harness"] != "claude":
+                # OpenCode appends this context to the finished tool result, which its TUI may draw
+                # for the person, and a one-line form row's text is the whole old text.
+                continue
             native_boundary = bool(native_delivery and event in _NATIVE_BOUNDARY_EVENTS)
             try:
                 claimed = reserve_pending_herdr(
@@ -5138,8 +5290,20 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
             except BlockingIOError:
                 continue
             if claimed:
+                shown = claimed["text"]
+                agent = _secret_answer_agent_text(secret, claimed["ref"]) if secret else ""
+                if agent and recipient["harness"] == "claude":
+                    # Claude's hook context is the agent's alone: the pointer and its full text.
+                    shown += "\n\n" + agent
+                elif agent:
+                    # OpenCode: the tool result (which its TUI may draw) keeps the pointer; the full
+                    # text goes to the plugin's system context for the tool loop's next model call.
+                    claimed["system_text"] = agent
+                    system.append(agent)
+                if secret:
+                    claimed["shown_text"], claimed["secret_answer"] = shown, True
                 claims.append(claimed)
-                context.append(claimed["text"])
+                context.append(shown)
     now = time.time()
     for row in rows:
         try:
@@ -5192,6 +5356,8 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
             release_pending_herdr_claim(row)
             try:
                 context.remove(row.get("shown_text", row["text"]))
+                if row.get("system_text"):
+                    system.remove(row["system_text"])
             except ValueError:
                 pass
     claims = begun
@@ -5200,6 +5366,8 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
     text = "\n\n".join(context)
     output = ({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}
               if event else {"context": text})
+    if system:
+        output["system"] = "\n\n".join(system)
     print(json.dumps(output, ensure_ascii=False), file=stream)
     stream.flush()
     for row in claims:

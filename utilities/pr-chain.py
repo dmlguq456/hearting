@@ -34,7 +34,10 @@ HERE = Path(__file__).resolve().parent
 #   최종 판정: 수정 후 병합 — head <hex>          Final verdict: changes requested — head <hex>
 # Any other wording on that line makes it not a verdict, and the rest of the document
 # (code examples, quotes, history) is never read, so a person reads the report.
-# core/OPERATIONS.md §5.11 names the same rule; keep the two in step.
+# core/OPERATIONS.md §5.11 names the same rule; keep the two in step. The runtime's own reading
+# of a review or audit end (codex_dispatch_terminal.closed_review_kind) starts from these forms and
+# also takes one verdict written in both forms on one line, joined by ` · `; this chain does not, so
+# such a line is `awaiting-review` here and a person reads the report.
 VERDICT_FORMS = (
     ("merge", "최종 판정: 병합 가능"),
     ("merge", "Final verdict: mergeable"),

@@ -658,7 +658,10 @@ class MessageQuestions(unittest.TestCase):
         calls, _ref, pending = self.f.courier(signal)
         self.assertEqual(len(calls), 1)
         wire, recipient = pending["text"], pending["to"]
-        self.assertIn(answer, wire)
+        # This window never showed it reads the one-line form: it gets a pointer, and the agent's
+        # copy of the raw answer is the transfer's private payload (11-26).
+        self.assertNotIn(answer, wire)
+        self.assertIn(answer, self.f.peer.read_peer_payload(_ref)["body"])
         self.f.peer.receive_peer_message(wire, recipient)
         self.assertEqual(tidy_decisions.list_pending(), [])
         self.assertNotIn(answer, json.dumps(list(self.f.peer._iter_records())))

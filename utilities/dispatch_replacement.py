@@ -2054,9 +2054,15 @@ def _reuse_snapshot(jobs, route, lines, *, proof=None, pinned=None):
     observations = {}
     present = []
     unit = route.get('capability') == 'unit'
-    # A unit has one open turn. Any marker from an earlier turn is history
-    # that stays sealed in its own cycle, outside the current recovery.
-    for node in [] if unit else route.get('nodes', []):
+    root = Path(route['artifact_root'])
+    from artifact_producer import route_cycle_for, cycle_route_admission
+    cycle = route_cycle_for(root, route)
+    # A later turn (a unit's, or a one-shot owner's later request on its closed route) began
+    # its own cycle, recorded as a continuation of the last turn's.
+    continued = bool(cycle and cycle.get('continuation_attempt_id') and cycle.get('continues_cycle_id'))
+    # A unit has one open turn, and so has a later turn. Any marker from an earlier turn is
+    # history that stays sealed in its own cycle, outside the current recovery.
+    for node in [] if unit or continued else route.get('nodes', []):
         path = directory/(str(node['id'])+'.json')
         if not path.exists():
             continue
@@ -2151,17 +2157,13 @@ def _reuse_snapshot(jobs, route, lines, *, proof=None, pinned=None):
                           **({'restored_from': restored_from} if restored_from else {})})
     pending = [str(node.get('id')) for node in route.get('nodes', [])
                if str(node.get('id')) not in {row['node'] for row in completed}]
-    root = Path(route['artifact_root'])
-    from artifact_producer import route_cycle_for, cycle_route_admission
-    cycle = route_cycle_for(root, route)
-    if (not cycle or unit and cycle.get('state') != 'open'
+    if (not cycle or (unit or continued) and cycle.get('state') != 'open'
             or not cycle_route_admission(root, cycle, route).allow):
         raise DC.DispatchContractError('replacement-producer-not-open')
-    # A previous, finished unit turn left its workflow ledger complete. A new
-    # request already opened its own cycle, so recovery addresses that cycle only.
-    continued_unit = bool(unit and cycle.get('continuation_attempt_id') and cycle.get('continues_cycle_id'))
+    # A previous, finished turn left its workflow ledger complete. A new request
+    # already opened its own cycle, so recovery addresses that cycle only.
     return {'completed': completed, 'cycle_id': cycle['cycle_id'],
-            'producer_id': cycle.get('producer_id', ''), 'gates': _gate_snapshot(jobs, route, continued_unit=continued_unit),
+            'producer_id': cycle.get('producer_id', ''), 'gates': _gate_snapshot(jobs, route, continued_turn=continued),
             'invalidated': [invalidated[key] for key in sorted(invalidated)],
             'pending': pending}
 
@@ -2182,7 +2184,7 @@ def _reopened_outputs_note(route, invalidated, jobs):
             + '; '.join(rows) + '.\n') if rows else ''
 
 
-def _gate_snapshot(jobs, route, *, continued_unit=False):
+def _gate_snapshot(jobs, route, *, continued_turn=False):
     import workflow_state as WS
     ledger = WS.WorkflowLedger(route['route_id'], route['route_hash'], jobs=jobs)
     try:
@@ -2197,8 +2199,13 @@ def _gate_snapshot(jobs, route, *, continued_unit=False):
            or e.get('route_hash') != route['route_hash'] for e in entries):
         raise DC.DispatchContractError('replacement-workflow-journal-mismatch')
     state = ledger._rebuild(entries)['workflow_state']
-    if state == 'CANCELLED' or state == 'COMPLETE' and not continued_unit:
-        raise DC.DispatchContractError('replacement-workflow-not-open')
+    if state == 'CANCELLED' or state == 'COMPLETE' and not continued_turn:
+        refusal = DC.DispatchContractError('replacement-workflow-not-open')
+        # Definitive (`advance` settles it): the same start refuses the same way every time.
+        refusal.next_step = (f"This route's workflow already ended ({state}), so no replacement owner can continue "
+                             "it, and running the same start again is refused the same way. Read the owner's result; "
+                             "to end the route as it is, run close_command; for more work, compose a new route.")
+        raise refusal
     names = {str(b['gate']) for b in route.get('human_gate_bindings',[]) if b.get('gate')}
     names.update(str((e.get('evidence') or {})['gate']) for e in entries
                  if e.get('workflow_state') == 'BLOCKED_HUMAN_GATE' and (e.get('evidence') or {}).get('gate'))

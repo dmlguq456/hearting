@@ -7063,4 +7063,68 @@ class SuccessorSetsTests(unittest.TestCase):
         self.assertFalse(mod._plain_retry_successor(rows, 'att-nobody'))
 
 
+class LaterTurnReplacementTest(unittest.TestCase):
+    """(다) A one-shot owner's route closed PASS took a later request (`correct --route`), and that turn ended
+    without a PASS. Its replacement (the parent's answer to a FAIL, the runtime's observation of a format error)
+    continues the turn's own cycle as a unit route's later turn does: the earlier turn's COMPLETE ledger and
+    completion marker are that turn's history, not a closed workflow."""
+
+    def setUp(self):
+        import workflow_state as WS
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.jobs = self.root / "jobs.log"
+        self.jobs.write_text("", encoding="utf-8")
+        self.completion = self.root / "completion" / "rt-later"
+        self.completion.mkdir(parents=True)
+        self.route = {"route_id": "rt-later", "route_hash": "sha256:later", "capability": "autopilot-code",
+                      "artifact_root": str(self.root), "cwd": str(self.root), "human_gate_bindings": [],
+                      "nodes": [{"id": "one-shot", "depends_on": []}]}
+        # Turn 1 ended PASS: its marker and the ledger it completed stay as they were.
+        (self.completion / "one-shot.json").write_text(json.dumps(
+            {"route_id": "rt-later", "route_hash": "sha256:later", "node_id": "one-shot",
+             "attempt_id": "att-turn-1", "sequence": 1, "verdict": "PASS"}), encoding="utf-8")
+        ledger = WS.WorkflowLedger("rt-later", "sha256:later", jobs=self.jobs)
+        for state in WS.completion_transition_path("CREATED", "COMPLETE"):
+            ledger.set_workflow_state(state)
+
+    def snapshot(self, cycle):
+        import artifact_producer
+        module = SimpleNamespace(completion_dir=lambda route_id, jobs=None: self.completion)
+        with patch_split(D, "_route_module", return_value=module), \
+                patch_split(D, "gate_currency", side_effect=AssertionError("an earlier turn's marker is not read")), \
+                patch_split(artifact_producer, "route_cycle_for", return_value=cycle), \
+                patch_split(artifact_producer, "cycle_route_admission", return_value=SimpleNamespace(allow=True)):
+            return R._reuse_snapshot(self.jobs, self.route, [])
+
+    def test_a_later_turns_replacement_continues_that_turns_cycle(self):
+        later = {"cycle_id": "cyc-turn-2", "producer_id": "prod-turn-2", "state": "open",
+                 "continuation_attempt_id": "att-turn-2", "continues_cycle_id": "cyc-turn-1"}
+        snapshot = self.snapshot(later)
+        self.assertEqual((snapshot["cycle_id"], snapshot["completed"], snapshot["pending"], snapshot["gates"]),
+                         ("cyc-turn-2", [], ["one-shot"], []))
+
+    def test_a_sealed_later_turn_takes_no_replacement(self):
+        sealed = {"cycle_id": "cyc-turn-2", "producer_id": "prod-turn-2", "state": "sealed",
+                  "continuation_attempt_id": "att-turn-2", "continues_cycle_id": "cyc-turn-1"}
+        with self.assertRaises(D.DispatchContractError) as caught:
+            self.snapshot(sealed)
+        self.assertEqual(caught.exception.reason, "replacement-producer-not-open")
+
+    def test_a_finished_workflow_is_refused_once_with_what_to_do_instead(self):
+        # The route's own (first) cycle: COMPLETE still takes no replacement, and the refusal says why and what to
+        # do next rather than "retry after the launch settles" (the same start refuses the same way every time).
+        (self.completion / "one-shot.json").unlink()
+        with self.assertRaises(D.DispatchContractError) as caught:
+            self.snapshot({"cycle_id": "cyc-turn-1", "producer_id": "prod-turn-1", "state": "open"})
+        self.assertEqual(caught.exception.reason, "replacement-workflow-not-open")
+        self.assertIn("already ended (COMPLETE)", caught.exception.next_step)
+        self.assertIn("running the same start again is refused the same way", caught.exception.next_step)
+        self.assertIn("run close_command", caught.exception.next_step)
+        # The `next:` line appends a command for each name its step says: resume_command would invite the repeat.
+        self.assertNotIn("resume_command", caught.exception.next_step)
+        self.assertFalse(getattr(caught.exception, "retry_when", ""))
+
+
 if __name__=='__main__':unittest.main()

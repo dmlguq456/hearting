@@ -1849,7 +1849,24 @@ def _status_popup(binding, request, columns, colors, no_color, kind="status"):
         # the document is read whole, so the two never share the answer's size. A list that alone does not fit is left out and
         # the answer is the document's, as it always was.  The backlog's list is a function of how many items it draws: the most
         # that fit stand, and the rest is one line (`… N more in backlog.md`), so a long backlog is never a page with no list.
-        if callable(listing):
+        if callable(listing) and getattr(listing, "board", False):
+            # 11-26 (scheme A): the backlog's board is one short row per item, newest first, and the host groups, filters and finds on them
+            # (``backlog-board.cjs``); the most that fit the answer stand (the newest), and the board says how many more the document has.
+            names = {name: style(name) for name in session_status.BOARD_STYLES}
+
+            def boarded(drawn=None):
+                return {**result, "board": {**listing(drawn), "styles": names}}
+            whole = boarded()
+            if weight(whole) <= BACKLOG_ANSWER_BYTES:
+                return whole
+            low, high = -1, listing.total      # the most items that fit (-1: not even none)
+            while high - low > 1:
+                middle = (low + high) // 2
+                low, high = (middle, high) if weight(boarded(middle)) <= BACKLOG_ANSWER_BYTES else (low, middle)
+            if low >= 0:
+                return boarded(low)
+            forget()
+        elif callable(listing):
             listed = {**result, "list": entries_of(listing())}
             if weight(listed) <= BACKLOG_ANSWER_BYTES:
                 return listed
@@ -1886,7 +1903,8 @@ def _backlog_detail(named, request, columns, colors, no_color, session_status):
     own = request.get("own") if isinstance(request.get("own"), str) and len(request["own"]) <= 200 and "/" not in request["own"] else ""
     if not isinstance(key, str) or not key.startswith("i:") or len(key) > 64:
         return {"ok": False, "reason": "invalid-status"}
-    rows = session_status.backlog_detail(session_status._root(named[0], time.time()), own, key, columns)
+    indent = request.get("indent") if isinstance(request.get("indent"), int) and not isinstance(request.get("indent"), bool) else 0
+    rows = session_status.backlog_detail(session_status._root(named[0], time.time()), own, key, columns, max(0, min(40, indent)))
     if rows is None:
         return {"ok": False, "reason": "no-item"}
     styles, index = [], {}

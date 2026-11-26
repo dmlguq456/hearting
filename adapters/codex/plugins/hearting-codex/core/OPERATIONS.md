@@ -1801,7 +1801,9 @@ With `**`/`__` emphasis, surrounding spaces and a trailing period removed, that 
 exactly `최종 판정: 병합 가능 — head <hex>` or `Final verdict: mergeable — head <hex>`
 (merge), or `최종 판정: 수정 후 병합 — head <hex>` or `Final verdict: changes requested — head <hex>`
 (fix), with 7–40 hex digits. Any other word on that line is not interpreted, and the rest
-of the document (code examples, quotes, history, later re-reviews) is not read. A first
+of the document (code examples, quotes, history, later re-reviews) is not read. (The
+runtime's reading of a review or audit end also takes one verdict written in both forms on
+one line, joined by ` · `; the chain does not, so that line is `awaiting-review`.) A first
 line whose hex is a prefix of the current head is the current verdict; one naming another
 head is `review-stale`; otherwise the step is `awaiting-review`: a person reads the report
 and takes the next step, its `next=` quoting the first line. Reviewers are not required to
@@ -1857,6 +1859,13 @@ and the workflow as CANCELLED, and records the route outcome. Repeated close
 and the existing execution observers resume this same cleanup after interruption.
 Unknown process evidence stays termination-pending; it grants no signal or
 false completion and requires no new caller recovery ritual.
+When the route's latest owner had already ended without a PASS (FAIL, BLOCKED,
+a format error), the same close records the unproven outcome and leaves the
+workflow CANCELLED and the open cycle sealed `abandoned`, as for a running owner;
+a proven close, an owner that ended PASS or whose end is not settled yet, and a
+route with no registered owner keep their cycle for its completion. A busy
+artifact lock leaves that cycle open with the closure standing (exit 0); the same
+close run again seals it, and once it is sealed a further close changes nothing.
 Fleet's explicit user kill (`note=fleet-kill`, `failure_class=cancelled`)
 is likewise a committed cancellation. Once its process, owner and cleanup
 obligations settle, it no longer blocks pane completion or retirement as an
@@ -2135,7 +2144,9 @@ input binding and diagnostic. Changed inputs use ordinary smoke verification
 and a distinct retry without locking another session's edits.
 The smoke attestation and the resource launch share a normalized execution
 identity for the selected cwd, interpreter, local environment selectors, and
-compute-host/environment plus explicit remote payload selectors. The launcher
+compute-host/environment plus explicit remote payload selectors. A local
+payload inherits the selected values the smoke captured (a value the smoke
+lacked is removed), and an explicit assignment is still compared. The launcher
 rechecks that identity before reservation and again at queued controller
 release; a changed or unbound record cannot authorize a new payload. Only the
 small selected environment set is recorded, not ambient secrets. Legacy
@@ -3300,7 +3311,24 @@ read-everywhere contract agree. The native queue checks the Codex contract again
 at submission. Unknown, stale, unresolved, contradictory, and other-runtime
 evidence keeps the complete body inline; SID-less panes remain inline until
 session binding. Helper file reads and model-readable access are separate
-observations.
+observations. One runtime delivery takes a payload on every harness: a body
+holding a secret question's answer that gets no one-line display form (to
+OpenCode none at all, since its idle plugin delivery pastes a row's sealed text)
+shows the window only a pointer to its private payload (`private-answer`).
+Each carrier that takes the row gives the agent the verified full text in an
+agent-only place before the row settles: the Claude and Codex prompt hooks and
+the OpenCode plugin's system context for the pointer as a prompt (an idle
+resume sets that message's own guidance first, one resume an idle), Claude's
+hook context at a tool or prompt boundary, and at an OpenCode tool boundary
+the plugin's system context, while the tool result, which its TUI draws, gets
+the pointer alone. The OpenCode plugin holds that text, whatever message comes,
+until a model call of the session has carried it, and drops it when that turn
+ends; one no call carried waits for the next turn. A row that fits
+one Claude hook context alone but not beside other text waits for a boundary
+with room. No file read is needed, except for a delivery too long for one
+Claude hook context even alone, whose context says so and names the file.
+Only the recipient gets the text: another session given the same pointer gets
+no recovery copy.
 
 Queued and ambiguous envelopes retain their original wire body, digest, and
 identity. When queue submission or a receiver callback cannot establish current

@@ -106,11 +106,12 @@ for(let h=70;h>=14;h--){
   const v=draw({height:h}),m=mem(v),g=msgs(v);
   seen.push({h,records:m?m.rows.length:0,head:!!m,msg:g.count,two:g.two});
 }
-assert(seen[0].records===3&&seen[0].msg===3&&seen[0].two,JSON.stringify(seen[0]));
-// 11-20: MESSAGES and MEM are the first sections to go down, together: the messages take the one-row form, then MEM shows two records and MESSAGES
-// two messages, then one of each; three messages at most.
-const msgFold=seen.find(s=>!s.two),firstFewer=seen.find(s=>s.head&&s.records<3);
-assert(msgFold&&firstFewer&&msgFold.h>=firstFewer.h,JSON.stringify(seen));
+assert(seen[0].records===3&&seen[0].msg===3&&!seen[0].two,JSON.stringify(seen[0]));
+// 11-20: MESSAGES and MEM are the first sections to go down, together: MEM shows two records and MESSAGES two messages, then one of each; three messages at most.
+// 11-26 (panel B): a side panel message is one row at every height (the two-row form and its fold are the bottom layout's), so there is no fold step: MEM goes down first, then the messages.
+assert(seen.every(s=>!s.two),JSON.stringify(seen));
+const msgFewer=seen.find(s=>s.head&&s.msg<3),firstFewer=seen.find(s=>s.head&&s.records<3);
+assert(msgFewer&&firstFewer&&firstFewer.h>=msgFewer.h,JSON.stringify(seen));
 assert(seen.some(s=>s.records===1&&s.msg===1),JSON.stringify(seen));
 console.log(JSON.stringify(seen.map(s=>[s.h,s.records,s.msg,s.two?2:1])));
 """)

@@ -1742,9 +1742,9 @@ class BacklogTests(SectionFixture):
         positions = [page.index(mark) for mark in marks]
         self.assertEqual(positions, sorted(positions))
         self.assertIn("The session that postpones work writes one line each.", readme)
-        self.assertIn("[Open backlog.md](<backlog.md>)\n   FIX ? · IMPR ? · NOTE ? · TBD 3 · 3 total · updated 2026-11-21 23:10", readme)
+        self.assertIn("[Open backlog.md](<backlog.md>)\n   3 total · FIX ? · TASK ? · NOTE ? · TBD 3 · Discuss 0 · updated 2026-11-21 23:10", readme)
         self.assertIn('<a href="backlog.md">Open backlog.md</a> '
-                      '<span class="meta">FIX ? · IMPR ? · NOTE ? · TBD 3 · 3 total · updated 2026-11-21 23:10</span>', page)
+                      '<span class="meta">3 total · FIX ? · TASK ? · NOTE ? · TBD 3 · Discuss 0 · updated 2026-11-21 23:10</span>', page)
         self.assertEqual(readme.count("(<backlog.md>)"), 1)
         self.assertEqual(page.count('href="backlog.md"'), 1)
 
@@ -1909,26 +1909,30 @@ class BacklogTests(SectionFixture):
         self.assertEqual(targets[number:], ["recent-route-reports.md", "campaigns/INDEX.md"])
         out = self.reports()
         self.assertIn("Backlog\n   Work handed off, and what you said then.", out)
-        self.assertIn(f"{number}. Open backlog.md\n   backlog.md\n   FIX ? · IMPR ? · NOTE ? · TBD 3 · 3 total · updated 2026-11-21 23:10", out)
+        self.assertIn(f"{number}. Open backlog.md\n   backlog.md\n   3 total · FIX ? · TASK ? · NOTE ? · TBD 3 · Discuss 0 · updated 2026-11-21 23:10", out)
         self.assertEqual(self.open_line(number), str(self.root / "backlog.md"))
         self.assertEqual(self.open_line(number + 1), str(self.root / "recent-route-reports.html"))
         self.assertEqual(self.open_line(number + 2), str(self.root / "campaigns/INDEX.md"))
 
     def test_the_line_tells_each_sort_the_total_and_the_date(self):
-        mixed = ("# B\n갱신 2026-11-21 23:10\n## C\n- a\n  kind: fix\n- b\n  kind: Improve\n- c\n  kind: note\n- d\n- e\n  kind: fix\n  kind: note\n## D\n- f\n  kind: FIX\n")
+        # 11-26 (scheme A): `<total> total · FIX n · TASK n · NOTE n · Discuss n · updated …`, `TBD n` after NOTE where a job has no kind;
+        # the earlier `improve` counts as TASK.
+        mixed = ("# B\n갱신 2026-11-21 23:10\n## C\n- a\n  kind: fix\n  state: discuss\n- b\n  kind: Improve\n- c\n  kind: note\n- d\n- e\n  kind: fix\n  kind: note\n"
+                 "## D\n- f\n  kind: FIX\n  state: Discuss\n- g\n  kind: task\n  state: waiting\n")
         self._setup(mixed)
-        meta = "FIX 2 · IMPR 1 · NOTE 1 · TBD 2 · 6 total · updated 2026-11-21 23:10"
+        meta = "7 total · FIX 2 · TASK 2 · NOTE 1 · TBD 2 · Discuss 2 · updated 2026-11-21 23:10"
         self.assertIn("[Open backlog.md](<backlog.md>)\n   " + meta, self.entrance())
         self.assertIn('<span class="meta">' + meta + '</span>', self.entrance("index.html"))
-        self.assertEqual(E._backlog(self.root)["kinds"], {"fix": 2, "improve": 1, "note": 1, "tbd": 2})
+        self.assertEqual(E._backlog(self.root)["kinds"], {"fix": 2, "task": 2, "note": 1, "tbd": 2})
+        self.assertEqual(E._backlog(self.root)["states"], {"discuss": 2, "ready": 0, "waiting": 1})
         # an old document (no `kind:` line anywhere): what is sorted is not told, as against none; nothing else of the line moves
         self._setup("# B\n갱신 2026-11-21 23:10\n## C\n- a\n- b\n")
-        self.assertIn("\n   FIX ? · IMPR ? · NOTE ? · TBD 2 · 2 total · updated 2026-11-21 23:10", self.entrance())
-        # an empty one is zeros; only notes is zeros for the rest
+        self.assertIn("\n   2 total · FIX ? · TASK ? · NOTE ? · TBD 2 · Discuss 0 · updated 2026-11-21 23:10", self.entrance())
+        # an empty one is zeros (no TBD); only notes is zeros for the rest
         self._setup("# B\n")
-        self.assertIn("\n   FIX 0 · IMPR 0 · NOTE 0 · TBD 0 · 0 total", self.entrance())
+        self.assertIn("\n   0 total · FIX 0 · TASK 0 · NOTE 0 · Discuss 0\n", self.entrance())
         self._setup("# B\n## C\n- a\n  kind: note\n")
-        self.assertIn("\n   FIX 0 · IMPR 0 · NOTE 1 · TBD 0 · 1 total", self.entrance())
+        self.assertIn("\n   1 total · FIX 0 · TASK 0 · NOTE 1 · Discuss 0\n", self.entrance())
 
     def test_the_backlog_is_read_only_and_leaves_the_file_as_it_was(self):
         self._setup()
@@ -1945,14 +1949,14 @@ class BacklogTests(SectionFixture):
         readme = self.entrance()
         self.assertIn("## 백로그", readme)
         self.assertIn("맡긴 일과 그때 하신 말. 일을 미루는 세션이 한 줄씩 적습니다.", readme)
-        self.assertIn("[backlog.md 열기](<backlog.md>)\n   FIX ? · IMPR ? · NOTE ? · TBD 3 · 전체 3 · 갱신 2026-11-21 23:10", readme)
+        self.assertIn("[backlog.md 열기](<backlog.md>)\n   전체 3 · FIX ? · TASK ? · NOTE ? · TBD 3 · Discuss 0 · 갱신 2026-11-21 23:10", readme)
         self.assertIn("<h2>백로그</h2>", self.entrance("index.html"))
 
     def test_the_fallback_dictionary_carries_the_backlog_words(self):
         for key in ("entrance.section_backlog", "entrance.backlog_note", "entrance.backlog_open",
                     "entrance.backlog_count", "entrance.backlog_updated", "entrance.backlog_kinds",
-                    "entrance.backlog_unavailable"):
-            self.assertNotEqual(E._fallback_translator(key, count="1", date="d", fix="1", improve="1", note="1", tbd="1"), key)
+                    "entrance.backlog_tbd", "entrance.backlog_discuss", "entrance.backlog_unavailable"):
+            self.assertNotEqual(E._fallback_translator(key, count="1", date="d", fix="1", task="1", note="1", tbd="1", discuss="1"), key)
 
 
 def _has_entrance_marker(path):

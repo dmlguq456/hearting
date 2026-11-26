@@ -24,6 +24,7 @@ shared-utility-deferred	artifact_spec_storage.py
 shared-utility-deferred	artifact_viewer.py
 shared-utility-deferred	artifact_workflow_group_review.py
 shared-utility-deferred	atomic_publish.py
+shared-utility-deferred	backlog_items.py
 shared-utility-deferred	campaign_title_repair.py
 shared-utility-deferred	claude_process_identity.py
 shared-utility-deferred	detached_lifetime.py
@@ -78,6 +79,7 @@ shared-utility-deferred	harness_behavior_cases_unit_route.py
 shared-utility-deferred	harness_behavior_cases_unit_nested.py
 shared-utility-deferred	harness_behavior_cases_unit_continue.py
 shared-utility-deferred	harness_behavior_cases_owner_continue.py
+shared-utility-deferred	harness_behavior_cases_owner_fail.py
 shared-utility-deferred	harness_behavior_cases_unit_explore.py
 shared-utility-deferred	harness_behavior_cases_request.py
 shared-utility-deferred	harness_behavior_cases_parked.py

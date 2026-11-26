@@ -49,15 +49,19 @@ const message=(delivery,extra={})=>({way:'→',who:'[6c]',harness:'claude',when:
 const sent=message(['보냄','dim']),waiting=message([why,'dim','전달 대기']),bare=message(['전달 대기','dim','전달 대기']);
 const top=(m,width,side=true)=>{const v=render([],width,30,{side,model:{messages:[m],route_count:0,route_total:0}});return plain(v).filter(s=>/→ \[6c\]/.test(s)).map(s=>s.replace(/^│ │? ?/,'').replace(/ *│$/,''));};
 const rowCount=(m,width,side)=>plain(render([],width,30,{side,model:{messages:[m]}})).length;
-// 40 cells beside: the word whole, the why as far as it goes and then `…`; no row is added.
+// 11-26 (panel B): beside the native area a message is one row (arrow, number, body, time at the right): the delivery word and its why are not on the row
+// (the MESSAGES popup has them), and no row is added.
 for(const width of [40,44,50]){
- const line=top(waiting,width)[0];assert(line.includes('전달 대기'),line);
+ const [line,...more]=top(waiting,width);assert.equal(more.length,0,width+' '+more);
+ assert(/^→ \[6c\] 검토 요청 +3m$/.test(line.trimEnd())&&!line.includes('전달 대기')&&!line.includes('…'),line);
  const inner=width-4;assert(cells(line.trimEnd())<=inner,width+' '+line);
 }
-const narrow=top(waiting,40)[0];assert(/전달 대기 · .*…$/.test(narrow.trimEnd()),narrow);
 assert.equal(rowCount(waiting,40,true),rowCount(sent,40,true));
-// A word with no why reads whole; a sent one reads as before.
-assert(/ · 전달 대기 *$/.test(top(bare,40)[0])&&!top(bare,40)[0].includes('…'));assert(/보냄/.test(top(sent,40)[0]));
+assert.equal(top(waiting,40)[0],top(sent,40)[0]);
+// The bottom layout keeps the word: a word with no why reads whole; a sent one reads as before; where the row is short of cells the why ends in `…`.
+assert(/ · 전달 대기 *$/.test(top(bare,60,false)[0])&&!top(bare,60,false)[0].includes('…'));assert(/보냄/.test(top(sent,60,false)[0]));
+const narrow=top(waiting,60,false)[0];assert(/전달 대기 · .*…$/.test(narrow.trimEnd()),narrow);
+assert.equal(rowCount(waiting,60,false),rowCount(sent,60,false));
 // Room enough: the whole why, no ellipsis, the harness and time still in front.
 const wide=top(waiting,120,false)[0];assert(wide.includes(why)&&!wide.includes('…'),wide);
 // The bottom layout (one wide row for the message head) reads the same word.

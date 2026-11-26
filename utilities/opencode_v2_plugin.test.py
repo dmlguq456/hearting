@@ -786,7 +786,7 @@ const flushed = path.join(process.env.FIXTURE_ROOT, 'flushed')
 while (!fs.existsSync(flushed) && Date.now() - started < 20000) {}
 const holdUntil = Date.now() + 300
 while (Date.now() < holdUntil) {}
-assert.equal(await pending, 'FLUSHED-BEFORE-KILL')
+assert.deepEqual(await pending, {text: 'FLUSHED-BEFORE-KILL', system: ''})
 assert(Date.now() - started < 25000)
 """)
             result = subprocess.run([node, str(script)], cwd=ROOT, env=dict(BASE_ENV,
