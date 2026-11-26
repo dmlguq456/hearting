@@ -29,7 +29,12 @@ rewrites the shared file). Such a list is never followed from: a write pass firs
 installed CLI write it again, once, outside the table's lock (`_REFRESH`; no process of its group
 is left behind), and when that does not make the versions agree the harness's cells are left as they
 are and one line says so. Versions are compared with trailing zeros dropped (0.171 is 0.171.0). A
-survey (`fleet_view`) only reports it and never starts the refresh.
+survey (`fleet_view`) only reports it and never starts the refresh. An update asks once for all of
+its passes (`refresh_lists_once`, then `REFRESHED_ENV` for the passes and the activations it starts).
+
+A record of refused models that is there but cannot be read (`_rejected` gives None) may hold a
+refusal: that harness's cells are not followed or written and one line says so. An absent record
+is "nothing refused".
 """
 from __future__ import annotations
 
@@ -66,6 +71,10 @@ _CLI_TIMEOUT = 3
 # `debug models` prints the list as JSON and rewrites its cache.
 _REFRESH = {"codex": ("debug", "models")}
 REFRESH_WAIT = 10.0
+# Set by `update` for the passes it runs and the activations it starts (a child gets it through
+# its environment): the harnesses (comma separated) whose list `update` already asked the CLI to
+# write, so no later pass of that update asks again. Without it a pass refreshes as before.
+REFRESHED_ENV = "HEARTING_MODEL_LIST_REFRESHED"
 # How long a pass waits for the table's lock. A pass runs inside other work (an activation
 # holds locks of its own paths), so it never waits long: a table it cannot lock in this time is
 # not written and the next update or refresh tries again.
@@ -396,6 +405,49 @@ def _refresh(harness, observe, wait) -> bool:
     return clean and proc.returncode == 0
 
 
+def _refreshed(harness) -> bool:
+    return harness in os.environ.get(REFRESHED_ENV, "").split(",")
+
+
+def refresh_lists_once(harnesses: Iterable[str], *, runtime: str | Path | None = None,
+                       source_root: str | Path | None = None, read_catalog: Callable | None = None,
+                       probe: Callable | None = None, refresh_wait: float = REFRESH_WAIT) -> None:
+    """Ask the installed CLI to write its list again for each harness of `harnesses` whose table
+    is the user's and whose list another CLI version wrote; at most once per harness. Never
+    raises. `update` calls it once before its first pass and then sets `REFRESHED_ENV`
+    (see `list_refresh_done`), so a CLI that ends late or never is waited for once per update."""
+    for harness in harnesses:
+        try:
+            if harness not in _REFRESH or _refreshed(harness):
+                continue
+            home = _own_home(harness, runtime)
+            _values, receipt = model_config.resolve_config(harness, runtime=home, source_root=source_root)
+            if receipt.source != "user":
+                continue
+            catalog = _read_catalog(harness, read_catalog)
+            observe = _observer(harness, probe or installed_cli)
+            if catalog is not None and _other_cli(catalog, observe):
+                _refresh(harness, observe, refresh_wait)
+        except Exception:  # noqa: BLE001 - a list that is not refreshed is the answer, never an error
+            pass
+
+
+def list_refresh_done(harnesses: Iterable[str]) -> dict:
+    """The environment value that says `harnesses` had their list asked for already: the old
+    value of `REFRESHED_ENV` is returned for the caller to put back (`None` when it was unset)."""
+    before = os.environ.get(REFRESHED_ENV)
+    kept = [name for name in (before or "").split(",") if name]
+    os.environ[REFRESHED_ENV] = ",".join(dict.fromkeys([*kept, *harnesses]))
+    return {"before": before}
+
+
+def list_refresh_restore(token: Mapping) -> None:
+    if token.get("before") is None:
+        os.environ.pop(REFRESHED_ENV, None)
+    else:
+        os.environ[REFRESHED_ENV] = token["before"]
+
+
 def _cli_note(harness, catalog, entries, observe) -> dict | None:
     """The 'CLI is too old to list the next model' signal, or the 'list is from another CLI' one;
     needs only local facts."""
@@ -673,12 +725,18 @@ def _catalog(harness):
     return model_catalog.read_catalog(harness, deadline=_SERVICE_SECONDS)
 
 
-def _rejected(harness: str) -> frozenset:
+def _rejected(harness: str) -> frozenset | None:
+    """The models the record holds as refused: an empty set for a record that is absent, and None
+    when it cannot be read. A record that cannot be read may hold a refusal, so a caller that
+    gets None follows no model of this harness (and writes nothing)."""
     try:
-        import model_outcome_record
+        try:
+            import model_outcome_record
+        except ImportError:  # package import in focused unit tests
+            from utilities import model_outcome_record
         return model_outcome_record.rejected_models(harness)
-    except Exception:
-        return frozenset()
+    except Exception:  # noqa: BLE001 - not known is the answer: nothing is followed on it
+        return None
 
 
 def _observer(harness, probe):
@@ -749,7 +807,13 @@ def survey_harness(harness: str, *, source_root: str | Path | None = None,
         cell_list = cells(harness, values)
         skipped["states"] = _state_counts(
             model_follow_mark.cell_state(cell["model"], marks.get(cell["key"])) for cell in cell_list)
-        refused = frozenset(_rejected(harness) if rejected is None else rejected)
+        refused = _rejected(harness) if rejected is None else frozenset(rejected)
+        if refused is None:  # the record cannot be read: no cell can be told, none is followed
+            entries = follow_stage(harness, values, marks, None, _observer(harness, probe or installed_cli),
+                                   today)
+            for entry in entries:
+                entry["reason"] = "record-unreadable"
+            return {**skipped, "reason": "record-unreadable", "entries": entries}
         reverts = revert_stage(harness, values, marks, refused, today)
         skipped["plan"] = _plan_writes(reverts, [])
         try:
@@ -845,6 +909,9 @@ def apply_harness(harness: str, *, source_root: str | Path | None = None,
         values, receipt = model_config.resolve_config(harness, runtime=runtime, source_root=source_root)
         if receipt.source != "user":
             return {**result, "reason": "no-user-file"}
+        refused = _rejected(harness) if rejected is None else frozenset(rejected)
+        if refused is None:  # the record cannot be read: it may hold a refusal, so nothing is written
+            return {**result, "reason": "record-unreadable"}
         catalog = None
         try:
             catalog = _read_catalog(harness, read_catalog)
@@ -856,7 +923,8 @@ def apply_harness(harness: str, *, source_root: str | Path | None = None,
             observe()  # the CLI is asked before the table is locked, never under the lock
         other = _other_cli(catalog, observe) if catalog is not None else None
         if other:  # the installed CLI writes its list once more (outside the lock); else nothing follows
-            if _refresh(harness, observe, refresh_wait):
+            # An update asked once already for all of its passes (`REFRESHED_ENV`): not again.
+            if not _refreshed(harness) and _refresh(harness, observe, refresh_wait):
                 try:
                     again = _read_catalog(harness, read_catalog)
                 except Exception:  # noqa: BLE001
@@ -864,7 +932,6 @@ def apply_harness(harness: str, *, source_root: str | Path | None = None,
                 if again is not None:
                     catalog = again
                     other = _other_cli(catalog, observe)
-        refused = frozenset(_rejected(harness) if rejected is None else rejected)
         settings = _model_settings()
         ok = _check(settings, harness, source_root)
         held = {}
@@ -973,8 +1040,9 @@ def state_counts(result: Mapping) -> tuple[int, int, int]:
 # not know (a Claude alias such as `opus` is one), a model with no family and version, or a
 # newer model whose companion lines cannot move with it.
 _NOT_FOLLOWABLE = frozenset({"not-in-list", "no-pattern", "lines-do-not-fit"})
-# Why a cell cannot be told at all: there is no list, or the list is another CLI version's.
-_NOT_KNOWN = frozenset({"no-catalog", "list-from-another-cli"})
+# Why a cell cannot be told at all: there is no list, the list is another CLI version's, or the
+# record of refused models cannot be read.
+_NOT_KNOWN = frozenset({"no-catalog", "list-from-another-cli", "record-unreadable"})
 
 
 def fleet_view(harnesses: Iterable[str] = HARNESSES, **kwargs) -> list[dict]:
@@ -1076,6 +1144,9 @@ def lines(results: Iterable[Mapping]) -> list[str]:
                        "(the table would not accept the new lines)")
         if result.get("error"):
             out.append(f"model follow: {harness} table not updated ({result['error']})")
+        if result.get("reason") == "record-unreadable":
+            out.append(f"model follow: {harness} not followed (the record of rejected models "
+                       "cannot be read)")
         if result.get("read_only"):
             out.append(f"model follow: {harness} table is read-only · not updated")
         for entry in result.get("entries", ()):

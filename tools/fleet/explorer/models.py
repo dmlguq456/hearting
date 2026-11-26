@@ -187,7 +187,8 @@ def _fit(candidates, room):
         elif cell_width(text) <= room:
             return text
     last = candidates[-1]
-    return clip_cells(last if isinstance(last, str) else "".join(last), max(1, room))
+    # A tuple candidate is `(name, tail[, keep])`: only the name and the tail are text.
+    return clip_cells(last if isinstance(last, str) else "".join(last[:2]), max(1, room))
 
 
 def _box_plan(view, harness, profile, shown, values, table_effort=None):

@@ -247,17 +247,38 @@ def _opencode_rejected() -> frozenset:
     return frozenset(found)
 
 
+class RecordUnreadable(Exception):
+    """The record exists but cannot be read (damaged, not ours, or a later version's)."""
+
+
+def _load_checked(harness: str) -> dict:
+    """The file's lines: `{}` when the file is absent, `RecordUnreadable` when it is there and
+    cannot be read as ours. An absent record holds no refusal; a damaged one may."""
+    try:
+        with open(_path(harness), encoding="utf-8") as fh:
+            item = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError, TypeError) as exc:  # a text that is not UTF-8 is a ValueError
+        raise RecordUnreadable(f"{harness}: {type(exc).__name__}") from exc
+    if (not isinstance(item, dict) or item.get("schema_version") != SCHEMA_VERSION
+            or item.get("harness") != harness or not isinstance(item.get("providers"), dict)):
+        raise RecordUnreadable(f"{harness}: not a record of this version")
+    return item["providers"]
+
+
 def rejected_models(harness) -> frozenset:
     """The models this harness's record holds as `unavailable`, for any account scope.
 
     Claude and Codex name a model as the record keeps it (`model_key`). OpenCode keeps its lines
     in the usage cache and names `provider/model`; only a model-level reason counts there, for
-    the account in use (see `_opencode_rejected`). Read only; an absent or unreadable record
-    gives an empty set.
+    the account in use (see `_opencode_rejected`). Read only. An absent record holds no refusal
+    (an empty set); one that is there and cannot be read raises `RecordUnreadable`, so a caller
+    that follows models can leave them alone instead of taking it for "nothing refused".
     """
     if harness == "opencode":
         return _opencode_rejected()
-    lines = _load(harness) if harness in HARNESSES else None
+    lines = _load_checked(harness) if harness in HARNESSES else {}
     return frozenset(model_key(row.get("model")) for row in (lines or {}).values()
                      if isinstance(row, dict) and row.get("state") == "unavailable"
                      and row.get("model"))
