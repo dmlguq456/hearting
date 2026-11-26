@@ -7120,7 +7120,10 @@ class LaterTurnReplacementTest(unittest.TestCase):
             self.snapshot({"cycle_id": "cyc-turn-1", "producer_id": "prod-turn-1", "state": "open"})
         self.assertEqual(caught.exception.reason, "replacement-workflow-not-open")
         self.assertIn("already ended (COMPLETE)", caught.exception.next_step)
-        self.assertIn("close", caught.exception.next_step)
+        self.assertIn("running the same start again is refused the same way", caught.exception.next_step)
+        self.assertIn("run close_command", caught.exception.next_step)
+        # The `next:` line appends a command for each name its step says: resume_command would invite the repeat.
+        self.assertNotIn("resume_command", caught.exception.next_step)
         self.assertFalse(getattr(caught.exception, "retry_when", ""))
 
 

@@ -2203,7 +2203,7 @@ def _gate_snapshot(jobs, route, *, continued_turn=False):
         refusal = DC.DispatchContractError('replacement-workflow-not-open')
         # Definitive (`advance` settles it): the same start refuses the same way every time.
         refusal.next_step = (f"This route's workflow already ended ({state}), so no replacement owner can continue "
-                             "it and running resume_command again is refused the same way. Read the owner's result; "
+                             "it, and running the same start again is refused the same way. Read the owner's result; "
                              "to end the route as it is, run close_command; for more work, compose a new route.")
         raise refusal
     names = {str(b['gate']) for b in route.get('human_gate_bindings',[]) if b.get('gate')}

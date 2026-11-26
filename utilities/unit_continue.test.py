@@ -553,6 +553,16 @@ class CorrectUnitRouteTest(unittest.TestCase):
         self.assertEqual((receipt["required_action"], receipt["parent_next_command"]), ("compose-again", "compose --unit x"))
         self.assertEqual(UC.entries(self.jobs, "rt-abc"), [])
 
+    def test_a_unit_that_is_not_a_review_keeps_the_no_verdict_words(self):
+        # 🟡4: the closed review verdict is a review's form; another unit's readable FAIL is told as before.
+        self.rows = {FIRST: ("done", meta(worker_type="support", note="dead-worker-fail", failure_class="fail"))}
+        with mock.patch.object(self.W, "_compose_again", return_value="compose --unit x"):
+            (code, receipt), start = self.call("look again")
+        start.assert_not_called()
+        self.assertEqual((code, receipt["reason"]), (69, "unit-continue-last-turn-no-verdict"))
+        self.assertIn("ended without a verdict", receipt["next_step"])
+        self.assertNotIn("closed review verdict", receipt["next_step"])
+
     def test_a_review_read_as_finished_takes_the_closure_check_as_a_mergeable_one_does(self):
         # A changes-requested review read as finished work (a pass whose assessment is FAIL) and a mergeable one
         # both take the next turn the same way.

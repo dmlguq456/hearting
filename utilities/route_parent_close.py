@@ -1361,14 +1361,18 @@ def _cancel_ledger(route, ledger, *, legal_only=False):
 
 
 def finish_ended_owner_close(route, outcome, *, jobs=None):
-    """The rest of a `close` that found no running owner to stop and did not prove the route's gate.
+    """The rest of a `close` that found no running owner to stop and does not prove the route's gate.
 
-    The route's latest registered owner had already ended without a PASS (FAIL, BLOCKED, a format error, a
-    death): the ledger and the cycle end as the close of a running owner leaves them (`continue_close`): the
-    ledger CANCELLED and the open cycle sealed `abandoned`, never `completed`. A proven close is the route's
-    PASS and is not touched. Neither is a route whose latest owner ended PASS (its completion may still prove
-    the gate and seal the cycle) nor one with no registered owner (inline or legacy work, whose later exact
-    completion may still consume an unproven close). Nothing here waits or refuses: the closure stands."""
+    The route's latest registered owner had already ended, and its end is a committed failure or
+    cancellation (FAIL, BLOCKED, a format error, a death, a stop): the ledger and the cycle end as the close
+    of a running owner leaves them (`continue_close`): the ledger CANCELLED and the open cycle sealed
+    `abandoned`, never `completed`. A proven close is the route's PASS and is not touched. Neither is a route
+    whose latest owner ended PASS or whose end is not settled yet (a deferred completion, a terminal conflict
+    under review, a row no outcome reads from), whose completion may still prove the gate and seal the cycle,
+    nor one with no registered owner (inline or legacy work, whose later exact completion may still consume
+    an unproven close). The same close run again finishes what a busy lock left (only while the cycle is
+    still open; a sealed cycle is left as it is, and the ledger takes no second entry). Nothing here waits
+    or refuses: the closure stands."""
     if outcome.get("terminal_gate_proven") is True:
         return False
     jobs = jobs_path(jobs)
@@ -1381,8 +1385,11 @@ def finish_ended_owner_close(route, outcome, *, jobs=None):
     if not owners:
         return False
     status, latest = owners[-1][0][1], owners[-1][1]
-    if status in OPEN or DC.verdict_pass(latest) or DC.deferred_completion(latest) == "pending":
+    if (status in OPEN or DC.committed_outcome(status, latest) not in ENDED_WITHOUT_PASS
+            or DC.terminal_conflict_pending(latest)):
         return False
+    if _open_cycle(route) is None:
+        return False     # already sealed (an earlier or concurrent close), or no cycle: nothing to finish
     if jobs.exists():
         ledger = WS.WorkflowLedger(route["route_id"], route["route_hash"], jobs=jobs)
         try:
@@ -1393,10 +1400,25 @@ def finish_ended_owner_close(route, outcome, *, jobs=None):
     return _finish_existing_cycle(route, jobs=jobs, lock_timeout=5.0)
 
 
+# The committed ends (`dispatch_attempt_policy.committed_outcome`) a close seals abandoned.
+ENDED_WITHOUT_PASS = {"failed", "cancelled"}
+
+
+def _open_cycle(route):
+    import artifact_producer as AP
+    try:
+        cycle = AP.route_cycle_for(Path(route["artifact_root"]), route)
+    except (OSError, ValueError, AP.ProducerError):
+        return None
+    return cycle if cycle and cycle.get("state") == "open" else None
+
+
 def _finish_existing_cycle(route, *, jobs=None, lock_timeout=0.5):
     # This is ordinary producer closure, never a dependency on retaining its
     # files. Absence/deletion leaves the cancellation result fully replayable.
+    import artifact_admission
     import artifact_producer as AP
+    import dispatch_lock_order
     root = Path(route["artifact_root"])
     try:
         if verified_owner_pin_handoff_close(route, jobs=jobs):
@@ -1406,8 +1428,9 @@ def _finish_existing_cycle(route, *, jobs=None, lock_timeout=0.5):
             AP.finalize(root, cycle_id=cycle["cycle_id"], state="abandoned",
                         abandon_reason="operator-decision", lock_timeout=lock_timeout)
             return True
-    except (OSError, ValueError, AP.ProducerError):
-        pass
+    except (OSError, ValueError, AP.ProducerError, artifact_admission.AdmissionBusy,
+            dispatch_lock_order.LockOrderError):
+        pass     # a busy or out-of-order lock leaves the cycle open; the same close run again finishes it
     return False
 
 

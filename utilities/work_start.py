@@ -26,7 +26,7 @@ from dispatch_contract import (
     parse_registry_metadata, verdict_pass,
 )
 from capacity_auto_resume import UNIT_CAPACITY_PAUSE
-from dispatch_attempt_policy import REVIEW_BLOCKING_NOTE, deferred_completion, readable_result, terminal_conflict_pending
+from dispatch_attempt_policy import REVIEW_BLOCKING_NOTE, deferred_completion, terminal_conflict_pending
 from dispatch_completion_join import (
     join_selected_attempts, current_delivery_state, delivery_classification,
     delivery_required_action, completion_harvest_command,
@@ -2526,7 +2526,10 @@ def _advance_open(route, path, jobs, result, request, resume, *, wait, interview
         # A closure with an explicitly unproven gate is not successful work.
         if closed.get("terminal_gate_proven") is not True:
             return {**result, "state": "needs-attention", "reason": "route-closed-unproven",
-                    "required_action": "inspect-closed-route", "outcome": closed}
+                    "required_action": "inspect-closed-route", "outcome": closed,
+                    "next_step": "This route is closed and its result is on record (outcome: the closure, its gate "
+                                 "unproven); starting it again changes nothing and is answered the same way. Read the "
+                                 "closure and the owner's report; for more work, compose it as a new route."}
         if RP.is_framed_route(route):
             return _framed_settle(route, path, jobs, result, closed=closed, wait=wait, run=run,
                                   sleep=sleep, clock=clock)
@@ -2972,13 +2975,17 @@ def _advance_open(route, path, jobs, result, request, resume, *, wait, interview
                 **({"owner_report": report} if report else {}),
                 **({"owner_log_file": str(metadata["log_file"])} if not report and metadata.get("log_file") else {}),
                 "close_command": _close_command(path, jobs),
-                "next_step": f"{opening} {report_context} To accept the result as it is, or to stop the work, run "
-                    "close_command: the route closes with the owner's result on record (its gate unproven, the cycle "
-                    "sealed abandoned, its files kept) and no owner runs again. Only when the owner has something to "
-                    "do (a fix the person approves, an answer, a choice), get the person's answer (or fix what it "
-                    "names), then run correction_command with --message-file <answer file>: that continues this route "
-                    "at once in a replacement owner that receives the answer (in the same session when it can be "
-                    "woken). Do not recompose the route."}
+                # A FAIL has a result to accept as it is; a BLOCKED stop has none, only the work to stop.
+                "next_step": f"{opening} {report_context} "
+                    + ("To accept the result as it is, or to stop the work, run close_command: the route closes with "
+                       "the owner's result on record" if owner_stop == "FAIL" else
+                       "To stop the work, run close_command: the route closes as it stopped")
+                    + " (its gate unproven, the cycle sealed abandoned, its files kept) and no owner runs again. "
+                    + ("Only when the owner has something to do (a fix the person approves, an answer, a choice), get "
+                       if owner_stop == "FAIL" else "Otherwise get ")
+                    + "the person's answer (or fix what it names), then run correction_command with --message-file "
+                    "<answer file>: that continues this route at once in a replacement owner that receives the answer "
+                    "(in the same session when it can be woken). Do not recompose the route."}
     if replacement.get("state") == "needs-attention":
         result["replacement_attention"] = [replacement]
         if replacement["reason"] == "replacement-capacity-wait":
@@ -3174,10 +3181,10 @@ def correct_unit_route(route, path, jobs, text, request_id=None, **start_kwargs)
                        "next_step": "The unit worker's last turn ended without a verdict, so this route cannot "
                                     "take another turn and nothing was kept. To run the same unit again, run "
                                     "parent_next_command (a new route; this one stays as it ended)."}
-            if last_status == "done" and (last_meta.get("note") == REVIEW_BLOCKING_NOTE
-                                          or readable_result(last_meta) == "FAIL"):
-                # It has a verdict: a FAIL whose report did not open on a closed review verdict, so the end was
-                # not read as a finished review. Say that rather than "no verdict".
+            if (last_status == "done" and last_meta.get("worker_type") == "review"
+                    and last_meta.get("note") == REVIEW_BLOCKING_NOTE):
+                # A review has a verdict here: a FAIL whose report did not open on a closed review verdict, so the
+                # end was not read as a finished review. Say that rather than "no verdict". Other units keep it.
                 refusal.update(reason="unit-continue-last-turn-unread-review", next_step=(
                     "The unit worker's last turn ended FAIL, but its report does not open on a closed review verdict "
                     "(`Final verdict: changes requested — head <sha>`, or the same verdict in both forms on one line "

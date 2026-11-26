@@ -2800,9 +2800,10 @@ def main():
                                             summary=a.summary, commit=a.commit)
             if outcome is None:
                 outcome,created=close_route(route,a.route,a.commit,a.summary,allow_unproven=True)
-                if created and outcome.get("terminal_gate_proven") is not True:
-                    # No running owner to stop: the owner had ended without a PASS. The new unproven
-                    # closure ends the ledger and the cycle as stopping a running owner does.
+                if outcome.get("terminal_gate_proven") is not True:
+                    # No running owner to stop: the owner had ended without a PASS. The unproven closure
+                    # ends the ledger and the cycle as stopping a running owner does; the same close run
+                    # again finishes a cycle a busy lock left open (a sealed one is left as it is).
                     route_parent_close.finish_ended_owner_close(route, outcome)
             else:
                 created=True

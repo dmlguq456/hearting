@@ -1414,6 +1414,14 @@ class WorkStartTest(unittest.TestCase):
         self.assertIn('owner_log_file ' + str(Path(self.tmp.name) / 'owner.log'), results[0]['next_step'])
         self.assertEqual(results[0]['owner_log_file'], str(Path(self.tmp.name) / 'owner.log'))
         self.assertNotIn('owner_report says', results[0]['next_step'])
+        # 🟡7: a BLOCKED stop has no result to accept; the next line and the step say only "stop".
+        self.assertIn('To stop the work, run close_command', results[0]['next_step'])
+        self.assertNotIn('accept the result', results[0]['next_step'])
+        from start_receipt import next_line
+        self.assertEqual(next_line(results[0]),
+                         'next: to stop the work, run: ' + results[0]['close_command'] + "; otherwise get the "
+                         "person's answer to owner_report, then run: " + results[0]['correction_command']
+                         + ' --message-file <answer file>')
         self.assertEqual(len(self.calls), 3)
         self.assertEqual(self.jobs.read_bytes(), stable)
 
@@ -1435,12 +1443,20 @@ class WorkStartTest(unittest.TestCase):
         self.assertIn('To accept the result as it is, or to stop the work, run close_command', step)
         self.assertIn('Only when the owner has something to do', step)
         self.assertLess(step.index('close_command'), step.index('correction_command'))
+        # The `next:` line says the same, in the same order, with the receipt's own commands.
+        from start_receipt import next_line
+        self.assertEqual(next_line(result),
+                         'next: to accept the result as it is, or to stop the work, run: ' + result['close_command']
+                         + "; only if the owner has something to do, get the person's answer to owner_report, then "
+                         'run: ' + result['correction_command'] + ' --message-file <answer file>')
         self.assertEqual(len(self.calls), 3)
 
     def test_a_replacement_refused_for_an_ended_workflow_says_why_and_what_to_do_once(self):
         # (다) A definitive refusal is not "retry after the launch settles": the same start refuses the same way.
         self._parked_owner_row()
-        step = "This route's workflow already ended (COMPLETE), so no replacement owner can continue it."
+        step = ("This route's workflow already ended (COMPLETE), so no replacement owner can continue it, and "
+                "running the same start again is refused the same way. Read the owner's result; to end the route "
+                "as it is, run close_command; for more work, compose a new route.")
         with mock.patch('dispatch_replacement.owner_parked_gate', return_value=None), \
              mock.patch('dispatch_replacement.advance', return_value={
                  'state': 'needs-attention', 'reason': 'replacement-workflow-not-open', 'next_step': step}):
@@ -1450,6 +1466,9 @@ class WorkStartTest(unittest.TestCase):
         self.assertNotIn('next_action', result)
         self.assertNotIn('retry_when', result)
         self.assertIn(' close --route ', result['close_command'])
+        from start_receipt import next_line
+        self.assertEqual(next_line(result), 'next: inspect-preparation (replacement-workflow-not-open): ' + step
+                         + ' close_command=' + result['close_command'])
 
     def test_released_parked_owner_continues_through_replacement(self):
         owner=self._parked_owner_row()
@@ -1852,7 +1871,16 @@ class WorkStartTest(unittest.TestCase):
         self.assertEqual(self.calls, [])
         outcome["terminal_gate_proven"] = False
         self.path.with_suffix(".outcome.json").write_text(json.dumps(outcome))
-        self.assertEqual(self.start()["reason"], "route-closed-unproven")
+        closed = self.start()
+        self.assertEqual(closed["reason"], "route-closed-unproven")
+        # The closed route's own words, not the general "correct the admission input ... then use resume_command".
+        from start_receipt import next_line
+        self.assertEqual(next_line(closed),
+                         "next: inspect-closed-route (route-closed-unproven): This route is closed and its result is "
+                         "on record (outcome: the closure, its gate unproven); starting it again changes nothing and "
+                         "is answered the same way. Read the closure and the owner's report; for more work, compose "
+                         "it as a new route.")
+        self.assertNotIn("resume_command", next_line(closed))
 
     def test_closed_spec_publication_gap_retries_without_preparing_or_restarting_work(self):
         import artifact_producer

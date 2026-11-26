@@ -20,6 +20,16 @@ and the model is the loopback fixture.
     observation (as a first turn's format error is), that owner ends FAIL, and the parent's answer continues it
     again; the route closes on the answer's PASS.
 
+``owner-fail-answer-twice-headless-parent``
+    The owner ends FAIL and the parent sends the same answer twice at once (two `correct` calls with one
+    text): one replacement owner starts (held running until both calls returned), ends PASS and the route
+    closes on it.
+
+``owner-fail-answer-close-race-headless-parent``
+    The owner ends FAIL and the parent's answer (`correct`) and `close_command` run at the same moment. The
+    end is one clean state either way: the route is closed, its cycle sealed, no owner row is still open and
+    no owner model request arrives after the close returned; an unproven close leaves no replacement PASS.
+
 ``unit-continue-bilingual-verdict``
     The ``unit-continue`` run with the review's verdict line written in both forms on one line
     (`Final verdict: changes requested — head <sha> · 최종 판정: 수정 후 병합 — head <sha>`): the end reads as a
@@ -31,7 +41,9 @@ import json
 import re
 import shlex
 import sys
+import subprocess
 import threading
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -111,6 +123,7 @@ class OwnerFailCloseScenario(HeadlessParent, OwnerContinueScenario):
     # -- the fixture model ------------------------------------------------------------------------
     def script(self, run):
         self.worker_end = threading.Event()
+        self.release = threading.Event()
         self.ran = set()
         self.parent_outputs = []
         cell = self
@@ -122,6 +135,12 @@ class OwnerFailCloseScenario(HeadlessParent, OwnerContinueScenario):
             target = (outputs[-1] if outputs else "/nonexistent") + "/of_report.md"
             if phase == "observed":                       # the runtime's observation alone: the owner judges again
                 return Reply(f"artifact: {target}\nverdict: FAIL\nblocker: {BLOCKER}")
+            if phase == "answer" and cell.variant in {"answer-twice", "answer-close-race"} \
+                    and record["last_kind"] != "tool":
+                # The replacement stays running (its first answer held) until both parent calls returned.
+                line = "hb-of-final"
+                return Reply(shell=(f"mkdir -p {shlex.quote(target.rsplit('/', 1)[0])} && "
+                                    f"printf '%s\\n' {shlex.quote(line)} >> {shlex.quote(target)}"), gate=cell.release)
             if record["last_kind"] != "tool":
                 line = {"t1": "first line", "t2": "second line HB-OF-T2-DONE", "answer": "hb-of-final"}[phase]
                 return Reply(shell=(f"mkdir -p {shlex.quote(target.rsplit('/', 1)[0])} && "
@@ -129,7 +148,7 @@ class OwnerFailCloseScenario(HeadlessParent, OwnerContinueScenario):
                                     f"printf '%s\\n' {shlex.quote(line)} >> hb_of_work.txt && git add hb_of_work.txt && "
                                     f"git commit -q -m {shlex.quote(phase)} && git rev-parse --short HEAD"))
             if phase == "t1":
-                verdict = "FAIL" if cell.variant == "close" else "PASS"
+                verdict = "PASS" if cell.variant.startswith("follow-up") else "FAIL"
             elif phase == "t2":
                 if cell.variant == "follow-up-bad":
                     return Reply("The second line is written; I stop here.")     # no three-line handoff
@@ -148,7 +167,7 @@ class OwnerFailCloseScenario(HeadlessParent, OwnerContinueScenario):
         return answer
 
     def prepare(self, run):
-        unit.UnitRouteScenario.prepare(self, run)
+        OwnerContinueScenario.prepare(self, run)     # its Codex login shim too, so the scenario runs on Codex
         root = run.home.root
         (root / "brief.md").write_text(f"{WORK}: add one line to hb_of_work.txt in the repository, commit it and "
                                        "report.\n", encoding="utf-8")
@@ -183,6 +202,7 @@ class OwnerFailCloseScenario(HeadlessParent, OwnerContinueScenario):
                 "turn", "session")
         view = {k: top.get(k) for k in keep if k in top}
         view["already_closed_notice"] = "route already closed" in text
+        view["next_line"] = next((line for line in reversed(text.splitlines()) if line.startswith("next:")), "")
         return view
 
     def cycles(self, run, route_id):
@@ -238,8 +258,13 @@ class OwnerFailCloseScenario(HeadlessParent, OwnerContinueScenario):
                 run.note("the first owner never ended")
                 return "inconclusive"
             wait_for(lambda: False, 6, 1)
-            return self.run_close(run, ev) if self.variant == "close" else self.run_follow_up(run, ev)
+            if self.variant == "close":
+                return self.run_close(run, ev)
+            if self.variant in {"answer-twice", "answer-close-race"}:
+                return self.run_race(run, ev)
+            return self.run_follow_up(run, ev)
         finally:
+            self.release.set()
             self.worker_end.set()
             ev["parent_outputs"] = [text[-2500:] for text in self.parent_outputs]
 
@@ -255,6 +280,9 @@ class OwnerFailCloseScenario(HeadlessParent, OwnerContinueScenario):
         ok = (len(rows) == 1 and rows[0].get("failure_class") == "fail"
               and offered.get("reason") == "owner-failed" and bool(offered.get("close_command"))
               and "accept" in (offered.get("next_step") or "") and "close_command" in (offered.get("next_step") or "")
+              # The one-line directive says the same, in the same order, with the receipt's own close command.
+              and offered.get("next_line", "").startswith(
+                  "next: to accept the result as it is, or to stop the work, run: " + offered["close_command"] + ";")
               and closed["after"]["closure"].get("terminal_gate_proven") is False
               and "abandoned" in (cycle.get("state"), cycle.get("cycle_state"))
               and closed["after"]["ledger"].get("workflow_state") == "CANCELLED"
@@ -302,6 +330,75 @@ class OwnerFailCloseScenario(HeadlessParent, OwnerContinueScenario):
         return "pass" if ok else "fail"
 
 
+    def run_race(self, run, ev):
+        """Two parent calls at the same moment on a FAIL owner: the same answer twice, or the answer and the close."""
+        ev["after_fail"] = self.snapshot(run, "after-fail")
+        self.ask(run, RESTART)                       # the failed receipt, which carries close_command
+        markers = [ANSWER, ANSWER] if self.variant == "answer-twice" else [ANSWER, CLOSE]
+        commands = [self.parent_command(run, marker) for marker in markers]
+        env = {key: value for key, value in {**run.home.env, **self.parent_identity}.items() if value}
+        outputs = [None, None]
+
+        def call(index):
+            done = subprocess.run(["bash", "-c", commands[index]], env=env, cwd=str(run.home.workspace),
+                                  text=True, capture_output=True, timeout=900)
+            outputs[index] = done.stdout + done.stderr
+        threads = [threading.Thread(target=call, args=(index,)) for index in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=900)
+        returned = time.time()
+        self.parent_outputs.extend(text or "" for text in outputs)
+        ev["race_outputs"] = [(text or "")[-1500:] for text in outputs]
+        ev["rows_while_held"] = [self.row_view(r) for r in self.owner_rows()]
+        wait_for(lambda: False, 3, 1)
+        self.release.set()                            # a replacement still running may answer now
+        wait_for(lambda: all(r["status"] in TERMINAL_STATES for r in self.owner_rows()), 120, 2)
+        wait_for(lambda: self.closure(run) is not None and (self.closure(run).get("terminal_gate_proven") is not True
+                                                            or self.closure(run).get("terminal_owner_attempt_id")),
+                 90, 2)
+        wait_for(lambda: False, 6, 1)
+        end = self.snapshot(run, "after-race")
+        ev["after_race"] = end
+        rows = self.owner_rows()
+        late = [r for r in self.owner_requests(run) if r["at"] > returned + 2 and _phase(r["text"]) != "answer"]
+        ev["late_owner_requests"] = len(late)
+        closure = end["closure"]
+        cycle = (end["cycles"] or [{}])[-1]
+        cycle_end = cycle.get("cycle_state") or cycle.get("state")
+        still_open = [r for r in rows if r.get("status") not in TERMINAL_STATES]
+        if self.variant == "answer-twice":
+            replacements = [r for r in rows if r.get("automatic_retry_of")]
+            ok = (len(rows) == 2 and len(replacements) == 1 and rows[1].get("failure_class") == "pass"
+                  and closure.get("terminal_gate_proven") is True and cycle_end == "completed" and not still_open)
+            run.note(f"owners={len(rows)} replacements={len(replacements)} closed_proven="
+                     f"{closure.get('terminal_gate_proven')} cycle={cycle_end}")
+            return "pass" if ok else "fail"
+        proven = closure.get("terminal_gate_proven") is True
+        replacement_pass = any(r.get("automatic_retry_of") and r.get("failure_class") == "pass" for r in rows)
+        ok = (bool(closure) and not still_open and cycle.get("state") != "open"
+              and (cycle_end == "completed" if proven else cycle_end == "abandoned" and not replacement_pass))
+        after_close = [r for r in self.owner_requests(run) if r["at"] > returned + 2]
+        ok = ok and not after_close
+        run.note(f"owners={len(rows)} closed_proven={proven} cycle={cycle_end} still_open={len(still_open)} "
+                 f"requests_after_close={len(after_close)} rows={[r.get('status') + '/' + str(r.get('failure_class')) for r in rows]}")
+        return "pass" if ok else "fail"
+
+
+class OwnerFailAnswerTwiceScenario(OwnerFailCloseScenario):
+    name = "owner-fail-answer-twice-headless-parent"
+    summary = "The same answer sent twice at once to a FAIL owner starts one replacement owner."
+    variant = "answer-twice"
+
+
+class OwnerFailAnswerCloseRaceScenario(OwnerFailCloseScenario):
+    name = "owner-fail-answer-close-race-headless-parent"
+    summary = ("A FAIL owner's answer and `close_command` at the same moment end in one clean state: closed, "
+               "sealed, nothing running on the closed route.")
+    variant = "answer-close-race"
+
+
 class OwnerFollowUpFailScenario(OwnerFailCloseScenario):
     name = "owner-follow-up-fail-headless-parent"
     summary = ("A PASS-closed route's later turn ends FAIL; the parent's answer continues that turn in a replacement "
@@ -341,4 +438,4 @@ class UnitContinueBilingualVerdictScenario(UnitContinueScenario):
 
 
 SCENARIOS = [OwnerFailCloseScenario, OwnerFollowUpFailScenario, OwnerFollowUpBadHandoffScenario,
-             UnitContinueBilingualVerdictScenario]
+             OwnerFailAnswerTwiceScenario, OwnerFailAnswerCloseRaceScenario, UnitContinueBilingualVerdictScenario]
