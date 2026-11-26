@@ -41,6 +41,14 @@ samples, and internal notes). Mode auto-detects between code and doc when
 omitted; paper requires explicit `--mode paper`. Output is the persistent input
 source for downstream `autopilot-{draft,code,research}` capabilities.
 
+`analyze-project:analysis` is a separate one-off part: an optional, shareable stage
+(unit `analysis/analyze`) that answers one question about what is already at hand
+and writes only its `analysis.md`, never `analysis_project/`. Another kind borrows it
+in an explicit graph, for example `--capability autopilot-code --shape staged --graph
+analyze-project:analysis,autopilot-draft:fact-verify,report`, and it is written under
+that host's `parts/analyze-project/analysis/`. It fetches no outside sources; that
+stays `autopilot-research`.
+
 Adapters may expose this capability through native commands, skill files, prompt instructions, or explicit wrappers. The adapter must report unsupported runtime mechanics instead of silently treating another runtime's native file format as portable.
 
 ## Artifact Ownership

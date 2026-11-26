@@ -393,9 +393,13 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec, find_input=None, 
         follower = rows[after[0] + 2][1]
         order[follower] = {"depends_on": list(order.get(follower, {}).get("depends_on") or []) + [node_id]}
     if unknown:
+        # The kind stays the one named; another kind's shareable part is written as `capability:stage`.
+        borrowable = TOPO.borrowable_parts(registry, base_recipe)
         raise ValueError(
             "compose-graph-unknown-node:" + ",".join(unknown)
             + " (available: " + ",".join(view) + ")"
+            + (" (borrow from another kind as capability:stage: " + ",".join(borrowable) + ")"
+               if borrowable else "")
             + " (run `capability-route.py stages --capability "
             + base_recipe["capability"] + "` to list valid stage ids)"
         )
