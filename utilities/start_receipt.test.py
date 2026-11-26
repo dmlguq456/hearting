@@ -141,6 +141,55 @@ hooks.dispose();'''
         self.assertTrue(output['output'].startswith('FILTERED\n[start-receipt]'))
         self.assertIn('parent_next=bounded-wait', output['output'])
 
+    def route_files(self, route_id='rt-test', closed=False, outcome_text=None):
+        """A route file and, once closed, its outcome beside it; the receipt names the route file."""
+        routes = Path(self.tmp.name) / '.runtime' / 'routes'
+        routes.mkdir(parents=True, exist_ok=True)
+        route = {'route_id': route_id, 'route_hash': 'sha256:' + 'b' * 64}
+        path = routes / (route_id + '.json')
+        path.write_text(json.dumps(route))
+        if closed or outcome_text is not None:
+            (routes / (route_id + '.outcome.json')).write_text(
+                outcome_text if outcome_text is not None else json.dumps(dict(route, closed_at='2026-11-26T00:00:00Z')))
+        return path
+
+    def after_compaction(self):
+        import context_repeat
+        context_repeat.reset('codex', 'own', compaction=True)
+
+    def test_a_closed_routes_receipt_is_not_published_again_after_a_compaction(self):
+        self.result['route_file'] = str(self.route_files(closed=True))
+        self.save()
+        self.after_compaction()
+        self.assertEqual(receipt.context('codex', 'own', self.jobs), '')
+
+    def test_an_open_routes_receipt_is_published_again_after_a_compaction(self):
+        self.result['route_file'] = str(self.route_files())
+        self.save()
+        self.assertIn('state=running', receipt.context('codex', 'own', self.jobs))
+        self.after_compaction()
+        self.assertIn('state=running', receipt.context('codex', 'own', self.jobs))
+
+    def test_an_unreadable_closure_leaves_the_receipt_published(self):
+        saved = self.save()                                  # no route_file at all
+        self.assertIn('parent_next=bounded-wait', receipt.context('codex', 'own', self.jobs))
+        for route_file, outcome in (('relative/rt-test.json', None),                  # not absolute
+                                    (str(Path(self.tmp.name) / 'gone.json'), None),   # route file missing
+                                    (None, 'not json'),                               # outcome unreadable
+                                    (None, json.dumps({'route_id': 'rt-test', 'route_hash': 'sha256:other'}))):  # other generation
+            self.result['route_file'] = route_file or str(self.route_files(outcome_text=outcome))
+            self.save()
+            self.after_compaction()
+            self.assertIn('state=running', receipt.context('codex', 'own', self.jobs), (route_file, outcome))
+
+    def test_a_closed_routes_receipt_gives_way_to_the_sessions_newer_route(self):
+        # One receipt file per session: a later start overwrites it, so the next Bash shows that route.
+        self.result['route_file'] = str(self.route_files(closed=True))
+        self.save()
+        self.result.update(route_id='rt-next', route_file=str(self.route_files('rt-next')))
+        self.save()
+        self.assertIn('route_id=rt-next', receipt.context('codex', 'own', self.jobs))
+
 
 class NextLineTest(unittest.TestCase):
     """One plain line restating the receipt's directive, so nobody parses the JSON to act."""

@@ -3,9 +3,9 @@
 Execute only the assigned pipeline stage. Read its stage Skill and named input
 artifacts; obey the assigned write scope and completion gate. Write the stage's
 durable output and evidence for the next stage. Do not reselect the capability,
-intensity, topology, or model role, and do not dispatch another registered
-worker or create dispatch depth 3. A checked runtime-native helper is allowed
-only under the bounded helper contract in `roles/worker-bootstrap.md`.
+intensity, topology, or model role, and do not start another stage of the
+route. A read-only job you hand to another worker is a unit route of its own
+(`capabilities/unit.md`), not a deeper stage of yours.
 
 A normal single-session route node with `commit_expected: true` commits its own
 validated work, including tracked documentation and configuration examples it
