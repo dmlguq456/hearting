@@ -438,7 +438,9 @@ class F51GitTelemetryTest(unittest.TestCase):
             self.assertEqual(self._ahead_behind_sync(root), (2, 1))
 
             session = Session(harness="claude", pid=1, cwd=root, liveness="idle", mtime=1000)
-            with mock.patch.object(procscan, "scan", return_value=[session]):
+            # --json's header would run `git describe --dirty` in the checkout under test.
+            with mock.patch.object(procscan, "scan", return_value=[session]), \
+                 mock.patch.object(fleet_mod.installinfo, "collect", return_value={}):
                 buf = io.StringIO()
                 with mock.patch.object(sys, "stdout", buf):
                     fleet_mod.main(["--json"])
@@ -452,7 +454,8 @@ class F51GitTelemetryTest(unittest.TestCase):
             self._make_repo(root2, ahead=0, behind=0)
             gitinfo._CACHE.clear(); gitinfo._INFLIGHT.clear()
             session2 = Session(harness="claude", pid=2, cwd=root2, liveness="idle", mtime=1000)
-            with mock.patch.object(procscan, "scan", return_value=[session2]):
+            with mock.patch.object(procscan, "scan", return_value=[session2]), \
+                 mock.patch.object(fleet_mod.installinfo, "collect", return_value={}):
                 buf2 = io.StringIO()
                 with mock.patch.object(sys, "stdout", buf2):
                     fleet_mod.main(["--json"])
