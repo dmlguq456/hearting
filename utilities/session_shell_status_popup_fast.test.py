@@ -478,12 +478,12 @@ const checks={};
      checks.messages_head=popupHas('BL_MSG_ONE')(r.s);await close();}
     // Short of rows the two heads fold into the REPO row's buttons: the last `›` opens the board, the row's first cells the status popup.
     rows=16;term.resize(cols,rows);child.resize(cols,rows);
-    const folded=/REPO .*(STATUS ›  BACKLOG ›|›  ›) │/;
+    const folded=/REPO .*›  (BACKLOG[^│]*)?› │/;   // (`STATUS +5 ›  BACKLOG +3 ›`, `STATUS ›  BACKLOG ›` or `›  ›`, as the row's own value leaves room)
     r=await until(s=>s.some(l=>folded.test(l)),'the buttons on the REPO row');
     {const y=r.s.findIndex(l=>folded.test(l)),line=r.s[y];checks.folded_row=line.slice(line.lastIndexOf('│',line.indexOf('REPO'))).trim();
-     // (by cells: `at` maps the text to the screen's columns, a wide `⚠️` taking two)
-     const button=await at(/BACKLOG › +│/),name=await at(/REPO +tmp/);
-     await press(button.x+1,button.y,0);let o=await until(s=>{const x=box(s);return !!x&&x.rows[0].includes('BACKLOG')&&popupHas('6 total')(s);},'the board from the folded button');
+     // (by cells, the folder's name and its Git words being the machine's: the last `›` of the row is BACKLOG's button, its label `REPO` lies in STATUS's press)
+     await flush();const c=cellsOf(y),button={x:c.lastIndexOf('›'),y},name=await at(/REPO +/);
+     await press(button.x,button.y,0);let o=await until(s=>{const x=box(s);return !!x&&x.rows[0].includes('BACKLOG')&&popupHas('6 total')(s);},'the board from the folded button');
      checks.folded_backlog=true;await close();   // (16 rows: the board's head lines; its items are below its short window)
      await press(name.x+1,name.y,0);o=await until(s=>{const x=box(s);return !!x&&x.rows[0].includes('STATUS');},'the status popup from the REPO row');
      checks.folded_status=true;await close();}
@@ -680,8 +680,8 @@ class PtyTest(unittest.TestCase):
         # 11-26 (panel B): the BACKLOG head, the MESSAGES head (its message one row, the time at the right end) and the REPO row's folded buttons.
         for name in ('backlog_head', 'messages_head', 'folded_backlog', 'folded_status'):
             self.assertTrue(checks[name], (name, checks))
-        self.assertRegex(checks['message_row'], r'│  → peer BL_MSG_ONE .* \d\d:\d\d │', checks)
-        self.assertRegex(checks['folded_row'], r'^│  REPO +tmp \(⚠️\?\) STATUS ›  BACKLOG › │$', checks)
+        self.assertRegex(checks['message_row'], r'│  → peer BL_MSG_ONE .* \d\d[:-]\d\d │', checks)
+        self.assertRegex(checks['folded_row'], r'^│  REPO .*›  (BACKLOG[^│]*)?› │$', checks)
 
     def test_a_late_fleet_part_of_another_width_is_not_kept(self):
         checks = self.run_case('width')
