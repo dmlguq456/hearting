@@ -4,6 +4,9 @@ Enrichment ONLY: every test in NoRegressionTest exists to pin prd.md:291's "neve
 session-existence" contract. Fixtures are a throwaway sqlite DB (OpenCode) and throwaway
 jsonl transcripts (Claude) — no real opencode/claude state is ever touched.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 import os
 import sqlite3
@@ -632,7 +635,11 @@ class CodexSubagentTest(unittest.TestCase):
             replacement = os.path.join(tmp, "replacement.jsonl")
             self._lifecycle(replacement, [("task_started", "replacement")])
             os.replace(replacement, path)
-            self.assertIsNone(codex._latest_task_lifecycle(path))
+            # The replaced file is read again from its start in the same call.
+            self.assertEqual(
+                codex._latest_task_lifecycle(path),
+                ("task_started", "replacement"),
+            )
             self.assertEqual(
                 codex._latest_task_lifecycle(path),
                 ("task_started", "replacement"),
@@ -1008,16 +1015,16 @@ class ClaudeSidechainTest(unittest.TestCase):
             self.assertEqual(len(subs), 1)
             self.assertEqual(subs[0].agent_type, "explore")
 
-    def test_cache_keyed_on_mtime_and_size(self):
+    def test_cache_keyed_on_exact_stat_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "t.jsonl")
             _write_transcript(path, [_tool_use_line("t1", "explore")])
             first = claude._tail_subagents(path)
             self.assertEqual(len(first), 1)
             st = os.stat(path)
-            claude._SUBAGENT_CACHE[path] = (st.st_mtime, st.st_size, [])   # poison the cache
+            claude._SUBAGENT_CACHE[path] = (claude._file_identity(st), [])   # poison the cache
             cached = claude._tail_subagents(path)
-            self.assertEqual(cached, [], "재읽기 없이 (mtime,size) 캐시를 그대로 반환해야 함")
+            self.assertEqual(cached, [], "재읽기 없이 같은 신원의 캐시를 그대로 반환해야 함")
 
 
 class NoRegressionTest(unittest.TestCase):

@@ -18,6 +18,7 @@ import tempfile
 from pathlib import Path
 
 import route_identity as ROUTE_IDENTITY
+import route_form as ROUTE_FORM
 import dispatch_terminal_commit
 from dispatch_contract import (
     DispatchContractError, owner_operation_fence, verdict_pass, attempt_process_quiescence,
@@ -104,6 +105,16 @@ def terminal_gate_observation(route, *, jobs=None, exact_terminal=False, registr
             rows[node_id]=_marker_identity_row(route,node,node_id,node.get("terminal_gate"), jobs=jobs,
                                               exact_terminal=exact_terminal,
                                               registry_lines=registry_lines)
+            if (rows[node_id].get("passed") and owner_executed_terminal(node)
+                    and ROUTE_FORM.one_shot_review_route(route)):
+                # The middle cell's owner marker (a harness that writes one at the owner's end) does not
+                # stand in for the review its end waits on: the owner made the work, it cannot also pass it.
+                try:
+                    missing=owner_terminal_prerequisites(route,node,jobs,registry_lines=registry_lines)
+                except (OSError,ValueError,KeyError,TypeError):
+                    missing={"review":"owner-prerequisite-unreadable"}
+                if missing:
+                    rows[node_id]={"passed":False,"reason":"owner-prerequisite-unproven:"+json.dumps(missing,sort_keys=True)}
     for group_id,error in sorted(owner_merge_auxiliary_groups(route).items()):
         key=f"parallel_group:{group_id}"
         row=_arbitration_observation(route,group_id,error)
@@ -177,7 +188,7 @@ def _owner_terminal_observation(route,node,*,jobs=None,registry_rows=None,
         # A one-shot owner sealed by `route_*` fields alone (its supervisor closed the row
         # before the marker writer ran) has no lifecycle binding; the quick node-bound
         # contract that `dispatch_terminal_commit.validate_owner_route` enforces stands in.
-        node_bound=(binding is None and route.get("effective_intensity")=="quick"
+        node_bound=(binding is None and ROUTE_FORM.one_shot_owner(route)
                     and not any(k in meta for k in ("owner_route_file","owner_route_id","owner_route_hash"))
                     and Path(meta.get("route_file","")).resolve()==canonical_route_path(route["artifact_root"],route["route_id"]))
         if not ((binding is not None and binding.route_id==route["route_id"] and binding.route_hash==route["route_hash"])
@@ -788,10 +799,10 @@ def close_route(route, route_file, commit=None, summary=None, publication=None,
     finally:
         os.unlink(temporary)
     try:
-        # C-W4: the campaign's status page, when it keeps one, records this close (ARTIFACT_META).
-        import status_board
-        status_board.note_route_closed(route, outcome)
-    except Exception:  # noqa: BLE001 -- the page is optional; a close never waits on it
+        # The campaign's document is kept by the entrance worker: ask for a turn, never wait for it.
+        import artifact_entrance
+        artifact_entrance.request_refresh(Path(str(route["artifact_root"])))
+    except Exception:  # noqa: BLE001 -- the document is derived; a close never waits on it
         pass
     return outcome, True
 

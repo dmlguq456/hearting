@@ -12,6 +12,9 @@ Root-cause pair, both fixed here and pinned by these tests:
 Hermetic: temp CLAUDE_CONFIG_DIR only; no real ~/.claude, no live process dependency.
 The statusline.sh injection tests drive the real script with a verified native executable fixture.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 import os
 import shutil
@@ -662,7 +665,9 @@ int main(void) {
                 "AGENT_HOME": self.config_home, "FLEET_TITLE_STATE_DIR": str(state),
                 "FIXTURE_NAME": name, "FIXTURE_NAME_SOURCE": name_source})
             self.assertEqual(process.returncode, 0, error)
-            self.assertIn(expected, output.decode())
+            # Spec 2026-11-11 rule 10: the statusline carries no session title;
+            # the verified runtime still binds the tap to the native process.
+            self.assertNotIn(expected, output.decode())
             self.assertEqual(json.loads(self._tap(sid))["pid"], process.pid)
 
     def test_non_brace_quote_input_stays_verbatim(self):

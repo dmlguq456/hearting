@@ -631,8 +631,7 @@ def resolve_dangling_registry(
     compat-window  parent is gone, no alias, and the legacy read window is
                     still open. This cycle never closes the window, so
                     `window_open` defaults `True`; a future cycle can pass
-                    the real judgement once `legacy_read_window_may_close()`
-                    is wired to an authoritative count.
+                    the real judgement.
     unresolved     parent is gone, no alias, and the window is closed.
     """
 
@@ -659,28 +658,6 @@ def resolve_dangling_registry(
     if window_open:
         return DanglingRegistryResolution("compat-window", None, None)
     return DanglingRegistryResolution("unresolved", None, None)
-
-
-LEGACY_READ_WINDOW_MIN_SUPPORTED_RELEASES = 2
-
-
-def legacy_read_window_may_close(
-    *,
-    supported_releases_elapsed: int,
-    legacy_bound_open_writers: int,
-    delta: int,
-    legacy_read_hits: int,
-) -> bool:
-    """Pure four-condition truth table (SD-112 §13.33.2-(6), B-13a). Never
-    touches the filesystem and never calls `_succeed_dispatch_state()`; actual
-    post-promotion delta reachability is Slice 3's B-13b, not this slice's."""
-
-    return (
-        supported_releases_elapsed >= LEGACY_READ_WINDOW_MIN_SUPPORTED_RELEASES
-        and legacy_bound_open_writers == 0
-        and delta == 0
-        and legacy_read_hits == 0
-    )
 
 
 def validate_nested_eligibility(

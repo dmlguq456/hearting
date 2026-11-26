@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import base64
 import contextlib
@@ -34,11 +37,15 @@ assert SPEC.loader is not None
 sys.modules[SPEC.name] = JOIN
 SPEC.loader.exec_module(JOIN)
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import dispatch_contract as D  # noqa: E402
 import dispatch_observation_log as OBS  # noqa: E402
 import dispatch_terminal_commit as TERMINAL  # noqa: E402
 import dispatch_supervision  # noqa: E402
 from split_module_fixture import patch_split, split_patch  # noqa: E402
+
+MISSING_WATCHER_ATTEMPT = unique_attempt_id("att-missing-watcher")
 
 # D-42 hermeticity: `classify_supervised_shell_command` and the supervisor
 # state readers consult the LIVE session's dispatch environment on purpose, so
@@ -658,7 +665,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         self.assertEqual(saved.metadata["attempt_descendant_proof"], D.ATTEMPT_DESCENDANT_PROOF)
 
     def missing_watcher_row(self):
-        fields = self.residue_row(attempt="att-missing-watcher", with_envelope=True).strip().split("\t")
+        fields = self.residue_row(attempt=MISSING_WATCHER_ATTEMPT, with_envelope=True).strip().split("\t")
         metadata = D.parse_registry_metadata(fields[5])
         for key in tuple(metadata):
             if key.startswith(("group_reap_", "attempt_descendant_")) or key == "launch_outcome":
@@ -671,7 +678,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         # A real harmless process stays alive until its watcher has exited.
         worker = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
                                   stdin=subprocess.PIPE, start_new_session=True,
-                                  env={**os.environ, "AGENT_DISPATCH_ATTEMPT_ID": "att-missing-watcher"})
+                                  env={**os.environ, "AGENT_DISPATCH_ATTEMPT_ID": MISSING_WATCHER_ATTEMPT})
         try:
             start = D.process_start_ticks(worker.pid)
             watcher = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
@@ -690,7 +697,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
                 worker.wait(timeout=3)
             if worker.stdin and not worker.stdin.closed:
                 worker.stdin.close()
-        child = JOIN.current_attempt_row(self.jobs, "att-missing-watcher")
+        child = JOIN.current_attempt_row(self.jobs, MISSING_WATCHER_ATTEMPT)
         stalled = D.attempt_process_quiescence(child.metadata, terminal_receipt=True)
         self.assertEqual(stalled.reason, "post-exit-receipt-incomplete")
         with mock.patch.object(JOIN.subprocess, "run") as run:
@@ -701,7 +708,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         self.assertEqual(fresh.metadata["launch_outcome"], "governed-process-group-drained")
         self.assertEqual(D.attempt_process_quiescence(fresh.metadata, terminal_receipt=True).state, "quiescent")
 
-        def settle(_jobs, current):
+        def settle(_jobs, current, _previous=None):
             self.assertEqual(current.attempt_id, child.attempt_id)
             self.assertEqual(current.metadata["attempt_descendant_proof"], D.ATTEMPT_DESCENDANT_PROOF)
             self.jobs.write_text(self.jobs.read_text().replace("\topen\t", "\tdone\t")
@@ -729,7 +736,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         for name, helper, result in cases:
             self.jobs.write_bytes(original)
             with self.subTest(case=name), patch_split(D, helper, return_value=result):
-                recovery = D.resolve_residue_drain(self.jobs, "att-missing-watcher", apply=True)
+                recovery = D.resolve_residue_drain(self.jobs, MISSING_WATCHER_ATTEMPT, apply=True)
                 self.assertFalse(recovery.get("changed"), recovery)
                 self.assertEqual(self.jobs.read_bytes(), original)
 
@@ -746,7 +753,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
                                  .replace("note=,", "note=completed-subsession,"))
             return {"attempt_id": child.attempt_id, "closed": True, "reason": "completed-subsession"}
 
-        with mock.patch.object(JOIN, "settle_finished_attempt", side_effect=lambda jobs, child: settle(child)):
+        with mock.patch.object(JOIN, "settle_finished_attempt", side_effect=lambda jobs, child, *_: settle(child)):
             receipt = JOIN.join_batch(jobs=self.jobs, parent_attempt_id="att-parent", timeout=5,
                                       interval=0.05, recover_receiptless=True)
         self.assertEqual(receipt["state"], "ready", receipt)
@@ -1408,7 +1415,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
 
     def test_committed_marker_waits_for_live_descendant_cleanup_then_delivers_success(self):
         """A real live descendant is a cleanup obligation, never a failed PASS."""
-        attempt = "att-residue-marker"
+        attempt = unique_attempt_id("att-residue-marker")
         self.marker_delivery_fixture(attempt)
         residue = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(30)"],
@@ -2040,6 +2047,115 @@ class DispatchCompletionJoinTest(unittest.TestCase):
             armed["successor_command"]=["would-spawn-model"]
             with self.assertRaisesRegex(JOIN.JoinContractError,"resource-owner-binding-invalid"):
                 RESOURCE.context(args,control)
+
+    def _observer_fixture(self, observer_extra=None):
+        """A running supervised-owner primary plus an auxiliary observer of it, one registry."""
+        import dispatch_resource_wait as RESOURCE
+        from types import SimpleNamespace
+        registry = self.root / "resources.json"
+        owner = {"parent_attempt_id": "att-parent"}
+        primary = {"run_id": "primary", "pid": 123, "starttime": "100", "command": ["train"],
+                   "route": "/exact", "node": "full-run", "jobs": str(self.jobs),
+                   "owner_wait": owner, "resource_policy": "supervised-owner", "status": "running"}
+        observer = {"run_id": "watch", "pid": 124, "starttime": "101", "command": ["watch"],
+                    "route": "/exact", "node": "full-run", "jobs": str(self.jobs),
+                    "owner_wait": owner, "resource_policy": "observer", "observer_of": "primary",
+                    "status": "running", **(observer_extra or {})}
+        registry.write_text(json.dumps({"runs": {"primary": primary, "watch": observer}}))
+        armed = {"node": "full-run", "predecessor_id": "primary", "resource_registry": str(registry)}
+        state = {"watch": {"terminal": False, "reason": "resource-still-running", "liveness": "working"},
+                 "primary": {"terminal": False, "reason": "resource-still-running", "liveness": "working"}}
+        def evidence(item):
+            value = dict(state[item["predecessor_id"]])
+            if value.get("terminal"):
+                row = json.loads(registry.read_text())["runs"][item["predecessor_id"]]
+                value["resource_sha256"] = RESOURCE.RESUME.row_digest(row)
+            return value
+        polls = []
+        sup = SimpleNamespace(poll_once=lambda *_: polls.append(1), resource_evidence=evidence,
+            read_resource_watches=lambda *_: [armed], artifact_evidence=lambda _: {"missing": []},
+            resource_predecessors=lambda *_: [(armed, primary)], reattach_resource_watch=lambda *_: None,
+            runner=lambda: SimpleNamespace(read_sentinel=lambda _: None))
+        ledger = SimpleNamespace(state=lambda: {"nodes": {"full-run": {"state": "RUNNING"}}})
+        args = SimpleNamespace(parent_attempt_id="att-parent", route_id="rt-resource",
+                               route_hash="sha256:route", jobs=str(self.jobs))
+        control = SimpleNamespace(thread_id="same-native", pending=lambda: False)
+        path = self.root / "state.json"
+        JOIN.write_supervisor_state(path, "att-parent", set(), phase="running-turn")
+        return SimpleNamespace(RESOURCE=RESOURCE, registry=registry, armed=armed, primary=primary,
+                               observer=observer, state=state, sup=sup, ledger=ledger, args=args,
+                               control=control, path=path, polls=polls,
+                               ctx=(sup, {}, ledger, [(armed, primary)]))
+
+    def test_observer_failure_reaches_the_waiting_owner_once_and_leaves_the_primary_alone(self):
+        f = self._observer_fixture()
+        RESOURCE = f.RESOURCE
+        class Paused(Exception):
+            pass
+        def pause(_):
+            raise Paused()
+        primary_before = json.dumps(f.primary, sort_keys=True)
+        with mock.patch.object(RESOURCE, "context", return_value=f.ctx), \
+             mock.patch.object(RESOURCE.RESUME, "supervisor_alive", return_value=True):
+            # A clean or unknown observer ends nobody's wait: the owner keeps waiting.
+            for observation in ({"terminal": True, "succeeded": True, "exit_code": 0, "quiescent": None},
+                                {"terminal": False, "reason": "resource-observation-unsettled", "liveness": "unknown"}):
+                f.state["watch"] = observation
+                with self.assertRaises(Paused):
+                    RESOURCE.wait(f.args, f.path, f.control, set(), lambda _: None, sleep=pause)
+                self.assertIsNone(JOIN.read_supervisor_phase_state(f.path, "att-parent").resource["outbox"])
+            f.state["watch"] = {"terminal": True, "succeeded": False, "exit_code": 6, "quiescent": None}
+            prompt = RESOURCE.wait(f.args, f.path, f.control, set(), lambda _: None,
+                                   sleep=lambda _: self.fail("an observer failure returns at once"))
+            state = JOIN.read_supervisor_phase_state(f.path, "att-parent")
+            receipt = state.resource["outbox"]["receipt"]
+            self.assertEqual((receipt["state"], receipt["reason"], receipt["exit_code"], receipt["run_id"]),
+                             ("needs-attention", "observer-failed", 6, "watch"))
+            self.assertEqual(receipt["successors"], [])
+            self.assertFalse(receipt["verification_pass"] or receipt["workflow_complete"])
+            self.assertTrue(JOIN.valid_resource_state(state.resource))
+            self.assertIn("observer-failed", prompt)
+            self.assertIn("adds no retry authorization", prompt)
+            self.assertEqual(state.delivered_attempt_ids, frozenset())
+            # The same pending receipt is returned again, never a second one.
+            self.assertEqual(RESOURCE.wait(f.args, f.path, f.control, set(), lambda _: None), prompt)
+            self.assertTrue(RESOURCE.acknowledge(f.path, "att-parent", state.resource["outbox"]["receipt_id"]))
+            # Acknowledged once: the same failed observer does not wake the owner again.
+            with self.assertRaises(Paused):
+                RESOURCE.wait(f.args, f.path, f.control, set(), lambda _: None, sleep=pause)
+            self.assertIsNone(JOIN.read_supervisor_phase_state(f.path, "att-parent").resource["outbox"])
+        self.assertEqual(json.dumps(f.primary, sort_keys=True), primary_before)
+        self.assertEqual(json.loads(f.registry.read_text())["runs"]["primary"]["status"], "running")
+
+    def test_observer_failure_survives_the_primary_ending_before_acknowledgement(self):
+        f = self._observer_fixture()
+        RESOURCE = f.RESOURCE
+        f.state["watch"] = {"terminal": True, "succeeded": False, "exit_code": 6, "quiescent": None}
+        found_primary = {**f.primary}
+        with mock.patch.object(RESOURCE, "context", return_value=f.ctx), \
+             mock.patch.object(RESOURCE.RESUME, "supervisor_alive", return_value=True):
+            prompt = RESOURCE.wait(f.args, f.path, f.control, set(), lambda _: None)
+            # The primary's watch is gone: the receipt is still described from the observer row.
+            f.ctx = (f.sup, {}, f.ledger, [])
+            with mock.patch.object(RESOURCE, "current_responsibility", return_value={"ok": True}), \
+                 mock.patch.object(RESOURCE, "resource_holder", return_value={
+                     "origin": {"route_id": None, "route_hash": None, "route_file": None}}):
+                f.sup.resource_predecessors = lambda *_: [({**f.armed, "route_id": None, "route_hash": None,
+                    "route_file": None, "jobs": str(Path(f.args.jobs).resolve()),
+                    "successor_external": True, "successor_command": None}, found_primary)]
+                f.ctx = (f.sup, {}, f.ledger, [(f.armed, found_primary)])
+                with mock.patch.object(RESOURCE, "context", return_value=f.ctx):
+                    self.assertEqual(RESOURCE.pending_prompt(f.path, "att-parent", f.args, f.control), prompt)
+
+    def test_observer_of_another_route_or_owner_is_not_this_owners_to_hear(self):
+        for field, value in (("route", "/other"), ("node", "other-run"),
+                             ("observer_of", "someone-else"), ("owner_wait", {"parent_attempt_id": "att-other"}),
+                             ("pid", None), ("execution", {"kind": "compute-hosts"})):
+            with self.subTest(field=field):
+                f = self._observer_fixture({field: value})
+                self.assertEqual(f.RESOURCE.observer_rows([(f.armed, f.primary)]), [])
+        f = self._observer_fixture()
+        self.assertEqual([row["run_id"] for _, row in f.RESOURCE.observer_rows([(f.armed, f.primary)])], ["watch"])
 
     def test_resource_state_reader_rejects_malformed_foreign_and_false_pass(self):
         import copy
@@ -2927,6 +3043,9 @@ class NormalReadyCleanupJoinTest(unittest.TestCase):
 class HarvestVocabularyTest(unittest.TestCase):
     """DC-3, DC-4 (plan SS5.7 / SS3.4 D1, D1b): one harvest vocabulary."""
 
+    HARVEST = f"python3 {JOIN.ROOT / 'utilities/dispatch-harvest.py'}"
+    CODEX_WRAPPER = f"{JOIN.ROOT / 'adapters/codex/bin/preflight.sh'} harvest"
+
     def setUp(self):
         self.claude = load_supervisor("claude-session-supervisor")
         self.codex = load_supervisor("codex-app-server-supervisor")
@@ -2948,22 +3067,26 @@ class HarvestVocabularyTest(unittest.TestCase):
         )
 
     def test_command_projection_preserves_exact_arguments_without_prose_punctuation(self):
-        surface = "/fixture root/owner's preflight.sh"
-        jobs = "/fixture root/exact jobs.log"
-        command = JOIN.completion_harvest_command("att-exact", "complete-open", jobs=jobs, surface=surface)
-        self.assertEqual(shlex.split(command), [surface, "harvest", "--jobs", jobs,
-                         "--attempt-id", "att-exact", "--status", "open", "--mark-done"])
-        command = JOIN.completion_harvest_command("att-exact", "inspect-done-failure", jobs=jobs, surface=surface)
+        jobs = "/fixture root/owner's exact jobs.log"
+        command = JOIN.completion_harvest_command("att-exact", "complete-open", jobs=jobs)
+        tokens = shlex.split(command)
+        self.assertEqual(tokens[0], "python3")
+        self.assertTrue(tokens[1].endswith("/utilities/dispatch-harvest.py"))
+        self.assertTrue(Path(tokens[1]).is_file())
+        self.assertNotIn("/adapters/", command)
+        self.assertEqual(tokens[2:], ["--jobs", jobs, "--attempt-id", "att-exact",
+                                      "--status", "open", "--mark-done"])
+        command = JOIN.completion_harvest_command("att-exact", "inspect-done-failure", jobs=jobs)
         tokens = shlex.split(command)
         self.assertEqual(tokens[0], "python3")
         self.assertTrue(tokens[1].endswith("/utilities/dispatch-registry.py"))
         self.assertEqual(tokens[2:], ["observed-status", "--jobs", jobs, "--attempt", "att-exact"])
-        self.assertEqual(JOIN.completion_harvest_command("att-exact", "advance-completed", jobs=jobs, surface=surface), "")
+        self.assertEqual(JOIN.completion_harvest_command("att-exact", "advance-completed", jobs=jobs), "")
 
     def test_incident_command_with_jobs_now_classifies(self):
         # D-1: the exact command string the incident denied.
         line = (
-            f"{self.claude.SHARED_HARVEST_SURFACE} harvest --jobs {self.jobs} "
+            f"{self.HARVEST} --jobs {self.jobs} "
             "--attempt-id att-a --status done --failure-detail"
         )
         action = self._classify(line)
@@ -2976,7 +3099,7 @@ class HarvestVocabularyTest(unittest.TestCase):
     def test_open_status_with_jobs_and_mark_done_classifies(self):
         # D-2
         line = (
-            f"{self.claude.SHARED_HARVEST_SURFACE} harvest --jobs {self.jobs} "
+            f"{self.HARVEST} --jobs {self.jobs} "
             "--attempt-id att-a --status open --mark-done"
         )
         action = self._classify(line)
@@ -2986,19 +3109,44 @@ class HarvestVocabularyTest(unittest.TestCase):
     def test_jobs_supplied_twice_or_valueless_is_rejected(self):
         # D-3: the value-option arity check still rejects malformed --jobs.
         twice = (
-            f"{self.claude.SHARED_HARVEST_SURFACE} harvest --jobs {self.jobs} "
+            f"{self.HARVEST} --jobs {self.jobs} "
             f"--jobs {self.jobs} --attempt-id att-a --status open --mark-done"
         )
         self.assertIsNone(self._classify(twice))
         valueless = (
-            f"{self.claude.SHARED_HARVEST_SURFACE} harvest --jobs "
+            f"{self.HARVEST} --jobs "
             "--attempt-id att-a --status open --mark-done"
         )
         self.assertIsNone(self._classify(valueless))
 
+    def test_codex_wrapper_line_from_an_earlier_receipt_still_classifies(self):
+        line = f"{self.CODEX_WRAPPER} --jobs {self.jobs} --attempt-id att-a --status open --mark-done"
+        action = self._classify(line)
+        self.assertIsNotNone(action)
+        self.assertTrue(action.mark_done)
+        self.assertEqual(JOIN.harvest_command_lines(line), [line])
+
+    def test_previous_wording_names_the_codex_wrapper_of_the_same_tree(self):
+        current = JOIN.completion_harvest_command("att-a", "complete-open", jobs=self.jobs)
+        text = "Completion bookkeeping for the listed attempts:\n" + current + "\ntail"
+        previous = JOIN.previous_harvest_wording(text)
+        self.assertEqual(previous, "Completion bookkeeping for the listed attempts:\n"
+                         f"{self.CODEX_WRAPPER} --jobs {self.jobs} --attempt-id att-a "
+                         "--status open --mark-done\ntail")
+        inspect = JOIN.completion_harvest_command("att-a", "inspect-done-failure", jobs=self.jobs)
+        self.assertEqual(JOIN.previous_harvest_wording(inspect), inspect)
+
+    def test_every_owner_harness_is_shown_the_same_shared_line(self):
+        receipt = {"children": [{"attempt_id": "att-a", "required_action": "complete-open"}]}
+        lines = {name: JOIN.harvest_command_lines(module.completion_prompt(receipt, jobs=self.jobs))
+                 for name, module in (("claude-session", self.claude), ("codex-app-server", self.codex))}
+        self.assertEqual(lines["claude-session"], lines["codex-app-server"])
+        self.assertEqual(len(lines["claude-session"]), 1)
+        self.assertTrue(lines["claude-session"][0].startswith(self.HARVEST + " "))
+
     def test_jobs_pointed_at_another_registry_is_rejected(self):
         line = (
-            f"{self.claude.SHARED_HARVEST_SURFACE} harvest --jobs /other/jobs.log "
+            f"{self.HARVEST} --jobs /other/jobs.log "
             "--attempt-id att-a --status open --mark-done"
         )
         self.assertIsNone(self._classify(line))
@@ -4069,6 +4217,207 @@ class DeferredCompletionClosureTest(FinishedChildClosure):
         self.assertTrue(outcome["closed"], outcome)
 
 
+class RefusedCompletionHandOverTest(FinishedChildClosure):
+    """A finished worker whose reap watcher was lost reaches the owner.
+
+    2026-11-12: a Codex execute worker ended its turn with a PASS naming its
+    cycle output directory, `complete` refused that evidence, and its reap
+    watcher had exited before the drain receipt. The join repeated the drain
+    and then retried the refused completion for six hours with the row open.
+    The watcher itself closes such a row typed; the join now does the same.
+    """
+
+    TERMINAL_ROWS = {
+        "claude": lambda text: [{"type": "result", "subtype": "success", "is_error": False,
+                                 "result": text}],
+        "codex": lambda text: [{"type": "item.completed",
+                                "item": {"type": "agent_message", "text": text}},
+                               {"type": "turn.completed"}],
+        "opencode": lambda text: [{"type": "text", "part": {"type": "text", "text": text}},
+                                  {"type": "step_finish",
+                                   "part": {"type": "step-finish", "reason": "stop"}}],
+    }
+
+    def harness_child(self, harness: str, *, status: str = "open") -> JOIN.ChildRow:
+        attempt_id = f"att-{harness}-refused"
+        # The refusal itself is stubbed at `run_route_completion`; any readable
+        # in-root evidence reaches it (the observed one named a directory).
+        evidence = self.artifact / "execute-report.md"
+        evidence.write_text("evidence\n", encoding="utf-8")
+        log = self.base / f"{attempt_id}.{harness}.jsonl"
+        text = f"artifact: {evidence}\nverdict: PASS\nblocker: none"
+        log.write_text("\n".join(json.dumps(item) for item in self.TERMINAL_ROWS[harness](text))
+                       + "\n", encoding="utf-8")
+        meta = {
+            "attempt_id": attempt_id, "attempt_schema_version": "2", "dispatch_depth": "2",
+            "transport": "headless", "execution_surface": "registered-headless",
+            "registered_worker": "1", "fallback_hop": "cross-harness-headless",
+            "harness": harness, "log_file": str(log), "artifact_root": str(self.artifact),
+            "launch_outcome": "reaped-before-publish",
+            "route_file": str(self.base / "route.json"), "route_node": "execute",
+        }
+        raw = "\t".join(["2026-11-11T21:52:17Z", status, str(self.base), str(self.base),
+                         f"{attempt_id}-slug", ",".join(f"{k}={v}" for k, v in meta.items())])
+        self.jobs.write_text(raw + "\n", encoding="utf-8")
+        return JOIN.ChildRow(order=0, status=status, slug=f"{attempt_id}-slug",
+                             attempt_id=attempt_id, raw=raw, metadata=meta)
+
+    def completion_sequence(self, child: JOIN.ChildRow, *results: str):
+        """Stub `complete`: answer each result in turn; "" commits it as `complete` does."""
+
+        calls = []
+        answers = list(results)
+
+        def complete(command, **_kw):
+            calls.append(command)
+            answer = answers.pop(0) if answers else results[-1]
+            if not answer:
+                self.jobs.write_text(
+                    self.jobs.read_text().replace("\topen\t", "\tdone\t", 1)
+                    .replace("launch_outcome=", "note=completed,failure_class=pass,launch_outcome=", 1),
+                    encoding="utf-8")
+            return answer
+
+        return calls, mock.patch.object(JOIN, "run_route_completion", side_effect=complete)
+
+    def test_join_closes_a_refusal_typed_when_the_next_pass_repeats_it(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                child = self.harness_child(harness)
+                calls, stub = self.completion_sequence(child, "completion-rejected")
+                with stub:
+                    first = JOIN.settle_finished_attempt(self.jobs, child)
+                    # A first refusal may be transient: the row stays open.
+                    self.assertEqual((first["closed"], first["reason"]), (False, "completion-rejected"))
+                    self.assertEqual(JOIN.exact_attempt_row(self.jobs, child.attempt_id).status, "open")
+                    second = JOIN.settle_finished_attempt(
+                        self.jobs, child, (first["closed"], first["reason"]))
+                current = JOIN.exact_attempt_row(self.jobs, child.attempt_id)
+                self.assertTrue(second["closed"], second)
+                self.assertEqual(second["reason"], "completion-rejected")
+                self.assertEqual(current.status, "done")
+                self.assertEqual(current.metadata.get("note"), "dead-route-completion-rejected")
+                self.assertEqual(current.metadata.get("failure_class"), "contract")
+                self.assertEqual(current.metadata.get("classifier_source"),
+                                 "registered-wrapper-completion-v1")
+                # Each pass is the budget's call plus its one immediate retry.
+                self.assertEqual(len(calls), 4, calls)
+
+    def test_join_closes_a_refusal_that_clears_by_the_next_pass_as_success(self):
+        # Review RV-PR1561 T2: a route file unreadable for a few seconds on NAS
+        # refuses `complete`, then clears; the stage must still complete.
+        child = self.harness_child("codex")
+        calls, stub = self.completion_sequence(child, "completion-rejected", "completion-rejected", "")
+        with stub:
+            first = JOIN.settle_finished_attempt(self.jobs, child)
+            second = JOIN.settle_finished_attempt(self.jobs, child, (first["closed"], first["reason"]))
+        current = JOIN.exact_attempt_row(self.jobs, child.attempt_id)
+        self.assertFalse(first["closed"], first)
+        self.assertTrue(second["closed"], second)
+        self.assertEqual((current.status, current.metadata.get("note")), ("done", "completed"))
+        self.assertEqual(len(calls), 3, calls)
+
+    def test_a_different_earlier_outcome_does_not_close_the_refusal(self):
+        child = self.harness_child("codex")
+        for previous in (None, (False, "completion-transient:TimeoutExpired"),
+                         (False, "terminal-commit-unconfirmed"), (True, "completion-rejected")):
+            with self.subTest(previous=previous):
+                _calls, stub = self.completion_sequence(child, "completion-rejected")
+                with stub:
+                    outcome = JOIN.settle_finished_attempt(self.jobs, child, previous)
+                self.assertFalse(outcome["closed"], outcome)
+                self.assertEqual(JOIN.exact_attempt_row(self.jobs, child.attempt_id).status, "open")
+
+    def test_watcher_keeps_its_two_completion_attempts_before_the_typed_close(self):
+        # The reap watcher's sequence (`dispatch-reap-watch.py`): one shared
+        # step, then its second completion attempt that closes typed.
+        def watcher(child):
+            row = JOIN.exact_attempt_row(self.jobs, child.attempt_id)
+            if JOIN.close_reaped_child(row, jobs=self.jobs).startswith("completion-"):
+                JOIN.close_reaped_child(row, jobs=self.jobs, refused_before=True)
+            return JOIN.exact_attempt_row(self.jobs, child.attempt_id)
+
+        child = self.harness_child("codex")
+        calls, stub = self.completion_sequence(child, "completion-rejected", "completion-rejected", "")
+        with stub:
+            current = watcher(child)
+        self.assertEqual((current.status, current.metadata.get("note")), ("done", "completed"))
+        self.assertEqual(len(calls), 3, calls)
+
+        child = self.harness_child("codex")
+        calls, stub = self.completion_sequence(child, "completion-rejected")
+        with stub:
+            current = watcher(child)
+        self.assertEqual(current.metadata.get("note"), "dead-route-completion-rejected")
+        self.assertEqual(len(calls), 4, calls)
+
+    def test_join_hands_the_refused_pass_to_its_owner_instead_of_waiting(self):
+        child = self.harness_child("codex")
+        fields = child.raw.split("\t")
+        fields[5] += ",parent_attempt_id=att-parent"
+        self.jobs.write_text("\t".join(fields) + "\n", encoding="utf-8")
+        initial = JOIN.current_children(self.jobs, "att-parent")
+        calls = []
+        with mock.patch.object(JOIN, "run_route_completion",
+                               side_effect=lambda command, **_kw: calls.append(command)
+                               or "completion-rejected"), \
+             mock.patch.object(dispatch_supervision, "materialize", return_value=[]) as notice:
+            receipt = JOIN._join_snapshot(
+                jobs=self.jobs, initial=initial,
+                refresh=lambda _attempts: JOIN.current_children(self.jobs, "att-parent"),
+                identity={"parent_attempt_id": "att-parent"}, interval=0.01, timeout=8.0,
+                liveness_command=None, liveness_probe_timeout=1.0, env=None, recovery=None,
+                observation_jobs=self.jobs,
+                settlement=lambda row, previous=None: JOIN.settle_finished_attempt(
+                    self.jobs, row, previous),
+            )
+        self.assertEqual(receipt["state"], "ready", receipt)
+        self.assertEqual(receipt["children"][0]["status"], "done", receipt)
+        self.assertEqual(JOIN.exact_attempt_row(self.jobs, child.attempt_id).metadata.get("note"),
+                         "dead-route-completion-rejected")
+        # Closed on the second settlement pass, not retried pass after pass.
+        self.assertEqual(len(calls), 4, calls)
+        notice.assert_not_called()
+
+    def test_a_reason_other_than_a_completion_refusal_keeps_the_row_open(self):
+        child = self.harness_child("codex")
+        for reason in ("subsession-not-quiescent", "evidence-absent", "pending"):
+            with self.subTest(reason=reason), \
+                 mock.patch.object(JOIN, "close_finished_child", return_value=reason), \
+                 mock.patch.object(JOIN, "reconcile_attempt_terminal") as close:
+                self.assertEqual(
+                    JOIN.close_reaped_child(child, jobs=self.jobs, refused_before=reason), reason)
+                close.assert_not_called()
+        self.assertEqual(JOIN.exact_attempt_row(self.jobs, child.attempt_id).status, "open")
+
+    def test_a_closed_row_is_never_reclosed_by_the_shared_step(self):
+        child = self.harness_child("codex", status="done")
+        with mock.patch.object(JOIN, "close_finished_child", return_value="completion-rejected"), \
+             mock.patch.object(JOIN, "reconcile_attempt_terminal") as close:
+            self.assertEqual(JOIN.close_reaped_child(child, jobs=self.jobs, refused_before=True),
+                             "completion-rejected")
+        close.assert_not_called()
+
+    def test_a_row_closed_by_another_writer_meanwhile_is_not_rewritten(self):
+        # Review RV-PR1561 R2: the join closed the row dead while the watcher's
+        # budget was still running; its later transient end must not write
+        # `completion-deferred` over it (a terminal conflict).
+        child = self.harness_child("codex")
+        self.jobs.write_text(self.jobs.read_text().replace("\topen\t", "\tdone\t", 1).replace(
+            "launch_outcome=", "note=dead-route-completion-rejected,failure_class=contract,"
+            "launch_outcome=", 1), encoding="utf-8")
+        before = self.jobs.read_bytes()
+        for reason in ("completion-transient:TimeoutExpired", "completion-rejected"):
+            with self.subTest(reason=reason), \
+                 mock.patch.object(JOIN, "close_finished_child", return_value=reason), \
+                 mock.patch.object(JOIN, "reconcile_attempt_terminal") as close:
+                # `child` is the caller's earlier, still-open read of the row.
+                self.assertEqual(JOIN.close_reaped_child(child, jobs=self.jobs, refused_before=True),
+                                 reason)
+                close.assert_not_called()
+        self.assertEqual(self.jobs.read_bytes(), before)
+
+
 class StageAdvanceReceiptNegotiationTest(unittest.TestCase):
     """SD-110 plan.md §6 A-18 (receipt v1/v2 byte-identity for un-negotiated
     consumers, proved with golden-byte comparison rather than mere successful
@@ -4445,13 +4794,13 @@ class NextLegReceiptTest(unittest.TestCase):
             "dispatch_depth": "1", "worker_type": "owner", "workflow_completion": "runtime-v1"}))
         receipt = {"children": [{"attempt_id": "owner", "required_action": "advance-completed",
                                  "next_leg": self.NEXT_LEG}]}
-        text = JOIN.completion_followup_text(receipt, jobs=str(jobs), surface="/fixture/preflight.sh")
-        self.assertIn("Original request/format apply", text)
+        text = JOIN.completion_followup_text(receipt, jobs=str(jobs))
+        self.assertIn("Close per §0.5", text)
         self.assertIn(self.NEXT_LEG["compose_command"], text)
         self.assertIn("If this next leg is already approved, execute it in this turn", text)
-        self.assertIn("Receipt/ACK isn't execution", text)
+        self.assertIn("Nothing starts it from receipt alone", text)
         plain = JOIN.completion_followup_text({"children": [{"attempt_id": "owner", "required_action": "advance-completed"}]},
-                                              jobs=str(jobs), surface="/fixture/preflight.sh")
+                                              jobs=str(jobs))
         self.assertNotIn("next leg", plain)
 
     def test_completion_followup_preserves_original_task_and_requested_output(self):
@@ -4463,19 +4812,27 @@ class NextLegReceiptTest(unittest.TestCase):
         receipt = {"children": [{"attempt_id": "owner",
                                  "required_action": "advance-completed"}]}
         text = JOIN.completion_followup_text(
-            receipt, jobs=str(jobs), surface="/fixture/preflight.sh")
+            receipt, jobs=str(jobs))
         from dispatch_session_sweep import COMPLETION_DELIVERY_HEADER
         fixed_text = COMPLETION_DELIVERY_HEADER + "\n" + text
-        required = ("Original request/format apply", "Review result",
-                    "approved follow-through", "First close:",
-                    "checks run/reused/skipped/unrun", "commit/PR/deployment/serving",
-                    "No harvest/restart/manual finalize", "Receipt/ACK isn't execution",
-                    "handled exact repeats need no ACK", "new failures/conflicts",
-                    "unfinished work, questions")
-        self.assertTrue(all(part in fixed_text for part in required))
-        self.assertLessEqual(len(COMPLETION_DELIVERY_HEADER) + len(text), 583)
+        # The receipt names the delivery, says no harvest is owed and points at the close
+        # contract; the contract itself lives once in every adapter bootstrap and WORKFLOW
+        # §0.5, which the session already holds, instead of on every notice.
+        required = ("Act on each required_action", "keep failures, unfinished work and questions",
+                    "Owner finished; no harvest.", "Close per §0.5")
+        missing = [part for part in required if part not in fixed_text]
+        self.assertFalse(missing, f"missing completion-close pointers: {missing}")
         receipt_only = "Receipt received. The queue was consumed and ACKed."
         self.assertFalse(all(part in receipt_only for part in required))
+        repo = Path(JOIN.__file__).resolve().parents[1]
+        contract = ("Close material work with the §0.5 contract: result in one or two sentences",
+                    "keep requested output", "A receipt, queue entry or ACK is not execution")
+        for bootstrap in ("adapters/claude/CLAUDE.md", "adapters/codex/AGENTS.md", "adapters/opencode/AGENTS.md"):
+            flat = " ".join((repo / bootstrap).read_text(encoding="utf-8").split())
+            missing = [part for part in contract if part not in flat]
+            self.assertFalse(missing, f"{bootstrap} lacks the close contract: {missing}")
+        workflow = (repo / "core/WORKFLOW.md").read_text(encoding="utf-8")
+        self.assertIn("first close gives\nthe result in one or two sentences", workflow)
 
     def test_completion_followup_carries_the_runtime_sealed_summary(self):
         import dispatch_terminal_commit as DTC
@@ -4489,22 +4846,43 @@ class NextLegReceiptTest(unittest.TestCase):
             "dispatch_depth": "1", "worker_type": "owner", "workflow_completion": "runtime-v1",
             "owner_route_file": str(route_file)}))
         receipt = {"children": [{"attempt_id": "owner", "required_action": "advance-completed"}]}
-        before = JOIN.completion_followup_text(receipt, jobs=str(jobs), surface="/fixture/preflight.sh")
+        before = JOIN.completion_followup_text(receipt, jobs=str(jobs))
         slot = DTC.terminal_slot(root, "rt-owner", "owner")
         slot.mkdir(parents=True)
         summary = "[완료 요약] autopilot-code · route rt-owner\n결과: 완료\n산출물: 없음"
         (slot / work_intent.SUMMARY_NAME).write_text(summary + "\n")
-        text = JOIN.completion_followup_text(receipt, jobs=str(jobs), surface="/fixture/preflight.sh")
-        self.assertIn("First close: changes/why", before)  # no sealed summary: the text is unchanged
+        text = JOIN.completion_followup_text(receipt, jobs=str(jobs))
+        self.assertEqual(before, "Owner finished; no harvest. Close per §0.5.")
         self.assertNotIn("[완료 요약]", before)
-        self.assertTrue(text.startswith("Original request/format apply."))
-        self.assertIn("show the runtime summary below to the person first, as written", text)
-        self.assertIn("then add what it does not show of changes/why, before/after, checks run/reused/skipped/unrun, "
-                      "commit/PR/deployment/serving, limits.", text)   # a one-line summary never shrinks the close
+        self.assertTrue(text.startswith("Owner finished; no harvest. Close per §0.5;"))
+        self.assertIn("the summary below is agent context: do not reproduce it for the person.", text)
+        self.assertNotIn("show the runtime summary below to the person", text)
         self.assertIn("\n" + summary, text)
         self.assertNotIn("\n\n", text)
-        self.assertEqual(text, JOIN.completion_followup_text(receipt, jobs=str(jobs),
-                                                             surface="/fixture/preflight.sh"))
+        self.assertEqual(text, JOIN.completion_followup_text(receipt, jobs=str(jobs)))
+
+
+    def test_a_notice_line_failure_never_loses_the_sealed_summary(self):
+        import dispatch_terminal_commit as DTC
+        import work_intent
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        route_file = root / "rt-owner.json"
+        route_file.write_text(json.dumps({"route_id": "rt-owner", "artifact_root": str(root)}))
+        jobs = root / "jobs.log"
+        jobs.write_text(row("done", "owner", "parent", "task", process_metadata={
+            "dispatch_depth": "1", "worker_type": "owner", "workflow_completion": "runtime-v1",
+            "owner_route_file": str(route_file)}))
+        slot = DTC.terminal_slot(root, "rt-owner", "owner")
+        slot.mkdir(parents=True)
+        summary = "[Completion summary] unit · route rt-owner\nResult: Done"
+        (slot / work_intent.SUMMARY_NAME).write_text(summary + "\n")
+        receipt = {"children": [{"attempt_id": "owner", "required_action": "advance-completed"}]}
+        for error in (OSError("store unreadable"), ValueError("bad row")):
+            with self.subTest(type(error).__name__), \
+                    mock.patch("unit_continue.notice_lines", side_effect=error):
+                text = JOIN.completion_followup_text(receipt, jobs=str(jobs))
+            self.assertIn("\n" + summary, text)
 
 
 class MaterializePendingDeliveryTest(unittest.TestCase):
@@ -5178,6 +5556,81 @@ class ReconcilePendingDeliveryTest(unittest.TestCase):
         ]))
         return f"2026-08-28T00:00:00Z\topen\t/r\t/w\texecute\t{pipe}"
 
+    def _live_parent_notice(self, td):
+        """A closed row's notice whose exact parent (this process, same birth)
+        is alive, made by the normal close/materialize API, 8 days old."""
+        jobs = Path(td) / "jobs.log"
+        attempt = "att-reconcile-live-ttl"
+        birth = D.process_start_ticks(os.getpid())
+        row = self._row(attempt, ancestry=(os.getpid(), birth)).replace(
+            "route_node=execute", "route_node=notice")
+        jobs.write_text(row + "\n", encoding="utf-8")
+        self.assertTrue(D.close_attempt_row(jobs, attempt, "completed-marker"))
+        self.assertTrue(JOIN.materialize_after_terminal_close(jobs, attempt))
+        pd = JOIN.pending_delivery
+        owner = JOIN.current_attempt_row(jobs, attempt)
+        sid, delivery = owner.metadata["parent_sid"], owner.metadata["delivery_id"]
+        record = pd.read(jobs.parent, sid, delivery)
+        self.assertEqual(record["route_node"], "notice")
+        old = time.time() - 8 * 86400
+        os.utime(pd.record_path(jobs.parent, sid, delivery), (old, old))
+        self.assertEqual(JOIN.expire_pending_for_dead_recipient(
+            jobs, owner.metadata, record, attempt_id=attempt), "pending")
+        # A readable, empty archive as in a live state root: only the registry
+        # observation itself stands between this notice and the TTL.
+        (jobs.parent / "archive" / "registry-2026-08").mkdir(parents=True)
+        (jobs.parent / "archive" / "registry-2026-08" / "rows.jsonl").write_text("")
+        return jobs, sid, delivery
+
+    def test_notice_ttl_never_ages_out_a_notice_its_row_still_protects(self):
+        # Review R1 (PR #1529): the dead-recipient rule keeps a live parent's
+        # notice pending; an 8-day mtime alone must not expire it.
+        with tempfile.TemporaryDirectory() as td:
+            jobs, sid, delivery = self._live_parent_notice(td)
+            result = JOIN.reconcile_pending_delivery(jobs)
+            self.assertEqual(result["expired"], 0)
+            self.assertEqual(JOIN.pending_delivery.read(
+                jobs.parent, sid, delivery)["state"], "pending")
+
+    def test_notice_ttl_keeps_every_notice_when_the_registry_was_not_observed(self):
+        # Reviews R2 and R3 (PR #1529): a registry that could not be read
+        # (OSError, a directory), is missing, is a broken symlink, or has an
+        # owner row that does not parse (7 fields) was not observed, so the
+        # live parent's 8-day notice is kept, never read as "no owner".
+        def oserror(jobs):
+            def unreadable(*_args, **_kwargs):
+                raise OSError("fixture registry read unavailable")
+            return mock.patch.dict(JOIN.reconcile_pending_delivery.__globals__,
+                                   {"registry_lines": unreadable})
+
+        def directory(jobs):
+            jobs.unlink()
+            jobs.mkdir()
+            return contextlib.nullcontext()
+
+        def missing(jobs):
+            jobs.rename(jobs.with_name("jobs.log.fixture-backup"))
+            return contextlib.nullcontext()
+
+        def broken_link(jobs):
+            jobs.rename(jobs.with_name("jobs.log.fixture-backup"))
+            jobs.symlink_to(jobs.with_name("jobs.log.nowhere"))
+            return contextlib.nullcontext()
+
+        def seven_fields(jobs):
+            lines = jobs.read_text(encoding="utf-8").splitlines()
+            jobs.write_text("".join(line + "\textra\n" for line in lines), encoding="utf-8")
+            return contextlib.nullcontext()
+
+        for failure in (oserror, directory, missing, broken_link, seven_fields):
+            with self.subTest(failure=failure.__name__), tempfile.TemporaryDirectory() as td:
+                jobs, sid, delivery = self._live_parent_notice(td)
+                with failure(jobs):
+                    result = JOIN.reconcile_pending_delivery(jobs)
+                self.assertEqual(result["expired"], 0)
+                self.assertEqual(JOIN.pending_delivery.read(
+                    jobs.parent, sid, delivery)["state"], "pending")
+
     def test_materializes_a_row_intent_stamped_but_not_yet_materialized(self):
         with tempfile.TemporaryDirectory() as td:
             jobs = Path(td) / "jobs.log"
@@ -5595,7 +6048,7 @@ class JoinClosureBlockedTest(unittest.TestCase):
         settlement_calls = []
         notices = []
 
-        def settlement(child_row):
+        def settlement(child_row, _previous=None):
             settlement_calls.append(child_row.attempt_id)
             return {"attempt_id": child_row.attempt_id, "closed": False,
                     "reason": "should-not-be-called"}
@@ -5703,7 +6156,7 @@ class JoinClosureBlockedTest(unittest.TestCase):
         settlement_calls = []
         notices = []
 
-        def settlement(child_row):
+        def settlement(child_row, _previous=None):
             settlement_calls.append(child_row.attempt_id)
             return {"attempt_id": child_row.attempt_id, "closed": False,
                     "reason": "should-not-be-called"}
@@ -5736,7 +6189,7 @@ class JoinClosureBlockedTest(unittest.TestCase):
         row = self._blocked_owner_row()
         settlement_calls = []
 
-        def settlement(child_row):
+        def settlement(child_row, _previous=None):
             settlement_calls.append(child_row.attempt_id)
             return {"attempt_id": child_row.attempt_id, "closed": False,
                     "reason": "producer-finalize-failed"}
@@ -5840,7 +6293,7 @@ class SettlementBackoffTest(unittest.TestCase):
                 clock["t"] += 0.5
                 return clock["t"]
 
-            def settlement(child_row):
+            def settlement(child_row, _previous=None):
                 settlement_call_times.append(clock["t"])
                 return {"attempt_id": child_row.attempt_id, "closed": False,
                         "reason": "same-every-time"}
@@ -5886,7 +6339,7 @@ class SettlementBackoffTest(unittest.TestCase):
                 clock["t"] += 0.5
                 return clock["t"]
 
-            def settlement(child_row):
+            def settlement(child_row, _previous=None):
                 settlement_call_times.append(clock["t"])
                 if len(settlement_call_times) == 3:
                     # Real content/mtime change -- a fresh stat() key.
@@ -5938,7 +6391,7 @@ class WorkContinuationReceiptTest(unittest.TestCase):
 
     def render(self, actions):
         return JOIN.completion_followup_text({"children":[{"attempt_id":aid,"required_action":action}
-            for aid,action in actions]},jobs=str(self.jobs),surface="/fixture/preflight.sh")
+            for aid,action in actions]},jobs=str(self.jobs))
 
     def test_two_frame_receipts_return_one_existing_work_handle_even_on_failure(self):
         self.jobs.write_text(self.record("first")+self.record("second"))
@@ -5952,7 +6405,7 @@ class WorkContinuationReceiptTest(unittest.TestCase):
         text = self.render([("owner","advance-completed")])
         self.assertNotIn("capability-route.py start",text)
         self.assertNotIn("preflight.sh harvest",text)
-        self.assertIn("Original request/format apply",text)
+        self.assertIn("Owner finished; no harvest.",text)
         self.assertNotIn("advance the route",text)
 
     def test_parked_owner_followup_says_paused_and_keeps_start_handle(self):
@@ -6015,7 +6468,7 @@ class NextReadyReceiptTest(unittest.TestCase):
 
     def render(self, jobs=None):
         receipt = {"children": [{"attempt_id": "stage-1", "required_action": "advance-completed"}]}
-        return JOIN.completion_followup_text(receipt, jobs=str(self.jobs if jobs is None else jobs), surface="/fixture/preflight.sh")
+        return JOIN.completion_followup_text(receipt, jobs=str(self.jobs if jobs is None else jobs))
 
     def old_text(self):
         with mock.patch.object(JOIN, "_next_ready_start_lines", return_value=[]):
@@ -6100,13 +6553,13 @@ class NextReadyReceiptTest(unittest.TestCase):
         with self.subTest("no jobs"):
             self.assertEqual(self.render(jobs=""), JOIN.completion_followup_text(
                 {"children": [{"attempt_id": "stage-1", "required_action": "advance-completed"}]},
-                jobs="", surface="/fixture/preflight.sh"))
+                jobs=""))
             self.assertNotIn("Next ready", self.render(jobs=""))
 
     def test_a_harvest_command_row_keeps_the_existing_branch(self):
         self.jobs.write_text(self.stage_row("stage-1", "plan"))
         receipt = {"children": [{"attempt_id": "stage-1", "required_action": "inspect-done-failure"}]}
-        text = JOIN.completion_followup_text(receipt, jobs=str(self.jobs), surface="/fixture/preflight.sh")
+        text = JOIN.completion_followup_text(receipt, jobs=str(self.jobs))
         self.assertIn("--attempt stage-1", text)
         self.assertNotIn("Next ready", text)
 
@@ -6492,7 +6945,9 @@ class ProcessUnverifiableNoticeTest(unittest.TestCase):
             "pgid": str(os.getpid()), "pid_scope": "namespace-local",
             "pid_ns": namespace, "pid_observer_ns": namespace,
         }
-        child_line = row("done", attempt, parent, "execute", process_metadata=child_metadata)
+        # The worker vanished: its row is still open and it left no final
+        # runtime envelope, so this is not a normal exit awaiting its receipt.
+        child_line = row("open", attempt, parent, "execute", process_metadata=child_metadata)
         live_line = row("open", attempt, parent, "execute", process_metadata=live_metadata)
         sibling_line = row("open", sibling, parent, "sibling", process_metadata=sibling_metadata)
         sibling_done_line = row("done", sibling, parent, "sibling", process_metadata=sibling_metadata)
@@ -6612,6 +7067,219 @@ class ProcessUnverifiableNoticeTest(unittest.TestCase):
         by_attempt = {child["attempt_id"]: child for child in receipt["children"]}
         self.assertEqual(by_attempt[sibling]["reason"], "process-alive")
         self.assertEqual(len(notices), 0)
+
+
+class SettlingReceiptNoticeTest(unittest.TestCase):
+    """A normally finished child awaiting its post-exit receipt is settling."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.jobs = self.root / "jobs.log"
+        self.parent = "att-parent"
+        self.attempt = "att-settling-child"
+        namespace = D.process_namespace_identity()
+        self.owner = row("open", self.parent, "-", "owner", process_metadata={
+            "attempt_id": self.parent, "parent_sid": "sess-settling-owner",
+            "parent_completion_delivery": "claude-parent-runtime",
+            "owner_route_id": "rt-settling", "harness": "claude",
+        })
+        live = {
+            "pid": str(os.getpid()), "pid_start": D.process_start_ticks(os.getpid()),
+            "pgid": str(os.getpid()), "pid_scope": "namespace-local",
+            "pid_ns": namespace, "pid_observer_ns": namespace, "harness": "claude",
+            "launch_outcome": "governed-process-reaped", "attempt_id": self.attempt,
+            "registered_worker": "1", "worker_type": "stage",
+            "route_id": "rt-settling", "route_node": "execute",
+        }
+        exited = dict(live, pid="99999999", pgid="99999999", pid_ns="pid:[999999999]")
+        proof = D.QuiescenceProof(
+            True, "cancellation-quiescence-proven", self.attempt, "exact-teardown",
+            int(exited["pgid"]), "empty", "empty", True,
+            D._cancellation_quiescence_binding_digest(exited),
+        )
+        self.proof = proof
+        with patch_split(D, "attempt_governed_process_quiescence",
+                         return_value=D.ProcessQuiescence("quiescent", "fixture")), \
+             patch_split(D, "prove_attempt_quiescence", return_value=proof):
+            cleanup = D._terminal_cleanup_values(exited)
+        self.live_line = row("open", self.attempt, self.parent, "execute", process_metadata=live)
+        self.awaiting_line = row("done", self.attempt, self.parent, "execute", process_metadata=exited)
+        self.ready_line = row("done", self.attempt, self.parent, "execute",
+                              process_metadata=dict(exited, **cleanup))
+
+    def join(self, phases, timeout):
+        self.jobs.write_text(self.owner + phases[0][1], encoding="utf-8")
+        initial = JOIN.current_children(self.jobs, self.parent)
+        clock = {"t": 0.0, "phase": 0}
+        observations = []
+
+        def refresh(_attempts):
+            clock["t"], line = phases[min(clock["phase"], len(phases) - 1)]
+            clock["phase"] += 1
+            self.jobs.write_text(self.owner + line, encoding="utf-8")
+            return JOIN.current_children(self.jobs, self.parent)
+
+        original_observe = JOIN.write_join_observation
+
+        def observe(*args, **kwargs):
+            result = original_observe(*args, **kwargs)
+            value = JOIN.read_join_observation(self.jobs, {"parent_attempt_id": self.parent},
+                                               now=time.time())
+            observations.append((clock["t"], value.get("state")))
+            return result
+
+        context = __import__("runtime_observation").ObservationContext(max_entries=8)
+        with patch_split(D, "attempt_governed_process_quiescence",
+                         return_value=D.ProcessQuiescence("quiescent", "fixture")), \
+             patch_split(D, "prove_attempt_quiescence", return_value=self.proof), \
+             mock.patch.object(JOIN.time, "monotonic", side_effect=lambda: clock["t"]), \
+             mock.patch.object(JOIN.time, "sleep"), \
+             mock.patch.object(JOIN, "write_join_observation", side_effect=observe):
+            receipt = JOIN._join_snapshot(
+                jobs=self.jobs, initial=initial, refresh=refresh,
+                identity={"parent_attempt_id": self.parent}, interval=0.01, timeout=timeout,
+                liveness_command=None, liveness_probe_timeout=1.0, env=None,
+                recovery=None, observation_jobs=self.jobs, observation_context=context,
+            )
+        notices = [record for record in (
+                       json.loads(path.read_text(encoding="utf-8"))
+                       for path in (self.root / "pending-delivery").glob("*/*.json"))
+                   if record.get("receipt", {}).get("kind") == "supervision"
+                   and record["receipt"].get("reason") == "process-unverifiable"]
+        return receipt, notices, observations
+
+    def test_receipt_arriving_after_the_short_threshold_sends_no_notice(self):
+        short, ceiling = JOIN.UNVERIFIABLE_NOTICE_SECONDS, JOIN.SETTLING_NOTICE_SECONDS
+        late = 61.0 + (short + ceiling) / 2
+        receipt, notices, observations = self.join([
+            (0.0, self.live_line), (61.0, self.awaiting_line),
+            (61.0 + short + 1, self.awaiting_line), (late, self.awaiting_line),
+            (late + 1, self.ready_line), (late + 2, self.ready_line),
+        ], timeout=late + 2)
+        self.assertEqual(receipt["state"], "ready", receipt)
+        self.assertEqual(notices, [])
+        self.assertNotIn("attention", [state for _t, state in observations], observations)
+
+    def test_receipt_that_never_arrives_is_noticed_once_at_the_settling_ceiling(self):
+        ceiling = JOIN.SETTLING_NOTICE_SECONDS
+        receipt, notices, observations = self.join([
+            (0.0, self.live_line), (61.0, self.awaiting_line),
+            (61.0 + ceiling - 0.1, self.awaiting_line), (61.0 + ceiling, self.awaiting_line),
+            (62.0 + ceiling, self.awaiting_line),
+        ], timeout=62.0 + ceiling)
+        self.assertEqual(receipt["state"], "timeout")
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0]["receipt"]["monitored_attempt_ids"], [self.attempt])
+        self.assertIn((61.0 + ceiling - 0.1, "waiting"), observations, observations)
+        self.assertIn((61.0 + ceiling, "attention"), observations, observations)
+
+    def test_a_wait_cut_into_short_joins_keeps_the_settling_clock(self):
+        """RV-PR1602 finding 4: a supervisor that looks at its resources between join pieces
+        starts a new join process every 30s. The child that ended normally and never gets its
+        post-exit receipt is still noticed once at the settling ceiling, as one long join does."""
+        self.jobs.write_text(self.owner + self.awaiting_line, encoding="utf-8")
+        rows = JOIN.current_children(self.jobs, self.parent)
+        clock = [0.0]
+
+        def piece(seconds):
+            # No observation context passed in: a fresh one, exactly as a new join process has.
+            return JOIN._join_snapshot(
+                jobs=self.jobs, initial=rows, refresh=lambda _: JOIN.current_children(self.jobs, self.parent),
+                identity={"parent_attempt_id": self.parent}, interval=2.0, timeout=seconds,
+                liveness_command=None, liveness_probe_timeout=1.0, env=None, observation_jobs=self.jobs)
+
+        def notices():
+            return [record for record in (
+                        json.loads(path.read_text(encoding="utf-8"))
+                        for path in (self.root / "pending-delivery").glob("*/*.json"))
+                    if record.get("receipt", {}).get("reason") == "process-unverifiable"]
+
+        with patch_split(D, "attempt_governed_process_quiescence",
+                         return_value=D.ProcessQuiescence("quiescent", "fixture")), \
+             patch_split(D, "prove_attempt_quiescence", return_value=self.proof), \
+             mock.patch.object(JOIN.time, "monotonic", side_effect=lambda: clock[0]), \
+             mock.patch.object(JOIN.time, "sleep", side_effect=lambda s: clock.__setitem__(0, clock[0] + s)), \
+             mock.patch("dispatch_supervision.materialize", wraps=__import__("dispatch_supervision").materialize) as told:
+            early = [piece(30.0) for _ in range(19)]
+            self.assertLess(clock[0], JOIN.SETTLING_NOTICE_SECONDS)
+            self.assertEqual(notices(), [])
+            later = [piece(30.0) for _ in range(5)]
+        self.assertGreaterEqual(clock[0], JOIN.SETTLING_NOTICE_SECONDS)
+        self.assertEqual({receipt["state"] for receipt in early + later}, {"timeout"})
+        self.assertEqual(len(notices()), 1)
+        self.assertEqual(notices()[0]["receipt"]["monitored_attempt_ids"], [self.attempt])
+        # The recorded notice is carried too: later pieces do not record it again.
+        self.assertEqual(told.call_count, 1)
+
+    def _cut_wait(self, gap, pieces=24):
+        """30s join pieces with `gap` seconds between them, each a fresh join process."""
+        self.jobs.write_text(self.owner + self.awaiting_line, encoding="utf-8")
+        rows = JOIN.current_children(self.jobs, self.parent)
+        clock = [0.0]
+        receipts = []
+        with patch_split(D, "attempt_governed_process_quiescence",
+                         return_value=D.ProcessQuiescence("quiescent", "fixture")), \
+             patch_split(D, "prove_attempt_quiescence", return_value=self.proof), \
+             mock.patch.object(JOIN.time, "monotonic", side_effect=lambda: clock[0]), \
+             mock.patch.object(JOIN.time, "time", side_effect=lambda: 10000.0 + clock[0]), \
+             mock.patch.object(JOIN.time, "sleep", side_effect=lambda s: clock.__setitem__(0, clock[0] + s)), \
+             mock.patch("dispatch_supervision.materialize",
+                        wraps=__import__("dispatch_supervision").materialize) as told:
+            for index in range(pieces):
+                receipts.append(JOIN._join_snapshot(
+                    jobs=self.jobs, initial=rows, refresh=lambda _: rows,
+                    identity={"parent_attempt_id": self.parent}, interval=2.0, timeout=30.0,
+                    liveness_command=None, liveness_probe_timeout=1.0, env=None,
+                    observation_jobs=self.jobs))
+                if index + 1 < pieces:
+                    clock[0] += gap
+        notices = [record for record in (
+                       json.loads(path.read_text(encoding="utf-8"))
+                       for path in (self.root / "pending-delivery").glob("*/*.json"))
+                   if record.get("receipt", {}).get("reason") == "process-unverifiable"]
+        return receipts, notices, told.call_count, clock[0]
+
+    def test_a_wait_cut_into_short_joins_far_apart_keeps_the_settling_clock(self):
+        """RV-PR1602-R2 finding 2: a display record older than 120s is stale for display, but the
+        same parent still waiting on the same unsettled child keeps that child's settling clock
+        and its recorded notice: exactly one notice whether pieces are 121s or 300s apart."""
+        for gap in (121.0, 300.0):
+            with self.subTest(gap=gap):
+                self.setUp()
+                receipts, notices, told, elapsed = self._cut_wait(gap)
+                self.assertGreater(elapsed, JOIN.SETTLING_NOTICE_SECONDS)
+                self.assertEqual({receipt["state"] for receipt in receipts}, {"timeout"})
+                self.assertEqual(len(notices), 1, (gap, notices))
+                self.assertEqual(notices[0]["receipt"]["monitored_attempt_ids"], [self.attempt])
+                self.assertEqual(told, 1)
+
+    def test_a_far_older_record_carries_only_the_same_parents_same_unsettled_child(self):
+        identity = {"parent_attempt_id": self.parent}
+        JOIN.write_join_observation(
+            self.jobs, identity,
+            [{"attempt_id": self.attempt, "readiness": "pending", "reason": "process-unverifiable"},
+             {"attempt_id": "att-alive-child", "readiness": "pending", "reason": "process-alive"}],
+            elapsed=700, recovery_results={}, eligible_attempt_ids={self.attempt},
+            unverifiable_seconds={self.attempt: 700.0}, notified_attempt_ids={self.attempt})
+        path = JOIN.join_observation_path(self.jobs, identity)
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["observed_at"] -= 3600
+        path.write_text(json.dumps(value), encoding="utf-8")
+        # Stale for any display reader...
+        self.assertEqual(JOIN.read_join_observation(self.jobs, identity), {})
+        # ...but the same parent's same unsettled child keeps its clock (gap included) and notice.
+        since, notified = JOIN.joined_observation_history(
+            self.jobs, identity, {self.attempt, "att-alive-child", "att-new-child"})
+        self.assertEqual(set(since), {self.attempt})
+        self.assertGreaterEqual(time.monotonic() - since[self.attempt], 700 + 3600 - 1)
+        self.assertEqual(notified, {self.attempt})
+        # Another parent, or the next wait's new attempt, does not inherit it.
+        self.assertEqual(JOIN.joined_observation_history(
+            self.jobs, {"parent_attempt_id": "att-other-parent"}, {self.attempt}), ({}, set()))
+        self.assertEqual(JOIN.joined_observation_history(
+            self.jobs, identity, {"att-new-child"}), ({}, set()))
 
 
 class RegisteredDeliveryExpiryHelperTest(unittest.TestCase):

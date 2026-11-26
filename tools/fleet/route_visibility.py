@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 
 SCHEMA = "route_visibility_v1"
-_OUTCOME_CACHE = {}  # {path: (mtime, size, data|None)}
+_OUTCOME_CACHE = {}  # {path: (identity, data|None)}; identity = (dev, ino, size, mtime_ns, ctime_ns)
 
 _SHAPE_BY_TOPOLOGY = {"inline": "direct", "one-shot-owner": "solo", "staged": "staged",
                       "transactional-owner": "staged"}
@@ -76,7 +76,8 @@ def _route_file(record):
 
 
 def read_outcome(record):
-    """The full outcome sidecar of this exact route, or None. Cached by mtime/size."""
+    """The full outcome sidecar of this exact route, or None. Cached by the file's exact identity
+    (device, inode, size, mtime and ctime in ns): a rewrite that keeps size and mtime is a new file."""
     if not isinstance(record, dict):
         return None
     route_file = _route_file(record)
@@ -87,9 +88,10 @@ def read_outcome(record):
         st = os.stat(path)
     except OSError:
         return None
+    identity = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
     cached = _OUTCOME_CACHE.get(path)
-    if cached is not None and cached[:2] == (st.st_mtime, st.st_size):
-        data = cached[2]
+    if cached is not None and cached[0] == identity:
+        data = cached[1]
     else:
         try:
             with open(path, encoding="utf-8") as handle:
@@ -98,7 +100,7 @@ def read_outcome(record):
             data = None
         if not isinstance(data, dict):
             data = None
-        _OUTCOME_CACHE[path] = (st.st_mtime, st.st_size, data)
+        _OUTCOME_CACHE[path] = (identity, data)
     if data is None or data.get("route_id") != record.get("route_id"):
         return None
     if record.get("route_hash") and data.get("route_hash") not in (None, record.get("route_hash")):
@@ -421,9 +423,11 @@ def _next_step(record, stages, verification, outcome, owner, inline, view):
         return {"kind": "closed", "text": "closed · nothing pending"}
     if outcome is not None and verification["closed_at"] and not verification["terminal_gate_proven"]:
         return {"kind": "attention", "text": "closed without a proven terminal gate"}
+    # A unit route has no owner: the one worker it called is what ended or runs.
+    who = "worker" if _is_unit_route(record) else "owner"
     if owner and owner.get("liveness") in ("dead", "done", "stale") and not verification["closed_at"]:
-        return {"kind": "attention", "text": "owner %s ended (%s) · route not closed" % (
-            owner.get("attempt_id") or "·", owner.get("reason") or owner.get("liveness"))}
+        return {"kind": "attention", "text": "%s %s ended (%s) · route not closed" % (
+            who, owner.get("attempt_id") or "·", owner.get("reason") or owner.get("liveness"))}
     by_id = {s["id"]: s for s in stages}
     active = [s for s in stages if s["state"] in ("active", "reconciling", "recovering")]
     if _no_response(view, verification):
@@ -445,8 +449,8 @@ def _next_step(record, stages, verification, outcome, owner, inline, view):
     if owner and owner.get("liveness") in _LIVE:
         since = _clock(owner.get("started_at"))
         return {"kind": "wait", "node": owner.get("node"), "harness": owner.get("harness"),
-                "text": "wait · owner %s %s%s" % (
-                    owner.get("harness") or "·", owner.get("liveness"), " since " + since if since else "")}
+                "text": "wait · %s %s %s%s" % (
+                    who, owner.get("harness") or "·", owner.get("liveness"), " since " + since if since else "")}
     if inline and _shape(record) == "direct":
         return {"kind": "start" if inline != "finished" else "close",
                 "text": "inline finish %s in the main session" % inline}
@@ -582,24 +586,46 @@ def _gate_code(verification):
     return "unproven"
 
 
+def _is_unit_route(desc):
+    """A unit route: one worker called with no owner (``capability: unit``). Its owner and independent-review
+    words mean nothing there, so the lines below name the unit and the worker instead."""
+    capability = str((desc or {}).get("capability") or "")
+    return (capability[len("autopilot-"):] if capability.startswith("autopilot-") else capability) == "unit"
+
+
+def _gate_names(verification):
+    """``gate unit-complete ✓``: the gate's own name (only when the route has one) with its mark."""
+    names = []
+    for gate in verification.get("completion_gates") or ():
+        name = gate.get("gate") or gate.get("node")
+        if name and name not in names:
+            names.append(str(name))
+    mark = {"proven": " ✓", "failed": " ✕"}.get(_gate_code(verification), "")
+    return "gate " + ", ".join(names) + mark if names else ""
+
+
 def summary_text(desc, current=True):
     """One line: ``solo·default · one-shot running · no reviewer · CI recorded same-head · gate ✓``."""
     if not desc:
         return ""
     verification = desc.get("verification") or {}
-    parts = ["%s·%s" % (desc.get("shape") or "unknown",
-                        _BASIS_WORD.get((desc.get("basis") or {}).get("kind"), "basis unrecorded"))]
+    unit = _is_unit_route(desc)
+    parts = [] if unit else ["%s·%s" % (desc.get("shape") or "unknown",
+                                        _BASIS_WORD.get((desc.get("basis") or {}).get("kind"), "basis unrecorded"))]
     if current and desc.get("current"):
         if (desc.get("next") or {}).get("kind") == "no-response":
             parts.append("%s no response" % desc["current"])
         else:
             parts.append("%s %s" % (desc["current"], _STATE_WORDS.get(desc.get("current_state"),
                                                                       desc.get("current_state") or "")))
-    parts.append(_review_mark(verification, desc))
+    if not unit:
+        parts.append(_review_mark(verification, desc))
     ci = _ci_mark(verification)
     if ci:
         parts.append(ci)
-    if verification.get("completion_gates"):
+    if unit:
+        parts.append(_gate_names(verification))
+    elif verification.get("completion_gates"):
         parts.append("gate " + {"proven": "✓", "failed": "✕"}.get(_gate_code(verification), "·"))
     # The card (current=False) sits beside a stage rail in a narrow column: tighter joins.
     return (" · " if current else "  ").join(part.strip() for part in parts if part)
@@ -611,13 +637,22 @@ def detail_lines(desc):
         return []
     basis = desc.get("basis") or {}
     verification = desc.get("verification") or {}
-    lines = [("route", "%s · %s · %s %s" % (
-        desc.get("shape"), _BASIS_WORD.get(basis.get("kind"), "basis unrecorded"),
-        desc.get("capability") or "·", desc.get("intensity") or ""), "info")]
+    unit = _is_unit_route(desc)
+    if unit:
+        # A unit route is its one worker's unit: its name (its intensity is no choice, so none is told), with no owner
+        # and no reviewer of its own.
+        named = next((s["unit"] for s in desc.get("stages") or () if s.get("unit")), None)
+        lines = [("unit", named or "·", "info")]
+    else:
+        lines = [("route", "%s · %s · %s %s" % (
+            desc.get("shape"), _BASIS_WORD.get(basis.get("kind"), "basis unrecorded"),
+            desc.get("capability") or "·", desc.get("intensity") or ""), "info")]
     if basis.get("notes"):
         lines.append(("why", "; ".join(basis["notes"]), "dim"))
     owner = desc.get("owner") or {}
-    if owner:
+    if unit:
+        pass
+    elif owner:
         since = _clock(owner.get("started_at"))
         lines.append(("owner", " · ".join(x for x in (
             " ".join(x for x in (owner.get("harness"), owner.get("model"), owner.get("effort")) if x) or None,
@@ -645,7 +680,9 @@ def detail_lines(desc):
                       "good" if stage["gate_passed"] else "info"))
     for row in verification.get("tests") or ():
         lines.append(("test", row["text"], row["tone"]))
-    if verification.get("reviewers"):
+    if unit:
+        pass
+    elif verification.get("reviewers"):
         for reviewer in verification["reviewers"]:
             who = " ".join(x for x in (reviewer.get("harness"), reviewer.get("model")) if x) or "harness ·"
             verdict = "gate ✓" if reviewer.get("gate_passed") else \
@@ -684,6 +721,8 @@ def detail_lines(desc):
                   "bad" if _gate_code(verification) == "failed" else "info"))
     if verification.get("result"):
         lines.append(("result", verification["result"], "info"))
+    for link in desc.get("links") or ():
+        lines.append(("path", "%s %s" % (link["label"], link["path"]), "dim"))
     nxt = desc.get("next") or {}
     lines.append(("next", nxt.get("text") or "·",
                   "good" if nxt.get("kind") == "closed" else
@@ -789,7 +828,7 @@ def codes(desc):
     }
 
 
-def bounded(desc, max_lines=14):
+def bounded(desc, max_lines=20):
     """A compact, string-only projection for another display surface (session shell).
 
     The sentences (``summary``/``card``/``next``/``owner``/``lines``) are the English fallback;

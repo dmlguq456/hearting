@@ -5,6 +5,9 @@ A route that borrows nothing and uses no optional part or widened choice keeps
 the node bytes it had before the catalog existed (golden fixture below); a
 `capability:stage` token borrows a shareable part into the host route.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import copy
 import hashlib
 import importlib.util
@@ -129,10 +132,10 @@ def _normalize(text, case):
 
 
 def _recipes():
-    """The recipes a person can compose or preset; the compiler-internal framed recipe is reached
-    only through `--shape framed` and has its own scenario."""
+    """The recipes a person can compose or preset; the compiler-internal recipes are reached only
+    through `--shape framed` (own scenario below) or `--unit` (route_unit.test.py)."""
     return [(r["capability"], sorted(r["modes"])[0], [n["id"] for n in r["standard_plus"]["nodes"]])
-            for r in TOPO.load_registry()["recipes"] if r["capability"] != R.ROUTE_FRAME_CAPABILITY]
+            for r in TOPO.load_registry()["recipes"] if r["capability"] not in TOPO.COMPILER_INTERNAL_CAPABILITIES]
 
 
 def _historical_setup_projection(recipe, case):
@@ -161,6 +164,10 @@ def _historical_code_recipe_projection(recipe, case):
     if recipe.get("capability") != "autopilot-code":
         return recipe
     historical = copy.deepcopy(recipe)
+    # The middle cell's declaration (`one_shot_review`, route form 3b-1) is one additive key: it opens `solo` at
+    # `standard` and changes no route this fixture compiles.
+    declared = historical.pop("one_shot_review", None)   # (a composed recipe cut from it does not carry it)
+    case.assertIn(declared, (None, recipe.get("one_shot_review")))
     quick = historical["quick"]
     case.assertEqual(quick["write_scope"], ["source-scoped", "plans/<cycle>/**", "spec/**"])
     case.assertEqual(quick["guard_preconditions"], ["artifact-order-prechecked"])
@@ -302,8 +309,10 @@ def golden_payload(case):
     registry = json.loads(json.dumps(registry))
     registry["recipes"] = [_historical_code_recipe_projection(
         _historical_setup_projection(recipe, case), case) for recipe in registry["recipes"]]
+    # The golden pins the routes that existed before the `unit` kind; that kind has route_unit.test.py.
     digests = {capability: TOPO.capability_registry_digest(registry, capability)
-               for capability in sorted({r["capability"] for r in registry["recipes"]})}
+               for capability in sorted({r["capability"] for r in registry["recipes"]})
+               if capability != TOPO.UNIT_CAPABILITY}
     return _normalize(json.dumps({"scenarios": scenarios, "capability_registry_digest": digests},
                                  sort_keys=True, indent=1, ensure_ascii=False), case)
 
@@ -938,6 +947,7 @@ class ResourceShareTest(CatalogBase):
                                                         checked_worktree=str(repo.resolve()))]}))
         composed = subprocess.run([
             sys.executable, str(HERE / "capability-route.py"), "compose", "--shape", "staged",
+            "--capability", "autopilot-code",
             "--graph", CODE_RESOURCE, "--slug", "sd165-resource", "--unassigned", "--cwd", str(repo),
             "--artifact-root", str(artifacts), "--dispatch-evidence", str(evidence),
             "--parent-harness", "claude", "--spec-read", "not-applicable"],

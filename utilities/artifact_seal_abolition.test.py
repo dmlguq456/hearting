@@ -16,6 +16,9 @@ finished cycle as it is now, the batch and freeze digest guards stay).  Every
 fixture runs on an isolated temporary artifact root; the real canonical root,
 registry, and routes directory are never touched.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import contextlib
 import hashlib
 import importlib.util
@@ -1276,6 +1279,33 @@ class B1RefreshTest(B1RefreshBase):
                                  expected_binding=binding)["status"], "already-sealed")
 
     # -- A28-3 -----------------------------------------------------------
+    def test_b1_the_frame_intent_files_written_late_are_added_by_the_next_refresh(self):
+        # A frame leg's answer released on the question board and rendered by a later start: its
+        # answers, round intent and shared intent land in an already sealed cycle.
+        files = {"shards/frame/round-1/interview.json": b"{}\n", "shards/frame/frame-summary.json": b"{}\n",
+                 "plans/cycle/plan.md": b"plan body\n"}
+        result = self.closed("b1-frame-late", files)
+        record_before = P.read_cycle_record(self.root, result["cycle_id"])
+        before = json.loads(self.manifest_path(result).read_text(encoding="utf-8"))
+        late = ("shards/frame/round-1/answers.json", "shards/frame/round-1/intent.md", "shards/frame/intent.md")
+        for rel in late:
+            target = Path(result["cycle_dir"]) / "artifacts" / rel
+            self.assertEqual(P.check_write(self.root, target)["verdict"], "allow")
+            self.write_output(result, rel, b"late\n")
+        out = self.refresh(result)
+        self.assertEqual(out["status"], "emitted", out)
+        after = json.loads(self.manifest_path(result).read_text(encoding="utf-8"))
+        old = {r["locator"]["path"] for r in before["artifact_revisions"]}
+        new = {r["locator"]["path"] for r in after["artifact_revisions"]}
+        self.assertEqual(new - old, {"artifacts/" + rel for rel in late})
+        self.assertEqual(old - new, set())
+        self.assertEqual(sorted(e["operation"] for e in self.history.published), ["add"] * 3)
+        record = P.read_cycle_record(self.root, result["cycle_id"])
+        self.assertEqual((record["state"], record["cycle_state"], record["sealed_on"]),
+                         ("sealed", "completed", record_before["sealed_on"]))
+        self.assertTrue(adm.verify_index(self.root).ok)
+        self.assertEqual(self.refresh(result)["status"], "unchanged")
+
     def test_b1_study_25_plus26_modified4_and_noop(self):
         files = {f"plans/cycle/declared_{i:02d}.md": f"declared {i}\n".encode() for i in range(25)}
         result = self.closed("b1-study", files)

@@ -1,4 +1,7 @@
 """Renderer rules for live view models, each reproduced on a small scrubbed synthetic view model."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import contextlib
 import io
 import os
@@ -79,7 +82,7 @@ class StageRule(unittest.TestCase):
         items = _stage_items([{"name": f"s{index}", "st": "active"} for index in range(6)])
         keys = [parts[0][1] for parts, _status in items]
         self.assertNotIn("unknown", keys)
-        self.assertEqual(keys[:2], ["hb_opencode", "hb_claude"])
+        self.assertEqual(keys[:2], ["fam_sonnet", "fam_opus"])
 
     def test_harness_mix_counts_only_drawn_depth2_workers(self):
         base = dict(state="working", harness="claude",
@@ -122,13 +125,13 @@ class HeaderRule(unittest.TestCase):
         answered = (("repo-a", (("10:00", "one"), ("10:01", "two"))), ("repo-b", (("09:00", "three"),)))
         system = dict(_mapping()["system"], answered_total=3)
         text = "\n".join(_frame(_vm(answered=answered, system=system), "QUESTIONS").text_rows())
-        self.assertIn("── answered today 3 ─", text)
+        self.assertIn("│ 3 ANSWERED TODAY ─", text)
         self.assertNotIn("in all projects", text)
         self.assertRegex(text, r"✓ 10:00  repo-a\s+one")
         self.assertRegex(text, r"✓ 09:00  repo-b\s+three")
         system = dict(system, answered_total=7)
         text = "\n".join(_frame(_vm(answered=answered[:1], system=system), "QUESTIONS").text_rows())
-        self.assertIn("── answered today 2 (7 in all projects) ─", text)
+        self.assertIn("│ 2 ANSWERED TODAY (7 in all projects) ─", text)
         self.assertRegex(text, r"✓ 10:00  one")
 
 
@@ -183,8 +186,9 @@ class CutRule(unittest.TestCase):
         sessions = [dict(session, last_clear=None) for session in _mapping()["sessions"]]
         tag = next(seat[0] for seat in _mapping()["seats"])
         frame = _frame(_vm(sessions=sessions), "OVERVIEW", cols=168, scope="session:" + tag)
-        context = next(row for row in frame.text_rows() if "context:" in row)
-        self.assertIn("· last clear ·", context)
+        # The seat's head line on the session page keeps the clear it does not know as ``·``.
+        context = next(row for row in frame.text_rows() if "generation " in row)
+        self.assertIn("· cleared ·", context)
 
 
 class ModelsRule(unittest.TestCase):

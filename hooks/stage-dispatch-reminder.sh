@@ -14,6 +14,9 @@
 #                            AND skill ∈ {code-plan,code-execute,code-test,code-report}
 #     · not conductor_code_stage        → silent (main, dispatch-depth-2 stage session, non-code)
 #     · intensity ∈ {direct,quick}      → silent (direct inline; quick is a dispatch-depth-1 one-shot worker)
+#     · the route's owner makes the work itself (a `one-shot` owner node, read from the route file named by
+#       AGENT_ROUTE_FILE / AGENT_OWNER_ROUTE_FILE; the middle cell `solo·standard` is one) → silent: it
+#       is the maker, not a conductor, and its only dispatched stage is its review
 #     · otherwise (standard+ or unknown) → reminder (additionalContext JSON on stdout), exit 0
 #
 #   Portable CLI (conformance): stage-dispatch-reminder.sh --skill <name>
@@ -36,6 +39,19 @@ conductor_code_stage() { # $1=skill $2=depth ; env: AGENT_DISPATCH_DEPTH (via ca
   return 0
 }
 
+# owner_makes_route — whether this session is the owner that makes its route's work itself (the route's nodes
+# hold a depth-1 `_kernel/owner` node `one-shot`: `route_form.one_shot_owner`). Unknown or unreadable → no.
+owner_makes_route() {
+  route_file=${AGENT_ROUTE_FILE:-${AGENT_OWNER_ROUTE_FILE:-}}
+  [ -n "$route_file" ] && [ -r "$route_file" ] || return 1
+  hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd) || return 1
+  [ -r "$hook_dir/../utilities/route_form.py" ] || return 1
+  python3 -I -c 'import json,sys
+sys.path.insert(0, sys.argv[1])
+import route_form
+sys.exit(0 if route_form.one_shot_owner(json.load(open(sys.argv[2]))) else 1)' "$hook_dir/../utilities" "$route_file" 2>/dev/null
+}
+
 _json_wrap() { # $1=message ; emit PreToolUse hookSpecificOutput additionalContext
   printf '%s' "$1" | python3 -c 'import sys,json
 out={"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":sys.stdin.read()}}
@@ -53,7 +69,8 @@ decide() { # $1=skill $2=depth $3=intensity
   conductor_code_stage "$1" "$2" || return 0
   case "$3" in
     direct|quick) return 0 ;;  # Direct inline / quick one-shot worker: stay silent.
-    *) emit_reminder "$1" ;;   # standard+ or unknown intensity: remind, never deny.
+    *) owner_makes_route && return 0   # a maker owner (the middle cell) is no conductor: stay silent.
+       emit_reminder "$1" ;;           # standard+ or unknown intensity: remind, never deny.
   esac
 }
 

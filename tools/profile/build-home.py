@@ -24,6 +24,7 @@ import re
 import stat
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 try:
@@ -377,6 +378,98 @@ def publish_claude_user_rules(source, home):
                     path.unlink(missing_ok=True)
 
 
+# The native sub-agents a worker can call by name: the light, balanced and deep
+# entries of the selected models.conf catalog. A spawn that names no agent keeps
+# the runtime's own default, so the main session's general-purpose (and the
+# memory-scout helper) are not placed here.
+WORKER_NATIVE_AGENTS = ('light', 'balanced', 'deep')
+
+
+_NATIVE_AGENT_RENDERERS = {}
+_NATIVE_AGENT_RENDERERS_LOCK = threading.Lock()
+
+
+def _native_agent_renderer(agent_home, harness):
+    """The adapter's `sync-native-agents.py`, loaded once by path; its import paths are dropped."""
+    path = Path(agent_home) / 'adapters' / harness / 'bin' / 'sync-native-agents.py'
+    with _NATIVE_AGENT_RENDERERS_LOCK:
+        module = _NATIVE_AGENT_RENDERERS.get(path)
+        if module is None:
+            spec = importlib.util.spec_from_file_location(f'hearting_worker_native_agents_{harness}', path)
+            module = importlib.util.module_from_spec(spec)
+            search = list(sys.path)
+            try:
+                spec.loader.exec_module(module)
+            finally:
+                for entry in [entry for entry in sys.path if entry not in search]:
+                    sys.path.remove(entry)
+            _NATIVE_AGENT_RENDERERS[path] = module
+    return module
+
+
+def publish_worker_native_agents(agent_home, harness, model_config_home, home, names=WORKER_NATIVE_AGENTS):
+    """Write the named catalog agents into ``home/agents``; returns the names written.
+
+    The definitions come from the renderer release activation uses
+    (`utilities/native_agents.py` `runtime_plan`) and the models.conf that
+    ``model_config_home`` selects, so each keeps the user's tier model and effort.
+    Every file is a regular file (Codex refuses a linked role file). An agent the
+    config withholds (main-session-only model) or cannot render gets no file, and
+    a file an earlier build of this home wrote for it is removed. A plan that
+    cannot be made, or a path that cannot be written (an existing file, link or
+    folder, an unwritable folder), leaves the home with only what was written;
+    nothing already on the path is touched and the build does not fail.
+    """
+    names = [name for name in names if name in WORKER_NATIVE_AGENTS]
+    if not names:
+        return []
+    agents_dir = Path(home) / 'agents'
+    wanted = {}
+    try:
+        renderer = _native_agent_renderer(agent_home, harness)
+        fmt = renderer.FORMAT
+        plan = renderer.native_agents.runtime_plan(fmt, Path(model_config_home))
+        for row in plan['agents']:
+            if row['name'] not in names or row['status'] not in ('shipped', 'rendered'):
+                continue
+            body = row.get('content')
+            if body is None:
+                body = (fmt.out_dir / row['shipped_relpath']).read_text(encoding='utf-8')
+            wanted[row['dest_name']] = (row['name'], body)
+    except Exception:
+        wanted = {}
+    # A definition that cannot be placed never stops the worker: an existing
+    # file, link or folder on the path is left as it is, and the home is built
+    # with the definitions that could be written.
+    written = []
+    try:
+        if agents_dir.is_symlink() or (agents_dir.exists() and not agents_dir.is_dir()):
+            return []
+        if wanted:
+            agents_dir.mkdir(exist_ok=True)
+        for dest_name, (name, body) in sorted(wanted.items()):
+            target = agents_dir / dest_name
+            if target.is_symlink() or (target.exists() and not target.is_file()):
+                continue
+            try:
+                write_worker_text(target, body)
+            except OSError:
+                continue
+            written.append(name)
+        if agents_dir.is_dir():
+            for path in agents_dir.iterdir():
+                stem = path.name.rsplit('.', 1)[0]
+                if (stem in WORKER_NATIVE_AGENTS and path.name not in wanted
+                        and path.is_file() and not path.is_symlink()):
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+    except OSError:
+        pass
+    return sorted(written)
+
+
 def link(target, linkpath):
     """Python port of install-runtime-projection.sh's link() primitive.
 
@@ -548,8 +641,9 @@ def _dispatch_defaults_module():
     if spec is None or spec.loader is None:
         raise ImportError('dispatch defaults loader is unavailable')
     module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
     spec.loader.exec_module(module)
+    # Cache it only once loaded: a concurrent caller never sees a half-run module.
+    sys.modules[name] = module
     return module
 
 
@@ -733,11 +827,14 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
         write_worker_text(path, json.dumps(value, ensure_ascii=False, indent=2) + '\n')
 
     filename = BOOTSTRAP_FILENAME[harness]
+    # A declaration picks which of the light/balanced/deep agents its home gets.
+    agent_names = WORKER_NATIVE_AGENTS
     if profile:
         decl_path, data = load_declaration(agent_home, profile)
         declared_harness, declared_type, fragments, expose = validate_declaration(agent_home, decl_path, data)
         if (declared_harness, declared_type) != (harness, worker_type):
             raise ValueError('profile worker home type mismatch')
+        agent_names = tuple(expose.get('agents') or ())
         # The declaration's body is specialization; its full skill catalog is
         # not needed because the dispatcher supplies the assigned contract.
         bootstrap = home / filename
@@ -779,6 +876,10 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
         values.update(codex_worker_launch_values(
             agent_home, source, home, worker_type, home_env,
         ))
+        # Codex reads `$CODEX_HOME/agents/*.toml`; only an owner keeps multi_agent.
+        worker_agents = publish_worker_native_agents(
+            agent_home, harness, values['HEARTING_MODEL_CONFIG_HOME'], home,
+            agent_names if worker_type == 'owner' else ())
     elif harness == 'claude':
         source = Path(env.get('CLAUDE_CONFIG_DIR') or Path(home_env) / '.claude')
         source = source.resolve(strict=False)
@@ -855,6 +956,9 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
         # Project/local settings and managed policy still load normally. The
         # copied user settings retain all user guard hooks and permission rules.
         values['CLAUDE_CONFIG_DIR'] = str(home)
+        # Claude reads user agents from its config dir, as it does rules/.
+        worker_agents = publish_worker_native_agents(
+            agent_home, harness, values['HEARTING_MODEL_CONFIG_HOME'], home, agent_names)
     else:
         # XDG isolation belongs to OpenCode, not the user's compute inventory.
         # Pin the existing inventory input before masking XDG_CONFIG_HOME, so
@@ -910,12 +1014,23 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
             publish_opencode_user_rules(env.get('CLAUDE_CONFIG_DIR') or Path(home_env) / '.claude',
                                         home, config, env)
         write_json(home / 'opencode.json', config)
+        # A V1 worker reads agents from its own config dir (this home). A V2 worker's
+        # shared service owns config, so it already sees the user's own agents.
+        worker_agents = publish_worker_native_agents(
+            agent_home, harness, values['HEARTING_MODEL_CONFIG_HOME'], home,
+            () if v2_runtime else agent_names)
         runtime = home / 'runtime'
         for kind in ('data', 'cache', 'state', 'config'):
             target = runtime / kind
             target.mkdir(parents=True, exist_ok=True, mode=0o700)
             if not v2_runtime:
                 values['XDG_' + kind.upper() + '_HOME'] = str(target)
+        if not v2_runtime and not env.get('HARNESS_STATE_ROOT'):
+            # The masked XDG_STATE_HOME below would move the per-user state root
+            # (`state_root`) under this worker's private home, so a nested runner
+            # or peer record would land in a second root. Pin the user's own.
+            user_state = Path(env.get('XDG_STATE_HOME') or Path(home_env) / '.local/state') / 'hearting'
+            values['HARNESS_STATE_ROOT'] = str(user_state.expanduser().absolute())
         if not v2_runtime:
             data = (account_source if account_source is not None else
                     Path(env.get('XDG_DATA_HOME') or Path.home() / '.local/share'))
@@ -938,7 +1053,12 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
     metadata = {'harness': harness, 'worker_type': worker_type,
                 'source': str(agent_home), 'profile': profile,
                 'schema': 2, 'identity': identity, 'key': key,
-                'destination': destination is not None}
+                'destination': destination is not None,
+                # The home this one replaced: the shared runner started from a
+                # worker follows it back to the user's own home.
+                'model_config_home': values['HEARTING_MODEL_CONFIG_HOME'],
+                # The light/balanced/deep agents this home's agents/ holds.
+                'native_agents': worker_agents}
     if harness == 'codex':
         metadata.update(
             codex_config_home=str(source.expanduser().absolute()),

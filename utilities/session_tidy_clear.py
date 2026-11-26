@@ -10,6 +10,9 @@ screen labels do not. Idle failure and cancellation are silent.
 
 Bookings remain in clear/<seat>.json under the existing lock and nonce. After a
 send, a restarted helper observes the same operation without typing it again.
+The one exception is a /compact the session provably dropped: Codex disables it
+while a task is in progress, so when a queued turn started just before the keys
+the helper waits for that turn's end and types it again (``compact_preempted``).
 Runtime compaction never creates another card request or booking. An existing
 legacy compact-origin booking is cancelled without resuming its retired flow.
 Memory tidying runs independently of the foreground command.
@@ -57,7 +60,27 @@ COMPACT_CONFIRM_SEC = 900.0          # compaction of ~950k tokens took 145 s (me
 # No-trailer body used by the exact-native attachment or the sealed pending-ref carrier.
 CONTINUE_TEXT = "이어서해"
 STATUS_ONLY_TEXT = "현재 카드 기준 현황만 짧게 표시하고 새 작업은 시작하지 말고 다음 입력을 기다리세요."
-CONTINUE_WINDOW_SEC = 120.0
+# The window opens once the compaction is confirmed (``cleared``). The session may still be on a
+# turn of its own then (a notice or result turn); the continue is sent when that turn ends. A
+# hook can come minutes after the compaction (5 of 9 manual tidies recorded 391 s to 49 h before
+# the next one), so the window is as long as the compaction wait itself. A continue held back
+# while the session works is asked again by the helper, the one process that lives through the
+# window on every harness; a hook process (``receiver_idle``) asks once and ends.
+CONTINUE_WINDOW_SEC = COMPACT_CONFIRM_SEC
+SCREEN_RETRY_SEC = 5.0
+# A panel host that is being replaced answers nothing for ~15 s (11-20 15:09); an attachment that
+# is gone for good answers the same ``shell-no-answer`` (``attachment-changed`` and a refused
+# connection both read so), and one look cannot tell the two apart. So the doubt is waited out
+# for about a minute (12 looks, 5 s apart), not for the whole booking.
+SCREEN_DOUBT_LOOKS = 12
+# Reasons a continue is held back for the composer or the pane, which pass on their own; the
+# steward answers ``queued`` for them and the helper may ask again. An older shell host does not
+# pass on its own (``shell-host-outdated``), so it is not here.
+CONTINUE_INPUT_WAIT = frozenset({"draft", "draft-unknown", "form-open", "screen-unknown",
+                                 "shell-editor-open", "shell-no-answer", "pane-in-mode",
+                                 "pane-synchronized", "pane-input-off", "pane-state-unknown"})
+# Seconds between asks while the composer or pane holds the continue (each ask starts a steward).
+CONTINUE_INPUT_RETRY_SEC = 15.0
 IDLE_CARD_WINDOW_SEC = 300.0
 
 REASON_TEXT = {
@@ -70,6 +93,9 @@ REASON_TEXT = {
     "draft": "입력창에 쓰던 글이 있습니다",
     "draft-unknown": "입력창이 비어 있는지 알 수 없습니다",
     "screen-unknown": "화면을 읽지 못했습니다",
+    "shell-host-outdated": "이 창의 하팅 셸이 이전 판이라 입력창을 확인할 수 없고, 창을 다시 열면 새 판으로 바뀝니다",
+    "shell-editor-open": "하팅 셸의 설정·Fleet 탐색기·질문 화면이 열려 있습니다",
+    "shell-no-answer": "하팅 셸이 화면 요청에 답하지 않았습니다",
     "target-changed": "그 자리의 세션이 바뀌었습니다",
     "herdr-not-found": "herdr를 찾지 못했습니다",
     "pane-in-mode": "창이 tmux 복사·선택 모드에 있습니다",
@@ -420,6 +446,8 @@ def compaction_position(seat: "st.Seat", harness: str, sid: str) -> str:
     ledger = str(max((float(r.get("ts", 0)) for r in events), default=0))
     summary = st.session_summary(seat).get((harness, sid)) or {}
     path = summary.get("transcript", "")
+    if harness in ("claude", "codex") and not path:
+        return ledger + ":unknown"      # no history to read yet: a later read is no compaction
     if harness in ("claude", "codex") and path:
         try:
             with open(path, "rb") as f:
@@ -438,6 +466,21 @@ def compaction_position(seat: "st.Seat", harness: str, sid: str) -> str:
         except OSError:
             return ledger + ":unreadable"
     return ledger
+
+
+def compaction_moved(booked: str, current: str) -> bool:
+    """Whether ``current`` shows a compaction after the ``booked`` position.
+
+    The history part is a hash of the last boundary row inside the final 8 MB of the file.
+    A long-running session writes past that tail, so the boundary that was there at booking
+    scrolls out and the part simply disappears: that is no compaction. A boundary newly
+    inside the tail, or a new ledger row, is one; an unreadable or unknown part says nothing."""
+    ledger, _, seen = str(booked).partition(":")
+    now_ledger, _, now_seen = str(current).partition(":")
+    if ledger != now_ledger:
+        return True
+    return (len(now_seen) == 64 and now_seen != seen
+            and (len(seen) == 64 or seen == ""))
 
 
 def note_compaction(seat: "st.Seat", harness: str, sid: str, *, now: float) -> None:
@@ -677,7 +720,7 @@ def validate_idle_request(path, nonce: Optional[str] = None, *, now: Optional[fl
         reason = _idle_route_reason(req["harness"], req["sid"])
         if reason:
             return None, reason
-        if compaction_position(seat, req["harness"], req["sid"]) != idle.get("compaction", ""):
+        if compaction_moved(idle.get("compaction", ""), compaction_position(seat, req["harness"], req["sid"])):
             return None, "compacted"
         from session_tidy_idle import _tokens_and_provider
         transcript = (st.session_summary(seat).get((req["harness"], req["sid"])) or {}).get("transcript", "")
@@ -1043,6 +1086,10 @@ def idle_context_for_enqueue(seat: "st.Seat", harness: str, sid: str) -> Optiona
     eligible = bool(req.get("status") == "reserved" and request.get("state") in ("arrived", "sent")
                     and arrival.get("sid") == sid
                     and st.read_prompt_seq(seat) == sequence(arrival.get("prompt_seq"), -1))
+    if not eligible and not (req.get("status") == "reserved" and request.get("source") == "memory-helper"):
+        # No automatic request of this booking arrived on this turn (none was sent, or its
+        # turn is another): a tidy the session runs now is a manually invoked one, whoever woke it.
+        return None
     return {"nonce": req["nonce"], "identity": identity,
             "origin": req.get("origin"), "arrival_seq": sequence(arrival.get("prompt_seq"), -1),
             "claim_id": request.get("token"), "eligible": eligible}
@@ -1394,6 +1441,9 @@ def compact_confirmed(req: dict) -> bool:
     harness, sid = str(req.get("harness") or ""), str(req.get("sid") or "")
     if claim.get("command") != "compact" or not sid:
         return False
+    # A typing the session dropped (``release_unsent_compact``) is read from its own start too.
+    first = {"offset": claim.get("first_offset", claim.get("offset")),
+             "at": claim.get("first_at", claim.get("at"))}
     if req.get("origin") == "idle":
         seat = st.session_seat(st.seat_from_dict(req["seat"]), harness, sid)
         card = st.read_latest_card(seat)
@@ -1401,7 +1451,7 @@ def compact_confirmed(req: dict) -> bool:
                 or (card.get("author") or {}).get("sid") != sid
                 or not st.card_text_path(seat).is_file()):
             return False
-    source, offset = str(claim.get("transcript") or ""), claim.get("offset")
+    source, offset = str(claim.get("transcript") or ""), first["offset"]
     if source and type(offset) is int and offset >= 0:
         with contextlib.suppress(OSError):
             with open(source, "rb") as handle:
@@ -1420,11 +1470,82 @@ def compact_confirmed(req: dict) -> bool:
                         return True
     try:
         seat = _booked_seat(req, str((req.get("seat") or {}).get("key") or ""))
-        since = float(claim.get("at", 0) or 0)
+        since = float(first["at"] or 0)
         return any(row.get("event") == "compact" and row.get("harness") == harness and row.get("sid") == sid
                    and float(row.get("ts", 0) or 0) >= since for row in st._read_ledger_lines(seat))
     except (OSError, ValueError, TypeError, st.StateError):
         return False
+
+
+def compact_preempted(req: dict) -> bool:
+    """The booked /compact met a Codex turn that had already started, so it never ran.
+
+    Codex disables /compact while a task is in progress: its TUI prints one line
+    ("'/compact' is disabled while a task is in progress."), empties the composer, and
+    neither runs nor queues the command, and nothing reaches the model (measured on
+    0.163.0 in a private tmux, 2026-11-13).  A queued notice can start a turn between the
+    helper's last look and its keys.  The thread's own rollout then shows a turn's input
+    row after the claim's offset before any compaction row; a compaction the keys did
+    start comes first, and a turn queued behind it comes after it.  Only a Codex pane on
+    tmux is read; anything unreadable is not preempted, so the existing wait stands.
+    """
+    claim = req.get("clear_claim") if isinstance(req.get("clear_claim"), dict) else {}
+    seat = req.get("seat") if isinstance(req.get("seat"), dict) else {}
+    if (req.get("harness") != "codex" or claim.get("command") != "compact"
+            or claim.get("state") != "sending" or seat.get("kind") != "pane"):
+        return False
+    try:
+        from terminal_surface import is_tmux_pane
+        if not is_tmux_pane(str(seat.get("pane") or "")):
+            return False
+    except Exception:  # noqa: BLE001 - an optional reader never changes the wait
+        return False
+    source, offset = str(claim.get("transcript") or ""), claim.get("offset")
+    if not source or type(offset) is not int or offset < 0:
+        return False
+    with contextlib.suppress(OSError):
+        with open(source, "rb") as handle:
+            handle.seek(offset)
+            for line in handle:
+                if b'"compacted"' not in line and b'"user"' not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                if row.get("type") == "compacted":
+                    return False
+                payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                if (row.get("type") == "response_item" and payload.get("type") == "message"
+                        and payload.get("role") == "user"):
+                    return True
+    return False
+
+
+def release_unsent_compact(seat_key: str, nonce: str, claim: dict) -> bool:
+    """Return a /compact the session dropped (``compact_preempted``) to its booking.
+
+    Only this exact sending claim goes; the booking stays ``reserved``. Its first
+    typing's anchor stays as ``compact_typed``, so the next claim still counts a
+    compaction an earlier typing started after all, and nothing is typed twice.
+    """
+    with st.seat_lock(seat_key):
+        req = read_reservation(seat_key)
+        if (not req or req.get("nonce") != nonce or req.get("status") != "reserved"
+                or req.get("clear_claim") != claim or (claim or {}).get("state") != "sending"):
+            return False
+        typed = req.get("compact_typed") if isinstance(req.get("compact_typed"), dict) else {}
+        req["compact_typed"] = {
+            "transcript": typed.get("transcript", claim.get("transcript")),
+            "offset": typed.get("offset", claim.get("offset")),
+            "at": typed.get("at", claim.get("at")),
+            "dropped": int(typed.get("dropped", 0) or 0) + 1, "released": st.now_epoch()}
+        req.pop("clear_claim", None)
+        req.pop("clear_command", None)
+        _write_reservation(req)
+        return True
 
 
 def note_start_locked(seat: "st.Seat", harness: str, sid: str, now: float) -> None:
@@ -1624,8 +1745,8 @@ def validate_request(path, nonce: Optional[str] = None, *, now: Optional[float] 
         if reason:
             return None, reason
     if (req.get("origin") == "idle"
-            and compaction_position(seat, req["harness"], req["sid"])
-            != (req.get("idle") or {}).get("compaction", "")):
+            and compaction_moved((req.get("idle") or {}).get("compaction", ""),
+                                 compaction_position(seat, req["harness"], req["sid"]))):
         return None, "compacted"
     held_claim = req.get("clear_claim") if isinstance(req.get("clear_claim"), dict) else {}
     claimed = (_sending_claim is not None and held_claim.get("state") == "sending"
@@ -1717,6 +1838,10 @@ def claim_clear(path, nonce: Optional[str] = None, *, ready=None):
         claim = {"state": "sending", "nonce": req["nonce"], "token": secrets.token_hex(12),
                  "at": st.now_epoch()}
         claim.update(command="compact", transcript=transcript, offset=offset)
+        typed = req.get("compact_typed") if isinstance(req.get("compact_typed"), dict) else {}
+        if typed.get("transcript") == transcript and type(typed.get("offset")) is int:
+            # Typed again after a dropped /compact: its compaction is read from the first typing.
+            claim.update(first_offset=typed["offset"], first_at=typed.get("at"))
         req["clear_command"] = "compact"
         req["clear_claim"] = claim
         _write_reservation(req)
@@ -1899,10 +2024,11 @@ def continue_card_reason(req: dict) -> Optional[str]:
 def settle_unsent_continue(harness: str, sid: str, *, now: Optional[float] = None) -> int:
     """Close a queued continue that will never be sent, with its real reason.
 
-    A continue held back while the session worked (``not-idle-*``) has no transfer ref and
-    no later sender on every harness; once the card reached another turn (``card-taken``) or
-    the continue window ended (``expired``) it is skipped, not left ``pending``. Called from
-    the session's own turn-end observation; nothing is typed and nothing is retried here."""
+    A continue held back while the session worked (``not-idle-*``) has no transfer ref; on
+    every harness the helper asks again inside the window and ends with it (a hook process asks
+    once). Once the card reached another turn (``card-taken``) or the continue window ended
+    (``expired``) it is skipped, not left ``pending``. Called from the session's own turn-end
+    observation; nothing is typed and nothing is retried here."""
     if harness not in ("claude", "codex", "opencode") or not sid:
         return 0
     now = st.now_epoch() if now is None else now
@@ -2081,6 +2207,9 @@ _IDLE_WAIT_TEXT = {
     "draft": "입력창에 쓰던 글이 있었습니다",
     "draft-unknown": "입력창이 비어 있는지 알 수 없었습니다",
     "screen-unknown": "화면을 읽지 못했습니다",
+    "shell-host-outdated": "이 창의 하팅 셸이 이전 판이라 입력창을 확인할 수 없었습니다",
+    "shell-editor-open": "하팅 셸의 설정·Fleet 탐색기·질문 화면이 열려 있었습니다",
+    "shell-no-answer": "하팅 셸이 화면 요청에 답하지 않았습니다",
     "expired": "보낼 수 있는 때가 예약 시간 안에 오지 않았습니다",
 }
 # Not-sent reasons the person caused (typing, a new card): no line for these.
@@ -2129,7 +2258,7 @@ def _set_successor_prompt_frontier(req: dict, sid: str) -> None:
 
 
 def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observed: str = "",
-            expected_idle_due: Optional[float] = None) -> bool:
+            expected_idle_due: Optional[float] = None, detail: str = "") -> bool:
     """Record how the booking ended -- only while it is still this helper's -- and leave the
     one result line for anything but a clear.  The notice is written after the seat lock is
     released (``write_notice`` takes it itself)."""
@@ -2144,6 +2273,8 @@ def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observ
         if reason == NOTIFICATION_TURN:
             outcome = "cancelled"
         req.update(status=outcome, reason=reason, finished=now)
+        if detail:
+            req["detail"] = detail   # what a look was still waiting for (`screen-unknown` only)
         claim = req.get("clear_claim")
         if isinstance(claim, dict) and claim.get("state") == "sending":
             req["clear_claim"] = {**claim, "state": "sent" if outcome in ("cleared", "unverified") else "finished",
@@ -2156,7 +2287,8 @@ def _finish(seat_key: str, nonce: str, outcome: str, reason: str = "", *, observ
             # Written before anything is typed: the new Codex thread's first hook finds its window by it.
             kind = req.get("followup_kind") or "continue"
             req["continued"] = {"state": "pending", "kind": kind,
-                                "deadline": now + _tunable("CONTINUE_WINDOW", CONTINUE_WINDOW_SEC)}
+                                "deadline": now + _tunable(
+                                    "CONTINUE_WINDOW", _tunable("COMPACT_CONFIRM", CONTINUE_WINDOW_SEC))}
         _write_reservation(req)
     if req.get("origin") == "idle":
         if outcome == "compacted":
@@ -2270,10 +2402,19 @@ def _show_on_herdr(req: dict, text: str) -> bool:
     return isinstance(result, dict) and result.get("shown") is True
 
 def _continue(seat_key: str, nonce: str, continuer: Callable[[Path, str, str], dict], *,
-              sleep: Callable[[float], None] = time.sleep) -> str:
-    """After a confirmed clear, ask ``peer-steward.py continue`` once and record its result.
+              sleep: Callable[[float], None] = time.sleep, ask_again: bool = False) -> str:
+    """After a confirmed clear, ask ``peer-steward.py continue`` and record its result.
     ``continued`` means the exact native continuation was confirmed; the clear remains valid
     when continuation is queued, skipped or unverified.
+
+    One ask by default, which is what a hook process (``receiver_idle``, from Claude's Stop and
+    UserPromptSubmit hooks or a peer receive) does: it ends with that call and must not linger.
+    ``ask_again`` is for the helper, the one process that lives through the window on every
+    harness (OpenCode has no end-of-turn callback that asks again): while the session works, or
+    its composer or pane holds the input, nothing was sent and nothing bound, so it asks again
+    inside the window (the loop top ends it as ``expired`` once the window has passed). Every
+    ask passes the steward's full checks again. A continue the steward saw taken by another ask
+    (``superseded``) is not settled here: the other ask settles it.
     """
     path = reservation_path(seat_key)
     while True:
@@ -2284,9 +2425,19 @@ def _continue(seat_key: str, nonce: str, continuer: Callable[[Path, str, str], d
             verdict = {"continued": "skipped", "reason": reason}
             break
         verdict = continuer(path, nonce, str((req.get("seat") or {}).get("pane") or ""))
-        if (verdict.get("continued") not in {"queued", "skipped"}
-                or verdict.get("reason") != "idle-card-observation-unavailable"):
-            break
+        reason = str(verdict.get("reason") or "")
+        if verdict.get("continued") == "skipped" and reason == "superseded":
+            return "cleared"            # another ask holds it, or settled it: never overwrite theirs
+        if verdict.get("continued") in {"queued", "skipped"} and reason == "idle-card-observation-unavailable":
+            continue
+        if ask_again and verdict.get("continued") == "queued" and not verdict.get("transfer_ref"):
+            if reason.startswith("not-idle-"):
+                sleep(COMPACT_POLL_SEC)     # the steward already looked for ~18 s
+                continue
+            if reason in CONTINUE_INPUT_WAIT:
+                sleep(CONTINUE_INPUT_RETRY_SEC)
+                continue
+        break
     outcome = verdict.get("continued", "failed")
     _finish_continue(seat_key, nonce, outcome, verdict.get("reason", ""),
                        claim_id=verdict.get("claim_id", ""), transfer_ref=verdict.get("transfer_ref", ""))
@@ -2344,6 +2495,7 @@ def _wait_idle_card_acceptance(seat_key: str, nonce: str, sleep: Callable[[float
 def _idle_due_and_request(seat_key: str, nonce: str, sleep: Callable[[float], None]) -> str:
     path = reservation_path(seat_key)
     waited = ""         # why the last look did not send (a form, a draft, a busy screen)
+    waited_detail = ""
     while True:
         req = read_reservation(seat_key)
         if not req or req.get("nonce") != nonce or req.get("status") != "reserved":
@@ -2365,7 +2517,8 @@ def _idle_due_and_request(seat_key: str, nonce: str, sleep: Callable[[float], No
         due = float(idle.get("due_at", 0) or 0)
         now = st.now_epoch()
         if now > float(req.get("deadline", 0) or 0):
-            if _finish(seat_key, nonce, "skipped", waited or "expired", expected_idle_due=due):
+            if _finish(seat_key, nonce, "skipped", waited or "expired", expected_idle_due=due,
+                       detail=waited_detail if waited == "screen-unknown" else ""):
                 return "skipped"
             continue
         if now < due:
@@ -2398,10 +2551,12 @@ def _idle_due_and_request(seat_key: str, nonce: str, sleep: Callable[[float], No
                 return "pending"
             if verdict.get("accepted") == "queued" and st.now_epoch() < float(req.get("deadline", 0) or 0):
                 waited = str(verdict.get("reason") or waited)
+                waited_detail = str(verdict.get("detail") or "")
                 sleep(min(5.0, max(0.0, float(req.get("deadline", 0) or 0) - st.now_epoch())))
                 continue
             reason = verdict.get("reason") or "idle-card-not-accepted"
-            if _finish(seat_key, nonce, "skipped", reason, expected_idle_due=due):
+            if _finish(seat_key, nonce, "skipped", reason, expected_idle_due=due,
+                       detail=str(verdict.get("detail") or "")):
                 return "skipped"
             continue
         accepted = _wait_idle_card_acceptance(seat_key, nonce, sleep)
@@ -2449,25 +2604,76 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
         if accepted != "accepted":
             return accepted
         req = read_reservation(seat_key) or req
-    remaining = float(req.get("deadline", 0)) - st.now_epoch()
-    if remaining <= 0:
-        return "skipped" if _finish(seat_key, nonce, "skipped", "expired") else "superseded"
-    if (req.get("seat") or {}).get("kind") == "native":
-        from session_tidy_native import wait_idle
-        state = wait_idle(req["seat"].get("native"), req["sid"], int(remaining * 1000))
-    else:
-        state = wait(pane, int(remaining * 1000))
-    if state not in ("idle", "done"):
-        reason = "timeout" if state.startswith(("timeout", "state-")) else state
-        return "skipped" if _finish(seat_key, nonce, "skipped", reason) else "superseded"
-    req, reason = reobserve_request(path, nonce, sleep=sleep)
+    def turn_ended(booked):
+        """``(booking, "")`` once the window's current turn ended and the booking still holds,
+        else ``(None, result)``; one wait inside the booking's own deadline."""
+        remaining = float(booked.get("deadline", 0)) - st.now_epoch()
+        if remaining <= 0:
+            return None, "skipped" if _finish(seat_key, nonce, "skipped", "expired") else "superseded"
+        if (booked.get("seat") or {}).get("kind") == "native":
+            from session_tidy_native import wait_idle
+            state = wait_idle(booked["seat"].get("native"), booked["sid"], int(remaining * 1000))
+        else:
+            state = wait(pane, int(remaining * 1000))
+        if state not in ("idle", "done"):
+            why = "timeout" if state.startswith(("timeout", "state-")) else state
+            return None, "skipped" if _finish(seat_key, nonce, "skipped", why) else "superseded"
+        current, why = reobserve_request(path, nonce, sleep=sleep)
+        if current is None:
+            if why == "superseded":
+                return None, "superseded"
+            return None, "skipped" if _finish(seat_key, nonce, "skipped", why) else "superseded"
+        return current, ""
+
+    def typed_compaction(reason):
+        """After one typed /compact: ``(None, result)`` once it is confirmed (and continued),
+        unverified at its bound or ended; ``(booking, "")`` when the session dropped the keys
+        (``compact_preempted``) and the turn that took them has ended, to type it again."""
+        sid = str(req.get("sid") or "")
+        # /compact was typed once; the same session shows it ends (it takes minutes).
+        deadline = time.monotonic() + _tunable("COMPACT_CONFIRM", COMPACT_CONFIRM_SEC)
+        while True:
+            held = read_reservation(seat_key)
+            if not held or held.get("nonce") != nonce or held.get("status") != "reserved":
+                return None, "superseded"
+            if compact_confirmed(held):
+                _finish(seat_key, nonce, "cleared", observed=sid)
+                return None, _continue(seat_key, nonce, continuer, sleep=sleep, ask_again=True)
+            if compact_preempted(held) and release_unsent_compact(seat_key, nonce, held["clear_claim"]):
+                # A queued turn had started just before the keys and Codex dropped them: no
+                # compaction will come from them, so the booking waits for that turn's end.
+                return turn_ended(read_reservation(seat_key) or held)
+            if time.monotonic() >= deadline:
+                return None, ("unverified" if _finish(seat_key, nonce, "unverified", reason)
+                              else "superseded")
+            sleep(COMPACT_POLL_SEC)
+
+    req, result = turn_ended(req)
     if req is None:
-        if reason == "superseded":
-            return "superseded"
-        return "skipped" if _finish(seat_key, nonce, "skipped", reason) else "superseded"
+        return result
+    screen_doubt, doubt_looks = "", 0   # the shell host's last non-answer, kept for the notice
     while True:
         verdict = steward(path, nonce, pane)
         outcome, reason = verdict.get("cleared", "failed"), verdict.get("reason", "")
+        if reason == "expired" and screen_doubt:
+            reason = screen_doubt           # the last thing seen was the doubt itself
+        elif reason not in ("expired", "shell-no-answer"):
+            screen_doubt, doubt_looks = "", 0
+        if reason == "shell-no-answer" and outcome in {"queued", "skipped"}:
+            # A panel host taking over (an upgrade, a restart) answers nothing for a moment. The
+            # idle path already waits such a doubt out inside its booking; this one waits for
+            # ``SCREEN_DOUBT_LOOKS`` looks, because a host that is gone for good reads the same.
+            # It also covers the idle booking's /compact step (no origin check here).
+            screen_doubt, doubt_looks = reason, doubt_looks + 1
+            checked, why = (reobserve_request(path, nonce, sleep=sleep) if doubt_looks < SCREEN_DOUBT_LOOKS
+                            else (None, "expired"))
+            if checked is not None:
+                sleep(min(SCREEN_RETRY_SEC, max(0.0, float(checked.get("deadline", 0)) - st.now_epoch())))
+                continue
+            if why == "superseded":
+                return "superseded"
+            return "skipped" if _finish(seat_key, nonce, "skipped",
+                                        reason if why == "expired" else why) else "superseded"
         if reason == "idle-card-observation-unavailable" and outcome in {"queued", "skipped"}:
             checked, why = reobserve_request(path, nonce, sleep=sleep)
             if checked is not None:
@@ -2475,29 +2681,31 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
             if why == "superseded":
                 return "superseded"
             return "skipped" if _finish(seat_key, nonce, "skipped", why) else "superseded"
+        if outcome == "queued" and reason.startswith("not-idle-") and req.get("origin") != "idle":
+            # Another turn began after the tidy turn ended: a notice or completion the runtime
+            # had queued (a Codex queue item starts right at the turn end). Nothing was typed and
+            # an automatic turn is not the person's input, so the booking waits for that turn's
+            # end; a prompt the person submits meanwhile still ends it at the next look.
+            req, result = turn_ended(req)
+            if req is None:
+                return result
+            continue
+        held = read_reservation(seat_key) or {}
+        if (outcome == "unverified" and req.get("origin") != "idle"
+                and (held.get("clear_claim") or {}).get("command") == "compact"):
+            req, result = typed_compaction(reason)
+            if req is None:
+                return result
+            continue  # The session dropped the keys; that turn ended and the booking holds.
         break
     if req.get("origin") == "idle":
         return _await_idle_compaction(seat_key, nonce, sleep)
     sid = str(req.get("sid") or "")
     if outcome == "true":
         _finish(seat_key, nonce, "cleared", observed=sid)
-        return _continue(seat_key, nonce, continuer, sleep=sleep)
-    held = read_reservation(seat_key) or {}
-    if outcome == "unverified" and (held.get("clear_claim") or {}).get("command") == "compact":
-        # /compact was typed once; the same session shows it ends (it takes minutes).
-        deadline = time.monotonic() + _tunable("COMPACT_CONFIRM", COMPACT_CONFIRM_SEC)
-        while True:
-            held = read_reservation(seat_key)
-            if not held or held.get("nonce") != nonce or held.get("status") != "reserved":
-                return "superseded"
-            if compact_confirmed(held):
-                _finish(seat_key, nonce, "cleared", observed=sid)
-                return _continue(seat_key, nonce, continuer, sleep=sleep)
-            if time.monotonic() >= deadline:
-                return "unverified" if _finish(seat_key, nonce, "unverified", reason) else "superseded"
-            sleep(COMPACT_POLL_SEC)
+        return _continue(seat_key, nonce, continuer, sleep=sleep, ask_again=True)
     final = "skipped" if outcome == "skipped" else "failed"
-    return final if _finish(seat_key, nonce, final, reason) else "superseded"
+    return final if _finish(seat_key, nonce, final, reason, detail=str(verdict.get("detail") or "")) else "superseded"
 
 
 def main(argv=None) -> int:

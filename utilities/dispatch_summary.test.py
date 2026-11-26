@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 import fcntl
 import os
@@ -496,6 +499,7 @@ class DispatchSummaryTest(unittest.TestCase):
             self.assertEqual(launch.call_args.kwargs["runtime_home"],
                              f"{self.tmp.name}/worker-home")
             self.assertEqual(launch.call_args.kwargs["attempt_cwd"], "/wt")
+            self.assertEqual(launch.call_args.kwargs["jobs"], jobs.resolve())
             self.assertIn("summary_owner=dispatch-v1", jobs.read_text())
         finally:
             for process in (worker, owner):
@@ -596,8 +600,10 @@ class DispatchSummaryTest(unittest.TestCase):
                     attempt_id=attempt, harness="codex", transcript=log,
                     target_pid=worker.pid, target_start=start, prompt_path=prompt,
                     runtime_home=Path(self.tmp.name) / "worker-home",
-                    attempt_cwd="/exact/worktree",
+                    attempt_cwd="/exact/worktree", jobs=Path(self.tmp.name) / "jobs.log",
                 )
+            self.assertEqual(captured["env"]["AGENT_DISPATCH_JOBS"],
+                             str(Path(self.tmp.name) / "jobs.log"))
             self.assertEqual(captured["argv"].count("--prompt"), 1)
             prompt_index = captured["argv"].index("--prompt")
             self.assertEqual(captured["argv"][prompt_index + 1], str(prompt))
@@ -954,6 +960,100 @@ class DispatchSummaryTest(unittest.TestCase):
         state = json.loads(S.owner_state_path("claude", attempt).read_text())
         self.assertEqual(state["summary_source"], str(transcript))
         self.assertEqual(state["status"], "terminal")
+
+    def test_owner_shaped_supervisor_without_ambient_jobs_still_gets_now(self):
+        """An owner is launched from a session that has no `AGENT_DISPATCH_JOBS`.
+
+        Only a worker's own environment carries the registry path, so a stage
+        worker's supervisor (launched by an owner) inherits it while an owner's
+        supervisor (launched by the depth-0 session) did not. Without it the
+        worker-home read path of `maybe_spawn` returns False, so no NOW was ever
+        requested for any owner. The wrapper hands the registry it resolved to the
+        launcher, so the supervisor sees the same value a stage worker's does.
+        """
+        import dispatch_wrapper_common as WC
+        from types import SimpleNamespace
+        attempt = "att-owner-shape-now"
+        session_id = "beadbead-1234-5678-9abc-beadbeadbead"
+        dispatch_root = Path(self.tmp.name) / "d"
+        jobs = dispatch_root / "jobs.log"
+        dispatch_root.mkdir()
+        from worker_runtime_home import _builder
+        from claude_project_dir import encode_project_dir
+        home_key = _builder.worker_home_key(str(ROOT), "claude", "owner", attempt)
+        worker_home = dispatch_root / "homes" / "workers" / home_key
+        project = worker_home / "projects" / encode_project_dir("/wt/owner")
+        project.mkdir(parents=True)
+        (worker_home / "worker-home.json").write_text(json.dumps({
+            "schema": 2, "identity": attempt, "key": home_key, "harness": "claude",
+            "worker_type": "owner", "source": str(ROOT),
+        }), encoding="utf-8")
+        transcript = project / f"{session_id}.jsonl"
+        transcript.write_text(json.dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "OWNER_TURN one"}]},
+        }) + "\n", encoding="utf-8")
+        log = dispatch_root / f"owner.{attempt}.claude.jsonl"
+        log.write_text(self._announce(session_id, "/wt/owner"), encoding="utf-8")
+        jobs.write_text(
+            "2026-11-17T00:00:00Z\topen\t/wt/owner\t/wt/owner\towner\t"
+            "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
+            "execution_surface=registered-headless,registered_worker=1,"
+            "fallback_hop=same-harness-headless,worker_type=owner,"
+            f"attempt_id={attempt},harness=claude,runtime_home={worker_home},log_file={log}\n",
+            encoding="utf-8")
+        # The launcher's own environment, as the depth-0 session has it.
+        os.environ.pop("AGENT_DISPATCH_JOBS", None)
+        os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self.tmp.name) / "producer-home")
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                 start_new_session=True)
+        owner_pid = None
+        try:
+            start = S.process_observation(child.pid)[1]
+            args = SimpleNamespace(
+                attempt_id=attempt, review_output_binding=None, worktree="/wt/owner",
+                jobs_path=jobs, review_governed_lease_nonce=None)
+            receipt = WC.attach_summary_owner(
+                args, log, None, {"pid": str(child.pid), "pid_start": start},
+                harness="claude", summary_launcher=S.launch_summary_owner,
+                runtime_home=str(worker_home))
+            owner_pid = int(receipt["summary_owner_pid"])
+            sid = S.summary_sid(attempt)
+            deadline = time.monotonic() + 20
+            sidecar = {}
+            while time.monotonic() < deadline and not sidecar.get("summary"):
+                time.sleep(0.2)
+                sidecar = titles.read(sid, harness="claude") or {}
+            self.assertEqual(sidecar.get("summary"), "분사 작업 요약을 갱신하고 있습니다")
+            # The supervisor runs with the registry path a stage worker's has.
+            environ = Path(f"/proc/{owner_pid}/environ")
+            if environ.exists():
+                self.assertIn(f"AGENT_DISPATCH_JOBS={jobs}".encode(),
+                              environ.read_bytes().split(b"\0"))
+            state = json.loads(S.owner_state_path("claude", attempt).read_text())
+            self.assertEqual(state["last_refresh_phase"], "initial")
+            self.assertEqual(state["summary_source"], str(transcript))
+            # The end of the run asks for the closing refresh once more text came in.
+            with transcript.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"type": "assistant", "message": {"content": [
+                    {"type": "text", "text": "OWNER_TURN two"}]}}) + "\n")
+            child.kill()
+            child.wait()
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and state.get("status") == "active":
+                time.sleep(0.2)
+                state = json.loads(S.owner_state_path("claude", attempt).read_text())
+            self.assertEqual(state["status"], "terminal")
+            self.assertEqual(state["last_refresh_phase"], "final")
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait()
+            if owner_pid:
+                try:
+                    os.killpg(owner_pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
 
     def test_supervisor_announces_its_child_session_before_the_first_turn(self):
         source = (ROOT / "utilities" / "claude-session-supervisor.py").read_text()

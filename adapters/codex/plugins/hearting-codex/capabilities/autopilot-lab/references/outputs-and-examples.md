@@ -13,7 +13,7 @@
 │   ├── experiment_spec.md          [T1] One-screen specification
 │   ├── summary.md                  [T1] One-line index for RUNLOG/parent auto-load; points to REPORT.md
 │   ├── train.py / eval.py / config.yaml  [T1] Setup scaffold
-│   ├── runs/                       [T2] User-produced run results
+│   ├── runs/                       [T2] Run logs and small results; raw outputs go under $AGENT_RAW_DATA_DIR
 │   │   └── run-001/
 │   │       ├── log.txt
 │   │       └── eval_result.json    Optional one-off result; never name it metrics.json(l)
@@ -29,9 +29,11 @@
 │       └── debug_reviews/          `qa/ml-debug` unit logs
 ```
 
-New checkpoints live at `$AGENT_RUNTIME_DIR/experiments/<slug>/runs/<run>/ckpt/`;
+New checkpoints live at `$AGENT_RAW_DATA_DIR/experiments/<slug>/runs/<run>/ckpt/`;
 the artifact-side `run.json` keeps compatible `ckpt_path` plus optional
 `ckpt_sha256` and `ckpt_byte_size` after the file exists.
+
+`run.json` may also carry an optional `seeds` field: the list of seeds the run used (for example `"seeds": [0, 1, 2]`). Omit it when the seeds are unknown; no reader requires it, and the report's "Seeds and variation" line does not depend on it.
 
 When project convention keeps variants beside each model, as with TF_Enhancer, use:
 
@@ -57,6 +59,19 @@ model/
 ```
 
 Choose the latter when `experiment_conventions.md` defines a model-directory variation prefix; choose the former when it defines a separate experiment folder. Project conventions take priority.
+
+## Leaderboard
+
+`python3 utilities/experiment_catalog.py leaderboard [--group <id|name>] [--format md|tsv]` prints one table per
+catalog group; it never fails the caller (exit 0, also for a missing or broken catalog).
+
+- Columns: condition (catalog name) / run (for tracing) / latest@epoch / best@epoch / baseline (label value@epoch) /
+  diff (`%p` for percent values, else the metric's unit) / relative % / state or reason.
+- Order: rows compared to the target, the better latest value first (the group's `metric.direction`; ties keep the
+  catalog order); rows with no value or no valid comparison below them, in catalog order, each with its reason.
+  Groups are never mixed and the table is not a final winner or a pass/fail call.
+- Every number comes from the catalog's one comparison; nothing is recomputed here. A tracking evaluation table
+  (`tracking/summary.csv`) takes the catalog name as its first column.
 
 ## Pipeline state
 

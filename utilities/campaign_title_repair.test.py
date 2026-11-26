@@ -1,3 +1,6 @@
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import contextlib
 import hashlib
 import importlib.util
@@ -225,7 +228,7 @@ def data_of(prompt):
 
 
 def unified(title, summary="한 일과 결과를 한 줄로 적음", harness="claude", **over):
-    """An `invoke` that records prompts and answers the unified v2 reply (groups: none; one title for
+    """An `invoke` that records prompts and answers the metadata-only reply (one title for
     the campaign); the model is never called."""
     calls = []
 
@@ -234,10 +237,7 @@ def unified(title, summary="한 일과 결과를 한 줄로 적음", harness="cl
         data = data_of(prompt)
         vocab = [item["code"] for item in data["project_meta"]["branches"]]
         entity = {"title": title, "summary": summary, "branches": [vocab[0] if vocab else "GEN"], "kinds": ["평가"]}
-        reply = {"decisions": [{"cycle_id": cid, "verdict": "none", "reason": "근거 한 문장"}
-                               for cid in data["group_target_ids"]],
-                 "new_groups": [], "relations": [],
-                 "metadata": {"campaign": dict(entity), "cycles": {cid: dict(entity, title=f"{title} 사이클")
+        reply = {"metadata": {"campaign": dict(entity), "cycles": {cid: dict(entity, title=f"{title} 사이클")
                                                                      for cid in data["metadata_target_ids"]}},
                  "new_branches": [] if vocab else [{"code": "GEN", "label": "일반", "note": "기본 갈래"}]}
         reply.update(over)
@@ -435,9 +435,7 @@ class AutoSelectionAndWriteTest(AutoBase):
             def invoke(prompt):
                 data = data_of(prompt)
                 vocab = [item["code"] for item in data["project_meta"]["branches"]]
-                body = {"decisions": [{"cycle_id": c, "verdict": "none", "reason": "r"} for c in data["group_target_ids"]],
-                        "new_groups": [], "relations": [],
-                        "metadata": {"campaign": entity(title=title, branches=[vocab[0] if vocab else "GEN"]),
+                body = {"metadata": {"campaign": entity(title=title, branches=[vocab[0] if vocab else "GEN"]),
                                      "cycles": {c: entity(branches=[vocab[0] if vocab else "GEN"])
                                                 for c in data["metadata_target_ids"]}},
                         "new_branches": [] if vocab else [{"code": "GEN", "label": "일반", "note": ""}]}
@@ -478,7 +476,7 @@ class AutoSelectionAndWriteTest(AutoBase):
         result = self.auto(begun, unified("다시 시도해서 얻은 제목"))
         self.assertEqual(result["targets"][0]["status"], "written")
         self.assertEqual(self.meta(begun)["campaign"]["title"], "다시 시도해서 얻은 제목")
-        self.assertEqual({self.record()["cycles"][cid]["verdict"] for cid in self.meta(begun)["cycles"]}, {"unassigned"})
+        self.assertEqual({self.record()["cycles"][cid]["verdict"] for cid in self.meta(begun)["cycles"]}, {"titled"})
 
     def test_a_later_sealed_cycle_gets_its_own_metadata_and_refreshes_the_campaign_summary(self):  # A8
         begun = self.seal(key="later", slug="first", now=PAST)

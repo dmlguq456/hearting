@@ -6,6 +6,9 @@ Reuses `artifact_producer.test.py`'s `ProducerTestBase` (real activate/begin/
 close/finalize fixtures) via importlib, exactly as `tools/artifact_w8_handoff.test.py`
 does, rather than duplicating producer setup here.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import importlib.util
 import io
 import json
@@ -403,11 +406,6 @@ class CycleTitlesTestBase(producer_fixture.ProducerTestBase):
         except FileNotFoundError:
             pass
 
-    @staticmethod
-    def _accept_all_reader(candidate_bytes, root_id, repository_id, *, reader_dir=None):
-        doc = json.loads(candidate_bytes.decode("utf-8"))
-        ids = frozenset(entry["cycle_id"] for entry in doc["entries"])
-        return CT.ReaderResult("accepted", ids, "", "fixture")
 
 
 # ---------------------------------------------------------------------------
@@ -421,7 +419,7 @@ class EligibilityTest(CycleTitlesTestBase):
         self.assertIn(result["cycle_id"], {e["cycle_id"] for e in self._read_declaration()["entries"]})
         P.mark_cycle_superseded(self.root, result["cycle_id"], superseded_by=[],
                                 superseded_event_id="evt_" + "1" * 32)
-        backfill_result = CT.backfill(self.root, reader=self._accept_all_reader)
+        backfill_result = CT.backfill(self.root)
         self.assertEqual(backfill_result["counts"]["ineligible"], {})
         self.assertEqual(backfill_result["counts"]["eligible"], 1)
         self.assertEqual(backfill_result["counts"]["existing_dropped"], 0)
@@ -431,7 +429,7 @@ class EligibilityTest(CycleTitlesTestBase):
         result, outcome = self.seal(title="Digest Mismatch Title")
         manifest_path = Path(outcome["manifest_path"])
         manifest_path.write_bytes(manifest_path.read_bytes() + b" ")
-        backfill_result = CT.backfill(self.root, reader=self._accept_all_reader)
+        backfill_result = CT.backfill(self.root)
         self.assertIn("record-digest-mismatch", backfill_result["counts"]["ineligible"])
 
     def test_symlink_campaign_alias_not_double_counted_real_duplicate_is_ambiguous(self):
@@ -457,7 +455,7 @@ class EligibilityTest(CycleTitlesTestBase):
         shutil.copytree(cycle_dir, clone_dir)
         found_after_clone = CT._walk_manifests(self.root)
         self.assertEqual(len(found_after_clone[result["cycle_id"]]), 2)
-        backfill_result = CT.backfill(self.root, reader=self._accept_all_reader)
+        backfill_result = CT.backfill(self.root)
         self.assertIn("manifest-ambiguous", backfill_result["counts"]["ineligible"])
 
 
@@ -542,11 +540,11 @@ class BackfillTest(CycleTitlesTestBase):
     def test_idempotent_apply_then_new_seal_adds_one_entry(self):
         self.seal(title="Idempotent Apply Title")
         self._declaration_path().unlink()  # simulate a sealed cycle predating this feature
-        first = CT.backfill(self.root, apply=True, reader=self._accept_all_reader)
+        first = CT.backfill(self.root, apply=True)
         self.assertEqual(first["status"], "applied")
         journal_dir = self.root / CT.BACKFILL_JOURNAL_REL
         self.assertEqual(len(list(journal_dir.glob("*.json"))), 1)
-        second = CT.backfill(self.root, apply=True, reader=self._accept_all_reader)
+        second = CT.backfill(self.root, apply=True)
         self.assertEqual(second["status"], "unchanged")
         self.assertEqual(second["post_digest"], first["post_digest"])
         self.assertEqual(len(list(journal_dir.glob("*.json"))), 1)
@@ -564,7 +562,7 @@ class BackfillTest(CycleTitlesTestBase):
         self.seal(title=None, slug="replay-two", primary_body=b"# Shared Report Heading\nbody two\n", now=1_700_000_100)
         sequential_bytes = self._declaration_path().read_bytes()
         self._declaration_path().unlink()
-        result = CT.backfill(self.root, apply=True, reader=self._accept_all_reader)
+        result = CT.backfill(self.root, apply=True)
         self.assertEqual(result["status"], "applied")
         self.assertEqual(self._declaration_path().read_bytes(), sequential_bytes)
 
@@ -583,52 +581,46 @@ class BackfillTest(CycleTitlesTestBase):
         self.assertEqual(entry1["display_title"], "Shared Heading")
         self.assertNotIn(result3["cycle_id"], {e["cycle_id"] for e in doc2["entries"]})
 
-    def test_reader_gate_unavailable_rejected_drift_and_digest_mismatch(self):
-        self.seal(title="Reader Gate Title")
+    def test_apply_refuses_on_drift_and_on_a_post_digest_mismatch(self):
+        self.seal(title="Drift Guard Title")
         self._unlink_declaration()
+        real_render = CT.render_declaration
 
-        def unavailable_reader(candidate_bytes, root_id, repository_id, *, reader_dir=None):
-            return CT.ReaderResult("unavailable", frozenset(), "no-app-dir", None)
-
-        result = CT.backfill(self.root, apply=True, reader=unavailable_reader)
-        self.assertEqual(result["status"], "refused:reader-unavailable")
-        self.assertFalse(self._declaration_path().exists())
-
-        def rejected_reader(candidate_bytes, root_id, repository_id, *, reader_dir=None):
-            return CT.ReaderResult("rejected", frozenset(), "bad", "fixture")
-
-        result2 = CT.backfill(self.root, apply=True, reader=rejected_reader)
-        self.assertEqual(result2["status"], "refused:reader-rejected")
-
-        def drifting_reader(candidate_bytes, root_id, repository_id, *, reader_dir=None):
+        def drifting_render(*args, **kwargs):   # the declaration changes after it was read, before the lock
+            raw = real_render(*args, **kwargs)
             self._declaration_path().parent.mkdir(parents=True, exist_ok=True)
             self._declaration_path().write_bytes(b'{"schema":"drift","artifact_root_id":"","repository_id":"","entries":[]}')
-            doc = json.loads(candidate_bytes.decode("utf-8"))
-            ids = frozenset(entry["cycle_id"] for entry in doc["entries"])
-            return CT.ReaderResult("accepted", ids, "", "fixture")
+            return raw
+
+        with mock.patch.object(CT, "render_declaration", side_effect=drifting_render):
+            result = CT.backfill(self.root, apply=True)
+        self.assertEqual(result["status"], "refused:declaration-drift")
 
         self._unlink_declaration()
-        result3 = CT.backfill(self.root, apply=True, reader=drifting_reader)
-        self.assertEqual(result3["status"], "refused:declaration-drift")
+        result2 = CT.backfill(self.root, apply=True, expect_post_digest="sha256:" + "0" * 64)
+        self.assertEqual(result2["status"], "refused:post-digest-mismatch")
+        self.assertFalse(self._declaration_path().exists())
 
+    def test_apply_needs_no_external_reader_starts_no_process_and_reads_no_viewer_config(self):
+        self.seal(title="Hearting Alone Title")
         self._unlink_declaration()
-        result4 = CT.backfill(self.root, apply=True, reader=self._accept_all_reader,
-                              expect_post_digest="sha256:" + "0" * 64)
-        self.assertEqual(result4["status"], "refused:post-digest-mismatch")
-
-    def test_real_reader_accepts_fixture_candidate_when_deployed(self):
-        app_dir = CT._resolve_reader_dir(None)
-        if app_dir is None:
-            self.skipTest("no deployed cairn-sync reader available")
-        self.seal(title="Real Reader Fixture Title")
-        self._declaration_path().unlink()
-        result = CT.backfill(self.root, apply=False)
-        self.assertEqual(result["reader"]["status"], "accepted")
+        home = Path(self._tmp.name) / "home"
+        (home / ".config" / "cairn-sync").mkdir(parents=True)
+        (home / ".config" / "cairn-sync" / "config.json").write_text('{"app_dir": "/nonexistent"}')
+        started = AssertionError("a process was started")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}), \
+                mock.patch("subprocess.run", side_effect=started), mock.patch("subprocess.Popen", side_effect=started):
+            result = CT.backfill(self.root, apply=True)
+        self.assertEqual(result["status"], "applied")
+        self.assertNotIn("reader", result)
+        self.assertTrue(self._declaration_path().exists())
+        for name in ("ReaderResult", "run_cairn_reader", "_resolve_reader_dir"):
+            self.assertFalse(hasattr(CT, name), name)
 
     def test_dry_run_does_not_write_anything(self):
         self.seal(title="Dry Run Snapshot Title")
         before = self._snapshot()
-        CT.backfill(self.root, apply=False, reader=self._accept_all_reader)
+        CT.backfill(self.root, apply=False)
         after = self._snapshot()
         self.assertEqual(before, after)
         self.assertFalse((self.root / CT.EMISSIONS_REL).exists())
@@ -644,7 +636,7 @@ class BackfillTest(CycleTitlesTestBase):
     def test_restore_backfill_returns_to_pre_state(self):
         self.seal(title="Restore Target Title")
         self._declaration_path().unlink()
-        result = CT.backfill(self.root, apply=True, reader=self._accept_all_reader)
+        result = CT.backfill(self.root, apply=True)
         self.assertEqual(result["status"], "applied")
         restored = CT.restore_backfill(self.root, Path(result["journal"]))
         self.assertEqual(restored["status"], "restored")
@@ -653,7 +645,7 @@ class BackfillTest(CycleTitlesTestBase):
     def test_restore_backfill_refuses_on_drift(self):
         self.seal(title="Restore Drift Title")
         self._declaration_path().unlink()
-        result = CT.backfill(self.root, apply=True, reader=self._accept_all_reader)
+        result = CT.backfill(self.root, apply=True)
         self._declaration_path().write_bytes(b"tampered")
         restored = CT.restore_backfill(self.root, Path(result["journal"]))
         self.assertEqual(restored["status"], "refused:restore-drift")
@@ -665,7 +657,7 @@ class BackfillTest(CycleTitlesTestBase):
 
 
 class CliTest(CycleTitlesTestBase):
-    def test_cli_dry_run_and_apply_without_reader(self):
+    def test_cli_dry_run_then_apply_with_hearting_alone(self):
         self.seal(title="CLI Dry Run Title")
         self._declaration_path().unlink()
         out = io.StringIO()
@@ -675,15 +667,17 @@ class CliTest(CycleTitlesTestBase):
         payload = json.loads(out.getvalue())
         self.assertEqual(payload["status"], "dry-run")
 
-        empty_reader_dir = Path(self._tmp.name) / "empty-reader-dir"
-        empty_reader_dir.mkdir()
         out2 = io.StringIO()
         with mock.patch("sys.stdout", out2):
-            code2 = P.main(["cycle-display-titles-backfill", "--artifact-root", str(self.root),
-                           "--apply", "--reader-dir", str(empty_reader_dir)])
-        self.assertEqual(code2, P.BLOCKED)
+            code2 = P.main(["cycle-display-titles-backfill", "--artifact-root", str(self.root), "--apply"])
         payload2 = json.loads(out2.getvalue())
-        self.assertEqual(payload2["status"], "refused:reader-unavailable")
+        self.assertEqual((code2, payload2["status"]), (P.OK, "applied"))
+        self.assertTrue(self._declaration_path().exists())
+
+    def test_neither_command_takes_an_external_reader_folder(self):
+        for command in (lambda argv: P.main(["cycle-display-titles-backfill", *argv]), CT.main):
+            with mock.patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+                command(["--artifact-root", str(self.root), "--apply", "--reader-dir", str(self.root)])
 
 
 if __name__ == "__main__":

@@ -1,4 +1,7 @@
 """GPU arbitration tests: fake devices, real concurrent CPU-only payloads."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import concurrent.futures
 import importlib.util
 import io
@@ -15,6 +18,8 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import gpu_leases as G
 
 SOURCE = Path(G.__file__).read_text()
@@ -266,7 +271,7 @@ class LeasesTest(unittest.TestCase):
         options["tmux_environment"] = {
             **{key: "" for key in G.session_environment_keys()},
             "AGENT_HOME": "/fixture/pinned-release",
-            "AGENT_DISPATCH_ATTEMPT_ID": "att-current-launch",
+            "AGENT_DISPATCH_ATTEMPT_ID": unique_attempt_id("att-current-launch"),
             "CODEX_THREAD_ID": "current-thread",
             "HEARTING_COMPUTE_RUN_ID": options["run_id"],
             "HEARTING_COMPUTE_HOST": "fixture-host",
@@ -278,7 +283,7 @@ class LeasesTest(unittest.TestCase):
             "PATH": str(fakebin) + os.pathsep + str(self.no_tmux_bin),
             "HEARTING_FAKE_TMUX_RECORDS": str(records),
             "AGENT_HOME": "/launcher/stale-release",
-            "AGENT_DISPATCH_ATTEMPT_ID": "att-launcher-stale",
+            "AGENT_DISPATCH_ATTEMPT_ID": unique_attempt_id("att-launcher-stale"),
             "CODEX_THREAD_ID": "launcher-stale-thread",
             "TMUX": "/tmp/default-tmux,123,0",
             "TMUX_PANE": "%9",
@@ -296,7 +301,7 @@ class LeasesTest(unittest.TestCase):
                           str(wrapper_env_path))
         receipt = self.launch(options, env=server_env, payload_source=payload_source)
         self.assertEqual(output.read_text(),
-                         "/fixture/pinned-release|att-current-launch|current-thread")
+                         "/fixture/pinned-release|" + unique_attempt_id("att-current-launch") + "|current-thread")
         transport = receipt["tmux_transport"]
         self.assertEqual(transport["kind"], "hearting-tmux-v1")
         self.assertRegex(transport["server"], r"^hearting-[0-9a-f]{20}$")
@@ -310,7 +315,7 @@ class LeasesTest(unittest.TestCase):
         self.assertEqual(shlex.split(session["command"])[0:2], ["exec", "env"])
         wrapper_env = json.loads(wrapper_env_path.read_text())
         self.assertEqual(wrapper_env["AGENT_HOME"], "/fixture/pinned-release")
-        self.assertEqual(wrapper_env["AGENT_DISPATCH_ATTEMPT_ID"], "att-current-launch")
+        self.assertEqual(wrapper_env["AGENT_DISPATCH_ATTEMPT_ID"], unique_attempt_id("att-current-launch"))
         self.assertEqual(wrapper_env["CODEX_THREAD_ID"], "current-thread")
         self.assertEqual(wrapper_env["CLAUDE_CODE_SESSION_ID"], "")
         self.assertEqual(wrapper_env["HEARTING_RESOURCE_RUN_ID"], "")
@@ -349,7 +354,7 @@ class LeasesTest(unittest.TestCase):
                                         "\"$AGENT_HOME\" \"$HEARTING_RESOURCE_RUN_ID\" > "
                                         + shlex.quote(str(output)))
                     options["tmux_environment"] = {
-                        "AGENT_HOME": "/current/release", "AGENT_DISPATCH_ATTEMPT_ID": "att-current",
+                        "AGENT_HOME": "/current/release", "AGENT_DISPATCH_ATTEMPT_ID": unique_attempt_id("att-current"),
                         "HEARTING_COMPUTE_RUN_ID": options["run_id"],
                         "HEARTING_COMPUTE_HOST": "old-tmux", "HEARTING_RESOURCE_RUN_ID": "",
                         "HEARTING_GPU_LEASE_RELEASE": "", "CODEX_THREAD_ID": "thread-current",
@@ -361,7 +366,7 @@ class LeasesTest(unittest.TestCase):
                                        "'HEARTING_RESOURCE_RUN_ID','CLAUDE_CODE_SESSION_ID')}))\n") %
                                       str(probe))
                     launch_env = {"PATH": str(fakebin) + os.pathsep + os.environ.get("PATH", ""),
-                                  "AGENT_HOME": "stale", "AGENT_DISPATCH_ATTEMPT_ID": "stale",
+                                  "AGENT_HOME": "stale", "AGENT_DISPATCH_ATTEMPT_ID": unique_attempt_id("stale"),
                                   "HEARTING_RESOURCE_RUN_ID": "stale", "TMUX": "stale",
                                   "TMUX_TEST_CWD": str(self.root / (tag + "-cwd"))}
                     if namespaced:
@@ -384,7 +389,7 @@ class LeasesTest(unittest.TestCase):
                     self.assertEqual(output.read_text(), "/current/release|")
                     wrapper_env = json.loads(probe.read_text())
                     self.assertEqual(wrapper_env["AGENT_HOME"], "/current/release")
-                    self.assertEqual(wrapper_env["AGENT_DISPATCH_ATTEMPT_ID"], "att-current")
+                    self.assertEqual(wrapper_env["AGENT_DISPATCH_ATTEMPT_ID"], unique_attempt_id("att-current"))
                     self.assertEqual(wrapper_env["HEARTING_RESOURCE_RUN_ID"], "")
                     self.assertEqual(wrapper_env["CLAUDE_CODE_SESSION_ID"], "")
 
@@ -813,6 +818,7 @@ class LeasesTest(unittest.TestCase):
         real_run = subprocess.run
         def local_remote(_host, script, **kwargs):
             return real_run(["bash", "-c", script], capture_output=True, text=True, timeout=10,
+                            input=kwargs.get("input"),
                             env={**os.environ, "PATH": str(self.no_tmux_bin)})
         output, warning = io.StringIO(), io.StringIO()
         with mock.patch.object(tool, "load_config", return_value={"run_root": self.root / "managed-runs",
@@ -846,8 +852,8 @@ class LeasesTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("_gpu_test_compute", Path(G.__file__).with_name("compute-hosts.py"))
         tool = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(tool)
-        def check_script(_host, script, **kwargs):
-            body = script.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        def check_script(_host, _command, *, input, **kwargs):
+            body = input.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
             compile(body, "composed-probe", "exec")
             return subprocess.CompletedProcess([], 0, json.dumps({"gpus": [], "gpu_leases": []}), "")
         with mock.patch.object(tool, "remote", side_effect=check_script), \

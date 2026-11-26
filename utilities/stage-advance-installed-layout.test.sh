@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/../tools/run-tests.py" --direct-run bash "$0" "$@"
 # stage-advance-installed-layout.test.sh -- SD-110 block 4 mandatory installed-layout
 # reproduction (plan.md §8.3-2, checklist 4.6-4.8). Modelled on
 # adapters/claude/bin/installed-layout-home.test.sh's bundle/source -> release ->

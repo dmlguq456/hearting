@@ -7,5 +7,5 @@ fragments:
   - profiles/fragments/code-test.md
 expose:
   skills: [code-test, autopilot-code]
-  agents: []
+  agents: [light, balanced, deep]
   triggers: []

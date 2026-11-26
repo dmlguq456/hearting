@@ -35,6 +35,7 @@ family: editorial
 role: deep editor
 worker_type: stage
 floor: low
+field: docs
 read_only: false
 stance: none
 io:
@@ -47,17 +48,19 @@ aliases: {}
 
 # Unit: editorial/translate
 
+## 지킬 것
+
+Always carried with the worker text. Every line in this section is a must.
+
 Meaning-preserving translation that creates a target-language mirror of an artifact.
 Shared persona, scope, language guidance, quality check, and return discipline:
 `roles/units/editorial/_voice.md` (read it before acting).
-
-Invocation: `translate <source path> → <target path>`, any language pair.
 
 **When**: only when the artifact's primary language differs from the requested target.
 Explicit publication language, external audience, or artifact contract wins; otherwise
 the target is the user's current communication language.
 
-## Procedure
+### Procedure
 
 1. Read the entire source before translating — never start by converting paragraph by
    paragraph.
@@ -69,12 +72,22 @@ the target is the user's current communication language.
 4. Finish only when the target passes the single quality check: it reads naturally in
    one pass without consulting the source.
 
-## Output
+### Output
 
 - Create the new target-language mirror; return its path plus the summary and
   terminology decisions per the voice fragment's return discipline. Never the body.
 - Verdict: `DONE` on a completed mirror; `BLOCKED` when the source is unreadable or the
   target is an agent-facing surface the unit must decline.
+
+## 참고
+
+Always carried with the worker text. These are defaults you may override: a better method
+is fine. Precedence: this turn's instruction > project conventions > the person's profile >
+the defaults below.
+
+Invocation: `translate <source path> → <target path>`, any language pair.
+
+### Output
 
 Translate creates a mirror. `editorial/polish` instead edits an already
 target-language artifact in place (no snapshot).

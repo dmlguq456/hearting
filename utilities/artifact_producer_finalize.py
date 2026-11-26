@@ -104,6 +104,7 @@ def _finalize(
     jobs: Optional[Path] = None,
     lock_timeout: Optional[float] = None,
     exclude_symlinks: bool = False,
+    leave_outside: bool = False,
     _admission_lock_fd: Optional[int] = None,
     _recovery_scope: str = "root",
     _prescan: Optional[_Prescan] = None,
@@ -114,6 +115,9 @@ def _finalize(
     checkpoint defaults); a background sweep passes 0 so a held lock defers it.
     The first close of an open cycle reads its files before the admission lock; `_scan_budget`
     (a background sweep's time) lets it stop between files and answer `deferred`.
+    `leave_outside` is for a person's own `finalize --state abandoned` only: the abandon then leaves a
+    regular file outside `artifacts/` where it is instead of refusing on it. Every abandon the runtime
+    makes by itself (a sweep, a cancel, a finish) and every completed close leaves it off and refuses as ever.
     Symbolic links are always left out of the manifest and recorded as
     `excluded_symlinks` on the result and the cycle record (`exclude_symlinks`
     is accepted for old callers and changes nothing)."""
@@ -127,6 +131,7 @@ def _finalize(
         _observe_control_changes(root, cycle_id, now=now)
     if state not in {"completed", "abandoned"}:
         raise ProducerError("finalize-state-invalid", state)
+    leave_outside = leave_outside and state == "abandoned"
     if _admission_lock_fd is not None:
         raise ProducerError("finalize-reentry-forbidden", cycle_id)
     # PRD §13.53.4(3) names the producer admission mutex as the lock that must
@@ -146,7 +151,7 @@ def _finalize(
     # (`_prescan` on that second call).
     prescan = _prescan if _last_try else _prescan_cycle(
         root, cycle_id, unless_recorded=expected_binding, include_open=True,
-        exclude_hidden=exclude_hidden, budget=_scan_budget)
+        exclude_hidden=exclude_hidden, budget=_scan_budget, leave_outside=leave_outside)
     lock_fd = _admission_lock_fd
     interim_guard = contextlib.ExitStack()
     sweep_unresolved: List[Dict[str, Any]] = []
@@ -403,7 +408,8 @@ def _finalize(
                                               marker_observations=marker_observations,
                                               excluded_roots=excluded_roots,
                                               skip_directories=[tree.directory for tree in bundle_trees],
-                                              read_markers=marker_read)
+                                              read_markers=marker_read,
+                                              leave_outside=leave_outside)
             bundle_dirs = [tree.directory for tree in bundle_trees]
             journal = _read_json(journal_path(root, cycle_id)) or {}
             owned = {row.get("locator") for row in journal.get("directory_bundles", [])
@@ -575,11 +581,11 @@ def _finalize(
         exclude_hidden=exclude_hidden, adopt_root_outputs=adopt_root_outputs, abandon_reason=abandon_reason,
         force_abandon_ignoring_lease=force_abandon_ignoring_lease, support_locators=support_locators,
         expected_binding=expected_binding, jobs=jobs, lock_timeout=lock_timeout,
-        exclude_symlinks=exclude_symlinks,
+        exclude_symlinks=exclude_symlinks, leave_outside=leave_outside,
         _recovery_scope=_recovery_scope, _last_try=True, _scan_budget=_scan_budget,
         _prescan=_prescan_cycle(root, cycle_id, unless_recorded=expected_binding,
                                 include_open=True, exclude_hidden=exclude_hidden,
-                                budget=_scan_budget))
+                                budget=_scan_budget, leave_outside=leave_outside))
 
 
 def finalize(root: Path, *, cycle_id: str, **kwargs: Any) -> Dict[str, Any]:
@@ -688,6 +694,8 @@ def _verify_sealed_cycle_locked(root: Path, record: Mapping[str, Any],
                                 historical: bool = False) -> Dict[str, Any]:
     """Prove a closed cycle's record, current manifest and index agree (§45 D-127).
 
+    A D-9 no-lineage record proves the bound identity. Before the owner envelope
+    is sealed, it also proves there are no files the producer would seal.
     What is checked is identity and consistency: the cycle record, the current
     `manifest.json` and the index row all describe the same document, and the
     terminal record that closed the cycle is in it.  Whether the files still
@@ -697,7 +705,7 @@ def _verify_sealed_cycle_locked(root: Path, record: Mapping[str, Any],
     finished; it may be an earlier one, and the result then says the cycle was
     updated since (`updated_since`) while still returning that recorded digest.
     """
-    if record.get("state") != "sealed" or not record.get("sealed_on"):
+    if record.get("state") not in {"sealed", "no-lineage"} or not record.get("sealed_on"):
         raise ProducerError("already-sealed-mismatch", "cycle-record")
     if expected_binding is not None:
         for key in ("cycle_id", "producer_id"):
@@ -709,6 +717,25 @@ def _verify_sealed_cycle_locked(root: Path, record: Mapping[str, Any],
                     record, expected_binding["cycle_record_digest"],
                     campaign_id=expected_binding.get("campaign_id"))):
             raise ProducerError("already-sealed-mismatch", "cycle-identity")
+    if record.get("state") == "no-lineage":
+        # D-9's other successful terminal shape has no manifest or index row.
+        # Never manufacture an empty seal or rejudge completed output inventory.
+        if not expected_binding or not expected_binding.get("cycle_record_digest"):
+            raise ProducerError("already-sealed-mismatch", "cycle-identity")
+        if "manifest_digest" not in record or record["manifest_digest"] is not None:
+            raise ProducerError("already-sealed-mismatch", "manifest")
+        if expected_manifest_digest is not None:
+            raise ProducerError("already-sealed-mismatch", "manifest")
+        if not historical:
+            manifest_path = _record_cycle_manifest_path(root, record, missing_if_reused=True)
+            if manifest_path is not None and _path_entry_present(manifest_path.parent):
+                directory = manifest_path.parent
+                bundles = _scan_directory_bundles(directory)
+                paths, violations = _output_paths(
+                    directory, skip_directories=[tree.directory for tree in bundles])
+                if bundles or paths or violations:
+                    raise ProducerError("already-sealed-mismatch", "no-lineage-output")
+        return {"status": "no-lineage", "cycle_id": record["cycle_id"], "lineage_committed": False}
     manifest_path = _record_cycle_manifest_path(root, record)
     directory = manifest_path.parent
     try:
@@ -887,6 +914,10 @@ def observe_finalized_cycle(root: Path, *, cycle_id: str, expected_binding: Mapp
         raise ProducerError("cycle-unknown", cycle_id)
     if record.get("deleted_at"):
         return _verify_deleted_cycle(record, expected_binding, expected_manifest_digest)
+    if record.get("state") == "no-lineage":
+        # The envelope already proved no output; later locator reuse is unrelated.
+        return _verify_sealed_cycle_locked(root, record, expected_binding,
+            expected_manifest_digest=expected_manifest_digest, historical=True)
     # Cache only the immutable historical consistency proof. Review leases
     # above and the terminal controller's child/process/claim checks remain
     # fresh. Missing optional markers/snapshot directories depend on their

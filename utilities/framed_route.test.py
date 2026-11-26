@@ -6,6 +6,9 @@ code. Only the two runtime gates that need live frame attempts (two current fram
 a released frame-review gate) and the model launch are controlled here; each has a
 refusal test against the unpatched gate.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import contextlib
 import copy
 import hashlib
@@ -300,7 +303,7 @@ class FramedRouteCompileTest(FramedBase):
     def test_the_card_shows_the_two_framed_lines_and_no_other_shape_does(self):
         card = R.compose_card(self.compose())
         self.assertIn("  frame이 방향과 경로를 조립해 제안합니다", card)
-        self.assertIn("  비용: 최상위 모델 두 갈래 · 방향 확인 질문 1회", card)
+        self.assertIn("  비용: 최상위 모델 두 갈래 · 방향 확인 질문 최대 1회", card)
         self.assertIn("framed(standard)", card.splitlines()[0])
         self.assertIn("사람 게이트 frame-review", card.splitlines()[0])
         staged = R.compose_route(
@@ -321,7 +324,7 @@ class FramedRouteCompileTest(FramedBase):
         self.assertTrue(card.startswith("[Route] route-frame \u00b7 framed("), card)
         self.assertIn("human gate frame-review", card.splitlines()[0])
         self.assertIn("  frame assembles and proposes the direction and route", card)
-        self.assertIn("  Cost: two top-model legs \u00b7 one direction-check question", card)
+        self.assertIn("  Cost: two top-model legs \u00b7 at most one direction-check question", card)
         self.assertIn("  Size: nodes=", lines)
         self.assertIn("awaiting frame decision", lines)
         with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"}):
@@ -423,7 +426,7 @@ class FramedRouteCompileTest(FramedBase):
                 "--dispatch-evidence", str(evidence), "--prompt-file", str(task), "--slug", "cli-framed"]
         one = subprocess.run(base + ["--unassigned", "--explain"], text=True, capture_output=True, env=env, check=False)
         self.assertEqual(one.returncode, 0, one.stderr)
-        self.assertIn("비용: 최상위 모델 두 갈래 · 방향 확인 질문 1회", one.stderr)
+        self.assertIn("비용: 최상위 모델 두 갈래 · 방향 확인 질문 최대 1회", one.stderr)
         base += ["--intensity", "strong"]
         done = subprocess.run(
             base + ["--campaign-key", "cli-key", "--capability", "autopilot-refine", "--graph", "review",
@@ -435,7 +438,7 @@ class FramedRouteCompileTest(FramedBase):
         self.assertEqual(route["work_request"]["routing_hints"],
                          {"capability": "autopilot-refine", "graph": "review", "profile": "light"})
         self.assertIn("frame이 방향과 경로를 조립해 제안합니다", done.stderr)
-        self.assertIn("비용: 최상위 모델 두 갈래 · 방향 확인 질문 1회", done.stderr)
+        self.assertIn("비용: 최상위 모델 두 갈래 · 방향 확인 질문 최대 1회", done.stderr)
         explained = subprocess.run(base + ["--unassigned", "--explain"], text=True, capture_output=True,
                                    env=env, check=False)
         self.assertEqual(explained.returncode, 0, explained.stderr)
@@ -454,8 +457,15 @@ class FramedRouteCompileTest(FramedBase):
         route = json.loads(Path(receipt["route_file"]).read_text(encoding="utf-8"))
         self.assertEqual((route["selection"]["shape"], route["capability"]), ("framed", "route-frame"))
 
-        direct = subprocess.run(omitted + ["--shape", "direct", "--slug", "direct-shape", "--explain"],
-                                text=True, capture_output=True, env=env, check=False)
+        # A decided shape names its kind or field: naming neither is refused, naming what is missing.
+        unnamed = subprocess.run(omitted + ["--shape", "direct", "--slug", "direct-shape", "--explain"],
+                                 text=True, capture_output=True, env=env, check=False)
+        self.assertEqual(unnamed.returncode, 64, unnamed.stderr)
+        self.assertIn("compose-capability-required:direct", unnamed.stderr)
+        self.assertIn("--capability", unnamed.stderr)
+        self.assertIn("--field", unnamed.stderr)
+        direct = subprocess.run(omitted + ["--shape", "direct", "--field", "code", "--slug", "direct-shape",
+                                           "--explain"], text=True, capture_output=True, env=env, check=False)
         self.assertEqual(direct.returncode, 0, direct.stderr)
         direct_result = json.loads(direct.stdout.strip().splitlines()[-1])
         self.assertEqual((direct_result["shape"], direct_result["capability"]),
@@ -501,7 +511,33 @@ class RegistryRegistrationTest(unittest.TestCase):
         layout = restore(registry)
         self._assert_audit_report_delta_and_restore(layout)
         self._assert_draft_project_scope_delta_and_restore(layout)
+        self._assert_field_delta_and_restore(layout)
         return layout
+
+    def _assert_field_delta_and_restore(self, registry):
+        # Routing redesign piece 4 intentionally adds the field vocabulary, each
+        # field's default recipe and each recipe's default field; nothing else.
+        self.assertEqual(registry.pop("fields"),
+                         ["plan", "design", "code", "lab", "research", "docs", "admin", "other"])
+        defaults = registry.pop("field_default_recipes")
+        self.assertEqual({field: (row or {}).get("capability") for field, row in defaults.items()}, {
+            "plan": "autopilot-spec", "design": "autopilot-design", "code": "autopilot-code",
+            "lab": "autopilot-lab", "research": "autopilot-research", "docs": "autopilot-draft",
+            "admin": None, "other": None})
+        # The per-field harness weights table is one more top-level table; it is sealed into each
+        # route's own allocation and sits outside every capability's registry digest.
+        table = registry.pop("field_harness_weights")
+        self.assertEqual(set(table), {"checked_on", "rule", "basis", "weights"})
+        self.assertTrue(set(table["weights"]) <= set(CT.FIELDS))
+        for recipe in registry["recipes"]:
+            if recipe["capability"] in ("route-frame", "unit"):
+                self.assertNotIn("field", recipe)   # the frame proposes it; a unit's comes from its head
+                continue
+            field = recipe.pop("field")
+            if isinstance(field, dict):
+                self.assertEqual(set(field), set(recipe["modes"]))
+            else:
+                self.assertIn(field, CT.FIELDS)
 
     def _assert_draft_project_scope_delta_and_restore(self, registry):
         # Authenticate the intentional project-document placement delta before
@@ -546,6 +582,9 @@ class RegistryRegistrationTest(unittest.TestCase):
         self.assertEqual(execute["write_scope"],
                          ["source/**", "spec/**", "checklist.md", "dev_logs/**", "evidence/**"])
         self.assertEqual(execute["guard_preconditions"], ["artifact-order-prechecked"])
+        # The middle cell's declaration (`one_shot_review`) is one additive key on the code recipe (the route
+        # form 3b-1); every other field of the recipe stays what the frozen digests below hold.
+        self.assertEqual(code.pop("one_shot_review")["node"], "impl-review")
         code["quick"]["write_scope"].remove("spec/**")
         del code["quick"]["guard_preconditions"]
         execute["write_scope"].remove("spec/**")
@@ -554,7 +593,8 @@ class RegistryRegistrationTest(unittest.TestCase):
     def test_the_internal_recipe_is_registered_with_the_smallest_surface(self):
         registry = self.registry()
         summary = CT.validate_registry(registry)
-        self.assertEqual((summary["capabilities"], summary["recipes"]), (13, 29))
+        # 13/29 before the `unit` recipe (route_unit.test.py).
+        self.assertEqual((summary["capabilities"], summary["recipes"]), (14, 30))
         self.assertIn(("route-frame", "default"), CT.recipe_keys(registry))
         manifest = json.loads((HERE.parent / "harness-manifest.json").read_text(encoding="utf-8"))
         row = manifest["capabilities"]["route-frame"]
@@ -618,7 +658,7 @@ class RegistryRegistrationTest(unittest.TestCase):
         self.assertFalse(any(n["completion_gate"] == "compose-owner-close"
                              for r in after["recipes"] for n in r["standard_plus"]["nodes"]))
         rest = {k: v for k, v in after["completion_gate_contracts"].items()
-                if k not in ("route-frame", "route-decision", "compose-owner-close")}
+                if k not in ("route-frame", "route-decision", "compose-owner-close", "unit-complete")}
         self.assertEqual(_frozen_digest(rest), FROZEN_GATE_CONTRACT_DIGEST)
 
     def test_other_capabilities_keep_their_registry_digest(self):
@@ -629,7 +669,7 @@ class RegistryRegistrationTest(unittest.TestCase):
                 self.assertEqual(recipe["promotion_signals"].count("gpu"), 1)
                 recipe["promotion_signals"].remove("gpu")
         self.assertEqual(
-            sorted({r["capability"] for r in registry["recipes"]} - {"route-frame"}),
+            sorted({r["capability"] for r in registry["recipes"]} - {"route-frame", "unit"}),
             sorted(FROZEN_CAPABILITY_REGISTRY_DIGESTS),
         )
         for capability, digest in FROZEN_CAPABILITY_REGISTRY_DIGESTS.items():
@@ -637,7 +677,7 @@ class RegistryRegistrationTest(unittest.TestCase):
                 self.assertEqual(CT.capability_registry_digest(registry, capability), digest)
 
     def test_the_producer_admits_the_internal_capability_and_checks_route_equality(self):
-        self.assertEqual(P.INTERNAL_CAPABILITIES, ("route-frame",))
+        self.assertEqual(P.INTERNAL_CAPABILITIES, ("route-frame", "unit"))
         self.assertNotIn("route-frame", P.ENTRY_CAPABILITIES + P.STAGE_CAPABILITIES)
 
 

@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Deterministic entry-router layer gate, including owner-link resolution."""
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import json
 import re
@@ -143,7 +146,7 @@ portable_sources = harness_manifest.portable_bundle_files(ROOT)
 portable_paths = {path.relative_to(ROOT).as_posix() for path in portable_sources}
 assert "docs/lab-execution-access.md" in portable_paths, "linked lab access document is absent from plugin closure"
 assert "core/references/session-shell.md" in portable_paths, "session shell contract is absent from plugin closure"
-assert len(portable_sources) == 191, f"expected 191 portable bundle sources, got {len(portable_sources)}"
+assert len(portable_sources) == 208, f"expected 208 portable bundle sources, got {len(portable_sources)}"
 assert {path for path in portable_paths if path not in {
     path.relative_to(ROOT).as_posix()
     for section in ("core", "capabilities", "roles")

@@ -21,9 +21,9 @@ capability/stage contract. It does not explicitly read the full adapter
 target project's `AGENTS.md`; no verified per-worker disable switch is claimed,
 so this is prompt isolation with a documented physical-masking fallback.
 
-Registered-headless child attempts are exact-parent bound across both Codex and
-Claude Code. Codex liveness/harvest normalize Codex `turn.completed` and Claude
-stream-json `result` envelopes, while parent-death reconciliation uses only
+Registered-headless child attempts are exact-parent bound across Codex, Claude
+Code and OpenCode. Codex liveness/harvest normalize Codex `turn.completed`, Claude
+stream-json `result` and OpenCode terminal envelopes, while parent-death reconciliation uses only
 sealed attempt and PID/start/PGID evidence; runtime-native subagents are a
 separate surface.
 
@@ -69,7 +69,7 @@ uninstall removes only it.
 
 The always-loaded `adapters/codex/AGENTS.md` keeps purpose, judgment, where
 to look, and the instruction to follow the next action the runtime prints.
-The command detail it used to carry lives here; command output stays
+The command detail lives here; command output stays
 authoritative for current support.
 
 If the memory prompt hook is unavailable, record `recall` or `skip` with
@@ -116,7 +116,7 @@ adapter row unverified/unsupported.
 The exact-batch sidecar checks consumed and pending messages before sending;
 ambiguous sends may repeat. Only an exact Hearting item may restart an interrupted
 parent. The TUI owns questions and approvals; headless owners keep their separate
-supervisor. Default mode asks via waiting `request_user_input` (`default_mode_request_user_input`); it submits empty at 120 s (countdown from 60 s; typing cancels). Empty is no decision: restate at turn end (Fleet keeps `answer needed`); `_async`: fallback.
+supervisor. A question to the person is a Hearting question (`hearting run questions ask`); if the model calls `request_user_input` anyway, `PreToolUse` registers it the same way and refuses the call (`pretooluse-question-redirect.py`), and a registration failure lets the native tool run: it submits empty at 120 s (countdown from 60 s; typing cancels), and empty is no decision: restate at turn end (Fleet keeps `answer needed`).
 Arbitrary detached shell output still does not auto-resume. For non-dispatch
 long-running work, obey `preflight.sh loop-info runtime-watch` and its explicit automatic-follow-up-impossible fallback
 instead of ending with a detached completion promise. The native queue never
@@ -132,7 +132,7 @@ Check `preflight.sh headless [--check] [--require-hook-trust] <worktree>`.
 `preflight.sh dispatch --dry-run|--register|--start [--require-hook-trust]`
 runs the raw wrapper; the route commands reach it with the sealed tuple.
 A direct interactive launch selects completion by the parent runtime: a Codex
-parent uses its native queue and a Claude parent uses Claude resume. Native
+parent uses its native queue, a Claude parent uses Claude resume and an OpenCode parent the `opencode-turn` carrier. Native
 queue delivery does not force Stop/PreToolUse trust. Keep the parent
 conversational; a wait is never an in-model `sleep`/liveness loop.
 `--allow-unmanaged-parent-poll` stays operator-only. Legacy stamped Stop state
@@ -187,19 +187,25 @@ read-only unless the user explicitly opts into a separately validated feature.
 | autopilot routing | Codex exposes `autopilot-*` as native Skills/plugin entries and can select matching Skills from descriptions, but the adapter does not emulate Claude slash-command routing. `prompt-signal` emits the portable routing contract and Codex-native entrypoint surface; for spec-backed work, rely on spec-read/capability gates plus the relevant Skill or explicit dispatch wrapper |
 | subagent delegation | Codex supports native subagent workflows, but they are explicit or main-dispatched. Run `adapters/codex/bin/preflight.sh subagent-info --check` to verify the `multi_agent` runtime feature and projected custom agents before claiming delegation parity. Use prompt-directed subagents or `preflight.sh dispatch`; do not treat UI/status state as an automatic delegation trigger |
 
-Native Codex owns question timing. Runtime activation enables
+A question to the person goes to the Hearting question board: `PreToolUse` on
+`request_user_input` and `request_user_input_async` registers it and refuses the native call
+(`utilities/native_question_redirect.py`, the same behavior as Claude and OpenCode). The
+native tool below is only the fall-through when registration fails or the caller is a worker.
+The old `PostToolUse(request_user_input)` frame-answer bridge stays in `hooks.json` as a no-op
+so the other entries keep their place and their current-hash hook trust.
+Native Codex owns the timing of the native question box. Runtime activation enables
 `features.default_mode_request_user_input` in interactive `$CODEX_HOME/config.toml`
 when the existing feature table can be safely extended; explicit false and
 unsupported feature forms are preserved and reported as a config conflict, while
 the harness identity block is still merged.
-Worker homes override the feature to false. In Default mode use the waiting
-`request_user_input`: its countdown is hidden for 60 seconds, then visibly
-counts down for 60 seconds before submitting an empty answer. Typing or pasting
-cancels the countdown and the box waits for submit. Empty answers never satisfy
-a human decision gate; restate an open question at turn end and keep Fleet's
-ledger based `answer needed` indication active until a real answer is recorded.
-Use `request_user_input_async` only in an interactive session when the waiting
-tool is unavailable; a registered worker has no reader for either tool. Do not
+Worker homes override the feature to false. When the native box does appear (the
+fall-through above), the waiting `request_user_input` hides its countdown for 60
+seconds, then visibly counts down for 60 seconds before submitting an empty answer;
+typing or pasting cancels the countdown and the box waits for submit. Empty answers
+never satisfy a human decision gate; restate an open question at turn end and keep
+Fleet's ledger based `answer needed` indication active until a real answer is
+recorded. `request_user_input_async` is the box Codex offers when the waiting tool is
+unavailable; a registered worker has no reader for either tool. Do not
 open repeated boxes or switch to Plan mode. The normal frame start
 receipt keeps `human_wait.question_block` and the existing interview artifact;
 empty/timeout/accepted responses return the same pending question without
@@ -229,7 +235,7 @@ Registry writes and harvest rewrites are serialized with a `.lock` file; `_kerne
 | design scaffold assets | Use `<agent-home>/scaffolds/` for reusable HTML scaffold assets. `codex_setting/scaffolds` points at the Codex-owned projection under `adapters/codex/scaffolds/`, not Claude runtime paths |
 | memory injection | Codex `SessionStart` hook bridge automatically emits the same bounded summary as Claude/OpenCode on startup, resume, clear and compact; `CODEX_SESSION_MEMORY_INJECT=0` disables it (`1` still enables it). A shared app-server daemon runs hooks with the environment it started with, so a later `CODEX_SESSION_MEMORY_INJECT=0 codex` does not reach them; set `"codex_session_memory_inject": false` in `${XDG_CONFIG_HOME:-$HOME/.config}/hearting/memory-sync.json` (read at every start; a flag in the hook environment wins) or launch with `--no-daemon`. Every start emits the summary; when resume or clear is followed by an immediate compact before the first request, that request carries two copies (accepted rather than risking none). It emits `adapters/codex/bin/preflight.sh memory [cwd]` through `hookSpecificOutput.additionalContext`; the same command is available for manual lookup |
 | memory sync | Nothing runs at Codex `SessionEnd` (D-82; the `preflight.sh session-end` subcommand is gone) and there is no automatic distiller (D-78). `mem.py` exchanges in the background after a successful write (20-second batching window) and after a main-session read when the last receive is older than ten minutes; the remote is used only when `MEM_SYNC_REMOTE=1` (or the shared policy file) enables it, and with it off the exchange stops at the local dump commit. The adapter passes the user's `MEM_SYNC_REMOTE` and deprecated `MEM_DUMP_PUSH` environment unchanged and never forces remote exchange. A failed run leaves one line for the next `mem` command; `MEM_EXCHANGE_AUTO=0` turns the automatic exchange off. `SessionStart` with `source` `compact` or `clear` empties the session's candidate display history. Codex `Stop` never starts this lifecycle; its only side effect is clearing the exact Fleet interaction marker |
-| memory candidate exposure and deeper retrieval | Codex `UserPromptSubmit` runs the fail-open capsule-only candidate bridge and adds at most six headline-and-ID candidates within 1,200 UTF-8 bytes. The bridge publishes a same-turn receipt; `PreToolUse` requires it before main-session material mutation. The model ignores unrelated candidates and reads relevant records in full. Use `preflight.sh recall <query> [cwd] [session-id]` for deeper search or `recall-gate` as the hook-failure recovery path. No prompt classifier or body injection is attached |
+| memory candidate exposure and deeper retrieval | Codex `UserPromptSubmit` runs the fail-open capsule-only candidate bridge and adds at most three headline-and-ID candidates within 600 UTF-8 bytes. The bridge publishes a same-turn receipt; `PreToolUse` requires it before main-session material mutation. The model ignores unrelated candidates and reads relevant records in full. Use `preflight.sh recall <query> [cwd] [session-id]` for deeper search or `recall-gate` as the hook-failure recovery path. No prompt classifier or body injection is attached |
 | oncall briefing injection | Codex `UserPromptSubmit` hook bridge runs `adapters/codex/bin/preflight.sh briefing [cwd]` and aggregates matching output into `hookSpecificOutput.additionalContext`; run it manually when hooks are unavailable |
 | loop guidance | `adapters/codex/bin/preflight.sh loop-info <oncall|note|study|drill|runtime-watch>` reports whether a loop has a Codex manual contract, unsupported executable projection, or missing native implementation; `note` is application-owned and the harness exposes only the optional app-neutral `artifact-sink` port |
 | capability mapping | `adapters/codex/bin/preflight.sh capability-info <capability>` reports Codex's native Skill realization and instruction-only or tool-contract status; an optional marketplace copy is informational only, and root Skill compatibility references report `compat_reference=not-projected` |
@@ -279,8 +285,9 @@ the Codex projection. Codex exposes its adapter-owned liveness command through
 `adapters/codex/bin/preflight.sh liveness [jobs.log]`, backed by
 `~/.codex/sessions/**/*.jsonl` metadata and mtime.
 Codex also exposes `adapters/codex/bin/preflight.sh harvest` for registry-only
-status and selected `open` to `done` updates. It intentionally does not merge
-branches or delete worktrees.
+status and selected `open` to `done` updates; it runs the shared
+`utilities/dispatch-harvest.py`, the entry point completion receipts name. It
+intentionally does not merge branches or delete worktrees.
 
 ## Native Skill Projection
 
@@ -392,8 +399,6 @@ entrypoints are represented by Codex-native Skills and the installable
 
 ## Native Hook Projection
 
-Write-denying hook gates are retired; no write preflight or core-read marker is required.
-
 Fleet reads structured rollout question evidence. Blocking `request_user_input`
 calls remain pending until their matching output or turn boundary. Async
 `request_user_input_async` calls retain only call/turn identity, time and
@@ -466,7 +471,7 @@ route additionally seals one of these profiles from the single
 | `balanced` | configured light tier / `high` | long multi-step execution after the decision is settled |
 | `light` | configured light tier / `medium` | routine implementation, verification, reporting, and breadth legs |
 | `mini` | configured mini tier / `low` | lifecycle and micro-semantic helpers only; substantive dispatch-depth-1/2 work is rejected |
-| `top` | configured top tier / `xhigh` | exception above deep: the main-session-only model (`CFG_MAIN_SESSION_ONLY_MODELS`, enforced by this wrapper since 2026-09-10; a user copy without the key stays selected whole-file and unrestricted, receipt `main_session_only_policy=absent`), reachable only from a route that seals the explicit `top` profile on a dispatch-depth-1 owner (refused without it); no cascade in or out, no `--model` override, and `--inherit-model-settings` is refused while the key names a model (the same rule on every adapter) |
+| `top` | configured top tier / `xhigh` | exception above deep: the main-session-only model (`CFG_MAIN_SESSION_ONLY_MODELS`, enforced by this wrapper since 2026-09-10; a user copy without the key stays selected whole-file and unrestricted, receipt `main_session_only_policy=absent`), reachable only from a route that seals the explicit `top` profile on a dispatch-depth-1 owner, or, at intensity `strong`+, on a depth-2 stage worker or review/verification leg the person named in `--explicit-profiles` (refused without it); no cascade in or out, no `--model` override, and `--inherit-model-settings` is refused while the key names a model (the same rule on every adapter) |
 
 Non-route role compatibility overrides remain explicit and config-derived:
 
@@ -508,7 +513,7 @@ Claude Code-specific files remain valid as implementation references, not as Cod
 When porting a behavior, copy the underlying invariant from `CORE.md`, `WORKFLOW.md`, `CONVENTIONS.md`, or `OPERATIONS.md`; then map it to Codex's tool, approval, and session model.
 # Material-route boundary
 
-Hook write gates are retired except the two kept core write gates and the route presence gate (`core/HOOKS.md`). Spec-read observations, design checks, memory and session signals remain available.
+Hook write gates: the two core write gates and the route presence gate (`core/HOOKS.md`). Spec-read observations, design checks, memory and session signals remain available.
 
 Resource-runner startup requires a sealed route, exact detached resource node,
 and smoke attestation before launch state or a child process exists. Installing

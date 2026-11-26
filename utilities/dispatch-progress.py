@@ -361,6 +361,7 @@ def watchdog(args, now):
             "attempt_id": args.attempt_id, "route_id": args.route_id,
             "route_node": args.route_node, "heartbeat": hb or None,
             "tool": tool_event,
+            "turn": supervision.runtime_turn_mark(metadata),
             "registry_transition": {
                 "status": fields[1], "note": metadata.get("note", ""),
             },

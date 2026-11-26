@@ -1,6 +1,9 @@
 """Pinned Herdr asset, user-config migration, and native registration fixtures."""
 
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import importlib.util
 import json
@@ -123,7 +126,9 @@ class PinnedSourceTest(unittest.TestCase):
                 },
             }
             settings_path.write_text(json.dumps(original_settings), encoding="utf-8")
-            with mock.patch.object(activation, "_config_path", return_value=settings_path):
+            with mock.patch.object(activation, "_config_path", return_value=settings_path), \
+                    mock.patch.object(activation, "_claude_global_config_path",
+                                      return_value=root / ".claude.json"):
                 activation._merge_claude_settings(active_root, None)
             merged = json.loads(settings_path.read_text(encoding="utf-8"))
             start = merged["hooks"]["SessionStart"]
@@ -140,7 +145,9 @@ class PinnedSourceTest(unittest.TestCase):
                      if herdr._owned_state_hook(hook.get("command"))]
             self.assertEqual(owned, [("SessionStart", herdr.CLAUDE_SESSION_COMMAND)])
             after_first = settings_path.read_bytes()
-            with mock.patch.object(activation, "_config_path", return_value=settings_path):
+            with mock.patch.object(activation, "_config_path", return_value=settings_path), \
+                    mock.patch.object(activation, "_claude_global_config_path",
+                                      return_value=root / ".claude.json"):
                 activation._merge_claude_settings(active_root, None)
             self.assertEqual(settings_path.read_bytes(), after_first)
 

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Behaviour scenarios C: route presence/start/close, session tidy card, Fleet retire.
+"""Behaviour scenarios C: route presence/start/close and Fleet retire.
 
 Loaded by ``harness_behavior_scenarios.py`` (``SCENARIOS`` below).  Each scenario
 runs on the real Claude, Codex and OpenCode TUIs in the base harness's throwaway
-HOME, loopback model and private tmux socket.
+HOME, loopback model and private tmux socket (``retire`` also on ``--surface herdr``).
+The session tidy is measured by ``tidy-compact*`` (``harness_behavior_cases_tidy_compact``):
+the old ``session-tidy-card`` scenario typed ``/clear``, which tidy no longer does.
 
 Isolation added here, inside this file only:
 
@@ -352,163 +354,28 @@ class RouteStartClose(Scenario):
 
 
 # --------------------------------------------------------------------------
-# 2. session-tidy-card
-# --------------------------------------------------------------------------
-
-CARD_MARK = "SCENARIO-CARD-MARK"
-CARD_BODY = (f"원래 목표: {CARD_MARK} 카드 전달 검증\n"
-             "진행 중: 픽스처 세션 정리\n기다리는 결정: 없음\n다음 할 일: 새 대화에서 이어가기\n"
-             "관련 세션: 없음")
-CLEAR_COMMAND = {"claude": "/clear", "codex": "/clear", "opencode": "/new"}
-
-
-class SessionTidyCard(Scenario):
-    name = "session-tidy-card"
-    summary = ("Stop/session.idle observer records the turn's marked wait (and idle booking); "
-               "a manual tidy card reaches the next conversation after the clear.")
-
-    def prepare(self, run):
-        hide_herdr(run)
-        install_tui(run)
-        policy = Path(run.home.env["XDG_CONFIG_HOME"]) / "hearting" / "session-tidy.json"
-        policy.parent.mkdir(parents=True, exist_ok=True)
-        # Low floor so the fixture's tiny usage qualifies; a long wait so nothing fires.
-        policy.write_text(json.dumps({"idle": {"enabled": True, "wait_seconds": 3600,
-                                               "min_tokens": 1}}), encoding="utf-8")
-        self.phase = {}
-
-    def script(self, run):
-        tidy = ('python3 "$AGENT_HOME/utilities/session_tidy.py" tidy --text '
-                + shlex.quote(CARD_BODY) + " 2>&1; echo FX-TIDY-RC=$?")
-
-        def answer(record, earlier):
-            text = record["last_text"]
-            if record["last_kind"] == "tool":
-                return Reply("정리 요청 완료")
-            if "SCENARIO-TIDY-ONE" in text:
-                return Reply("확인했습니다.\n[답변 필요] SCENARIO-TIDY-Q 다음 단계를 진행할까요?")
-            if "SCENARIO-TIDY-TWO" in text and not any(
-                    "FX-TIDY-RC" in (r["reply"].get("shell") or "") for r in earlier):
-                return Reply(shell=tidy)
-            return Reply(f"이어서 진행합니다 {record['main_index']}")
-        return answer
-
-    def _waits(self, run):
-        root = state_home(run) / "hearting" / "human-waits"
-        found = []
-        for path in sorted(root.glob("*.json")):
-            with contextlib.suppress(OSError, ValueError):
-                value = json.loads(path.read_text(encoding="utf-8"))
-                found.append({k: value.get(k) for k in ("source", "harness", "session_id",
-                                                        "seat_key", "question")})
-        return found
-
-    def _reservations(self, run):
-        root = state_home(run) / "hearting" / "session-tidy" / "clear"
-        found = []
-        for path in sorted(root.glob("*.json")):
-            with contextlib.suppress(OSError, ValueError):
-                value = json.loads(path.read_text(encoding="utf-8"))
-                found.append({"origin": value.get("origin"), "status": value.get("status"),
-                              "harness": value.get("harness"), "sid": value.get("sid"),
-                              "seat_kind": (value.get("seat") or {}).get("kind"),
-                              "idle_tokens": (value.get("idle") or {}).get("tokens"),
-                              "new_session": value.get("new_session"),
-                              "clear_claim": {k: (value.get("clear_claim") or {}).get(k)
-                                              for k in ("state", "outcome")},
-                              "reason": value.get("reason")})
-        return found
-
-    def drive(self, run):
-        ev = run.evidence
-        run.prompt("SCENARIO-TIDY-ONE 확인만 해 주세요")
-        run.wait_idle(6, 90)
-        waits = wait_for(lambda: [w for w in self._waits(run)
-                                  if "SCENARIO-TIDY-Q" in str(w.get("question"))], 25)
-        ev["idle_observer_waits"] = self._waits(run)
-        ev["reservations_after_turn1"] = self._reservations(run)
-        idle_booked = any(r.get("origin") == "idle" for r in ev["reservations_after_turn1"])
-        observer_ok = bool(waits)
-        run.prompt("SCENARIO-TIDY-TWO 세션을 정리해 주세요")
-        before_clear = run.wait_idle(8, 120)
-        tidy_out = next((t for t in tool_texts(run) if "FX-TIDY-RC" in t), "")
-        ev["tidy_output"] = tidy_out[-1500:]
-        ev["reservations_after_tidy"] = self._reservations(run)
-
-        def conversation(requests):
-            # The detached memory worker is a separate headless session; leave it out.
-            return [r for r in requests if "ops/session-tidy-memory" not in r["text"]
-                    and "SCENARIO-TIDY-ONE" not in r["text"]]
-
-        def sent():
-            return [r for r in self._reservations(run)
-                    if r["clear_claim"].get("state") or r.get("new_session")
-                    or r.get("status") == "cleared"]
-        manual = "clear=manual" in tidy_out
-        helper_sent = False if manual else bool(wait_for(sent, 60, 0.5))
-        ev["helper_clear_sent"] = helper_sent
-        if helper_sent:
-            # The helper typed the clear; the person (or its continue) speaks next.
-            ev["helper_continue_seen"] = bool(wait_for(
-                lambda: conversation(run.main_requests()[before_clear:]), 20, 1))
-        else:
-            # Outside a provable pane the tidy asks the person to clear (hint) themselves.
-            run.tui.key("Escape")
-            time.sleep(0.5)
-            run.tui.type_text(CLEAR_COMMAND[run.harness])
-            time.sleep(5)
-            run.note(f"tidy answered {'clear=manual' if manual else 'no helper clear'}; "
-                     f"typed {CLEAR_COMMAND[run.harness]} as the person would")
-        memory_worker = [r for r in run.main_requests()
-                         if "ops/session-tidy-memory" in r["text"]]
-        ev["memory_worker_requests"] = len(memory_worker)
-        run.prompt("SCENARIO-TIDY-THREE 이어서 해 주세요")
-        run.wait_idle(6, 90)
-        after = conversation(run.main_requests()[before_clear:])
-        carded = [r for r in after if CARD_MARK in r["text"]]
-        ev["post_clear_requests"] = len(after)
-        ev["card_in_new_conversation"] = bool(carded)
-        if carded:
-            idx = carded[0]["text"].find(CARD_MARK)
-            ev["card_excerpt"] = carded[0]["text"][max(0, idx - 300): idx + 300]
-        ev["reservations_final"] = self._reservations(run)
-        ev["screen_card_hint"] = CARD_MARK in run.tui.screen() or "원래 목표" in run.tui.screen()
-        verdicts = []
-        if not observer_ok:
-            run.note("idle observer wrote no marked-wait record after the turn")
-            verdicts.append("fail")
-        if not idle_booked:
-            run.note("no idle booking after turn 1 (see reservations_after_turn1)")
-        if not after:
-            run.note("no request from a new conversation after tidy/clear")
-            verdicts.append("fail")
-        elif not carded:
-            run.note("new conversation did not receive the tidy card"
-                     + (" (no provable pane seat: tidy answered clear=manual)" if manual else ""))
-            verdicts.append("gap" if manual else "fail")
-        if not verdicts:
-            run.note("observer wait record + card in new conversation"
-                     + (" + idle booking" if idle_booked else ""))
-            return "pass"
-        return "fail" if "fail" in verdicts else verdicts[0]
-
-
-# --------------------------------------------------------------------------
-# 3. retire
+# 2. retire
 # --------------------------------------------------------------------------
 
 WAIT_SOURCE = {"claude": "claude-asktool", "codex": "codex-appserver",
                "opencode": "opencode-question"}
 
 
+def _on_herdr(run) -> bool:
+    """The driver's ``--surface herdr``: the TUI is an agent of the private Herdr server."""
+    return getattr(_base_module(run), "SURFACE", "tmux") == "herdr"
+
+
 class Retire(Scenario):
     name = "retire"
     summary = ("peer-steward retire sends the normal exit to an idle session in the private "
-               "tmux pane; the TUI exits to its shell and the session-end cleanup runs.")
+               "tmux pane (or private Herdr pane with --surface herdr); the TUI exits and the "
+               "session-end cleanup runs.")
 
     def prepare(self, run):
-        hide_herdr(run)
-        install_tui(run, host_shell=True)
+        if not _on_herdr(run):
+            hide_herdr(run)
+            install_tui(run, host_shell=True)
 
     def script(self, run):
         def answer(record, earlier):
@@ -528,7 +395,8 @@ class Retire(Scenario):
         if not sid:
             run.note("native session id not found")
             return "inconclusive"
-        env = tmux_env(run)
+        herdr = _on_herdr(run)
+        env = dict(run.home.env) if herdr else tmux_env(run)
         request_id = "fx-req-1"
         seeded = py(run, (
             "from fleet import interaction; import sys\n"
@@ -537,9 +405,9 @@ class Retire(Scenario):
             request_id)
         sidecar = state_home(run) / "agent-fleet" / "interactions" / run.harness / f"{sid}.json"
         ev["wait_seeded"] = seeded.stdout.strip() == "True" and sidecar.exists()
-        target = pane_address(run)
+        target = run.tui.panes.get(run.tui.name, run.tui.name) if herdr else pane_address(run)
         ev["pane"] = target
-        ev["pane_command_before"] = run.tui.pane_command()
+        ev["pane_command_before"] = None if herdr else run.tui.pane_command()
         watcher = ProcessWatch(run.home.root, (
             "sessionend-lifecycle", "fleet-interaction-state", "session_summary_trigger",
             "peer-steward"))
@@ -556,14 +424,17 @@ class Retire(Scenario):
             run.note("retire did not exit the TUI; sent its exit keys directly")
             if run.harness == "claude":
                 run.tui.key("Escape")
-                run.tui._tmux("send-keys", "-t", "scenario", "-l", "/exit")
+                if herdr:
+                    run.tui.herdr("pane", "send-text", target, "/exit", timeout=10)
+                else:
+                    run.tui._tmux("send-keys", "-t", "scenario", "-l", "/exit")
                 time.sleep(0.8)
                 run.tui.key("Enter")
             else:
                 run.tui.key("C-d")
             exited = bool(wait_for(lambda: not run.tui.alive(), 30))
             ev["manual_keys_exit"] = exited
-        ev["pane_command_after"] = run.tui.pane_command()
+        ev["pane_command_after"] = None if herdr else run.tui.pane_command()
         exited_at = time.time()
         # SessionEnd / session.deleted children are detached; give them a bounded while.
         cleared = bool(wait_for(lambda: not sidecar.exists(), 45, 0.5))
@@ -597,7 +468,9 @@ class Retire(Scenario):
                 duty = json.loads(path.read_text(encoding="utf-8"))
                 duties.append({k: duty.get(k) for k in ("kind", "state", "result")})
         ev["retire_obligations"] = duties
-        ev["pane_closed"] = run.tui._tmux("has-session", "-t", "scenario").returncode != 0
+        ev["pane_closed"] = (run.tui.herdr("agent", "get", run.tui.name, timeout=10).returncode != 0
+                             if herdr else
+                             run.tui._tmux("has-session", "-t", "scenario").returncode != 0)
         if not exited:
             run.note("TUI did not exit")
             return "fail"
@@ -617,4 +490,4 @@ class Retire(Scenario):
         return "fail"
 
 
-SCENARIOS = [RouteStartClose, SessionTidyCard, Retire]
+SCENARIOS = [RouteStartClose, Retire]

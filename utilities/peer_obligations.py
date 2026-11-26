@@ -52,8 +52,8 @@ _LEGACY_PENDING_RECEIPT_PROVENANCE = "validated-legacy-pending-receipt-v1"
 _OBLIGATION_RETENTION_NS = 14 * 86400 * 1_000_000_000
 _READINESS_RETENTION_NS = 86400 * 1_000_000_000
 _RETENTION_DUE_NS = 300 * 1_000_000_000
-_RETENTION_EXAMINE_LIMIT = 64
-_RETENTION_REMOVE_LIMIT = 16
+# Stat-only re-checks a rebuild makes before it calls the record set settled.
+_REBUILD_SETTLE_ROUNDS = 3
 _DIRECTORY_FLAGS = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
                     | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
 _ACTIVE_INDEX_FLOCK = fcntl.flock
@@ -316,6 +316,102 @@ def _service_exec_environment(source_root: Path, target_root: Path, environ=None
             else:
                 rewritten.append(str(target_root / relative))
         child_env["PYTHONPATH"] = os.pathsep.join(rewritten)
+    return child_env
+
+
+def _worker_built_home(path) -> bool:
+    """Whether ``path`` is a home the worker home builder made (it leaves its manifest)."""
+    try:
+        return (Path(path).expanduser() / "worker-home.json").is_file()
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return False
+
+
+def _same_directory(left, right) -> bool:
+    try:
+        return (Path(left).expanduser().resolve(strict=False)
+                == Path(right).expanduser().resolve(strict=False))
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return False
+
+
+_WORKER_IDENTITY_VARIABLES = (
+    "AGENT_SESSION_ROLE", "AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH",
+    "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID", "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+    "AGENT_CODEX_MANAGED_CONTROL_SOCKET")
+
+
+def _original_home(path, pinned=None):
+    """The user's own home behind a worker-built ``path``, or None when unknown.
+
+    Each worker home's manifest records the home it replaced
+    (``model_config_home``; Codex homes also ``codex_config_home``), so a home
+    built under another worker's home still leads back to the user's. A home
+    built before the manifest carried it falls back to the pinned value the
+    worker was started with.
+    """
+    current = path
+    for _hop in range(8):
+        if not _worker_built_home(current):
+            # A pinned home that no longer exists is no home: the default applies.
+            return str(current) if Path(current).expanduser().is_dir() else None
+        try:
+            manifest = json.loads((Path(current).expanduser() / "worker-home.json")
+                                  .read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            manifest = None
+        step = None
+        if isinstance(manifest, dict):
+            step = manifest.get("model_config_home") or manifest.get("codex_config_home")
+        if not isinstance(step, str) or not step:
+            return (pinned if pinned and not _worker_built_home(pinned)
+                    and Path(pinned).expanduser().is_dir() else None)
+        current = step
+    return None
+
+
+def _user_service_environment(environ):
+    """The shared runner's environment: the user's own harness homes, whoever started it.
+
+    The runner is one service of this user, so it reads the same native records
+    no matter which session's hook starts it. A registered worker masks its own
+    harness home (Claude ``CLAUDE_CONFIG_DIR``, Codex ``CODEX_HOME``) with a
+    private home, marks it with ``HEARTING_WORKER_HOME`` and pins the home it
+    replaced in ``HEARTING_MODEL_CONFIG_HOME``. A runner inheriting that mask
+    would look for the user's sessions in the worker's private home and find
+    none. Here every worker-built value goes back to the user's home it
+    replaced (followed through nested workers and mixed harnesses by each home's
+    manifest), or to the native default when that is the default; a home the
+    user chose is kept. The worker markers and the identity variables that make
+    the runner look like a worker (role, dispatch, the harness session ids and
+    the managed control socket) stay with the worker; any other environment is
+    returned unchanged (``None`` keeps meaning "inherit this process's
+    environment").
+    """
+    source = os.environ if environ is None else environ
+    worker_home = source.get("HEARTING_WORKER_HOME")
+    if not worker_home:
+        return environ
+    child_env = dict(source)
+    child_env.pop("HEARTING_WORKER_HOME", None)
+    pinned = child_env.pop("HEARTING_MODEL_CONFIG_HOME", None)
+    for key in _WORKER_IDENTITY_VARIABLES:
+        child_env.pop(key, None)
+    for key in tuple(child_env):
+        if key.startswith("OPENCODE_DISPATCH"):
+            child_env.pop(key)
+    home = Path(child_env.get("HOME") or Path.home()).expanduser()
+    for name, default in (("CLAUDE_CONFIG_DIR", home / ".claude"),
+                          ("CODEX_HOME", home / ".codex")):
+        value = child_env.get(name)
+        own_mask = bool(value) and _same_directory(value, worker_home)
+        if not value or not (own_mask or _worker_built_home(value)):
+            continue
+        restored = _original_home(value, pinned if own_mask else None)
+        if restored and not _same_directory(restored, default):
+            child_env[name] = restored
+        else:
+            child_env.pop(name, None)
     return child_env
 
 
@@ -962,6 +1058,35 @@ def request_obligation_recovery(*, lifecycle_root: str | Path | None = None) -> 
         return False
 
 
+_UNCACHED = object()
+
+
+_MEMORY_RELEASED_AT = [0.0]
+_LIBC_TRIM = []
+
+
+def release_freed_memory(*, min_interval=5.0):
+    """Hand heap pages freed by large one-pass reads back to the system.
+
+    A runner pass reads whole spec trees and ledgers and drops them; glibc keeps
+    the freed heap mapped, so the long-lived runner otherwise stays at its peak
+    size. Rate limited; a no-op where ``malloc_trim`` is unavailable.
+    """
+    now = time.monotonic()
+    if now - _MEMORY_RELEASED_AT[0] < min_interval:
+        return
+    _MEMORY_RELEASED_AT[0] = now
+    if not _LIBC_TRIM:
+        try:
+            import ctypes
+            _LIBC_TRIM.append(ctypes.CDLL("libc.so.6").malloc_trim)
+        except (OSError, AttributeError, ImportError):
+            _LIBC_TRIM.append(None)
+    if _LIBC_TRIM[0] is not None:
+        with contextlib.suppress(Exception):
+            _LIBC_TRIM[0](0)
+
+
 def _safe_id(value: str) -> str:
     if not isinstance(value, str) or not _SAFE_ID.fullmatch(value):
         raise ObligationError("peer-obligation-id-invalid")
@@ -977,6 +1102,19 @@ def _proc_start_for_store(pid: int):
         return fields[19]
     except (OSError, ValueError, TypeError, IndexError):
         return None
+
+
+def _pending_name_writer_gone(name: str) -> bool:
+    """True when ``.pending-<pid>-<start>-<hex>`` names a writer that has ended.
+
+    Same assumption as the content check in ``_active_names``: a pid whose
+    start time no longer matches is gone. An ``unknown`` start or any other
+    name shape is not judged, so the marker keeps counting as live.
+    """
+    parts = name[len(".pending-"):].split("-")
+    if len(parts) != 3 or not parts[0].isdecimal() or not parts[1].isdecimal():
+        return False
+    return _proc_start_for_store(int(parts[0])) != parts[1]
 
 
 def _read_record(path: Path) -> dict | None:
@@ -1254,7 +1392,7 @@ def retain_registered_notice(jobs, record):
     receipt = record.get("receipt") or {}
     if (receipt.get("kind") != supervision.KIND
             or receipt.get("reason") not in {
-                supervision.ANSWER_AWAITING_PARENT, "no-progress", "attempt-stalled",
+                supervision.ANSWER_AWAITING_PARENT, "no-progress", "attempt-stalled", supervision.UNIT_CAPACITY_PAUSE,
             }):
         return False
     row = current_attempt_row(jobs, receipt.get("owner_attempt_id", ""))
@@ -1881,10 +2019,26 @@ def session_notice_submission_current(message):
                for _store, duty, record, root, storage, _delivery in matches)
 
 
+def _session_notice_delivery_terminal(message, roots=None):
+    """A carrier row of a retained session notice whose every exact dispatch record is
+    already terminal (ACKed by the hook's own receipt, rejected or expired) has nothing
+    left to deliver. Only exact, verified records count; an unreadable or mismatched
+    binding leaves the row as it is."""
+    members = (message.get("producer_binding") or {}).get("records")
+    if not isinstance(members, list) or not members:
+        return False
+    matches = list(_session_notice_delivery_bindings(message, roots))
+    return len(matches) == len(members) and all(
+        record.get("state") in {"acked", "rejected", "expired"}
+        for _store, _duty, record, _root, _storage, _delivery in matches)
+
+
 def registered_delivery_settled(message, *, roots=None, read_context=None):
     """Settle only when every exact binding in a retained delivery is terminal."""
     if ordinary_notice_delivery_settled(message, roots=roots):
         return True
+    if (message.get("producer_binding") or {}).get("schema") == "session-notice-runtime-v1":
+        return _session_notice_delivery_terminal(message, roots)
     bindings = list(_registered_delivery_bindings(
         message, roots, require_current_recipient=False, read_context=read_context))
     declared = message.get("dispatch_notices")
@@ -2017,11 +2171,19 @@ class ObligationStore:
         self._list_cache: dict[str, tuple[tuple[int, int, int, int, int], dict | None]] = {}
         self._directory_snapshot = None
         self._directory_stamp = None
+        # record file name -> (stat signature, is-active) from the last rebuild.
+        self._rebuild_verdicts: dict[str, tuple[tuple, bool]] = {}
+        # record file name -> (stat signature, eligible-at ns or None) from the
+        # retention sweep; records only change by replace, so an equal signature
+        # means the record need not be read again.
+        self._retention_memo: dict[str, tuple[tuple, int | None]] = {}
         self._discovery_metrics = {"directory_scans": 0, "directory_entries": 0,
                                    "terminal_cache_hits": 0, "stat_calls": 0,
                                    "json_reads": 0, "json_parses": 0,
                                    "active_index_scans": 0, "active_index_entries": 0,
-                                   "active_full_scans": 0}
+                                   "active_full_scans": 0,
+                                   "active_rebuild_reads": 0,
+                                   "active_rebuild_rechecks": 0}
         self._active_list_context = None
         self._ensure_recovery_directory_fd = None
 
@@ -2308,14 +2470,24 @@ class ObligationStore:
                              sort_keys=True, separators=(",", ":")).encode("ascii")
         fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL
                      | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=active_fd)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        # Keep the marker visible before the record changes. Readers that see a
-        # live pending writer use the active names without trusting generation.
-        self._write_active_marker(active_fd, name)
-        os.fsync(active_fd)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            # Keep the marker visible before the record changes. Readers that
+            # see a live pending writer use the active names without trusting
+            # generation.
+            self._write_active_marker(active_fd, name)
+            os.fsync(active_fd)
+        except BaseException:
+            # The caller never learns this marker's name, so a failure here
+            # must not leave it behind as a writer that looks alive forever.
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(pending, dir_fd=active_fd)
+            with contextlib.suppress(OSError):
+                self._mark_active_rebuild(active_fd)
+            raise
         return pending
 
     def _finish_active_mutation(self, root_fd, active_fd, duty_id, record, pending_name):
@@ -2456,7 +2628,14 @@ class ObligationStore:
                             os.unlink(name, dir_fd=active_fd)
                             stale_pending = True
                     except (OSError, UnicodeError, ValueError, TypeError):
-                        live_pending = True
+                        # An empty or torn marker (its writer died between
+                        # create and write) still names its writer.
+                        if _pending_name_writer_gone(name):
+                            with contextlib.suppress(FileNotFoundError):
+                                os.unlink(name, dir_fd=active_fd)
+                            stale_pending = True
+                        else:
+                            live_pending = True
                     continue
                 if name.startswith("."):
                     continue
@@ -2468,64 +2647,165 @@ class ObligationStore:
             self._mark_active_rebuild(active_fd)
         return tuple(ids), live_pending
 
+    def _cached_list_record(self, key: str):
+        """The cached record of one unchanged file, or ``_UNCACHED``.
+
+        The active-index read stats every listed record on every pass; this is
+        the same stat signature ``_read_list_record`` compares, taken on the
+        record's path string so an unchanged file costs one ``lstat`` instead
+        of a ``Path`` construction per record.
+        """
+        cached = self._list_cache.get(key)
+        if cached is None:
+            return _UNCACHED
+        try:
+            info = os.lstat(key)
+        except OSError:
+            return _UNCACHED
+        if not stat.S_ISREG(info.st_mode):
+            return _UNCACHED
+        self._discovery_metrics["stat_calls"] += 1
+        if cached[0] != (info.st_dev, info.st_ino, info.st_mtime_ns,
+                         info.st_ctime_ns, info.st_size):
+            return _UNCACHED
+        return cached[1]
+
     def _read_active_records(self, root_fd, active_fd, *, live_pending=False):
         ids, live_pending = self._active_names(active_fd)
         self._discovery_metrics["active_index_scans"] += 1
         self._discovery_metrics["active_index_entries"] += len(ids)
         output = {}
         stale = []
+        prefix = os.path.join(str(self.root), "")
         for duty_id in ids:
-            path = self._record_path(duty_id)
-            try:
-                record = self._read_list_record(path)
-            except ObligationError:
-                continue
+            key = prefix + duty_id + ".json"
+            record = self._cached_list_record(key)
+            if record is _UNCACHED:
+                try:
+                    record = self._read_list_record(Path(key))
+                except ObligationError:
+                    continue
             if record is None:
                 continue
             if not self._active_record(record):
                 stale.append(duty_id)
                 if not live_pending:
                     continue
-            output[str(path)] = record
+            output[key] = record
         if stale and not live_pending:
             # A stale marker means a writer crashed between record and index
             # updates. Rebuild under the index lock on the next pass.
             self._mark_active_rebuild(active_fd)
         return output
 
+    @staticmethod
+    def _rebuild_collect(root_fd):
+        """Stat signature of every regular ``.json`` record, no content read."""
+        signatures = {}
+        with os.scandir(root_fd) as entries:
+            for entry in entries:
+                if not entry.name.endswith(".json"):
+                    continue
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                signatures[entry.name] = (info.st_dev, info.st_ino, info.st_mtime_ns,
+                                          info.st_ctime_ns, info.st_size)
+        return signatures
+
+    def _rebuild_load(self, root_fd, name, signature):
+        """``(signature, record-or-None, active)`` for one record file.
+
+        A record whose signature matches the last verdict is not read again:
+        records only ever change by replace, so an equal signature means equal
+        content. Only active records are kept in memory (``_list_cache``).
+        """
+        key = os.path.join(str(self.root), name)
+        verdict = self._rebuild_verdicts.get(name)
+        if verdict is not None and verdict[0] == signature:
+            if not verdict[1]:
+                return signature, None, False
+            cached = self._list_cache.get(key)
+            if cached is not None and cached[0] == signature and cached[1] is not None:
+                return signature, cached[1], True
+        self._discovery_metrics["active_rebuild_reads"] += 1
+        try:
+            record = _read_record(self.root / name)
+        except ObligationError:
+            record = None
+        try:
+            info = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            after = (info.st_dev, info.st_ino, info.st_mtime_ns,
+                     info.st_ctime_ns, info.st_size)
+        except OSError:
+            after = None
+        active = record is not None and self._active_record(record)
+        if after != signature:
+            # Changed while being read: keep the content for this pass but never
+            # trust it later; the settle re-check reads the file again.
+            self._rebuild_verdicts.pop(name, None)
+            self._list_cache.pop(key, None)
+            return None, record, active
+        self._rebuild_verdicts[name] = (signature, active)
+        if active:
+            self._list_cache[key] = (signature, copy.deepcopy(record))
+        else:
+            self._list_cache.pop(key, None)
+        return signature, record, active
+
+    @staticmethod
+    def _rebuild_differs(state, signatures):
+        """True when a name was added or replaced, or an active one vanished."""
+        for name, signature in signatures.items():
+            held = state.get(name)
+            if held is None or held[0] != signature:
+                return True
+        return any(held[2] for name, held in state.items() if name not in signatures)
+
     def _rebuild_active_index(self, root_fd, active_fd):
         with self._active_index_lock(active_fd):
             _ids, pending = self._active_names(active_fd)
             if pending:
                 return self._read_active_records(root_fd, active_fd, live_pending=True)
-            before = self._root_generation(root_fd)
             self._discovery_metrics["active_full_scans"] += 1
             self._discovery_metrics["directory_scans"] += 1
-            active_records = {}
-            with os.scandir(root_fd) as entries:
-                for entry in entries:
-                    if not entry.name.endswith(".json"):
-                        continue
-                    self._discovery_metrics["directory_entries"] += 1
-                    path = self.root / entry.name
-                    try:
-                        record = _read_record(path)
-                    except ObligationError:
-                        continue
-                    if record is None:
-                        continue
-                    if self._active_record(record):
-                        duty_id = entry.name[:-5]
-                        active_records[duty_id] = record
-            if self._root_generation(root_fd) != before:
+            signatures = self._rebuild_collect(root_fd)
+            self._discovery_metrics["directory_entries"] += len(signatures)
+            state = {name: self._rebuild_load(root_fd, name, signature)
+                     for name, signature in signatures.items()}
+            for name in set(self._rebuild_verdicts) - set(signatures):
+                self._rebuild_verdicts.pop(name, None)
+
+            def active_records():
+                return {str(self.root / name): held[1] for name, held in state.items()
+                        if held[2]}
+
+            settled = False
+            for _round in range(_REBUILD_SETTLE_ROUNDS):
+                self._discovery_metrics["active_rebuild_rechecks"] += 1
+                signatures = self._rebuild_collect(root_fd)
+                differs = self._rebuild_differs(state, signatures)
+                for name in set(state) - set(signatures):
+                    del state[name]
+                    self._rebuild_verdicts.pop(name, None)
+                for name, signature in signatures.items():
+                    held = state.get(name)
+                    if held is None or held[0] != signature:
+                        state[name] = self._rebuild_load(root_fd, name, signature)
+                if not differs:
+                    settled = True
+                    break
+            if not settled:
                 self._mark_active_rebuild(active_fd)
-                return {str(self.root / (duty_id + ".json")): record
-                        for duty_id, record in active_records.items()}
+                return active_records()
             current_ids, pending = self._active_names(active_fd)
             if pending:
                 self._mark_active_rebuild(active_fd)
                 return self._read_active_records(root_fd, active_fd, live_pending=True)
-            wanted = set(active_records)
+            wanted = {name[:-5] for name, held in state.items() if held[2]}
             for duty_id in set(current_ids) - wanted:
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(duty_id, dir_fd=active_fd)
@@ -2534,12 +2814,13 @@ class ObligationStore:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(".rebuild", dir_fd=active_fd)
             self._write_active_generation(root_fd, active_fd)
-            if self._root_generation(root_fd) != before:
+            # A file that appeared in the folder (a fresh ``.lock``) does not
+            # change any record; only a changed record voids the generation.
+            if self._rebuild_differs(state, self._rebuild_collect(root_fd)):
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(".generation", dir_fd=active_fd)
                 self._mark_active_rebuild(active_fd)
-            return {str(self.root / (duty_id + ".json")): record
-                    for duty_id, record in active_records.items()}
+            return active_records()
 
     def _read_active_without_index(self, root_fd):
         """Read active records without creating the index a reader never owns.
@@ -2633,10 +2914,8 @@ class ObligationStore:
         finally:
             os.close(root_fd)
 
-    def list(self, *, states: Iterable[str] | None = None,
-             kinds: Iterable[str] | None = None,
-             cached_terminal: bool = False,
-             fast_active_only: bool = False) -> list[dict]:
+    def _selected_records(self, states, kinds, cached_terminal, fast_active_only):
+        """The stored records ``list`` selects, uncopied; read once per runner pass."""
         explicit_states = states is not None
         wanted = set(_PENDING_STATES if states is None else states)
         wanted_kinds = None if kinds is None else set(kinds)
@@ -2652,8 +2931,7 @@ class ObligationStore:
                 fast_active_only=fast_active_only)
             if context is not None:
                 context["records"] = records
-        output = []
-        for key, record in records.items():
+        for record in records.values():
             followup = bool(
                 states is None and record is not None
                 and record.get("state") == "complete"
@@ -2663,8 +2941,25 @@ class ObligationStore:
             if (record is not None and (record.get("state") in wanted or followup)
                     and (wanted_kinds is None
                          or (record.get("intent") or {}).get("kind") in wanted_kinds)):
-                output.append(copy.deepcopy(record))
-        return output
+                yield record
+
+    def list(self, *, states: Iterable[str] | None = None,
+             kinds: Iterable[str] | None = None,
+             cached_terminal: bool = False,
+             fast_active_only: bool = False) -> list[dict]:
+        return [copy.deepcopy(record) for record in self._selected_records(
+            states, kinds, cached_terminal, fast_active_only)]
+
+    def has_active(self, *, kinds: Iterable[str] | None = None) -> bool:
+        """Whether ``list(kinds=kinds, fast_active_only=True)`` would be non-empty.
+
+        The runner-start checks need only that answer; this reads the same records
+        without copying them. Outside a runner pass it consults only the active markers.
+        Inside one it shares the pass's snapshot, and when that is empty it takes the
+        full read the pass's next ``list`` takes: a fast-only read never becomes the
+        snapshot that a later full recovery read of the same pass would reuse."""
+        fast_only = self._active_list_context is None
+        return any(True for _record in self._selected_records(None, kinds, False, fast_only))
 
     @staticmethod
     def _terminal_time_ns(record):
@@ -2756,49 +3051,82 @@ class ObligationStore:
                     == "complete")
         return False
 
+    def _retention_eligible_ns(self, name):
+        """Time a record becomes old enough to prune, read without the duty lock.
+
+        ``None`` means it cannot be pruned as it stands (not terminal, no
+        terminal time, or unreadable). The authoritative decision stays under
+        the lock in ``prune_terminal_obligations``; this only lets a young or
+        unfinished record be skipped without a flock.
+        """
+        try:
+            record = _read_record(self.root / name)
+        except ObligationError:
+            return None
+        if not record or record.get("state") not in {"complete", "cancelled"}:
+            return None
+        ended_ns = self._terminal_time_ns(record)
+        if ended_ns is None:
+            return None
+        kind = (record.get("intent") or {}).get("kind")
+        retention = (_READINESS_RETENTION_NS if kind == "readiness-observation"
+                     else _OBLIGATION_RETENTION_NS)
+        return ended_ns + retention
+
     def prune_terminal_obligations(self, *, now=None, time_budget=0.1):
-        """Prune a bounded cursor slice after verifying source-side settlement."""
+        """Prune terminal records within a time budget, resuming from a cursor.
+
+        The pass ends at the time budget or the end of the name list. A budget
+        stop leaves ``backlog`` set so the next call continues at once instead
+        of waiting out the due interval; a finished sweep rests for it.
+        """
         root_fd = self._obligations_fd(create=False)
         if root_fd is None:
             return {"status": "state-root-unavailable", "examined": 0, "removed": 0}
         try:
             now_ns = int((time.time() if now is None else float(now)) * 1_000_000_000)
+            fresh = {"last_pass_ns": 0, "cursor": "", "backlog": False}
             try:
                 cursor_fd = os.open("retention.cursor", os.O_RDONLY
                                     | getattr(os, "O_NOFOLLOW", 0), dir_fd=root_fd)
             except FileNotFoundError:
-                state = {"last_pass_ns": 0, "cursor": ""}
+                state = dict(fresh)
             else:
                 with os.fdopen(cursor_fd, "rb") as handle:
                     raw = handle.read(4097)
                 try:
                     state = json.loads(raw.decode("utf-8"))
                 except (UnicodeError, ValueError):
-                    state = {"last_pass_ns": 0, "cursor": ""}
+                    state = dict(fresh)
                 if (not isinstance(state, dict)
                         or not isinstance(state.get("last_pass_ns"), int)
-                        or not isinstance(state.get("cursor", ""), str)):
-                    state = {"last_pass_ns": 0, "cursor": ""}
-            if now_ns - state["last_pass_ns"] < _RETENTION_DUE_NS:
+                        or not isinstance(state.get("cursor", ""), str)
+                        or not isinstance(state.get("backlog", False), bool)):
+                    state = dict(fresh)
+            backlog = bool(state.get("backlog", False))
+            if not backlog and now_ns - state["last_pass_ns"] < _RETENTION_DUE_NS:
                 return {"status": "not-due", "examined": 0, "removed": 0,
-                        "cursor": state.get("cursor", "")}
+                        "cursor": state.get("cursor", ""), "backlog": False}
 
             with os.scandir(root_fd) as entries:
                 names = sorted(entry.name for entry in entries
                                if entry.name.endswith(".json"))
-            after = [name for name in names if name > state.get("cursor", "")]
-            if not after:
-                after = names
-            examined_names = after[:_RETENTION_EXAMINE_LIMIT]
+            pending_names = [name for name in names if name > state.get("cursor", "")]
+            if not pending_names:
+                pending_names = names
+            for gone in set(self._retention_memo) - set(names):
+                self._retention_memo.pop(gone, None)
             removed = 0
             examined = 0
+            last_name = None
+            finished = True
             deadline = time.monotonic() + max(0.0, float(time_budget))
-            for name in examined_names:
-                if removed >= _RETENTION_REMOVE_LIMIT or time.monotonic() >= deadline:
+            for name in pending_names:
+                if time.monotonic() >= deadline:
+                    finished = False
                     break
-                if not name.endswith(".json"):
-                    continue
                 duty_id = name[:-5]
+                last_name = name
                 try:
                     duty_id = _safe_id(duty_id)
                     before = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
@@ -2808,15 +3136,26 @@ class ObligationStore:
                 examined += 1
                 if not stat.S_ISREG(before.st_mode):
                     continue
+                signature = (before.st_dev, before.st_ino, before.st_mtime_ns,
+                             before.st_ctime_ns, before.st_size)
+                memo = self._retention_memo.get(name)
+                if memo is not None and memo[0] == signature:
+                    eligible_ns = memo[1]
+                else:
+                    eligible_ns = self._retention_eligible_ns(name)
+                    self._retention_memo[name] = (signature, eligible_ns)
+                if eligible_ns is None or now_ns < eligible_ns:
+                    continue
                 lock_fd = None
                 try:
                     lock_fd = self._lock(duty_id, create=False)
                     current = self.get(duty_id)
                     if not current or not self._terminal_source_settled(current, now_ns):
                         continue
-                    after = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
-                    if ((after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
-                            or not stat.S_ISREG(after.st_mode)):
+                    current_stat = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+                    if ((current_stat.st_dev, current_stat.st_ino)
+                            != (before.st_dev, before.st_ino)
+                            or not stat.S_ISREG(current_stat.st_mode)):
                         continue
                     live_fd = self._obligations_fd(create=False)
                     if live_fd is None:
@@ -2827,11 +3166,12 @@ class ObligationStore:
                         if (live.st_dev, live.st_ino) != (original.st_dev, original.st_ino):
                             break
                         os.unlink(name, dir_fd=live_fd)
-                        os.fsync(live_fd)
                         removed += 1
                     finally:
                         os.close(live_fd)
                     self._list_cache.pop(str(self.root / name), None)
+                    self._rebuild_verdicts.pop(name, None)
+                    self._retention_memo.pop(name, None)
                     if self._directory_snapshot is not None:
                         self._directory_snapshot.pop(name, None)
                 except (OSError, ObligationError):
@@ -2840,8 +3180,11 @@ class ObligationStore:
                     if lock_fd is not None:
                         os.close(lock_fd)
 
-            cursor = examined_names[min(examined, len(examined_names)) - 1] if examined else state.get("cursor", "")
-            payload = json.dumps({"last_pass_ns": now_ns, "cursor": cursor},
+            cursor = last_name if (not finished and last_name) else (
+                "" if finished else state.get("cursor", ""))
+            backlog = not finished
+            payload = json.dumps({"backlog": backlog, "cursor": cursor,
+                                  "last_pass_ns": now_ns},
                                  sort_keys=True, separators=(",", ":")).encode() + b"\n"
             temporary = ".retention-%s.tmp" % secrets.token_hex(8)
             temp_fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -2853,6 +3196,8 @@ class ObligationStore:
                     os.fsync(handle.fileno())
                 os.replace(temporary, "retention.cursor",
                            src_dir_fd=root_fd, dst_dir_fd=root_fd)
+                # One directory fsync for the whole pass: it makes this pass's
+                # unlinks and the cursor durable together.
                 os.fsync(root_fd)
             finally:
                 with contextlib.suppress(FileNotFoundError):
@@ -2872,7 +3217,7 @@ class ObligationStore:
             except OSError:
                 self._directory_stamp = None
             return {"status": "complete", "examined": examined,
-                    "removed": removed, "cursor": cursor}
+                    "removed": removed, "cursor": cursor, "backlog": backlog}
         finally:
             os.close(root_fd)
 
@@ -3224,7 +3569,27 @@ class ObligationStore:
                 watch_ids = _message_watch_ids(message.get("refs", []))
                 if watch_ids is None:
                     return False
-                if not watch_ids:
+                # A row still addressed to a window's old Claude session that its background
+                # session took over: the receipt's binding names the id the row carries.
+                from_id = binding.get("parked_from")
+                parked_follow = (not watch_ids and isinstance(from_id, dict)
+                                 and from_id.get("harness") == "claude" == recipient.get("harness")
+                                 and from_id.get("session_id") == saved_target.get("session_id")
+                                 == original.get("session_id")
+                                 and original.get("pane_id") is None)
+                # A sealed peer request follows the successor Hearting's lineage confirms;
+                # the receipt's own binding (made by the exact receiver check) names it.
+                followed = (isinstance(message.get("request"), dict)
+                            and isinstance(original.get("session_id"), str)
+                            and any(isinstance(item, str) and item.startswith("peer-request:")
+                                    for item in message.get("refs", []))
+                            and all((binding.get("recipient") or {}).get(key) == recipient.get(key)
+                                    for key in ("harness", "session_id")))
+                if not watch_ids and followed:
+                    pass
+                elif not watch_ids and parked_follow:
+                    pass
+                elif not watch_ids:
                     if original.get("harness") != recipient.get("harness"):
                         return False
                     pane_bound = original.get("session_id") is None
@@ -3392,7 +3757,8 @@ class ObligationStore:
                     return record
                 if evidence.get("server") != (identity.get("server") or "default"):
                     return record
-                if evidence.get("kind") not in {"recipient-session-absent", "first-input-process-dead"}:
+                if evidence.get("kind") not in {"recipient-session-absent", "recipient-session-ended",
+                                                   "first-input-process-dead", "request-withdrawn"}:
                     return record
                 endpoint = identity.get("server") or "default"
                 recipient_binding = evidence.get("recipient_binding")
@@ -3417,6 +3783,32 @@ class ObligationStore:
                             or evidence.get("session_id") != effective.get("session_id")
                             or evidence.get("harness") != effective.get("harness")):
                         return record
+                elif evidence.get("kind") == "recipient-session-ended":
+                    if (evidence.get("harness") != effective.get("harness")
+                            or evidence.get("session_id") != effective.get("session_id")
+                            or evidence.get("lifetime") != "ended"):
+                        return record
+                    try:
+                        tools = str(Path(__file__).resolve().parents[1] / "tools")
+                        if tools not in os.sys.path:
+                            os.sys.path.insert(0, tools)
+                        from fleet.collectors.steward import session_liveness
+                        if session_liveness(effective.get("harness"),
+                                            effective.get("session_id"), agents=()) != "ended":
+                            return record
+                        import dispatch_seat_handover as handover
+                        graph = handover.lineage_graph()
+                        _successor, disposition = handover._chain_end(
+                            graph, effective.get("harness"), effective.get("session_id"))
+                        if disposition != "self":
+                            return record
+                    except Exception:
+                        return record
+                elif evidence.get("kind") == "request-withdrawn":
+                    # The sender superseded or cancelled this revision before it was
+                    # delivered (peer-message re-read the request under the row lock).
+                    # This ends the delivery attempt; it proves no receipt.
+                    pass
                 else:
                     proof = (message or {}).get("first_input_process")
                     if (evidence.get("process_disposition") != "dead"
@@ -3495,7 +3887,7 @@ def _handoff_legacy_runner(store: ObligationStore, lock_path: Path, *,
     # Any newly accepted active duty may require code newer than the runner
     # already holding this lease. Consult only active markers so this handoff
     # never scans settled history on the producer callback.
-    active_duties = store.list(kinds={"registered-batch", "run-notice"}, fast_active_only=True)
+    active_duties = store.has_active(kinds={"registered-batch", "run-notice"})
     if not active_duties and not reconciliation_required:
         return False
     if not service_current:
@@ -3558,7 +3950,7 @@ def _ensure_runner(root, *, service_current=None, use_remembered=False,
     # Producer callbacks already know which duty they just accepted. Consult
     # only active markers here so a cold migration over terminal history never
     # delays the callback that starts the shared runner.
-    duties = store.list(fast_active_only=True)
+    duties = store.has_active()
     lock_path = store.root / RUNNER_LOCK_NAME
     if not duties and not remember_binding and not reconciliation_required:
         if not use_remembered or not lock_path.exists():
@@ -3622,7 +4014,8 @@ def _ensure_runner(root, *, service_current=None, use_remembered=False,
         runner_root = active_root or code_root
         runner = runner_root / "utilities" / "peer-steward.py"
         state_root = Path(root).resolve() if root else store.state_root
-        child_env = (_service_exec_environment(code_root, runner_root) if binding else None)
+        child_env = _user_service_environment(
+            _service_exec_environment(code_root, runner_root) if binding else None)
         argv = [sys.executable, str(runner), "__obligation-runner", "--lock-fd", str(fd),
                 "--state-root", str(state_root)]
         if binding:
@@ -3632,10 +4025,12 @@ def _ensure_runner(root, *, service_current=None, use_remembered=False,
             return False
         if not recovery_lock_is_current():
             return False
+        from dispatch_contract_base import governance_environment
         process = subprocess.Popen(
             argv,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            close_fds=True, pass_fds=(fd,), start_new_session=True, env=child_env,
+            # The runner is a shared service, not the starting worker's descendant: without its attempt tag.
+            close_fds=True, pass_fds=(fd,), start_new_session=True, env=governance_environment(child_env),
         )
         end_with_test(process)
         _RUNNERS.append(process)

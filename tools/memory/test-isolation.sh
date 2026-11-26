@@ -2,7 +2,16 @@
 # Test-only memory environment bootstrap. Never resolves or inspects a
 # production store; every caller gets fresh roots before importing mem.py.
 
+# A suite that cannot get its private roots stops here (exit 70): run on with
+# the caller's HOME, store, TMPDIR and cwd, its `git -C "$EMPTY"`/`cd "$EMPTY"`
+# lines would act on the current checkout and the real memory store.
 hearting_test_isolate() {
+  _hearting_test_make_roots "$@" && return 0
+  echo "test isolation failed: no private memory test root; nothing was run" >&2
+  exit 70
+}
+
+_hearting_test_make_roots() {
   _hti_root=${1:-}
   if [ -z "$_hti_root" ]; then
     _hti_root=$(mktemp -d "${TMPDIR:-/tmp}/hearting-memory-test.XXXXXX") || return 1

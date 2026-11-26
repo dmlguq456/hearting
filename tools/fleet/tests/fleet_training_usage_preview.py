@@ -52,13 +52,13 @@ def _ansi(segs, mode):
         if mode == "256":
             palette = {"d": None, "w": "soft", "g": "green", "y": "yellow",
                        "r": "red", "v": "vanilla", "c": "cyan", "m": "magenta",
-                       "l": "blue"}
+                       "l": "blue", "k": "claude"}
             color = palette.get(hue)
             if color:
-                codes.append("38;5;%d" % render._MUTED_256[color])
+                codes.append("38;5;%d" % {**render._MUTED_256, **render._HARNESS_256}[color])
         elif mode == "basic":
             palette = {"d": None, "w": "37", "g": "32", "y": "33", "r": "31",
-                       "v": "33", "c": "36", "m": "35", "l": "34"}
+                       "v": "33", "c": "36", "k": "36", "m": "35", "l": "34"}
             color = palette.get(hue)
             if color:
                 codes.append(color)
@@ -196,6 +196,9 @@ def main():
     parser.add_argument("--pty-width", type=int)
     parser.add_argument("--pty-term", default="xterm-256color")
     args = parser.parse_args()
+    # The renderer's parse cache and session readers default to the caller's HOME.
+    from tools.fleet.tests import readme_captures
+    readme_captures.isolate()
     widths = [int(value) for value in args.widths.split(",")]
     capture = _capture(widths, args.head)
     if args.pty_width:

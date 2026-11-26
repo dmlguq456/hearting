@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Sequential supervised resources retain one stage and its output requirement."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import contextlib
 import copy
 import fcntl
@@ -20,6 +23,8 @@ from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / 'tools'))
+from fixture_processes import unique_attempt_id  # noqa: E402
 spec = importlib.util.spec_from_file_location('sequence_fixture', HERE / 'workflow_supervisor.test.py')
 FIX = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = FIX
@@ -361,7 +366,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
         identity = SUP.RR.proc_identity(os.getpid())
         resource_snapshot = json.loads(registry.read_text())
         resource_route_file = resource_snapshot['runs']['fixture-run']['route']
-        attempt = 'att-owner'
+        attempt = unique_attempt_id('att-owner')
         lease = DC.supervisor_lease_path(jobs, attempt)
         nonce = 'd' * 64
         metadata = {
@@ -2913,7 +2918,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
                     args = SimpleNamespace(
                         route_file=str(path), route_node='run-verify', attempt_id='att-verify',
                         jobs=str(jobs), agent_home=ROOT, worktree=str(case.base), dispatch_depth=2,
-                        parent_slug='fixture-owner', parent_attempt_id='att-owner',
+                        parent_slug='fixture-owner', parent_attempt_id=unique_attempt_id('att-owner'),
                         parent_harness='codex', parent_transport='headless',
                         parent_sandbox='workspace-write', subsession_id=None,
                     )

@@ -33,6 +33,7 @@ from dispatch_completion_join import (  # noqa: E402
     current_children,
     current_delivery_state,
     completion_harvest_command,
+    unit_leg_report_line,
     delivery_classification,
     delivery_required_action,
 )
@@ -61,6 +62,9 @@ DEFAULT_ARM_WINDOW_SECONDS = 600
 MAXIMUM_CLOCK_SKEW_SECONDS = 60
 # Depth-1 workers that may wake the interactive parent through this hook.
 DEPTH1_WORKER_TYPES = frozenset({"owner", "frame", "review"})
+# A `support` worker wakes it only as the one leg of a unit route (a lookup, `general/explore`): its row names
+# the route and node. A route-free support row (a tidy worker) never does.
+ROUTE_BOUND_DEPTH1_WORKER_TYPES = frozenset({"support"})
 REGISTRY_DEPTH1_START = {
     "dispatch_depth": "1",
     "parent_completion_delivery": "claude-parent-runtime",
@@ -77,6 +81,14 @@ HOLD_MAX_SECONDS = 60.0  # longest wait between checks while a sibling batch is 
 # drains (dispatch-reap-watch). Exiting at the first missing record made that
 # ordinary lag a permanently lost wake for an idle session (2026-09-17).
 DEFAULT_RECORD_GRACE_SECONDS = 900
+
+
+def _row_is_depth1_waited(metadata: dict) -> bool:
+    """A registry row's worker type may wake the parent: a depth-1 type, or a support leg of a route."""
+    worker_type = metadata.get("worker_type")
+    return _worker_type_is_depth1(worker_type) or (
+        worker_type in ROUTE_BOUND_DEPTH1_WORKER_TYPES
+        and bool(metadata.get("route_id")) and bool(metadata.get("route_node")))
 
 
 def _worker_type_is_depth1(candidate: object) -> bool:
@@ -234,6 +246,8 @@ def parse_launch(payload: object) -> Launch | None:
     }
     if any(expected not in fields.get(key, []) for key, expected in required_memberships.items()):
         return None
+    # Deliberately not `_row_is_depth1_waited`: a support leg counts only with its route and node, which the start
+    # output does not name, so the registry sweep (`_session_owner_rows`) arms it; this shortcut only saves latency.
     if not _worker_type_is_depth1(fields.get("worker_type", [])):
         return None
     attempt_id = _single(fields, "attempt_id")
@@ -421,7 +435,7 @@ def _session_owner_states(
                 continue
             if any(metadata.get(key) != value for key, value in REGISTRY_DEPTH1_START.items()):
                 continue
-            if not _worker_type_is_depth1(metadata.get("worker_type")):
+            if not _row_is_depth1_waited(metadata):
                 continue
             # Unknown (an unreadable lineage) is not this session's row yet: the next call looks again.
             if seat_handover.owns(metadata, session, jobs, read_context=read_context) is not True:
@@ -450,13 +464,13 @@ def registry_launch(payload: object) -> tuple[Launch, ArmClaim] | ArmRefusal | N
     own call or the next one. A row older than the arm window is a first-time
     refusal (the next-prompt sweep owns stale completions); a row whose claim
     lapsed -- its holder died with the session, or its gate wake was spent and
-    the gate has since closed -- is re-armed regardless of age. Stop can
-    re-take only an existing claim, so a tool-free attention turn continues
-    its completion wait without discovering new starts at that boundary."""
+    the gate has since closed -- is re-armed regardless of age. A turn end
+    (`Stop`) or a session start (`SessionStart`, e.g. a resumed conversation)
+    is a boundary: `boundary_launch` watches every such row at once."""
 
-    stopping = isinstance(payload, dict) and payload.get("hook_event_name") == "Stop"
-    session = _payload_session(payload) if stopping else None
-    gate = (payload, session) if session else _bash_call(payload)
+    if _boundary_session(payload) is not None:
+        return boundary_launch(payload)
+    gate = _bash_call(payload)
     if gate is None:
         return None
     payload, session = gate
@@ -480,11 +494,14 @@ def registry_launch(payload: object) -> tuple[Launch, ArmClaim] | ArmRefusal | N
     # may have finished between the release and this call (top review M1).
     for attempt_id, age, _status in rows:
         fresh = attempt_id in open_rows and age <= window
-        if stopping and not arm_path(jobs, attempt_id).exists():
+        path = arm_path(jobs, attempt_id)
+        if attempt_id not in open_rows and not path.exists():
             continue
-        if attempt_id not in open_rows and not arm_path(jobs, attempt_id).exists():
-            continue
-        claim = claim_arm(jobs, attempt_id, session, fresh=fresh)
+        # A settled record refuses without the ledger lock or any lineage read: under the
+        # lock every one of a long session's ended arms re-read the registry row and
+        # re-observed the lineage, ~40ms each, so one Bash call held the shared lock
+        # ~700 times for ~23s of CPU and the session's hooks queued behind it (2026-11-17).
+        claim = _settled_arm(path) or claim_arm(jobs, attempt_id, session, fresh=fresh)
         if isinstance(claim, ArmRefusal):
             # Keep the receipt-named attempt's reason above any other's
             # (review R2 M2): the notice must say why *that* start did not arm.
@@ -494,6 +511,197 @@ def registry_launch(payload: object) -> tuple[Launch, ArmClaim] | ArmRefusal | N
         armed = "registry" if claim.arms == 1 else "registry-rearm"
         return Launch(attempt_id=attempt_id, jobs=jobs, session_id=session, armed=armed), claim
     return refusal
+
+
+# A turn end, and a session start (a resumed or cleared conversation in a new
+# Claude process, whose earlier hook processes died with the old one).
+BOUNDARY_EVENTS = frozenset({"Stop", "SessionStart"})
+
+
+def _boundary_session(payload: object) -> str | None:
+    if not isinstance(payload, dict) or payload.get("hook_event_name") not in BOUNDARY_EVENTS:
+        return None
+    return _payload_session(payload)
+
+
+def boundary_launch(payload: object) -> tuple[Launch, ArmClaim] | ArmRefusal | None:
+    """At a turn end or session start, watch every attempt of this session that
+    no live hook process watches, and wake for whichever is due first.
+
+    The candidates are the rows `registry_launch` could arm from a Bash call
+    (a fresh open row with no arm yet, or a row whose arm lapsed or lost its
+    holder), so a launch registered after its own tool call returned is armed
+    at the turn end, and a conversation reopened in a new Claude process --
+    which took its earlier waiters down with the old process -- is watched
+    again before anyone types. One hook process holds them all because Claude
+    wakes a resting session once per hook exit; the woken turn re-arms the
+    rest (`_first_due`)."""
+
+    session = _boundary_session(payload)
+    if session is None or os.environ.get("AGENT_DISPATCH_CHILD") == "1":
+        return None
+    jobs = _resolved_jobs(payload)
+    if jobs is None:
+        return None
+    window = _arm_window()
+    claims: list[tuple[Launch, ArmClaim]] = []
+    refusal: ArmRefusal | None = None
+    for attempt_id, age, status in _session_owner_states(jobs, session, RECEIPT_ROW_STATUSES):
+        fresh = status in ARM_ROW_STATUSES and age <= window
+        path = arm_path(jobs, attempt_id)
+        if not fresh and not path.exists():
+            continue
+        claim = _settled_arm(path) or claim_arm(jobs, attempt_id, session, fresh=fresh)  # see `registry_launch`
+        if isinstance(claim, ArmRefusal):
+            refusal = refusal or claim
+            continue
+        armed = "registry" if claim.arms == 1 else "registry-rearm"
+        claims.append((Launch(attempt_id=attempt_id, jobs=jobs, session_id=session, armed=armed),
+                       claim))
+    if not claims:
+        return refusal
+    if len(claims) == 1:
+        return claims[0]
+    return _first_due(claims) or refusal
+
+
+_TERMINAL_WAIT_STATUSES = frozenset({"", "open", "running"})
+
+
+def _completion_due(launch: Launch) -> str:
+    """For a finished row held by `_first_due`, what its wait does with it:
+    `due` when this wait's carrier could claim the completion now, `ended` when
+    the completion was carried elsewhere, `lapsed` when it is still open but not
+    this carrier's to carry, `wait` while it may still become due.
+
+    Only a delivery-owing completion is claim-gated (`_delivery_owing_row`);
+    any other end notice goes out as before. The owed record is judged the way
+    the carrier's claim would take it, without claiming: `pending`, or an
+    expired lease the batch claim reclaims, and not held for its siblings. A
+    closed record was delivered by another carrier (the woken turn's sweep, a
+    sibling's batch claim). A singleton lease another carrier let expire is
+    never re-sent by this carrier (`_carrier_one_claim`); its arm is released
+    for the courier that owns it. A missing record, a live lease, or a batch
+    hold may still become due."""
+
+    owing = _delivery_owing_row(launch)
+    if owing is None:
+        return "due"
+    delivery_id, recipient_key = owing.get("delivery_id", ""), owing.get("parent_sid", "")
+    if not delivery_id or not recipient_key:
+        return "ended"
+    root = launch.jobs.resolve(strict=False).parent
+    try:
+        record = pending_delivery.read(root, recipient_key, delivery_id)
+    except pending_delivery.PendingDeliveryError:
+        return "wait"
+    if record is None:
+        return "wait"
+    state = record.get("state")
+    if state not in pending_delivery.OPEN_STATES:
+        return "ended"
+    if state != "pending" and int(record.get("claim_deadline_ns") or 0) > time.monotonic_ns():
+        return "wait"
+    try:
+        from dispatch_notice_state import resolve_delivery_batch
+        batch = resolve_delivery_batch(launch.jobs, record, recipient_key=recipient_key,
+                                       delivery_root=root)
+    except Exception:
+        batch = None
+    if batch and batch.get("held"):
+        return "wait"
+    if state != "pending" and not (batch and len(batch.get("delivery_ids") or ()) > 1):
+        return "lapsed"
+    return "due"
+
+
+def _first_due(claims: list[tuple[Launch, ArmClaim]]) -> tuple[Launch, ArmClaim] | None:
+    """Hold several arms and return the first whose row ended with a completion
+    this wait can still carry (`_completion_due`), or whose owner's gate waits
+    for a carrier. A finished row with nothing left for this wait is settled and
+    dropped, and the wait goes on for the rest; every arm not returned is left
+    `lapsed` for the woken turn's next Bash call or Stop to re-arm, even while
+    this process still lives."""
+
+    interval = _bounded_number("AGENT_CLAUDE_REWAKE_INTERVAL_SECONDS", DEFAULT_INTERVAL_SECONDS, 1, 300)
+    maximum = _bounded_number("AGENT_CLAUDE_REWAKE_MAX_SECONDS", DEFAULT_MAX_SECONDS, interval, 86_400)
+    deadline = time.monotonic() + maximum
+    for launch, claim in claims:
+        _retain_completion(launch, claim)
+    pending = list(claims)
+    released: list[ArmClaim] = []
+    gate_scans: dict[str, tuple[float, int]] = {}
+    chosen = None
+    while chosen is None:
+        pending = [(launch, claim) for launch, claim in pending if _holds_arm(claim)]
+        if not pending:
+            break
+        for launch, claim in pending:
+            if _owner_status(launch) in _TERMINAL_WAIT_STATUSES:
+                continue
+            due = _completion_due(launch)
+            if due == "due":
+                chosen = (launch, claim)
+                break
+            if due != "wait" and settle_arm(claim, due):
+                released.append(claim)
+        pending = [(launch, claim) for launch, claim in pending if claim not in released]
+        if chosen is None and pending:
+            gated = _gate_due_attempt([launch for launch, _claim in pending], gate_scans)
+            chosen = next(((launch, claim) for launch, claim in pending
+                           if launch.attempt_id == gated), None)
+        if chosen is None:
+            if not pending or time.monotonic() >= deadline:
+                break
+            time.sleep(min(interval, max(0.0, deadline - time.monotonic())))
+    for _launch, claim in claims:
+        if claim not in released and (chosen is None or claim is not chosen[1]):
+            settle_arm(claim, "lapsed")
+    return chosen
+
+
+def _gate_due_attempt(launches: list[Launch], scans: dict[str, tuple[float, int]]) -> str | None:
+    """The first of `launches` whose gate record waits for a carrier, as
+    `_open_gate_pending` judges one attempt; a recipient directory is read
+    again only when it changed or a lease it held has expired."""
+
+    now = time.monotonic_ns()
+    by_directory: dict[str, list[Launch]] = {}
+    root = launches[0].jobs.resolve(strict=False).parent if launches else None
+    for launch in launches:
+        recipient_key = _recipient_key(launch)
+        if not recipient_key or root is None:
+            continue
+        try:
+            directory = pending_delivery.record_directory(root, recipient_key)
+        except pending_delivery.PendingDeliveryError:
+            continue
+        by_directory.setdefault(str(directory), []).append(launch)
+    for directory, members in by_directory.items():
+        try:
+            mtime = Path(directory).stat().st_mtime
+        except OSError:
+            continue
+        seen = scans.get(directory)
+        if seen is not None and seen[0] == mtime and now < seen[1]:
+            continue
+        attempts = {launch.attempt_id for launch in members}
+        next_deadline = 2 ** 63
+        due = None
+        for _root, _key, _delivery_id, record in _recipient_gate_records(members[0]):
+            mine = attempts.intersection(record.get("attempt_ids") or [])
+            if not mine:
+                continue
+            state = record.get("state")
+            lease = int(record.get("claim_deadline_ns") or 0)
+            if state == "pending" or (state in {"claimed", "sent-ambiguous"} and lease < now):
+                due = due or sorted(mine)[0]
+            elif state in {"claimed", "sent-ambiguous"}:
+                next_deadline = min(next_deadline, lease)
+        scans[directory] = (mtime, next_deadline)
+        if due:
+            return due
+    return None
 
 
 def _process_identity(pid: int) -> tuple[str, str, str] | None:
@@ -630,13 +838,50 @@ def _holds_arm(claim: "ArmClaim") -> bool:
     return bool(held) and held.get("holder") == list(claim.holder) and held.get("session_id") == claim.session_id
 
 
-def _reclaim_refusal(existing: dict[str, Any], jobs: Path, session: str) -> str | None:
-    """None when the existing record may be re-taken, else the typed reason."""
+# Reasons a record settles by itself: no later read can make it claimable
+# (`ended` is permanent, `arms` only grows), so the claim loops refuse it
+# without the ledger lock (2026-11-17).
+SETTLED_ARM_REASONS = frozenset({"ended", "exhausted"})
 
-    if existing.get("state") == "unreadable":
+
+def _record_refusal(existing: dict[str, Any]) -> str | None:
+    """The refusal the record alone decides, before any registry or lineage read."""
+
+    if existing.get("state") == "unreadable" or existing.get("schema") != ARM_SCHEMA:
         return "unreadable"
-    if existing.get("schema") != ARM_SCHEMA:
+    arms = existing.get("arms")
+    if not isinstance(arms, int):
         return "unreadable"
+    if arms >= ARM_LIMIT:
+        return "exhausted"
+    state = existing.get("state")
+    if state == "ended":
+        return "ended"
+    if state not in ARM_STATES:
+        return "unreadable"
+    return None
+
+
+def _settled_arm(path: Path) -> ArmRefusal | None:
+    """The claim refusal for a record that settled for good, read without the lock.
+
+    Only `SETTLED_ARM_REASONS` count: a missing, unreadable, or unknown record
+    goes through `claim_arm`, so a transient read failure never costs an arm."""
+
+    existing = _read_arm(path)
+    reason = None if existing is None else _record_refusal(existing)
+    return ArmRefusal(reason) if reason in SETTLED_ARM_REASONS else None
+
+
+def _reclaim_refusal(existing: dict[str, Any], jobs: Path, session: str) -> str | None:
+    """None when the existing record may be re-taken, else the typed reason.
+
+    The record's own refusals come first; the registry and lineage are read
+    only for a record that may still be claimable."""
+
+    refusal = _record_refusal(existing)
+    if refusal is not None:
+        return refusal
     # The session that armed it may have been cleared; its same-seat successor takes the wait over.
     handed = existing.get("session_id") != session and _handed_to(jobs, existing.get("attempt_id"), session)
     if handed is None:
@@ -649,17 +894,11 @@ def _reclaim_refusal(existing: dict[str, Any], jobs: Path, session: str) -> str 
         return "foreign-session"       # the arming session handed the owner on and no longer answers for it
     if metadata is not None and owned is None:
         return "handover-unreadable"   # unknown, not another session: the next call looks again
-    arms = existing.get("arms")
-    if not isinstance(arms, int):
-        return "unreadable"
-    if arms >= ARM_LIMIT:
-        return "exhausted"
     state = existing.get("state")
-    if state == "ended":
-        return "ended"
-    if state not in ARM_STATES:
-        return "unreadable"
-    if _holder_alive(existing.get("holder")) and not handed:
+    # A `lapsed` arm is one its holder stopped waiting on (a timeout, or a row a
+    # boundary wait holding several did not wake for); that holder may still
+    # live while it carries another row's wake (`_first_due`).
+    if state != "lapsed" and _holder_alive(existing.get("holder")) and not handed:
         return "held-live"
     if state == "gate-wake-sent" and _gate_record_open(
             jobs, (metadata or {}).get("parent_sid") or existing.get("session_id") or session,
@@ -753,11 +992,16 @@ def claim_arm(jobs: Path, attempt_id: str, session: str, *, fresh: bool) -> ArmC
                 if refusal is not None:
                     return ArmRefusal(refusal)
                 arms = int(existing["arms"]) + 1
+            runtime = runtime_ancestry_binding(os.getpid())
             record = {
                 "schema": ARM_SCHEMA,
                 "attempt_id": attempt_id,
                 "session_id": session,
                 "holder": list(identity),
+                # The Claude process this hook process wakes. After a resume it is
+                # not the row's launch-time runtime, and the shared runner's
+                # retained wake defers to a live holder only while this one lives.
+                "runtime": list(runtime) if runtime else None,
                 "state": "waiting",
                 "arms": arms,
                 "gate_delivery_id": None,
@@ -975,7 +1219,7 @@ def replacement_authority(launch: Launch, claim: ArmClaim, jobs: Path, aid: str,
         and held.get("session_id") == launch.session_id
         and _process_identity(os.getpid()) == claim.holder
         and all(metadata.get(key) == value for key, value in REGISTRY_DEPTH1_START.items())
-        and _worker_type_is_depth1(metadata.get("worker_type"))
+        and _row_is_depth1_waited(metadata)
         and _incarnation_binding_matches(metadata)
     )
 
@@ -1077,16 +1321,16 @@ def classified_receipt(
     # The row's sealed launch_home (SD-49) is the checkout the attempt actually
     # ran under; `root` (agent_home(), preferring env AGENT_HOME) may point at a
     # mutable primary checkout instead when this hook inherits that env var --
-    # a harvest command built from `root` can then be rejected by a parent
-    # guard that expects the sealed path. Prefer the sealed value and fall back
-    # to `root` only when it is missing or no longer names a real checkout.
+    # a release or resume command built from `root` can then be rejected by a
+    # parent guard that expects the sealed path. Prefer the sealed value and fall
+    # back to `root` only when it is missing or no longer names a harness root.
+    # Harvest and inspection lines name their own shared entry point
+    # (`completion_harvest_command`).
     sealed = row.metadata.get("launch_home") if row is not None else None
     home = Path(sealed) if sealed else root
-    if not (home / "adapters" / "codex" / "bin" / "preflight.sh").is_file():
+    if not (home / "core" / "CORE.md").is_file():
         home = root
-    harvest = home / "adapters" / "codex" / "bin" / "preflight.sh"
     status = delivery.status if delivery is not None else ""
-    row_revision = delivery.row_revision if delivery is not None else "unavailable"
     marker_current = bool(delivery and _completion_evidence_current(delivery))
     if delivery is not None:
         owned_children = delivery.owned_children
@@ -1103,8 +1347,6 @@ def classified_receipt(
     else:
         owned_children = 0
     quiescent = bool(delivery and delivery.quiescent)
-    advanced = bool(delivery and delivery.advanced)
-    row_digest = delivery.row_digest if delivery is not None else "unavailable"
     if (
         state in {"ready", "attention"}
         and delivery is not None
@@ -1129,12 +1371,20 @@ def classified_receipt(
             except (ImportError, OSError, ValueError):  # the optional explanation never blocks a wake
                 parked = None
         if state == "success":
-            instruction = "No harvest command is required; the registered owner completed."
+            # The shared runtime-v1 follow-up line (Codex and OpenCode carry the same one);
+            # the close contract itself is the adapter bootstrap's (§0.5).
+            from dispatch_completion_join import RUNTIME_V1_FOLLOWUP_PREFIXES
             summary = _sealed_summary(row, launch.attempt_id)
-            if summary:
-                instruction += ("\nFirst close: show this runtime summary to the person first, as written; "
-                                "then add what it does not show of changes/why, before/after, checks "
-                                "run/reused/skipped/unrun, commit/PR/deployment/serving, limits.\n" + summary)
+            head = kept = ""
+            if row is not None and row.metadata.get("capability") == "unit":
+                try:   # a continued unit turn names its turn; a request kept for the route names its start
+                    import unit_continue
+                    head, kept = unit_continue.notice_lines(str(launch.jobs), row.metadata, agent_home=home)
+                except Exception:  # noqa: BLE001 -- the extra lines never block a wake
+                    head = kept = ""
+            instruction = (RUNTIME_V1_FOLLOWUP_PREFIXES[bool(summary)]
+                           + ("\n" + (head + "\n" if head else "") + summary if summary else "")
+                           + ("\n" + kept if kept else ""))
         elif parked and parked["status"] == "blocked":
             gate = parked["gate"]
             required_action = HUMAN_GATE_PREFIX + gate
@@ -1159,8 +1409,12 @@ def classified_receipt(
             instruction = (
                 "Exact completion bookkeeping command:\n"
                 + completion_harvest_command(launch.attempt_id, required_action,
-                    jobs=str(launch.jobs), surface=str(harvest))
+                    jobs=str(launch.jobs))
             )
+            if required_action == "inspect-done-failure":
+                # A unit route's review that failed and was not read as finished work: name its report.
+                report = unit_leg_report_line(row.metadata if row is not None else {})
+                instruction += ("\n" + report) if report else ""
         elif required_action == "advance-completed":
             instruction = "No harvest command is required; advance or finish the route."
         elif required_action.startswith(HUMAN_GATE_PREFIX):
@@ -1175,7 +1429,7 @@ def classified_receipt(
             instruction = (
                 "Inspect the exact current row and completion marker with:\n"
                 + completion_harvest_command(launch.attempt_id, "inspect-done-failure",
-                    jobs=str(launch.jobs), surface=str(harvest))
+                    jobs=str(launch.jobs))
             )
     elif transaction_error:
         state = "attention"
@@ -1194,16 +1448,17 @@ def classified_receipt(
         if state == "success"
         else "Hearting dispatch requires attention"
     )
+    # Only what the model acts on: the row revision and digest are the runtime's own
+    # record (the delivery record keeps them), and waiting, polling and recaps are the
+    # adapter bootstrap's rules already.
     message = (
         f"{title}. Runtime owner completion receipt "
         f"schema=2 state={state} attempt_id={launch.attempt_id} armed={launch.armed} "
-        f"status={status or '-'} row_revision={row_revision} "
-        f"row_digest={row_digest} marker_current={int(marker_current)} "
+        f"status={status or '-'} marker_current={int(marker_current)} "
         f"quiescent={int(quiescent)} owned_children={owned_children} "
-        f"advanced={int(advanced)} "
+        f"advanced={int(bool(delivery and delivery.advanced))} "
         f"reason={reason} required_action={required_action}. "
-        "Do not start or re-arm Background Bash, Monitor, liveness, or dispatch-wait. "
-        f"{instruction}\nDo not emit a periodic progress recap."
+        f"{instruction}"
     )
     return state, message
 
@@ -1271,7 +1526,13 @@ def _attention_has_open_child(message: str) -> bool:
 def _incarnation_binding_matches(metadata: dict[str, str]) -> bool:
     """SD-111 P2 round 2 C-3: the recorded launch-time triple must match this
     hook process's own walk exactly on all three fields. Absence, a partial
-    recording, or any mismatch is a fail-closed no (§3.2.1's fork)."""
+    recording, or any mismatch is a fail-closed no (§3.2.1's fork) -- except
+    when the recorded Claude process is provably gone: the same session id
+    reopened in a new process is the same conversation (stage-dispatch
+    §13.34.1, a resumed Claude session is a later delivery, not a misdelivery),
+    and without this a conversation reopened to pick up a new release could
+    never be woken for work it started. A live or unreadable recorded process
+    still refuses, so two live processes on one session never both claim."""
 
     recorded = (
         metadata.get("parent_runtime_pid", ""),
@@ -1283,7 +1544,7 @@ def _incarnation_binding_matches(metadata: dict[str, str]) -> bool:
     observed = runtime_ancestry_binding(os.getpid())
     if observed is None:
         return False
-    return recorded == observed
+    return recorded == observed or not _holder_alive(list(recorded))
 
 
 @dataclass(frozen=True)
@@ -1450,9 +1711,26 @@ def _recipient_key(launch: Launch) -> str:
     return recipient_key
 
 
-def _recipient_gate_records(launch: Launch) -> list[tuple[Path, str, str, dict]]:
+def _resource_notice_for_launch(launch: Launch, recipient_key: str, record: dict) -> bool:
+    """A notice that wakes a resting session (an experiment's attention or failure) and is
+    addressed to this owner's supervising session: its own attempt-parent lineage, or a
+    provenance notice any owner of that session may announce (one claim decides which).
+    A notice whose storage or lineage does not check out is not this hook's to wake."""
+
+    try:
+        import session_notice
+        if record.get("receipt", {}).get("kind") != "notice" or not session_notice.wakes_resting_recipient(record):
+            return False
+        _jobs, lineage = session_notice.pending_lineage(record, "claude", recipient_key, launch.jobs)
+    except (ValueError, TypeError, KeyError, OSError, RuntimeError):
+        return False
+    return lineage.get("kind") == "provenance" or lineage.get("attempt_id") == launch.attempt_id
+
+
+def _recipient_gate_records(launch: Launch, *, notices: bool = False) -> list[tuple[Path, str, str, dict]]:
     """Every open gate record addressed to this launch's depth-0 session:
-    `(root, recipient_key, delivery_id, record)`; empty on any refusal."""
+    `(root, recipient_key, delivery_id, record)`; empty on any refusal.
+    `notices` also lists the resource notices `_resource_notice_for_launch` accepts."""
 
     recipient_key = _recipient_key(launch)
     if not recipient_key:
@@ -1472,7 +1750,8 @@ def _recipient_gate_records(launch: Launch) -> list[tuple[Path, str, str, dict]]
             continue
         if record is None or record.get("state") not in pending_delivery.OPEN_STATES:
             continue
-        if not is_human_gate_record(record) and record.get("receipt", {}).get("kind") != "supervision":
+        if (not is_human_gate_record(record) and record.get("receipt", {}).get("kind") != "supervision"
+                and not (notices and _resource_notice_for_launch(launch, recipient_key, record))):
             continue
         found.append((root, recipient_key, delivery_id, record))
     return found
@@ -1511,8 +1790,9 @@ def _open_gate_pending(launch: Launch) -> bool:
         return False
     _PROBE_DIRECTORY_MTIME[key] = mtime
     _PROBE_NEXT_DEADLINE_NS.pop(key, None)
-    for _root, _key, _delivery_id, record in _recipient_gate_records(launch):
-        if launch.attempt_id not in (record.get("attempt_ids") or []):
+    for _root, _key, _delivery_id, record in _recipient_gate_records(launch, notices=True):
+        if (record.get("receipt", {}).get("kind") != "notice"
+                and launch.attempt_id not in (record.get("attempt_ids") or [])):
             continue
         state = record.get("state")
         if state == "pending":
@@ -1549,8 +1829,9 @@ def _gate_notices(
     """
 
     notices: list[str] = []
-    for root, recipient_key, delivery_id, record in _recipient_gate_records(launch):
-        if attempt_only and launch.attempt_id not in (record.get("attempt_ids") or []):
+    for root, recipient_key, delivery_id, record in _recipient_gate_records(launch, notices=attempt_only):
+        if (attempt_only and record.get("receipt", {}).get("kind") != "notice"
+                and launch.attempt_id not in (record.get("attempt_ids") or [])):
             continue
         claim_owner = f"claude-async-rewake-gate:{os.getpid()}:{time.monotonic_ns()}"
         try:
@@ -1595,7 +1876,7 @@ def _gate_notices(
             announced_records.append(record)
         if announced is not None:
             announced.append(delivery_id)
-        if supervision_claims is not None and record.get("receipt", {}).get("kind") == "supervision":
+        if supervision_claims is not None and record.get("receipt", {}).get("kind") in {"supervision", "notice"}:
             supervision_claims.append((root, recipient_key, delivery_id, claim_owner))
         try:
             # Hook output/exit is ambiguous delivery. The native recipient
@@ -1608,23 +1889,28 @@ def _gate_notices(
     return notices
 
 
-def gate_wake_message(launch: Launch, notices: list[str], *, human_gate: bool) -> str:
+def gate_wake_message(launch: Launch, notices: list[str], *, human_gate: bool,
+                      resource_notice: bool = False) -> str:
     """The in-wait gate wake: bounded, typed, and explicit that the gate is
     answered, not harvested; the owner may still be waiting or may have paused
     at the gate."""
 
     if not human_gate:
-        return " ".join(notices)
+        return ((f"Hearting resource notice while owner attempt_id={launch.attempt_id} is still running; "
+                 "this is not the owner's completion, and its own completion will still wake this session. "
+                 if resource_notice else "") + " ".join(notices))
     return (
         "Hearting human gate awaiting your decision (SD-123/129). Runtime gate receipt "
         f"schema=2 state=attention attempt_id={launch.attempt_id} armed={launch.armed} "
         "owner=waiting-or-parked required_action=human-gate. "
         "The owner is waiting on `workflow-supervisor.py await-release` or has paused at the "
-        "gate; either way it is answered, not harvested, and a release continues the work. Read the artifact named below (an interview file or frame summary), put "
-        "the [방향 확인] card -- and every interview question, one topic at a time, in plain "
-        "words -- to the user through AskUserQuestion, then record the answer with "
+        "gate; either way it is answered, not harvested, and a release continues the work. Read the artifact named below (an interview file or frame summary) and show "
+        "the [방향 확인] card in your reply. The gate's questions are already on the Hearting "
+        "question board (the panel, Fleet and `hearting run questions`), where the person "
+        "answers them; do not ask them again through another tool. An answer the person gives in "
+        "conversation is recorded with "
         "`workflow-supervisor.py release --route <route file> --gate <name> --decision "
-        "proceed|revise|stop [--answers <answers.json>]`. That release command re-arms this "
+        "proceed|revise|stop [--answers <answers.json>]`. A release re-arms this "
         "hook for the owner's completion. Do not start or re-arm Background Bash, Monitor, "
         "liveness, or dispatch-wait, and do not emit a periodic progress recap. "
         + " ".join(notices)
@@ -1807,7 +2093,9 @@ def _announce_gate(launch: Launch, claim: ArmClaim, observation: dict[str, Any])
         observation.update(wait_state="gate", reason="human-gate-open")
         code = emit_receipt("attention", gate_wake_message(
             launch, notices, human_gate=any(is_human_gate_record(record)
-                                          for record in announced_records)), block=False)
+                                          for record in announced_records),
+            resource_notice=any(record.get("receipt", {}).get("kind") == "notice"
+                                for record in announced_records)), block=False)
         settle_arm(claim, "gate-wake-sent", gate_delivery_id=announced[0])
     # The native wake immediately runs UserPromptSubmit. Keeping
     # this exited carrier's 30s lease prevents that synchronous

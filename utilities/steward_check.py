@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import os
 import sys
 import time
@@ -37,6 +38,7 @@ DEFAULT_INTERVAL_SECONDS = 7200
 _TERMINAL = frozenset({"complete", "cancelled"})
 _OPEN_NOTICE_STATES = frozenset({"pending", "claimed", "sent-ambiguous"})
 _MAX_NAMES = 5
+_MAX_LAB_MEMORY = 1024
 
 _POLICY = {"signature": None, "interval": DEFAULT_INTERVAL_SECONDS, "warnings": []}
 _THROTTLE: dict[tuple[str, str], float] = {}
@@ -192,20 +194,29 @@ def _role_flagged(harness: str, session_id: str) -> bool:
     if function is None:
         return True  # no collector: keep the existing check rather than go silent
     try:
-        return bool(function(harness, session_id))
+        # Native registry rows, as in `_observe_role`: the flag never asks Herdr.
+        rows = collector._registry_sessions()
+        targets = collector.role_targets(harness, session_id, sessions=rows, include_native=True)
+        return bool(function(harness, session_id, sessions=rows, _targets=targets))
     except Exception:  # noqa: BLE001
         return True
 
 
-def _agents():
+def _role_flag_cause(harness: str, session_id: str) -> str:
+    """Why an unflagged role is unflagged, for the duty's observation: the runner could not
+    read the native records, the role has no targets, or only foreign-repository evidence."""
+    collector = _collector()
     try:
-        tools = _UTILITIES.parent / "tools"
-        if str(tools) not in sys.path:
-            sys.path.insert(0, str(tools))
-        from fleet.collectors import herdr
-        return herdr.list_agents()
+        rows = collector._registry_sessions()
+        targets = collector.role_targets(harness, session_id, sessions=rows, include_native=True)
     except Exception:  # noqa: BLE001
-        return None
+        return "native-records-unreadable"
+    return "foreign-repository-only" if targets else "no-targets"
+
+
+def _agents():
+    """The shared steward pass intentionally has no Herdr inventory input."""
+    return ()
 
 
 def _end_observation():
@@ -223,8 +234,10 @@ def _session_liveness(harness: str, session_id: str, agents=None, observation=No
     function = getattr(collector, "session_liveness", None)
     if function is None or not session_id:
         return "unknown"
-    options = {key: value for key, value in (("agents", agents), ("observation", observation))
-               if value is not None}
+    # No Herdr inventory: a missing ``agents`` means none, never a Herdr agent list.
+    options = {"agents": () if agents is None else agents}
+    if observation is not None:
+        options["observation"] = observation
     try:
         result = function(harness, session_id, **options)
     except Exception:  # noqa: BLE001
@@ -249,70 +262,14 @@ def _holder_seat_keys(harness: str, session_id: str):
     return keys
 
 
-def _seat_panes(harness: str, session_id: str, seat_keys):
-    """``{seat_key: {(pane, server)}}`` from this holder's watch arms, or None.
+def _window_closed(harness: str, session_id: str, observation=None) -> bool:
+    """Release a holder only on positive native proof of exact session end.
 
-    A watch arm names the pane its supervisor sat in, and the arm file outlives its
-    receipt. A seat with no such arm has no pane evidence, so nothing is concluded."""
-    import json
-    module = getattr(_collector(), "_peer_message_module", None)
-    root = Path(module().peer_state_root()) / "peer-watches" if module else None
-    if root is None or not root.is_dir():
-        return None
-    found = {key: set() for key in seat_keys}
-    for path in sorted(root.glob("*.json")):
-        if path.name.startswith(".") or path.name.endswith(
-                (".receipt.json", ".ack.json", ".observation.json")):
-            continue
-        try:
-            arm = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        steward = arm.get("steward") if isinstance(arm, dict) else None
-        seat = arm.get("steward_seat") if isinstance(arm, dict) else None
-        if (not isinstance(steward, dict) or not isinstance(seat, dict)
-                or (steward.get("harness"), steward.get("session_id")) != (harness, session_id)
-                or seat.get("key") not in found or seat.get("kind") != "pane"
-                or not seat.get("pane") or not arm.get("steward_server")):
-            continue
-        found[seat["key"]].add((str(seat["pane"]), str(arm["steward_server"])))
-    return found if all(found.values()) else None
-
-
-def _pane_census(server: str):
-    try:
-        import herdr_observation
-        return herdr_observation.pane_census(session=server)
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _window_closed(harness: str, session_id: str) -> bool:
-    """True only when every seat this holder's role sits in was seen empty in a complete
-    pane census and the session's liveness is not ``live``.
-
-    The ground for release is therefore "unknown (or ended) liveness plus the absence of
-    the same seat's pane", not liveness alone: a holder that is merely unobserved while
-    its pane still exists, or whose pane now shows another session, is left as it is.
-    A holder that moved to a different pane without a herdr row or process evidence is
-    the residual case; it is handled like any session whose proof of life is missing."""
-    keys = _holder_seat_keys(harness, session_id)
-    if not keys:
-        return False
-    panes = _seat_panes(harness, session_id, keys)
-    if panes is None:
-        return False
-    try:
-        import herdr_observation
-    except Exception:  # noqa: BLE001
-        return False
-    censuses = {}
-    for pane, server in sorted({item for values in panes.values() for item in values}):
-        if server not in censuses:
-            censuses[server] = _pane_census(server)
-        if not herdr_observation.confirms_absence(censuses[server], pane, endpoint=server):
-            return False
-    return _session_liveness(harness, session_id, _agents(), _end_observation()) != "live"
+    ``observation`` is the runner pass's one shared reading of the live session holders;
+    without it the call takes its own."""
+    if observation is None:
+        observation = _end_observation()
+    return _session_liveness(harness, session_id, (), observation) == "ended"
 
 
 _ACTIVITY_EVENTS = frozenset({"start", "prompt", "real-prompt", "summary"})
@@ -337,7 +294,7 @@ def _evidence_ts(relation: dict) -> float:
     return latest
 
 
-def _seat_cleared(harness: str, session_id: str) -> bool:
+def _seat_cleared(harness: str, session_id: str, observation=None) -> bool:
     """True only when every seat this holder's role sits in recorded the holder's own
     confirmed same-harness ``/clear``, nothing shows the holder after that clear, and the
     session is not ``live``.
@@ -400,20 +357,34 @@ def _seat_cleared(harness: str, session_id: str) -> bool:
                 return False
     except Exception:  # noqa: BLE001 - unreadable lineage concludes nothing
         return False
-    return _session_liveness(harness, session_id, _agents(), _end_observation()) != "live"
+    if observation is None:
+        observation = _end_observation()
+    return _session_liveness(harness, session_id, _agents(), observation) != "live"
 
 
-def _release_if_window_closed(duty, store, harness: str, session_id: str, now: float) -> bool:
-    """Release a role whose session closed through an ordinary path the hook did not see:
-    its seat pane vanished (``window-closed``) or its seat moved on by a confirmed
-    ``/clear`` (``cleared``). The release itself is the one ``release_closed_session``;
-    while it cannot resolve the role, the duty stays for the next pass."""
+def _release_reason(harness: str, session_id: str, observation):
+    """``session-ended``, ``cleared`` or None from one reading of the session holders."""
+    if _window_closed(harness, session_id, observation):
+        return "session-ended"
+    if _seat_cleared(harness, session_id, observation):
+        return "cleared"
+    return None
+
+
+def _release_if_window_closed(duty, store, harness: str, session_id: str, now: float,
+                              observation=None) -> bool:
+    """Release a role only on exact native end or confirmed clear evidence.
+
+    The release itself is the one ``release_closed_session``; if role resolution is
+    uncertain, keep the duty for the next pass. The round's shared ``observation`` can
+    predate a resume of this same session, so a release it points to is decided again
+    on a fresh reading, as the message cancel re-checks lifetime before it acts.
+    """
     try:
-        if _window_closed(harness, session_id):
-            reason = "window-closed"
-        elif _seat_cleared(harness, session_id):
-            reason = "cleared"
-        else:
+        reason = _release_reason(harness, session_id, observation)
+        if reason is not None and observation is not None:
+            reason = _release_reason(harness, session_id, _end_observation())
+        if reason is None:
             return False
         module = getattr(_collector(), "_peer_message_module", None)
         peer_message = module() if module else None
@@ -443,7 +414,8 @@ def _human_wait_open(harness: str, session_id: str, now: float) -> bool:
 def _holder_cwd(harness: str, session_id: str):
     """The holder's own single cwd from the collector's session rows, or None."""
     collector = _collector()
-    rows_of = getattr(collector, "_projection_sessions", None)
+    # Native registry rows: the holder's cwd never needs a Herdr agent list.
+    rows_of = getattr(collector, "_registry_sessions", None)
     keys_of = getattr(collector, "_session_keys", None)
     if rows_of is None or keys_of is None:
         return None
@@ -485,7 +457,7 @@ def _open_work(harness: str, session_id: str) -> tuple[list[str], list[str]]:
         rows, _watched = observe(cwd)
     except Exception:  # noqa: BLE001 - backlog is optional evidence
         return [], []
-    work, decisions = [], []
+    open_rows = []
     for row in rows or ():
         row = row if isinstance(row, dict) else {}
         headline = " ".join(str(row.get("headline") or "").split())
@@ -496,23 +468,154 @@ def _open_work(harness: str, session_id: str) -> tuple[list[str], list[str]]:
                 continue
         except Exception:  # noqa: BLE001
             continue
-        (decisions if _is_user_decision(row, headline) else work).append(headline)
+        open_rows.append((row, headline))
+    # Work handed to a route whose worker runs now is the route's, not this session's to do:
+    # it comes back as the route's own completion. A finished route's unreceived result and
+    # a record with no running route, or one that also names another session's or a finished
+    # route, stay open work.
+    try:
+        from fleet.session_work import delegated
+        handed = {id(row) for row in delegated(
+            [row for row, _ in open_rows], lambda ids: _running_routes(ids, session_id))}
+    except Exception:  # noqa: BLE001
+        handed = set()
+    work, decisions = [], []
+    for row, headline in open_rows:
+        if _is_user_decision(row, headline):
+            decisions.append(headline)
+        elif id(row) not in handed:
+            work.append(headline)
     return work, decisions
 
 
+def _running_routes(route_ids, session_id) -> set:
+    """Which of these route ids this session launched and still have a live worker, from the
+    existing dispatch observer."""
+    import dispatch_supervision
+    import session_notice
+    return dispatch_supervision.running_route_ids(
+        session_notice._registry(None), route_ids, session_id or "")
+
+
 def _pending_count(module, harness: str, session_id) -> int:
+    """Peer requests another session sent to ``session_id`` that it has not received yet.
+
+    A runtime notice (``from.harness == "runtime"``: route completions, experiment
+    finals and this check's own notice) is not a peer request: its non-delivery is the
+    duty's own ``undelivered_notices``, and counting it would let the check's notice
+    become the next check's work."""
     if module is None or not session_id:
         return 0
     try:
         rows = module.pending_messages({"harness": harness, "session_id": session_id})
     except Exception:  # noqa: BLE001
         return 0
-    return len([row for row in rows or () if row.get("state") == "pending"])
+    return len([row for row in rows or ()
+                if row.get("state") == "pending"
+                and (row.get("from") or {}).get("harness") != "runtime"])
+
+
+def _observe_lab(cwds) -> dict:
+    """One shared board read per target artifact root; optional, read-only evidence."""
+    if not cwds:
+        return {}
+    try:
+        from fleet.collectors.project_status import artifact_root
+        roots = {root for cwd in sorted(cwds) if (root := artifact_root(cwd))}
+        if not roots:
+            return {}
+        import experiment_board
+        import experiment_catalog
+    except Exception:  # noqa: BLE001 - LAB must not disable the existing check
+        return {}
+    lab = {}
+    for root in sorted(roots):
+        try:
+            if not experiment_catalog.catalog_path(Path(root)).is_file():
+                continue
+            board, _ = experiment_board.read(Path(root))
+            if board["catalog"]["status"] != "ok":
+                continue
+            groups = []
+            for group in board["groups"]:
+                headline = group["headline"]
+                groups.append({"name": group["name"],
+                               **{key: group["counts"][key] for key in ("failed", "stagnant", "unknown")},
+                               "headline_name": headline["name"],
+                               "rows": [{key: row[key] for key in
+                                         ("condition_id", "run_id", "started_at", "unknown_flag")}
+                                        for row in group["rows"]]})
+            lab[root] = {**{key: board["totals"][key] for key in ("failed", "stagnant", "unknown")},
+                         "unlinked": board["unlinked"]["count"],
+                         "unlinked_run_ids": board["unlinked"]["run_ids"], "groups": groups}
+        except Exception:  # noqa: BLE001 - missing/broken optional evidence changes no duty behavior
+            continue
+    return lab
+
+
+def _lab_text():
+    def load():
+        path = _UTILITIES.parent / "tools" / "i18n" / "ui_text.py"
+        spec = importlib.util.spec_from_file_location("_steward_ui_text", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    return _module("ui_text", load).translator()
+
+
+def _lab_id(root: str, *identity) -> str:
+    # Fixed-size nameplates keep 1024 entries within the duty store's 128 KiB limit.
+    return hashlib.sha256(json.dumps([root, *identity]).encode()).hexdigest()
+
+
+def _lab_run_ids(root: str, group: dict) -> list[str]:
+    ids = []
+    for row in group.get("rows", []):
+        if row["unknown_flag"]:
+            identity = ("condition", row["condition_id"], row.get("run_id"))
+            ids.append(_lab_id(root, *identity))
+            if row.get("started_at") is not None:
+                ids.append(_lab_id(root, *identity, row["started_at"]))
+    return ids
+
+
+def _lab_summary(observation: dict, notified) -> tuple[str, str, dict]:
+    """Counts always fit first; one optional name pair never controls memory or wake."""
+    labs = observation.get("lab") or {}
+    if not labs:
+        return "", "", {}
+    t = _lab_text()
+    groups = [(root, group) for root, lab in labs.items() for group in lab["groups"]]
+    ids = [rid for root, group in groups for rid in _lab_run_ids(root, group)]
+    ids += [_lab_id(root, "unlinked", rid)
+            for root, lab in labs.items() for rid in lab.get("unlinked_run_ids", [])]
+    # Only the id-less tail needs a count watermark; named runs use identities.
+    overflow = {_lab_id(root, "unlinked-overflow"): lab["unlinked"] for root, lab in labs.items()
+                if lab["unlinked"] > len(lab.get("unlinked_run_ids", []))}
+    if len(ids) > _MAX_LAB_MEMORY:
+        # More nameplates are visible than the memory holds: remember their number, so the
+        # count is announced once and then stays quiet until it grows.
+        ids, overflow = [], {**overflow, _lab_id("visible-overflow"): len(ids)}
+    # The head, the Fleet line and this line name a run without a catalog name with one word.
+    line = "LAB: " + "·".join(
+        t("fleet.lab.n_" + word, n=sum(lab[key] for lab in labs.values()))
+        for key, word in (("unknown", "unknown"), ("unlinked", "unnamed"),
+                          ("failed", "failed"), ("stagnant", "stagnant")))
+    if len(groups) > 1:
+        line += " (" + t("fleet.lab.n_groups", n=len(groups)) + ")"
+    selected = next((group for root, group in groups
+                     if set(_lab_run_ids(root, group)) - set(notified)),
+                    groups[0][1] if groups else None)
+    names = (", " + t("fleet.lab.look_now", name=
+             f"{selected['name']} — {selected['headline_name']}")
+             if selected and selected["name"] and selected["headline_name"] else "")
+    return line, names, {**dict.fromkeys(ids, 1), **overflow}
 
 
 def _observe_role(harness: str, session_id: str) -> dict:
     """``{"targets": [{name, harness, session_id, state, liveness, owed}],
-    "pending_messages": n, "open_work": [headline, ...], "user_decisions": [headline, ...]}``
+    "pending_messages": n, "open_work": [headline, ...], "user_decisions": [headline, ...],
+    "lab": {root: counts_and_group_names}}``
     for this holder's own winner targets only; ``owed`` and ``pending_messages`` count peer
     requests queued but not yet delivered to that target or to the holder."""
     collector = _collector()
@@ -521,19 +624,34 @@ def _observe_role(harness: str, session_id: str) -> dict:
     except Exception:  # noqa: BLE001
         module = None
     targets = []
-    agents = _agents()
+    cwds = set()
+    agents = ()
     observation = _end_observation()
-    by_session = {}
-    for agent in agents or ():
-        identity = agent.get("agent_session") or {}
-        sid = identity.get("value") if isinstance(identity, dict) else None
-        if sid:
-            by_session[(str(agent.get("agent") or "").lower(), sid)] = agent
     if collector is not None:
-        for target in collector.role_targets(harness, session_id) or ():
+        # Native registry rows only (as `_holder_cwd` and `grant_steward`): no Herdr agent list.
+        rows = collector._registry_sessions()
+        resolved = collector.role_targets(harness, session_id, sessions=rows, include_native=True) or []
+        unresolved_reader = getattr(collector, "unresolved_role_targets", None)
+        unresolved = unresolved_reader(harness, session_id, sessions=rows) if callable(unresolved_reader) else []
+        for target in [*resolved, *unresolved]:
             t_harness = str(target.get("harness") or "").lower()
             t_sid = target.get("session_id")
-            agent = by_session.get((t_harness, t_sid))
+            try:
+                from peer_steward_native import native_agent
+                payload = native_agent(t_harness, t_sid)
+                agent = (payload or {}).get("result", {}).get("agent")
+            except Exception:
+                agent = None
+            if target.get("unresolved"):
+                agent = None
+            if not target.get("unresolved"):
+                directories = {row.cwd for row in rows if getattr(row, "cwd", None)
+                               and getattr(row, "harness", None) == t_harness
+                               and t_sid in (getattr(row, "session_id", None),
+                                             *(getattr(row, "session_aliases", None) or ()))}
+                if not directories and (agent or {}).get("cwd"):
+                    directories.add(agent["cwd"])
+                cwds.update(directories)
             state = (agent or {}).get("agent_status") or "unknown"
             targets.append({
                 "name": str(target.get("name") or (t_sid or "-")[:8]),
@@ -541,11 +659,30 @@ def _observe_role(harness: str, session_id: str) -> dict:
                 "state": state,
                 "liveness": (_session_liveness(t_harness, t_sid, agents, observation)
                              if t_sid else "unknown"),
+                **({"unresolved": True} if target.get("unresolved") else {}),
                 "owed": _pending_count(module, t_harness, t_sid)})
+    _lengthen_shared_prefixes(targets)
     pending = _pending_count(module, harness, session_id)
     work, decisions = _open_work(harness, session_id)
+    lab = _observe_lab(cwds)
     return {"targets": targets, "pending_messages": pending,
-            "open_work": work, "user_decisions": decisions}
+            "open_work": work, "user_decisions": decisions, "lab": lab}
+
+
+def _lengthen_shared_prefixes(targets: list) -> None:
+    """Two targets named only by the first 8 characters of different session ids keep
+    them apart: each such name is lengthened to the shortest prefix that differs."""
+    nameless = [t for t in targets if t.get("session_id") and t["name"] == t["session_id"][:8]]
+    for target in nameless:
+        others = [o["session_id"] for o in nameless
+                  if o is not target and o["session_id"] != target["session_id"]
+                  and o["session_id"][:8] == target["session_id"][:8]]
+        if not others:
+            continue
+        sid, length = target["session_id"], 8
+        while length < len(sid) and any(other[:length] == sid[:length] for other in others):
+            length += 1
+        target["name"] = sid[:length]
 
 
 def _queued_for(target: dict) -> int:
@@ -628,11 +765,30 @@ def _signature(action: str, observation: dict) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def _none_live(observation: dict) -> bool:
+    """Every target has ended (or never proved live): nobody is left to watch or assign to."""
+    return not any(t["liveness"] != "ended" for t in observation["targets"]
+                   if not t.get("unresolved") or t["liveness"] == "live")
+
+
+def _quiet_signature(observation: dict) -> str:
+    """What a role with no live target is quiet about: its targets alone.
+
+    The holder's own open records, decisions and queued requests reach it on their own
+    (its memory, its prompts, the courier); with nobody left to watch or to take work
+    they open no turn. A live idle target keeps the full signature: new work is for it."""
+    rows = sorted((t["name"], t["harness"], str(t["session_id"]), t["state"], t["liveness"])
+                  for t in observation["targets"])
+    return hashlib.sha256(repr(("quiet", rows)).encode("utf-8")).hexdigest()[:16]
+
+
 def _quiet(observation: dict) -> bool:
     """No live unfinished target: an unchanged state sends no further model turn. Open
-    records alone do not repeat; a live unfinished target is checked every interval."""
+    records alone do not repeat; a live unfinished target is checked every interval.
+    Unresolved targets remain visible, but only repeat when positively live."""
     return not any(t["state"] != "done" and t["liveness"] != "ended"
-                   for t in observation["targets"])
+                   for t in observation["targets"]
+                   if not t.get("unresolved") or t["liveness"] == "live")
 
 
 def _classify(observation: dict) -> str:
@@ -647,18 +803,46 @@ def _classify(observation: dict) -> str:
     return "run-steward-check"
 
 
-def _actions_text(actions: list[str]) -> str:
+def _actions_text(actions: list[str], limit: int | None = None, *, max_actions=_MAX_ACTIONS) -> str:
     """The assign-next notice within the carrier's text limit."""
     import session_notice
-    limit = getattr(session_notice, "MAX_TEXT", 600)
-    shown = list(actions[:_MAX_ACTIONS])
+    limit = session_notice.MAX_TEXT if limit is None else limit
+    shown = list(actions[:max_actions])
     while True:
         more = len(actions) - len(shown)
-        joined = "; ".join(shown) + (f"; +{more} more" if more else "")
+        joined = "; ".join([*shown, *([f"+{more} more"] if more else [])])
         text = TEXT_ASSIGN_NEXT.format(actions=joined)
-        if len(text) <= limit or len(shown) <= 1:
-            return text[:limit]
+        if len(text) <= limit or not shown:
+            return text
         shown.pop()
+
+
+def _notice_text(base: str, seen: dict, action: str, key: str, waiting_since, now,
+                 line="", names="") -> str:
+    """Reserve all LAB counts, then fit whole actions/targets and one whole name pair."""
+    import session_notice
+    actions = next_actions(seen, waiting_since, now) if action == "assign-next" else None
+    maximum = min(len(actions), _MAX_ACTIONS) if actions is not None else _MAX_NAMES
+
+    def fits(text):
+        try:
+            session_notice.validate({"schema_version": 1, "kind": "notice",
+                "subject": "steward-check", "text": text, "required_action": action, "key": key})
+            return True
+        except ValueError:
+            return False
+
+    for count in range(maximum, -1, -1):
+        advice = base
+        if actions is not None:
+            advice = _actions_text(actions, max_actions=count)
+        elif action == "tidy-and-release":
+            advice = TEXT_TIDY_AND_RELEASE.format(count=len(seen["targets"]),
+                                                 names=_names(seen["targets"], count))
+        text = " ".join((advice + (" | " + line if line else "")).split())
+        if fits(text):
+            return text + names if names and fits(text + names) else text
+    return base
 
 
 # ---------------------------------------------------------------- notices
@@ -819,10 +1003,10 @@ def _retire_for_role(duty: dict, store, role: dict, now=None) -> None:
             successor=role.get("successor"), now=now)
 
 
-def _names(targets: list[dict]) -> str:
+def _names(targets: list[dict], limit=_MAX_NAMES) -> str:
     names = [t["name"] for t in targets]
-    shown = ", ".join(names[:_MAX_NAMES])
-    return shown + (f" +{len(names) - _MAX_NAMES} more" if len(names) > _MAX_NAMES else "")
+    shown = ", ".join(names[:limit])
+    return shown + (f" +{len(names) - limit} more" if len(names) > limit else "")
 
 
 def _throttled(duty_id_: str, kind: str, now: float) -> bool:
@@ -833,8 +1017,11 @@ def _throttled(duty_id_: str, kind: str, now: float) -> bool:
     return False
 
 
-def advance(duty: dict, store, *, now: float | None = None) -> None:
-    """One runner pass for one duty. Before the due time this is a memory comparison."""
+def advance(duty: dict, store, *, now: float | None = None, end_observation=None) -> None:
+    """One runner pass for one duty. Before the due time this is a memory comparison.
+
+    ``end_observation`` is the runner pass's shared ``end_observation()``: every duty of
+    one pass asks the same live-session question of one process-table reading."""
     if not _active(duty):
         return
     now = _now() if now is None else now
@@ -848,8 +1035,8 @@ def advance(duty: dict, store, *, now: float | None = None) -> None:
         store.update(duty["id"], state="complete", cleanup="complete")
         return
     if not _throttled(duty["id"], "window", now):
-        # A polling cadence for `herdr pane list`, not a time condition on the verdict.
-        if _release_if_window_closed(duty, store, harness, session_id, now):
+        # A cadence for the native window-closed read, not a time condition on the verdict.
+        if _release_if_window_closed(duty, store, harness, session_id, now, end_observation):
             return
     if phase == "notified":
         _advance_notified(duty, store, observation, harness, session_id, now)
@@ -903,19 +1090,17 @@ def _due(duty, store, observation, harness, session_id, now) -> None:
         # no notice and no model turn; the duty waits for a role or a release.
         store.update(duty["id"], observation={
             **observation, "anchor": now, "skipped": int(observation.get("skipped") or 0) + 1,
-            "reason": "no-steward-flag"})
+            "reason": "no-steward-flag", "cause": _role_flag_cause(harness, session_id)})
         return
     seen = _observe_role(harness, session_id)
     waiting_since = _track_waiting(observation.get("waiting_since"), seen["targets"], now)
     observation = {**observation, "waiting_since": waiting_since}
     action = _classify(seen)
-    signature = _signature(action, seen)
+    retained = dict(observation.get("lab_notified") or [])
+    line, names, current = _lab_summary(seen, retained)
+    new_lab = any(count > retained.get(rid, 0) for rid, count in current.items())
     quiet = _quiet(seen)
-    if quiet and signature == observation.get("quiet_signature"):
-        store.update(duty["id"], observation={
-            **observation, "anchor": now, "skipped": int(observation.get("skipped") or 0) + 1,
-            "reason": "quiet-no-change"})
-        return
+    signature = _quiet_signature(seen) if quiet and _none_live(seen) else _signature(action, seen)
     if action == "release-if-idle":
         text = TEXT_RELEASE_IF_IDLE
     elif action == "tidy-and-release":
@@ -926,12 +1111,22 @@ def _due(duty, store, observation, harness, session_id, now) -> None:
         text = TEXT_RUN_CHECK
     cycle = int(observation.get("cycle") or 0)
     key = _notice_key(harness, session_id, observation["epoch"], cycle)
+    text = _notice_text(text, seen, action, key, waiting_since, now, line, names)
+    if quiet and signature == observation.get("quiet_signature") and not new_lab:
+        store.update(duty["id"], observation={
+            **observation, "anchor": now, "skipped": int(observation.get("skipped") or 0) + 1,
+            "reason": "quiet-no-change"})
+        return
+    # List order survives the store's sorted JSON keys. Evict the oldest announcements first.
+    # The nameplates seen now go last, so the cut below never drops one that is still visible.
+    retained.update({rid: max(count, retained.pop(rid, 0)) for rid, count in current.items()})
+    lab_notified = list(retained.items())[-_MAX_LAB_MEMORY:]
     delivery_id = _delivery_id(key)
     # Record the intent first so a carrier claiming right away already finds the
     # duty vouching for this exact notice.
     sent = {**observation, "phase": "notified", "cycle": cycle + 1, "notified_at": now,
             "notice_delivery_id": delivery_id, "reason": action,
-            "quiet_signature": signature if quiet else None}
+            "quiet_signature": signature if quiet else None, "lab_notified": lab_notified}
     store.update(duty["id"], observation=sent)
     _THROTTLE[(duty["id"], "notified")] = now
     try:
@@ -962,15 +1157,22 @@ def reconcile_self(store=None, *, identity=None) -> None:
         harness, session_id = getattr(identity, "harness", ""), getattr(identity, "session_id", "")
         if not harness or not session_id:
             return
+        module = getattr(_collector(), "_peer_message_module", None)
+        peer_message = module() if module else None
+        resume = getattr(peer_message, "observe_steward_resume", None)
         st = _store(store)
         duty = st.get(duty_id(harness, session_id))
         marker = _marker_exists(st, harness, session_id)
         if not marker and not _active(duty):
             return
         if marker and _active(duty):
+            if resume:
+                resume(harness, session_id)
             return  # consistent; the runner re-verifies at each due time
         role = _role_held(harness, session_id)
         if role["held"]:
+            if resume:
+                resume(harness, session_id)
             register(harness, session_id, store=st, ensure_runner=False)
         elif _active(duty):
             _retire_for_role(duty, st, role)
@@ -983,7 +1185,8 @@ def reconcile_all(store) -> None:
 
     It reads only the role relations and one record per holder, never a store
     listing, so the runner's cold pass keeps its I/O shape; a duty whose holder
-    lost the role retires at its own next due point (`_due`)."""
+    lost the role retires at its own next due point (`_due`). One reading of the
+    session holders serves every holder; each ended one is read again before release."""
     try:
         relations = _relations()
     except Exception:  # noqa: BLE001
@@ -999,8 +1202,17 @@ def reconcile_all(store) -> None:
     observation = _end_observation()
     for (harness, session_id) in holders:
         try:
-            if _session_liveness(harness, session_id, agents, observation) != "ended":
+            # The shared reading only nominates an ended holder; the release acts on a
+            # fresh reading, as in ``_release_if_window_closed``.
+            if (_session_liveness(harness, session_id, agents, observation) != "ended"
+                    or _session_liveness(harness, session_id, agents,
+                                         _end_observation()) != "ended"):
                 register(harness, session_id, store=store, ensure_runner=False)
+            else:
+                module = getattr(_collector(), "_peer_message_module", None)
+                peer_message = module() if module else None
+                if peer_message:
+                    peer_message.release_closed_session(harness, session_id, reason="session-ended")
         except Exception:  # noqa: BLE001
             continue
 
@@ -1062,6 +1274,12 @@ def cmd_check(harness: str, session_id: str, *, now: float | None = None, out=No
           f"targets={count} changes={changes} checked_at={stamp}", file=out)
     for warning in policy_warnings():
         print(f"warning={warning}", file=out)
+    try:  # the same LAB line the periodic notice carries; a lab read that breaks hides only this line
+        line, names, _ = _lab_summary(seen, dict(observation.get("lab_notified") or []))
+    except Exception:  # noqa: BLE001
+        line = names = ""
+    if line:
+        print(line + names, file=out)
     actions = next_actions(seen, waiting_since, now)
     if not targets and not actions:
         print("hint=nothing to supervise; tidy finished sessions and release with "

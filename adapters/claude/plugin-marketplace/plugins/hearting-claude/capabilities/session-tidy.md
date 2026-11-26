@@ -38,7 +38,16 @@ endpoint, current-root, ambiguity and input-readiness checks apply unchanged;
 Claude's caller, inner PID/start and native SID must agree on that same pane and
 socket. Native card storage remains available without a physical pane.
 
-Claude Code, Codex, and OpenCode give the interactive main session a non-blocking notice based on the latest request's input usage: strictly above 500,000 tokens recommends `/session-tidy`, and strictly above 700,000 asks for tidying now. Each threshold is emitted once per native session ID; a jump across both emits the urgent notice once and consumes both. Compaction does not reset these notices. Owners, workers, auxiliary/reviewer sessions, and subagents are excluded. These are work-preservation notices, not a guarantee of remaining context or time before native compaction; they do not change the runtime's compaction policy.
+Claude Code, Codex, and OpenCode give the interactive main session a non-blocking notice based on the latest request's input usage: strictly above 500,000 tokens recommends `/session-tidy`, and strictly above 700,000 asks for the default tidy (same-session compaction, keeping the session number, supervisor role and pending completion notices) once the current item of work is passed on, in one short line that also says `정리만` does not reduce the context. Each threshold is emitted once while the session stays above it; a jump across both emits the urgent notice once and consumes both. When the session's latest request falls to 400,000 tokens or fewer — as after its own compaction, by session-tidy or the runtime; a small dip under 500,000 does not count — both thresholds may speak once more; a new native session ID starts the same way. A zero or unknown count changes nothing. The notice rides each harness's existing prompt boundary, which also runs for a turn woken by a runtime notice rather than a person (Claude's asyncRewake turn, Codex's queued runtime input, OpenCode's runtime prompt). Owners, workers, auxiliary/reviewer sessions, and subagents are excluded. These are work-preservation notices, not a guarantee of remaining context or time before native compaction; they do not change the runtime's compaction policy.
+
+When the work folder has an experiment catalog (`utilities/experiment_catalog.py`), the writer
+is given its group names, goals and condition names with the writing guide and calls each
+condition by that catalog name. The card is saved exactly as written. When the saved card says a
+run id, a `run:row`, an identifier-like alias or a former name without its catalog name, `card`,
+`tidy` and `handoff` print one `names=` advice line after their own line (at most eight names).
+Dated quotes and PRD locations are not judged; ordinary words, numbers, code, quotes, paths and
+commands stay quiet. The advice changes neither the save, the exit code nor the `say=` line.
+Native compaction does none of this (below).
 
 Native runtime compaction is not a session-tidy invocation. PreCompact adds no
 card instructions; PostCompact records the exact native session's compaction
@@ -118,7 +127,11 @@ A manually invoked tidy writes its handoff card and queues memory work in one
 tool call (`utilities/session_tidy.py tidy`), followed by the command's short
 `say=` reply. `card`, `enqueue`, `--no-clear`, `--no-continue` and peer handoff
 keep their existing meaning. Manual memory-tidy results retain their undo and
-partial-coverage details.
+partial-coverage details. A tidy the session runs on any turn where no automatic
+request of this booking arrived (a person's turn, another session's message, a
+runtime notice or a completion wake) is a manually invoked tidy, whoever woke
+it: it schedules the compaction and takes the booking's place, and the unspent
+idle booking sends nothing afterwards.
 
 Automatic idle work needs no main-session Skill, tool or model turn. Its existing
 booking and memory queue bind the helper output to the unchanged session,
@@ -144,8 +157,19 @@ The compaction counts as confirmed only from that session's own native history
 after the claim (Claude's `compact_boundary` row, Codex's `compacted` row, or the
 session's PostCompact/compaction ledger row); a screen label or transport ACK is
 not evidence. The PostCompact of a booked compaction writes no card and queues
-no second memory tidy. After a confirmed compaction a manual booking asks
-`utilities/peer-steward.py continue` once for the same session. It preserves the
+no second memory tidy. A panel host that gives no answer to the screen request
+(`shell-no-answer`, as while it is replaced) is asked again for about a minute (12 looks, 5 seconds
+apart) before the booking ends with that reason; a host that is gone for good answers the same, so the
+two are not told apart, and this also covers the `/compact` step of a rest-time booking. After a confirmed compaction a manual booking asks
+`utilities/peer-steward.py continue` for the same session inside a window as long as
+the compaction wait (900 seconds from the confirmation). Every ask passes the same checks
+again and sends at most once; nothing already handed to the receiver is asked twice. A
+session still on a turn of its own holds the continue back, and the helper, the one process
+that lives through the window on every harness, asks again inside it (a hook process, Claude's
+Stop or UserPromptSubmit or a peer receive, asks once and ends; OpenCode has no end-of-turn
+callback that asks again). A Claude continue is typed only into an empty prompt; a Codex or
+OpenCode continue starts its turn only over an empty input box, read before and after the claim
+(15 seconds between asks while a draft or an open form holds the input box). It preserves the
 booking, claim, card generation, seat, unchanged prompt count and expiry. An
 exact-native seat with a supported attachment keeps that bounded path: it
 rechecks the booked process, idle state, form and empty input, then writes the
@@ -254,6 +278,8 @@ line; report its `prompted=` line for handoff and do not retry an uncertain send
 `정리만` / `--no-clear` saves the card and queues the existing memory work while
 keeping the conversation uncompacted. Saving does not shrink its context, disable native
 automatic compaction or establish that compaction was avoided.
+A tidy started because of the 500K/700K notice is the default `정리` unless the
+person asked for `정리만`.
 
 A supervisor or user may run the same transfer for a session it names:
 `python3 $AGENT_HOME/utilities/session_tidy.py handoff --from <세션> --kind <하네스>`.
@@ -311,10 +337,10 @@ role authority, or adapter-specific rule is introduced.
   ],
   "selection_order": ["confirmed_role", "main_route_capability", "work_folder"],
   "modules": [
-    {"id": "supervision", "label": "지휘·감독", "roles": ["supervision", "supervisor", "steward", "지휘", "감독"], "capabilities": [], "folders": [], "keep": "assignee/session, route, last verified state/time, result path, next action"},
+    {"id": "supervision", "label": "지휘·감독", "roles": ["supervision", "supervisor", "steward", "지휘", "감독"], "capabilities": [], "folders": [], "keep": "assignee/session, route, last verified state/time, result path, next action; when it supervises experiments, the experiment catalog location and each condition by its catalog name"},
     {"id": "publication", "label": "출판·릴리스", "roles": ["publication", "release", "publisher", "출판", "릴리스"], "capabilities": ["autopilot-ship"], "folders": ["releases"], "keep": "pending PR/head/CI run, dependency order, approved merge/install scope, installed version/receipt, queue path"},
     {"id": "code", "label": "코드 구현", "roles": ["code", "implementation", "developer", "코드", "구현"], "capabilities": ["autopilot-code"], "folders": [], "keep": "repo/worktree/branch/head, dirty/conflict state, change goal, verified tests/failures, PR/CI reference"},
-    {"id": "research", "label": "연구·실험", "roles": ["research", "experiment", "researcher", "연구", "실험"], "capabilities": ["autopilot-research", "autopilot-lab"], "folders": ["research", "experiments"], "keep": "run/host/GPU/state, config/checkpoint, input/truth/scoring conditions and paths, metrics/units, unknowns"},
+    {"id": "research", "label": "연구·실험", "roles": ["research", "experiment", "researcher", "연구", "실험"], "capabilities": ["autopilot-research", "autopilot-lab"], "folders": ["research", "experiments"], "keep": "run/host/GPU/state, config/checkpoint, input/truth/scoring conditions and paths, metrics/units, unknowns; experiment catalog location, one-line goal, and each condition by its catalog name (run id in parentheses)"},
     {"id": "document", "label": "문서 작성", "roles": ["document", "writer", "editor", "문서", "작성"], "capabilities": ["autopilot-draft", "autopilot-refine", "autopilot-apply"], "folders": ["documents", "papers"], "keep": "audience, current deliverable/revision/source, tracked changes, remaining sections/evidence, delivery state/time"},
     {"id": "operations", "label": "운영", "roles": ["operations", "operator", "운영"], "capabilities": [], "folders": ["ops"], "keep": "service/host/version, last run/failure/cost/usage time, next action/hold conditions, relevant backup/restore path"}
   ]

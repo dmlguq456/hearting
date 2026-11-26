@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 import re
 from route_authority import depth1_supported_harnesses, route_in_force
+from route_plan import is_depth0_leg
+from route_form import serial_attempt_route
 
 from dispatch_contract_base import (
     ATTEMPT_SCHEMA_VERSION, DispatchContractError, EXECUTION_SURFACES, FALLBACK_HOPS,
@@ -233,7 +235,9 @@ def headless_attempt_policy(
     if int(node.get("dispatch_depth", -1)) != dispatch_depth:
         raise DispatchContractError("route-dispatch-depth-mismatch", str(node.get("dispatch_depth")))
 
-    if route.get("effective_intensity") == "quick":
+    if serial_attempt_route(route) and int(node.get("dispatch_depth", -1)) == 1:
+        # The policy follows the node: a depth-1 node of a serial-attempt route (the owner, a frame leg,
+        # a unit leg) takes the candidate-list rules; a depth-2 node takes the checked-chain rules below.
         # Quick is a THREE-node route now (`frame`, `frame-alternative`,
         # `one-shot`), so the shape check is a per-node-id table rather than a
         # pin to a single id. Depth 1 and "no parent slug" still hold for all
@@ -243,6 +247,10 @@ def headless_attempt_policy(
             "frame": ("frame", "plan/frame"),
             "frame-alternative": ("frame", "plan/frame"),
         }.get(str(route_node))
+        if expected_tuple is None and route.get("capability") == "unit" and is_depth0_leg(node):
+            # A unit route's one leg is whatever the unit head makes of it; the verifier already
+            # rebuilt it from the recipe and the head, so the sealed node is the tuple.
+            expected_tuple = (node.get("worker_type"), node.get("unit"))
         if dispatch_depth != 1 or parent_slug or expected_tuple is None:
             raise DispatchContractError("quick-route-shape-invalid", str(route_node))
         if (node.get("worker_type"), node.get("unit")) != expected_tuple:
@@ -299,18 +307,15 @@ def headless_attempt_policy(
     # axis; making a chain match it would mean adding a new enum value that
     # batch, chain and manifest code all read. That is a far wider and riskier
     # change than one guarded return, and it was rejected deliberately.
-    if (
-        int(node.get("dispatch_depth", -1)) == 1
-        and node.get("worker_type") == "frame"
-        and node.get("unit") == "plan/frame"
-    ):
+    if (int(node.get("dispatch_depth", -1)) == 1 and is_depth0_leg(node)
+            and node.get("worker_type") not in (None, "owner") and node.get("unit") not in (None, "_kernel/owner")):
         if execution_surface != "registered-headless" or registered_worker is not True:
             raise DispatchContractError("frame-route-surface-invalid", str(execution_surface))
         if effective_hop not in {"same-harness-headless", "cross-harness-headless"}:
             raise DispatchContractError("frame-route-surface-invalid", effective_hop)
         # Standard+ HAS checked dispatch evidence (quick does not), so the
         # requested harness is checked against it rather than taken on trust.
-        if harness not in depth1_supported_harnesses(route, worker_type="frame"):
+        if harness not in depth1_supported_harnesses(route, worker_type=node.get("worker_type")):
             raise DispatchContractError("frame-harness-unsupported", str(harness))
         policy.update(fallback_hop=effective_hop)
         return policy

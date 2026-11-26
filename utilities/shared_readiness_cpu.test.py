@@ -9,6 +9,9 @@ Herdr CLI and its local observation endpoint are faked.
 """
 
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import contextlib
 import argparse
@@ -30,6 +33,8 @@ from pathlib import PurePosixPath
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SOURCE_ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 DEFAULT_WINDOW = 12.0
 COLD_SAMPLE_INTERVAL = 0.05
 SAMPLE_INTERVAL = 0.05
@@ -806,7 +811,7 @@ def _run_carrier_case(source, candidate, jobs, workload, data_root, case_root,
     shutil.copyfile(source_jobs, jobs)
     if _hash_file(jobs) != workload["sha256"]:
         raise AssertionError("carrier case did not receive the canonical workload bytes")
-    attempts = [f"att-readiness-cpu-{index:02d}" for index in range(consumer_count)]
+    attempts = [unique_attempt_id(f"att-readiness-cpu-{index:02d}") for index in range(consumer_count)]
     consumers = []
 
     def launch():
@@ -1947,13 +1952,13 @@ def _prepare_jobs(root):
     target_a_rows = []
     target_a_processes = []
     for index in range(PENDING_ATTEMPTS):
-        attempt = f"att-readiness-cpu-{index:02d}"
+        attempt = unique_attempt_id(f"att-readiness-cpu-{index:02d}")
         process, identity, argv = _start_bound_process(attempt)
         processes.append(process)
         record = {"process": process, "identity": identity, "argv": argv, "attempt_id": attempt}
         target_a_processes.append(record)
         target_a_rows.append(_make_attempt_row(attempt, "sid-target-a", identity))
-    target_b_attempt = "att-readiness-separate-target"
+    target_b_attempt = unique_attempt_id("att-readiness-separate-target")
     target_b_process, identity_b, argv_b = _start_bound_process(target_b_attempt)
     processes.append(target_b_process)
     target_b_processes = [{"process": target_b_process, "identity": identity_b,

@@ -1,4 +1,6 @@
 #!/usr/bin/env sh
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/run-tests.py" --direct-run bash "$0" "$@"
 # Canonical-only change, stale edit rejection, and second-run determinism.
 set -eu
 export PYTHONDONTWRITEBYTECODE=1
@@ -262,21 +264,22 @@ grep -Fq '### 0.5. Post-Execution Completion Report' "$ROOT/core/WORKFLOW.md"
 grep -Fq '[완료 보고]' "$ROOT/core/WORKFLOW.md"
 has_first_close_content() {
   case "$1" in
-    *'first close of material work'*'what changed and why'*'before/after'*'checks actually run'*'commit/pr/deployment/serving state'*'limits or work that remains'*'preserve explicit user-requested content and output formats'*) return 0 ;;
+    *'one or two sentences'*'remaining failure'*'unfinished work'*'at most one decision'*'pointer to the detailed record'*'preserve explicit user-requested content and output formats'*) return 0 ;;
     *) return 1 ;;
   esac
 }
 workflow_flat=$(tr '\n' ' ' < "$ROOT/core/WORKFLOW.md" | tr -s ' ' | tr 'A-Z' 'a-z')
-has_first_close_content "$workflow_flat" || {
+workflow_contract=$(printf '%s' "$workflow_flat" | sed 's/one necessary decision/one decision/')
+has_first_close_content "$workflow_contract" || {
   echo "not ok - shared first-close content contract is incomplete" >&2
   exit 1
 }
 case "$workflow_flat" in
-  *'must not present partial, failed, or blocked work as completed'*) ;;
+  *'preserve unknowns'*'honest outcome (completed, partial, failed, or blocked)'*) ;;
   *) echo "not ok - honest completion status contract regressed" >&2; exit 1 ;;
 esac
 case "$workflow_flat" in
-  *'neither the card nor its field order is required'*) ;;
+  *'one optional presentation is'*) ;;
   *) echo "not ok - completion card is still mandatory" >&2; exit 1 ;;
 esac
 case "$workflow_flat" in
@@ -291,14 +294,15 @@ if has_first_close_content "$without_requested_output"; then
   echo "not ok - first-close check accepts a missing explicit-output priority" >&2
   exit 1
 fi
+
 grep -Fq 'A process exit or intermediate stage verdict alone is not task completion.' "$ROOT/core/WORKFLOW.md" || {
   echo "not ok - process/stage completion boundary missing from core/WORKFLOW.md" >&2
   exit 1
 }
 response_policy_flat=$(tr '\n' ' ' < "$ROOT/roles/response-policy.md" | tr -s ' ' | tr 'A-Z' 'a-z')
 case "$response_policy_flat" in
-  *'first close of material work follows the content contract in `core/workflow.md §0.5`'*'card is an optional presentation'*'required facts and explicit user-requested output'*) ;;
-  *) echo "not ok - response policy must preserve first-close content without requiring a card" >&2; exit 1 ;;
+  *'first close of material work follows `core/workflow.md §0.5`'*'one or two sentences'*'at most one necessary decision'*'one pointer to the detailed record'*) ;;
+  *) echo "not ok - response policy must preserve the short first-close contract" >&2; exit 1 ;;
 esac
 case "$response_policy_flat" in
   *'continuation keeps the original accepted user task'*'every requested output constraint intact'*'receipt is supplemental context'*'not a replacement or a reason to narrow the task'*'do not assume the original user message was physically deleted'*) ;;
@@ -313,7 +317,7 @@ followup_flat=$(tr '\n' ' ' < "$ROOT/utilities/dispatch_completion_join.py" | \
   sed -E 's/"[[:space:]]*"/ /g' | tr -s ' ' | tr 'A-Z' 'a-z')
 has_original_task_followthrough() {
   case "$1" in
-    *'original request/format apply'*'review result; do approved follow-through or existing continuation'*'first close:'*"receipt/ack isn't execution"*) return 0 ;;
+    *'original request/format apply'*'review the result and continue approved work or its existing continuation'*'one or two sentences'*'point to the detailed record'*"receipt/ack isn't execution"*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -337,7 +341,7 @@ has_entry_confirmation() {
 }
 has_first_report_reference() {
   case "$1" in
-    *'first-report content required by §0.5; its card is optional'*) return 0 ;;
+    *'close material work with the §0.5 contract: result in one or two sentences'*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -369,13 +373,13 @@ for bootstrap in \
     exit 1
   }
   case "$bootstrap_flat" in
-    *'close with the §0.5 card'*|*'five-field completion card in §0.5'*|*'close with §0.5'*)
+    *'close with the §0.5 card'*|*'five-field completion card in §0.5'*|*'must close with §0.5'*)
       echo "not ok - adapter bootstrap still requires a completion card" >&2
       exit 1
       ;;
   esac
   without_first_report=$(printf '%s' "$bootstrap_flat" | sed \
-    's/first-report content required by §0\.5; its card is optional//g')
+    's/close material work with the §0\.5 contract: result in one or two sentences//g')
   if has_first_report_reference "$without_first_report"; then
     echo "not ok - adapter check accepts a missing first-report reference in $bootstrap" >&2
     exit 1
@@ -398,14 +402,14 @@ for bootstrap in \
     esac
   done <<'BOOTSTRAP_PARITY_EOF'
 §5.11|OPERATIONS §5.11 same-turn commit/push policy
-dispatch depth 3 is forbidden|dispatch-depth-3 prohibition
+a short check or lookup adds `--ephemeral`|unit-route delegation clause
 genuinely non-obvious|genuinely-non-obvious ask clause
 if structured input is unavailable|structured-input fallback clause
 legacy `.claude_reports/` is only a fallback|legacy artifact-root fallback qualifier
 depth, tests, safety, and validation on fallback|fallback preservation guarantee
 before committing|expose-change-before-committing clause
 large scope, destructive work, or an external-system outcome|destructive-work structured-input clause
-using `--shape staged --graph <stage,…>` for person-named stages|person-named stage shape clause
+using `--shape staged --capability <kind> --graph <stage,…>` for person-named stages|person-named stage shape clause
 are handles, not orders|resume/correction handle clause
 BOOTSTRAP_PARITY_EOF
 done

@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """``hearting run questions``: one shared board, answers only through the existing path."""
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import contextlib
 import io
@@ -35,6 +38,48 @@ class BuildResponseTest(unittest.TestCase):
          "choices": [{"value": "Small", "label": "Small"}, {"value": "Both", "label": "Both"}]},
     ]}}
 
+    def test_single_value_native_form_does_not_offer_combined_input(self):
+        envelope = {"harness": "opencode", "native_ref": {"transport": "opencode-http-v2"},
+                    "detail": {"questions": [{"id": "q", "question": "Pick", "choices": ["one"],
+                                               "field_type": "string", "is_other": True}]}}
+        self.assertFalse(questions.questions_of(envelope)[0]["free_text"])
+        envelope["native_ref"]["transport"] = "hearting-message-answer"
+        self.assertTrue(questions.questions_of(envelope)[0]["free_text"])
+
+    def test_a_registered_question_with_choices_takes_words_beside_them(self):
+        """11-22: a question a session registered (`questions ask --choice …`) is answered by a choice, text, or both."""
+        registered = {"kind": "question", "question_id": "message-response",
+                      "native_ref": {"transport": "hearting-message-answer"}}
+        # The one-question form (no `questions` list in its detail) and the list form without `is_other`.
+        form = dict(registered, detail="Which one?", choices=["one", "two", "three", "four"])
+        self.assertTrue(questions.questions_of(form)[0]["free_text"])
+        listed = dict(registered, detail={"questions": [{"id": "message-response", "question": "Which one?",
+                                                         "choices": ["one", "two", "three", "four"]}]})
+        self.assertTrue(questions.questions_of(listed)[0]["free_text"])
+        # What stays as it was: a native question with choices, an approval, a native form's own `is_other`.
+        native = {"kind": "question", "question_id": "q", "harness": "codex", "detail": "Which?",
+                  "choices": ["a", "b"], "native_ref": {"transport": "codex-app-server"}}
+        self.assertFalse(questions.questions_of(native)[0]["free_text"])
+        self.assertTrue(questions.questions_of(dict(native, choices=[]))[0]["free_text"])
+        flagged = dict(native, detail={"questions": [{"id": "q", "question": "Which?", "choices": ["a"],
+                                                      "is_other": False}]})
+        self.assertFalse(questions.questions_of(flagged)[0]["free_text"])
+        opencode = dict(registered, native_ref={"transport": "opencode-http-v2"},
+                        detail={"questions": [{"id": "q", "question": "Pick", "choices": ["one"],
+                                               "field_type": "string", "is_other": True}]})
+        self.assertFalse(questions.questions_of(opencode)[0]["free_text"])
+        # The answers keep their existing shapes: a choice and a note, text alone, a choice alone.
+        for kwargs, want in (({"answers": {"message-response": ["two", "but softer"]}}, ["two", "but softer"]),
+                             ({"text": "neither"}, ["neither"]),
+                             ({"choices": [2]}, ["two"])):
+            response, error = questions.build_response(form, **kwargs)
+            self.assertIsNone(error)
+            self.assertEqual(response, {"answers": {"message-response": want}})
+        # Delivered to the asking session, both the choice and the typed text are in the body.
+        body = state._message_body({"answers": {"message-response": ["two", "but softer"]}})
+        self.assertEqual(json.loads(body), ["two", "but softer"])
+        self.assertEqual(state._message_body({"answers": {"message-response": ["neither"]}}), "neither")
+
     def test_one_choice_per_question_maps_to_the_native_values(self):
         response, error = questions.build_response(self.INTERVIEW, choices=[1, 2])
         self.assertIsNone(error)
@@ -44,6 +89,27 @@ class BuildResponseTest(unittest.TestCase):
         self.assertIsNone(questions.build_response(self.INTERVIEW, choices=[1, 3])[0])
         self.assertIsNone(questions.build_response(self.INTERVIEW, text="note")[0])
         self.assertEqual(questions.questions_of(self.INTERVIEW)[1]["recommended"], 1)
+
+    def test_render_reuses_the_shared_recommended_label(self):
+        row = {"id": "q1", "kind": "question", "age": "now", "project": "",
+               "owner": {}, "owner_state": "live", "state": "current", "answerable": False,
+               "questions": [{"question": "Pick one", "choices": ["A", "B"], "recommended": 0}]}
+        with mock.patch.object(questions.HWS, "wait_counts", return_value={"total": 1, "older": 0, "ownerless": 0}), \
+             mock.patch.object(questions.HWS, "ui_translator", return_value=lambda _key: "추천"):
+            out = questions.render({"items": [], "complete": True}, [row], [])
+        self.assertIn("(recommended)", out)
+
+    def test_render_indents_continuation_lines_of_decision_questions(self):
+        row = {"id": "q1", "kind": "question", "age": "now", "project": "",
+               "owner": {}, "owner_state": "live", "state": "current", "answerable": False,
+               "questions": [{"question": "[결정 필요] 보관 기간\n- 30일: 유지\n추천: 30일 — 복구 가능",
+                              "choices": [], "recommended": None}]}
+        with mock.patch.object(questions.HWS, "wait_counts", return_value={"total": 1, "older": 0, "ownerless": 0}):
+            out = questions.render({"items": [], "complete": True}, [row], [])
+        lines = out.splitlines()
+        self.assertIn("  [결정 필요] 보관 기간", lines)
+        self.assertIn("  - 30일: 유지", lines)
+        self.assertIn("  추천: 30일 — 복구 가능", lines)
 
     def test_single_question_text_answers_file_and_approval_shapes(self):
         single = {"kind": "question", "question_id": "owner-correction",
@@ -76,11 +142,64 @@ class BoardTest(unittest.TestCase):
         demand.start()
         self.addCleanup(demand.stop)
 
+    def test_closed_native_questions_are_distinct_from_unknown_ids(self):
+        from fleet import interaction
+        for harness, source in (("claude", "claude-asktool"), ("codex", "codex-appserver"),
+                                ("opencode", "opencode-question")):
+            with self.subTest(harness=harness):
+                interaction.set_wait("fixture-session", harness, "decision", source, now=1000)
+                interaction.clear_wait("fixture-session", harness)
+                with mock.patch.object(questions, "load_board", return_value={"items": []}):
+                    code, _, err = _run("answer", f"S1:{harness}:fixture-session:1000000", "--text", "yes")
+                    self.assertEqual(code, 2)
+                    self.assertIn("closed", err)
+                    self.assertIn("reason unavailable", err)
+                    self.assertIn("UTC", err)
+                    unknown = _run("answer", f"S1:{harness}:fixture-session:999", "--text", "yes")
+                    self.assertIn("no recorded question", unknown[2])
+
+    def test_native_closure_reasons_and_reopened_id_do_not_change_publication(self):
+        from fleet import interaction
+        for status in ("answered", "cancelled", "expired"):
+            interaction.set_wait("known", "codex", "decision", "codex-appserver", now=1000)
+            interaction.clear_wait("known", "codex", reason=status)
+            item_id = "S1:codex:known:1000000"
+            state.publish_cache({"complete": True, "items": []})
+            with mock.patch.object(questions, "load_board", return_value={"items": []}):
+                self.assertIn(status, _run("answer", item_id, "--text", "yes")[2])
+            interaction.set_wait("known", "codex", "decision", "codex-appserver", now=1000)
+            self.assertIsNone(state.closed_question(item_id))
+            self.assertIsNotNone(interaction.read_wait("known", "codex"))
+            interaction.set_wait("known", "codex", "decision", "codex-appserver", now=1001)
+            self.assertEqual(state.closed_question(item_id)["status"], "replaced")
+
     def test_missing_observation_is_unknown_not_an_empty_board(self):
         with mock.patch.object(questions, "_CACHE_WAIT_SECONDS", 0.0):
             code, out, err = _run()
         self.assertEqual((code, out), (3, ""))
         self.assertIn("unknown", err)
+
+    def test_list_head_counts_waits_answered_elsewhere_and_names_blocked_owners_apart(self):
+        # 11-14: a Claude native request and a marker question wait for a person like any
+        # question; a blocked owner is listed for its parent agent and left out of the count.
+        import time
+        now = time.time()
+        owner = {"harness": "claude", "session_id": "sid-a"}
+        self.assertTrue(state.publish_cache({"observed_at": now, "complete": True, "items": [
+            {"id": "S1:claude:sid-a:1", "source": "S1", "kind": "approval", "since": now - 30,
+             "stale": False, "owner": owner, "owner_state": "live", "attribution": "exact"},
+            {"id": "S4:marker", "source": "S4", "kind": "marker", "since": now - 20,
+             "stale": False, "owner": owner, "owner_state": "live", "attribution": "exact"},
+            *({"id": "S3:att-%d" % n, "source": "S3", "kind": "decision", "since": now - 10,
+               "stale": False, "owner": owner, "owner_state": "live", "attribution": "lineage"}
+              for n in range(8)),
+        ]}))
+        with mock.patch.object(state, "read_selected_request", return_value=None):
+            code, out, _err = _run()
+        self.assertEqual(code, 0)
+        head = out.splitlines()[0]
+        self.assertIn("questions: 2 current · 0 older · 8 blocked owners for the parent agent", head)
+        self.assertNotIn("answered in their own session", out)
 
     def test_list_counts_match_the_shared_projection_and_ids_resolve_exactly(self):
         import time
@@ -157,6 +276,24 @@ class MessageQuestionTest(unittest.TestCase):
         self.f = self.fixture.__enter__()
         self.addCleanup(self.fixture.__exit__, None, None, None)
 
+    def test_closed_registered_question_names_answer_or_replacement_without_exposing_text(self):
+        for harness in ("claude", "codex", "opencode"):
+            signal, _ = self.f.ask(harness=harness)
+            self.assertTrue(state.close_signal(signal["seat_key"], harness=harness,
+                session_id=signal["session_id"], sequence=signal["sequence"] + 1, answer="PRIVATE ANSWER"))
+            with mock.patch.object(questions, "load_board", return_value={"items": []}):
+                code, _, err = _run("answer", signal["id"], "--text", "second answer")
+            self.assertEqual(code, 2)
+            self.assertIn("answered", err)
+            self.assertIn("UTC", err)
+            self.assertNotIn("PRIVATE", err)
+            old, _ = self.f.ask(harness=harness, text="old question")
+            self.f.ask(harness=harness, text="new question")
+            with mock.patch.object(questions, "load_board", return_value={"items": []}):
+                code, _, err = _run("answer", old["id"], "--text", "second answer")
+            self.assertEqual(code, 2)
+            self.assertIn("replaced", err)
+
     def test_ask_cli_uses_caller_seat_sequence_and_preserves_private_detail(self):
         import session_tidy as tidy
         from fleet import process_identity
@@ -178,6 +315,47 @@ class MessageQuestionTest(unittest.TestCase):
         self.assertNotIn(text, out)
         self.assertEqual(state._signal_path({"seat_key": seat.key}).stat().st_mode & 0o777, 0o600)
         self.assertEqual(state.state_root().stat().st_mode & 0o777, 0o700)
+
+    def test_ask_says_which_unanswered_question_it_replaced(self):
+        import session_tidy as tidy
+        from fleet import process_identity
+        with mock.patch("dispatch_parent_completion.interactive_parent_identity", return_value=("claude", "native-question-session")), \
+             mock.patch.object(tidy, "resolve_seat", return_value=self.f.seat()), \
+             mock.patch.object(process_identity, "current_launch_context", return_value=None):
+            first = _run("ask", "first line of the old one\nsecond line stays out", "--json")
+            self.assertEqual(first[0], 0)
+            self.assertNotIn("replaced", json.loads(first[1]))
+            old_id = json.loads(first[1])["id"]
+            # Asking the same text again is a retry, not a replacement.
+            retry = _run("ask", "first line of the old one\nsecond line stays out", "--json")
+            self.assertNotIn("replaced", json.loads(retry[1]))
+            text = _run("ask", "the new question")
+            self.assertEqual(text[0], 0)
+            lines = text[1].splitlines()
+            self.assertTrue(lines[0].startswith("S4:") and lines[0] != old_id)
+            self.assertEqual(lines[1], "questions: replaced %s — first line of the old one" % old_id)
+            self.assertEqual(len(lines), 3)
+            self.assertNotIn("second line", text[1])
+            # Each new ask names only the one it closed.
+            third = _run("ask", "a third question", "--json")
+            replaced = json.loads(third[1])["replaced"]
+            self.assertEqual(replaced["first_line"], "the new question")
+            self.assertEqual(state.closed_question(old_id)["status"], "replaced")
+
+    def test_registration_notice_names_choice_answers_only_when_choices_exist(self):
+        import session_tidy as tidy
+        from fleet import process_identity
+        with mock.patch("dispatch_parent_completion.interactive_parent_identity", return_value=("claude", "native-question-session")), \
+             mock.patch.object(tidy, "resolve_seat", return_value=self.f.seat()), \
+             mock.patch.object(process_identity, "current_launch_context", return_value=None), \
+             mock.patch.dict(os.environ, {"HEARTING_LANG": "ko"}):
+            plain = _run("ask", "free question")
+            choice = _run("ask", "choice question", "--choice", "A", "--choice", "B")
+        self.assertEqual((plain[0], choice[0]), (0, 0))
+        self.assertIn(state.ui_translator()("questions.registered"), plain[1])
+        self.assertIn(state.ui_translator()("questions.registered_choices"), choice[1])
+        self.assertNotEqual(state.ui_translator()("questions.registered"),
+                            state.ui_translator()("questions.registered_choices"))
 
     def test_one_line_cli_resolves_each_harness_without_a_supplied_sid_or_tag(self):
         import session_tidy as tidy
@@ -276,7 +454,7 @@ class MessageQuestionTest(unittest.TestCase):
     def test_raw_answer_limits_private_receipt_and_tamper_rejection(self):
         import session_notice
         s, e = self.f.ask()
-        for text in ("", "   ", "x" * 601, "가" * 601):
+        for text in ("", "   ", "x" * 4097, "가" * 1366):
             with self.subTest(length=len(text)):
                 self.f.submit(e, text)
                 self.assertIsNone(self.f.record(s))
@@ -297,7 +475,7 @@ class MessageQuestionTest(unittest.TestCase):
             state.message_answer_body(binding)
         self.assertEqual(state._read(state._signal_path(s))["lifecycle"], "open")
 
-    def test_draft_utf8_boundaries_and_600_character_answer_boundary(self):
+    def test_draft_utf8_boundaries_and_4096_byte_answer_boundary(self):
         s, e = self.f.ask()
         for size in (4095, 4096, 4097):
             text = "가" * (size // 3) + "x" * (size % 3)
@@ -306,12 +484,11 @@ class MessageQuestionTest(unittest.TestCase):
                 self.assertEqual(result["draft"], text)
             else:
                 self.assertNotEqual(result.get("draft"), text)
-        # Independent size limits: 600 Unicode characters fit at most 2400
-        # UTF-8 bytes; the 4096-byte draft limit does not license 601 chars.
-        for length in (599, 600, 601):
+        # The accepted answer has the same byte limit as the editor's draft.
+        for length in (4095, 4096, 4097):
             s, e = self.f.ask(text="length " + str(length))
-            result = self.f.submit(e, "🙂" * length, action="length-" + str(length))
-            self.assertEqual(self.f.record(s) is not None, length <= 600)
+            result = self.f.submit(e, "🙂" * (length // 4) + "x" * (length % 4), action="length-" + str(length))
+            self.assertEqual(self.f.record(s) is not None, length <= 4096)
 
     def test_same_precheck_two_submitters_make_one_claim_and_one_notice(self):
         _s, e = self.f.ask()

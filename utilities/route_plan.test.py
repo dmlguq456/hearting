@@ -5,6 +5,9 @@ The parser tests are pure. Validation and compile tests use the real compose/com
 fixed readiness evidence, and assert that validating writes nothing, starts nothing and records
 nothing.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import importlib.util
 import json
 import os
@@ -62,6 +65,19 @@ class ExtractionTest(unittest.TestCase):
         self.assertEqual(decide("quick", "clean", {"capability": "autopilot-spec"})[0], 2)
         self.assertEqual(decide("quick", "score/a.py hardcore/b.py adapters/codex-extra/a.py notprd.md")[0], 1)
         self.assertEqual(decide("quick", "/tmp/work/prd.md")[0], 2)
+
+    def test_frame_signals_are_the_signs_the_frame_width_reads_and_never_decide_anything(self):
+        signals = RP.frame_signals
+        self.assertEqual(signals("utilities/x.py 확인"), [])
+        self.assertEqual(signals("core/WORKFLOW.md 고침"), [("protected-path", "core/WORKFLOW.md")])
+        self.assertEqual(signals("adapters/claude/a.py adapters/codex/b.py"), [("adapters", "claude,codex")])
+        self.assertEqual(signals("adapters/claude/a.py"), [])
+        self.assertEqual(signals("clean", "autopilot-spec"), [("capability", "autopilot-spec")])
+        self.assertEqual(signals("clean", "autopilot-ship"), [("capability", "autopilot-ship")])
+        self.assertEqual(signals("clean", "autopilot-code"), [])
+        self.assertEqual([kind for kind, _ in signals("spec/a.md adapters/claude/a adapters/codex/b", "autopilot-spec")],
+                         ["protected-path", "adapters", "capability"])
+        self.assertEqual(signals(None), [])
 
     def parse(self, text):
         return RP.parse_proposal(text)
@@ -461,8 +477,10 @@ class ProposalValidationTest(ValidationBase):
              "ignored:legs[0].intensity:standard-for-direct"),
             ({"capability": "autopilot-code", "shape": "direct", "intensity": "strong"}, "direct",
              "ignored:legs[0].intensity:strong-for-direct"),
-            ({"capability": "autopilot-code", "shape": "solo", "intensity": "standard"}, "quick",
-             "ignored:legs[0].intensity:standard-for-solo"),
+            # solo carries quick, and standard and up where its kind declares a one-shot review (code does): a
+            # proposal below what the form allows keeps its default (direct is no solo intensity).
+            ({"capability": "autopilot-code", "shape": "solo", "intensity": "direct"}, "quick",
+             "ignored:legs[0].intensity:direct-for-solo"),
             ({"capability": "autopilot-code", "shape": "staged", "intensity": "quick", "graph": ["execute"]},
              "standard", "ignored:legs[0].intensity:quick-for-staged"),
             ({"capability": "autopilot-code", "shape": "staged", "intensity": "direct", "graph": ["execute"]},
@@ -474,6 +492,14 @@ class ProposalValidationTest(ValidationBase):
                 self.assertEqual(row["reason"], "valid", row)
                 self.assertEqual(row["facts"]["legs"][0]["intensity"], effective)
                 self.assertEqual(row["read_notes"], [note])
+        for kept in ("strong", "thorough", "adversarial"):
+            solo_up = self.evaluate([{"capability": "autopilot-code", "shape": "solo", "intensity": kept}])
+            self.assertEqual((solo_up["reason"], solo_up["facts"]["legs"][0]["intensity"], solo_up.get("read_notes", [])),
+                             ("valid", kept, []))
+        solo_standard = self.evaluate([{"capability": "autopilot-code", "shape": "solo", "intensity": "standard"}])
+        self.assertEqual(solo_standard["reason"], "valid", solo_standard)
+        self.assertEqual(solo_standard["facts"]["legs"][0]["intensity"], "standard")
+        self.assertEqual(solo_standard.get("read_notes", []), [])
         staged_strong = self.evaluate([{"capability": "autopilot-code", "shape": "staged", "intensity": "strong",
                                         "graph": ["execute"]}])
         self.assertEqual(staged_strong["reason"], "valid", staged_strong)
@@ -704,6 +730,43 @@ class NonGitDocumentPlanTest(PlanFixture):
         self.assertEqual(projected["leg"]["graph"], ["quality-review", "fact-verify"])
         self.assertFalse((self.project / ".git").exists())
         self.assertFalse(list(self.project.parent.glob(self.project.name + "-wt*")))
+
+
+class FieldPlanTest(PlanFixture):
+    """A frame proposal names a leg's field (`field_source=frame`); without one, the proposed kind's."""
+
+    LEGS = [{"capability": "autopilot-draft", "mode": "doc", "field": "admin", "shape": "direct",
+             "why": "fill in the form the office sent"},
+            {"capability": "autopilot-code", "shape": "staged", "graph": ["execute", "test", "report"]}]
+
+    def leg(self, index, **kw):
+        leg = self.record_data["decision"]["proposal"]["legs"][index]
+        arguments = dict(**RP.leg_arguments(leg), slug=f"field-leg{index}", cwd=R.ROOT, artifact_root=self.root,
+                         spec_read="fixture", campaign_key="framed-key",
+                         parent_cycle_id=self.record_data["decision"]["frame_route"]["cycle_id"],
+                         dispatch_evidence={"tuples": [T.nested("claude", "codex")]},
+                         registered_headless_evidence=T.registered_headless(),
+                         work_request={"text": "do it", "owner_harness": None}, route_plan=self.binding(index))
+        arguments.update(kw)
+        return R.compose_route(**arguments)
+
+    def test_a_proposed_field_or_the_proposed_kinds_field_is_recorded_as_frame(self):
+        self.assertEqual(self.record_data["decision"]["proposal"]["legs"][0]["field"], "admin")
+        first = self.leg(0)
+        self.assertEqual((first["capability"], first["field"], first["field_source"]),
+                         ("autopilot-draft", "admin", "frame"))
+        R.verify_route(json.loads(json.dumps(first)), R.ROOT)
+        second = self.leg(1)
+        self.assertEqual((second["capability"], second["field"], second["field_source"]),
+                         ("autopilot-code", "code", "frame"))
+        # A field typed beside the plan reference is the person's own choice.
+        typed = self.leg(1, field="docs")
+        self.assertEqual((typed["field"], typed["field_source"]), ("docs", "explicit"))
+        # The printed next-leg command carries no --field, so the leg's own field stays `frame`.
+        argv = RP.compose_argv(self.record_data["decision"]["proposal"]["legs"][0],
+                               context={"cwd": str(R.ROOT), "artifact_root": str(self.root), "prompt_file": "t.md"},
+                               route_plan_arg="r.json#0", parent_cycle="c", slug="s")
+        self.assertNotIn("--field", argv)
 
 
 class RoutePlanArgumentTest(PlanFixture):

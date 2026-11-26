@@ -318,10 +318,12 @@ class ExplorerRuntime:
         continuation = envelope.get("detail_continuation")
         if continuation is not None and not self._valid_continuation(continuation):
             return None
-        self._cached_continuation = continuation
+        # Reading the file is not a hand-off. Only ``load_last_complete`` (a viewer starting up)
+        # takes the payload; the writer thread also reads the file back to compare ``observed_at``
+        # and must never arm the running viewer's detail worker with a resume payload.
         return {"model": model, "observed_at": float(stamp), "generation": generation,
                 "generation_identity": generation_identity,
-                "source_freshness": freshness}
+                "source_freshness": freshness, "continuation": continuation}
 
     @staticmethod
     def _valid_freshness(value):
@@ -383,6 +385,7 @@ class ExplorerRuntime:
         envelope = self._read_cache()
         if envelope is None:
             return None
+        self._cached_continuation = envelope["continuation"]
         return self.prepare_replay(envelope["model"])
 
     def prepare_replay(self, vm):
@@ -807,9 +810,15 @@ class ExplorerRuntime:
                             if isinstance(item.get("observed_at"), (int, float))
                             and not isinstance(item.get("observed_at"), bool)
                             and math.isfinite(item["observed_at"])]
+                # ``observed``: the basic collection is in. It is not ``ready``: the late sources
+                # are still pending, so such a model is never kept as the last complete one
+                # (``mark_published`` and the persistence below read ``ready``/``all_new`` only).
+                observed_basic = ("basic" not in incomplete and basic_identity is not None)
                 readiness = {"ready": ready, "fully_fresh": ready,
                              "all_new": all_new, "generation": generation,
                              "generation_identity": generation_identity,
+                             "observed": observed_basic,
+                             "details_pending": tuple(name for name in pending if name != "basic"),
                              "pending": pending, "sources": source_states,
                              "observed_at": max(observed) if observed else
                              (now if now is not None else time.time())}
@@ -821,6 +830,12 @@ class ExplorerRuntime:
                              "pending": pending, "sources": source_states,
                              "observed_at": now if now is not None else time.time()}
         return model, readiness
+
+    @staticmethod
+    def observed_only(readiness):
+        """Basic is in and a late source is not: a frame to show with its late cells marked."""
+        return (isinstance(readiness, Mapping) and readiness.get("observed") is True
+                and readiness.get("ready") is not True)
 
     def mark_published(self, readiness):
         if self.publication_ready(readiness):
@@ -869,6 +884,18 @@ class ExplorerRuntime:
                     raise ValueError("context window is not a displayed choice")
                 target_name, requested = "context-window", str(amount)
                 variant_observation = None
+            elif len(effect) == 6:
+                _kind, harness, target, name, requested, dry_run = effect
+                if target != "follow" or not isinstance(name, str):
+                    raise ValueError("unsupported model setting")
+                cells = ((models.get("follow") or {}).get("cells") or {}).get(harness)
+                cell = next((item for item in cells or () if item.get("target") == name), None)
+                if cell is None:
+                    raise ValueError("cell is not a displayed one")
+                from . import follow
+                if not isinstance(requested, str) or requested not in ("keep", "follow", follow.undo_request(cell)):
+                    raise ValueError("not a choice of this cell")
+                target_name, variant_observation = name, None
             elif len(effect) == 7:
                 _kind, harness, target, profile, model, effort, dry_run = effect
                 profiles = models.get("profiles", ())
@@ -938,7 +965,7 @@ class ExplorerRuntime:
             result = {"status": status, "error": str(exc),
                       "lines": [f"model set: {exc}"]}
         try:
-            refreshed = focus.read_model_config()
+            refreshed = focus.read_model_config(refresh=False)
         except Exception as exc:
             refreshed = None
             refresh_error = str(exc)
@@ -1012,7 +1039,7 @@ class ExplorerRuntime:
         finally:
             sys.path[:] = original_path
         try:
-            refreshed = focus.read_model_config()
+            refreshed = focus.read_model_config(refresh=False)
         except Exception as exc:
             refreshed, note = None, " · refresh failed: " + str(exc)
         else:

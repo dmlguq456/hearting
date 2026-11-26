@@ -29,7 +29,7 @@ already encoded in the fragment and the unit contracts:
   never "proven safe".
 - `research/fact-check` declares `stance: none`: it is a verbatim-comparison contract
   (cards vs. sources) with its own strict mismatch tables; its adversarial counterpart is
-  `research/claim-verify`, which is default-refute with quorum aggregation.
+  `research/claim-verify`, which is default-refute with majority over the verifiers its node launches.
 
 This stance is a posture inside whatever check runs — distinct from the separate
 independent adversary *pass* that only higher intensities add, which is realized by

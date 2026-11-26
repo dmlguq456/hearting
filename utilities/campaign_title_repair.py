@@ -726,7 +726,7 @@ def promote(review_path: Path, output: Path, confirmation: str) -> Dict[str, Any
 # ---------------------------------------------------------------------------
 # automatic display titles -- now one part of the unified background review
 #
-# Campaign titles, summaries, tags, and workflow groups are judged by ONE model call per
+# Campaign titles, summaries, and tags are judged by ONE model call per
 # campaign in `artifact_workflow_group_review`, and written to `campaigns/<locator>/meta.json`
 # through `artifact_meta`.  This module keeps the explicit declaration repair above and thin
 # compatibility entry points (`auto_title`, `backfill_roots`, `launch_after_seal`) that run

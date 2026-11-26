@@ -112,7 +112,9 @@ projection contradiction and changed input are conflicts; malformed input,
 schema, kind, enum or event is invalid. `campaign-event-invalid` retains the
 shared fold's detailed rejection internally, including
 `rename-evidence-missing`, `rename-binding-mismatch`,
-`rename-evidence-tampered` and `closure-provenance-mismatch`.
+`rename-evidence-tampered`, `rename-evidence-kind-or-size` (a preserved or
+current manifest that is not a regular file or is past the one read limit; it is
+never called tampered) and `closure-provenance-mismatch`.
 
 Presentation reuses artifact-meta/v1 validation. Its reason is the metadata
 reason with `presentation-` prefixed unless already present. Examples are

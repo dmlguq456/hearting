@@ -1,4 +1,7 @@
 """Session-local badges consume OVERVIEW's exact route projection."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import os
 from pathlib import Path
 import tempfile
@@ -35,7 +38,7 @@ class SessionRouteStatusTests(unittest.TestCase):
                     vm = live.build_view_model(snapshot)
                     counts, opened = live.current_route_counts(vm.routes)
                     labels = live.session_route_status(snapshot)
-                    expected = f"⏳ route {counts['s1']} · frame" if "s1" in opened else None
+                    expected = f"route {counts['s1']} · frame" if "s1" in opened else None
                     self.assertEqual(labels.get("claude\0sid-current"), expected)
                     self.assertEqual(labels.get("claude\0sid-before"), expected)
                     self.assertNotIn("opencode\0sid-current", labels)
@@ -44,9 +47,9 @@ class SessionRouteStatusTests(unittest.TestCase):
         snapshot = self.snapshot(2)
         snapshot["jobs"][1].work_projection._route_view["view"]["nodes"][0]["id"] = "execute"
         self.assertEqual(live.session_route_status(snapshot)["claude\0sid-current"],
-                         "⏳ route 2 · frame, execute")
+                         "route 2 · frame, execute")
         snapshot["jobs"][1].work_projection._route_view["view"]["nodes"][0]["id"] = "\x1b[31mPRIVATE\n"
-        self.assertEqual(live.session_route_status(snapshot)["claude\0sid-current"], "⏳ route 2 · frame")
+        self.assertEqual(live.session_route_status(snapshot)["claude\0sid-current"], "route 2 · frame")
 
     def test_shell_detail_reuses_the_same_interpretation_and_only_actual_stages(self):
         snapshot = self.snapshot(stage="inline")
@@ -58,6 +61,53 @@ class SessionRouteStatusTests(unittest.TestCase):
         self.assertEqual(rows, panels["claude\0sid-before"])
         self.assertEqual([stage["name"] for stage in rows[0]["stages"]], ["inline"])
         self.assertNotIn("opencode\0sid-current", panels)
+
+    def test_shell_detail_keeps_every_current_route(self):
+        # Spec rule 23: the panel shows every current route, so none is cut at eight.
+        snapshot = self.snapshot(12)
+        labels, panels = live.session_route_status(snapshot, include_details=True)
+        self.assertEqual(labels["claude\0sid-current"].split(" · ")[0], "route 12")
+        self.assertEqual(len(panels["claude\0sid-current"]), 12)
+
+    def test_shell_detail_carries_what_routes_unfolds_from_the_same_records(self):
+        # Spec rule 21: kind, owner, each stage's doer and box, workers and age come from
+        # the very route records and node boxes ROUTES draws; nothing is read again.
+        snapshot = self.snapshot(stage="execute")
+        view = snapshot["jobs"][0].work_projection._route_view["view"]
+        view["nodes"] = [{"id": "plan", "state": "done", "harness": "codex", "model": "gpt-fixture",
+                          "effort": "high", "elapsed_min": 12, "unit": "plan/code"},
+                         {"id": "execute", "state": "active", "harness": "claude", "unit": "dev/backend",
+                          "route_attempt_round": 2},
+                         {"id": "review", "state": "todo"}]
+        view.update(capability="autopilot-code", capability_mode="dev", effective_intensity="standard")
+        with mock.patch.object(live, "_route_records", wraps=live._route_records) as reader:
+            _, panels = live.session_route_status(snapshot, include_details=True)
+        self.assertEqual(reader.call_count, 1)
+        row = panels["claude\0sid-current"][0]
+        routes, nodes = live._route_records(snapshot, *live._session_records(snapshot, None, live._resolver(snapshot))[:2],
+                                            live._resolver(snapshot), __import__("time").time())
+        route = routes[0]
+        self.assertEqual([stage["name"] for stage in row["stages"]], ["plan", "execute", "review"])
+        plan, execute = row["stages"][0], row["stages"][1]
+        self.assertEqual((plan["h"], plan["m"], plan["e"], plan["el"]), ("codex", "gpt-fixture", "high", "12m"))
+        self.assertEqual(plan["unit"], "plan/code")
+        self.assertEqual(execute.get("r"), 2)
+        self.assertEqual(row["mode"], route["mode"])
+        self.assertEqual(row["intensity"], route["intensity"])
+        self.assertEqual(row["legs"], len(route["legs"]))
+        boxes = {item["n"]: item for group in nodes[route["id"]] for item in group.get("detail") or ()}
+        self.assertEqual(execute.get("verdict"), boxes["execute"]["verdict"])
+        # Each live worker keeps the attempt Fleet chose (the shell finds that job again by it).
+        self.assertTrue(route["worker_contexts"])
+        self.assertEqual([item.get("attempt") for item in row["worker_contexts"]],
+                         [item["attempt"] for item in route["worker_contexts"]])
+        self.assertTrue(all(isinstance(item.get("attempt"), str) for item in row["worker_contexts"]))
+        from tools.fleet import session_panel
+        shown = session_panel.presentation({}, {"route_panels": panels}, "claude", "sid-current", 40)["routes"][0]
+        self.assertEqual(shown["kind_text"], "code(dev·std)")
+        self.assertEqual([stage["mark"] for stage in shown["stages"]], ["✓", "●", ""])
+        self.assertEqual(shown["stages"][0]["harness"], "codex")
+        self.assertEqual(shown["stages"][1]["round"], 2)
 
     def test_shell_carries_exact_route_visibility_without_another_read(self):
         snapshot = self.snapshot(stage="inline")
@@ -172,7 +222,7 @@ class SessionRouteStatusTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(dispatch, "_scan_processes", return_value=[]))
             stack.enter_context(mock.patch.object(dispatch, "_dispatch_liveness", return_value="working"))
             stack.enter_context(mock.patch.object(liveness, "classify", return_value="idle"))
-            expected = {"claude\0sid-native": "⏳ route 1 · execute"}
+            expected = {"claude\0sid-native": "route 1 · execute"}
             for requested in (None, [("claude", "sid-native")]):
                 snapshot = collectors.collect_all(route_sessions=requested, include_report_verification=False)
                 self.assertTrue(snapshot.observations["basic"]["all_new"])

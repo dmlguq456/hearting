@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Public CLI and forward-recovery tests for direct inline finish."""
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import importlib.util
 import fcntl
@@ -19,6 +22,8 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import artifact_lifecycle
 import artifact_producer
 import dispatch_terminal_commit
@@ -1010,7 +1015,7 @@ class PublicInlineFinishTest(unittest.TestCase):
 
     def test_registered_caller_is_refused_before_intent(self):
         env = self.env.copy()
-        env["AGENT_DISPATCH_ATTEMPT_ID"] = "att-" + "a"*48
+        env["AGENT_DISPATCH_ATTEMPT_ID"] = unique_attempt_id("att-" + "a"*48)
         refused = subprocess.run(self.command, cwd=self.repo, env=env,
                                  capture_output=True, text=True)
         self.assertNotEqual(refused.returncode, 0)
@@ -1272,7 +1277,7 @@ class PublicInlineFinishTest(unittest.TestCase):
                 with self.assertRaisesRegex(inline_finish.InlineFinishError, "finish-route-not-direct"):
                     inline_finish.finish(args, candidate, self.route_file, CAP)
         env = self.env.copy()
-        env["AGENT_DISPATCH_ATTEMPT_ID"] = "att-" + "f" * 48
+        env["AGENT_DISPATCH_ATTEMPT_ID"] = unique_attempt_id("att-" + "f" * 48)
         env["AGENT_ROUTE_ID"] = "rt-" + "e" * 16
         foreign = subprocess.run(self.command, cwd=self.repo, env=env,
                                  capture_output=True, text=True)

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Unit tests for utilities/peer-message.py (SD-122 peer-message ledger)."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import hashlib
 import contextlib
 import errno
@@ -163,7 +166,7 @@ class PeerMessageTest(_TmpRootMixin, unittest.TestCase):
             body, sender, recipient, defer=True, refs=refs,
             producer_binding=producer, receipt="native-pending")
         self.assertEqual(replay, (text, ref))
-        self.assertIn("(runtime-from: runtime [?] Hearting runtime ; pane=- ; sid=- ; ref=" + ref + ")", text)
+        self.assertIn("(runtime-from: runtime [?] Hearting runtime ; ref=" + ref + ")", text)
         transfer = peer_message._read_transfer_record(ref)
         pending = peer_message._read_pending(ref)
         self.assertEqual(transfer["from"], sender)
@@ -708,7 +711,7 @@ class F100cSenderAndStewardTest(unittest.TestCase):
 
     def test_trailer_round_trip_and_last_wins(self):
         t = peer_message.peer_trailer("claude", "sid-a", "hearting-46")
-        self.assertIn("(peer-from: claude [?] hearting-46 ; pane=- ; sid=sid-a)", t)
+        self.assertIn("(peer-from: claude [?] hearting-46)", t)
         self.assertEqual(peer_message.parse_peer_trailer("body\n\n" + t),
                          {"harness": "claude", "session_id": None, "name": "hearting-46"})
         self.assertEqual(peer_message.parse_peer_trailer("(peer-from: codex 01a0)")["name"], None)
@@ -719,6 +722,33 @@ class F100cSenderAndStewardTest(unittest.TestCase):
         # a name with a ')' cannot break the envelope
         self.assertEqual(peer_message.parse_peer_trailer(
             peer_message.peer_trailer("claude", "s", "a) b"))["name"], "a  b".replace("  ", " "))
+
+    def test_trailer_drops_a_derived_label_that_only_repeats_the_tag(self):
+        # BC-SMALL-SURFACE-1112 #4: `claude [57] 2026-11-57` read as a date; SID and ref stay.
+        # RV-PR1533-1112: only Fleet's `nameSource == "derived"` record drops a name; a
+        # user-set `release-57` has the same shape and stays (the `derived_tag` contract).
+        sessions = self.root / "cfg" / "sessions"
+        sessions.mkdir(parents=True)
+        os.environ["CLAUDE_CONFIG_DIR"] = str(self.root / "cfg")
+
+        def trailer(name, source):
+            (sessions / "1.json").write_text(json.dumps(
+                {"sessionId": "sid-a", "name": name, "nameSource": source}))
+            with mock.patch.object(peer_message, "peer_alias", return_value="[57]"):
+                return peer_message.peer_trailer("claude", "sid-a", name,
+                                                 transfer_ref="a" * 32, pane_id="w1:p3")
+
+        self.assertEqual(trailer("2026-11-57", "derived"),
+                         "(peer-from: claude [57] ; ref=" + "a" * 32 + ")")
+        self.assertIn("(peer-from: claude [57] release-notes ; ref=", trailer("release-notes", "user"))
+        user_set = trailer("release-57", "user")
+        self.assertIn("(peer-from: claude [57] release-57 ; ref=", user_set)
+        self.assertEqual(peer_message.parse_peer_trailer(user_set)["name"], "release-57")
+        # No registry record is no provenance: the name stays.
+        (sessions / "1.json").unlink()
+        with mock.patch.object(peer_message, "peer_alias", return_value="[57]"):
+            self.assertIn("claude [57] 2026-11-57)",
+                          peer_message.peer_trailer("claude", "sid-a", "2026-11-57", pane_id="w1:p3"))
 
     def _marker_keys_on_disk(self):
         return {(h, d.get("session_id")) for h, _p, d in
@@ -1242,18 +1272,19 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
             text, ref = self.pending("한글 " * 1800, sender=sender)
         self.assertEqual(alias.call_count, 1)
         self.assertIn("[93]", text)
-        self.assertIn(" ; pane=w:sender ; sid=" + sender["session_id"], text)
+        self.assertNotIn("pane=", text)
+        self.assertNotIn("sid=", text)
         self.assertLessEqual(len(text.encode("utf-8")), 1024)
         self.assertEqual(peer_message.parse_peer_trailer(text, self.recipient)["session_id"],
                          sender["session_id"])
         self.assertIsNotNone(peer_message._read_transfer_record(ref).get("body_ref"))
 
     def test_reference_with_identity_larger_than_cap_falls_back_to_complete_inline_body(self):
-        sender = dict(self.sender, session_id="native-" + "x" * 1200, pane_id="w:sender")
+        sender = dict(self.sender, name="x" * 1200, pane_id="w:sender")
         body = "한글 " * 1800
         text, ref = self.pending(body, sender=sender)
         self.assertIn(body, text)
-        self.assertIn("sid=" + sender["session_id"], text)
+        self.assertIn("x" * 1200, text)
         self.assertIsNone(peer_message._read_transfer_record(ref).get("body_ref"))
         self.assertEqual(peer_message.parse_peer_trailer(text, self.recipient)["session_id"],
                          sender["session_id"])
@@ -3389,7 +3420,10 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
             guidance = peer_message.receiver_guidance(
                 text, self.recipient, cwd=str(self.tmp_root))
 
-        self.assertEqual(guidance, peer_message._ordinary_receiver_guidance())
+        # the ordinary guidance, led by the sealed sender's reply address (the trailer shows only a tag)
+        self.assertTrue(guidance.endswith("\n\n" + peer_message._ordinary_receiver_guidance()))
+        self.assertTrue(guidance.startswith("Sender of the message above: (peer-from: "))
+        self.assertEqual(guidance.count("\n\n"), 1)
         self.assertNotIn("handoff accept", guidance)
         resolve.assert_not_called()
         target.assert_not_called()
@@ -4380,9 +4414,14 @@ class SupervisedHandoffTest(_TmpRootMixin, unittest.TestCase):
     def test_supervisor_command_records_the_typed_cutover_and_reserves_retire(self):
         meta = self._register_job()
         self._write_source_card("진행 중: 카드 본문", prompt_seq=0)
-        with mock.patch.object(peer_message, "deliver_pending_codex",
-                               return_value={"status": "received"}), \
-             mock.patch.object(self.steward, "_codex_interrupt_start_gate", return_value=False), \
+        def codex_receives(ref, **_kwargs):
+            # Stand-in for the exact Codex queue and its native receipt: only the
+            # row's received state makes the prompt report true.
+            with peer_message.pending_lock(ref):
+                peer_message._save_pending(dict(peer_message._read_pending(ref), state="received"))
+            return {"ok": True, "status": "received"}
+        with mock.patch.object(peer_message, "deliver_pending_codex", side_effect=codex_receives), \
+             mock.patch.object(self.steward, "_codex_shell_start_gate", return_value=False), \
              mock.patch.object(self.steward, "_record", wraps=self.steward._record) as recorded:
             code, lines, stderr = self._run(["handoff", "--from", "w1:p1", "--kind", "codex"])
         self.assertEqual(code, 0, (lines, stderr))

@@ -34,11 +34,33 @@ class PeerReadContext:
         self._handover_snapshots = None
         self._handover_ledgers = {}
         self._lineage_graphs = {}
+        self._lineage_hot = None     # (the signature object the held graph was built for, that graph)
         self._lineage_pin = None
         self._lineage_summary = None
         self._recipient_censuses = {}
         self._transfer_roots = None
         self._peer_notice_records = None
+        self._end_observation = _UNOBSERVED
+        self._native_sessions = _UNOBSERVED
+
+    def native_sessions(self, loader):
+        """Reuse one native-session census (a ``/proc`` walk) for this read pass.
+
+        Like ``end_observation`` it is an observation of live processes, never
+        delivery state, a claim or an acknowledgement. Only a successful reading is
+        kept; a caller that acts on absence proves the death on its own."""
+        if self._native_sessions is _UNOBSERVED:
+            self._native_sessions = loader()
+        return self._native_sessions
+
+    def end_observation(self, loader):
+        """Reuse one lazy session-holder reading for every lifetime question of this pass.
+
+        It is an observation of live processes, never delivery state, a claim or an
+        acknowledgement; a settlement that acts on it re-checks lifetime afresh."""
+        if self._end_observation is _UNOBSERVED:
+            self._end_observation = loader()
+        return self._end_observation
 
     def transfer_roots(self, loader):
         """Reuse candidate ledger roots for exact per-message transfer reads.
@@ -170,11 +192,18 @@ class PeerReadContext:
         at an effect boundary comes from a fresh readable lineage observation,
         even when that boundary was preceded by this same context's discovery.
         """
+        hot = self._lineage_hot
+        if hot is not None and hot[0] is signature and self._lineage_graphs:
+            # The very signature object (an immutable tuple) the held graph was built for: no need
+            # to hash its every ledger entry again for each of a sweep's thousands of lookups.
+            return hot[1]
         key = tuple(signature)
         if key not in self._lineage_graphs:
             self._lineage_graphs = {key: loader()}
             self._lineage_summary = None
-        return self._lineage_graphs[key]
+        graph = self._lineage_graphs[key]
+        self._lineage_hot = (signature, graph)
+        return graph
 
     def lineage_summary(self, graph, loader):
         """Derived history index belongs to the exact readable graph, only for this pass."""
@@ -182,9 +211,21 @@ class PeerReadContext:
             self._lineage_summary = (graph, loader())
         return self._lineage_summary[1]
 
+    def replace_lineage_graph(self, signature, graph):
+        """A fresh normal observation replaces this pass's graph.
+
+        Inside ``pinned_lineage`` the pin moves to that same observation, so
+        the rest of the loop reuses it instead of re-stating every ledger.
+        """
+        self.invalidate_lineage_graph()
+        self.lineage_graph(signature, lambda: graph)
+        if self._lineage_pin is not None:
+            self._lineage_pin = tuple(signature)
+
     def invalidate_lineage_graph(self):
         """An unavailable current dependency cannot leave authority cached."""
         self._lineage_graphs.clear()
+        self._lineage_hot = None
         if self._lineage_pin is not None:
             self._lineage_pin = _UNOBSERVED
         self._lineage_summary = None

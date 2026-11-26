@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """G2/G3/G4 executor tests for `artifact_cutover.py` on a synthetic legacy root."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import importlib.util
 import json
 import os
@@ -917,6 +920,25 @@ class CloseoutTest(unittest.TestCase):
         )
         self.assertEqual(quiesce["external_open_cycles"], [])
         self.assertTrue(quiesce["proven"])
+
+    def test_a_root_document_is_not_in_the_closeout_residue_plan(self):
+        self.w("backlog.md", "# Backlog\n갱신 2026-11-21 23:10\n\n## 2026-01-01_some-campaign\n- a job\n")
+        _route_package, closeout_package = self.packages()
+        selected = {row["path"] for row in closeout_package["plan"]["source_inventory"]}
+        self.assertIn("plan.md", selected)  # a loose root file is still residue
+        self.assertNotIn("backlog.md", selected)
+
+    def test_a_link_named_as_a_root_document_is_not_skipped_by_the_closeout_plan(self):
+        for target in ("plan.md", "no-such-file.md"):  # a link to a file, then a broken link
+            with self.subTest(target=target):
+                link = self.root / "backlog.md"
+                link.symlink_to(self.root / target)
+                try:
+                    _route_package, closeout_package = self.packages()
+                finally:
+                    link.unlink()
+                blockers = closeout_package["plan"]["target_blockers"]
+                self.assertIn({"path": "backlog.md", "reason": "top-level-symlink"}, blockers)
 
     def test_false_approval_refuses_both_apply_surfaces(self):
         route_package, closeout_package = self.packages()

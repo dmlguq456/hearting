@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import argparse
 import contextlib
@@ -24,6 +27,8 @@ from split_module_fixture import patch_split
 
 ROOT = Path(__file__).resolve().parents[1]
 SUPERVISOR = ROOT / "utilities" / "codex-app-server-supervisor.py"
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 PARENT = "att-parent"
 DELIVERY_TIMING_POINTS = (
     "last_child_terminal_ns", "join_completed_ns", "same_thread_resume_ns",
@@ -116,7 +121,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                                       'error':{'code':-32000,'message':'fixture resume failure'}})
                                 continue
                         else:
-                            record('thread-start')
+                            record('thread-start', ephemeral=value['params'].get('ephemeral'))
                         send({'jsonrpc':'2.0','id':value['id'],'result':{'thread':{'id':'thread-1'}}})
                     elif method == 'turn/start':
                         turns += 1
@@ -440,6 +445,26 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
             timeout=10,
         )
 
+    def test_an_owner_keeps_its_thread_and_a_later_owner_wakes_it_with_its_own_grants(self):
+        # The owner that takes over from an earlier owner of its route (an answer, an observation, a
+        # usage limit, a later request) wakes that thread; every owner keeps its thread for the next one.
+        self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
+        env = {**os.environ, "FAKE_TRACE": str(self.trace)}
+        kept = subprocess.run([*self.command(), "--keep-session"], input="initial assignment", text=True,
+                              capture_output=True, env=env, timeout=10)
+        self.assertEqual(kept.returncode, 0, kept.stderr + kept.stdout)
+        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        self.assertEqual([row.get("ephemeral") for row in trace if row["event"] == "thread-start"], [False])
+        self.trace.write_text("", encoding="utf-8")
+        self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
+        self.state.unlink(missing_ok=True)
+        woken = subprocess.run([*self.command(), "--keep-session", "--resume-thread", "thread-1"],
+                               input="the earlier owner's context", text=True, capture_output=True, env=env, timeout=10)
+        self.assertEqual(woken.returncode, 0, woken.stderr + woken.stdout)
+        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        self.assertEqual([row["event"] for row in trace if row["event"].startswith("thread-")], ["thread-resume"])
+        self.assertEqual(next(row["thread"] for row in trace if row["event"] == "thread-resume"), "thread-1")
+
     def test_context_window_is_captured_by_supervised_server_across_resume(self):
         self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
         result = self.run_supervisor(model_context_window="600000")
@@ -596,6 +621,191 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         self.assertNotIn("registration-required",turns[1][1])
         creation = next(c for c in app.return_value.request.call_args_list if c.args[0]=="thread/start")
         self.assertIs(creation.args[1]["ephemeral"],False)
+
+    def _timeout_once_then_ready_join(self) -> Path:
+        """A join fake: `timeout` on its first call, then it closes the child and reports `ready`."""
+        counter = self.base / "join_calls.count"
+        counter.write_text("0", encoding="utf-8")
+        script = self.base / "fake_join_timeout_once.py"
+        script.write_text(textwrap.dedent(f"""\
+            import json, sys
+            counter = {str(counter)!r}
+            jobs = sys.argv[sys.argv.index('--jobs') + 1]
+            parent = sys.argv[sys.argv.index('--parent-attempt-id') + 1]
+            attempts = [sys.argv[i + 1] for i, value in enumerate(sys.argv) if value == '--attempt-id']
+            calls = int(open(counter).read()) + 1
+            open(counter, 'w').write(str(calls))
+            if calls == 1:
+                state, status, readiness = 'timeout', 'open', 'pending'
+            else:
+                state, status, readiness = 'ready', 'done', 'ready'
+                kept, current = [], {{}}
+                for line in open(jobs).read().splitlines():
+                    fields = line.split('\\t')
+                    meta = dict(part.split('=', 1) for part in fields[5].split(',') if '=' in part) if len(fields) == 6 else {{}}
+                    if meta.get('attempt_id') in attempts:
+                        fields[1] = 'done'
+                        fields[5] += ',failure_class=pass,note=completed-supervisor,launch_outcome=never-launched'
+                    kept.append('\\t'.join(fields))
+                open(jobs, 'w').write('\\n'.join(kept) + '\\n')
+            print(json.dumps({{'schema_version': 2, 'state': state, 'parent_attempt_id': parent,
+                'children': [{{'attempt_id': a, 'status': status, 'readiness': readiness,
+                               'reason': 'process-alive' if state == 'timeout' else 'registry-closed',
+                               'required_action': 'complete-open' if state == 'timeout' else 'advance-completed'}}
+                              for a in attempts]}}))
+            """), encoding="utf-8")
+        return script
+
+    def test_resource_attention_reaches_the_owner_while_a_model_child_stays_parked(self):
+        """Mixed: a held resource fails while a model sibling is still open (BC-AMI-CHILD-FAIL-NO-WAKE)."""
+        import dispatch_resource_wait as RESOURCE
+        from types import SimpleNamespace
+        module = load_supervisor_module()
+        join = RESOURCE.JOIN
+        self.jobs.write_text(owner_row(self.lease) + child_row())
+        route_value = seal_route({"schema_version":2,"cwd":str(self.base),
+            "nodes":[{"id":"full-run","kind":"resource-runner","continuation":{"kind":"supervised"}},
+                     {"id":"verify"}]})
+        route_path = self.base / "mixed-attention-route.json"
+        route_path.write_text(json.dumps(route_value))
+        route_args = ["--route-file",str(route_path),"--route-id",route_value["route_id"],"--route-hash",route_value["route_hash"]]
+        row = {"run_id":"failing-resource","pid":555,"starttime":"201","command":["approved"],
+               "node":"full-run","status":"failed","exit_code":3,"sentinel":"/fixture-exit"}
+        armed = {"node":"full-run","successors":["verify"]}
+        stage = {"state":"FAILED_RETRYABLE"}
+        sup = SimpleNamespace(poll_once=mock.Mock(),read_resource_watches=lambda *_: [armed],
+            resource_evidence=lambda _: {"terminal":True,"quiescent":True,"succeeded":False,"liveness":"exited","exit_code":3},
+            artifact_evidence=lambda _: {"checked":True,"missing":[]},runner=lambda:SimpleNamespace(read_sentinel=lambda _:3))
+        ctx = (sup,route_value,SimpleNamespace(state=lambda:{"nodes":{"full-run":stage}}),[(armed,row)])
+        turns, events, children_at_resource_turn, events_before_resource_turn = [], [], [], []
+        def turn(*a,**k):
+            prompt = k["prompt"]
+            kind = "resource" if "Runtime resource receipt" in prompt else "model"
+            turns.append(kind)
+            if kind == "resource":
+                state = join.read_supervisor_phase_state(self.state,PARENT)
+                children_at_resource_turn.append(set(state.delivered_attempt_ids))
+                events_before_resource_turn.append(len(events))
+                self.assertIn('"state":"needs-attention"',prompt)
+            text = ("runtime_wait: registered-children" if len(turns) <= 2
+                    else "artifact: -\nverdict: PASS\nblocker: none")
+            return text,{}
+        command = self.command_with_join(self._timeout_once_then_ready_join())[2:]
+        with mock.patch.object(RESOURCE,"context",return_value=ctx), \
+             mock.patch.object(RESOURCE.RESUME,"supervisor_alive",return_value=True), \
+             mock.patch.object(module,"run_turn",side_effect=turn), \
+             mock.patch.object(module,"reconcile",return_value=True), \
+             mock.patch.object(sys,"stdin",io.StringIO("initial assignment")), \
+             mock.patch.object(module,"emit",side_effect=events.append), mock.patch.object(module,"AppServer") as app:
+            app.return_value.request.return_value={"thread":{"id":"same-native"}}
+            self.assertEqual(module.main(command+route_args),0)
+        self.assertEqual(turns[:2],["model","resource"])
+        self.assertEqual(children_at_resource_turn,[set()])
+        self.assertEqual(int((self.base / "join_calls.count").read_text()),2)
+        self.assertFalse([e for e in events[:events_before_resource_turn[0]]
+                          if "stage-advance" in str(e.get("type"))])
+        self.assertEqual(sum(1 for e in events if e.get("type") == "dispatch.supervisor.parked"),2)
+        self.assertEqual(sum(k == "resource" for k in turns),1)
+
+    def test_a_correction_reaches_the_owner_while_its_model_child_stays_parked(self):
+        """Observation 5 (BC-AMI-CHILD-FAIL-NO-WAKE), Codex: the same checkpoint as Claude."""
+        import dispatch_resource_wait as RESOURCE
+        module = load_supervisor_module()
+        join = RESOURCE.JOIN
+        self.jobs.write_text(owner_row(self.lease) + child_row())
+        counter = self.base / "join_calls.count"
+        sent = []
+
+        class CorrectionAfterFirstPiece(module.OwnerInput):
+            def pending(self):
+                return counter.exists() and int(counter.read_text()) >= 1 and not sent
+
+            def prepare(self, prompt):
+                if self.pending():
+                    sent.append(prompt)
+                    return prompt + "\nUSER-CORRECTION: also record the seed"
+                return super().prepare(prompt)
+
+        turns, delivered_at_correction = [], []
+        def turn(*a, **k):
+            prompt = k["prompt"]
+            kind = "correction" if "USER-CORRECTION" in prompt else "model"
+            turns.append(kind)
+            if kind == "correction":
+                state = join.read_supervisor_phase_state(self.state, PARENT)
+                delivered_at_correction.append(set(state.delivered_attempt_ids))
+                self.assertIn("still running", prompt)
+            text = ("runtime_wait: registered-children" if len(turns) <= 2
+                    else "artifact: -\nverdict: PASS\nblocker: none")
+            return text, {}
+        events = []
+        command = self.command_with_join(self._timeout_once_then_ready_join())[2:]
+        with mock.patch.object(RESOURCE, "context", return_value=None), \
+             mock.patch.object(module, "OwnerInput", CorrectionAfterFirstPiece), \
+             mock.patch.object(module, "run_turn", side_effect=turn), \
+             mock.patch.object(module, "reconcile", return_value=True), \
+             mock.patch.object(sys, "stdin", io.StringIO("initial assignment")), \
+             mock.patch.object(module, "emit", side_effect=events.append), \
+             mock.patch.object(module, "AppServer") as app:
+            app.return_value.request.return_value = {"thread": {"id": "same-native"}}
+            self.assertEqual(module.main(command), 0)
+        self.assertEqual(turns, ["model", "correction", "model"])
+        self.assertEqual(delivered_at_correction, [set()])
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(int(counter.read_text()), 2)
+        self.assertEqual(sum(1 for e in events if e.get("type") == "dispatch.supervisor.parked"), 2)
+
+    def test_restart_with_a_running_resource_still_delivers_the_finished_model_child(self):
+        """RV-PR1602 finding 3 (Codex): the recovered wait is the loop's combined one, so a
+        finished model child is delivered while the primary is still training."""
+        import dispatch_resource_wait as RESOURCE
+        from types import SimpleNamespace
+        module = load_supervisor_module()
+        join = RESOURCE.JOIN
+        self.jobs.write_text(owner_row(self.lease) + child_row())
+        route_value = seal_route({"schema_version":2,"cwd":str(self.base),
+            "nodes":[{"id":"full-run","kind":"resource-runner","continuation":{"kind":"supervised"}},
+                     {"id":"verify"}]})
+        route_path = self.base / "restart-mixed-route.json"
+        route_path.write_text(json.dumps(route_value))
+        route_args = ["--route-file",str(route_path),"--route-id",route_value["route_id"],"--route-hash",route_value["route_hash"]]
+        join.write_supervisor_state(self.state,PARENT,set(),phase="parked")
+        with join._supervisor_state_lock(self.state):
+            join._write_supervisor_state_unlocked(self.state,PARENT,set(),phase="parked",
+                resource={"session_id":"same-native","delivered":["a"*64],"outbox":None})
+        row = {"run_id":"training","pid":557,"starttime":"203","command":["approved"],
+               "node":"full-run","status":"running","sentinel":"/fixture-exit"}
+        armed = {"node":"full-run","successors":["verify"]}
+        sup = SimpleNamespace(poll_once=mock.Mock(),read_resource_watches=lambda *_: [armed],
+            resource_evidence=lambda _: {"terminal":False,"reason":"resource-still-running","liveness":"working"},
+            artifact_evidence=lambda _: {"checked":True,"missing":[]},reattach_resource_watch=lambda *_: None,
+            runner=lambda:SimpleNamespace(read_sentinel=lambda _:None))
+        ctx = (sup,route_value,SimpleNamespace(state=lambda:{"nodes":{"full-run":{"state":"RUNNING"}}}),[(armed,row)])
+        class StillTraining(Exception):
+            pass
+        turns, prompts = [], []
+        def turn(*a,**k):
+            prompt = k["prompt"]
+            prompts.append(prompt)
+            turns.append("child" if "att-child" in prompt else "resume")
+            return ("runtime_wait: registered-children" if len(turns) == 1
+                    else "artifact: -\nverdict: PASS\nblocker: none"),{}
+        def still_training(*_a, **_k):
+            raise StillTraining()  # the one-second look at the still-running primary
+        command = self.command_with_join(self._timeout_once_then_ready_join())[2:]
+        (self.base / "join_calls.count").write_text("1", encoding="utf-8")  # every join: ready
+        with mock.patch.object(RESOURCE,"context",return_value=ctx), \
+             mock.patch.object(RESOURCE,"observe_once",side_effect=still_training), \
+             mock.patch.object(RESOURCE.RESUME,"supervisor_alive",return_value=True), \
+             mock.patch.object(module,"run_turn",side_effect=turn), \
+             mock.patch.object(module,"reconcile",return_value=True), \
+             mock.patch.object(sys,"stdin",io.StringIO("initial assignment")), \
+             mock.patch.object(module,"emit"), mock.patch.object(module,"AppServer") as app:
+            app.return_value.request.return_value={"thread":{"id":"same-native"}}
+            module.main(command+route_args)
+        # Before the fix the restart waited on the primary first: no turn at all.
+        self.assertEqual(turns,["resume","child"])
+        self.assertNotIn("Runtime resource receipt",prompts[1])
 
     def test_progress_carrying_resource_settlements_do_not_spend_the_continuation_budget(self):
         # Phase F d6 (F-1), symmetric to claude_session_supervisor.test.py's
@@ -1209,7 +1419,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         worker_home = (jobs.parent / "codex-owner-home" if legacy_record
                        else runtime_dir / "codex-owner-home")
         route_path = base / "owner-route.json"
-        attempt = PARENT
+        attempt = unique_attempt_id("att-parent")
         parent_session = "fixture-parent"
         log_path = logs / f"owner.{attempt}.codex.jsonl"
         summary_prompt = logs / f"owner.{attempt}.codex.prompt.txt"
@@ -2792,6 +3002,91 @@ class OneTurnStageTransportTest(unittest.TestCase):
         self.assertEqual(sum(row.get("event") == "turn" for row in events), 1)
         self.assertIn({"event": "closed"}, events)
         self.assertNotIn("--parent-attempt-id", result.args)
+
+    def test_a_unit_leg_keeps_its_thread_and_a_later_turn_wakes_it_with_its_own_grants(self):
+        fake = self.root / "unit_fake.py"
+        trace = self.root / "unit_trace.jsonl"
+        fake.write_text(textwrap.dedent("""\
+            import json, os, sys
+            trace = os.environ['STAGE_TRACE']
+            def send(value): print(json.dumps(value), flush=True)
+            def record(value):
+                with open(trace, 'a', encoding='utf-8') as out:
+                    out.write(json.dumps(value) + '\\n')
+            for line in sys.stdin:
+                value = json.loads(line); method = value.get('method')
+                if method == 'initialize':
+                    send({'jsonrpc':'2.0','id':value['id'],'result':{}})
+                elif method in ('thread/start', 'thread/resume'):
+                    record({'event': method, 'params': value['params']})
+                    send({'jsonrpc':'2.0','id':value['id'],'result':{'thread':{'id':value['params'].get('threadId','thread-new')}}})
+                elif method == 'turn/start':
+                    send({'jsonrpc':'2.0','id':value['id'],'result':{'turn':{'id':'t'}}})
+                    send({'jsonrpc':'2.0','method':'item/completed','params':{'turnId':'t','item':{
+                        'type':'agentMessage','id':'m','text':'artifact: -\\nverdict: PASS\\nblocker: none'}}})
+                    send({'jsonrpc':'2.0','method':'turn/completed','params':{'turn':{'id':'t','status':'completed'}}})
+                elif method == 'shutdown':
+                    break
+        """), encoding="utf-8")
+        env = {**os.environ, "STAGE_TRACE": str(trace)}
+        common = [sys.executable, str(SUPERVISOR), "--one-turn", "--worktree", str(self.root),
+                  "--sandbox", "read-only", "--approval", "never", "--model", "m-1",
+                  "--app-server-command", f"{sys.executable} {fake}"]
+        first = subprocess.run([*common, "--keep-session"], input="turn one", text=True, capture_output=True,
+                               env=env, timeout=15)
+        woken = subprocess.run([*common, "--keep-session", "--resume-thread", "thread-new"], input="turn two",
+                               text=True, capture_output=True, env=env, timeout=15)
+        self.assertEqual((first.returncode, woken.returncode), (0, 0), first.stdout + woken.stdout)
+        events = [json.loads(line) for line in trace.read_text().splitlines()]
+        start, resume = events
+        self.assertEqual(start["event"], "thread/start")
+        self.assertIs(start["params"]["ephemeral"], False)
+        self.assertEqual(resume["event"], "thread/resume")
+        self.assertEqual(resume["params"]["threadId"], "thread-new")
+        self.assertNotIn("ephemeral", resume["params"])
+        # the woken thread is given this launch's own cwd, sandbox, approval and model again
+        for key in ("cwd", "sandbox", "approvalPolicy", "model"):
+            self.assertEqual(resume["params"][key], start["params"][key], key)
+        self.assertIn('"thread_id":"thread-new"', woken.stdout.replace(" ", ""))
+
+    def test_a_thread_that_cannot_be_woken_ends_the_turn_with_its_reason_and_starts_no_fresh_thread(self):
+        trace = self.root / "refuse_trace.jsonl"
+        env = {**os.environ, "STAGE_TRACE": str(trace)}
+        for name, answer in (("refused", "{'error': {'code': -32000, 'message': 'no rollout'}}"),
+                             ("renamed", "{'result': {'thread': {'id': 'thread-other'}}}")):
+            fake = self.root / f"{name}.py"
+            fake.write_text(textwrap.dedent(f"""\
+                import json, os, sys
+                trace = os.environ['STAGE_TRACE']
+                def send(value): print(json.dumps(value), flush=True)
+                def record(value):
+                    with open(trace, 'a', encoding='utf-8') as out:
+                        out.write(json.dumps(value) + '\\n')
+                for line in sys.stdin:
+                    value = json.loads(line); method = value.get('method')
+                    if method == 'initialize':
+                        send({{'jsonrpc':'2.0','id':value['id'],'result':{{}}}})
+                    elif method in ('thread/start', 'thread/resume', 'turn/start'):
+                        record({{'event': method}})
+                        if method == 'thread/resume':
+                            send({{'jsonrpc':'2.0','id':value['id'], **{answer}}})
+                        else:
+                            send({{'jsonrpc':'2.0','id':value['id'],'result':{{'thread':{{'id':'thread-new'}}}}}})
+                    elif method == 'shutdown':
+                        break
+                """), encoding="utf-8")
+            woken = subprocess.run([sys.executable, str(SUPERVISOR), "--one-turn", "--worktree", str(self.root),
+                                    "--sandbox", "read-only", "--keep-session", "--resume-thread", "thread-new",
+                                    "--app-server-command", f"{sys.executable} {fake}"],
+                                   input="turn two", text=True, capture_output=True, env=env, timeout=15)
+            rows = [json.loads(line) for line in woken.stdout.splitlines()]
+            self.assertEqual(woken.returncode, 70, name + woken.stdout)
+            reason = next(row["reason"] for row in rows if row.get("type") == "dispatch.supervisor.error")
+            self.assertEqual(reason, {"refused": "app-server-request-failed:thread/resume",
+                                      "renamed": "resume-native-session-changed"}[name])
+            self.assertFalse(any(row.get("type") == "turn.completed" for row in rows), name)
+        events = [json.loads(line)["event"] for line in trace.read_text().splitlines()]
+        self.assertEqual(events, ["thread/resume", "thread/resume"])     # no fresh thread, no turn
 
     def test_empty_prompt_and_app_server_eof_fail_without_terminal_success(self):
         marker = self.root / "started"

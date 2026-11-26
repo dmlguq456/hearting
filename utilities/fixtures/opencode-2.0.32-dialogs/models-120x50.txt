@@ -1,0 +1,50 @@
+   New session                     New session                   +
+
+  ┃
+  ┃  a second message
+  ┃
+
+     Error: placeholder error texts for the first prompt, with a placeholder link (https://example.invalid); more tos
+     keep going: https://example.org/go
+
+     Build · Model Zeta · 349ms
+
+  ┃
+  ┃  first prompt
+  ┃
+                                  Select model                                     esc
+     Error: placeholder text r                                                            placeholder error text here
+     keep going: placeholder-x    Search
+
+     Build · Model Zeta · 286m    Model A Free                                    Free
+                                  Model B Free                                    Free
+                                  Model C Free                                    Free
+                                  Model D Free                                    Free
+                                  Model E Free                                    Free
+                                  Model F Free                                    Free
+                                  Model G Free                                    Free
+                                  Model H Free                                    Free
+                                  Model I Free                                    Free
+                                  Model J Free                                    Free
+                                  Model L Free                                    Free
+                                ● Model Zeta                                      Free
+
+                                  View all integrations ctrl+a
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · Model Zeta OpenCode
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  /tmp/ocx-XXXX/proj                                                                 shift+tab agents  ctrl+p commands
+

@@ -98,6 +98,7 @@ import artifact_directory_bundle  # noqa: E402
 import artifact_campaign  # noqa: E402
 import route_identity  # noqa: E402
 import route_lineage  # noqa: E402
+import route_form  # noqa: E402
 import directory_record_index  # noqa: E402
 import dispatch_contract  # noqa: E402
 import dispatch_lock_order  # noqa: E402
@@ -133,7 +134,7 @@ from artifact_producer_store import (  # noqa: F401
     _CLOSED_RECORD_STATES, _copy_tree_files, _cycle_rel, _digest, _disposition_value,
     _earlier_documents, _ensure_dir, _excluded_by_roots, _fallback_blocks, _folder_cycle_id,
     _fsync_dir, _HASH_CHUNK_BYTES, _HISTORICAL_OBSERVATIONS, _HISTORICAL_PROJECTIONS,
-    _is_payload_directory, _is_runtime_owned_top_level, _json_bytes, _KEY_RE, _LayoutScan,
+    _is_payload_directory, _is_runtime_owned_entry, _is_runtime_owned_top_level, _json_bytes, _KEY_RE, _LayoutScan,
     _legacy_content_names, _published_cycle_state, _QUIET_HISTORY, _read_json,
     _record_content_digest, _record_cycle_manifest_path, _reference_path, _rfc3339,
     _rfc3339_precise, _rfc3339_to_epoch, _SEALED_CYCLE_STATES, _stream_file_facts,
@@ -146,13 +147,13 @@ from artifact_producer_store import (  # noqa: F401
     classify_root, CLOSED_BINDABLE_STATES, COMPAT_OVERRIDE_FIELDS, COMPAT_OVERRIDE_NAME,
     compat_override_path, CONTRACT, cutover_path, cycle_dir, cycle_disposition,
     cycle_record_closed, cycle_record_path, default_bucket, ENTRANCE_NAMES, ENTRY_CAPABILITIES,
-    find_campaign_by_key, INACTIVE_FALLBACK_ENV, inactive_fallback_level, INTENSITIES,    INTERNAL_CAPABILITIES, is_active, journal_path, legacy_fallback_state, LEGACY_TOP_LEVEL,
+    find_campaign_by_key, INACTIVE_FALLBACK_ENV, inactive_fallback_level, INTENSITIES,    INTERNAL_CAPABILITIES, is_active, is_root_document, journal_path, legacy_fallback_state, LEGACY_TOP_LEVEL,
     LEGACY_WRITE_HINT, list_cycle_records, MEDIA_TYPES, OK, PRIMARY_CANDIDATES, producer_dir,
     PRODUCER_REL, ProducerError, PROVISIONAL_SEAL_WARNING, read_campaign,
     read_campaign_tombstone, read_compat_override, read_cutover, read_cycle_record,
     read_relayout_state, RECORD_SEGMENTS, RELATED_KINDS, RELAYOUT_STATE_NAME,
     relayout_state_path, REVIEW_LEASE_REL, REVISION_RECORD_NAME, ROOT_CLASSES,
-    RUNTIME_OWNED_EXACT, shared_journal_path, SHARED_KINDS, STAGE_CAPABILITIES,
+    ROOT_DOCUMENT_NAMES, RUNTIME_OWNED_EXACT, shared_journal_path, SHARED_KINDS, STAGE_CAPABILITIES,
     STATUS_DOCUMENT_NAMES, SUPPORT_SEGMENTS, transition_window_closed, USAGE,
     USER_DOCUMENT_NAMES, validate_time_bounded_grant, WAIVER_FIELDS,
 )
@@ -173,7 +174,8 @@ from artifact_producer_history import (  # noqa: F401
     _control_file_key, _control_keys, _control_keys_settled, _CONTROL_MEMO_SETTLE_NS,
     _deliver_pending, _flush_campaign_pending_locked, _flush_cycle_pending_locked, _HAND_ACTOR,
     _history_actor, _history_by, _history_deliver_locked, _history_file_ref, _history_id,
-    _history_module, _HISTORY_TOKEN, _last_known_path, _locator_suffix, _merge_pending,
+    _history_module, _HISTORY_TOKEN, _last_known_path,
+    _locator_suffix, _merge_pending,
     _observe_control_changes, _observe_root_controls, _preserve_current_manifest,
     _QUIET_HISTORY_SECONDS, _read_control_memo, _read_history_quiet, _read_manifest_raw,
     _refresh_history_lines, _UNSET, _with_cycle_lines, _with_pending, _write_control_memo,
@@ -597,6 +599,10 @@ def _env_for(root: Path, record: Mapping[str, Any], route: Optional[Mapping[str,
     runtime_candidate = worker_bootstrap.runtime_dir_candidate(root, **runtime_context)
     if runtime_candidate:
         env["AGENT_RUNTIME_DIR"] = runtime_candidate
+    raw_candidate = worker_bootstrap.raw_data_dir_candidate(
+        root, runtime_candidate, source_root=runtime_context.get("source_root"))
+    if raw_candidate:
+        env["AGENT_RAW_DATA_DIR"] = raw_candidate
     # This is an already-declared producer context. Carrying it through the
     # existing artifact env lets the next explicit same-campaign cycle join
     # without an agent remembering a group ID or changing route lineage.
@@ -692,7 +698,8 @@ def bind_owner_launch(args, jobs: Path, *, environ=None) -> Optional[Dict[str, A
 
 
 def prepare_route_artifact_env(route_file: Path, *, start: bool, jobs: Path,
-                               require_cycle: bool = True, sibling_looked: bool = False) -> Dict[str, str]:
+                               require_cycle: bool = True, sibling_looked: bool = False,
+                               fresh_cycle: Optional[str] = None) -> Dict[str, str]:
     """Resolve the route's own output context; callers need not copy begin's env.
 
     Start owns idempotent preparation. Readiness checks only read an existing
@@ -722,7 +729,8 @@ def prepare_route_artifact_env(route_file: Path, *, start: bool, jobs: Path,
         return _begin_waiting_for_admission(
             root, route_file=route_file, capability=route["capability"],
             intensity=route["effective_intensity"], require_cycle=require_cycle, jobs=jobs,
-            sibling_looked=sibling_looked, journal_target=not require_cycle, **selection)["env"]
+            sibling_looked=sibling_looked, journal_target=not require_cycle,
+            **({"fresh_cycle": fresh_cycle} if fresh_cycle else {}), **selection)["env"]
     record = route_cycle_for(root, route)
     if record is None:
         import artifact_journal
@@ -1196,7 +1204,12 @@ def _begin_cycle_record(
     owner_attempt_id: Optional[str] = None,
     resume_only: bool = False,
     journal_target: bool = False,
+    fresh_cycle: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """`fresh_cycle`: the attempt id of a unit route's next turn. It begins a new cycle, a child of the
+    route's sealed one, instead of binding the sealed cycle again (§45 D-123): each turn has its own
+    terminal evidence, and the index accepts a second cycle of a route only as the child of its first. The
+    same attempt asking again resumes the cycle it began; any other open cycle refuses."""
     dispatch_terminal_commit.require_current_cleanup("producer-begin", jobs=jobs)
     root = Path(root).resolve()
     if capability not in ENTRY_CAPABILITIES + STAGE_CAPABILITIES + INTERNAL_CAPABILITIES:
@@ -1318,9 +1331,21 @@ def _begin_cycle_record(
             # already admitted route can still use its ordinary independent
             # cycle, with the unresolved association retained for inspection.
             request_binding, request_note = None, str(exc)
+        continued_from = None
         resumable = route_cycle_for(root, route)
         if resumable is not None and resumable.get("deleted_at"):
             resumable = None  # a deleted folder is never resumed; the route's next cycle is a new one
+        if fresh_cycle and request_binding:
+            raise ProducerError("unit-continue-request-bound-route", route["route_id"])
+        if fresh_cycle and resumable is not None:
+            if resumable.get("state") == "open":
+                if resumable.get("continuation_attempt_id") != fresh_cycle:
+                    raise ProducerError("unit-continue-prior-cycle-open", resumable["cycle_id"])
+            elif resumable.get("request_binding") or "parent_cycle_id" in route:
+                raise ProducerError("unit-continue-request-bound-route", route["route_id"])
+            else:
+                continued_from = parent_cycle_id = resumable["cycle_id"]   # the turn's cycle is a child of the last turn's
+                resumable = None
         if resume_only and resumable is None:
             raise ProducerError("producer-binding-required", "route-cycle-absent")
         if resumable is not None and resumable.get("request_binding"):
@@ -1574,6 +1599,8 @@ def _begin_cycle_record(
             "locator_suffix": cycle_locator_suffix,
             **({"request_binding": request_binding} if request_binding else {}),
             **({"request_binding_note": request_note} if request_note else {}),
+            **({"continues_cycle_id": continued_from, "continuation_attempt_id": fresh_cycle}
+               if fresh_cycle else {}),
         }
         if shared_reference_pins is not None:
             record["shared_reference_pins"] = [dict(pin) for pin in shared_reference_pins]
@@ -1640,6 +1667,12 @@ def _observe_after_begin(root: Path, result: Mapping[str, Any]) -> None:
             artifact_checkpoint_trigger.launch(trigger="begin", key=f"begin-{observed}",
                                                artifact_root=str(root), cycle_id=observed)
     except Exception:  # noqa: BLE001 -- observing other cycles never fails a begin
+        pass
+    try:
+        import artifact_entrance  # the new cycle's campaign document is kept by the entrance worker
+
+        artifact_entrance.request_refresh(root, result.get("cycle_id"))
+    except Exception:  # noqa: BLE001 -- a derived document never fails a begin
         pass
 
 
@@ -1810,7 +1843,7 @@ def _quick_refine_write_gate(root: Path, target: Path, route=None) -> None:
         return
     if "_internal" in parts:
         return
-    if route.get("effective_intensity") != "quick":
+    if not route_form.one_shot_owner(route):
         return
     node = next((n for n in route.get("nodes", []) if n.get("id") == "one-shot"), {})
     if node.get("inline_human_gates") != ["preview-disposition"]:
@@ -1932,6 +1965,10 @@ def check_write(root: Path, target: Path) -> Dict[str, Any]:
     top = parts[0]
     if top.startswith(".") or top == "_scratch":
         return {**base, "verdict": "allow", "reason": "runtime-owned", "layout": "runtime"}
+    if len(parts) == 1 and top in ROOT_DOCUMENT_NAMES and (
+            not os.path.lexists(str(root / top)) or is_root_document(root / top)):
+        # a person's or a session's root document, not a record; a link or a folder of that name is not one
+        return {**base, "verdict": "allow", "reason": "root-document", "layout": "runtime"}
     if top == "shared":
         return {**base, "verdict": "deny", "reason": "shared-revision-immutable", "layout": "shared"}
     if top == "campaigns":
@@ -2187,6 +2224,13 @@ def _route_cli_context(argv: Sequence[str]):
     return values, context
 
 
+def _typed_root(value: "str | Path") -> Path:
+    """The root as typed. A relative one is the working directory's, made absolute here once, before any
+    command reads it; an absolute one is left exactly as typed."""
+    root = Path(value)
+    return root if root.is_absolute() else Path(os.path.abspath(root))
+
+
 def _checkpoint_cli(args: argparse.Namespace) -> Dict[str, Any]:
     route_file: Optional[Path] = None
     root_value = args.artifact_root or os.environ.get("AGENT_ARTIFACT_ROOT") or ""
@@ -2198,7 +2242,7 @@ def _checkpoint_cli(args: argparse.Namespace) -> Dict[str, Any]:
     cycle_id = args.cycle or (None if args.route else os.environ.get("AGENT_ARTIFACT_CYCLE_ID") or None)
     if not root_value:
         raise ProducerError("checkpoint-target-required", "--artifact-root or $AGENT_ARTIFACT_ROOT")
-    root = Path(root_value)
+    root = _typed_root(root_value)
     if route_file is not None:
         route_file = resolve_route_argument(root, route_file)
     return checkpoint(root, cycle_id=cycle_id, route_file=route_file, trigger=args.trigger)
@@ -2242,12 +2286,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--apply", action="store_true", help="write recovered_started_on into records (default: dry run)")
 
     p = sub.add_parser("cycle-display-titles-backfill",
-                       help="declare cycle display titles for Cairn from sealed cycles (default: dry run)")
+                       help="declare cycle display titles from sealed cycles (default: dry run)")
     p.add_argument("--artifact-root", required=True)
     p.add_argument("--apply", action="store_true", help="write the declaration (default: dry run)")
     p.add_argument("--report", help="write a markdown report to this path")
     p.add_argument("--out", help="write the candidate declaration bytes to this path (outside the artifact root)")
-    p.add_argument("--reader-dir", help="Cairn app_dir to gate --apply against (default: ~/.config/cairn-sync/config.json)")
     p.add_argument("--expect-post-digest", help="refuse --apply unless the computed post-digest matches")
     p.add_argument("--restore-journal", help="restore the declaration from a prior --apply's journal")
 
@@ -2397,7 +2440,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "checkpoint":
             _print(_checkpoint_cli(args))
             return OK
-        root = Path(args.artifact_root)
+        root = _typed_root(args.artifact_root)
         if args.command == "activate":
             w7: Dict[str, Any] = {}
             if args.w7_campaign_id:
@@ -2443,7 +2486,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     root, apply=args.apply,
                     report_path=Path(args.report) if args.report else None,
                     out_path=Path(args.out) if args.out else None,
-                    reader_dir=Path(args.reader_dir) if args.reader_dir else None,
                     expect_post_digest=args.expect_post_digest,
                 )
             _print(result)
@@ -2513,7 +2555,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                               publication=args.publication, allow_open_route=args.allow_open_route,
                               adopt_root_outputs=args.adopt_root_output,
                               abandon_reason=args.abandon_reason,
-                              force_abandon_ignoring_lease=args.force_abandon_ignoring_lease)
+                              force_abandon_ignoring_lease=args.force_abandon_ignoring_lease,
+                              leave_outside=args.state == "abandoned")  # a person's abandon only
             if result.get("warning"):
                 print(result["warning"], file=sys.stderr)
             record = read_cycle_record(root, args.cycle)

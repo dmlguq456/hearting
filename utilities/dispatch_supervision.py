@@ -27,14 +27,16 @@ from typing import Callable, Iterable
 from dispatch_attempt_policy import decide_attempt, terminal_conflict_digest
 from dispatch_receipt_identity import receipt_digest
 from dispatch_registry_cache import registry_view
+from foreground_activity import BLOCKING_COMMAND_MAX_SECONDS
 import dispatch_pending_delivery as pending_delivery
+from capacity_auto_resume import UNIT_CAPACITY_PAUSE
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 KIND = "supervision"
-REASONS = frozenset({"owner-input-undelivered", "no-progress", "attempt-stalled", "process-unverifiable", "join-deadline", "supervisor-exited", "join-observer-failed", "terminal-evidence-conflict", "workflow-completion-pending", "closure-blocked", "watch-deadline", "receiver-unavailable", "answer-awaiting-parent", "parent-session-ended"})
+REASONS = frozenset({"owner-input-undelivered", "no-progress", "attempt-stalled", "process-unverifiable", "join-deadline", "supervisor-exited", "join-observer-failed", "terminal-evidence-conflict", "workflow-completion-pending", "closure-blocked", "watch-deadline", "receiver-unavailable", "answer-awaiting-parent", "parent-session-ended", UNIT_CAPACITY_PAUSE})
 # Notices that only say "still waiting / cannot classify": confirmed execution is not a reason to ask anyone.
 CONFIRMED_WAIT_REASONS = frozenset({"join-deadline", "process-unverifiable"})
 # Another session answered a BLOCKED owner; only the route's parent launches the continuation.
@@ -190,8 +192,16 @@ def _tool_event_source(metadata, log_path):
 
 
 def runtime_tool_progress(metadata, previous=None):
-    """Read only the latest bounded native tool identity, never transcript prose."""
+    """Read only the latest bounded native tool identity, never transcript prose.
+
+    A call still in flight outranks a later sibling's result: parallel calls
+    (two subagents, or a subagent beside a quick command) write the quick
+    result last while the long call is still running. A Claude call belongs to
+    one model message; the next message starts only after every call of the
+    previous one returned, so a new message settles them.
+    """
     latest = previous or None
+    in_flight = {}
     raw_path = metadata.get("log_file", "")
     if not raw_path or not Path(raw_path).is_absolute():
         return latest
@@ -213,10 +223,20 @@ def runtime_tool_progress(metadata, previous=None):
         if not isinstance(event, dict):
             continue
         kind, item = event.get("type"), event.get("item")
+        if kind in {"turn.completed", "turn.failed"}:
+            in_flight = {key: value for key, value in in_flight.items() if key[0] != "codex"}
         if kind in {"item.started", "item.completed"} and isinstance(item, dict):
             if item.get("type") in {"command_execution", "file_change", "mcp_tool_call", "web_search"} and item.get("id"):
                 latest = ["codex", str(item["id"])[:256], kind]
+                if kind == "item.started":
+                    in_flight[("codex", latest[1])] = (latest, "")
+                else:
+                    in_flight.pop(("codex", latest[1]), None)
         if kind in {"assistant", "user"} and isinstance(event.get("message"), dict):
+            message_id = str(event["message"].get("id") or "")
+            if kind == "assistant" and not event.get("isSidechain"):
+                in_flight = {key: value for key, value in in_flight.items()
+                             if key[0] != "claude" or value[1] == message_id}
             content = event["message"].get("content")
             for block in content if isinstance(content, list) else []:
                 if not isinstance(block, dict):
@@ -225,6 +245,10 @@ def runtime_tool_progress(metadata, previous=None):
                 identity = block.get("id") if block_type == "tool_use" else block.get("tool_use_id")
                 if block_type in {"tool_use", "tool_result"} and identity:
                     latest = ["claude", str(identity)[:256], block_type]
+                    if block_type == "tool_use":
+                        in_flight[("claude", latest[1])] = (latest, message_id)
+                    else:
+                        in_flight.pop(("claude", latest[1]), None)
         part = event.get("part")
         if kind == "tool_use" and isinstance(part, dict) and part.get("type") == "tool":
             state = part.get("state")
@@ -232,14 +256,123 @@ def runtime_tool_progress(metadata, previous=None):
             identity = part.get("callID") or part.get("id")
             if identity and status in {"pending", "running", "completed", "error"}:
                 latest = ["opencode", str(identity)[:256], status]
+                if status in {"pending", "running"}:
+                    in_flight[("opencode", latest[1])] = (latest, "")
+                else:
+                    in_flight.pop(("opencode", latest[1]), None)
+    if in_flight:
+        return next(reversed(in_flight.values()))[0]
     return latest
 
 
-def _transient_retry_wait_active(metadata, attempt_id):
-    """Recognize only a live, exact-attempt bounded Codex transport wait."""
+# Rows a runtime appends as its own turn or step moves, in each harness's shape. Bare
+# speech rows (``text``) and the supervisor's ``dispatch.supervisor.*`` bookkeeping are not
+# turns, so long talk or a supervisor's own writes never read as progress. The one
+# exception is ``dispatch.supervisor.step_tokens``: a supervised OpenCode owner's log keeps
+# no native step rows, and this row is written only when a native step finishes.
+_TURN_EVENT_TYPES = frozenset({
+    "turn.started", "turn.completed", "turn.failed", "item.started", "item.completed",  # codex
+    "assistant", "user",  # claude transcript
+    "step_start", "step_finish", "tool_use",  # opencode, written by its own flow
+    "dispatch.supervisor.step_tokens"})  # opencode, supervised owner: one per finished step
+
+
+def runtime_turn_mark(metadata):
+    """Where the worker's own newest turn/step row sits in its event source, plus what its
+    subagents have written, or ``None``.
+
+    A live worker's new turn is progress even when it ran no tool, and so is the activity of
+    a subagent it started and waits on. Only a byte offset and file sizes are read; never prose.
+    """
     raw_path = metadata.get("log_file", "")
     if not raw_path or not Path(raw_path).is_absolute():
-        return False
+        return None
+    source = _tool_event_source(metadata, Path(raw_path))
+    mark = None
+    try:
+        with source.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            start = max(0, handle.tell() - 262144)
+            handle.seek(start)
+            if start:
+                start += len(handle.readline())
+            data = handle.read(262144)
+        offset = start
+        for line in data.splitlines(keepends=True):
+            try:
+                event = json.loads(line)
+            except (ValueError, UnicodeDecodeError):
+                event = None
+            if isinstance(event, dict) and event.get("type") in _TURN_EVENT_TYPES:
+                mark = offset
+            offset += len(line)
+    except OSError:
+        pass
+    subagents = _subagent_signature(source)
+    return [mark, subagents] if subagents else mark
+
+
+def _subagent_signature(source):
+    """(name, size) of the session's subagent transcripts, or ``None`` when it has none.
+
+    Claude writes each subagent of a session to ``<session>/subagents/*.jsonl`` beside the
+    session transcript; a growing file is that subagent's new event. Codex and OpenCode keep
+    a child in its own thread/session, which this attempt's log does not point to, so nothing
+    is read for them here.
+    """
+    try:
+        folder = source.parent / source.stem / "subagents"
+        entries = []
+        for item in folder.iterdir():
+            if item.suffix == ".jsonl" and not item.is_symlink():
+                entries.append((item.name, item.stat().st_size))
+                if len(entries) >= 64:
+                    break
+        return sorted(entries) or None
+    except OSError:
+        return None
+
+
+# Retry waits each supervisor writes (`session_supervisor_decisions.wait_transient_retry`,
+# Codex `run_turn`): Codex names its turn by thread/turn id, Claude and OpenCode by turn ordinal.
+_TRANSIENT_WAIT_REASONS = {"codex": {"transient-capacity", "transient-edge-block"},
+                           "claude": {"transient-edge-block"},
+                           "opencode": {"transient-edge-block"}}
+
+
+def _transient_wait_turn(harness, row):
+    """The waiting turn's identity in this harness's own event shape, else ``None``."""
+    if harness == "codex":
+        thread, turn = row.get("thread_id"), row.get("turn_id")
+        return (thread, turn) if isinstance(thread, str) and thread and isinstance(turn, str) and turn else None
+    ordinal = row.get("turn_ordinal")
+    return ((ordinal,) if isinstance(ordinal, int) and not isinstance(ordinal, bool) and ordinal >= 1
+            else None)
+
+
+def _transient_retry_wait_active(metadata, attempt_id):
+    """Recognize only an exact-attempt bounded retry wait its supervisor still runs."""
+    return _transient_retry_scan(metadata, attempt_id)[0]
+
+
+def _registered_process_live(metadata) -> bool:
+    """The attempt's recorded launch process (the supervisor's own) lives: PID and start time."""
+    from dispatch_contract import process_identity_is_live
+    raw_pid = str(metadata.get("pid", ""))
+    return raw_pid.isdigit() and process_identity_is_live(int(raw_pid), str(metadata.get("pid_start", "")))
+
+
+def _transient_retry_scan(metadata, attempt_id):
+    """``(waiting, resumed)`` from this attempt's own retry-wait events.
+
+    ``waiting``: an exact-attempt bounded retry wait its supervisor still runs.
+    ``resumed``: the monotonic time the latest finished wait handed the same session
+    back -- its next turn's own start time, else the wait's deadline -- or ``None``.
+    """
+    harness = metadata.get("harness")
+    raw_path = metadata.get("log_file", "")
+    if harness not in _TRANSIENT_WAIT_REASONS or not raw_path or not Path(raw_path).is_absolute():
+        return False, None
     try:
         with Path(raw_path).open("rb") as handle:
             handle.seek(0, os.SEEK_END)
@@ -247,10 +380,16 @@ def _transient_retry_wait_active(metadata, attempt_id):
             handle.seek(start)
             if start:
                 handle.readline()
-            lines = handle.read(1024 * 1024).splitlines()
+            data = handle.read(1024 * 1024)
     except OSError:
-        return False
+        return False, None
+    if b"transient-wait.started" not in data:
+        return False, None
+    lines = data.splitlines()
+    clock = time.monotonic()
     active = None
+    finished = None  # the deadline of a wait that ended, until its next turn starts
+    resumed = None
     for line in lines:
         try:
             row = json.loads(line)
@@ -260,11 +399,10 @@ def _transient_retry_wait_active(metadata, attempt_id):
             continue
         kind = row.get("type")
         if kind == "dispatch.supervisor.transient-wait.started":
-            if (metadata.get("harness") == "codex"
+            turn = _transient_wait_turn(harness, row)
+            if (turn is not None
                     and row.get("parent_attempt_id") == attempt_id
-                    and isinstance(row.get("thread_id"), str) and row.get("thread_id")
-                    and isinstance(row.get("turn_id"), str) and row.get("turn_id")
-                    and row.get("reason_code") == "transient-capacity"
+                    and row.get("reason_code") in _TRANSIENT_WAIT_REASONS.get(harness, ())
                     and isinstance(row.get("ordinal"), int)
                     and not isinstance(row.get("ordinal"), bool)
                     and 1 <= row["ordinal"] <= 5):
@@ -273,23 +411,37 @@ def _transient_retry_wait_active(metadata, attempt_id):
                 except (TypeError, ValueError, OverflowError):
                     active = None
                     continue
-                active = ((row.get("thread_id"), row.get("turn_id"), deadline)
-                          if math.isfinite(deadline) and deadline - time.monotonic() <= 960
+                active = ((turn, deadline)
+                          if math.isfinite(deadline) and deadline - clock <= 960
                           else None)
+                finished = None
             else:
                 active = None
         elif kind in {"dispatch.supervisor.transient-wait.ended",
                       "dispatch.supervisor.turn.started", "turn.completed",
+                      "dispatch.supervisor.turn-started", "dispatch.supervisor.turn-completed",
                       "dispatch.supervisor.error"}:
-            if active is not None:
-                if (kind == "dispatch.supervisor.transient-wait.ended"
+            if kind == "dispatch.supervisor.transient-wait.ended":
+                if (active is not None
                         and row.get("parent_attempt_id") == attempt_id
-                        and row.get("thread_id") == active[0]
-                        and row.get("turn_id") == active[1]):
+                        and _transient_wait_turn(harness, row) == active[0]):
+                    # Its end hands the session back; the wait never outlasts its deadline.
+                    finished = resumed = active[1]
                     active = None
-                elif kind != "dispatch.supervisor.transient-wait.ended":
-                    active = None
-    return active is not None and time.monotonic() < active[2]
+                continue
+            deadline = active[1] if active is not None else finished
+            if deadline is not None and (
+                    (harness == "codex" and kind == "dispatch.supervisor.turn.started")
+                    or (harness != "codex" and kind == "dispatch.supervisor.turn-started"
+                        and row.get("parent_attempt_id") == attempt_id)):
+                # The next turn of the same session: progress from its own start time.
+                resumed = deadline
+                started_ns = row.get("monotonic_ns")
+                if isinstance(started_ns, int) and not isinstance(started_ns, bool):
+                    if deadline - 960 <= started_ns / 1e9 <= clock:
+                        resumed = started_ns / 1e9
+            active = finished = None
+    return active is not None and clock < active[1], resumed
 
 
 def verification_process_digest(pid):
@@ -539,6 +691,12 @@ def _running_tool_text(metadata):
             f"is still running: {program}")
 
 
+def _call_command_running(metadata, since):
+    """The attempt's live tool command started at or after ``since`` (epoch seconds)."""
+    running = _running_tool_command(metadata)
+    return bool(running) and running[0] >= since
+
+
 def _runtime_tool_active(event):
     if not isinstance(event, list) or len(event) != 3:
         return False
@@ -563,6 +721,94 @@ def _owned_child_executing(jobs, attempt_id, metadata, now) -> bool:
                 and _execution_confirmed(jobs, child, row[0], row[1], now=now)):
             return True
     return False
+
+
+def _resource_handed_to(jobs, attempt_id, metadata, run) -> bool:
+    """The run's launching owner was replaced and this owner is its verified consumer.
+
+    A normal handoff leaves the run and owner records naming the predecessor; the
+    resource wait's own reader answers it from the lineage: a proven pin handoff to
+    this owner's route, or the replacement claim on the same route. A run of an
+    unrelated owner, or a holder that cannot be read, is not this owner's.
+    """
+    try:
+        from dispatch_resource_wait import current_responsibility
+        route = {"route_id": metadata.get("owner_route_id") or "",
+                 "route_hash": metadata.get("owner_route_hash") or ""}
+        return current_responsibility(run, route=route, owner_attempt_id=attempt_id,
+                                      session_id=None, jobs=str(jobs)) is not None
+    except Exception:  # an unread lineage is unconfirmed, never a crash of the pass
+        return False
+
+
+def _owner_resource_working(jobs, attempt_id, metadata) -> bool:
+    """True while a resource run armed for this owner runs under its exact process identity.
+
+    The owner route's armed watches name the exact runs it waits on (the records the
+    resource wait and parent close read); the run registry's exact identity says whether
+    one still runs. The run is this owner's when it launched it or a verified handoff
+    moved it here. A missing, finished, foreign, or unreadable run is not running.
+    """
+    route_id = metadata.get("owner_route_id") or ""
+    if not route_id:
+        return False
+    try:
+        from workflow_state import WorkflowLedger
+        from resource_run_registry import classify_identity
+        armed = WorkflowLedger(route_id, metadata.get("owner_route_hash") or "", jobs=jobs).root / "armed"
+        registries = {}
+        for watch_file in sorted([*armed.glob("*.json"), *armed.glob("resource-runs/**/*.json")])[:64]:
+            watch = json.loads(watch_file.read_text(encoding="utf-8"))
+            if not isinstance(watch, dict) or watch.get("predecessor_kind") != "resource":
+                continue
+            registry = Path(str(watch.get("resource_registry") or ""))
+            if not registry.is_absolute() or registry.is_symlink():
+                continue
+            if registry not in registries:
+                registries[registry] = json.loads(registry.read_text(encoding="utf-8")).get("runs")
+            runs = registries[registry]
+            run = runs.get(str(watch.get("predecessor_id") or "")) if isinstance(runs, dict) else None
+            if not isinstance(run, dict):
+                continue
+            owner = run.get("owner_wait") if isinstance(run.get("owner_wait"), dict) else {}
+            if (run.get("resource_policy") == "supervised-owner" and run.get("status") == "running"
+                    and not run.get("cancel_requested") and run.get("jobs") in {None, "", str(jobs)}
+                    and classify_identity(run)[0] == "working"
+                    and (attempt_id in {run.get("parent_attempt_id"), owner.get("parent_attempt_id")}
+                         or _resource_handed_to(jobs, attempt_id, metadata, run))):
+                return True
+    except (ImportError, OSError, ValueError, TypeError, AttributeError):
+        return False
+    return False
+
+
+def _supervised_owner_wait(jobs, attempt_id, metadata, now) -> str:
+    """How the owner's own runtime holds it between turns; "" when it does not.
+
+    ``supervisor-live``: a parked, deliverable, or recovery phase under the held outer
+    supervisor lease (the verdict the orphan watch uses). The lease shows only that the
+    supervisor lives, not that anything progresses. ``target-running``: parked, and the
+    exact work it waits on runs now -- a direct child whose own observation reads
+    active, or a resource run armed for it (launched by it or handed to it) whose
+    exact process is live. A wait on nothing, a pending settlement, or unconfirmed
+    work keeps the owner's quiet windows.
+    """
+    if metadata.get("worker_type") != "owner":
+        return ""
+    try:
+        from dispatch_completion_join import read_supervisor_phase_state
+        from dispatch_contract import dispatch_state_root, supervisor_lease_is_held
+        state = read_supervisor_phase_state(
+            dispatch_state_root(jobs) / "supervisor-state" / f"{attempt_id}.json", attempt_id)
+        if (state is None or state.phase not in {"parked", "deliverable", "recovery"}
+                or not supervisor_lease_is_held(jobs, metadata)):
+            return ""
+    except (ImportError, OSError, ValueError, TypeError, KeyError):
+        return ""
+    if state.phase == "parked" and (_owned_child_executing(jobs, attempt_id, metadata, now)
+                                    or _owner_resource_working(jobs, attempt_id, metadata)):
+        return "target-running"
+    return "supervisor-live"
 
 
 def _execution_confirmed(jobs, aid, status, metadata, *, now=None, decision=None) -> bool:
@@ -612,7 +858,7 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
                                      row=None):
     """Update one advisory observation without invoking watchdog terminal policy."""
     from dispatch_contract import (
-        attempt_execution_observation, dispatch_state_root,
+        attempt_execution_observation, dispatch_state_root, supervisor_lease_is_held,
     )
     from tools.fleet.model import ATTEMPT_CLASSIFIER_SOURCE, deterministic_progress_fingerprint
     jobs = Path(jobs).resolve(strict=True)
@@ -644,6 +890,7 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
         fingerprint = deterministic_progress_fingerprint({
             "attempt_id": attempt_id, "route_id": route_id, "route_node": route_node,
             "heartbeat": hb or None, "tool": tool_event,
+            "turn": runtime_turn_mark(metadata),
             "registry_transition": {"status": status, "note": metadata.get("note", "")},
             "file_signature": scoped_file_signature(
                 metadata, worktree if worktree is not None else metadata.get("_stall_worktree", "")),
@@ -680,6 +927,25 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
             if elapsed_windows:
                 quiet += elapsed_windows
                 last_window += elapsed_windows * max(1.0, progress_window_seconds)
+        retry_waiting, retry_resumed = _transient_retry_scan(metadata, attempt_id)
+        if retry_resumed is not None:
+            # A retry wait's end and the next turn it hands back are progress at their own
+            # time, seen or not: the windows count from there, never from the last sample.
+            resumed_at = now - max(0.0, time.monotonic() - retry_resumed)
+            if resumed_at > last_progress:
+                window = max(1.0, progress_window_seconds)
+                quiet = max(0, int((now - resumed_at) // window))
+                last_progress = resumed_at
+                last_window = resumed_at + quiet * window
+        # When this exact tool event was first seen: an unfinished call is backed only by
+        # a command that started for it, never by an older resident shell.
+        try:
+            tool_since = (float(state.get("runtime_tool_since", last_progress))
+                          if same_binding and state.get("runtime_tool_event") == tool_event else now)
+            if not math.isfinite(tool_since):
+                tool_since = now
+        except (TypeError, ValueError, OverflowError):
+            tool_since = now
         if lease:
             last_progress = last_window = now
             quiet = 0
@@ -691,6 +957,7 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
                          or metadata.get("resource_run_id")
                          or metadata.get("resource_id"))
         tool_active = _runtime_tool_active(tool_event)
+        supervised = _supervised_owner_wait(jobs, attempt_id, metadata, now)
         if human_wait is None:
             observation_state, reason = "unknown", "human-gate-observation-unverifiable"
         elif human_wait:
@@ -701,7 +968,13 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
             observation_state, reason = "waiting", "resource-watch-owns-progress"
         elif lease:
             observation_state, reason = "active", "exact-verification-lease"
-        elif execution.state == "absent":
+        elif supervised == "target-running":
+            # Parked by its own runtime on a child or resource run that runs now: that
+            # work owns the progress. A dead owner holds no lease and keeps the branches below.
+            observation_state, reason = "active", "supervised-owner-parked"
+        elif execution.state == "absent" and supervised != "supervisor-live":
+            # A held supervisor lease is a live supervisor between turns, not an absent
+            # owner; its unconfirmed wait falls to the quiet windows below.
             if tool_active:
                 observation_state, reason = "unknown", "runtime-tool-active-process-absent"
             else:
@@ -710,7 +983,16 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
                     observation_state, reason = "stalled", "settlement-unresolved"
                 else:
                     observation_state, reason = "stalled", "execution-absent"
-        elif (execution.state == "unknown" and tool_active
+        elif (execution.state in {"active", "unknown"} and retry_waiting
+              and supervisor_lease_is_held(jobs, metadata)
+              and _registered_process_live(metadata)):
+            # Its own supervisor, holding the exact lease, waits out a bounded retry and
+            # then resumes the same session: working, not quiet. Between turns that
+            # supervisor is the unclassified carrier, so "unknown" counts. The lease shows
+            # only that someone holds the file, so the attempt's recorded process must
+            # also live; past the deadline, or either unconfirmed, the branches below apply.
+            observation_state, reason = "waiting", "registered-transient-retry-backoff"
+        elif (execution.state == "unknown" and tool_active and quiet < max_quiet_windows
               and any(len(identity) >= 3 and str(identity[2]).startswith("unclassified:")
                       for identity in execution.identities)):
             observation_state, reason = "active", "native-tool-process-live"
@@ -721,14 +1003,30 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
             observation_state, reason = "active", "owned-child-executing"
         elif execution.state == "unknown":
             observation_state, reason = "unknown", execution.reason or "execution-unverifiable"
-        elif execution.state == "present" and _transient_retry_wait_active(metadata, attempt_id):
-            observation_state, reason = "waiting", "registered-transient-capacity-backoff"
-        elif tool_active:
+        elif tool_active and (quiet < max_quiet_windows or _call_command_running(
+                metadata, tool_since - max(1.0, progress_window_seconds))):
+            # An unfinished call record is not progress by itself: it counts inside the
+            # quiet windows, or while the exact tool command started for it still runs.
             observation_state, reason = "active", "native-tool-active"
+        elif (quiet >= max_quiet_windows and now - last_progress < BLOCKING_COMMAND_MAX_SECONDS
+              and _call_command_running(
+                  metadata, last_progress - max(1.0, progress_window_seconds))):
+            # One blocking command (a CI watch) that started after the last event and still
+            # runs is the worker's wait, whether or not its call row is still in flight, for
+            # as long as one command may run (the headless Bash maximum); past that, a
+            # stuck command is quiet like any other and the notice names its program. An
+            # older resident shell is not a wait: it started before the last event.
+            observation_state, reason = "active", "tool-command-running"
         elif quiet >= max_quiet_windows:
             observation_state, reason = "stalled", "no-comparable-progress"
         else:
             observation_state, reason = "active", "within-progress-window"
+        if reason in {"supervised-owner-parked", "owned-child-executing",
+                      "registered-transient-retry-backoff"}:
+            # A wait on its own work or retry is not quiet: the owner resumes with a fresh
+            # window instead of the windows its children, resource run, or retry delay spent.
+            last_progress = last_window = now
+            quiet = 0
 
         prior = state.get("stall_observation") if isinstance(state.get("stall_observation"), dict) else {}
         unknown_since = (prior.get("unknown_since") if prior.get("state") in {"observing", "unknown"}
@@ -773,6 +1071,7 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
                       "route_id": route_id, "route_node": route_node,
                       "classifier_source": ATTEMPT_CLASSIFIER_SOURCE,
                       "fingerprint": fingerprint, "runtime_tool_event": tool_event,
+                      "runtime_tool_since": tool_since,
                       "last_progress_at": last_progress, "last_window_at": last_window,
                       "quiet_windows": quiet, "warning": int(quiet >= 1),
                       "observed_at": now, "stall_observation": observation})
@@ -826,6 +1125,42 @@ def _open_attempt_rows(jobs):
         seen.add(attempt_id)
         result.append((record.status, metadata))
     return result
+
+
+def running_route_ids(jobs, candidates, session_id=None):
+    """Which of the ``candidates`` route ids have a worker that works or waits on its own work now.
+
+    With ``session_id``, only routes that session launched count (an attempt whose
+    ``parent_sid`` is that session): another session's running route is not its hand-off.
+
+    Read-only, from the same observer the stall notice uses: an open attempt of the route
+    whose observation reads ``active``, or ``waiting`` on something other than a person
+    (a parked owner on its child or resource run). A stalled, unverifiable or finished
+    route is not running, so its unreceived result stays open work.
+    """
+    wanted = {str(item) for item in candidates or ()}
+    if not wanted:
+        return set()
+    from dispatch_contract import process_table_scan_scope
+    running = set()
+    try:
+        jobs = Path(jobs).resolve(strict=True)
+        with process_table_scan_scope():
+            for status, metadata in _open_attempt_rows(jobs):
+                route = metadata.get("owner_route_id") or metadata.get("route_id")
+                if route not in wanted or route in running:
+                    continue
+                if session_id is not None and metadata.get("parent_sid") != session_id:
+                    continue
+                observation = update_attempt_stall_observation(
+                    jobs, metadata.get("attempt_id", ""), persist=False, row=(status, metadata))
+                if observation and (observation.get("state") == "active" or (
+                        observation.get("state") == "waiting"
+                        and observation.get("reason") != "raised-human-gate")):
+                    running.add(route)
+    except (OSError, ValueError, SupervisionError):
+        return running
+    return running
 
 
 def has_unowned_stall_observation(jobs):
@@ -1006,7 +1341,7 @@ def _awaiting_answers(jobs: Path, aid: str) -> list[str]:
 def _attempt_stall_superseded(jobs: Path, aid: str, metadata: dict) -> bool:
     """A claimed replacement or linked retry owns the route's live attempt now."""
     from dispatch_replacement import (
-        _plain_retry_successor, _replacement_in_flight, registry_rows,
+        _plain_retry_successor, _replacement_in_flight, _replacement_row_of, registry_rows,
     )
     try:
         rows = registry_rows(jobs)
@@ -1016,9 +1351,7 @@ def _attempt_stall_superseded(jobs: Path, aid: str, metadata: dict) -> bool:
         return True
     if _replacement_in_flight(jobs, rows, metadata) or _plain_retry_successor(rows, aid):
         return True
-    if any(candidate.get("replacement_original_attempt_id") == aid
-           and fields[1] in {"open", "running", "done"}
-           for fields, candidate in rows.values()):
+    if _replacement_row_of(rows, aid):
         return True
     marker_path = metadata.get("completion_marker", "")
     route_file = metadata.get("owner_route_file") or metadata.get("route_file") or ""
@@ -1067,11 +1400,13 @@ def _pending(rows: dict, attempts: list[str], jobs: Path, reason=None, *, notice
             metadata = (rows.get(aid) or (None, {}))[1]
             if _attempt_stall_superseded(jobs, aid, metadata):
                 continue
-            status = update_attempt_stall_observation(jobs, aid, persist=False,
-                                                       row=rows.get(aid))
+            status = _stall_observation_for_notice(jobs, aid, rows.get(aid))
             if status and status.get("state") in {"stalled", "unknown"}:
                 return True
         return False
+    if reason == UNIT_CAPACITY_PAUSE:
+        from dispatch_replacement import unit_capacity_pause
+        return any(unit_capacity_pause(jobs, aid) for aid in attempts)
     if reason == "no-progress":
         from dispatch_replacement import parent_resume_obligation
         for aid in attempts:
@@ -1115,6 +1450,32 @@ def _pending(rows: dict, attempts: list[str], jobs: Path, reason=None, *, notice
     return False
 
 
+def _stall_observation_for_notice(jobs, aid, row):
+    """One read-only stall observation of ``aid`` for the two questions a notice asks about it.
+
+    ``notice_is_current`` asks twice (its obligation revision, then whether it is still pending). Inside
+    one Fleet collection pass the first observation is that pass's observation and the second reads
+    it (the observation depends on the clock and on the attempt's processes, so the next pass
+    observes again). Outside a pass (a carrier, a hook) every call observes afresh.
+
+    Contract: one collection pass is one snapshot. Inside it this attempt has one value; a change
+    that lands after the first observation (an outcome cancelled, a run ended) shows in the next
+    pass, not in the same one. That is safe only because a pass is passive display: the collectors
+    read and never write, and every path that acts on a notice (carrier, hook, delivery, settlement,
+    question) runs outside any pass, on its own thread or process, and observes afresh. The pass
+    scope is thread-local; do not open one around an acting path, and do not add the attempt's
+    execution state to this key (the observation reads too many inputs to name them exactly)."""
+    # Fleet is imported as ``fleet`` or as ``tools.fleet``; the pass that is open is in whichever
+    # copy of the module its collectors use, so look for an open one instead of importing a new copy.
+    pass_scope = next((module for module in (sys.modules.get("fleet.pass_scope"),
+                                             sys.modules.get("tools.fleet.pass_scope"))
+                       if module is not None and module.active()), None)
+    if pass_scope is None:
+        return update_attempt_stall_observation(jobs, aid, persist=False, row=row)
+    return pass_scope.cached(("stall-observation", str(jobs), aid, id(row)),
+                             lambda: update_attempt_stall_observation(jobs, aid, persist=False, row=row))
+
+
 def _obligation_revision(rows: dict, attempts: list[str], reason: str, jobs=None) -> str:
     if reason == "owner-input-undelivered":
         from dispatch_owner_input import unresolved_revision
@@ -1126,8 +1487,7 @@ def _obligation_revision(rows: dict, attempts: list[str], reason: str, jobs=None
     if reason == "attempt-stalled":
         values = []
         for aid in attempts:
-            observation = update_attempt_stall_observation(
-                jobs, aid, persist=False, row=rows.get(aid))
+            observation = _stall_observation_for_notice(jobs, aid, rows.get(aid))
             if observation is None:
                 values.append((aid, "missing", "", ""))
             else:
@@ -1184,6 +1544,7 @@ def materialize(jobs: Path, attempts: set[str], *, reason: str) -> list[dict]:
         if reason == "attempt-stalled":
             for monitored_attempt in receipt["monitored_attempt_ids"]:
                 _attach_stall_delivery(jobs, monitored_attempt, record)
+        if reason in {"attempt-stalled", UNIT_CAPACITY_PAUSE}:
             try:
                 from peer_obligations import retain_registered_notice
                 retain_registered_notice(jobs, record)
@@ -1351,6 +1712,10 @@ def _residue_text(receipt: dict) -> str:
             "stop it if it is no longer needed. Nothing is signalled automatically.")
 
 
+# The fixed opening of a needs-attention notice; a reader can tell Hearting's own text by it.
+NEEDS_ATTENTION_HEAD = "Hearting supervision needs attention. This is not workflow completion. "
+
+
 def _printed(name: str) -> str:
     from parent_next_directive import entrypoint
     return entrypoint(Path(__file__).resolve().parents[1], f"utilities/{name}")
@@ -1512,9 +1877,10 @@ def _completion_refusal_notice(receipt: dict, *, notice_context=None) -> str:
     try:
         utility = _printed("dispatch_terminal_commit.py")
     except Exception:  # noqa: BLE001 -- a read-only path fallback keeps the pending notice useful
-        utility = str(Path(__file__).resolve().parents[1] / "utilities" / "dispatch_terminal_commit.py")
+        utility = ""
     clean = lambda value: re.sub(r"[\x00-\x1f\x7f]", "", str(value))[:2048]
-    command = shlex.join(["python3", str(utility), "inspect",
+    command = shlex.join((["python3", str(utility)] if utility else
+                          ["hearting", "run", "dispatch_terminal_commit"]) + ["inspect",
                           "--jobs", clean(receipt["job_registry"]),
                           "--attempt", clean(receipt["owner_attempt_id"])])
     diagnosis = _exact_notice_diagnosis(receipt, notice_context)
@@ -1629,7 +1995,7 @@ def continue_for_parent(record: dict, *, session_id: str, recipient_kind: str,
     their existing answer-resume behavior."""
     receipt = record.get("receipt") if isinstance(record, dict) else None
     if (not session_id or not isinstance(receipt, dict) or receipt.get("kind") != KIND
-            or receipt.get("reason") not in {ANSWER_AWAITING_PARENT, "no-progress"}):
+            or receipt.get("reason") not in {ANSWER_AWAITING_PARENT, "no-progress", UNIT_CAPACITY_PAUSE}):
         return None
     try:
         from dispatch_replacement import _route, source_reservation
@@ -1643,7 +2009,7 @@ def continue_for_parent(record: dict, *, session_id: str, recipient_kind: str,
         if arm is None:
             from capacity_auto_resume import arm
         result = {"reason": receipt["reason"], "route_id": route.get("route_id")}
-        if receipt["reason"] == "no-progress" or source_reservation(jobs, owner):
+        if receipt["reason"] in {"no-progress", UNIT_CAPACITY_PAUSE} or source_reservation(jobs, owner):
             result["source_attempt_id"] = owner
         return arm(result, route_file, jobs, environ=env)
     except Exception:  # noqa: BLE001 -- the notice still carries the start command
@@ -1651,20 +2017,50 @@ def continue_for_parent(record: dict, *, session_id: str, recipient_kind: str,
 
 
 # Settlement verdicts left after a committed PASS: the process tree is still draining
-# (`wait`) or the completion controller has not delivered yet. Unverifiable, reconcile
-# and conflict verdicts are not settlement.
+# (`wait`) or the completion controller has not delivered yet. Reconcile and conflict
+# verdicts are not settlement; an unverifiable verdict is settlement only for the exact
+# cleanup proofs a normally ended worker is still completing (SETTLING_PROCESS_REASONS).
 SETTLING_ACTIONS = frozenset({"wait", "advance", "complete"})
+# After the final result is committed (`done`), these unverifiable reasons mean only that
+# the exact post-exit cleanup proof is not complete yet -- the judgment itself is unchanged
+# and still fail-closed; it decides only the timing and wording of a notice.
+SETTLING_PROCESS_REASONS = frozenset({"post-exit-receipt-incomplete", "attempt-descendant-unverifiable"})
+SETTLING_PROOF = "settle"
+
+
+def _settling_action(status: str, meta: dict) -> str | None:
+    """The settlement action of one attempt that ended with a committed PASS, else None."""
+    from dispatch_attempt_policy import terminal_conflict_pending, verdict_pass
+    if status != "done" or not verdict_pass(meta) or terminal_conflict_pending(meta):
+        return None
+    proof, decision = _settlement_decision(status, meta)
+    if decision.action in SETTLING_ACTIONS:
+        return decision.action
+    if decision.action == "recover" and proof.process_reason in SETTLING_PROCESS_REASONS:
+        return SETTLING_PROOF
+    return None
+
+
+def settlement_only(jobs: Path, attempts) -> bool:
+    """True when every attempt ended normally with PASS and only Hearting's own settlement
+    (cleanup proof, completion summary or delivery) remains. A running process (`wait`), an
+    open row, or anything unreadable is not settlement-only."""
+    try:
+        rows = _rows(Path(jobs), set(attempts))
+        return bool(attempts) and all(
+            _settling_action(*rows[aid]) in {"advance", "complete", SETTLING_PROOF}
+            for aid in attempts)
+    except Exception:  # noqa: BLE001 -- unknown evidence is noticed at once, as before
+        return False
 
 
 def settling_after_pass(receipt: dict) -> list[tuple[str, str]]:
     """(attempt, settlement action) of a `supervisor-exited` notice when every attempt ended
-    with a committed PASS and only its settlement remains; [] whenever anything else is true
-    or unreadable.
+    with a committed PASS, only its settlement remains and a process it started is still
+    running; [] whenever anything else is true or unreadable.
 
-    The supervisor's exit then is the ordinary end of a finished worker: the route's own
-    completion notice follows from the completion controller, which keeps its own deadline
-    notices. Display only -- the record, its delivery and the controller's duty are unchanged."""
-    from dispatch_attempt_policy import terminal_conflict_pending, verdict_pass
+    The supervisor's exit then is the ordinary end of a finished worker whose process is still
+    draining. Display only -- the record, its delivery and the controller's duty are unchanged."""
     if receipt.get("reason") != "supervisor-exited":
         return []
     settled = []
@@ -1672,16 +2068,17 @@ def settling_after_pass(receipt: dict) -> list[tuple[str, str]]:
         attempts = list(receipt["monitored_attempt_ids"])
         rows = _rows(Path(receipt["job_registry"]), set(attempts) | {receipt["owner_attempt_id"]})
         for aid in attempts:
-            status, meta = rows[aid]
-            if status != "done" or not verdict_pass(meta) or terminal_conflict_pending(meta):
-                return []
-            action = _settlement_decision(status, meta)[1].action
-            if action not in SETTLING_ACTIONS:
+            action = _settling_action(*rows[aid])
+            if action is None:
                 return []
             settled.append((aid, action))
     except Exception:  # noqa: BLE001 -- unknown evidence keeps the ordinary attention text
         return []
-    return settled
+    # The orphan watcher records a batch whose only remainder is settlement after it has
+    # waited SETTLING_NOTICE_SECONDS past the owner's end; one that never finishes within
+    # that ceiling -- including a live descendant whose environment cannot be read -- is
+    # the ordinary attention notice, not settlement. A running process keeps its own text.
+    return settled if any(action == "wait" for _aid, action in settled) else []
 
 
 def _live_pids(receipt: dict, attempts: list[str]) -> list[int]:
@@ -1702,29 +2099,20 @@ def _settling_text(receipt: dict, settled: list[tuple[str, str]]) -> str:
                           f"{shlex.quote(receipt['job_registry'])} --attempt {shlex.quote(aid)}"
                           for aid in attempts)
     running = [aid for aid, action in settled if action == "wait"]
-    if running:
-        # A tagged descendant may be a Hearting helper or work the worker started (training,
-        # a server); nothing here tells them apart, so the notice does not call it settlement.
-        residue = _residue_text(receipt)   # a sealed residue already names its pids
-        pids = [] if residue else _live_pids(receipt, running)
-        named = f" (pid {', '.join(map(str, pids))})" if pids else ""
-        return ("Hearting supervision: the worker ended normally, but a process it started is still running "
-                "-- not a blockage, and not finished either. "
-                f"reason=supervisor-exited owner={receipt['owner_attempt_id']}. "
-                f"{', '.join(attempts)} finished with PASS; {', '.join(running)} still has a running "
-                f"process{named}. It may be Hearting's own cleanup or work the worker started. Do not report "
-                "the work as finished while it runs; if it is the user's work, tell the user it is still "
-                "running. Hearting signals nothing; the row closes by itself once that process exits and the "
-                "route's completion notice follows from the existing completion controller. Read-only diagnosis: "
-                + commands + residue)
-    return ("Hearting settlement in progress -- not a blockage. "
+    # A tagged descendant may be a Hearting helper or work the worker started (training,
+    # a server); nothing here tells them apart, so the notice does not call it settlement.
+    residue = _residue_text(receipt)   # a sealed residue already names its pids
+    pids = [] if residue else _live_pids(receipt, running)
+    named = f" (pid {', '.join(map(str, pids))})" if pids else ""
+    return ("Hearting supervision: the worker ended normally, but a process it started is still running "
+            "-- not a blockage, and not finished either. "
             f"reason=supervisor-exited owner={receipt['owner_attempt_id']}. "
-            f"{', '.join(attempts)} finished with PASS and no process of it is running; only Hearting's own "
-            "settlement remains (completion summary or completion delivery). The route's completion notice "
-            "follows from the existing completion controller. Do not report this to the user as blocked, "
-            "and do not restart, retry, cancel, or erase anything. If that completion never arrives, the "
-            "controller keeps the duty and its own deadline notice follows. Read-only diagnosis: "
-            + commands + _residue_text(receipt))
+            f"{', '.join(attempts)} finished with PASS; {', '.join(running)} still has a running "
+            f"process{named}. It may be Hearting's own cleanup or work the worker started. Do not report "
+            "the work as finished while it runs; if it is the user's work, tell the user it is still "
+            "running. Hearting signals nothing; the row closes by itself once that process exits and the "
+            "route's completion notice follows from the existing completion controller. Read-only diagnosis: "
+            + commands + residue)
 
 
 def render_text(receipt: dict, *, continued: dict | None = None, notice_context=None) -> str:
@@ -1790,8 +2178,7 @@ def render_text(receipt: dict, *, continued: dict | None = None, notice_context=
             next_command += "The route's existing authority and gate checks still apply."
         else:
             aid = receipt["monitored_attempt_ids"][0]
-            command = shlex.join(["python3", str(Path(__file__).resolve().parents[1]
-                                                    / "utilities/dispatch-registry.py"),
+            command = shlex.join(["python3", _printed("dispatch-registry.py"),
                                   "reconcile", "--jobs", receipt["job_registry"],
                                   "--attempt", aid])
             next_command = "Read-only next command: " + command + "."
@@ -1809,6 +2196,14 @@ def render_text(receipt: dict, *, continued: dict | None = None, notice_context=
                 "the answer is kept. Only this route's parent session launches its continuation, so "
                 "continue the work with the route's start command: the new owner receives the answer "
                 "first. Do not ask for the answer again." + (" " + command if command else ""))
+    if receipt["reason"] == UNIT_CAPACITY_PAUSE:
+        command = _resume_text(receipt)
+        if continued:
+            return (f"The unit worker stopped at a usage limit. The same route will try to continue "
+                    f"at {continued['resume_at']} or when the usage gate clears. Its result comes back here. "
+                    f"You can also read the result with {command or 'start --route <route-id>'}.")
+        return ("The unit worker stopped at a usage limit. The existing route can continue when capacity returns."
+                + (" " + command if command else ""))
     if receipt["reason"] == "no-progress":
         if continued:
             return ("The route parent has an armed start for the remaining replacement work. Its runtime "
@@ -1889,8 +2284,8 @@ def render_text(receipt: dict, *, continued: dict | None = None, notice_context=
         "does not require a user decision. Ask about cancellation only when actual unfinished work "
         "requires that decision under its existing authority; "
     )
-    return ("Hearting supervision needs attention. This is not workflow completion. "
-            f"reason={receipt['reason']} owner={receipt['owner_attempt_id']}. "
+    return (NEEDS_ATTENTION_HEAD
+            + f"reason={receipt['reason']} owner={receipt['owner_attempt_id']}. "
             "The controller retains waiting/recovery responsibility. Explain the blockage to the user "
             "and inspect these exact attempts. Do not infer death, erase rows, or retry from this notice. "
             + disposition +
@@ -1946,7 +2341,8 @@ def wait_for_batch(*, join: Callable[[set[str]], dict], attempts: set[str],
                    on_timeout: Callable[[set[str]], None] | None = None,
                    deadline: float | None = None,
                    stop_check: Callable[[], str] | None = None,
-                   replacement_checkpoint: Callable | None = None) -> dict:
+                   replacement_checkpoint: Callable | None = None,
+                   on_observer_error: Callable[[BaseException], None] | None = None) -> dict:
     """One shared wait loop. Join deadlines are checkpoints, never death votes.
 
     Execution boundaries retain their finite budgets. The parent receives one
@@ -1963,6 +2359,13 @@ def wait_for_batch(*, join: Callable[[set[str]], dict], attempts: set[str],
     REASONS token it returns halts the same way, under that reason). Neither
     ever fires mid-join -- only at the same checkpoint an ordinary
     `join-deadline` notice already used.
+
+    A round whose join or replacement checkpoint raised skips both `stop_check`
+    and the deadline.
+    `on_observer_error`, also optional and `None` for every other caller, is
+    the one call such a round still makes: it receives the exception, may end
+    the wait by raising `StopWaiting`, and anything else it raises leaves the
+    round an ordinary observer-error round.
     """
     ordinal = 0
     lineage_edges = []
@@ -1970,7 +2373,7 @@ def wait_for_batch(*, join: Callable[[set[str]], dict], attempts: set[str],
     roots = set(attempts)
     attention = []
     while True:
-        observer_error, deferred = "", None
+        observer_error, deferred, failure = "", None, None
         try:
             receipt = join(set(attempts))
             if replacement_checkpoint is not None:
@@ -1994,8 +2397,15 @@ def wait_for_batch(*, join: Callable[[set[str]], dict], attempts: set[str],
                 deferred = exc
             else:
                 # Observation failure retains the exact batch and diagnostic.
-                observer_error = str(exc)
+                observer_error, failure = str(exc), exc
         ordinal += 1
+        if failure is not None and on_observer_error is not None:
+            try:
+                on_observer_error(failure)
+            except StopWaiting:
+                raise
+            except Exception:  # noqa: BLE001 -- the round stays an ordinary error round
+                pass
         halt_reason = ""
         if not observer_error:
             if stop_check is not None:

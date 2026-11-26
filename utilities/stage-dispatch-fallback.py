@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 from model_config import ModelConfigError, resolve_config  # noqa: E402
 from route_authority import decide_continuation, harness_admitted, new_owner_request, retry_predecessor, route_in_force, sealed_pin_harness  # noqa: E402
+from route_form import one_shot_review_node_ids  # noqa: E402
 
 
 def _unit_role(unit):
@@ -89,7 +90,7 @@ from codex_dispatch_terminal import REVIEW_BLOCKING_NOTE  # noqa: E402
 from review_round_cap import classify_round_row  # noqa: E402
 from dispatch_degradation import record_degradation  # noqa: E402
 from dispatch_allocation_receipt import record_allocation_receipt  # noqa: E402
-from dispatch_allocation import inert_allocation_keys  # noqa: E402
+from dispatch_allocation import effective_harness_weights, inert_allocation_keys  # noqa: E402
 import dispatch_launch_tuple as LAUNCH_TUPLE  # noqa: E402
 from dispatch_quality_peer import quality_peer_families  # noqa: E402
 from dispatch_allocation import (  # noqa: E402
@@ -534,7 +535,10 @@ def load_node(route_path: Path, node_id: str, launch_phase: str) -> tuple[dict, 
     if not node:
         raise ValueError(f"unknown route node: {node_id}")
     chain = node.get("fallback_hops")
-    if not isinstance(chain, list) or [row.get("fallback_hop") for row in chain] != ORDER:
+    hops = [row.get("fallback_hop") for row in chain] if isinstance(chain, list) else None
+    if hops != ORDER and not (hops == ORDER[:2] and node_id in one_shot_review_node_ids(route)):
+        # The middle cell's reviews declare their own chain: registered headless hops only. Neither `inline` nor a
+        # native subagent (whose completion is recorded as inline) can close the review of the owner's own work.
         raise ValueError("route node lacks checked ordered fallback")
     return route, node
 
@@ -760,7 +764,7 @@ def ordered_fallback_hops(
             preferred=CAPACITY.preferred_for_depth(allocation, int(node.get("dispatch_depth", 2))),
             affinity_weight=allocation.get("depth_affinity_weight", 0.5),
             headroom_exponent=allocation.get("usage_headroom_exponent", 1),
-            harness_weights=allocation.get("harness_weights"),
+            harness_weights=effective_harness_weights(allocation),
         )
         band_order = ("relief", "primary", "last_resort") if relief_promoted else (
             "primary", "relief", "last_resort"
@@ -964,7 +968,7 @@ def _persist_allocation_receipt(args, route, node, context, row, *, attempt_id=N
         parent_cross=context.get("parent_cross"), sole_gate=context.get("sole_gate"),
         affinity=context.get("affinity"), handed_over_affinity=context.get("handed_over_affinity"),
         affinity_source=context.get("affinity_source"), owner_family=context.get("owner_family"),
-        jobs=getattr(args, "jobs", None),
+        field=route.get("field"), jobs=getattr(args, "jobs", None),
     )
 
 
@@ -2477,6 +2481,11 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
             args.review_source_subject_digest = node_round_admission.source_subject_digest
         except (DispatchContractError, ValueError) as exc:
             return fail(getattr(exc, "reason", str(exc)), 65, child_spawned="0")
+        reused = DISPATCH_NODE.REVIEW_ROUND_CAP.reuse_deterministic_pass(route, node, args.jobs, node_round_budget)
+        if reused:
+            for key, value in reused.items():
+                print(f"{key}={value}")
+            return 0
         choice = decide_continuation(route, action="round", node=node, facts={"budget": node_round_budget})
         if not choice.allowed:
             fields = {"next_action": choice.next_action, "retry_when": choice.retry_when}

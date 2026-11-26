@@ -12,7 +12,8 @@ from typing import Any, Callable
 
 import opencode_server_log
 from dispatch_contract import reconcile_attempt_terminal
-from route_authority import HANDOFF_RE, pass_blocker_violation
+from model_outcome_record import REJECTED_REASON
+from route_authority import HANDOFF_RE, handoff_search, pass_blocker_violation
 
 
 CLASSIFIER_SOURCE = "supervisor-terminal-v1"
@@ -37,6 +38,48 @@ _AUTH_RE = re.compile(
     r"authentication_error|invalid api key|not logged in|unauthorized|forbidden",
     re.I,
 )
+# A 401/403 whose body is the edge network's block or challenge page: the
+# provider's API never saw the request, so no key or account was judged. Seen
+# 2026-11-13 on eight Claude owners within two minutes, the whole envelope being
+# "Failed to authenticate. API Error: 403 Attention Required! | Cloudflare".
+# Only these page titles count; any other 401/403 body stays an auth stop.
+_EDGE_BLOCK_RE = re.compile(
+    r"Attention Required! \| Cloudflare|<title>\s*Just a moment\.\.\.\s*</title>",
+    re.I,
+)
+EDGE_BLOCK_REASON = "runtime-edge-block-envelope"
+# A runtime end whose envelope confirms the provider refused the requested
+# model itself ("this account cannot call this model" / "no such model"). It
+# stays `dead-runtime-error` / `runtime` -- every reader that treats that note
+# alike keeps doing so -- and only the reason column names it, followed by the
+# rejected model when the envelope states one (`runtime-model-rejected:<model>`).
+# Evidence (checked 2026-11-21):
+#   codex  -- typed `CodexErrorInfo::ModelNotFound` (wire `model_not_found`,
+#             app-server `modelNotFound`), openai/codex codex-rs/protocol/src/
+#             codex_error_info.rs and app-server-protocol schema, first released
+#             in rust-v0.166.0.
+#   claude -- the CLI's documented runtime error "There's an issue with the
+#             selected model (<model>)" (code.claude.com/docs/en/errors.md), and
+#             the API's 404 `not_found_error` whose message is `model: <model>`
+#             (platform.claude.com/docs/en/api/errors.md for the 404 type;
+#             message form seen in public anthropics/claude-code issues 6169
+#             and 16387).
+# Capacity, usage limit, overload, auth, 5xx and edge-block envelopes never
+# reach this check: it only refines the final `runtime-error-envelope` fall-through.
+MODEL_REJECTED_REASON = REJECTED_REASON  # the record reads this same prefix
+_MODEL_REJECTION_RUNTIMES = frozenset({"claude", "codex"})
+_MODEL_REJECTION_CODES = frozenset({"modelNotFound", "model_not_found"})
+_MODEL_NAME = r"[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,79}"
+_CLAUDE_SELECTED_MODEL_RE = re.compile(
+    r"There's an issue with the selected model \((" + _MODEL_NAME + r")\)")
+# The 404 envelope's `type` and `message` are read as one object whatever order
+# the keys are written in (the span between two braces is one flat object).
+_CLAUDE_NOT_FOUND_TYPE_RE = re.compile(r'"type"\s*:\s*"not_found_error"')
+_CLAUDE_NOT_FOUND_MESSAGE_RE = re.compile(
+    r'"message"\s*:\s*"model:\s*(' + _MODEL_NAME + r')"')
+# A typed Codex refusal code only stands when the envelope's status does not
+# contradict it: the code is raised with no status, 400, 403 or 404, never 5xx/429.
+_MODEL_REJECTION_STATUSES = frozenset({"", "400", "403", "404"})
 _PROTOCOL_REASON_RE = re.compile(
     r"missing|protocol|schema|shape|json|eof|request-failed|result-invalid|"
     r"thread-start|turn-start-response|join-receipt|contract",
@@ -124,7 +167,7 @@ def _handoff_terminal(text: object, *, event: str, process_exit: int) -> Supervi
     # search, not fullmatch — the pattern anchors the block to the end of the
     # message, so a prepended sentence is ignored rather than fatal. A
     # trailing fence or up to two sentences are tolerated the same way (G1).
-    match = _HANDOFF_RE.search(text.strip()) if isinstance(text, str) else None
+    match = handoff_search(text)
     if match is None:
         return SupervisorTerminal(
             "dead-contract",
@@ -133,8 +176,8 @@ def _handoff_terminal(text: object, *, event: str, process_exit: int) -> Supervi
             "final-handoff-invalid",
             str(process_exit),
         )
-    verdict = match.group("verdict")
-    blocker = match.group("blocker")
+    verdict = match["verdict"]
+    blocker = match["blocker"]
     violation = pass_blocker_violation(verdict, blocker)
     if violation:
         return SupervisorTerminal(
@@ -201,7 +244,19 @@ def classify_runtime_failure(
             str(process_exit),
             status,
         )
-    if status in {"401", "403"} or structured_code == _CODEX_AUTH_STRUCTURED_CODE:
+    auth_status = status in {"401", "403"} or structured_code == _CODEX_AUTH_STRUCTURED_CODE
+    if auth_status and _EDGE_BLOCK_RE.search(text):
+        # A runtime end, so the supervisors' bounded transient retry and the
+        # existing runtime-death continuation (`correct`, `start --route`) apply.
+        return SupervisorTerminal(
+            "dead-runtime-error",
+            "runtime",
+            event,
+            EDGE_BLOCK_REASON,
+            str(process_exit),
+            status,
+        )
+    if auth_status:
         return SupervisorTerminal(
             "dead-auth",
             "auth",
@@ -235,14 +290,58 @@ def classify_runtime_failure(
             str(process_exit),
             status,
         )
+    rejected = model_rejection(runtime, status=status, text=text, structured_code=structured_code)
     return SupervisorTerminal(
         "dead-runtime-error",
         "runtime",
         event,
-        "runtime-error-envelope",
+        "runtime-error-envelope" if rejected is None else (
+            MODEL_REJECTED_REASON + (f":{rejected}" if rejected else "")),
         str(process_exit),
         status,
     )
+
+
+def model_rejection(
+    runtime: str, *, status: str = "", text: str = "", structured_code: str = ""
+) -> str | None:
+    """The rejected model's name ("" when the envelope names none), or None.
+
+    Only a confirmed refusal of the model counts: a typed Codex code first (with
+    no status, or 400/403/404); then, for Claude, a 404 `not_found_error` naming
+    `model: <id>` or the CLI's own selected-model message (no status, or 404).
+    Any other status, or the word "model" alone, is not evidence. The
+    selected-model sentence is read wherever it stands in the text: an envelope
+    gives no ground to tell it from a quotation inside another error's text.
+    """
+    if runtime not in _MODEL_REJECTION_RUNTIMES:
+        return None
+    if structured_code:
+        return ("" if runtime == "codex" and structured_code in _MODEL_REJECTION_CODES
+                and status in _MODEL_REJECTION_STATUSES else None)
+    if runtime != "claude":
+        return None
+    if status == "404":
+        found = _claude_not_found_model(text) or _claude_selected_model(text)
+    elif status == "":
+        found = _claude_selected_model(text)
+    else:
+        found = None
+    return found or None
+
+
+def _claude_not_found_model(text: str) -> str | None:
+    for segment in re.split(r"[{}]", text):
+        if _CLAUDE_NOT_FOUND_TYPE_RE.search(segment):
+            named = _CLAUDE_NOT_FOUND_MESSAGE_RE.search(segment)
+            if named:
+                return named.group(1)
+    return None
+
+
+def _claude_selected_model(text: str) -> str | None:
+    named = _CLAUDE_SELECTED_MODEL_RE.search(text)
+    return named.group(1) if named else None
 
 
 def classify_session_result(
@@ -297,11 +396,12 @@ def completed_owner_assessment(terminal, text, *, jobs=None, attempt_id=None):
         if text is None:
             parsed = inspect_terminal_attempt(meta.get("log_file"), **context)
         else:
-            match = HANDOFF_RE.search(text.strip()) if isinstance(text, str) else None
+            match = handoff_search(text)
             if not match or match["verdict"] != "FAIL":
                 return terminal
             parsed = inspect_terminal_value({"state": "valid", "verdict": "FAIL", "blocker": match["blocker"],
-                "artifact": match["artifact"], "artifact_state": "unchecked", "source": "exact-owner-handoff"}, **context)
+                "artifact": match["artifact"], "artifact_state": "unchecked", "source": "exact-owner-handoff",
+                **({"disposition": match["disposition"]} if match.get("disposition") else {})}, **context)
         if "completed-audit-with-findings" not in str(parsed.get("envelope_normalized") or "").split(","):
             return terminal
         return replace(terminal, note="completed-supervisor", failure_class="pass",
@@ -443,10 +543,13 @@ def classify_escaped_terminal_commit_error(exc, *, route_file, route_id, owner_a
 # result": the supervisor itself recorded the end. Harness-specific reason
 # names (`terminal-event-missing`, `opencode-final-stop-missing`, ...) stay in
 # `reconcile_reason` and are not judged. `tools/install/distribution.py` keeps
-# a standalone copy of the same two columns.
+# a standalone copy of the same two columns. A provider's 401/403 refusal
+# (`dead-auth`) is the runtime ending the attempt too: the model produced no
+# result, so `correct` and `start --route` continue its work in the same
+# lineage once the cause is cleared, instead of leaving a route with no way on.
 SUPERVISOR_ERROR_EVENT = "dispatch.supervisor.error"
 RUNTIME_END_FAILURE_CLASSES = frozenset({"runtime", "protocol"})
-RUNTIME_END_NOTES = frozenset({"dead-runtime-exit", "dead-runtime-error"})
+RUNTIME_END_NOTES = frozenset({"dead-runtime-exit", "dead-runtime-error", "dead-auth"})
 
 
 def runtime_ended_without_result(meta) -> bool:

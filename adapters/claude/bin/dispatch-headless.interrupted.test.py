@@ -5,6 +5,9 @@ The wrapper receives SIGINT while its worker runs: it stops the worker and
 closes the row `dead-interrupted` with `failure_class=runtime` and
 `reconcile_reason=interrupted` -- the Claude, Codex and OpenCode wrappers alike.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import importlib.util
 import io
 import os
@@ -22,6 +25,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "utilities"))
 from dispatch_contract import parse_registry_metadata  # noqa: E402
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 
 MODEL_ARGS = {
     "codex": ["--model", "gpt-test", "--reasoning", "low"],
@@ -47,6 +52,7 @@ class ForegroundInterruptedCloseTest(unittest.TestCase):
                        if harness == "opencode" else "")
             fake.write_text("#!/bin/sh\n" + version + "exec sleep 60\n", encoding="utf-8")
             fake.chmod(0o755)
+            parent_attempt = unique_attempt_id("att-parent-fixture")
             parent = subprocess.Popen(["sleep", "60"])
             self.addCleanup(lambda: (parent.kill(), parent.wait()))
             start = (Path("/proc") / str(parent.pid) / "stat").read_text().split()[21]
@@ -55,12 +61,12 @@ class ForegroundInterruptedCloseTest(unittest.TestCase):
                 "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
                 "execution_surface=registered-headless,registered_worker=1,"
                 f"fallback_hop=same-harness-headless,worker_type=owner,harness={harness},"
-                f"runtime_sandbox=fixture,attempt_id=att-parent-fixture,pid={parent.pid},pid_start={start}\n")
+                f"runtime_sandbox=fixture,attempt_id={parent_attempt},pid={parent.pid},pid_start={start}\n")
             spec = importlib.util.spec_from_file_location(
                 f"{harness}_interrupted_fixture", ROOT / f"adapters/{harness}/bin/dispatch-headless.py")
             wrapper = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(wrapper)
-            attempt = f"att-{harness}-interrupted-0001"
+            attempt = unique_attempt_id(f"att-{harness}-interrupted-0001")
             argv = ["dispatch-headless.py", "--start", "--worktree", str(repo), "--slug", f"{harness}-stop",
                     "--capability", "autopilot-code", "--capability-mode", "dev", "--worker-mode", "dev/backend",
                     "--intensity", "standard", "--dispatch-depth", "2", "--parent", "owner",
@@ -78,7 +84,7 @@ class ForegroundInterruptedCloseTest(unittest.TestCase):
             env = {**ambient, "PATH": str(fakebin) + os.pathsep + os.environ.get("PATH", ""),
                    "AGENT_HOME": str(ROOT), "AGENT_ARTIFACT_ROOT": str(art),
                    "AGENT_DISPATCH_JOBS": str(jobs), "AGENT_DISPATCH_CHILD": "1",
-                   "AGENT_DISPATCH_ATTEMPT_ID": "att-parent-fixture",
+                   "AGENT_DISPATCH_ATTEMPT_ID": parent_attempt,
                    "OPENCODE_CONFIG_CONTENT": "{}", "XDG_STATE_HOME": str(root / "state")}
             env.pop("AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN", None)
             resolution = wrapper.reconcile_launch_lifecycle(

@@ -4,6 +4,9 @@
 Admission and observation are controlled here to exercise crash/replay and
 refusal boundaries. Actual claim/process/closure tests live in their owners.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 import contextlib
 import io
@@ -18,6 +21,8 @@ import unittest
 from unittest import mock
 from types import SimpleNamespace
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import work_start as W
 from dispatch_completion_join import CurrentDeliveryState
 from split_module_fixture import patch_split, split_patch
@@ -38,7 +43,8 @@ class WorkStartTest(unittest.TestCase):
         self.jobs = Path(self.tmp.name) / "jobs.log"
         self.route = {"route_id": "rt-probe", "route_hash": "sha256:probe", "slug": "task",
             "effective_intensity": "standard", "work_request": {"text": "Run the two commands", "owner_harness": "codex"},
-            "nodes": [{"id": n, "worker_type": "frame", "dispatch_depth": 1} for n in ("frame", "frame-alternative")]
+            "nodes": [{"id": n, "worker_type": "frame", "dispatch_depth": 1, "launch_authority": "depth-0"}
+                      for n in ("frame", "frame-alternative")]
                      + [{"id": "test", "depends_on": ["frame", "frame-alternative"]}],
             "dispatch_evidence": {"tuples": [{"child_harness": h, "status": "supported"} for h in ("codex", "opencode")]}}
         self.path = Path(self.tmp.name) / "route.json"
@@ -458,6 +464,23 @@ class WorkStartTest(unittest.TestCase):
         self.assertEqual(result["result"]["marker"]["artifact"], "/exact/report.md")
         self.start(); self.assertEqual(len(self.calls), 3)
 
+    def test_a_gate_released_without_intent_is_finished_by_the_plain_start_before_the_owner(self):
+        self.start(); self.ready = self.released = True
+        steps = []
+        def fill(route, path, jobs, **kwargs):
+            steps.append(kwargs)
+            return {"state": "released", "decision": "proceed"}
+        with mock.patch.object(W, "released_without_intent", return_value=True), \
+                mock.patch.object(W, "frame_interview_step", side_effect=fill):
+            result = self.start()
+        self.assertEqual(steps, [{"interview": None, "answers": None, "decision": "proceed"}])
+        self.assertEqual(result["state"], "completed", result)
+        self.assertEqual(len(self.calls), 3)                      # two frames, then the one owner
+        with mock.patch.object(W, "released_without_intent", return_value=False), \
+                mock.patch.object(W, "frame_interview_step", side_effect=AssertionError("asked again")):
+            self.start()
+        self.assertEqual(len(self.calls), 3)
+
     def test_partial_admission_retains_the_started_child_and_exact_resume(self):
         def partial(command, **kwargs):
             if "frame-alternative" in command:
@@ -527,6 +550,28 @@ class WorkStartTest(unittest.TestCase):
         self.assertEqual((expired["state"], expired["reason"]),
                          ("needs-attention", "parent-wait-deadline"))
         self.assertEqual(len(self.calls), 2)
+
+    def test_ended_frames_whose_settlement_is_open_name_the_bounded_wait_not_end_turn(self):
+        first = self.start()
+        original = self.jobs.read_bytes()
+        for reason in ("completion-deferred", "terminal-commit-pending"):
+            children = [{"attempt_id": aid, "status": "done", "readiness": "pending", "reason": reason}
+                        for aid in first["frame_attempts"]]
+            W.join_selected_attempts.side_effect = None
+            W.join_selected_attempts.return_value = {"state": "timeout", "children": children}
+            result = self.start()
+            self.assertEqual((result["state"], result["reason"], result["required_action"]),
+                             ("preparing", "frame-result-settling", "wait-for-frame-results"), result)
+            self.assertEqual(result["parent_next"], "bounded-wait")
+            self.assertTrue(result["parent_next_command"].endswith(" --wait"))
+            self.assertEqual(result["observation"]["children"], children)
+        self.assertEqual(self.jobs.read_bytes(), original)
+        self.assertEqual(len(self.calls), 2)
+        # A leg still running keeps the old answer: the runtime's wake brings its result.
+        children[0].update(status="open", reason="process-alive")
+        live = self.start()
+        self.assertEqual((live["state"], live["parent_next"]), ("preparing", "end-turn"))
+        self.assertNotIn("reason", live)
 
     def test_typed_budget_refusal_is_waiting_capacity_not_failure(self):
         run = self.make_run(refuse_node="frame-alternative", refuse_times=99,
@@ -841,6 +886,9 @@ class WorkStartTest(unittest.TestCase):
         self.assertEqual((result["state"], result["reason"], result["required_action"]),
                          ("needs-attention", "workflow-executor-exited", "report-unfinished-work"), result)
         self.assertIn("already a continuation", result["next_step"])
+        # A PASS row takes no owner input, so this receipt offers no correction; it names the close.
+        self.assertNotIn("correction_command", result)
+        self.assertIn(" close --route ", result["close_command"])
 
     def test_completed_deferred_owner_still_reports_workflow_gaps(self):
         """C15 (S3a): `verdict_pass` recognizes a marker-bound deferred owner
@@ -892,10 +940,16 @@ class WorkStartTest(unittest.TestCase):
 
     def test_running_owner_receipt_states_the_parent_role(self):
         self.start(); self.ready = self.released = True; self.start()
+        launched = len(self.calls)
         with mock.patch.object(W, "join_selected_attempts", return_value={"state": "timeout", "children": []}):
             result = self.start()
+            # A session that reopens runs `start --route` on a route whose owner is alive (route resume):
+            # that is this same typed state and launches nothing.
+            again = self.start()
         self.assertEqual(result["state"], "running", result)
         self.assertIn("parent_next", result)
+        self.assertEqual((again["state"], again["launches"]), ("running", []), again)
+        self.assertEqual(len(self.calls), launched)
 
     def test_open_but_exited_or_unobservable_owner_is_never_reported_running(self):
         import dispatch_contract as D
@@ -1320,8 +1374,10 @@ class WorkStartTest(unittest.TestCase):
         self.assertEqual((result['state'],result['reason'],result['required_action']),
                          ('needs-attention','owner-blocked','answer-blocked-owner'),result)
         self.assertIn('--attempt-id '+owner,result['correction_command'])
-        for token in ('correction_command','--message-file','replacement owner','Do not close or recompose'):
+        for token in ('correction_command','--message-file','replacement owner','Do not recompose','close_command'):
             self.assertIn(token,result['next_step'])
+        # Both actions the receipt names can be run: the answer, and the parent's close of this route.
+        self.assertIn(' close --route ',result['close_command'])
         self.assertEqual(len(self.calls),3)   # nothing new launched while it waits
 
     def test_blocked_owner_with_unreadable_report_and_log_waits_instead_of_asking_a_person(self):
@@ -1796,7 +1852,9 @@ class WorkStartTest(unittest.TestCase):
              patch_split(artifact_producer, "route_cycle_for", return_value={"cycle_id": "cyc-original"}), \
              patch_split(artifact_producer, "completed_spec_publication", side_effect=[pending, admitted]) as publish:
             first = self.start()
-            self.assertEqual((first["state"], first["reason"]), ("needs-attention", "shared-spec-publication-pending"))
+            # The gap rides on the completed receipt; it does not hold the route.
+            self.assertEqual(first["state"], "completed")
+            self.assertEqual(first["required_action"], "advance-completed")
             self.assertEqual(first["shared_publication"], pending)
             second = self.start()
             self.assertEqual(second["state"], "completed")
@@ -1825,8 +1883,7 @@ class WorkStartTest(unittest.TestCase):
                     self.route["artifact_root"] = root
                 self.path.write_text(json.dumps(self.route))
                 receipt = self.start()
-                self.assertEqual((receipt["state"], receipt["reason"]),
-                                 ("needs-attention", "shared-spec-publication-pending"))
+                self.assertEqual(receipt["state"], "completed")
                 self.assertEqual(receipt["shared_publication"],
                                  {"status": "pending", "reason": "spec-artifact-root-unavailable"})
                 self.assertEqual(receipt["launches"], [])
@@ -1864,19 +1921,79 @@ class WorkStartTest(unittest.TestCase):
             "route_id": self.route["route_id"], "route_hash": self.route["route_hash"],
             "terminal_gate_proven": True, "terminal_owner_attempt_id": "att-original"}))
         meta = {"workflow_completion": "runtime-v1", "owner_route_id": self.route["route_id"]}
+        pending = {"status": "pending", "reason": "shared-spec-conflict"}
         publication = {"status": "admitted", "shared_reference_revision_id": "rrev-original"}
         with mock.patch.object(W, "_rows", return_value={"att-original": ("done", meta)}), \
-             mock.patch.object(terminal, "owner_completion_state", side_effect=[
-                 terminal.CompletionState("pending", "shared-spec-publication-pending"), terminal.CompletionState("complete")]), \
-             mock.patch.object(terminal, "settle_owner_completion", return_value=terminal.TerminalCommitResult(
-                 "completed", shared_publication=publication)) as settle, \
-             patch_split(artifact_producer, "completed_spec_publication") as duplicate, \
+             mock.patch.object(terminal, "owner_completion_state", return_value=terminal.CompletionState("complete")), \
+             mock.patch.object(terminal, "completed_owner_publication", return_value=pending), \
+             mock.patch.object(terminal, "settle_owner_completion",
+                               side_effect=AssertionError("the sealed owner is not settled again")), \
+             patch_split(artifact_producer, "completed_route_spec_publication",
+                         return_value=publication) as retry, \
              mock.patch.object(artifact_producer, "prepare_route_artifact_env", side_effect=AssertionError("reopen")):
             result = self.start()
         self.assertEqual(result["state"], "completed")
         self.assertEqual(result["shared_publication"], publication)
-        settle.assert_called_once_with(self.jobs, "done", meta)
-        duplicate.assert_not_called()
+        retry.assert_called_once_with(self.route, settle=True)
+        self.assertEqual(self.calls, [])
+
+    def test_plan_advance_keeps_the_finished_legs_publication_on_the_new_receipt(self):
+        pending = {"cycle_id": "cyc-leg0", "status": "pending", "reason": "shared-spec-conflict"}
+        finished = {"state": "completed", "required_action": "advance-completed",
+                    "next_leg": {"index": 1}, "shared_publication": pending}
+        route = {"route_id": "rt-leg0", "artifact_root": self.tmp.name, "route_plan": {"index": 0}}
+        record = {"record": {"decision": {"approvals": {"execution_scope": "complete"}}}}
+        with mock.patch.object(W.RP, "validate_sealed", return_value={"decision": "d.json", "index": 0}), \
+             mock.patch.object(W.RP, "read_route_plan", return_value=record), \
+             mock.patch.object(W, "_plan_leg", return_value=({"route_id": "rt-leg1"}, Path("leg1.json"))), \
+             mock.patch.object(W, "start_work", return_value={"state": "running"}):
+            advanced = W._advance_plan(route, self.jobs, finished, run=None, sleep=None, clock=None)
+            self.assertEqual(advanced["state"], "running")
+            self.assertEqual(advanced["plan_advanced"]["shared_publication"], pending)
+            quiet = W._advance_plan(route, self.jobs, {**finished, "shared_publication": None},
+                                    run=None, sleep=None, clock=None)
+        self.assertNotIn("shared_publication", quiet["plan_advanced"])
+
+    def test_a_report_plan_stops_after_every_leg_and_a_complete_plan_goes_on_to_the_last(self):
+        # Three legs: the choice is read from the one decision record each time a leg finishes.
+        route = {"route_id": "rt-leg", "artifact_root": self.tmp.name, "route_plan": {"index": 0}}
+        for scope, starts in (("report", 0), ("complete", 1)):
+            for index in (0, 1):
+                with self.subTest(scope=scope, finished_leg=index):
+                    finished = {"state": "completed", "next_leg": {"index": index + 1}}
+                    record = {"record": {"decision": {"approvals": {"execution_scope": scope}}}}
+                    with mock.patch.object(W.RP, "validate_sealed", return_value={"decision": "d.json", "index": index}), \
+                         mock.patch.object(W.RP, "read_route_plan", return_value=record), \
+                         mock.patch.object(W, "_plan_leg", return_value=({"route_id": "rt-next"}, Path("next.json"))) as leg, \
+                         mock.patch.object(W, "start_work", return_value={"state": "running"}) as started:
+                        advanced = W._advance_plan(route, self.jobs, finished, run=None, sleep=None, clock=None)
+                    self.assertEqual(started.call_count, starts)
+                    self.assertEqual(leg.call_count, starts)
+                    if starts:
+                        leg.assert_called_once_with(route, self.jobs, index + 1)
+                    else:
+                        self.assertEqual(advanced, finished)
+
+    def test_closed_runtime_owner_with_unpublishable_spec_completes_and_reports_the_gap(self):
+        import artifact_producer
+        import dispatch_terminal_commit as terminal
+        self.route["capability"] = "autopilot-code"
+        self.path.with_suffix(".outcome.json").write_text(json.dumps({
+            "route_id": self.route["route_id"], "route_hash": self.route["route_hash"],
+            "terminal_gate_proven": True, "terminal_owner_attempt_id": "att-original"}))
+        meta = {"workflow_completion": "runtime-v1", "owner_route_id": self.route["route_id"]}
+        pending = {"cycle_id": "cyc-original", "status": "pending", "reason": "shared-spec-conflict"}
+        with mock.patch.object(W, "_rows", return_value={"att-original": ("done", meta)}), \
+             mock.patch.object(terminal, "owner_completion_state", return_value=terminal.CompletionState("complete")), \
+             mock.patch.object(terminal, "completed_owner_publication", return_value=pending), \
+             patch_split(artifact_producer, "completed_route_spec_publication", return_value=pending) as retry, \
+             mock.patch.object(artifact_producer, "prepare_route_artifact_env", side_effect=AssertionError("reopen")):
+            first = self.start()
+            again = self.start()
+        for receipt in (first, again):
+            self.assertEqual((receipt["state"], receipt["required_action"]), ("completed", "advance-completed"))
+            self.assertEqual(receipt["shared_publication"], pending)
+        self.assertEqual(retry.call_count, 2)  # one normal retry per start, no loop
         self.assertEqual(self.calls, [])
 
     def test_direct_start_replay_is_fenced_while_inline_finish_is_pending(self):
@@ -2183,6 +2300,20 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
         self.assertEqual(released["state"], "released")
         self.assertEqual(self.resolution()["actor_kind"], "user")
 
+    def test_the_refusal_branch_of_needs_question_carries_the_name_advice_too(self):
+        self.lab_catalog()
+        question, answer, response = self.crossing()
+        question["questions"][0]["question"] += " (run-rev-1)"
+        self.question_file.write_text(json.dumps(question))
+        self.step(interview=self.question_file)
+        answer.write_text(json.dumps({**response, "actor_kind": "supervisor"}))
+        refused = self.step(answers=answer)
+        self.assertEqual((refused["state"], refused["reason"]), ("needs-question", "supervisor-choice-crosses-not-doing"))
+        self.assertEqual([(w["field"], w["token"], w["name"]) for w in refused["name_warnings"]],
+                         [("questions[0].question", "run-rev-1", "잔향 줄임")])
+        self.assertIn("run-rev-1 (= 잔향 줄임)", refused["next_step"])
+        self.assertIn("only the person can choose it", refused["next_step"])
+
     def test_the_release_command_refuses_the_same_supervisor_choice(self):
         import work_intent
         question, answer, response = self.crossing()
@@ -2348,6 +2479,109 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
                       Path(released["intent_file"]).read_text())
         self.assertEqual(self.calls, ["gate", "release"])
 
+    # --- name advice on the registered question (BC-LAB-REPORT-LEGIBILITY, requirement 6) ----------------
+
+    def lab_catalog(self, broken=False):
+        """A project whose catalog gives run `run-rev-1` the name `잔향 줄임`; the route points at its root."""
+        import artifact_admission as admission
+        import experiment_catalog as E
+        root = self.base / "proj" / ".agent_reports"
+        root.mkdir(parents=True)
+        admission.ensure_root_identity(root)
+        E.run_write(root, lambda ctx: E.op_register(ctx, {
+            "groups": [{"display_name": "소리 분리 개선", "goal": "잔향에서 기준보다 높은가"}],
+            "conditions": [{"display_name": "잔향 줄임", "group": "소리 분리 개선", "aliases": ["rev-a"],
+                            "refs": {"runs": [{"run_id": "run-rev-1"}]}}]}), now=1_790_000_000.0)
+        if broken:
+            E.catalog_path(root).write_text("{no", encoding="utf-8")
+        self.route["artifact_root"] = str(root)
+
+    def ask_with_label(self, label):
+        import frame_interview as FI
+        item = json.loads(json.dumps(FI.QUESTION_EXAMPLE))
+        item["options"][0]["label"] = label
+        self.question_file.write_text(json.dumps({**self.question, "questions": [item]}))
+        return self.step(interview=self.question_file)
+
+    def test_a_question_that_names_a_run_without_its_catalog_name_gets_advice_and_nothing_else_changes(self):
+        plain = self.ask_with_label("run-rev-1")
+        self.setUp()
+        self.lab_catalog()
+        asked = self.ask_with_label("run-rev-1")
+        self.assertEqual(asked["state"], "needs-question")
+        self.assertEqual(asked["required_action"], plain["required_action"])        # advice never changes what happens
+        self.assertEqual(asked["parent_next"], plain["parent_next"])
+        self.assertEqual(asked["human_wait"], plain["human_wait"])
+        self.assertEqual(asked["name_warnings"], [{"field": "questions[0].options[0].label", "token": "run-rev-1",
+                                                   "kind": "run-id", "name": "잔향 줄임"}])
+        self.assertTrue(asked["next_step"].startswith(plain["next_step"]))
+        self.assertIn("run-rev-1 (= 잔향 줄임)", asked["next_step"])
+        self.assertNotIn("name_warnings", plain)
+        self.assertEqual(self.resolution()["status"], "blocked")                      # the question is still registered as before
+
+    def test_the_catalog_name_beside_the_token_or_a_label_without_internal_names_gives_no_advice(self):
+        self.lab_catalog()
+        asked = self.ask_with_label("잔향 줄임 (run-rev-1)")
+        self.assertEqual(asked["state"], "needs-question")
+        self.assertNotIn("name_warnings", asked)
+        self.assertNotIn("catalog name", asked["next_step"])
+
+    def test_no_catalog_or_a_broken_one_leaves_the_field_out_and_the_question_unhindered(self):
+        for broken in (False, True):
+            with self.subTest(broken=broken):
+                self.setUp()
+                self.lab_catalog(broken=broken)
+                if not broken:
+                    import experiment_catalog as E
+                    E.catalog_path(Path(self.route["artifact_root"])).unlink()
+                asked = self.ask_with_label("run-rev-1")
+                self.assertEqual((asked["state"], asked["required_action"]), ("needs-question", "ask-registered-question"))
+                self.assertNotIn("name_warnings", asked)
+
+    def test_the_other_needs_question_branch_carries_the_same_advice(self):
+        self.lab_catalog()
+        item = {"id": "alpha", "topic": "t", "question": "q", "kind": "choice", "recommended": 0, "why": "w",
+                "options": [{"label": "run-rev-1", "means": "m"}, {"label": "Skip", "means": "n"}]}
+        step = {"state": "needs-question", "next_step": "ask"}
+        warned = W._with_name_warnings(self.route, {"understanding": "u", "questions": [item]}, step)
+        self.assertEqual([w["token"] for w in warned["name_warnings"]], ["run-rev-1"])
+        self.assertEqual((warned["state"], warned["next_step"].startswith("ask")), ("needs-question", True))
+        for _ in range(10):
+            item["options"].append({"label": "run-rev-1", "means": "x"})
+        many = W._with_name_warnings(self.route, {"understanding": "u", "questions": [item]}, step)
+        self.assertEqual(len(many["name_warnings"]), 8)                               # a bounded advice list
+
+    def test_ordinary_words_files_versions_and_a_name_given_elsewhere_in_the_question_get_no_advice(self):
+        self.lab_catalog()
+        import experiment_catalog as E
+        root = Path(self.route["artifact_root"])
+        cid = E.load(root).doc["conditions"][0]["id"]
+        E.run_write(root, lambda ctx: E.op_register(ctx, {"conditions": [
+            {"id": cid, "aliases": ["rev-a", "base", "v2", "0.3"]}]}), now=1_790_000_001.0)
+        self.assertEqual(E.load(root).doc["conditions"][0]["aliases"], ["rev-a", "base", "v2", "0.3"])
+        ordinary = {"understanding": "설정을 정리한다", "questions": [
+            {"question": "base.py를 고칠까요?", "options": [{"label": "v2 설치", "means": "base 경로 이용, 오차 0.3"}]}]}
+        self.assertEqual(W._name_warning_fields(self.route, ordinary), {})
+        named = {"understanding": "잔향 줄임(run-rev-1)을 다시 본다", "questions": [
+            {"question": "어떻게 할까요?", "options": [{"label": "run-rev-1 계속", "means": "그대로"}]}]}
+        self.assertEqual(W._name_warning_fields(self.route, named), {})
+        bare = {**named, "understanding": "다시 본다"}
+        self.assertEqual(W._name_warning_fields(self.route, bare)["name_warnings"],
+                         [{"field": "questions[0].options[0].label", "token": "run-rev-1", "kind": "run-id", "name": "잔향 줄임"}])
+
+    def test_one_lookup_table_serves_every_field_of_a_question(self):
+        from unittest import mock
+        import experiment_catalog as E
+        self.lab_catalog()
+        item = {"question": "q", "options": [{"label": f"선택 {i}", "means": "run-rev-1 대기"} for i in range(6)]}
+        real = E.scan_index
+        calls = []
+        with mock.patch.object(E, "scan_index", lambda *a, **kw: calls.append(1) or real(*a, **kw)), \
+                mock.patch.object(E, "resolve_ex", side_effect=AssertionError("no catalog walk per token")):
+            found = W._name_warning_fields(self.route, {"understanding": "u", "questions": [item]})
+        self.assertEqual(len(found["name_warnings"]), 6)
+        self.assertEqual(len(calls), 1)                                   # 14 fields, one table
+
     def test_register_before_question_then_actual_answers_release_once(self):
         self.assertEqual(self.step()["state"], "needs-interview")
         asked = self.step(interview=self.question_file)
@@ -2382,9 +2616,8 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
         self.assertEqual(asked["human_wait"], {"state": "pending", "fallback": "ordinary-conversation",
                                               "question_block": expected})
         self.assertNotIn("Confirm this understanding", asked["human_wait"]["question_block"])
-        self.assertIn("understanding sentence verbatim as the first question", asked["next_step"])
-        self.assertIn("in the same native question call when the tool accepts them all", asked["next_step"])
-        self.assertIn("the runtime combines the calls", asked["next_step"])
+        self.assertIn("already on the Hearting question board", asked["next_step"])
+        self.assertIn("do not ask it again through another tool", asked["next_step"])
         self.assertNotRegex(asked["next_step"], r"\b(at most|up to|no more than|maximum)\s+\d")
         registered = Path(asked["interview_file"])
         original = registered.read_bytes()
@@ -2480,13 +2713,14 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
         self.assertEqual(self.calls, ["gate", "release"])
         self.assertEqual(self.step(answers=real)["state"], "released")
         self.assertEqual(self.calls, ["gate", "release"])
-    def routed(self, *, approve=0, route_choice=0):
+    def routed(self, *, approve=0, route_choice=0, legs=1, scope=None):
         """An interview that maps its one route question to a proposal with a start approval."""
         import frame_interview as FI
         leg = {"capability": "autopilot-lab", "mode": "setup", "shape": "staged",
                "graph": ["scaffold", "smoke", "full-run", "run-verify", "handoff"]}
-        proposal = {"summary": "Set the experiment up and run it", "legs": [leg],
-                    "entry_approvals": [{"key": "full-run", "leg": 0, "question": "run-ok"}]}
+        proposal = {"summary": "Set the experiment up and run it", "legs": [leg] * legs,
+                    "entry_approvals": [{"key": "full-run", "leg": 0, "question": "run-ok"}],
+                    **({"execution_scope": scope} if scope else {})}
         ask = lambda qid, text, labels: {"id": qid, "topic": qid, "question": text, "kind": "yes-no", "recommended": 0,
                                          "options": [{"label": label, "means": label, **({"approves": True} if at == 0 else {})}
                                                      for at, label in enumerate(labels)],
@@ -2697,27 +2931,54 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
         self.question_file.write_text(json.dumps(question))
         return question
 
-    def test_the_persons_native_reply_is_recorded_and_the_next_start_takes_it(self):
+    def test_a_legacy_native_reply_record_is_still_taken_by_the_next_start(self):
+        # The harness hooks no longer write `answers.native.json` (a registered frame question is
+        # answered on the question board), but a record an earlier session left is still read.
+        import frame_interview as FI
         question = self.scope_question()
         self.assertEqual(self.step(interview=self.question_file)["state"], "needs-question")
-        shown = lambda scope_answer, restatement="예": [
+        interview = json.loads(Path(self.step()["interview_file"]).read_text())
+        answers = FI.answers_from_native(interview, [
             {"question": "제가 이해한 내용: " + question["understanding"], "options": ["예 (권장)", "아니오(고쳐 말하기)"],
-             "answer": restatement},
+             "answer": "예"},
             {"question": question["questions"][0]["question"], "options": ["Both (recommended)", "Approval only"],
-             "answer": scope_answer}]
-        self.assertIsNone(W.record_native_answer(self.route, self.jobs, shown("Both", restatement="아니오(고쳐 말하기)")))
-        self.assertIsNone(W.record_native_answer(self.route, self.jobs, shown("")))          # nothing picked
-        self.assertIsNone(W.record_native_answer(self.route, self.jobs, [{"question": "unrelated", "answer": "x"}]))
-        recorded = W.record_native_answer(self.route, self.jobs, shown("Approval only (keep the wording)"))
-        answers = json.loads(recorded.read_text())
-        self.assertEqual((answers["actor_kind"], answers["understanding_confirmed"]), ("user", True))
-        self.assertEqual(answers["answers"]["q-scope"], {"choice": "none", "note": "Approval only (keep the wording)"})
-        recorded = W.record_native_answer(self.route, self.jobs, shown("Approval only"))     # the latest reply
-        self.assertEqual(json.loads(recorded.read_text())["answers"]["q-scope"], {"choice": 1, "note": ""})
+             "answer": "Approval only"}])
+        (Path(self.step()["interview_file"]).parent / FI.NATIVE_ANSWERS_NAME).write_text(json.dumps(answers))
         released = self.step()                                     # a bare resume: no answers file to write
         self.assertEqual(released["state"], "released", released)
         self.assertEqual(self.calls, ["gate", "release"])
-        self.assertIsNone(W.record_native_answer(self.route, self.jobs, shown("Both")))     # answered: nothing waits
+        self.assertEqual(answers["answers"]["q-scope"], {"choice": 1, "note": ""})
+
+    def test_a_frame_question_answered_on_the_board_reaches_the_frame(self):
+        # The registered interview is a Hearting question (human_wait_state lists the understanding
+        # sentence, then each registered question); the picked labels become the answers file that
+        # releases the gate, with no native-tool reply or hook in between.
+        import frame_interview as FI
+        self.scope_question()
+        self.assertEqual(self.step(interview=self.question_file)["state"], "needs-question")
+        interview = json.loads(Path(self.step()["interview_file"]).read_text())
+        asked = [{"question": interview["understanding"], "options": ["I understand the restatement"],
+                  "answer": "I understand the restatement"}]
+        for item in interview["questions"]:
+            asked.append({"question": item["question"], "options": [o["label"] for o in item["options"]],
+                          "answer": item["options"][1]["label"]})
+        answers = FI.answers_from_native(interview, asked)
+        self.assertEqual(FI.validate_answers(interview, answers), [])
+        board = self.base / "board-answers.json"
+        board.write_text(json.dumps(answers))
+        released = self.step(answers=board)
+        self.assertEqual(released["state"], "released", released)
+        self.assertEqual(self.calls, ["gate", "release"])
+        self.assertEqual(self.resolution()["answers"]["answers"]["q-scope"]["choice"], 1)
+
+    def test_the_pending_question_points_at_the_board_and_names_no_native_tool(self):
+        self.scope_question()
+        pending = self.step(interview=self.question_file)
+        self.assertEqual(pending["state"], "needs-question")
+        text = pending["next_step"]
+        self.assertIn("Hearting question board", text)
+        for name in ("AskUserQuestion", "request_user_input", "native question", "native box", "harness hook"):
+            self.assertNotIn(name, text)
 
     def test_a_typed_correction_is_the_restatements_answer(self):
         question = self.scope_question()
@@ -2729,115 +2990,6 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
             {"question": question["questions"][0]["question"], "options": [], "answer": "Both"}])
         self.assertEqual((answers["understanding_confirmed"], answers["correction"]), (False, "Only the approval step."))
         self.assertEqual(FI.validate_answers(interview, answers), [])
-
-    # -- one interview answered over several native calls --------------------------------------------
-
-    def four_questions(self):
-        names = ("one", "two", "three", "four")
-        question = {**self.question, "questions": [{
-            "id": f"q-{name}", "topic": f"Choice {name}", "question": f"Which way for part {name}?", "kind": "choice",
-            "options": [{"label": f"Left {name}", "means": "Take the left way."},
-                        {"label": f"Right {name}", "means": "Take the right way."}],
-            "recommended": 0, "why": "Only you can weigh this part."} for name in names]}
-        self.question_file.write_text(json.dumps(question))
-        self.assertEqual(self.step(interview=self.question_file)["state"], "needs-question")
-        return question
-
-    def native_call(self, harness, question, names, *, restatement="예", answers=None):
-        """The `asked` rows one real adapter reads from a native call showing these parts."""
-        import frame_native_answer as N
-        shown = []
-        if restatement is not None:
-            shown.append({"id": "restate", "question": "제가 이해한 내용: " + question["understanding"],
-                          "options": ["예 (권장)", "아니오(고쳐 말하기)"], "answer": restatement})
-        for name in names:
-            right = (answers or {}).get(name, f"Right {name}")
-            shown.append({"id": f"q-{name}", "question": f"Which way for part {name}?",
-                          "options": [f"Left {name}", f"Right {name}"], "answer": right})
-        tool_questions = [{"id": row["id"], "question": row["question"], "options": [{"label": label} for label in row["options"]]}
-                          for row in shown]
-        if harness == "claude":
-            payload = {"tool_name": "AskUserQuestion", "session_id": "s", "tool_input": {"questions": tool_questions},
-                       "tool_response": {"answers": {row["question"]: row["answer"] for row in shown}}}
-        elif harness == "codex":
-            payload = {"tool_name": "request_user_input", "session_id": "s", "tool_input": {"questions": tool_questions},
-                       "tool_response": json.dumps({"answers": {row["id"]: {"answers": [row["answer"]]} for row in shown}})}
-        else:
-            payload = {"tool": "question", "sessionID": "s", "args": {"questions": tool_questions},
-                       "answers": [[row["answer"]] for row in shown]}
-        return N.asked_from(harness, payload)[1]
-
-    def reference_answers(self, question):
-        """The bytes one call showing everything writes; the file is removed again."""
-        recorded = W.record_native_answer(self.route, self.jobs, self.native_call("claude", question, ("one", "two", "three", "four")))
-        data = recorded.read_bytes()
-        recorded.unlink()
-        return data
-
-    def test_a_split_native_reply_writes_the_same_answers_file_as_one_call(self):
-        question = self.four_questions()
-        reference = self.reference_answers(question)
-        directory = Path(self.resolution()["artifact"]).parent
-        native, partial = directory / "answers.native.json", directory / "answers.native.partial.json"
-        shapes = {"claude": (("one", "two", "three"), ("four",)), "codex": (("one", "two"), ("three", "four")),
-                  "opencode": (("one",), ("two", "three", "four"))}
-        for harness, (first, second) in shapes.items():
-            with self.subTest(harness=harness):
-                kept = W.record_native_answer(self.route, self.jobs, self.native_call(harness, question, first))
-                self.assertEqual(kept, partial)
-                self.assertFalse(native.exists())
-                self.assertEqual(W.native_answer_candidate(
-                    self.route, self.jobs, self.native_call(harness, question, second, restatement=None))[0], native)
-                kept = W.record_native_answer(self.route, self.jobs, self.native_call(harness, question, second, restatement=None))
-                self.assertEqual(kept, native)
-                self.assertEqual(native.read_bytes(), reference)
-                self.assertFalse(partial.exists())
-                native.unlink()
-
-    def test_the_gate_stays_pending_until_the_last_question_is_answered(self):
-        question = self.four_questions()
-        W.record_native_answer(self.route, self.jobs, self.native_call("claude", question, ("one", "two", "three")))
-        waiting = self.step()
-        self.assertEqual((waiting["state"], waiting["required_action"]), ("needs-question", "wait-for-user-answer"))
-        self.assertEqual(self.resolution()["status"], "blocked")
-        W.record_native_answer(self.route, self.jobs, self.native_call("claude", question, ("four",), restatement=None))
-        released = self.step()
-        self.assertEqual(released["state"], "released", released)
-        self.assertEqual(self.calls, ["gate", "release"])
-        self.assertFalse((Path(released["interview_file"]).parent / "answers.native.partial.json").exists())
-
-    def test_a_later_native_answer_to_the_same_question_wins(self):
-        question = self.four_questions()
-        W.record_native_answer(self.route, self.jobs, self.native_call("claude", question, ("one",), answers={"one": "Left one"}))
-        kept = W.record_native_answer(self.route, self.jobs, self.native_call(
-            "codex", question, ("one", "two", "three", "four"), restatement=None, answers={"one": "Right one"}))
-        self.assertEqual(json.loads(kept.read_text())["answers"]["q-one"], {"choice": 1, "note": ""})
-
-    def test_a_partial_from_another_round_or_interview_is_ignored(self):
-        question = self.four_questions()
-        partial = Path(self.resolution()["artifact"]).parent / "answers.native.partial.json"
-        W.record_native_answer(self.route, self.jobs, self.native_call("claude", question, ("one", "two", "three")))
-        saved = json.loads(partial.read_text())
-        for key, value in (("interview_sha256", "0" * 64), ("round", saved["round"] + 1),
-                           ("route_id", "rt-foreign"), ("schema", "other")):
-            with self.subTest(key=key):
-                partial.write_text(json.dumps({**saved, key: value}))
-                kept = W.record_native_answer(self.route, self.jobs, self.native_call("claude", question, ("four",), restatement=None))
-                self.assertEqual(kept, partial)                     # still incomplete: the stale rows were not used
-                self.assertEqual(sorted(json.loads(partial.read_text())["slots"]), ["q-four"])
-        partial.write_text(json.dumps({**saved, "interview_sha256": "0" * 64}))
-        kept = W.record_native_answer(self.route, self.jobs, self.native_call("claude", question, ("one", "two", "three", "four")))
-        self.assertEqual(kept.name, "answers.native.json")           # a complete single call is unaffected
-
-    def test_a_rejected_call_keeps_nothing(self):
-        question = self.four_questions()
-        partial = Path(self.resolution()["artifact"]).parent / "answers.native.partial.json"
-        self.assertIsNone(W.record_native_answer(self.route, self.jobs, self.native_call(
-            "claude", question, ("one", "two", "three"), restatement="아니오(고쳐 말하기)")))
-        self.assertIsNone(W.record_native_answer(self.route, self.jobs, self.native_call(
-            "claude", question, ("one", "two"), answers={"two": ""})))
-        self.assertIsNone(W.record_native_answer(self.route, self.jobs, [{"question": "unrelated", "answer": "x"}]))
-        self.assertFalse(partial.exists())
 
     def answers_for_scope(self):
         path = self.base / "scope-answers.json"
@@ -2947,6 +3099,224 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
         self.assertFalse((self.output / "shards/frame/round-1/interview.json").exists())
         self.assertEqual(self.resolution()["status"], "not-raised")
         self.assertEqual(self.step(interview=self.question_file)["state"], "needs-question")
+
+    # -- an answer given on the question board: release records it, the next plain start renders ----
+    def board_release(self, answers_path, *, decision="proceed"):
+        """What the board's answer path runs: `release` with the person's answers file, nothing else."""
+        done = self.run_command([sys.executable, "workflow-supervisor.py", "release", "--route", str(self.path),
+                                 "--jobs", str(self.jobs), "--gate", "frame-review", "--decision", decision,
+                                 "--answers", str(answers_path)])
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def frame_files(self, *extra):
+        frame = self.output / "shards/frame"
+        # The two fixtures sit in different temp folders; only that path may differ between them.
+        return {name: (frame / name).read_bytes().replace(str(self.output).encode(), b"<output>")
+                if (frame / name).is_file() else None
+                for name in ("round-1/answers.json", "round-1/intent.md", "intent.md", *extra)}
+
+    def board_answered(self, answer):
+        """Ask, then answer on the board (release only): the gate is released and no intent exists."""
+        self.assertEqual(self.step(interview=self.question_file)["state"], "needs-question")
+        self.board_release(answer)
+        self.assertEqual(self.resolution()["status"], "proceed")
+        self.assertEqual(self.resolution()["actor_kind"], "user")
+        self.assertFalse((self.output / "shards/frame/intent.md").exists())
+
+    def test_a_board_answer_is_rendered_by_the_next_plain_start_with_the_conversation_bytes(self):
+        for variant in ("plain", "routed"):
+            with self.subTest(variant):
+                self.setUp()
+                answer = self.answers() if variant == "plain" else self.routed()[1]
+                self.step(interview=self.question_file, answers=answer)         # in conversation
+                talked = self.frame_files()
+                self.assertTrue(all(talked.values()), talked)
+                self.setUp()
+                answer = self.answers() if variant == "plain" else self.routed()[1]
+                self.board_answered(answer)
+                released = self.step()                                           # the notice's resume command
+                self.assertEqual(released["state"], "released")
+                self.assertEqual(self.frame_files(), talked)
+                self.assertEqual(Path(released["intent_file"]), self.output / "shards/frame/intent.md")
+                self.assertEqual(self.resolution()["actor_kind"], "user")
+                self.assertEqual(self.calls, ["gate", "release"])
+
+    def test_the_scope_line_on_a_multi_leg_route_card_leaves_the_answer_and_its_bytes_alone(self):
+        # The line is read from the proposal when a card is shown; the answer is still the option's
+        # label, so a board answer and a conversation answer record the same bytes either way.
+        for scope in ("complete", "report"):
+            with self.subTest(scope):
+                self.setUp()
+                question, answer = self.routed(legs=3, scope=scope)
+                self.step(interview=self.question_file, answers=answer)                  # in conversation
+                talked = self.frame_files()
+                self.assertTrue(all(talked.values()), talked)
+                rows = [line for line in talked["intent.md"].decode().split("\n") if line.startswith("- Leg ")]
+                self.assertEqual(len(rows), 3)
+                self.assertTrue(rows[2].endswith("(waits for the person's word)" if scope == "report" else
+                                                 "(starts when the leg before it ends, without asking again)"))
+                self.setUp()
+                question, answer = self.routed(legs=3, scope=scope)
+                self.board_answered(answer)
+                self.assertEqual(self.step()["state"], "released")
+                self.assertEqual(self.frame_files(), talked)
+                recorded = self.resolution()["answers"]["answers"]["go"]
+                self.assertEqual(recorded, {"choice": 0, "note": ""})
+                import frame_interview as FI
+                self.assertEqual(FI.route_choice(question, json.loads(answer.read_text()))["label"],
+                                 question["questions"][0]["options"][0]["label"])
+
+    def test_the_plain_start_that_fills_the_intent_is_repeatable_without_rewriting(self):
+        self.board_answered(self.answers())
+        first = self.step()
+        before = self.frame_files()
+        stat = {name: (self.output / "shards/frame" / name).stat().st_mtime_ns for name in before if before[name]}
+        with mock.patch.object(W, "_store_once", side_effect=AssertionError("rewrote a file")), \
+             mock.patch.object(W, "_store_bytes_once", side_effect=AssertionError("rewrote a file")), \
+             mock.patch.object(WF.WS, "_atomic_write", side_effect=AssertionError("rewrote a file")):
+            self.assertEqual(self.step(), first)
+        self.assertEqual(self.frame_files(), before)
+        self.assertEqual(stat, {name: (self.output / "shards/frame" / name).stat().st_mtime_ns
+                                for name in before if before[name]})
+        self.assertEqual(sorted(stat), ["intent.md", "round-1/answers.json", "round-1/intent.md"])
+        self.assertEqual(self.calls, ["gate", "release"])
+
+    def test_a_released_gate_keeps_its_recorded_answer_when_the_intent_is_filled(self):
+        answer = self.answers()
+        self.board_answered(answer)
+        changed = json.loads(answer.read_text())
+        changed["correction"] = "Change the scope."
+        answer.write_text(json.dumps(changed))
+        with self.assertRaisesRegex(ValueError, "frame-input-conflict"):
+            self.step(answers=answer)
+        self.assertFalse((self.output / "shards/frame/intent.md").exists())
+
+    def test_crash_points_after_the_answer_is_recorded_finish_with_one_plain_start(self):
+        for point in ("after-intent-render", "release-recorded"):
+            with self.subTest(point):
+                self.setUp()
+                answer = self.answers()
+                if point == "after-intent-render":
+                    def stop(name):
+                        if name == point:
+                            raise RuntimeError("crash at " + name)
+                    W.FAULT_HOOK = stop
+                    self.addCleanup(setattr, W, "FAULT_HOOK", None)
+                    with self.assertRaisesRegex(RuntimeError, "crash at"):
+                        self.step(interview=self.question_file, answers=answer)
+                    W.FAULT_HOOK = None
+                    self.assertEqual(self.resolution()["status"], "blocked")
+                    self.assertTrue((self.output / "shards/frame/round-1/intent.md").is_file())
+                else:
+                    self.board_answered(answer)
+                result = self.step()
+                self.assertEqual(result["state"], "released", result)
+                self.assertEqual(self.resolution()["status"], "proceed")
+                self.assertTrue((self.output / "shards/frame/intent.md").is_file())
+                self.assertEqual(self.calls.count("release"), 1)
+                self.assertEqual(self.step(), result)
+
+    def crash_at(self, point, **kwargs):
+        # The question is already on the board (gate raised); a reply then stops at `point`.
+        self.assertEqual(self.step(interview=self.question_file)["state"], "needs-question")
+        def stop(name):
+            if name == point:
+                raise RuntimeError("crash at " + name)
+        W.FAULT_HOOK = stop
+        self.addCleanup(setattr, W, "FAULT_HOOK", None)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "crash at " + point):
+                self.step(**kwargs)
+        finally:
+            W.FAULT_HOOK = None
+
+    def assert_still_asking(self, result):
+        self.assertEqual(result["state"], "needs-question", result)
+        self.assertEqual(self.resolution()["status"], "blocked")
+        self.assertEqual(self.calls.count("release"), 0)
+        for name in ("round-1/intent.md", "intent.md"):
+            self.assertFalse((self.output / "shards/frame" / name).exists(), name)
+
+    def test_a_saved_answer_of_another_decision_is_not_released_as_proceed_by_a_plain_start(self):
+        # `--answers <file> --decision revise|stop` saved the answer and stopped before its release;
+        # the person said "change it" / "stop", and a plain start (decision defaults to proceed) must
+        # not turn that saved file into a `proceed`.
+        for decision in ("revise", "stop"):
+            with self.subTest(decision):
+                self.setUp()
+                self.crash_at("after-answer-save", answers=self.answers(), decision=decision)
+                self.assertTrue((self.output / "shards/frame/round-1/answers.json").is_file())
+                self.assert_still_asking(self.step())
+
+    def test_a_proceed_answer_saved_before_its_intent_is_asked_again_as_before(self):
+        self.crash_at("after-answer-save", answers=self.answers())
+        self.assertTrue((self.output / "shards/frame/round-1/answers.json").is_file())
+        self.assert_still_asking(self.step())
+
+    def test_a_failed_release_of_another_decision_does_not_become_proceed_on_the_plain_start(self):
+        original = self.run_command
+        def fail(argv, **kwargs):
+            if argv[2] == "release":
+                return subprocess.CompletedProcess(argv, 70, "", "release failed")
+            return original(argv, **kwargs)
+        for decision in ("revise", "stop"):
+            with self.subTest(decision):
+                self.setUp()
+                with self.assertRaisesRegex(ValueError, "frame-release-pending"):
+                    W.frame_interview_step(self.route, self.path, self.jobs, interview=self.question_file,
+                                           answers=self.answers(), decision=decision, run=fail)
+                self.assertEqual(self.resolution()["status"], "blocked")
+                self.assert_still_asking(self.step())
+
+    def test_only_a_proceed_with_its_answer_and_no_intent_is_released_without_intent(self):
+        self.assertFalse(W.released_without_intent(self.route, self.jobs))            # nothing raised
+        self.step(interview=self.question_file)
+        self.assertFalse(W.released_without_intent(self.route, self.jobs))            # asked, unanswered
+        self.board_release(self.answers())
+        self.assertTrue(W.released_without_intent(self.route, self.jobs))
+        self.step()
+        self.assertFalse(W.released_without_intent(self.route, self.jobs))            # intent rendered
+        for decision in ("revise", "stop"):
+            self.setUp()
+            self.step(interview=self.question_file)
+            self.board_release(self.answers(), decision=decision)
+            self.assertFalse(W.released_without_intent(self.route, self.jobs))
+        self.setUp()
+        self.board_answered(self.answers())
+        (self.output / "shards/frame").mkdir(parents=True, exist_ok=True)
+        (self.output / "shards/frame/intent.md").write_text("an intent a person rendered by hand\n")
+        self.assertFalse(W.released_without_intent(self.route, self.jobs))
+        before = (self.output / "shards/frame/intent.md").read_bytes()
+        self.assertEqual(self.step()["state"], "released")                          # kept as it is
+        self.assertEqual((self.output / "shards/frame/intent.md").read_bytes(), before)
+        self.assertFalse((self.output / "shards/frame/round-1/intent.md").exists())
+
+    def test_a_released_gate_whose_recorded_question_cannot_be_read_is_left_as_it_was(self):
+        # A cycle folder moved or removed after the release: nothing is left to fill, so the start
+        # passes the released gate exactly as it did before the fill existed.
+        for how in ("moved", "removed"):
+            with self.subTest(how):
+                self.setUp()
+                self.board_answered(self.answers())
+                self.assertTrue(W.released_without_intent(self.route, self.jobs))
+                frame = self.output / "shards/frame"
+                if how == "moved":
+                    frame.rename(self.base / "moved-frame")
+                else:
+                    (frame / "round-1/interview.json").unlink()
+                self.assertFalse(W.released_without_intent(self.route, self.jobs))
+                self.assertFalse(frame.joinpath("intent.md").exists())
+
+    def test_a_board_answer_to_a_revision_or_stop_is_not_an_intent_and_stays_so(self):
+        for decision, state in (("revise", "needs-revision"), ("stop", "cancelled")):
+            with self.subTest(decision):
+                self.setUp()
+                self.assertEqual(self.step(interview=self.question_file)["state"], "needs-question")
+                self.board_release(self.answers(), decision=decision)
+                self.assertEqual(self.step()["state"], state)
+                self.assertFalse((self.output / "shards/frame/intent.md").exists())
+                self.assertFalse((self.output / "shards/frame/round-1/intent.md").exists())
+                self.assertEqual(self.step()["state"], state)
 
 
 GF = load("work_start_group_fixture", W.ROOT / "utilities/artifact_workflow_groups.test.py")
@@ -4938,17 +5308,17 @@ class CoupledReviewSelfDispositionTest(unittest.TestCase):
         node = next(n for n in self.f.route["nodes"] if n["id"] == "security-review")
         evidence = self.f.output / "security.json"
         evidence.write_text(json.dumps({"verdict":"PASS", "findings":[], "gate_met":True}))
-        meta = dict(self.f.meta, attempt_id="att-security", route_node=node["id"], log_file=str(self.f.base/"security.jsonl"))
+        meta = dict(self.f.meta, attempt_id=unique_attempt_id("att-security"), route_node=node["id"], log_file=str(self.f.base/"security.jsonl"))
         # The normal completion writer receives the real settled process
         # identity, rather than a late identity overwrite without a receipt.
         child=subprocess.Popen([sys.executable,"-c","import sys;sys.stdin.read()"],stdin=subprocess.PIPE,
-                               start_new_session=True,env={**os.environ,"AGENT_DISPATCH_ATTEMPT_ID":"att-security"})
+                               start_new_session=True,env={**os.environ,"AGENT_DISPATCH_ATTEMPT_ID":unique_attempt_id("att-security")})
         meta.update(self.d.process_launch_identity(child.pid))
         child.communicate(timeout=5)
         with self.jobs.open("a") as handle:
             handle.write("\t".join([self.cr.datetime.now(self.cr.timezone.utc).isoformat(), "running", str(self.f.repo), str(self.f.repo), "security",
                                        ",".join(f"{k}={v}" for k,v in meta.items())])+"\n")
-        self.cr.complete_node(self.f.route,node,node["id"],evidence,jobs=self.jobs,attempt_id="att-security")
+        self.cr.complete_node(self.f.route,node,node["id"],evidence,jobs=self.jobs,attempt_id=unique_attempt_id("att-security"))
         self.security_bytes=evidence.read_bytes()
 
     def cli(self, arguments, env):
@@ -5040,7 +5410,7 @@ class CoupledReviewSelfDispositionTest(unittest.TestCase):
         self.assertEqual(ship_parent_deploy.exact_attempt_row(self.jobs,"att-review-self").metadata["worker_type"],"review")
         verified_request,_=ship_parent_deploy.load_request(self.request_path)
         proof=ship_parent_deploy.reviews(self.f.route,deploy,self.jobs,verified_request)
-        self.assertEqual({p["attempt_id"] for p in proof.values()},{"att-review-self","att-security"})
+        self.assertEqual({p["attempt_id"] for p in proof.values()},{"att-review-self",unique_attempt_id("att-security")})
         for review_id in ("security-review","release-review"):
             current_marker=json.loads((self.f.directory/(review_id+".json")).read_text())
             self.assertEqual(current_marker["round_census"]["verdict_rounds"],3)
@@ -5049,7 +5419,7 @@ class CoupledReviewSelfDispositionTest(unittest.TestCase):
         for path,before in self.f.preserved.items():
             if path!=self.jobs:self.assertEqual(path.read_bytes(),before)
         before={p:p.read_bytes() for p in self.f.base.rglob('*') if p.is_file()}
-        for actor in ("att-foreign",""):
+        for actor in (unique_attempt_id("att-foreign"),""):
             refused={**env,"AGENT_DISPATCH_ATTEMPT_ID":actor,"CODEX_THREAD_ID":"foreign" if actor else ""}
             result=subprocess.run([sys.executable,str(W.ROOT/"utilities/capability-route.py"),*complete],
                                   env=refused,text=True,capture_output=True)

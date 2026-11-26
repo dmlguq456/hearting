@@ -3,7 +3,10 @@
 
 ``hearting run questions ask TEXT`` registers an explicit private message question
 for this interactive caller and returns immediately. Fleet or a nonempty answer
-in this session completes that question; native approvals keep their own surface.
+in this session completes that question; with choices, only a choice number or a
+choice's own wording typed in the session does, and any other prompt stays an
+ordinary prompt. A Fleet answer awaiting delivery is not replaced by a later prompt.
+Native approvals keep their own surface.
 
 ``hearting run questions`` lists the same board Fleet's QUESTIONS view shows (one
 shared projection, one count): each wait's question, choices and recommended answer,
@@ -27,6 +30,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from datetime import datetime, timezone
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -76,8 +80,18 @@ def _choice_value(choice):
     return str(choice)
 
 
+def _registered(envelope):
+    """A question a session registered with ``questions ask`` (its answer goes back as a message)."""
+    return isinstance(envelope, dict) and (
+        envelope.get("native_ref") or {}).get("transport") == "hearting-message-answer"
+
+
 def questions_of(envelope):
-    """``[{id, question, choices, recommended}]`` from one selected request envelope."""
+    """``[{id, question, choices, recommended}]`` from one selected request envelope.
+
+    A registered question (``questions ask``) takes words beside its choices, as ``[value, text]`` or text
+    alone (11-22): a native form keeps the schema's own ``is_other``."""
+    registered = _registered(envelope)
     detail = envelope.get("detail") if isinstance(envelope, dict) else None
     listed = detail.get("questions") if isinstance(detail, dict) else None
     if isinstance(listed, list) and listed:
@@ -91,7 +105,9 @@ def questions_of(envelope):
                         "choices": choices,
                         "recommended": recommended if type(recommended) is int
                         and 0 <= recommended < len(choices) else None,
-                        "free_text": bool(question.get("is_other", not choices)),
+                        "free_text": bool(question.get("is_other", registered or not choices)) and not (
+                            choices and (envelope.get("native_ref") or {}).get("transport") == "opencode-http-v2"
+                            and question.get("field_type") != "multiselect"),
                         "secret": bool(question.get("is_secret"))})
         return out
     question_id = envelope.get("question_id") if isinstance(envelope, dict) else None
@@ -103,7 +119,7 @@ def questions_of(envelope):
         choices = detail.get("choices")
     choices = choices if isinstance(choices, list) else []
     return [{"id": str(question_id), "question": str(text or ""), "choices": choices,
-             "recommended": None, "free_text": not choices}]
+             "recommended": None, "free_text": registered or not choices}]
 
 
 def _reference(item):
@@ -154,6 +170,16 @@ def describe(item, *, now, detail=True):
         row["reason"] = str(reason)
     if envelope.get("state") != "open":
         row["request_state"] = envelope.get("state")
+    sent = envelope.get("sent") if isinstance(envelope.get("sent"), dict) else None
+    if sent:
+        # The answer on its way, for the asking panel's one line (rule 5); a secret stays hidden.
+        secret = {q.get("id") for q in row["questions"] if q.get("secret")}
+        values = ([str(sent["decision"])] if isinstance(sent.get("decision"), str) else
+                  ["•••" if qid in secret else str(value)
+                   for qid, listed in (sent["answers"] if isinstance(sent.get("answers"), dict) else {}).items()
+                   if isinstance(listed, list)
+                   for value in listed][:4])
+        row["sent"] = [value[:200] for value in values]
     return row
 
 
@@ -174,10 +200,20 @@ def render(board, rows, folded):
         counts["total"] if board.get("complete") else "?", counts["older"])
     if counts["ownerless"]:
         head += " (%d ownerless)" % counts["ownerless"]
+    # Listed but not counted: a blocked owner is its parent agent's to answer, not a person's;
+    # an answer the person sent is on its way (rule 5).
+    current = [item for item in board.get("items") or () if isinstance(item, dict) and not item.get("stale")]
+    agents = sum(1 for item in current if item.get("source") == "S3")
+    if agents:
+        head += " · %d blocked owner%s for the parent agent" % (agents, "" if agents == 1 else "s")
+    sent = sum(1 for item in current if item.get("answer") == "sent")
+    if sent:
+        head += " · %d answer%s on the way" % (sent, "" if sent == 1 else "s")
     head += " · observed %s ago" % _age(observed) if observed >= 60 else " · observed now"
     if not board.get("complete"):
         head += " · observation incomplete"
     lines = [head]
+    recommended_label = "recommended"
     for row in rows:
         place = " · " + row["project"] if row.get("project") else ""
         lines.append("%s  %s · %s%s · %s" % (row["id"], row["kind"], row["age"], place,
@@ -186,9 +222,14 @@ def render(board, rows, folded):
             lines.append("  folded: %s" % row["state"])
         for index, question in enumerate(row.get("questions") or (), 1):
             prefix = "  q%d " % index if len(row["questions"]) > 1 else "  "
-            lines.append(prefix + (question["question"] or "(question text is in that session)"))
+            body = question["question"] or "(question text is in that session)"
+            body_lines = str(body).splitlines() or [""]
+            lines.append(prefix + body_lines[0])
+            continuation = " " * len(prefix)
+            lines.extend(continuation + line for line in body_lines[1:])
             for number, choice in enumerate(question["choices"], 1):
-                mark = "  (recommended)" if question["recommended"] == number - 1 else ""
+                mark = ("  (" + recommended_label + ")"
+                        if question["recommended"] == number - 1 else "")
                 lines.append("      %d) %s%s" % (number, _choice_label(choice), mark))
         if row.get("answerable"):
             listed = row.get("questions") or ()
@@ -202,6 +243,9 @@ def render(board, rows, folded):
                 # A file keeps free text (and any secret) out of the process list.
                 how = "--text-file FILE"
             lines.append("  answer: hearting run questions answer %s %s" % (row["id"], how))
+        elif row.get("request_state") == "submitted":
+            # Rule 5 (11-14): the person's answer is on its way; nothing waits on them here.
+            lines.append("  answer sent · waiting for its session to take it")
         elif row.get("reason"):
             lines.append("  answer in that session: %s" % row["reason"])
     for row in folded:
@@ -241,7 +285,23 @@ def _find(board, wanted):
              if isinstance(item, dict) and item.get("id") == wanted]
     if exact:
         return exact[0], None
-    return None, "no open question has exactly this id; copy the full id from the list"
+    closed = HWS.closed_question(wanted)
+    if closed:
+        return None, _closed_text(wanted, closed)
+    return None, "no recorded question has exactly this id; history may be unavailable; copy the full id from the list"
+
+
+def _closed_text(item_id, closed):
+    status = closed.get("status", "closed")
+    detail = " (reason unavailable)" if status == "closed" else ""
+    stamp = closed.get("at")
+    if isinstance(stamp, (int, float)):
+        try:
+            when = datetime.fromtimestamp(stamp, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            detail += ("; observed at " if closed.get("observed") else "; at ") + when
+        except (ValueError, OverflowError, OSError):
+            pass
+    return f"{item_id} is closed: {status}{detail}"
 
 
 def _answer_values(value):
@@ -288,6 +348,8 @@ def _answer(args):
     if board is None:
         print("questions: unknown · the shared answer-wait observation is not available yet",
               file=sys.stderr)
+        if closed := HWS.closed_question(args.id):
+            print("questions: retained history · " + _closed_text(args.id, closed), file=sys.stderr)
         return 3
     item, error = _find(board, args.id)
     if item is None:
@@ -307,6 +369,10 @@ def _answer(args):
         return 2
     support = envelope.get("support") if isinstance(envelope.get("support"), dict) else {}
     if envelope.get("state") != "open" or support.get("supported") is not True:
+        closed = HWS.closed_question(args.id)
+        if closed and envelope.get("state") in {"applied", "cancelled", "expired"}:
+            print("questions: " + _closed_text(args.id, closed), file=sys.stderr)
+            return 2
         reason = support.get("reason") or envelope.get("reason") or envelope.get("state")
         print("questions: %s cannot be answered here (%s)" % (item["id"], reason), file=sys.stderr)
         return 2
@@ -392,11 +458,20 @@ def _ask(args):
     except (OSError, ValueError, RuntimeError) as exc:
         print("questions: " + str(exc), file=sys.stderr)
         return 2
+    replaced = value.get("replaced")
+    if replaced:
+        first = (replaced["question"].strip().splitlines() or [""])[0].strip()
+        replaced = {"id": replaced["id"], "first_line": first if len(first) <= 80 else first[:79] + "…"}
     if args.json:
-        print(json.dumps({"id": value["id"], "state": value["lifecycle"]}))
+        print(json.dumps({"id": value["id"], "state": value["lifecycle"],
+                          **({"replaced": replaced} if replaced else {})}, ensure_ascii=False))
     else:
         print(value["id"])
-        print(HWS.ui_translator()("questions.registered"))
+        if replaced:
+            # One session keeps one open question: say which earlier unanswered one this closed.
+            print("questions: replaced %s — %s" % (replaced["id"], replaced["first_line"]))
+        print(HWS.ui_translator()("questions.registered_choices" if args.choice
+                                  else "questions.registered"))
     return 0
 
 
@@ -408,7 +483,8 @@ def main(argv=None):
     ask = sub.add_parser("ask", allow_abbrev=False, help="register a question in this session")
     ask.add_argument("text", nargs="?")
     ask.add_argument("--text-file")
-    ask.add_argument("--choice", action="append")
+    ask.add_argument("--choice", action="append",
+                     help="one choice the person can pick (repeat); list what is to be chosen here, not in the text")
     ask.add_argument("--recommend", type=int)
     ask.add_argument("--secret", action="store_true")
     ask.add_argument("--json", action="store_true")

@@ -1,4 +1,7 @@
 """SUPERVISION edits: current interval and per-repo limit, preview, Apply, failure, reread."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import os
 import shutil
 import stat
@@ -119,7 +122,7 @@ class StewardEditor(unittest.TestCase):
                 "holders": [{"harness": "claude", "session_id": "a" * 36, "name": "alpha", "liveness": "live",
                              "basis": "role", "counted": True},
                             {"harness": "codex", "session_id": "b" * 36, "name": None, "liveness": "unknown",
-                             "basis": "grant", "counted": True},
+                             "basis": "grant", "counted": True, "seat_key": "PRIVATE-SEAT-HASH"},
                             {"harness": "claude", "session_id": "c" * 36, "name": "gamma", "liveness": "ended",
                              "basis": "role", "counted": False},
                             {"harness": "claude", "session_id": "d" * 36, "name": "delta", "liveness": "live",
@@ -140,6 +143,9 @@ class StewardEditor(unittest.TestCase):
         self.assertIn("alpha, bbbbbbbb, gamma (ended), delta · over limit", row)
         self.assertEqual(frame.cells[y][row.find("hearting · 3")][1], "g_blocked")
         self.assertTrue(any("beta · 1 / 2 supervising" in row for row in rows))
+        self.assertTrue(any("bbbbbbbb: unknown" in row and "role marker" in row for row in rows))
+        self.assertNotIn("PRIVATE-SEAT-HASH", "\n".join(rows))
+        self.assertFalse(any("· seat " in row for row in rows))
 
         with mock.patch("tools.fleet.collectors.steward._last_supervision", {}), \
                 mock.patch("tools.fleet.collectors.steward._repository_key", return_value="/r/hearting/.git"):

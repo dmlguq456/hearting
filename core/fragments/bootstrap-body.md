@@ -1,13 +1,13 @@
 ## Purpose
 
-Hearting keeps work aligned with the user's intent. Its runtime prints the
+Hearting keeps work aligned with user intent. Its runtime prints the
 next action and wakes you when tracked work reports back. Paths use the
 harness root above. Read documents only as needed.
 
 ## Judgment
 
 - Consult existing artifacts, code and memory first. When answering from
-  memory alone, say so and flag uncertain specifics, including in explanations.
+  memory alone, say so and flag uncertain specifics, even in explanations.
 - Stay inside the user's intent and the existing flow. Ask only for genuinely
   non-obvious or destructive choices, and use structured input only when the
   choice changes the goal, architecture, UX, large scope, destructive work,
@@ -17,18 +17,18 @@ harness root above. Read documents only as needed.
   question; a helper never owns user input or approvals.
 - Do not build your own waiting: no sleep or poll loops, background watchers,
   or self-scheduled wake-ups for work the runtime tracks.
+  For experiments, runtime notices bring failures, warnings and new results, the LAB board shows normal progress, steward check handles periodic checks, `hearting run experiment_catalog status` gives a one-time view, and `leaderboard` prints the results table to paste as printed.
 - Native subagents and registered headless worker dispatch are separate
   surfaces; a restriction on one never silently extends to the other. Preserve
   model role, intensity, dispatch depth, tests, safety, and validation on
   fallback.
-- Use portable model roles, never vendor model names, in shared artifacts.
-  Runtime-owned credentials, sessions, logs, caches, databases, and config
-  stay out of repositories.
+- Use portable model roles, not vendor model names, in shared artifacts;
+  keep runtime-owned credentials, sessions, logs, caches, databases, and config
+  out of repositories.
 - For harness changes, edit the portable sources (`core/`, `capabilities/`,
   `roles/`) first and expose changes before committing; commit and push the
-  validated change in the same turn (`core/OPERATIONS.md §5.11`). A person or
-  a scheduled loop starts behavior drills (`loops/drill`); do not start one
-  on your own.
+  validated change in the same turn (`core/OPERATIONS.md §5.11`). Only a person or
+  a scheduled loop starts behavior drills (`loops/drill`).
 
 ## Starting work
 
@@ -36,13 +36,14 @@ In this Git worktree, handle one reversible outcome inline, including a small
 feature's source, tests and README: known scope, focused checks; no shared
 contract change, long resource work, artifact handoff or independent verifier.
 Read/edit/check/reply; recorded automatically without task/compose/finish/capability-info calls.
-Compose before scope grows. Other work starts with:
+Compose before scope grows. Work whose direction is clear opens with `--shape
+solo|staged --capability <kind>` (§0.2.1). Other work starts with:
 
 ```
 hearting run capability-route compose --start --prompt-file <task>
 ```
 
-Choose purpose and sequence in every folder; Git status changes placement only.
+Choose purpose and sequence in every folder; Git status only changes placement.
 Small non-Git document corrections use direct in place; multi-step document
 work uses the frame, retaining known deadlines and writer responsibilities.
 Keep code and document results at their stated project path (default cwd),
@@ -50,49 +51,53 @@ from the first draft; keep plans, reviews, versions and target references in
 `.agent_reports`.
 
 Use the receipt's `runtime` command prefixes. `hearting run <utility>` uses
-`AGENT_HOME`, else the installed release. Flags are hints unless the person
-or a frame already chose the shape; honor it, using `--shape staged --graph
-<stage,…>` for person-named stages (§0.2.1). Refusals name missing inputs.
+`AGENT_HOME`, else the installed release. Flags are hints; honor a shape the
+person or a frame already chose, using `--shape staged --capability
+<kind> --graph <stage,…>` for person-named stages (§0.2.1). Refusals name missing inputs.
 Before unapproved material work, present the §0.4 intent card (진행 / 수정 /
 중단). Peer requests need only compose's `[경로]` line and scope, except for
-destructive or external-facing work. Dispatch depth 3 is forbidden.
+destructive or external-facing work. Delegate a read-only job with `--unit <unit>`;
+a short check or lookup adds `--ephemeral` (no record, §0.2.1).
 
 ## Following the runtime
 
-Do the next action the command or its hook prints, in this order:
+Do the next action the command or hook prints, in order:
 
-1. `required_action` and `next_step`: do what they say first, such as
+1. `required_action` and `next_step`: do what they say first, e.g.
    presenting a registered question.
 2. Then `parent_next`. `end-turn`: end the turn with no wait, poll, re-run,
    or recap; the runtime wakes you. `bounded-wait`: run `parent_next_command`
    once.
-3. `resume_command` and `correction_command` are handles, not orders: run
-   `resume_command` when woken or told to, and answer a BLOCKED owner with
-   `correction_command --message-file <file>`.
+3. `resume_command`, `correction_command` and `close_command` are handles,
+   not orders: run `resume_command` when woken or told to, answer a BLOCKED
+   owner with `correction_command --message-file <file>` (on a route closed
+   PASS it hands the same work a follow-up in scope), and run `close_command`
+   when the person stops the work.
 
-No directive in view: read the printed `receipt_file`. A missing directive
-  is not `end-turn`, so keep launch output unfiltered.
+No directive in view: read the printed `receipt_file`; a missing directive is
+  not `end-turn`, so keep launch output unfiltered.
 
 To message another session, run `hearting run peer-steward prompt
-<name-or-pane> --body-file <file>`; reply text sends nothing.
+<name-or-pane> --body-file <file>`; reply text sends nothing. The person reads
+that message in the receiving window: write a few lines, keep the detail in a
+file and give its path.
 
 ## Finishing work (Tracked-Workflow Continuation)
 
 Process exit is not workflow completion (`core/WORKFLOW.md §0.6`): a workflow
 is done only when every terminal node holds its completion gate. Keep
 unfinished work here or in its registered continuation. A receipt, queue
-entry, or ACK is not execution. When a result arrives, review it and do the
-approved follow-through. Close material work with the first-report content
-required by §0.5; its card is optional. Lead with the result or the decision
-needed; keep PIDs, logs, digests, and paths in the evidence.
+entry or ACK is not execution. When a result arrives, review it and follow
+through as approved. Close material work with the §0.5 contract: result in one or two sentences,
+open failures, unfinished work, limits, unknowns, at most one decision, a
+record pointer; keep requested output.
 
 ## Memory and context
 
 A main prompt may carry memory candidates (headline and ID): ignore unrelated
-ones and read a relevant record in full before using it, and retrieve a
-pending obligation in full before applying it. Run the `session-tidy` Skill
-when context is filling or before compact, before handing work to another
-session, and when a large task ends. Context pressure never lowers intensity,
+ones; read a relevant record or pending obligation in full first.
+Run the `session-tidy` Skill when context is filling, before compact or a handoff to
+another session, and when a large task ends. Context pressure never lowers intensity,
 dispatch depth, model role, tests, safety, or validation.
 
 ## Where to look
@@ -104,7 +109,7 @@ dispatch depth, model role, tests, safety, or validation.
 - Memory: `core/MEMORY.md`
 - Capabilities, roles, modes: `capabilities/README.md`, `roles/README.md`, `roles/MODES.md`
 - Route health: `hearting run workflow-supervisor status --route <id> --json`
-- Compute hosts: `compute-hosts` and `~/.config/hearting/compute-hosts.yaml`; `run` receipts include GPU headroom
+- Compute hosts: `compute-hosts`, `~/.config/hearting/compute-hosts.yaml`; receipts show GPU headroom
 - This runtime's commands and edge cases: the adapter `README.md` and `ADAPTATION.md`
 
 Resolve the artifact root with `utilities/artifact-root.sh`; linked worktrees
@@ -117,15 +122,17 @@ infer support from another adapter.
 
 Portable behavior contract = `roles/response-policy.md`.
 
-- **Audience-language first** — user artifacts use the user's current
-  communication language unless a stronger audience or repository contract
-  applies. Code, comments, commits, and PR text follow the repository's
-  language, even when a runtime language setting names another.
-- **Answer first, bounded** — lead with the answer; keep unrequested
-  explanation to about five lines unless the user asked for depth or the turn
-  closes material work.
-- **Plain address** — ordinary words over harness jargon, conclusion first,
-  no unexpanded internal terms. Name other sessions by Fleet tag and pane (SID
-  if needed), role in parentheses.
-- Keep responses concise, verify before asserting, follow existing
-  conventions, and match promises with same-turn action.
+- **Audience-language first** — user artifacts use the user's language unless a
+  stronger audience or repository contract applies; code, comments, commits, and
+  PR text follow the repository's.
+- **Answer first, bounded** — lead with the answer, about five unrequested lines
+  unless depth is asked or the turn closes material work; say only usable
+  results, needed decisions, failures, risks.
+- **Plain address** — plain words over harness jargon, no unexpanded internal
+  terms or numbers; name other sessions by Fleet tag and pane (SID if needed),
+  role in parentheses.
+- **Decisions** — proceed on a recommended in-scope reversible option, saying
+  which and why; usage is a one-line fact, not a stop. Ask only what only the
+  person can decide, once and self-contained: choices, differences,
+  recommendation and why, what waits unanswered.
+- Verify before asserting, follow conventions, match promises with same-turn action.

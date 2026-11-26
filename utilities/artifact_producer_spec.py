@@ -11,6 +11,9 @@ import hashlib
 import json
 import os
 import re
+import threading
+from collections import OrderedDict
+from collections.abc import Mapping as _MappingABC
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
@@ -21,8 +24,8 @@ import artifact_directory_bundle
 
 from artifact_producer_store import (
     _canonical, _digest, _ensure_dir, _json_bytes, _read_json, _record_cycle_manifest_path,
-    _reference_path, _stream_file_facts, _walk_files, _write_atomic, CONTRACT, cycle_dir,
-    ProducerError, read_cycle_record, REVISION_RECORD_NAME, shared_journal_path, SHARED_KINDS,
+    _read_pass_entry, _reference_path, _stream_file_facts, _walk_files, _write_atomic,
+    CONTRACT, cycle_dir, ProducerError, shared_revision_read_scope, read_cycle_record, REVISION_RECORD_NAME, shared_journal_path, SHARED_KINDS,
 )
 
 
@@ -274,14 +277,15 @@ def _verify_completed_spec_publication(root: Path, reference: Mapping[str, Any],
     if not isinstance(proof, dict):
         raise ProducerError("shared-merge-proof-invalid", "missing merge proof")
     ref_id = reference["shared_reference_id"]
-    output, _record = _verified_shared_spec(root, ref_id, revision["shared_reference_revision_id"])
+    output, _record = _verified_shared_spec_record(
+        root, ref_id, revision["shared_reference_revision_id"])
     try:
         files = proof["source_files"]
         valid = (proof["source_content_digest"] == _spec_inventory_digest(files)
-                 and proof["output_content_digest"] == _spec_inventory_digest(_spec_inventory(output)))
+                 and proof["output_content_digest"] == _spec_inventory_digest(output))
         for revision_key, digest_key in (("base_revision_id", "base_content_digest"),
                                          ("latest_revision_id", "latest_content_digest")):
-            _tree, shared = _verified_shared_spec(root, ref_id, proof[revision_key])
+            _inventory, shared = _verified_shared_spec_record(root, ref_id, proof[revision_key])
             valid = valid and shared["content_digest"] == proof[digest_key]
     except (KeyError, TypeError, ValueError):
         valid = False
@@ -352,6 +356,178 @@ def _verified_shared_spec(root: Path, ref_id: str, revision_id: str):
         return read_revision(root, ref_id, revision_id)
     except StorageError as error:
         raise ProducerError(error.code, str(error)) from error
+
+
+# A shared revision is immutable once committed, yet every completed-publication
+# check re-read and re-hashed whole revision trees (575 files / 66 MB each on the
+# live store) for the output, base and latest revisions of every later
+# publication, on every runner pass.  A revision whose bytes were verified once
+# is recognised again by the stat identity of every entry of its tree (inode,
+# size, mtime and ctime: any rewrite, rename or added entry changes it), so the
+# bytes are not read again.  Only that identity and the record digest are kept.
+_VERIFIED_REVISIONS: "OrderedDict[str, Tuple[str, str]]" = OrderedDict()
+_VERIFIED_REVISIONS_MAX = 1024
+_VERIFIED_REVISIONS_LOCK = threading.Lock()
+# Within one read pass (`shared_revision_read_scope`) a revision already proven
+# unchanged is not walked again; the next pass observes it afresh.
+
+
+def _stored_sources(record: Any) -> Dict[str, Tuple[str, str]]:
+    """Logical path -> (provider revision, source path) for files stored elsewhere.
+
+    Storage schema 2 keeps an unchanged file in the earlier revision that first
+    held its bytes (``stored_in``); schema 1 named the provider only.
+    """
+    stored = record.get("stored_in") if isinstance(record, dict) else None
+    result = {}
+    for name, value in (stored or {}).items() if isinstance(stored, dict) else ():
+        if isinstance(value, dict):
+            provider, source = value.get("revision_id"), value.get("source_path")
+        else:
+            provider, source = value, name
+        if isinstance(provider, str) and isinstance(source, str):
+            result[name] = (provider, source)
+    return result
+
+
+def _revision_tree_signature(directory: Path) -> str:
+    """Stat identity of every entry beneath one revision directory.
+
+    Files the revision stores in an earlier revision are part of its identity
+    too, so a rewrite of a provider's bytes is never recognised as unchanged.
+    """
+    prefix = len(str(directory)) + 1
+    rows = []
+    for path in _walk_files(directory):
+        info = os.lstat(path)
+        rows.append((str(path)[prefix:], info.st_mode, info.st_dev, info.st_ino,
+                     info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+    record = _read_json(directory / REVISION_RECORD_NAME)
+    for name, (provider, source) in sorted(_stored_sources(record).items()):
+        info = os.lstat(directory.parent / provider / source)
+        rows.append(("stored:" + name, provider, source, info.st_mode, info.st_dev,
+                     info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+    return hashlib.sha256(repr(rows).encode("utf-8")).hexdigest()
+
+
+def _record_inventory(record: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """The verified record's inventory: equal to `_spec_inventory` of its tree."""
+    return sorted(record["files"], key=lambda row: row["path"])
+
+
+class _VerifiedRevisionTree(_MappingABC):
+    """A verified immutable revision whose file bytes are read only when used.
+
+    Each file read is checked against the record's digest and size, so a reader
+    never receives bytes the revision's inventory does not name.
+    """
+
+    def __init__(self, directory: Path, revision_id: str, rows: Sequence[Mapping[str, Any]],
+                 record: Any = None):
+        self._directory = directory
+        self._revision_id = revision_id
+        self._rows = {row["path"]: row for row in rows}
+        self._sources = _stored_sources(record)
+        self._bytes: Dict[str, bytes] = {}
+
+    def __getitem__(self, path: str) -> bytes:
+        row = self._rows[path]
+        data = self._bytes.get(path)
+        if data is None:
+            provider, source = self._sources.get(path, (None, path))
+            target = (self._directory.parent / provider / source if provider
+                      else self._directory / path)
+            try:
+                if target.is_symlink() or not target.is_file():
+                    raise ProducerError("shared-revision-integrity", self._revision_id)
+                data = target.read_bytes()
+            except OSError as exc:
+                raise ProducerError("shared-revision-integrity", self._revision_id) from exc
+            if len(data) != row["byte_size"] or _digest(data) != row["sha256"]:
+                raise ProducerError("shared-revision-integrity", self._revision_id)
+            self._bytes[path] = data
+        return data
+
+    def __iter__(self):
+        return iter(self._rows)
+
+    def __len__(self) -> int:
+        return len(self._rows)
+
+
+def _verified_shared_revision(root: Path, ref_id: str, revision_id: str):
+    """``(tree or None, inventory, record)`` with `_verified_shared_spec`'s checks.
+
+    ``tree`` is ``None`` when the revision was recognised as already verified.
+    """
+    if not artifact_identity.is_well_formed(revision_id, "shared_reference_revision"):
+        raise ProducerError("shared-base-invalid", str(revision_id))
+    directory = root / "shared/spec" / ref_id / "revisions" / revision_id
+    for parent in (directory, directory.parent, directory.parent.parent):
+        if parent.is_symlink():
+            raise ProducerError("shared-base-invalid", str(parent))
+    key = str(directory)
+    scope = _read_pass_entry("verified-revisions", set)
+
+    def recognised(held):
+        record = _read_json(directory / REVISION_RECORD_NAME)
+        if (isinstance(record, dict) and record.get("shared_reference_id") == ref_id
+                and record.get("shared_reference_revision_id") == revision_id
+                and _digest(_canonical(record)) == held[1]):
+            with _VERIFIED_REVISIONS_LOCK:
+                if key in _VERIFIED_REVISIONS:
+                    _VERIFIED_REVISIONS.move_to_end(key)
+            if scope is not None:
+                scope.add(key)
+            return record
+        return None
+
+    with _VERIFIED_REVISIONS_LOCK:
+        held = _VERIFIED_REVISIONS.get(key)
+    if held is not None and scope is not None and key in scope:
+        record = recognised(held)
+        if record is not None:
+            return None, _record_inventory(record), record
+    try:
+        signature = _revision_tree_signature(directory)
+    except OSError:
+        signature = None
+    if signature is not None and held is not None and held[0] == signature:
+        record = recognised(held)
+        if record is not None:
+            return None, _record_inventory(record), record
+    tree, record = _verified_shared_spec(root, ref_id, revision_id)
+    inventory = _spec_inventory(tree)
+    try:
+        settled = signature is not None and _revision_tree_signature(directory) == signature
+    except OSError:
+        settled = False
+    with _VERIFIED_REVISIONS_LOCK:
+        if settled:
+            _VERIFIED_REVISIONS[key] = (signature, _digest(_canonical(record)))
+            _VERIFIED_REVISIONS.move_to_end(key)
+            if scope is not None:
+                scope.add(key)
+            while len(_VERIFIED_REVISIONS) > _VERIFIED_REVISIONS_MAX:
+                _VERIFIED_REVISIONS.popitem(last=False)
+        else:
+            _VERIFIED_REVISIONS.pop(key, None)
+    return tree, inventory, record
+
+
+def _verified_shared_spec_record(root: Path, ref_id: str, revision_id: str):
+    """`_verified_shared_spec` for callers that need only the inventory and record."""
+    _tree, inventory, record = _verified_shared_revision(root, ref_id, revision_id)
+    return inventory, record
+
+
+def _verified_shared_spec_lazy(root: Path, ref_id: str, revision_id: str):
+    """`_verified_shared_spec` whose tree reads only the files a caller looks at."""
+    tree, inventory, record = _verified_shared_revision(root, ref_id, revision_id)
+    if tree is None:
+        directory = root / "shared/spec" / ref_id / "revisions" / revision_id
+        tree = _VerifiedRevisionTree(directory, revision_id, inventory, record)
+    return tree, record
 
 
 def _spec_seed_components(source_tree: Mapping[str, bytes]) -> Optional[Tuple[str, ...]]:
@@ -476,10 +652,10 @@ def _verify_exact_spec_publication(root: Path, reference: Mapping[str, Any], rev
     if "spec_base_revision_id" in revision and revision["spec_base_revision_id"] != base_id:
         raise ProducerError("shared-journal-mismatch", "publication ancestry")
     if base_id and not _legacy_adopted_spec_base(root, reference, base_id):
-        _verified_shared_spec(root, reference["shared_reference_id"], base_id)
+        _verified_shared_spec_record(root, reference["shared_reference_id"], base_id)
     if completed:
-        output, _record = _verified_shared_spec(root, reference["shared_reference_id"], revision_id)
-        _check_published_provenance(root, revision, _spec_inventory(output), code="shared-merge-proof-invalid")
+        output, _record = _verified_shared_spec_record(root, reference["shared_reference_id"], revision_id)
+        _check_published_provenance(root, revision, output, code="shared-merge-proof-invalid")
         return
     source = revision.get("source", {})
     record = read_cycle_record(root, source.get("cycle_id", ""))
@@ -493,9 +669,9 @@ def _verify_exact_spec_publication(root: Path, reference: Mapping[str, Any], rev
         source_base = _spec_admission_base(root, directory / rel, reference["shared_reference_id"], None)
         _check_shared_base(source_base, base_id)
     rows = _sealed_source_files(directory, record, rel, directory / rel)
-    output, _ = _verified_shared_spec(root, reference["shared_reference_id"],
-                                     revision["shared_reference_revision_id"])
-    if rows != [(r["path"], r["sha256"], r["byte_size"]) for r in _spec_inventory(output)]:
+    output, _ = _verified_shared_spec_record(root, reference["shared_reference_id"],
+                                            revision["shared_reference_revision_id"])
+    if rows != [(r["path"], r["sha256"], r["byte_size"]) for r in output]:
         raise ProducerError("shared-merge-proof-invalid", "nonexact publication lacks merge proof")
 
 

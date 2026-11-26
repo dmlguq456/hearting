@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Codex in-turn carrier: owed records at PostToolUse/Stop and one follow-through pass."""
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import importlib.util
 import io
@@ -167,6 +170,17 @@ class StopTest(CarrierCase):
                 "see [report] later\n(peer-from: claude [7b] x)", "thread-1"))
         self.assertIsNone(carrier.peer_body_item("[report] done"))
         self.assertEqual(carrier.peer_body_item("run it")["kind"], "peer-report")
+
+    def test_the_continuation_calls_a_sealed_request_a_request_and_names_show_and_report(self):
+        text = carrier.nudge_text([{"kind": "peer-report", "required_action": "follow-through",
+                                    "request": "rq-6813d5"}])
+        self.assertIn("another session's request rq-6813d5 arrived", text)
+        self.assertNotIn("report arrived", text)
+        self.assertIn('peer-steward.py" show rq-6813d5', text)
+        self.assertIn('peer-steward.py" report rq-6813d5', text)
+        # An ordinary peer message still reads as before.
+        self.assertIn("another session's report arrived",
+                      carrier.nudge_text([{"kind": "peer-report", "required_action": "follow-through"}]))
 
     def test_peer_report_item_names_the_receiving_harness(self):
         import session_tidy

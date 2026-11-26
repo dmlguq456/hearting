@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Safe real-process fixtures for parent close; no provider or live project runs."""
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 from types import SimpleNamespace
 import contextlib
 import io
@@ -830,7 +833,9 @@ class ParentCloseTest(unittest.TestCase):
             # release tree at test time.
             old_registry_digest = "sha256:67471577db7a8f65d3c1ae24df920d33031882ae214c938db8d1a628b26bfc2a"
             old_capability_digest = "sha256:bd146b5b0abf97788e9695cf9c70d5f956677d837712688c9fad811035495643"
-            old_unit_digest = "sha256:bbdaa2cef3e5759be7d71772c7baebe08d69e575d967973280a0ba9ad6760b5a"
+            # The unit heads now carry a default `field:`, so today's unit digest is no longer the one
+            # v3.47.0 sealed; this fixture needs only the unit axis to read current beside a stale registry.
+            old_unit_digest = ROUTE.unit_catalog_digest()
             historical_release_root = fixture.base / "sealed-release-v3.47.0"
             historical_release_root.mkdir()
             (historical_release_root / "release-provenance.json").write_text(json.dumps({

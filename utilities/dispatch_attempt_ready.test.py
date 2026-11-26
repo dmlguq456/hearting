@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import importlib.util
 import os
@@ -297,7 +300,7 @@ class RuntimeWaitSharedJoinTest(unittest.TestCase):
         self.assertEqual(REGISTRY.metrics_snapshot()["full_metadata_parses"], 1)
 
     def test_terminal_commit_must_land_before_success_is_consumed(self):
-        def commit(jobs, row):
+        def commit(jobs, row, _previous=None):
             self.assertEqual(row.attempt_id, self.attempt)
             self.write_row("done", {**self.meta, "note": "completed-review", "failure_class": "pass"})
             return {"closed": True}
@@ -374,6 +377,61 @@ class OmittedJobsTest(unittest.TestCase):
             capture_output=True, text=True, env=env)
         self.assertEqual(result.returncode, 2)
         self.assertIn("--jobs", result.stderr)
+
+
+class ArchivedAttemptTest(unittest.TestCase):
+    """A named attempt the registry archive moved is answered from its archived row."""
+
+    def main(self, archived):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs = Path(tmp) / "jobs.log"
+            jobs.write_text("", encoding="utf-8")
+            out = io.StringIO()
+            with mock.patch("dispatch_registry_archive.archived_rows", return_value=archived) as lookup, \
+                 mock.patch.object(sys, "argv", ["dispatch-attempt-ready.py", "--jobs", str(jobs),
+                                                 "--attempt-id", "att-old"]), \
+                 contextlib.redirect_stdout(out):
+                code = READY.main()
+            lookup.assert_called_once_with(jobs, "att-old")
+        return code, json.loads(out.getvalue())
+
+    @staticmethod
+    def line(attempt, status, note, **extra):
+        meta = ",".join(f"{k}={v}" for k, v in {"attempt_id": attempt, "note": note, **extra}.items())
+        return f"2026-10-01T00:00:00Z\t{status}\t/repo\t/repo\tslug-{attempt}\t{meta}"
+
+    def test_an_archived_failure_is_a_terminal_failure_not_complete(self):
+        code, receipt = self.main([self.line("att-old", "done", "dead-worker-fail")])
+        self.assertEqual((code, receipt["state"]), (3, "terminal"))
+        self.assertEqual(receipt["children"][0]["reason"], "archived-row")
+        self.assertEqual(receipt["children"][0]["note"], "dead-worker-fail")
+
+    def test_an_archived_completion_is_ready(self):
+        code, receipt = self.main([self.line("att-old", "done", "completed-marker")])
+        self.assertEqual((code, receipt["state"]), (0, "ready"))
+        self.assertEqual(receipt["children"][0]["readiness"], "ready")
+        code, receipt = self.main([self.line("att-old", "done", "completed-review", failure_class="pass")])
+        self.assertEqual((code, receipt["state"]), (0, "ready"))
+
+    def test_an_archived_finished_review_or_audit_with_findings_is_not_complete(self):
+        for note in ("completed-review-blocking", "completed-audit-with-findings"):
+            with self.subTest(note=note):
+                code, receipt = self.main([self.line("att-old", "done", note)])
+                self.assertEqual((code, receipt["state"]), (3, "terminal"))
+                self.assertEqual(receipt["children"][0]["note"], note)
+
+    def test_the_last_archived_row_of_that_exact_attempt_decides(self):
+        rows = [self.line("att-old", "done", "completed-marker"),
+                self.line("att-old", "cancelled", "cancelled-by-parent"),
+                self.line("att-child", "done", "completed-marker", parent_attempt_id="att-old")]
+        code, receipt = self.main(rows)
+        self.assertEqual((code, receipt["children"][0]["status"]), (3, "cancelled"))
+
+    def test_an_attempt_the_archive_does_not_hold_keeps_the_old_answer(self):
+        code, receipt = self.main([self.line("att-child", "done", "dead-worker-fail", parent_attempt_id="att-old")])
+        self.assertEqual((code, receipt["state"], receipt["children"]), (0, "ready", []))
 
 
 if __name__ == "__main__":

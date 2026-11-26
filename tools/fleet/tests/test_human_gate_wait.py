@@ -1,4 +1,7 @@
 """Privacy and liveness composition for ledger-backed interaction observations."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 import os
 import subprocess
@@ -217,8 +220,11 @@ class HumanGateEndToEndTest(unittest.TestCase):
                 {"question": QUESTION_TEXT, "options": [OPTION_BOTH, OPTION_ONE], "answer": answer}]
 
     def record_valid_answer(self, route):
-        recorded = self.work_start.record_native_answer(route["record"], self.jobs, self.native_reply(route))
-        self.assertIsNotNone(recorded)
+        # The harness hooks no longer record a native reply; an earlier session's record is still read.
+        answers = self.FI.answers_from_native(route["interview"], self.native_reply(route))
+        self.assertIsNotNone(answers)
+        recorded = route["interview_path"].parent / "answers.native.json"
+        recorded.write_text(json.dumps(answers), encoding="utf-8")
         return recorded
 
     def write_answers(self, route, name="answers.json", **overrides):
@@ -317,27 +323,6 @@ class HumanGateEndToEndTest(unittest.TestCase):
                 self.assert_quiet(harness, sid)
                 self.rows.clear()
 
-    def test_a_first_partial_native_reply_keeps_the_wait(self):
-        second = {"id": "order", "topic": "order", "question": "SENTINEL-QUESTION-2 which order first", "kind": "choice",
-                  "options": [{"label": "SENTINEL-OPTION-a", "means": "a"}, {"label": "SENTINEL-OPTION-b", "means": "b"}],
-                  "recommended": 0, "why": "only the person can say"}
-        for harness in ("claude", "codex", "opencode"):
-            with self.subTest(harness):
-                route, sid = self.waiting_route(harness, sid="sid-%s-0002" % harness, extra_questions=(second,))
-                first_call = self.native_reply(route)                       # the restatement and the first question
-                kept = self.work_start.record_native_answer(route["record"], self.jobs, first_call)
-                self.assertEqual(kept.name, "answers.native.partial.json")
-                self.assertFalse((route["interview_path"].parent / "answers.native.json").exists())
-                self.assert_waiting(harness, sid)                           # one question is still unanswered
-                kept = self.work_start.record_native_answer(route["record"], self.jobs, [
-                    {"question": second["question"], "options": ["SENTINEL-OPTION-a", "SENTINEL-OPTION-b"],
-                     "answer": "SENTINEL-OPTION-b"}])
-                self.assertEqual(kept.name, "answers.native.json")
-                resolution = self.WS.human_gate_resolution(self.ledger(route).journal(), GATE)
-                self.assertEqual(resolution["status"], "blocked")           # nothing released the gate
-                self.assert_quiet(harness, sid)
-                self.rows.clear()
-
     def test_cancelled_or_closed_route_has_no_chip_for_each_harness(self):
         for harness in ("claude", "codex", "opencode"):
             with self.subTest(harness, how="cancelled"):
@@ -360,9 +345,8 @@ class HumanGateEndToEndTest(unittest.TestCase):
     def test_unusable_answers_never_clear_or_move_the_wait(self):
         route, sid = self.waiting_route("claude")
         self.assert_waiting("claude", sid)
-        # An empty reply through the real bridge records nothing.
-        self.assertIsNone(self.work_start.record_native_answer(
-            route["record"], self.jobs, self.native_reply(route, answer="")))
+        # An empty reply is no answer.
+        self.assertIsNone(self.FI.answers_from_native(route["interview"], self.native_reply(route, answer="")))
         self.assertFalse((route["interview_path"].parent / "answers.native.json").exists())
         self.assert_waiting("claude", sid)
         foreign = self.make_route("claude")

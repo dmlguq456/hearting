@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """tools/fixture_processes.py — a detached writer is dead before its temp dir goes."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import os
 import json
 import signal
@@ -370,6 +373,19 @@ class ReapTest(unittest.TestCase):
     def test_nothing_marked_is_a_no_op(self):
         with tempfile.TemporaryDirectory() as name:
             self.assertEqual(fixture_processes.reap(name), [])
+
+
+class UniqueAttemptIdTest(unittest.TestCase):
+    def test_same_name_is_stable_within_a_run_and_differs_between_runs(self):
+        first = fixture_processes.unique_attempt_id("att-watcher-owner")
+        self.assertEqual(first, fixture_processes.unique_attempt_id("att-watcher-owner"))
+        self.assertTrue(first.startswith("att-watcher-owner-"))
+        self.assertNotEqual(first, fixture_processes.unique_attempt_id("att-other"))
+        probe = ("import sys;sys.path.insert(0,sys.argv[1]);import fixture_processes;"
+                 "print(fixture_processes.unique_attempt_id('att-watcher-owner'))")
+        other = subprocess.run([sys.executable, "-c", probe, str(Path(__file__).resolve().parent)],
+                               capture_output=True, text=True, check=True).stdout.strip()
+        self.assertNotEqual(first, other)
 
 
 if __name__ == "__main__":

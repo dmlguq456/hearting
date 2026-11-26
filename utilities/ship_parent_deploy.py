@@ -27,6 +27,7 @@ from dispatch_completion_join import exact_attempt_row, JoinContractError
 from dispatch_lifecycle import pid_namespace_evidence
 from dispatch_replacement import _route
 import route_authority as authority
+from parent_next_directive import entrypoint
 try:  # ends a detached child with the test that started it; no-op outside tests
     from detached_lifetime import bind as end_with_test
 except ImportError:  # a partial tree without it (e.g. a fixture release): no record
@@ -297,7 +298,7 @@ def prepare(jobs, attempt, command_file):
         value["request_digest"] = digest(value)
         value["parent_availability"] = availability
         write(request_path, value)
-    run_command = shlex.join([sys.executable, str(Path(__file__).resolve().with_name("ship-parent-deploy.py")),
+    run_command = shlex.join([sys.executable, entrypoint(Path(__file__).resolve().parents[1], "utilities/ship-parent-deploy.py"),
                              "run", "--request", str(request_path)])
     from session_notice import notify
     try:

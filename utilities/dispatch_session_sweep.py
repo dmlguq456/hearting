@@ -121,6 +121,15 @@ def is_human_gate_record(record: object) -> bool:
     )
 
 
+def is_completion_record(record: object) -> bool:
+    """True for an attempt completion: not a notice, supervision alert or gate."""
+
+    if not isinstance(record, dict) or is_human_gate_record(record):
+        return False
+    receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+    return receipt.get("kind") not in {"supervision", "notice", "human-gate"}
+
+
 def _bounded_receipt_text(record: dict) -> str:
     """One bounded line per pending record for `additionalContext`; never the
     receipt body, transcript, or artifact contents (SD-111 receipt policy).
@@ -704,7 +713,7 @@ def sweep_deliver(
     root: Path, recipient_kind: str, session_id: str, *, now_ns: int | None = None,
     native_evidence: dict | None = None, receipt_observer=None,
     notice_context=None, deadline_ns: int | None = None, read_context=None,
-    select=None,
+    select=None, defer_completions: bool = False, received_out: list | None = None,
 ) -> tuple[list[dict], int]:
     """Claude carrier 2 -- deliver, not merely refuse (2026-08-29 decision,
     supersedes the A-21 "surface nothing" slice for Claude).
@@ -721,6 +730,12 @@ def sweep_deliver(
 
     ``select``, when given, is a predicate on an addressed record: a record it
     rejects is not claimed here and stays with its existing carriers.
+
+    ``defer_completions`` (a Claude tool boundary): a registered completion is settled
+    when the transcript already shows it received, but never claimed or carried here.
+    The asyncRewake sends it; the turn's Stop and the next prompt carry what it did
+    not deliver. ``received_out`` collects the records the receipt observer showed
+    received, so the caller can count them for the turn's follow-through (PG-44).
 
     Returns ``(claimed_records, entry_count)``; never raises.
     """
@@ -844,6 +859,10 @@ def sweep_deliver(
         delivery_id = current["delivery_id"]
         observed_evidence.clear()
         if settle_observed(current)["received"]:
+            if received_out is not None:
+                received_out.append(current)
+            continue
+        if defer_completions and is_completion_record(current):
             continue
         if not currently_addressed(current, storage_key):
             continue
@@ -991,7 +1010,14 @@ def sweep_deliver(
     return claimed, entry_count
 
 
+# One line: a notice may be a run's end, a resumed route or a steward check, so it keeps
+# only what the bootstrap does not already say (report a run's metrics against the plan).
 NOTICE_DELIVERY_HEADER = (
+    "Hearting notice. Act only where a line's required_action asks for it; for a run, report "
+    "metrics, trend and elapsed/ETA against the plan, or say they are unavailable."
+)
+# The notice header v4.32.4 shipped (frozen; receipt recovery only).
+_SHIPPED_NOTICE_DELIVERY_HEADER = (
     "Hearting notice about work you started (a paused route resumed, a remote run ended). "
     "Report observed metrics, trend, and elapsed or ETA against the criteria and plan; state when unavailable. "
     "Act only where a line's required_action asks for it. "
@@ -1001,6 +1027,19 @@ NOTICE_DELIVERY_HEADER = (
 
 GATE_DELIVERY_HEADER = (
     "Hearting human gate awaiting your decision (SD-123/129). Read the named artifact "
+    "(an interview file or a frame summary) and show the [방향 확인] card in your reply. The gate's "
+    "questions are already on the Hearting question board (the panel, Fleet and "
+    "`hearting run questions`), where the person answers them; do not ask them again through "
+    "another tool. The answer releases the gate; the owner is waiting on `await-release` or has "
+    "paused at the gate, and the release continues the work either way. An answer the person "
+    "gives in conversation is recorded with `workflow-supervisor.py release --route <route file> "
+    "--gate <name> --decision proceed|revise|stop "
+    "[--answers <file from frame_interview.py answers-template>]`. "
+    "Do not start a separate harness-scheduled re-invocation, Monitor, dispatch-wait, or a polling loop."
+)
+# The gate header v4.40 shipped (receipt recovery only).
+_SHIPPED_V440_GATE_DELIVERY_HEADER = (
+    "Hearting human gate awaiting your decision (SD-123/129). Read the named artifact "
     "(an interview file or a frame summary), put the [방향 확인] card and every interview "
     "question to the user through AskUserQuestion -- one topic at a time, in plain words, "
     "recommended answer first -- then record the answer with `workflow-supervisor.py "
@@ -1009,7 +1048,14 @@ GATE_DELIVERY_HEADER = (
     "`await-release` or has paused at the gate; the release continues the work either way. "
     "Do not start a separate harness-scheduled re-invocation, Monitor, dispatch-wait, or a polling loop."
 )
+# One line: following required_action, keeping open work and not building a wait are
+# the adapter bootstrap's rules already; the header names the delivery and points at them.
 COMPLETION_DELIVERY_HEADER = (
+    "Hearting runtime delivery. Act on each required_action; keep failures, unfinished work "
+    "and questions; no polling."
+)
+# The header v4.32.4 shipped (frozen; receipt recovery only).
+_SHIPPED_COMPLETION_DELIVERY_HEADER = (
     "Hearting runtime delivery. Follow required_action/next-action receipt; "
     "inspect-recovery: diagnostic. runtime-v1 finalizes. Tracked-Workflow Continuation. "
     "Keep new failures/conflicts, unfinished work, questions; no extra "
@@ -1055,12 +1101,52 @@ _LEGACY_COMPLETION_DELIVERY_HEADER = (
     "and direct user questions. "
     "Do not start Monitor, dispatch-wait, or a polling loop."
 )
-_CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX = (
-    "Original request/format apply. Review result; do approved follow-through or existing "
-    "continuation. First close: changes/why, before/after, checks run/reused/skipped/unrun, "
-    "commit/PR/deployment/serving, limits. No harvest/restart/manual finalize. "
-    "Receipt/ACK isn't execution; handled exact repeats need no ACK."
-)
+# Exact first lines the immediately previous release shipped for a completed
+# runtime-v1 owner, keyed like dispatch_completion_join.RUNTIME_V1_FOLLOWUP_PREFIXES
+# by whether runtime summaries follow. Receipt recovery only.
+_PREVIOUS_RUNTIME_V1_FOLLOWUP_PREFIXES = {
+    True: ("Original request/format apply. Review result; do approved follow-through or existing "
+           "continuation. First close: show the runtime summary below to the person first, as written; "
+           "then add what it does not show of changes/why, before/after, checks run/reused/skipped/unrun, "
+           "commit/PR/deployment/serving, limits. No harvest/restart/manual finalize. "
+           "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
+    False: ("Original request/format apply. Review result; do approved follow-through or existing "
+            "continuation. First close: changes/why, before/after, checks run/reused/skipped/unrun, "
+            "commit/PR/deployment/serving, limits. No harvest/restart/manual finalize. "
+            "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
+}
+# The follow-up the short first close shipped just before the decision wording
+# (ask for at most one decision), same current headers. Receipt recovery only.
+_SHORT_RUNTIME_V1_FOLLOWUP_PREFIXES = {
+    True: ("Original request/format apply. Review the result and continue approved work or its existing "
+           "continuation. First close: give the result in one or two sentences; preserve any important "
+           "remaining failure, unfinished work, or user-impacting limit; ask for at most one decision the "
+           "person must make; and point to the detailed record. Keep the runtime summary below as agent "
+           "context and record; do not reproduce it for the person.  No harvest/restart/manual finalize. "
+           "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
+    False: ("Original request/format apply. Review the result and continue approved work or its existing "
+            "continuation. First close: give the result in one or two sentences, preserve any important "
+            "remaining failure, unfinished work, or user-impacting limit, ask for at most one necessary "
+            "decision, and point to the detailed record.  No harvest/restart/manual finalize. "
+            "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
+}
+# The follow-up the decision wording shipped just before the recommended next step was
+# limited to reversible work, same current headers. Receipt recovery only.
+_DECISION_RUNTIME_V1_FOLLOWUP_PREFIXES = {
+    True: ("Original request/format apply. Review the result and continue approved work or its existing "
+           "continuation. First close: give the result in one or two sentences; preserve any important "
+           "remaining failure, unfinished work, or user-impacting limit; ask only what only the person can "
+           "decide and state a recommended in-scope next step (such as fixing and re-testing) as proceeding; "
+           "and point to the detailed record. Keep the runtime summary below as agent context and record; "
+           "do not reproduce it for the person.  No harvest/restart/manual finalize. "
+           "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
+    False: ("Original request/format apply. Review the result and continue approved work or its existing "
+            "continuation. First close: give the result in one or two sentences, preserve any important "
+            "remaining failure, unfinished work, or user-impacting limit, ask only what only the person can "
+            "decide, state a recommended in-scope next step (such as fixing and re-testing) as proceeding, "
+            "and point to the detailed record.  No harvest/restart/manual finalize. "
+            "Receipt/ACK isn't execution; handled exact repeats need no ACK."),
+}
 _LEGACY_RUNTIME_V1_FOLLOWUP = (
     "The requested work is complete, including its declared stages and runtime workflow/route/cycle settlement. "
     "Continue and complete the original user task itself, preserving every explicit content and output-format "
@@ -1098,16 +1184,47 @@ def _previous_opencode_delivery_body(text: str, *, legacy_completion: bool = Fal
     return "\n\n".join(blocks)
 
 
-def _legacy_opencode_completion_body(text: str, roots: list[Path], records: list[dict]) -> str:
-    """Render the exact previous full body for receipt recovery only."""
-    legacy = _previous_opencode_delivery_body(text, legacy_completion=True)
+def _replace_runtime_v1_followups(text: str, roots: list[Path], records: list[dict],
+                                  frozen: dict[bool, str]) -> str:
+    """Swap each record's exact current follow-up prefix for a frozen shipped one."""
+    from dispatch_completion_join import RUNTIME_V1_FOLLOWUP_PREFIXES
     for root, record in zip(roots, records):
         follow = _followup(root, record)
-        if follow.startswith(_CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX):
-            replacement = _LEGACY_RUNTIME_V1_FOLLOWUP + follow[
-                len(_CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX):]
-            legacy = legacy.replace(follow, replacement, 1)
-    return legacy
+        for has_summary, prefix in RUNTIME_V1_FOLLOWUP_PREFIXES.items():
+            if has_summary in frozen and follow.startswith(prefix):
+                text = text.replace(follow, frozen[has_summary] + follow[len(prefix):], 1)
+                break
+    return text
+
+
+def _shipped_headers(text: str) -> str:
+    """The same body under the block headers v4.32.4 shipped, and the gate header v4.40 shipped (receipt recovery only)."""
+    from dispatch_recipient_receipt import OPENCODE_MARKER_LINE_RE
+    shipped = {COMPLETION_DELIVERY_HEADER: _SHIPPED_COMPLETION_DELIVERY_HEADER,
+               NOTICE_DELIVERY_HEADER: _SHIPPED_NOTICE_DELIVERY_HEADER,
+               GATE_DELIVERY_HEADER: _SHIPPED_V440_GATE_DELIVERY_HEADER}
+    blocks, previous = [], None
+    for block in text.split("\n\n"):
+        header, separator, body = block.partition("\n")
+        if (header in shipped
+                and (previous is None
+                     or OPENCODE_MARKER_LINE_RE.fullmatch(previous.rsplit("\n", 1)[-1]))):
+            header = shipped[header]
+        blocks.append(header + separator + body)
+        previous = block
+    return "\n\n".join(blocks)
+
+
+def _previous_runtime_v1_completion_body(text: str, roots: list[Path], records: list[dict]) -> str:
+    """The immediately previous body: same headers, previous follow-up wording."""
+    return _replace_runtime_v1_followups(text, roots, records, _PREVIOUS_RUNTIME_V1_FOLLOWUP_PREFIXES)
+
+
+def _legacy_opencode_completion_body(text: str, roots: list[Path], records: list[dict]) -> str:
+    """Render the exact previous full body for receipt recovery only."""
+    return _replace_runtime_v1_followups(
+        _previous_opencode_delivery_body(text, legacy_completion=True), roots, records,
+        {False: _LEGACY_RUNTIME_V1_FOLLOWUP})
 
 
 def _followup(root: Path, record: dict) -> str:
@@ -1120,18 +1237,21 @@ def _followup(root: Path, record: dict) -> str:
         jobs = record_jobs(root, record)
         if jobs is None:
             return ""
-        return completion_followup_text(
-            receipt, jobs=str(jobs),
-            surface=str(Path(__file__).resolve().parents[1] / "adapters" / "codex" / "bin" / "preflight.sh"))
+        return completion_followup_text(receipt, jobs=str(jobs))
     except Exception:  # noqa: BLE001 -- the bounded receipt line still reaches the parent
         return ""
 
 
+# `compute-hosts` leads a run's ended notice with the experiment catalog name when the run has one
+# (`{name}: run … ended with exit …`); the name is optional here so a named notice is folded and
+# recognized like an unnamed one.  The observation summary `compute-hosts` appends (`; 마지막 …` with a metric,
+# `; 지표 없음 …` without) is skipped up to the closing `read it with` phrase, so a run that carries metrics
+# is named by its catalog name too, not by its run id.
 _COMPUTE_RUN_NOTICE_RE = re.compile(
-    r"^run (?P<run_id>[A-Za-z0-9_-]+) on (?P<host>[A-Za-z0-9_.-]+) "
+    r"^(?:(?P<name>[^\n]+?): )?run (?P<run_id>[A-Za-z0-9_-]+) on (?P<host>[A-Za-z0-9_.-]+) "
     r"ended with exit (?P<exit>[0-9]+)(?: \([^()\n]*\))?"
     r"(?:; started by attempt [^;\n]+ in route [^;\n]+)?"
-    r"(?:; 지표 없음; 계획 시간 미상; run 기록 경로 없음)?"
+    r"(?:; (?:마지막|지표 없음)[^\n]*?)?"
     r"; read it with: compute-hosts tail (?P<tail>[A-Za-z0-9_-]+)$"
 )
 
@@ -1142,7 +1262,7 @@ def _compute_run_notice(record: dict) -> dict | None:
     receipt_key = receipt.get("key")
     if (receipt.get("kind") != "notice" or not isinstance(receipt_key, str)
             or receipt_key.split(":", 1)[0] != "compute-run"
-            or receipt.get("subject") != "compute run"):
+            or receipt.get("subject") not in {"compute run", "compute run, quiet"}):
         return None
     match = _COMPUTE_RUN_NOTICE_RE.fullmatch(receipt.get("text", ""))
     if not match or match.group("tail") != match.group("run_id"):
@@ -1166,12 +1286,40 @@ def _compute_run_notice(record: dict) -> dict | None:
         return None
     return {"host": host, "stamp": identity.group("stamp"),
             "label": identity.group("label") or "", "exit": int(match.group("exit")),
-            "run_id": run_id}
+            "run_id": run_id, "name": match.group("name") or ""}
 
 
 _EXPERIMENT_FINAL_KEY_RE = re.compile(r"^experiment:(?P<run_id>[^:]+):final(?::|$)")
-_STATUS_EXIT_RE = re.compile(
-    r"status=(?P<status>[^;,\s]+)(?P<sep>;\s*)exit=(?P<exit>[^;,\s]+)")
+_STATUS_EXIT_FALLBACK = "status={status}; exit={exit}"
+
+
+def _status_exit_forms() -> list:
+    """Every language's `status=…; exit=…` key as ``(template, regex)``, read from the UI catalog.
+
+    The producer writes this key from ``resource.key.status`` in the notice's own language, so the
+    words come from that one catalog entry (a new language or a changed word is followed, not copied
+    here). An unreadable catalog leaves the English form alone; a delivery never fails over it."""
+    templates = [_STATUS_EXIT_FALLBACK]
+    try:
+        entry = json.loads((Path(__file__).resolve().parents[1] / "tools" / "i18n" / "messages.json")
+                           .read_text(encoding="utf-8"))["messages"]["resource.key.status"]
+        templates += [value for value in entry.values()
+                      if isinstance(value, str) and value not in templates
+                      and 0 <= value.find("{status}") < value.find("{exit}")]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    forms = []
+    for template in templates:
+        head, rest = template.split("{status}", 1)
+        middle, tail = rest.split("{exit}", 1)
+        word = "[^;,\\s]+"
+        # A space in the template is any run of spaces, as the key was always read (`;\s*exit=`).
+        pattern = "".join((re.escape(head), word, re.escape(middle), word, re.escape(tail))).replace("\\ ", "\\s*")
+        forms.append((template, re.compile(pattern)))
+    return forms
+
+
+_STATUS_EXIT_FORMS = _status_exit_forms()
 
 
 def _utc_epoch(value) -> float | None:
@@ -1231,12 +1379,16 @@ def _refreshed_notice_text(root: Path, record: dict, cache: dict) -> str | None:
     if not isinstance(text, str):
         return None
     run = _experiment_run_state(root, record, cache)
-    if run is None or not _STATUS_EXIT_RE.search(text):
+    # Only the one `status=…; exit=…` the producer writes: a catalog name in front of it may
+    # hold the same words, and then which one is the run's own cannot be told from the text.
+    # The same holds across languages: the key of every language together must appear exactly once.
+    found = [(template, pattern) for template, pattern in _STATUS_EXIT_FORMS if pattern.search(text)]
+    if run is None or len(found) != 1 or len(found[0][1].findall(text)) != 1:
         return None
+    template, pattern = found[0]
     exit_code = run.get("exit_code")
     exit_text = "None" if exit_code is None else str(exit_code)
-    return _STATUS_EXIT_RE.sub(
-        f"status={run['status']}; exit={exit_text}", text, count=1)
+    return pattern.sub(lambda _match: template.format(status=run["status"], exit=exit_text), text, count=1)
 
 
 def _notice_text(root: Path, record: dict, cache: dict | None = None) -> str:
@@ -1264,6 +1416,126 @@ def _render_context(batches: list[tuple[Path, list[dict]]]) -> str:
 
     with registry_read_scope():
         return delivery_context(batches)
+
+
+def _notice_run(record: dict) -> tuple[str, str]:
+    """`(run id, short name)` for a routine line: the run id from a compute run's notice or the
+    notice key, and the catalog name a compute run's notice leads with (else the run id)."""
+    run = _compute_run_notice(record)
+    if run:
+        return run["run_id"], run["name"] or run["run_id"]
+    receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+    parts = str(receipt.get("key") or "").split(":")
+    if len(parts) > 2 and parts[0] in {"experiment", "compute-run"} and parts[1]:
+        return parts[1], parts[1]
+    name = str(receipt.get("subject") or "notice")
+    return str(record.get("delivery_id") or name), name
+
+
+ROUTINE_NAMES_SHOWN = 3
+# The same experiment attention posted again at a periodic checkpoint (`resource_progress`).
+_ATTENTION_CHECKPOINT_KEY_RE = re.compile(r"^experiment:[^:]+:attention-checkpoint:")
+
+
+def _notice_layout(notice_records: list[tuple[Path, dict]]) -> dict:
+    """Where each notice goes in a delivery: `(0, …)` needs attention and is shown first,
+    `(1, …)` keeps its own line, `(2, position)` is folded into the one routine line.
+
+    Routine notices (an experiment's normal checkpoint or end, a compute run's exit 0) fold
+    when there are two or more, or when one is quiet (a short or metric-less normal end, a
+    metric-less checkpoint): a quiet notice never gets a line of its own. A single routine
+    notice that carries a value keeps its own line, as before.
+
+    A run's failure or attention in the same delivery outranks its routine notices, whatever
+    order they arrived in: a failed end outranks every routine notice of that run, and an
+    attention (new, changed or re-posted) outranks its normal checkpoints. Such a routine
+    notice is not counted or named on the routine line; its receipt marker rides under that
+    run's first attention entry (`attached`). Only a normal end after an attention still
+    counts: an end is the run's last word.
+    """
+    import session_notice
+    kinds = {id(record): session_notice.classify(record.get("receipt"))
+             for _root, record in notice_records}
+    run_of = {id(record): _notice_run(record)[0] for _root, record in notice_records}
+
+    def key_of(record):
+        receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+        return str(receipt.get("key") or "")
+
+    def ends(record):
+        key = key_of(record)
+        return session_notice.EXPERIMENT_FINAL_KEY.match(key) is not None or key.startswith("compute-run:")
+
+    def flags(record):
+        return (kinds[id(record)] == session_notice.ATTENTION
+                or _ATTENTION_CHECKPOINT_KEY_RE.match(key_of(record)) is not None)
+
+    failed = {run_of[id(record)] for _root, record in notice_records
+              if kinds[id(record)] == session_notice.ATTENTION and ends(record)}
+    flagged = {run_of[id(record)] for _root, record in notice_records if flags(record)}
+    routine, held = [], []
+    for root, record in notice_records:
+        if kinds[id(record)] != session_notice.ROUTINE:
+            continue
+        run = run_of[id(record)]
+        outranked = run in failed or (run in flagged and not ends(record))
+        (held if outranked else routine).append((root, record))
+    fold = len(routine) >= 2 or any(session_notice.is_quiet(record.get("receipt"))
+                                    for _root, record in routine)
+
+    def order(pair):
+        run_id, name = _notice_run(pair[1])
+        # A catalog name first (it says what the run is), then bare run ids.
+        return (name == run_id, name, run_id, str(pair[1].get("delivery_id", "")))
+
+    folded = sorted(routine, key=order) if fold else []
+    held_ids = {id(record) for _root, record in held}
+    places: dict[int, tuple] = {}
+    for position, (_root, record) in enumerate(folded):
+        places[id(record)] = (2, position)
+    for _root, record in notice_records:
+        if id(record) in places or id(record) in held_ids:
+            continue
+        receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+        places[id(record)] = (0 if kinds[id(record)] == session_notice.ATTENTION else 1,
+                              str(receipt.get("text", "")),
+                              str(record.get("delivery_id", "")))
+    attached: dict[int, list[tuple[Path, dict]]] = {}
+    for root, record in held:
+        host = min((other for _other_root, other in notice_records
+                    if flags(other) and run_of[id(other)] == run_of[id(record)]),
+                   key=lambda other: places[id(other)])
+        places[id(record)] = (*places[id(host)], 1, str(record.get("delivery_id", "")))
+        attached.setdefault(id(host), []).append((root, record))
+    for members in attached.values():
+        members.sort(key=lambda pair: places[id(pair[1])])
+    line = ""
+    if folded:
+        ended, checkpoints, quiet, runs = set(), set(), set(), set()
+        names: list[str] = []
+        for _root, record in folded:
+            receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+            run_id, name = _notice_run(record)
+            key = str(receipt.get("key") or "")
+            (checkpoints if session_notice.EXPERIMENT_CHECKPOINT_KEY.match(key) else ended).add(run_id)
+            runs.add(run_id)
+            if session_notice.is_quiet(receipt):
+                quiet.add(run_id)
+            if name not in names:
+                names.append(name)
+        checkpoints -= ended  # a run that also ended is counted once, as ended
+        counts = []
+        if ended:
+            counts.append(f"{len(ended)} ended normally")
+        if checkpoints:
+            counts.append(f"{len(checkpoints)} still running normally")
+        shown = ", ".join(names[:ROUTINE_NAMES_SHOWN])
+        more = len(names) - ROUTINE_NAMES_SHOWN
+        line = (f"Routine, nothing to do ({len(runs)} run{'s' if len(runs) != 1 else ''}): "
+                + ", ".join(counts)
+                + (f" ({len(quiet)} short or without metrics)" if quiet else "")
+                + f" -- {shown}" + (f" and {more} more" if more > 0 else ""))
+    return {"places": places, "routine": folded, "routine_line": line, "attached": attached}
 
 
 def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
@@ -1318,52 +1590,124 @@ def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
         blocks.append(GATE_DELIVERY_HEADER + "\n" + "\n".join(
             f"- {line}" for _delivery_id, line in sorted(gate_lines)))
     if notice_records:
+        layout = _notice_layout(notice_records)
+        attention: list[tuple[tuple, str]] = []
         individual: list[tuple[tuple, str]] = []
-        groups: dict[tuple, list[tuple[dict, dict]]] = {}
+        held = {id(record) for members in layout["attached"].values() for _root, record in members}
         for root, record in notice_records:
-            run = _compute_run_notice(record)
-            if run and run["exit"] == 0:
-                receipt = record.get("receipt") or {}
-                key = (receipt.get("subject"), run["host"], run["label"],
-                       receipt.get("required_action"), 0)
-                groups.setdefault(key, []).append((run, {"root": root, "record": record}))
-            else:
-                receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
-                text = bound_notice_text(root, record)
-                individual.append(((0, str(receipt.get("text", "")),
-                                    str(record.get("delivery_id", ""))), text))
-        for key, members in groups.items():
-            members.sort(key=lambda item: (item[0]["stamp"], item[0]["run_id"],
-                                           str(item[1]["record"].get("delivery_id", ""))))
-            if len(members) < 3:
-                for run, pair in members:
-                    record = pair["record"]
-                    receipt = record.get("receipt") or {}
-                    individual.append(((0, str(receipt.get("text", "")),
-                                        str(record.get("delivery_id", ""))),
-                                       bound_notice_text(pair["root"], record)))
+            place = layout["places"][id(record)]
+            if place[0] == 2 or id(record) in held:
                 continue
-            runs = [run for run, _pair in members]
-            latest = runs[-1]
-            label = key[2] or "(unlabeled)"
-            summary = (f"compute run summary: {len(runs)} runs on {key[1]} label={label}; "
-                       f"exit 0:{len(runs)}; time {runs[0]['stamp']}..{latest['stamp']}; "
-                       f"latest {latest['run_id']}; compute-hosts tail {latest['run_id']}")
+            text = bound_notice_text(root, record)
+            # A routine notice this run's failure or attention outranks: its receipt only.
+            for other_root, other in layout["attached"].get(id(record), ()):
+                text += "".join("\n" + line for line in bound_notice_text(other_root, other).splitlines()
+                                if line.startswith("HEARTING_RECEIPT_V1 "))
+            (attention if place[0] == 0 else individual).append((place, text))
+        notice_lines: list[str] = []
+        if attention:
+            notice_lines.append(f"Needs attention ({len(attention)}), shown first:")
+            notice_lines.extend(f"- {line}" for _key, line in sorted(attention))
+            if individual or layout["routine"]:
+                notice_lines.append("Other notices:")
+        notice_lines.extend(f"- {line}" for _key, line in sorted(individual))
+        if layout["routine"]:
             markers = []
-            for _run, pair in members:
-                text = bound_notice_text(pair["root"], pair["record"])
+            for root, record in layout["routine"]:
+                text = bound_notice_text(root, record)
                 markers.extend(line for line in text.splitlines()
                                if line.startswith("HEARTING_RECEIPT_V1 "))
-            individual.append(((1, key, latest["run_id"]), summary + "\n" + "\n".join(markers)))
-        ordered_notices = sorted(individual, key=lambda item: item[0])
-        if ordered_notices:
-            blocks.append(NOTICE_DELIVERY_HEADER + "\n" + "\n".join(
-                f"- {line}" for _sort_key, line in ordered_notices))
+            notice_lines.append("- " + layout["routine_line"]
+                                + "".join("\n" + marker for marker in markers))
+        if notice_lines:
+            blocks.append(NOTICE_DELIVERY_HEADER + "\n" + "\n".join(notice_lines))
     if lines:
         blocks.append(COMPLETION_DELIVERY_HEADER + "\n" + "\n".join(
             f"- {line}" for _delivery_id, line in sorted(lines))
                       + "".join("\n" + follow for follow in followups))
     return "\n\n".join(blocks)
+
+
+def _answer_line(body: str, t) -> str:
+    """One answer as one short line: its first line, cut, and how many lines were left out."""
+    lines = [line.strip() for line in str(body).splitlines() if line.strip()]
+    first = lines[0] if lines else ""
+    first = first if len(first) <= 120 else first[:119].rstrip() + "…"
+    return first + (t("delivery_line.more_lines", count=len(lines) - 1) if len(lines) > 1 else "")
+
+
+SECRET_ANSWER_LINE = "•••"  # the panel's own one-line form of a secret value (questions.py)
+
+
+def _answered_question_secret(binding) -> bool:
+    """Whether the question this answer belongs to was asked as a secret one.
+
+    Read from the question's own recorded signal (its ``is_secret``, the same field the panel line
+    and the answer record follow). Anything not plainly ``False`` (the signal gone, unreadable, of
+    another request, or without the field) counts as secret: a doubtful answer is hidden."""
+    try:
+        import human_wait_state as waits
+        path = waits._signal_path(binding)
+        signal = waits._read(path) if path is not None else None
+        if (not signal or signal.get("id") != binding.get("request_id")
+                or signal.get("harness") != binding.get("harness")
+                or signal.get("session_id") != binding.get("session_id")):
+            return True
+        return signal["detail"]["questions"][0].get("is_secret") is not False
+    except Exception:  # noqa: BLE001 -- not readable: hide
+        return True
+
+
+def delivery_display_text(batches: list[tuple[Path, list[dict]]]) -> str | None:
+    """What the person's window shows for the delivery ``delivery_context(batches)`` renders.
+
+    One ``↳`` line per record (equal lines of different records: one line ending `` ×N``): a
+    question answer (``↳ 질문에 답함: <답>``) or a finished runtime-v1 work (``↳ 작업 끝: <작업> — <결과> (<걸린 시간>)``, every word read back from
+    the work's own completion summary). The agent still receives ``delivery_context``'s whole
+    text beside it. ``None`` when any record has no such short form (a human gate, a
+    supervision or run notice, a completion without a summary): the whole delivery then goes
+    out in its full form, so nothing the person has to decide is shortened away."""
+    try:
+        import human_wait_state as waits
+        import work_intent
+        from dispatch_registry_cache import registry_read_scope
+        t = work_intent.ui_translator()
+        answers: list[tuple[tuple, str]] = []
+        works: list[tuple[tuple, str]] = []
+        with registry_read_scope():
+            for root, records in batches:
+                for record in records:
+                    delivery_id = record.get("delivery_id")
+                    # A record with no delivery id cannot be told from another: never merge it.
+                    ident = (str(root), str(delivery_id) if delivery_id not in (None, "")
+                             else f"no-delivery-id-{len(answers) + len(works)}-{id(record)}")
+                    receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+                    if is_human_gate_record(record) or receipt.get("kind") == "supervision":
+                        return None
+                    if receipt.get("kind") == "notice":
+                        if "answer_binding" not in receipt:
+                            return None
+                        binding = receipt["answer_binding"]
+                        # A secret question's answer never reaches the person's window line.
+                        shown = (SECRET_ANSWER_LINE if _answered_question_secret(binding)
+                                 else _answer_line(waits.message_answer_body(binding), t))
+                        answers.append((ident, t("delivery_line.answered", answer=shown)))
+                        continue
+                    lines = [work_intent.completion_line(summary, t)
+                             for summary in work_intent.split_completion_summaries(_followup(root, record))]
+                    if not lines or any(line is None for line in lines):
+                        return None
+                    works.extend((ident, line) for line in lines)
+        # The same record listed twice is one line; different records with the same line (two
+        # questions both answered "네") stay visible as `<line> ×N`, so the person sees every one.
+        owners: dict[str, list[tuple]] = {}
+        for ident, line in answers + works:
+            if ident not in owners.setdefault(line, []):
+                owners[line].append(ident)
+        shown = [line + (f" ×{len(idents)}" if len(idents) > 1 else "") for line, idents in owners.items()]
+        return "\n".join(shown) if 0 < len(shown) <= 12 else None
+    except Exception:  # noqa: BLE001 -- a delivery with no short form is sent in full
+        return None
 
 
 # Native inline limit on one hook context string, measured 2026-11-10 (PG-47).
@@ -1388,37 +1732,25 @@ def utf8_len(text: str) -> int:
 def _render_keys(batches) -> dict[int, tuple]:
     """Each record's place in the text :func:`delivery_context` renders for ``batches``.
 
-    The same order the renderer uses: gates by delivery id, then notices (by
-    receipt text and delivery id; three or more successful compute runs of one
-    key as one summary after them), then completions by delivery id. Keyed by
-    ``id(record)``.
+    The same order the renderer uses: gates by delivery id, then notices (attention
+    first, then the others by receipt text and delivery id, then the one routine
+    line), then completions by delivery id. Keyed by ``id(record)``.
     """
-    groups: dict[tuple, list[tuple[dict, dict]]] = {}
     keys: dict[int, tuple] = {}
-    for _root, records in batches:
+    notice_records: list[tuple[Path, dict]] = []
+    for root, records in batches:
         for record in records:
             delivery_id = str(record.get("delivery_id", ""))
             receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
             if is_human_gate_record(record):
                 keys[id(record)] = (0, delivery_id)
             elif receipt.get("kind") == "notice":
-                run = _compute_run_notice(record)
-                if run and run["exit"] == 0:
-                    key = tuple(str(part) for part in (
-                        receipt.get("subject"), run["host"], run["label"],
-                        receipt.get("required_action")))
-                    groups.setdefault(key, []).append((run, record))
-                keys[id(record)] = (1, 0, str(receipt.get("text", "")), delivery_id)
+                notice_records.append((root, record))
             else:
                 keys[id(record)] = (2, delivery_id)
-    for key, members in groups.items():
-        if len(members) < 3:
-            continue
-        members.sort(key=lambda item: (str(item[0]["stamp"]), str(item[0]["run_id"]),
-                                       str(item[1].get("delivery_id", ""))))
-        latest = str(members[-1][0]["run_id"])
-        for position, (_run, record) in enumerate(members):
-            keys[id(record)] = (1, 1, key, latest, position)
+    layout = _notice_layout(notice_records)
+    for _root, record in notice_records:
+        keys[id(record)] = (1, *layout["places"][id(record)])
     return keys
 
 
@@ -1583,21 +1915,55 @@ STOP_RELEASE_SETTLE_SECONDS = pending_delivery.COURIER_RETRY_BASE_SECONDS
 def claude_hook_evidence(payload, session_id: str):
     """This session's native Claude receipts at a hook call, or ``None`` (unknown).
 
-    Reads the transcript the hook payload names through the same verified
-    reader the prompt sweep uses; nothing else (a later call, a tool run,
-    another hook's block) counts as a receipt.
+    Reads the transcript the hook payload names, checked by the file itself and
+    not by recomputing its place from the session's current folder; nothing else
+    (a later call, a tool run, another hook's block) counts as a receipt.
     """
     if not isinstance(payload, dict):
         return None
     transcript_path = payload.get("transcript_path", payload.get("transcriptPath"))
-    cwd = payload.get("cwd")
-    if not isinstance(transcript_path, str) or not isinstance(cwd, str):
+    if not isinstance(transcript_path, str):
         return None
     from dispatch_recipient_receipt import claude_transcript_evidence
     return claude_transcript_evidence(
-        transcript_path=transcript_path, session_id=session_id, cwd=cwd,
-        expected_cwd=os.getcwd(),
+        transcript_path=transcript_path, session_id=session_id,
         runtime_home=os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude"))
+
+
+def claude_receipt_observer(payload, session_id: str):
+    """A ``sweep_deliver`` receipt observer for one Claude hook call, or ``None``.
+
+    Re-reads the transcript only when it changed (size and mtime). On a prompt that
+    is itself a Stop-hook notification (the turn it woke), that prompt's receipts
+    count too: the model reads it in the same request as this hook's context.
+    """
+    if not isinstance(payload, dict):
+        return None
+    transcript_path = payload.get("transcript_path", payload.get("transcriptPath"))
+    if not isinstance(transcript_path, str):
+        return None
+    from dispatch_recipient_receipt import claude_prompt_bindings
+    prompt = claude_prompt_bindings(payload.get("prompt"))
+    cache = {"signature": object(), "evidence": None}
+
+    def observe(_root=None, _storage=None, _record=None):
+        try:
+            info = Path(transcript_path).stat()
+            signature = (info.st_size, info.st_mtime_ns)
+        except OSError:
+            signature = None
+        if signature != cache["signature"]:
+            try:
+                evidence = claude_hook_evidence(payload, session_id)
+            except (OSError, RuntimeError, TypeError, ValueError):
+                evidence = None
+            if prompt and isinstance(evidence, dict):
+                evidence = {**evidence, "bindings": sorted(
+                    {*map(tuple, evidence.get("bindings") or ()), *prompt})}
+            cache.update(signature=signature, evidence=evidence)
+        return cache["evidence"]
+
+    return observe
 
 
 def hold_stop_sends(session_id: str, batches, recipient_kind: str) -> None:
@@ -1853,11 +2219,25 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
         for root, record in selected:
             grouped_selected.setdefault(root, []).append(record)
         rendered = delivery_context(list(grouped_selected.items()))
-        previous_rendered = _previous_opencode_delivery_body(rendered)
+        previous_rendered = _previous_runtime_v1_completion_body(
+            rendered, [root for root, _record in selected],
+            [record for _root, record in selected]) if rendered else ""
         legacy_rendered = _legacy_opencode_completion_body(
             rendered, [root for root, _record in selected],
             [record for _root, record in selected]) if rendered else ""
-        variants = {rendered, previous_rendered, legacy_rendered}
+        # Shipped forms: current; the three previous follow-ups under current headers
+        # (the earliest one also under the older headers); and the legacy full body.
+        from dispatch_completion_join import SHIPPED_RUNTIME_V1_FOLLOWUP_PREFIXES
+        short_rendered, decision_rendered, shipped_rendered = (_replace_runtime_v1_followups(
+            rendered, [root for root, _record in selected],
+            [record for _root, record in selected], frozen) if rendered else ""
+            for frozen in (_SHORT_RUNTIME_V1_FOLLOWUP_PREFIXES, _DECISION_RUNTIME_V1_FOLLOWUP_PREFIXES,
+                           SHIPPED_RUNTIME_V1_FOLLOWUP_PREFIXES))
+        variants = {rendered, previous_rendered, legacy_rendered, short_rendered, decision_rendered,
+                    shipped_rendered,
+                    _previous_opencode_delivery_body(previous_rendered) if rendered else ""}
+        # Everything shipped up to v4.32.4 went out under that release's block headers.
+        variants.update(_shipped_headers(text) for text in tuple(variants) if text)
         if any((record.get("receipt") or {}).get("reason") == "workflow-completion-pending"
                for _root, record in selected):
             # Recover the previous wording from the same stored diagnosis.
@@ -1866,6 +2246,9 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
                 .replace("No recorded refusal is available.", "No current refusal record is available.")
                 .replace("The last recorded checkpoint is ", "The current checkpoint is ")
                 for text in tuple(variants))
+        # Each form as the previous release wrote an open-row harvest line (the Codex wrapper path).
+        from dispatch_completion_join import previous_harvest_wording
+        variants.update(previous_harvest_wording(text) for text in tuple(variants) if text)
         if not rendered or native_text not in variants:
             continue
         candidate = _opencode_expected_message(native_text, identities)
@@ -2463,13 +2846,18 @@ def main(argv: list[str] | None = None) -> int:
                         deadline_ns=deadline_ns)
                 if records:
                     batches.append((root, records))
+            import session_notice
             print(json.dumps({
                 "text": _render_context(batches),
                 "records": [{"root": str(root), "storage_key": record.get(STORAGE_KEY) or args.session,
                              "delivery_id": record["delivery_id"], "claim_owner": record.get("claim_owner"),
                              "immutable_identity": record.get(IDENTITY_KEY)
                              or pending_delivery.received_ack_identity(
-                                 record, record.get(STORAGE_KEY) or args.session, record["delivery_id"])}
+                                 record, record.get(STORAGE_KEY) or args.session, record["delivery_id"]),
+                             # A quiet notice to a supervising session opens no idle turn of its
+                             # own; the carrier keeps it for the session's next natural turn.
+                             "waits": session_notice.waits_for_next_delivery(
+                                 record, "opencode", record.get(STORAGE_KEY) or args.session)}
                             for root, records in batches for record in records],
             }, ensure_ascii=False), flush=True)
         finally:

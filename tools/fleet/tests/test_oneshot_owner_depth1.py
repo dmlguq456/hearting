@@ -1,4 +1,7 @@
 """A one-shot route's run is its depth-1 owner, in Fleet and in the session shell alike."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 import os
 from pathlib import Path
@@ -91,7 +94,9 @@ class OneShotOwnerTests(unittest.TestCase):
         line = next(row for row in overview.splitlines() if "Fixture solo" in row)
         self.assertIn("[s1]", line)
         self.assertIn("codex Opus 5.5 high", line)
-        self.assertIn("one-shot", line)
+        # 11-17 (route row 5): a route its owner does alone reads its kind and intensity, no stage word.
+        self.assertIn("code(solo·quick)", line)        # (11-19: the form leads the intensity)
+        self.assertNotIn("one-shot ", line)               # (the form is in the bracket, never a stage word of its own)
         page = draw(vm, NavState(view="ROUTES", scope="-"), 150, 40).text_rows()
         index = next(i for i, row in enumerate(page) if "Fixture solo" in row)
         self.assertIn("codex", page[index])
@@ -107,29 +112,63 @@ class OneShotOwnerTests(unittest.TestCase):
                 self.assertNotIn("worker", body_row)
 
     def test_shell_panel_reads_the_same_owner_for_every_harness(self):
+        # Spec 2026-11-11: one row per route with Fleet's own owner values, added
+        # by the shared line helper from the same snapshot the producer reads.
+        from tools.fleet.session_line import session_route_status as shell_route_status
         script = r'''
 const v=require(process.argv[1]),m=JSON.parse(process.argv[2]);
 const out=[];for(const side of [true,false]){const r=v.render({width:side?44:120,height:side?30:8,side,model:m,
  sid:'sid-main',questions:()=>[],configuration:{}});out.push(r.rows.map(row=>row.map(s=>s.text).join('')).join('\n'));}
 console.log(JSON.stringify(out));'''
+        rows_seen = []
         for harness in ("claude", "codex", "opencode"):
-            _labels, panels = session_route_status(_snapshot(harness), now=2000.0, include_details=True)
-            presented = session_panel.presentation({"model": "x", "effort": "high"}, {"route_panels": panels},
-                                                   harness, "sid-main", 60)
+            # Wall clock: the row keeps an absolute start time and the panel ages it.
+            labels, panels = shell_route_status(_snapshot(harness), include_details=True)
+            # Fleet's own judgment (spec rule 27): the staged route's owner waits on its
+            # running worker, so that route runs too.
+            self.assertEqual(set(labels.values()), {"route 2 ⠏2"})
+            presented = session_panel.presentation({"model": "x", "effort": "high", "route_label": "route 2 ⠏2"},
+                                                   {"route_panels": panels}, harness, "sid-main", 60)
             solo = next(route for route in presented["routes"] if route["id"] == "rt-solo")
             self.assertEqual(solo["owner"], "owner · codex (Opus 5.5·high)")
-            self.assertEqual(solo["owner_line"], "")                  # its body line already says owner
-            self.assertEqual(solo["reason"], "owner codex (Opus 5.5·high) · running 5m")
+            self.assertEqual((solo["harness"], solo["model_text"], solo["effort"]), ("codex", "Opus 5.5", "high"))
+            self.assertEqual(solo["elapsed"], "5m")
             staged = next(route for route in presented["routes"] if route["id"] == "rt-staged")
             self.assertEqual(staged["owner_line"], "owner · claude (Opus 5.5·high)")
-            self.assertEqual(staged["reason"], "worker codex · running 3m")
+            self.assertEqual(staged["harness"], "codex")              # the live worker of the shown stage
+            self.assertIn("code-execute ●", staged["flow"])
+            paint = lambda row: {name: {"text": row[name]} for name in ("glyph", "harness", "model_text", "effort", "ctx")
+                                 if row.get(name)}
+            for route in presented["routes"]:
+                route["paint"] = paint(route)
+                # Spec E9 rule 43: the owner apart from a leading worker, and each live worker.
+                if isinstance(route.get("owner_paint"), dict):
+                    route["owner_paint"] = paint(route["owner_paint"])
+                for worker in route.get("workers_live") or ():
+                    worker["paint"] = paint(worker)
             result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs"),
                                      json.dumps(presented)], capture_output=True, text=True, check=True)
             side, bottom = json.loads(result.stdout)
-            self.assertIn("owner codex (Opus 5.5·high)", side)
+            # Beside the native area a folded route reads who / context and time / what (spec
+            # rules 24, 36, 38, 43, 57; 11-15 the route box again): its glyph, role and harness, then its
+            # context row carrying its time (here, the context unknown, the time alone), then its title.
+            lines = side.splitlines()
+            # 11-17 (route row 5): kind and intensity / title / the owner's row, its time beside its model (no context is
+            # known here, so no `CTX`; 11-17, the person: the context beside the model, no gauge).
+            rows = [(lines[i - 1], line, lines[i + 1]) for i, line in enumerate(lines)
+                    if 0 < i < len(lines) - 2 and "│ │ " in line and "Fixture solo route" in line]
+            # 11-18: the route's time (`5m`) is at the end of its first line and nowhere on the owner's row.
+            self.assertTrue(any("● code(solo·quick)" in kind and "5m" in kind and "owner" in who and "codex" in who and "5m" not in who
+                                and "5m" not in title and "CTX" not in who for kind, title, who in rows), side)
+            # The staged route: its owner first, its live worker in the box under its stage text (11-18).
+            self.assertIn("owner  claude Opus 5.5 high", side)
+            self.assertIn("┌ 2/2: code-execute", side)           # (11-19: `staged` is in the bracket, not repeated in the box title)
+            self.assertIn("⠋ worker codex", side)
+            self.assertIn("codex Opus 5.5 high", bottom)
+            rows_seen.append([row for row in side.splitlines() if "Fixture" in row])
             self.assertNotIn("hb_", side + bottom)
-            self.assertIn("owner · codex (Opus 5.5·high)", bottom)
             self.assertEqual(len(bottom.splitlines()), 8)             # the bottom panel does not grow
+        self.assertEqual(rows_seen[0], rows_seen[1]); self.assertEqual(rows_seen[0], rows_seen[2])
 
     def test_one_shot_summary_names_its_completion_gate_instead_of_staying_unknown(self):
         codes = lambda gate: {"codes": {"schema": "route_visibility_codes_v1", "shape": "solo",

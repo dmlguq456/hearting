@@ -94,32 +94,6 @@ ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_JOIN_STATES = frozenset({"ready", "timeout"})
 
 
-# Deliberately UNRESOLVED, for the same reason as the identical helper in
-# claude-session-supervisor.py: resolving here would pin the receipt to the
-# versioned release directory behind the managed `current` pointer, so a
-# release rotation mid-flight would leave every delivered command denied.
-def harvest_surface(launch_file: str) -> str:
-    """Shared harvest CLI path as seen from THIS supervisor's launch path.
-
-    Absolute, not repository-relative. The park guard resolves a relative
-    `adapters/codex/bin/preflight.sh` against the *owner's* cwd, so the
-    relative form is admitted only when that cwd happens to be a harness root
-    and is denied for every ordinary project worktree -- the same
-    producer<->guard vocabulary split that deadlocked att-30344fd4 (plan
-    SS3.4 D1). Surfaced by the D2a precheck.
-    """
-
-    return shlex.quote(
-        str(
-            Path(launch_file).absolute().parents[1]
-            / "adapters" / "codex" / "bin" / "preflight.sh"
-        )
-    )
-
-
-SHARED_HARVEST_SURFACE = harvest_surface(__file__)
-
-
 SupervisorError = DECISIONS.SupervisorError
 
 
@@ -566,7 +540,7 @@ def completion_prompt(
             if outbox is not None
             else ""
         )
-        + completion_followup_text(receipt, jobs=jobs, surface=shlex.split(SHARED_HARVEST_SURFACE)[0])
+        + completion_followup_text(receipt, jobs=jobs)
         + "\nEmit the exact final three-line handoff when no owned registered child remains open."
         + (f"\n{notice}" if notice else "")
     )
@@ -1093,6 +1067,12 @@ def run_turn(server: AppServer, *, thread_id: str, prompt: str,
             else:
                 retry_index = failures
             delay = DECISIONS.transient_retry_delay(info, retry_index, registered=True)
+            reason_code = "transient-capacity"
+            if delay is None:
+                # The same edge block page the Claude/OpenCode supervisor retries.
+                delay = DECISIONS.edge_block_retry_delay(
+                    codex_turn_failure_terminal(exc.payload), retry_index)
+                reason_code = "transient-edge-block"
             if delay is None:
                 raise
             turn_id = str(exc.payload.get("turn_id") or "")
@@ -1102,7 +1082,7 @@ def run_turn(server: AppServer, *, thread_id: str, prompt: str,
             deadline = started + delay
             common = {"parent_attempt_id": getattr(args, "parent_attempt_id", ""),
                       "thread_id": thread_id, "turn_id": turn_id,
-                      "reason_code": "transient-capacity", "ordinal": retry_index + 1,
+                      "reason_code": reason_code, "ordinal": retry_index + 1,
                       "deadline_monotonic": deadline}
             emit({"type": "dispatch.supervisor.transient-wait.started", **common})
             while clock() < deadline:
@@ -1125,6 +1105,23 @@ def _admit_continuation(ledger, state_root, **kwargs):
     """Shared continuation admission (`session_supervisor_decisions`), with this module's `emit`."""
     return DECISIONS.admit_continuation(ledger, state_root, emit=lambda value: emit(value), **kwargs)
 
+
+def _resource_turn(args, state_path, ledger, state_root, prompt, continuations):
+    """A resource receipt's turn: admitted against the continuation budget once, like any other."""
+    state = read_supervisor_phase_state(state_path, args.parent_attempt_id)
+    if state is not None and (state.resource or {}).get("outbox"):
+        verdict, notice = _admit_continuation(
+            ledger, state_root, parent_attempt_id=args.parent_attempt_id,
+            route_id=args.route_id, route_hash=args.route_hash,
+            ordinal=continuations, purpose="ordinary", stalled=False,
+            warning_threshold=args.continuation_warning_threshold)
+        if not verdict.admitted:
+            raise SupervisorError("continuation-limit-exceeded")
+        continuations += 1
+        prompt = _apply_notice(prompt, notice)
+    return prompt, continuations
+
+
 def _seal_terminal_handoff_or_raise(ledger, state_root, **kwargs):
     """Shared reserved terminal hand-off (`session_supervisor_decisions`)."""
     return DECISIONS.seal_terminal_handoff_or_raise(
@@ -1134,6 +1131,9 @@ def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(description=__doc__)
     value.add_argument("--one-turn", action="store_true",
                        help=argparse.SUPPRESS)
+    # A unit leg keeps its thread (not ephemeral) and its next turn wakes it.
+    value.add_argument("--keep-session", action="store_true", help=argparse.SUPPRESS)
+    value.add_argument("--resume-thread", help=argparse.SUPPRESS)
     value.add_argument("--worktree", required=True)
     from dispatch_contract import inherited_jobs_argument
     jobs_options = inherited_jobs_argument()
@@ -1323,7 +1323,8 @@ def run_one_turn(args: argparse.Namespace) -> int:
                               if args.turn_permissions_supported else None)},
         )
         server.notification("initialized")
-        thread_params: dict[str, Any] = {"cwd": frame_repository.rpc_worktree(args.worktree, server), "ephemeral": True}
+        thread_params: dict[str, Any] = {"cwd": frame_repository.rpc_worktree(args.worktree, server),
+                                         "ephemeral": not args.keep_session}
         if getattr(args, "verification_profile_active", False):
             thread_params["permissions"] = LOCAL_VERIFICATION_PROFILE_NAME
         elif args.native_permission_profile is None:
@@ -1332,11 +1333,23 @@ def run_one_turn(args: argparse.Namespace) -> int:
             thread_params["approvalPolicy"] = args.approval
         if args.model:
             thread_params["model"] = args.model
-        thread_result = server.request("thread/start", frame_repository.runtime_request(thread_params, server))
+        thread_result = None
+        if args.resume_thread:
+            # The woken thread gets this launch's own cwd, sandbox, approval and model again: resuming
+            # never carries the earlier turn's grants over.
+            resume_params = {key: value for key, value in thread_params.items() if key != "ephemeral"}
+            resume_params["threadId"] = args.resume_thread
+            # A thread that cannot be woken ends this turn as an error: the prompt of a woken turn carries
+            # no brief, so a silent fresh thread would start without one.
+            thread_result = server.request("thread/resume", frame_repository.runtime_request(resume_params, server))
+        if thread_result is None:
+            thread_result = server.request("thread/start", frame_repository.runtime_request(thread_params, server))
         thread = thread_result.get("thread")
         if not isinstance(thread, dict) or not isinstance(thread.get("id"), str):
             raise SupervisorError("thread-start-response-invalid")
         thread_id = thread["id"]
+        if args.resume_thread and thread_id != args.resume_thread:
+            raise SupervisorError("resume-native-session-changed")
         run_turn(
             server, thread_id=thread_id, prompt=prompt, args=args
         )
@@ -1530,7 +1543,7 @@ def main(argv: list[str] | None = None) -> int:
         server.notification("initialized")
         thread_params: dict[str, Any] = {
             "cwd": frame_repository.rpc_worktree(args.worktree, server),
-            "ephemeral": not RESOURCE_WAIT.durable_native_session(args),
+            "ephemeral": not (args.keep_session or RESOURCE_WAIT.durable_native_session(args)),
         }
         if getattr(args, "verification_profile_active", False):
             thread_params["permissions"] = LOCAL_VERIFICATION_PROFILE_NAME
@@ -1541,6 +1554,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.model:
             thread_params["model"] = args.model
         resource_session = (recovered.resource or {}).get("session_id") if recovered else None
+        # The earlier owner's thread (an owner taking over from one of its route), with this launch's grants.
+        resource_session = resource_session or args.resume_thread
         if resource_session:
             thread_params.pop("ephemeral", None)
             thread_params["threadId"] = resource_session
@@ -1558,7 +1573,10 @@ def main(argv: list[str] | None = None) -> int:
         next_prompt = prompt
         pending_notice = ""
         if recovered is not None and recovered.resource is not None and active_outbox is None:
-            resource_prompt = RESOURCE_WAIT.wait(args, state_path, control, delivered, emit)
+            # The same combined wait the loop parks on: a finished model child is not held
+            # behind a resource that is still running.
+            resource_prompt = DECISIONS.recovered_resource_wait(
+                args, state_path, control, delivered, emit, run_join)
             if resource_prompt is not None:
                 next_prompt = resource_prompt
         while True:
@@ -1702,17 +1720,8 @@ def main(argv: list[str] | None = None) -> int:
             if not park_attempts and not unstarted and not partition.chain_pending:
                 resource_prompt = RESOURCE_WAIT.wait(args, state_path, control, delivered, emit)
                 if resource_prompt is not None:
-                    resource_state = read_supervisor_phase_state(state_path, args.parent_attempt_id)
-                    if resource_state is not None and (resource_state.resource or {}).get("outbox"):
-                        verdict, notice = _admit_continuation(
-                            ledger, budget_state_root, parent_attempt_id=args.parent_attempt_id,
-                            route_id=args.route_id, route_hash=args.route_hash,
-                            ordinal=continuations, purpose="ordinary", stalled=False,
-                            warning_threshold=args.continuation_warning_threshold)
-                        if not verdict.admitted:
-                            raise SupervisorError("continuation-limit-exceeded")
-                        continuations += 1
-                        resource_prompt = _apply_notice(resource_prompt, notice)
+                    resource_prompt, continuations = _resource_turn(
+                        args, state_path, ledger, budget_state_root, resource_prompt, continuations)
                     next_prompt = resource_prompt
                     continue
             empty_wait = (not new_attempts and wait_requested) or (
@@ -1787,13 +1796,22 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 from dispatch_supervision import wait_for_batch
                 from dispatch_replacement import advance_batch, adopt_receipt
-                receipt = wait_for_batch(
-                    join=lambda attempts: run_join(args, attempts),
-                    attempts=set(park_attempts), jobs=Path(args.jobs),
-                    parent_attempt_id=args.parent_attempt_id, emit=emit,
-                    replacement_checkpoint=lambda selected: advance_batch(Path(args.jobs), selected)
-                        if not control.pending() else (selected, [], []),
-                )
+                try:
+                    receipt = wait_for_batch(
+                        join=DECISIONS.join_with_resource_attention(
+                            args, state_path, control, delivered, run_join),
+                        attempts=set(park_attempts), jobs=Path(args.jobs),
+                        parent_attempt_id=args.parent_attempt_id, emit=emit,
+                        replacement_checkpoint=lambda selected: advance_batch(Path(args.jobs), selected)
+                            if not control.pending() else (selected, [], []),
+                    )
+                except DECISIONS.ResourceAttentionReady as ready:
+                    # A held resource needs this owner now. The model children stay undelivered
+                    # and are parked again on the next loop; their terminal handoff claim is
+                    # the same claim then (same children), not a second one.
+                    next_prompt, continuations = _resource_turn(
+                        args, state_path, ledger, budget_state_root, ready.prompt, continuations)
+                    continue
                 park_attempts, replaced_attempts = adopt_receipt(Path(args.jobs), set(park_attempts), receipt)
                 delivered.update(replaced_attempts)
                 joined_rows = current_children(

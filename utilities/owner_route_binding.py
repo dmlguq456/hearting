@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import contextlib
+import contextvars
 import fcntl
 import hashlib
 import importlib.util
@@ -30,6 +31,8 @@ if _spec is None or _spec.loader is None:
 ROUTE = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ROUTE)
 from hearting_gates import note_same_work_drift
+from route_plan import is_depth0_leg
+from route_form import serial_attempt_route
 
 
 class OwnerRouteBindingError(ValueError):
@@ -113,6 +116,41 @@ CURRENT_ROUTE_STATUSES = frozenset({
 })
 
 
+# One owner pass (``record_walk_scope``): directory components that are only ancestors of a
+# record, and the resolved jobs path, are read once. The record itself and everything under
+# the jobs directory is always looked at afresh.
+_RECORD_WALK: contextvars.ContextVar = contextvars.ContextVar(
+    "owner_route_record_walk", default=None)
+
+
+@contextlib.contextmanager
+def record_walk_scope():
+    """Observe-only pass scope: ancestors of the jobs directory are checked once.
+
+    Nested scopes join the outer one; the memo is dropped on the way out, so a
+    path that changes between passes is seen by the next pass."""
+    if _RECORD_WALK.get() is not None:
+        yield
+        return
+    token = _RECORD_WALK.set({})
+    try:
+        yield
+    finally:
+        _RECORD_WALK.reset(token)
+
+
+def _jobs_parent_resolved(jobs: Path) -> Path:
+    """``Path(jobs).resolve(strict=False).parent`` (memoized per ``record_walk_scope``)."""
+    memo = _RECORD_WALK.get()
+    if memo is None:
+        return jobs.resolve(strict=False).parent
+    key = ("resolve", os.fspath(jobs))
+    resolved = memo.get(key)
+    if resolved is None:
+        resolved = memo[key] = jobs.resolve(strict=False).parent
+    return resolved
+
+
 def _record_present(jobs: str | Path, *parts: str, reason: str) -> bool:
     """The one absence rule for a binding record beside the jobs registry.
 
@@ -123,6 +161,10 @@ def _record_present(jobs: str | Path, *parts: str, reason: str) -> bool:
     missing, a non-directory where a directory belongs, a permission or other
     lookup error) is a read error, never absence.  A link whose target exists
     is followed as normal.
+
+    Inside ``record_walk_scope`` a component that is a plain directory on the way
+    to the jobs directory (the directory itself included) is not looked at again;
+    anything below it, and any absence, link or error, is always read afresh.
     """
     jobs_path = Path(jobs).expanduser()
     if not jobs_path.is_absolute():
@@ -130,8 +172,12 @@ def _record_present(jobs: str | Path, *parts: str, reason: str) -> bool:
     target = jobs_path.parent.joinpath(*parts)
     walked = Path(target.anchor)
     names = target.parts[1:]
+    memo = _RECORD_WALK.get()
+    stable = min(len(jobs_path.parent.parts) - 1, len(names) - 1) if memo is not None else 0
     for index, name in enumerate(names):
         walked = walked / name
+        if index < stable and ("dir", walked) in memo:
+            continue
         try:
             entry = os.lstat(walked)
         except FileNotFoundError:
@@ -143,6 +189,8 @@ def _record_present(jobs: str | Path, *parts: str, reason: str) -> bool:
                 entry = os.stat(walked)
             except OSError as exc:
                 raise OwnerRouteBindingError(reason) from exc
+        elif index < stable and stat.S_ISDIR(entry.st_mode):
+            memo[("dir", walked)] = True
         if index < len(names) - 1 and not stat.S_ISDIR(entry.st_mode):
             raise OwnerRouteBindingError(reason)
     return True
@@ -152,14 +200,14 @@ def _attachment_root(jobs: str | Path) -> Path:
     path = Path(jobs).expanduser()
     if not path.is_absolute():
         raise OwnerRouteBindingError("owner-route-jobs-path-must-be-absolute")
-    return path.resolve(strict=False).parent / OWNER_ROUTE_ATTACHMENT_DIR
+    return _jobs_parent_resolved(path) / OWNER_ROUTE_ATTACHMENT_DIR
 
 
 def _advance_root(jobs: str | Path) -> Path:
     path = Path(jobs).expanduser()
     if not path.is_absolute():
         raise OwnerRouteBindingError("owner-route-jobs-path-must-be-absolute")
-    return path.resolve(strict=False).parent / OWNER_ROUTE_ADVANCE_DIR
+    return _jobs_parent_resolved(path) / OWNER_ROUTE_ADVANCE_DIR
 
 
 @contextlib.contextmanager
@@ -1183,6 +1231,17 @@ _QUICK_NODE_AXES = {
 }
 
 
+def _unit_leg_axes(node):
+    """The (worker type, unit, depth) a unit route's leg must carry, rebuilt from the recipe and the unit head."""
+    try:
+        registry = ROUTE.TOPO.load_registry()
+        recipe = next(r for r in registry["recipes"] if r["capability"] == ROUTE.TOPO.UNIT_CAPABILITY)
+        leg = ROUTE.unit_leg_node(recipe, node.get("unit"), registry)
+    except (StopIteration, TypeError, ValueError, KeyError, OSError):
+        return None
+    return (leg["worker_type"], leg["unit"], leg["dispatch_depth"])
+
+
 def derive_quick_owner_binding(route_file: str | Path, **kwargs) -> QuickOwnerRouteBinding:
     """Compatibility entry for quick node bindings."""
     return _derive_depth1_node_binding(route_file, **kwargs)
@@ -1212,7 +1271,9 @@ def _derive_depth1_node_binding(route_file: str | Path, *, worktree: str | Path,
     except (OSError, TypeError, ValueError) as exc:
         raise OwnerRouteBindingError("owner-route-verification-failed") from exc
     if frame:
-        if route_node not in {"frame", "frame-alternative"}:
+        # A frame launch binds a depth-0 leg: the node must be sealed as one.
+        leg = next((n for n in route.get("nodes", []) if n.get("id") == route_node), None)
+        if not is_depth0_leg(leg):
             raise OwnerRouteBindingError("frame-node-tuple-invalid")
         if (route.get("capability"), route.get("capability_mode"),
                 route.get("effective_intensity")) != (capability, capability_mode, intensity):
@@ -1221,15 +1282,17 @@ def _derive_depth1_node_binding(route_file: str | Path, *, worktree: str | Path,
         if harness not in depth1_supported_harnesses(route, worker_type="frame"):
             note_same_work_drift("frame-route-harness-mismatch")
     else:
-        if route.get("effective_intensity") != "quick":
+        if not serial_attempt_route(route):
             raise OwnerRouteBindingError("quick-owner-route-required")
         validate_owner_route_binding(path, worktree=worktree, capability=capability,
                                      capability_mode=capability_mode, intensity=intensity,
                                      harness=harness)
+    node = next((n for n in route.get("nodes", []) if n.get("id") == route_node), None)
     expected = _QUICK_NODE_AXES.get(str(route_node))
+    if expected is None and route.get("capability") == ROUTE.TOPO.UNIT_CAPABILITY and isinstance(node, dict):
+        expected = _unit_leg_axes(node)   # a unit route's one leg: the recipe's template and the unit head
     if expected is None:
         raise OwnerRouteBindingError("quick-node-tuple-invalid")
-    node = next((n for n in route.get("nodes", []) if n.get("id") == route_node), None)
     if not isinstance(node, dict):
         raise OwnerRouteBindingError("quick-owner-node-missing")
     if (node.get("worker_type"), node.get("unit"), node.get("dispatch_depth")) != expected:

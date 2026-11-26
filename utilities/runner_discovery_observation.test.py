@@ -4,6 +4,9 @@
 All state is private. Native delivery and external recovery endpoints are fake;
 locks, stores, read passes, discovery, ledger parsing and readiness threads are real.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import contextlib
 import fcntl
 import importlib.util
@@ -99,6 +102,9 @@ class RunnerDiscoveryObservationTest(peer._TmpRootMixin, unittest.TestCase):
         unavailable = True
         ordinary_passes, discoveries, messages, delays, workers, contexts = [], [], [], [], [], []
         prepared_messages = []
+        # A notice accepted between duties is handed over in the same pass on a
+        # fresh read pass of its own (never the running pass's snapshot).
+        mid_pass_refreshes, reconcile_depth = [], [0]
         watch_calls, batch_calls, external_passes, read_contexts = [], [], [], []
         started = threading.Event()
         real_read, real_stat, real_lstat, real_iterdir = tidy.read_bytes, Path.stat, Path.lstat, Path.iterdir
@@ -165,6 +171,8 @@ class RunnerDiscoveryObservationTest(peer._TmpRootMixin, unittest.TestCase):
             real_begin(current)
             if threading.current_thread() is main_thread:
                 ordinary_passes.append(current._active_list_context)
+                if reconcile_depth[0]:
+                    mid_pass_refreshes.append(current._active_list_context)
 
         def discover(current, **kwargs):
             observed = real_discovery(current, **kwargs)
@@ -200,7 +208,11 @@ class RunnerDiscoveryObservationTest(peer._TmpRootMixin, unittest.TestCase):
 
         def reconcile(current, duties, **kwargs):
             read_contexts.append(kwargs["read_context"])
-            real_reconcile(current, duties, **kwargs)
+            reconcile_depth[0] += 1
+            try:
+                real_reconcile(current, duties, **kwargs)
+            finally:
+                reconcile_depth[0] -= 1
 
         def snapshot():
             self.assertTrue(started.wait(3), "existing readiness worker started")
@@ -245,8 +257,12 @@ class RunnerDiscoveryObservationTest(peer._TmpRootMixin, unittest.TestCase):
                 if inventory and legacy:
                     self.assertEqual(observed_path_before,
                                      (failed_path.read_bytes(), real_stat(failed_path).st_mtime_ns))
-                if not inventory or legacy or historical or no_resend:
+                if not inventory or legacy or historical or (no_resend and no_resend != "pending"):
                     native.assert_not_called()
+                elif no_resend == "pending":
+                    # A's lineage is readable during partial inventory: its prepared
+                    # transfer may get its one first write, never a second transfer.
+                    self.assertLessEqual(native.call_count, 1)
                 else:
                     self.assertEqual(native.call_count, 1, "usable notice progresses during partial inventory")
                 if not inventory:
@@ -300,7 +316,13 @@ class RunnerDiscoveryObservationTest(peer._TmpRootMixin, unittest.TestCase):
                 self.assertEqual(steward.cmd_obligation_runner(SimpleNamespace(
                     state_root=self.tmp_root, lock_fd=lock.fileno(),
                     service_current="/fixture/current" if service else None)), 0)
-                self.assertEqual(native.call_count, 0 if historical or no_resend or replace_lock else 1)
+                # A prepared, still pending transfer gets its one first write from the
+                # message courier (same ref, never a new transfer); every other prepared
+                # state stays unsent.
+                first_write = no_resend == "pending" and not replace_lock
+                self.assertEqual(native.call_count,
+                                 1 if first_write else
+                                 0 if historical or no_resend or replace_lock else 1)
                 self.assertEqual(execute.call_count, len(discoveries) if service else 0)
                 self.assertTrue(all(not thread.is_alive() and stop.is_set() for thread, _, stop in workers))
                 with lock_path.open("r+") as contender:
@@ -319,11 +341,13 @@ class RunnerDiscoveryObservationTest(peer._TmpRootMixin, unittest.TestCase):
         self.assertEqual(delays[:len(expected_delays)], expected_delays)
         if message_progress:
             self.assertTrue(prepared_messages)
-            self.assertEqual(steward.peer_message._read_pending(ref)["state"], "pending")
+            # The same prepared transfer: pending, or accepted by its one first write.
+            self.assertIn(steward.peer_message._read_pending(ref)["state"], {"pending", "queued"})
         # Each iteration now reads accepted active notices before discovery,
         # then starts a separate full-recovery pass. Neither phase may reuse a
-        # store snapshot or authority context from an earlier phase/iteration.
-        read_phases = 2 * len(discoveries)
+        # store snapshot or authority context from an earlier phase/iteration;
+        # a mid-pass notice handover only adds fresh passes of its own.
+        read_phases = 2 * len(discoveries) + len(mid_pass_refreshes)
         self.assertEqual(len(ordinary_passes), read_phases)
         self.assertEqual(len({id(context) for context in ordinary_passes}), read_phases)
         self.assertGreaterEqual(len(read_contexts), len(discoveries))

@@ -9,6 +9,9 @@ if one is still alive at the end.
 """
 
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import json
 import os
@@ -686,6 +689,49 @@ mem._schedule_exchange("write")
         state = self._state("a")
         self.assertNotIn("failure_notice", state)
         self.assertNotIn("last_notified", state)
+
+    def test_a_stalled_exchange_names_its_cause_and_shows_one_summary_line(self):
+        unsafe = {"MEM_SYNC_DIR": str(self.project / "exchange-inside-project")}
+        written = self._mem("a", "add", "durable", "lesson", "kept while stalled",
+                            "--headline", "stalled write", remote=True, extra=unsafe)
+        self.assertEqual(written.returncode, 0, written.stderr)
+        self._wait_idle("a")
+        notice = self._state("a")["failure_notice"]["reason"]
+        self.assertEqual(
+            notice, "exchange-validation-failed:exchange-in-git-tree at /…")
+        self.assertNotIn(str(self.root), notice)
+
+        def inject():
+            result = self._mem("a", "inject", remote=True, extra=unsafe)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return [line for line in result.stdout.splitlines()
+                    if "not pushed to the remote" in line]
+
+        # Waiting, but not for long: healthy as far as the summary is concerned.
+        self.assertEqual(inject(), [])
+
+        connection = sqlite3.connect(self.stores["a"] / "memory.db")
+        try:
+            connection.execute(
+                "UPDATE sync_outbox SET queued_at=strftime('%Y-%m-%dT%H:%M:%fZ',"
+                "'now','-5 days') WHERE state<>'confirmed'")
+            connection.commit()
+        finally:
+            connection.close()
+        lines = inject()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertRegex(
+            lines[0], r"^⚠️ memory not pushed to the remote for 5 days; 1 pending; "
+            r"cause: exchange-validation-failed:exchange-in-git-tree at /…$")
+        doctor = self._mem("a", "doctor", remote=True, extra=unsafe)
+        self.assertIn("memory not pushed to the remote for 5 days", doctor.stdout)
+
+        # The exchange works again: the line goes away on its own.
+        self._mem("a", "add", "durable", "lesson", "written after the fix",
+                  "--headline", "fixed write", remote=True)
+        self._wait_idle("a")
+        self.assertEqual(set(self._outbox_states("a")), {"confirmed"})
+        self.assertEqual(inject(), [])
 
     def test_the_worker_survives_its_parents_process_group_being_killed(self):
         env = self._environment("a", remote=True, extra={"MEM_EXCHANGE_WINDOW_SECONDS": "3"})

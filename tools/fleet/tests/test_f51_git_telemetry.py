@@ -1,3 +1,6 @@
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import io
 import json
 import os
@@ -726,7 +729,8 @@ os.execv(os.environ["DISPLAY_REAL_GIT"], [os.environ["DISPLAY_REAL_GIT"], *sys.a
             rendered = subprocess.run(["bash", os.environ["AGENT_HOME"] + "/adapters/claude/statusline.sh"],
                 input=payload, text=True, capture_output=True, timeout=5)
             self.assertEqual(rendered.returncode, 0, rendered.stderr)
-            self.assertIn("unknown", rendered.stdout)
+            # A pending observation stays unknown (`⚠️?`, `🚧 ?`), never `no-git`.
+            self.assertIn("🚧 ?", rendered.stdout)
             self.assertNotIn("no-git", rendered.stdout)
             self.assertLess(time.monotonic() - started, 3)
         finally:

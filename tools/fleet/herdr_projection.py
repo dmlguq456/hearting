@@ -896,7 +896,11 @@ def _metadata_command(herdr, harness, session_id, pane, *, display_relations=Fal
 
 
 def _panel_counts(harness, sid, values, questions):
-    """Count the same current board, without reading another question source."""
+    """Count the same current board, without reading another question source.
+
+    A row whose answer was sent (``submitted``/``received``/``applied``) is the panel's receipt
+    line, in no count (rule 5, 11-14)."""
+    from fleet.session_block import _SENT_STATES
     if questions is None or values.get("answer_wait") is None:
         return None, None
     total = answerable = 0
@@ -905,7 +909,7 @@ def _panel_counts(harness, sid, values, questions):
             continue
         owner = row.get("owner") or {}
         if (row.get("state") != "current" or owner.get("harness") != harness
-                or owner.get("session_id") != sid):
+                or owner.get("session_id") != sid or row.get("request_state") in _SENT_STATES):
             continue
         count = max(1, len(row.get("questions") or ()))
         total += count

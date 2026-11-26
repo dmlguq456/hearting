@@ -730,8 +730,13 @@ def home_consumer_for_identity(attempt_id: str, harness: str,
     return home_consumer_evidence(metadata)
 
 
-def _owner_env() -> dict[str, str]:
+def _owner_env(jobs: str | Path | None = None) -> dict[str, str]:
     env = dict(os.environ)
+    if jobs is not None:
+        # Only a worker's own environment carries the registry path. An owner is
+        # launched from the depth-0 session that has none, and without it the
+        # worker-home refresh path and the opencode source lookup both give up.
+        env["AGENT_DISPATCH_JOBS"] = str(jobs)
     env["AGENT_SESSION_ROLE"] = "worker"
     env["AGENT_SUMMARY_OWNER"] = "dispatch"
     return env
@@ -745,6 +750,7 @@ def launch_summary_owner(
     review_lease_nonce: str | None = None,
     runtime_home: str | Path | None = None,
     attempt_cwd: str | Path | None = None,
+    jobs: str | Path | None = None,
 ) -> dict[str, str]:
     """Launch and prove one exact-attempt supervisor; return registry metadata."""
 
@@ -789,7 +795,7 @@ def launch_summary_owner(
     process = subprocess.Popen(
         argv,
         cwd=str(ROOT),
-        env=_owner_env(),
+        env=_owner_env(jobs),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -866,6 +872,22 @@ def _encoded_cwd(cwd: str) -> str:
     return encode_project_dir(cwd)
 
 
+def _plain_runtime_warning(raw: bytes) -> bool:
+    """A runtime's plain stderr text line, never damaged protocol data.
+
+    JSON-like bytes (a brace, a leading quote or bracket), a supervisor or session
+    marker, control bytes, or undecodable bytes stay malformed data: a damaged
+    announcement must not leave another session's announcement as the source.
+    """
+    try:
+        text = raw.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return False
+    return bool(text) and text[0] not in "[\"" and not any(
+        mark in text for mark in ("{", "}", "dispatch.supervisor", "session_id")) and not any(
+        ord(char) < 32 and char != "\t" for char in text)
+
+
 def announced_session(
     path: Path, scan: int = SESSION_ANNOUNCE_SCAN,
 ) -> tuple[bool, dict[str, str] | None]:
@@ -908,6 +930,10 @@ def announced_session(
         try:
             row = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
+            if found is not None and _plain_runtime_warning(raw):
+                # A runtime's plain stderr line (for example a CLI settings warning) after
+                # the exact announcement does not revoke it; the transcript stays the source.
+                continue
             # Malformed complete data is not converted into a successful source.
             return (True, {"invalid": "malformed-supervisor-log"}) if saw_supervisor else (False, None)
         if isinstance(row, dict) and str(row.get("type") or "").startswith("dispatch.supervisor."):
@@ -1369,6 +1395,7 @@ def ensure_attempt_owner(jobs: str | Path, attempt_id: str) -> dict[str, Any]:
                 prompt_path=retained_prompt,
                 runtime_home=metadata.get("runtime_home"),
                 attempt_cwd=fields[3],
+                jobs=jobs_path,
             )
         except (OSError, ValueError) as exc:
             return {"state": "failed", "reason": str(exc)}

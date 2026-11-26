@@ -286,7 +286,14 @@ class ObservationTransport:
         self._status_pane_ids: set[str] = set()
         self._agents: tuple[dict, ...] = ()
         self._observed_at = 0.0
+        # Why the latest ``observe`` returned None; the collector records it so
+        # a failed round names its cause (None after a complete view).
+        self.last_failure: str | None = None
         self._lock = threading.RLock()
+
+    def _failed(self, why, exc=None):
+        self.last_failure = why if exc is None else "%s: %s %s" % (
+            why, type(exc).__name__, str(exc)[:60])
 
     def close(self):
         with self._lock:
@@ -328,7 +335,8 @@ class ObservationTransport:
                 raise ValueError("herdr-subscribe-rejected")
             self._socket = client
             return True
-        except (OSError, ValueError, TimeoutError, ConnectionError):
+        except (OSError, ValueError, TimeoutError, ConnectionError) as exc:
+            self._failed("subscribe", exc)
             client.close()
             self._buffer.clear()
             return False
@@ -339,9 +347,11 @@ class ObservationTransport:
         try:
             response = _request_once(self.socket_path, "session.snapshot", {},
                                      timeout=self.timeout, connector=self._connector)
-        except (OSError, ValueError, TimeoutError, ConnectionError):
+        except (OSError, ValueError, TimeoutError, ConnectionError) as exc:
+            self._failed("snapshot", exc)
             return None
         if "error" in response:
+            self._failed("snapshot refused")
             return None
         result = response.get("result")
         snapshot = result.get("snapshot") if isinstance(result, dict) else None
@@ -350,6 +360,7 @@ class ObservationTransport:
                 or snapshot.get("protocol") != HERDR_API_PROTOCOL
                 or not isinstance(snapshot.get("panes"), list)
                 or not isinstance(snapshot.get("agents"), list)):
+            self._failed("snapshot malformed")
             return None
         agents = tuple(dict(agent) for agent in snapshot["agents"]
                         if isinstance(agent, dict))
@@ -364,6 +375,7 @@ class ObservationTransport:
         try:
             while True:
                 if frames >= _EVENT_DRAIN_FRAME_LIMIT or time.monotonic() >= deadline:
+                    self._failed("event drain over its limit")
                     self._state.reconnect()
                     return False, saw_event
                 marker = self._buffer.find(b"\n")
@@ -389,14 +401,17 @@ class ObservationTransport:
                 if "error" in envelope:
                     # Includes `error.code == events_lost`; no event enum or
                     # sequence number is inferred from that server error.
+                    self._failed("events lost")
                     self._state.reconnect()
                     return False, saw_event
                 if not self._state.apply_event(self.endpoint, envelope):
+                    self._failed("event rejected")
                     self._state.reconnect()
                     return False, saw_event
                 saw_event = True
                 frames += 1
-        except (OSError, ValueError, TimeoutError, ConnectionError):
+        except (OSError, ValueError, TimeoutError, ConnectionError) as exc:
+            self._failed("event stream", exc)
             self._state.reconnect()
             return False, saw_event
 
@@ -444,11 +459,14 @@ class ObservationTransport:
                 self._state.reconnect()
                 continue
             if not self._state.replace_snapshot(self.endpoint, panes):
+                self._failed("snapshot rejected")
                 self._close_socket()
                 return False
             self._agents = agents
             self._observed_at = time.monotonic()
+            self.last_failure = None
             return True
+        self._failed("events overlapped every snapshot")
         self._close_socket()
         self._state.reconnect()
         return False
@@ -627,10 +645,43 @@ def record_native_status(payload: dict, *, now: float | None = None) -> bool:
                 pass
 
 
+def _process_parent(pid: int) -> int | None:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        fields = stat[stat.rindex(")") + 1:].split()
+        return int(fields[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _is_descendant(pid: int, ancestor: int, *, depth: int = 6) -> bool:
+    """Whether live ``pid`` reaches live ``ancestor`` through at most ``depth`` parent links."""
+    current = pid
+    for _ in range(depth):
+        current = _process_parent(current)
+        if current is None or current <= 1:
+            return False
+        if current == ancestor:
+            return True
+    return False
+
+
 def read_native_status(endpoint: str, pane: str, harness: str, session_id: str,
-                       pid: int, pid_start: str, *, max_age: float = 15.0,
+                       pid: int, pid_start: str, *, max_age: float | None = 15.0,
                        now: float | None = None) -> dict | None:
-    """Return a fresh native event only for its exact pane, SID and PID birth."""
+    """Return a native event only for its exact pane, SID and PID birth.
+
+    ``max_age`` bounds how old the event may be (the retire guard keeps 15 s);
+    ``None`` accepts the latest event for as long as that exact process lives,
+    because the plugin writes one record per status change and an idle session
+    writes nothing more.
+
+    The OpenCode plugin runs in a process the TUI spawned, so its record names
+    that process, not the TUI. The record is the TUI's own when its writer is
+    the TUI (exact pid and birth) or a live, birth-exact descendant of the TUI
+    (same PID namespace); the pane and session id are in the record key, so
+    another session's record cannot match.
+    """
     try:
         path = _native_status_path(endpoint, pane, harness, session_id)
         row = json.loads(path.read_text(encoding="utf-8"))
@@ -638,17 +689,24 @@ def read_native_status(endpoint: str, pane: str, harness: str, session_id: str,
         if (not isinstance(row, dict) or row.get("schema_version") != 1
                 or any(row.get(key) != value for key, value in (
                     ("endpoint", endpoint_name(endpoint)), ("pane", pane),
-                    ("harness", harness), ("session_id", session_id),
-                    ("pid", pid), ("pid_start", pid_start)))
+                    ("harness", harness), ("session_id", session_id)))
                 or row.get("status") not in {"idle", "working", "blocked", "unknown"}
                 or type(row.get("observed_at")) not in (int, float)
                 or current - row["observed_at"] < 0
-                or current - row["observed_at"] > max_age
+                or (max_age is not None and current - row["observed_at"] > max_age)
                 or _process_start_ticks(pid) != pid_start
                 or row.get("pid_namespace") != os.readlink(f"/proc/{pid}/ns/pid")
                 or row.get("pid_namespace") != os.readlink("/proc/self/ns/pid")):
             return None
-        return row
+        writer, writer_start = row.get("pid"), row.get("pid_start")
+        if writer == pid and writer_start == pid_start:
+            return row
+        if (type(writer) is int and writer > 1 and isinstance(writer_start, str)
+                and _process_start_ticks(writer) == writer_start
+                and os.readlink(f"/proc/{writer}/ns/pid") == row["pid_namespace"]
+                and _is_descendant(writer, pid)):
+            return row
+        return None
     except (OSError, ValueError, TypeError):
         return None
 

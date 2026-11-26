@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import importlib.util,os,subprocess,sys,tempfile,unittest
 import contextlib,hashlib,io,json
 from contextlib import ExitStack
@@ -26,6 +29,21 @@ def _with_hash(data):
     return data
 
 class TestSmoke(unittest.TestCase):
+ def test_two_real_runs_of_same_bytes_have_distinct_execution_evidence(self):
+  with tempfile.TemporaryDirectory() as td:
+   source=Path(td)/"batch.py";source.write_text("pass\n")
+   output=Path(td)/"smoke.json"
+   command=[sys.executable,str(P),"attest","--input",str(source),"--cwd",td,
+            "--output",str(output),"--",sys.executable,str(source)]
+   subprocess.run(command,check=True,env=CLEAN_ENV,capture_output=True)
+   first=json.loads(output.read_text())
+   subprocess.run(command,check=True,env=CLEAN_ENV,capture_output=True)
+   second=json.loads(output.read_text())
+   self.assertTrue(M.verify(first));self.assertTrue(M.verify(second))
+   self.assertEqual(first["inputs"],second["inputs"])
+   self.assertNotEqual(first["attestation_hash"],second["attestation_hash"])
+   self.assertLess(first["executed_at"],second["executed_at"])
+
  def test_execution_environment_identity_binds_selection_without_ambient_secrets(self):
   import resource_execution_environment as ENV
   with tempfile.TemporaryDirectory() as td:

@@ -67,7 +67,8 @@ from .model import (fmt_min, dash, project_of, exec_child_is_wait,
                     current_attempt_rank)
 from . import gitinfo, titles
 from .config import ui_text
-from .palette import _HUE_OF, hue_colors
+from .palette import _HUE_OF, _KIND_256, _ZONE_256, harness_spin, hue_colors
+from .palette import KIND_FIELDS as _KIND_FIELDS
 from .work_titles import readable as _readable_name, resource_name as _resource_name, resource_title_key, subject_command
 from .collectors import compute_hosts as _compute_hosts
 from .refresh import LiveSnapshot, RefreshPump, background_read, as_snapshot
@@ -98,11 +99,11 @@ from .render_cells import (  # noqa: F401
     _MW, _NAME2_MAX, _NAME_COL, _NAME_GAP, _NAME_HUE, _NAME_KEY, _NAME_KEY_DIM, _NAME_WIDE_MAX,
     _NARROW_CUTOFF, _NARROW_L2_STAGE_COL, _narrow_session_cell_budget, _native_context_gauge,
     _NW_S, _OPTW, _pad, _pad_to_column, _palette_fg, _pct_key, _PIPE_STAGES, _QA_INT,
-    _resolved_alias_model, _resolved_alias_models, _RICHER_RGB_1000, _ROLE_MODEL_NAME,
+    _resolved_alias_model, _resolved_alias_models, _RICHER_RGB_1000, _HARNESS_256, _HARNESS_RGB_1000, _ROLE_MODEL_NAME,
     _route_current_index, _ROUTE_STAGE_ZONE_MAX, _route_zone_width, _SESSION_CELL_MAX,
     _session_routing_column, _short_model_id, _shorten_model_suffix, _SPIN, _STAGE_RESERVE,
     _STAGE_ROLE, _stage_role_label, _STAGE_ZONE_MAX, _state_key, _STEWARD_PAIR, _TAG_W,
-    _TINT_PAIR_START, _TINT_RGB_1000, _TITLE_MAX, _TWO_LINE_CUTOFF, _USAGE_BADGE_TEXT, _WIDE,
+    _KIND_PAIR_START, _TINT_PAIR_START, _ZONE_PAIR_START, _TINT_RGB_1000, _TITLE_MAX, _TWO_LINE_CUTOFF, _USAGE_BADGE_TEXT, _WIDE,
     _WIDE_STAGE_GAP, _WIDE_TIME_GAP, _wt_count, curses, NAME_KEYS,
 )
 from .render_stages import (  # noqa: F401
@@ -110,7 +111,7 @@ from .render_stages import (  # noqa: F401
     _compact_dispatch_name, _DISPATCH_NAME_MAX, _dispatch_stage_color_index,
     _dispatch_stage_label, _display_session_subject, _ICON_STEWARD, _interaction_badge,
     _interaction_chip, _is_owner_mode_row, _is_plugin_agent, _LEGACY_STAGE_COLOR_INDEX,
-    _one_shot_route, _plugin_phase, _projection_route_seq, _projection_stage_for_dispatch,
+    _one_shot_route, route_stage_key, _plugin_phase, _projection_route_seq, _projection_stage_for_dispatch,
     _projection_stage_text, _route_rides_the_rail, _ROUTE_STATE_MARK, _session_name,
     _session_tag_chip, _session_tag_slot, _spec_phase_seq, _stage_zone_segs,
     _stall_attention_stage_segs, _steward_flag, _subject_name_key, _subject_title, _text_age,
@@ -184,7 +185,7 @@ from .render_explorer import (  # noqa: F401
 )
 from .render_routes import (  # noqa: F401
     _append_segment, _BAR_ROLES, _clamp_offset, _click_target_excluded, _collect_governor,
-    _collect_memory, _collect_memory_observed, _collect_project_status, _entry_id, _GATE_MARK,
+    _collect_memory, _collect_memory_observed, _collect_project_status, _collect_experiment_status, _entry_id, _GATE_MARK,
     _gpu_strip_keys, _HFILL, _hit_at, _INSET, _is_fill, _jobs_unconfirmed,
     _known_parentless_support_job, _malformed, _observation_lines, _opencode_availability_text,
     _PAD_IN, _painted_hit_spans, _plain, _reading_legend, _route_card_l1, _route_job_row,
@@ -258,12 +259,14 @@ def _init_colors():
         if curses.COLORS >= 256 and curses.can_change_color():
             for name, rgb in _RICHER_RGB_1000.items():
                 curses.init_color(_MUTED_256[name], *rgb)
+            for name, rgb in _HARNESS_RGB_1000.items():
+                curses.init_color(_HARNESS_256[name], *rgb)
             for index, rgb in _TINT_RGB_1000.items():
                 curses.init_color(index, *rgb)
     except Exception:
         pass
     # color discipline (design review 2026-07-01): one meaning per color.
-    #   green/yellow/red = status + level ONLY · cyan/magenta/blue = harness identity ONLY
+    #   green/yellow/red = status + level ONLY · Claude orange/Codex lavender/OpenCode sky = harness identity ONLY (the families keep cyan/magenta/blue)
     #   soft-white bold = the row's single focal point (session name) · dim = all metadata
     fallback_spec = {
         "green": curses.COLOR_GREEN, "yellow": curses.COLOR_YELLOW, "red": curses.COLOR_RED,
@@ -272,7 +275,7 @@ def _init_colors():
         "orange": curses.COLOR_YELLOW,
     }
     palette_name = {
-        "h_claude": "cyan", "h_codex": "magenta", "h_opencode": "blue",
+        "h_claude": "claude", "h_codex": "codex", "h_opencode": "opencode",
     }
     spec = {
         key: _palette_fg(palette_name.get(key, key), fallback)
@@ -353,9 +356,9 @@ def _init_colors():
     # Idle summaries stay DIM; exact current process evidence promotes the same
     # hue to normal intensity (F-93). Text remains the primary identifier.
     for fam, hue_name in {
-        "rtx6000": "h_opencode", "rtx4090": "h_claude", "rtx5090": "green",
-        "blackwell": "green", "hopper": "h_codex", "ada": "h_claude",
-        "ampere": "h_opencode", "turing": "yellow", "legacy": "orange",
+        "rtx6000": "fam_sonnet", "rtx4090": "fam_opus", "rtx5090": "green",
+        "blackwell": "green", "hopper": "fam_fable", "ada": "fam_opus",
+        "ampere": "fam_sonnet", "turing": "yellow", "legacy": "orange",
     }.items():
         hue = _COLOR.get(hue_name, 0)
         _COLOR["gpu_" + fam] = hue | curses.A_DIM
@@ -376,7 +379,7 @@ def _init_colors():
         curses.init_pair(_STEWARD_PAIR, _palette_fg("steward_pink", curses.COLOR_MAGENTA), bg)
         _COLOR["tag_steward"] = curses.color_pair(_STEWARD_PAIR) | curses.A_BOLD
     except Exception:
-        _COLOR["tag_steward"] = (_COLOR.get("h_codex", 0) & ~curses.A_DIM) | curses.A_BOLD
+        _COLOR["tag_steward"] = (_COLOR.get("fam_fable", 0) & ~curses.A_DIM) | curses.A_BOLD
     _COLOR["tag_steward_dim"] = (_COLOR["tag_steward"] & ~curses.A_BOLD) | curses.A_DIM
     _COLOR["herdr_on"] = _COLOR.get("soft", 0)
     _COLOR["grp"] = _COLOR.get("soft", 0) | curses.A_BOLD  # group card title
@@ -390,7 +393,7 @@ def _init_colors():
     # Hearting identity is persistent metadata, not the screen's focal point.  Keep the
     # release in a quiet blue-grey and make checkout/build details recede further.  Dirty
     # remains barely warm so it is discoverable without reading like an alert.
-    _COLOR["version_release"] = _COLOR.get("h_opencode", 0) | curses.A_DIM
+    _COLOR["version_release"] = _COLOR.get("fam_sonnet", 0) | curses.A_DIM
     _COLOR["version_build"] = curses.A_DIM
     _COLOR["version_dirty"] = _COLOR.get("yellow", 0) | curses.A_DIM
     _COLOR["version_method"] = curses.A_DIM
@@ -412,8 +415,8 @@ def _init_colors():
     # (bold, the one true alarm — unchanged). No yellow anywhere in the ramp.
     _COLOR["eff_low"] = curses.A_DIM
     _COLOR["eff_medium"] = 0
-    _COLOR["eff_high"] = _COLOR.get("h_opencode", 0) & ~curses.A_DIM   # plain blue
-    _COLOR["eff_xhigh"] = (_COLOR.get("h_codex", 0) & ~curses.A_DIM) | curses.A_BOLD  # bold magenta
+    _COLOR["eff_high"] = _COLOR.get("fam_sonnet", 0) & ~curses.A_DIM   # plain blue (the family hue, not OpenCode's sky)
+    _COLOR["eff_xhigh"] = (_COLOR.get("fam_fable", 0) & ~curses.A_DIM) | curses.A_BOLD  # bold magenta (not Codex's lavender)
     _COLOR["eff_max"] = _COLOR.get("red", 0) | curses.A_BOLD
     # dispatch-row effort: the SAME hue ramp at dim weight (user 2026-07-20: 분사 행에도
     # 컬러 — a flat grey effort read as part of the grey subtitle). Bold is stripped so a
@@ -466,6 +469,9 @@ def _init_colors():
         if curses.COLORS >= 256:
             hues = hue_colors(curses.COLORS)
             n_pair = _TINT_PAIR_START
+            # The tint pairs end below the kind and zone pairs; a hue added past that would overwrite them, so tints stand down instead.
+            if n_pair + len(_TINT_LVL) * len(hues) > _KIND_PAIR_START:
+                raise ValueError("tint pairs would reach the kind pairs")
             for tch, lvl in _TINT_LVL.items():
                 for hch, fg in hues.items():
                     curses.init_pair(n_pair, fg, lvl)
@@ -477,8 +483,8 @@ def _init_colors():
         _TINT_PAIR.clear()
     # stage breadcrumb — each pipeline stage a DISTINCT color (user); the CURRENT stage is BOLD
     # Bright current stages stand out; past and pending stages use the same hue dimmed.
-    _stage_raw = [_hue.get("opencode", 0), _hue.get("claude", 0), _COLOR.get("green", 0),
-                  _COLOR.get("yellow", 0), _hue.get("codex", 0)]  # blue · cyan · green · yellow · magenta
+    _stage_raw = [_COLOR.get("fam_sonnet", 0), _COLOR.get("fam_opus", 0), _COLOR.get("green", 0),
+                  _COLOR.get("yellow", 0), _COLOR.get("fam_fable", 0)]  # blue · cyan · green · yellow · magenta
     for i, base in enumerate(_stage_raw):
         _COLOR["stg%d_on" % i] = base | curses.A_BOLD
         _COLOR["stg%d_off" % i] = base | curses.A_DIM
@@ -494,11 +500,45 @@ def _init_colors():
     for h in _NAME_HUE:
         _COLOR["nm_" + h] = _COLOR.get("hb_" + h, 0)
         _COLOR["nmd_" + h] = _COLOR.get("h_" + h, 0)
+        # 11-18: the working spinner of a line that names its harness, bright and receded.
+        _COLOR["hbb_" + h] = _COLOR.get("hb_" + h, 0) | curses.A_BOLD     # this window's own number on the PEERS line
+        _COLOR["spin_" + h] = _COLOR.get("hb_" + h, 0)
+        _COLOR["spind_" + h] = _COLOR.get("h_" + h, 0)
+    _COLOR["hbb_other"] = curses.A_BOLD
     _COLOR["nm_other"] = _COLOR.get("soft", 0) | curses.A_BOLD
     _COLOR["nmd_other"] = _COLOR.get("soft", 0) | curses.A_DIM
     _COLOR["head"] = curses.A_DIM
     _COLOR["section_head"] = _COLOR.get("soft", 0) | curses.A_BOLD
     _COLOR["unknown"] = curses.A_DIM
+    # 11-18 (route kind color): the kind word and its bracket in the field's 256-color hue (the word bold, the bracket dim,
+    # plain or bold by its intensity); under 256 colors they read as before (the word as `grp`, the bracket dim).
+    for number, field in enumerate(_KIND_FIELDS):
+        hue = None
+        try:
+            if curses.COLORS >= 256:
+                curses.init_pair(_KIND_PAIR_START + number, _KIND_256["kind_" + field], bg)
+                hue = curses.color_pair(_KIND_PAIR_START + number)
+        except Exception:
+            hue = None
+        if hue is None:
+            _COLOR["kind_" + field] = _COLOR.get("grp", 0)
+            for weight in "qsb":
+                _COLOR["kind%s_%s" % (weight, field)] = curses.A_DIM
+        else:
+            _COLOR["kind_" + field] = hue | curses.A_BOLD
+            _COLOR["kindq_" + field] = hue | curses.A_DIM
+            _COLOR["kinds_" + field] = hue
+            _COLOR["kindb_" + field] = hue | curses.A_BOLD
+    # 11-18 (review of #1715, follow-up 4): the three zone names (the route box's `─ direct ─`, and the request line's `→`) wear their
+    # hue where no row tint stands too: `_key_attr` reads these only without a tint (a tinted cell composes its own pair).
+    for number, zone in enumerate(_ZONE_256):
+        try:
+            if curses.COLORS < 256:
+                raise ValueError
+            curses.init_pair(_ZONE_PAIR_START + number, _ZONE_256[zone], bg)
+            _COLOR[zone] = curses.color_pair(_ZONE_PAIR_START + number)
+        except Exception:
+            pass   # (under 256 colors the zone name keeps its plain weight, as before)
 
 
 def _attr(key):
@@ -607,17 +647,17 @@ def _route_stage_segs(route_seq, working, max_width):
     # a node name and its state mark. Flush (`execute✕`) the glyph read as part of the word.
     for i, (nid, st) in enumerate(route_seq):
         if st == "failed":
-            items.append((i, nid + " ✕", "lvl_r"))
+            items.append((i, nid + " ✕", route_stage_key(i, st)))
         elif st == "attention":
-            items.append((i, nid + " !", "lvl_y"))
+            items.append((i, nid + " !", route_stage_key(i, st)))
         elif st == "degraded":
-            items.append((i, nid + " ◐", "lvl_y"))
+            items.append((i, nid + " ◐", route_stage_key(i, st)))
         elif st in ("reconciling", "recovering"):
-            items.append((i, nid + " …", "lvl_y"))
+            items.append((i, nid + " …", route_stage_key(i, st)))
         elif st == "done":
-            items.append((i, nid + " ✓", "stg%d_off" % (i % 5)))
+            items.append((i, nid + " ✓", route_stage_key(i, st)))
         elif st == "active":
-            items.append((i, nid, _cur_key(i)))
+            items.append((i, nid, route_stage_key(i, st, bright=not (working and not _BLINK_ON))))
         else:
             # pending (and any residual skipped that a caller did not filter) — the name in the
             # dim off-hue, no glyph. Kept glyph-free on purpose: ✓/✕ are the only markers, and a
@@ -903,6 +943,7 @@ def _session_row(s, narrow, is_parent=False, child_count=0, name_width=None,
     dim_tel = live in ("stale", "dead") or s.app_server or s.detached
     dead_stale = live in ("stale", "dead")   # F-13: telemetry gone, replaced with a single age cell
     gch, gkey = _glyph(live)
+    gkey = harness_spin(gkey, s.harness)      # 11-18: a working spinner in its harness's color
     if s.detached and live not in ("stale", "dead"):
         gch, gkey = _DETACHED_GLYPH, "g_work_off"   # detached: loading axis, dim-green
     # main↔spawned weight = font-color intensity (no bg fill — the reverse badge read as weird):
@@ -1074,9 +1115,11 @@ def _opts_segs(j, max_width=None):
     if stage_worker:
         knob_items = [t for t in (_short_level(getattr(j, "intensity", None)),) if t]
     else:
+        # 11-20: a unit route's leg shows no intensity (the registry row keeps it).
+        unit_leg = _strip_autopilot(getattr(j, "capability_owner", None) or "") == "unit"
         knob_items = [t for t in (
             _display_capability_mode(j),
-            _short_level(getattr(j, "intensity", None)),
+            None if unit_leg else _short_level(getattr(j, "intensity", None)),
         ) if t]
     # F-<next>: a compose-shaped owner route names its shape as a fourth behaviour knob
     # (mode·intensity·shape·role, plan §3 C-4.4) — owner rows only, and only when the
@@ -1194,6 +1237,7 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
     # slug stays the fallback — same title → name → slug chain as session rows.
     slug_name = _subject_title(j) or j.slug or key
     gch, gkey = _glyph(j.liveness, dim=True)
+    gkey = harness_spin(gkey, getattr(j, "harness", None))
     afterglow_j = bool(getattr(j, "afterglow", False))
     if afterglow_j:
         gch, gkey = _LIVE_GLYPH["done"], "dim"   # F-46: dim ✓, never the live green
@@ -1402,6 +1446,7 @@ def _session_row_2line(s, is_parent=False, child_count=0, _split=False, term_wid
     slug = s.slug or (s.cwd.rsplit("/", 1)[-1] if s.cwd else "?")
     dim_tel = live in ("stale", "dead") or s.app_server or s.detached
     gch, gkey = _glyph(live)
+    gkey = harness_spin(gkey, s.harness)
     if s.detached and live not in ("stale", "dead"):
         gch, gkey = _DETACHED_GLYPH, "g_work_off"
     hn = _BADGE_TEXT.get(s.harness, "?")
@@ -1493,7 +1538,7 @@ def _session_row_2line(s, is_parent=False, child_count=0, _split=False, term_wid
     # indent / no far-right flush).
     l2 = [(" " * _SESSION_DETAIL_COL, None),
           (_pad(fmt_min(s.elapsed_min), 4 + _HW - _SESSION_DETAIL_COL), "dim")]
-    l2 += _model_cell(s.model, s.effort, _MW, dim=dim_tel)
+    l2 += _model_cell(s.model, s.effort, _MW, dim=dim_tel, harness=s.harness)
     # Same cell as the wide row (capability tag, route chain, spec breadcrumb): this card
     # used to call the bare projection text and showed `-` for inline work the wide row named.
     l2 = _pad_to_column(l2, _session_routing_column("narrow"))
@@ -1540,6 +1585,7 @@ def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, 
     # slug stays the fallback — same title → name → slug chain as session rows.
     slug_name = _subject_title(j) or j.slug or key
     gch, gkey = _glyph(j.liveness, dim=True)
+    gkey = harness_spin(gkey, getattr(j, "harness", None))
     afterglow_j = bool(getattr(j, "afterglow", False))
     if afterglow_j:
         gch, gkey = _LIVE_GLYPH["done"], "dim"   # F-46 parity with the wide row
@@ -1576,7 +1622,7 @@ def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, 
         lead = _RAIL_COL + 3
         eff = j.effort or parent_effort or None
         l2 = [(" " * lead, None), (_pad(fmt_min(j.elapsed_min), 4 + _HW - lead), "dim")]
-        l2 += _model_cell(_job_display_model(j, parent_model), eff, _MW, dim=True)
+        l2 += _model_cell(_job_display_model(j, parent_model), eff, _MW, dim=True, harness=j.harness)
         l2 = _pad_to_column(l2, _session_routing_column("narrow"))
         l2 += _opts_segs(j)[0]
     elif afterglow_j:
@@ -1586,13 +1632,13 @@ def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, 
         # elapsed cell, so no depth needs it repeated (F-64a).
         eff = j.effort or parent_effort or None
         l2 = [("    ", None), (_pad(fmt_min(j.elapsed_min), _HW), "dim")]
-        l2 += _model_cell(_job_display_model(j, parent_model), eff, _MW, dim=True)
+        l2 += _model_cell(_job_display_model(j, parent_model), eff, _MW, dim=True, harness=j.harness)
         l2.append(("    ", None))
         l2 += _stage_zone_segs([("done %s" % _LIVE_GLYPH["done"], "dim")])
     else:
         eff = j.effort or parent_effort or None
         l2 = [("    ", None), (_pad(fmt_min(j.elapsed_min), _HW), "dim")]
-        l2 += _model_cell(_job_display_model(j, parent_model), eff, _MW, dim=True)
+        l2 += _model_cell(_job_display_model(j, parent_model), eff, _MW, dim=True, harness=j.harness)
         l2.append(("    ", None))
         opt_segs, optw = _opts_segs(j)
         l2 += opt_segs
@@ -2800,6 +2846,7 @@ _EXPLORER_GENERATION = 0
 _EXPLORER_READINESS = {"ready": True}
 _EXPLORER_SHOWN = False      # a complete frame was drawn: later pending sources never blank the screen again
 _EXPLORER_PUBLISHED_MODEL = None
+_EXPLORER_RETAINED = (None, None)  # (composed candidate, its publication with kept cells)
 _EXPLORER_REPLAY_ACTIVE = False
 _EXPLORER_DETAIL_CONTINUATION = None
 _EXPLORER_REMOTE_OBSERVATION = None
@@ -2807,6 +2854,14 @@ _EXPLORER_QUESTION_QUEUE = None
 _EXPLORER_QUESTION_PUMP = None
 _EXPLORER_QUESTION_GENERATION = 0
 _EXPLORER_QUESTION_REFRESH_AT = 0.0
+# Every finished selected-request action, in order. The pump hands over only
+# its latest value, so an empty follow-up run could replace a finished read and
+# leave the opened row on "loading" for good (2026-11-11).
+_EXPLORER_QUESTION_RESULTS = deque()
+# A read still running after this many seconds ends on the native-prompt
+# status; its late result is still adopted while the row stays selected.
+QUESTION_READ_WAIT_S = 15.0
+_EXPLORER_QUESTION_LOADING = (None, 0.0)
 
 
 def set_explorer_mode(enabled=True):
@@ -2843,6 +2898,33 @@ def _explorer_view(snapshot):
     if getattr(snapshot, "hearting", None) is None and isinstance(_HEARTING, dict):
         extras["hearting"] = dict(_HEARTING)         # the install info the default board's header uses
     return _ExplorerView(snapshot, **extras) if extras else snapshot
+
+
+def _basic_source_events():
+    """Kernel notification for the files whose change the basic collection reads: the dispatch
+    registries and the producer's ``projection.json`` (exact names). None when it cannot be had
+    or a source is on a network mount (those keep the 2 s tick)."""
+    try:
+        from .native_events import NativeDisplayEvents
+        from .collectors import dispatch
+        import human_wait_state
+        from claude_process_identity import is_local_path
+        paths = [str(path) for path in dispatch.human_gate_registry_paths()]
+        paths.append(str(human_wait_state.state_root() / "projection.json"))
+        local = []
+        for path in paths:
+            directory = os.path.dirname(os.path.abspath(path))
+            while directory and not os.path.isdir(directory) and os.path.dirname(directory) != directory:
+                directory = os.path.dirname(directory)
+            if is_local_path(directory):
+                local.append(path)
+        if not local:
+            return None
+        events = NativeDisplayEvents()
+        events.configure(tuple(local))
+        return events
+    except Exception:
+        return None
 
 
 def _explorer_runtime():
@@ -3218,8 +3300,10 @@ def _explorer_apply_effects(effects, vm, *, snapshot=None):
     if not isinstance(result, Mapping) or not result.get("model_action"):
         return result
 
+    from .explorer.state import finish_follow_draft
     state = _explorer_state_for(_EXPLORER_STATE, 0)
-    _EXPLORER_STATE = _replace_state(state, status=str(result.get("message") or "model set finished"))
+    _EXPLORER_STATE = finish_follow_draft(
+        _replace_state(state, status=str(result.get("message") or "model set finished")), model_actions, result)
     refreshed = result.get("models")
     if isinstance(refreshed, Mapping):
         for name in ("_EXPLORER_MODEL", "_EXPLORER_PUBLISHED_MODEL", "_EXPLORER_COMPOSE_MODEL"):
@@ -3297,10 +3381,19 @@ def _explorer_question_worker():
                 state.view != "QUESTIONS"
                 or state.opened_for("qsel:QUESTIONS", "") != ref.get("id")
                 or not _explorer_question_ref_current(ref)))):
-        return {"effect": effect, "result": {
-            "state": "unknown", "reason": "selected request changed before the action ran"}}
+        return _explorer_question_finished({"effect": effect, "result": {
+            "state": "unknown", "reason": "selected request changed before the action ran"}})
     from .explorer.runtime import ExplorerRuntime
-    return {"effect": effect, "result": ExplorerRuntime.execute_question_action(effect)}
+    return _explorer_question_finished(
+        {"effect": effect, "result": ExplorerRuntime.execute_question_action(effect)})
+
+
+def _explorer_question_finished(update):
+    """Keep every finished action for the next tick, in order."""
+    update["_queued"] = True
+    with _EXPLORER_QUESTION_QUEUE_LOCK:
+        _EXPLORER_QUESTION_RESULTS.append(update)
+    return update
 
 
 def _explorer_question_ref_current(ref):
@@ -3377,6 +3470,11 @@ def _explorer_accept_question_result(update):
                                result, "Selected request is ready." if envelope["state"] == "open"
                                else "Request state: " + envelope["state"]))
     elif operation == "questions.draft":
+        from .explorer.state import _question_draft_for_backend
+        # The editor may have changed or submitted this draft while its save was running.
+        if overlay.get("pending") or (len(effect) > 2 and isinstance(overlay.get("draft"), Mapping)
+                and effect[2] != _question_draft_for_backend(overlay["draft"], overlay.get("detail"))):
+            return
         if envelope is not None and envelope.get("state") == "open":
             from .explorer.state import question_draft_from_backend, question_ui_detail
             draft = question_draft_from_backend(envelope, envelope.get("draft"))
@@ -3415,15 +3513,49 @@ def _explorer_accept_question_result(update):
         _explorer_queue_question_effect(("questions.read", ref))
 
 
+def _explorer_question_loading_expired():
+    """End an opened row's "loading" after QUESTION_READ_WAIT_S on the native-prompt status."""
+    global _EXPLORER_STATE, _EXPLORER_QUESTION_LOADING
+    state = _explorer_state_for(_EXPLORER_STATE, 0)
+    overlay = state.question_overlay if isinstance(state.question_overlay, Mapping) else {}
+    ref = overlay.get("ref") if isinstance(overlay.get("ref"), Mapping) else {}
+    if overlay.get("state") != "loading" or not ref.get("id"):
+        _EXPLORER_QUESTION_LOADING = (None, 0.0)
+        return
+    now = time.monotonic()
+    key = (ref.get("id"), id(state.question_overlay))
+    if _EXPLORER_QUESTION_LOADING[0] != key:
+        _EXPLORER_QUESTION_LOADING = (key, now)
+        return
+    if now - _EXPLORER_QUESTION_LOADING[1] < QUESTION_READ_WAIT_S:
+        return
+    _EXPLORER_QUESTION_LOADING = (None, 0.0)
+    overlay = dict(overlay)
+    overlay.update(state="unknown", pending=False,
+                   status="Selected request could not be read in time; use the native prompt.")
+    from dataclasses import replace
+    _EXPLORER_STATE = replace(state, question_overlay=overlay)
+
+
 def _explorer_question_pump_tick():
     global _EXPLORER_QUESTION_GENERATION, _EXPLORER_QUESTION_REFRESH_AT
     pump = _EXPLORER_QUESTION_PUMP
     if pump is None:
         return
     update = pump.poll(_EXPLORER_QUESTION_GENERATION)
+    with _EXPLORER_QUESTION_QUEUE_LOCK:
+        finished = list(_EXPLORER_QUESTION_RESULTS)
+        _EXPLORER_QUESTION_RESULTS.clear()
     if update is not None:
         _EXPLORER_QUESTION_GENERATION, value = update
+        # A value that never went through the result queue (another producer)
+        # is still adopted; a queued one was taken from the queue already.
+        if (not finished and isinstance(value, Mapping)
+                and not value.get("_queued")):
+            finished = [value]
+    for value in finished:
         _explorer_accept_question_result(value)
+    _explorer_question_loading_expired()
     with _EXPLORER_QUESTION_QUEUE_LOCK:
         pending = bool(_EXPLORER_QUESTION_QUEUE)
     if pending:
@@ -5507,6 +5639,7 @@ def render_once(collect_all, hfilter, section, *, compute_hosts_refresh=None):
         size = shutil.get_terminal_size((100, 45))
         snapshot.governor, snapshot.memory = governor_snapshot, mem_snapshot
         snapshot.project_status = _collect_project_status(sessions)
+        snapshot.experiment_status = _collect_experiment_status(sessions)
         gitinfo.enrich_entities(list(sessions) + list(jobs), schedule_ahead=False)
         frame = _explorer_once_frame(snapshot, size.columns, size.lines, detail=True)
         sys.stdout.write("\n".join(frame.text_rows()).rstrip() + "\n")
@@ -6180,7 +6313,7 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
     global _HIT_SNAPSHOT_ID, _CURRENT_BODY_H, _CURRENT_BODY_TOP, _CURRENT_BODY_COUNT
     global _LAYOUT_META, _EXPLORER_SHOWN
     global _EXPLORER_MODEL, _EXPLORER_PUBLISHED_MODEL, _EXPLORER_REPLAY_ACTIVE
-    global _EXPLORER_DETAIL_CONTINUATION, _EXPLORER_STATE
+    global _EXPLORER_DETAIL_CONTINUATION, _EXPLORER_STATE, _EXPLORER_RETAINED
 
     _TOGGLE_ROWS, _TOGGLE_SPANS = {}, {}
     _CLICK_ROWS, _CLICK_SPANS = {}, {}
@@ -6216,13 +6349,21 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
             complete = runtime.publication_ready(readiness)
             if complete:
                 _EXPLORER_REPLAY_ACTIVE = False
-                _EXPLORER_PUBLISHED_MODEL = candidate_model
-                _EXPLORER_MODEL = _explorer_native_display(candidate_model)
+                # Ready required sources are not observations of every display
+                # cell: a same-process row keeps what it showed until a value
+                # is actually observed (unchanged inputs reuse the result).
+                if (_EXPLORER_RETAINED[0] is not candidate_model
+                        or _EXPLORER_RETAINED[1] is not _EXPLORER_PUBLISHED_MODEL):
+                    from .explorer.live import retain_unobserved_cells
+                    published = retain_unobserved_cells(candidate_model, _EXPLORER_PUBLISHED_MODEL)
+                    _EXPLORER_RETAINED = (candidate_model, published)
+                _EXPLORER_PUBLISHED_MODEL = _EXPLORER_RETAINED[1]
+                _EXPLORER_MODEL = _explorer_native_display(_EXPLORER_PUBLISHED_MODEL)
                 _EXPLORER_SHOWN = True
                 runtime.mark_published(readiness)
                 frame = runtime.draw_frame(_EXPLORER_MODEL, state, w, h, beat=int(_BLINK_ON))
                 if runtime.all_new(readiness):
-                    runtime.persist_complete_async(candidate_model, readiness,
+                    runtime.persist_complete_async(_EXPLORER_PUBLISHED_MODEL, readiness,
                                                    _EXPLORER_DETAIL_CONTINUATION)
             elif _EXPLORER_PUBLISHED_MODEL is not None:
                 from .explorer.live import selected_detail, current_claude_usage, current_session_activity
@@ -6239,6 +6380,14 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
                               else shown.with_updates(clock=clock))
                 frame = _explorer_frame_from_model(live_model, state, w, h,
                                                    beat=1 if _EXPLORER_REPLAY_ACTIVE else int(_BLINK_ON))
+                _EXPLORER_SHOWN = True
+            elif runtime.observed_only(readiness) and candidate_model is not None:
+                # Nothing saved to replay, the basic collection is in and the required details
+                # are not: show what is observed with its late cells marked "details wait". This
+                # frame is shown only; it is never published or kept as the last complete model.
+                from .explorer.live import mark_details_wait
+                _EXPLORER_MODEL = mark_details_wait(candidate_model, readiness)
+                frame = runtime.draw_frame(_EXPLORER_MODEL, state, w, h, beat=int(_BLINK_ON))
                 _EXPLORER_SHOWN = True
             else:
                 _EXPLORER_MODEL = None
@@ -6492,10 +6641,24 @@ def _explorer_question_editing():
                 and isinstance(overlay, Mapping) and overlay.get("editing"))
 
 
+def _explorer_question_writable():
+    from .explorer.state import QUESTION_OPEN_FOLD, question_items, question_free_text_supported
+    state = _EXPLORER_STATE
+    overlay = getattr(state, "question_overlay", None)
+    if (getattr(state, "view", None) != "QUESTIONS" or state.scope != "-"
+            or state.opened_for(QUESTION_OPEN_FOLD) == "-"
+            or not isinstance(overlay, Mapping) or overlay.get("state") != "open"):
+        return False
+    detail = overlay.get("detail")
+    specs = question_items(detail)
+    qid = overlay.get("editing_question_id") or (specs[0]["id"] if specs else "")
+    return bool(qid and question_free_text_supported(detail, qid))
+
+
 def _explorer_text_input():
     """Typed characters are text, not commands: a question is being edited or the MODELS list filtered."""
     from .explorer.state import models_finding
-    return _explorer_question_editing() or models_finding(_EXPLORER_STATE)
+    return _explorer_question_writable() or models_finding(_EXPLORER_STATE)
 
 
 def _explorer_unmoved_tree_release(bstate, state):
@@ -6563,11 +6726,15 @@ def _explorer_handle(ch, mouse_event=None, size=None, snapshot=None):
             _explorer_apply_effects(_effects, _EXPLORER_MODEL, snapshot=snapshot)
         return
     from .explorer.state import models_finding
-    editing = (state.view == "QUESTIONS" and _explorer_question_editing()) or models_finding(state)
+    editing = (state.view == "QUESTIONS" and _explorer_question_writable()
+               and (_explorer_question_editing() or ch not in range(49, 58))) or models_finding(state)
     if editing and isinstance(ch, int) and (32 <= ch < 127 or 128 <= ch < 256):
         key = _explorer_text_key(ch)
     else:
         key = _explorer_key_name(ch)
+        if key is None and _explorer_question_editing():
+            # 11-22: a typed answer has a place in it; these keys only mean something while it is typed.
+            key = {getattr(curses, "KEY_DC", -1): "delete", 1: "ctrl-a", 5: "ctrl-e"}.get(ch)
     if key:
         from .explorer.runtime import tag_cycle
         order = tag_cycle(getattr(_EXPLORER_MODEL, "ordering", None))
@@ -6756,6 +6923,7 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             value.memory, memory_state = _collect_memory_observed(include_backlog=_EXPLORER_ENABLED)
             value.governor = governor
             value.project_status = _collect_project_status(value.sessions)
+            value.experiment_status = _collect_experiment_status(value.sessions)
             observations = dict(getattr(value, "observations", None) or {})
             observations["optional:memory"] = {"state": memory_state,
                                                 "observed_at": time.time()}
@@ -6835,8 +7003,18 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
         # alone request this bounded reader. Normal census cadence stays intact.
         display_pump = RefreshPump(collect_native_display, interval,
                                    name="fleet-native-display", adaptive_cadence=True)
+        # The basic collection also starts when the registry or the answer-wait producer's
+        # projection changes, not only at its 2 s tick (the tick's phase was most of what a
+        # route start or an answer wait waited for). Fleet writes neither file, so this cannot
+        # wake itself; the pump's adaptive rest still bounds the cadence, and without kernel
+        # notification (or on a network file) the 2 s tick alone remains. It is armed once the
+        # first basic snapshot is in (below): the modules it needs are loaded by that collection,
+        # and building it before the first frame put their import (~0.4 s) in front of the saved
+        # model's replay.
+        basic_events, basic_events_pending = None, True
     else:
         _EXPLORER_NATIVE_DISPLAY = None
+        basic_events, basic_events_pending = None, False
     selection_feed = None
     sessions, jobs = snapshot.sessions, snapshot.jobs
     resources = snapshot.resources
@@ -6929,6 +7107,8 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
                 if (display_pump is not None and generation > 0
                         and display_events.take_changed()):
                     display_pump.request(force=True)
+                if basic_events is not None and basic_events.take_changed():
+                    pump.request_soon(now=now_mono)
             if install_pump is not None and background_started:
                 install_pump.request_due(now=now_mono)
                 install_update = install_pump.poll(install_generation)
@@ -6948,6 +7128,9 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
                 generation, basic_snapshot = update
                 if _EXPLORER_ENABLED:
                     detail_pump.request(force=True)
+                if basic_events_pending:
+                    basic_events_pending = False
+                    basic_events = _basic_source_events()
             detail_update = detail_pump.poll(detail_generation)
             if detail_update is not None:
                 detail_generation, next_detail = detail_update
@@ -7131,6 +7314,8 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             display_pump.stop(join_timeout=1.0)
         if display_events is not None:
             display_events.stop(join_timeout=1.0)
+        if basic_events is not None:
+            basic_events.stop(join_timeout=1.0)
         _EXPLORER_NATIVE_DISPLAY = None
         pump.stop(join_timeout=1.0)
         detail_pump.stop(join_timeout=1.0)

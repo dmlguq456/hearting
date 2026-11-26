@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Parent deploy uses only temporary fixtures; never any unit, service or DB."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 import contextlib
 import importlib.util
@@ -97,6 +100,22 @@ class ParentDeployTest(unittest.TestCase):
         self.assertEqual(delivery["receipt"]["required_action"], "run-parent-deploy")
         self.assertIn("--check, then", delivery["receipt"]["text"])
         self.assertEqual(delivery["route_id"], "rt-test")
+
+    def test_notice_command_uses_current_release_and_preserves_checkout_bytes(self):
+        import shlex
+        with patch("session_notice.notify", return_value=True):
+            result = S.prepare(self.jobs, "owner", self.command)
+        expected = shlex.join([sys.executable, str(Path(S.__file__).resolve().with_name("ship-parent-deploy.py")),
+                               "run", "--request", result["request"]])
+        self.assertEqual(result["run_command"].encode(), expected.encode())
+        install = self.root / "install with space"
+        (install / "current/core").mkdir(parents=True)
+        (install / "current/core/CORE.md").touch()
+        with patch.object(S, "__file__", str(install / "releases/v1/utilities/ship_parent_deploy.py")), \
+             patch("session_notice.notify", return_value=True):
+            release = S.prepare(self.jobs, "owner", self.command)
+        self.assertEqual(shlex.split(release["run_command"])[1],
+                         str(install / "current/utilities/ship-parent-deploy.py"))
 
     def test_notice_unavailable_returns_blocked_handoff_for_all_parents(self):
         for harness, variable in (("codex", "CODEX_THREAD_ID"), ("claude", "CLAUDE_CODE_SESSION_ID"),

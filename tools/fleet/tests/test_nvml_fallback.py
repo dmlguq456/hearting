@@ -1,4 +1,7 @@
 """NVML failure fixtures use fake proc/device files; never touch a compute host."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import contextlib
 import importlib.util
 import io
@@ -323,7 +326,7 @@ class NVMLFallbackTest(unittest.TestCase):
                 mock.patch.object(CH, "remote", return_value=subprocess.CompletedProcess([], 0, '{"gpus":[]}', "")) as remote:
             CH.probe_host("gpu", {"ssh_host": "local"}, ssh_session_bridges=[])
         # Execute the actual composed script, including its embedded lease API.
-        host = self.probe(script=remote.call_args.args[1])
+        host = self.probe(script=remote.call_args.kwargs["input"])
         self.assertTrue(all(not g["reservations"] for g in host["gpus"]))
         self.assertEqual(host["unplaced_gpu_reservations"][0]["owner"]["label"], "확인된 예약")
         render.set_compute_hosts({"configured": True, "hosts": [host]})

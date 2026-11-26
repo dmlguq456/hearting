@@ -1,0 +1,19 @@
+│ MODEL PROFILE  profile → model · effort, per harness ───────────────────────────────────────────────────
+│    PROFILE         CLAUDE                    CODEX                     OPENCODE
+│    top             Opus · max                gpt-6-astra · xhigh       glm-5.3-flash · max
+│    deep            Opus · xhigh            ▶ gpt-6-astra · high        glm-5.3-flash · max
+│    balanced-deep   Opus · medium             gpt-6.1-sol · xhigh       glm-5.3-flash · max
+│    balanced        Sonnet · high             gpt-6.1-terra · xhigh     deepseek-v4.1-flash · max
+│    light           Sonnet · medium           gpt-6-luna · xhigh        muse-spark · max
+│    mini            Haiku 5.5 · medium        gpt-6-luna · high         deepseek-v4.1-flash · xhigh
+│    main session only, never dispatched:  claude Fable
+│
+│  ┌─ codex · deep ──────────────────────────────────────────────────────────────────────────────────────┐
+│  │  now      gpt-6-astra · high                                                                        │
+│  │                                                                                                     │
+│  │  model    [ gpt-6-astra ]   gpt-6.1-sol     gpt-6.1-terra     gpt-6-luna                            │
+│  │  effort     low     medium   [ high ]   xhigh     max                                               │
+│  │                                                                                                     │
+│  │  $ hearting model set codex profile/deep gpt-6-astra@high                                           │
+│  │  pool     claude › codex  last resort codex                                                         │
+│  └─ models.conf → .bak backup · new sessions and launches only · routes keep their depth, launch s read┘

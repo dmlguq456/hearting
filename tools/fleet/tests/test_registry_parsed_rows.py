@@ -1,4 +1,7 @@
 """File-generation reuse contract for parsed registry rows."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import os
 import re
 import sys
@@ -491,6 +494,54 @@ class ParsedRegistryRowsTest(unittest.TestCase):
             self.assertEqual(actual[0], expected[0], raw)
             self.assertEqual(set(actual[1]), set(expected[1]), raw)
 
+    def test_whitespace_free_fast_path_gives_the_same_analysis_as_the_full_scan(self):
+        """The pure-string fast path of ``_registry_metadata_analysis`` against the
+        full per-piece scan it short-cuts (the reference below is that scan, unchanged)."""
+        whitespace_run = re.compile(r"\s+")
+
+        def reference(raw):
+            eq_pos, colon_pos = raw.find("="), raw.find(":")
+            if ("(" in raw or eq_pos < 0
+                    or (colon_pos >= 0 and colon_pos < eq_pos)):
+                return True, ()
+            whitespace_keys = set()
+            for part in raw.split(","):
+                field_eq = part.find("=")
+                if field_eq < 0:
+                    return True, ()
+                match = whitespace_run.search(part)
+                if match is None:
+                    continue
+                if match.start() <= field_eq + 1 or part.find("=", match.end()) >= 0:
+                    return True, ()
+                whitespace_keys.add(part[:field_eq])
+            return False, tuple(whitespace_keys)
+
+        examples = [
+            "a=1", "a=", "a=,b=2", "a=1,b=", "a=,b=,c=", "=", "=a", ",=", "a=1,=2",
+            "a=b=c", "a=b=c,d=e=f=g", "a==b", "a=1,", ",a=1", "a=1,,b=2", "a=1,b",
+            "a=1,b,c=2", "a", "", ",", "a:b=1", "a=b:c", "a=1(", "(a=1)", "a=1:2,b=3",
+            "a=1 b", "a=1, b=2", "a=1,b=2 ", " a=1", "a=1\tb", "a=1\nb=2", "a=1\x1cb", "a=1\x1fb",
+            "a=1\x0bb", "a=1\x0cb", "a=1\rb", "a= 1", "a =1", "a=1 b=2", "a=1 b,c=2",
+            "a=\u00e9", "a=\ud55c\uae00,b=2", "a=1\u00a0b", "a=1\u3000b", "a=1\u2003b=2",
+            "a=\u0085b", "\ud55c=1", "a=1,\ud55c", "a=1\x7fb", "a=1\x00b",
+            "capability=code,mode=dev", "capability=code,note=foo,bar",
+        ]
+        alphabet = ["a", "=", ",", " ", ":", "\u00a0", "\u00e9", "\x1f", "(", "1"]
+        import itertools
+        examples.extend("".join(chars) for length in range(1, 6)
+                        for chars in itertools.product(alphabet, repeat=length)
+                        if length <= 4 or chars[0] != " ")
+        fast = 0
+        for raw in examples:
+            actual = dispatch._registry_metadata_analysis(raw)
+            expected = reference(raw)
+            self.assertEqual(actual[0], expected[0], repr(raw))
+            self.assertEqual(set(actual[1]), set(expected[1]), repr(raw))
+            if raw.isascii() and not any(ch in raw for ch in " \t\n\v\f\r\x1c\x1d\x1e\x1f"):
+                fast += 1
+        self.assertGreater(fast, 100, "the fast path was not exercised")
+
     def test_canonical_metadata_normalizes_only_values_with_whitespace(self):
         class CountingWhitespace:
             def __init__(self):
@@ -829,5 +880,127 @@ class ParsedRegistryRowsTest(unittest.TestCase):
             self.assertEqual([row[1][4] for row in completed], ["first", "second"])
 
 
-if __name__ == "__main__":
+def index_number(steps, lines):
+    return next(position for position, candidate in enumerate(steps) if candidate is lines)
+
+
+class SegmentedEvidenceTest(unittest.TestCase):
+    """Folding only the segments a rewrite changed gives what folding every row gives."""
+
+    @staticmethod
+    def _row(index, status="done", route=None, node="execute", extra=""):
+        route = route or "rt-%d" % (index // 3)
+        meta = ("attempt_schema_version=2,dispatch_depth=2,transport=headless,"
+                "execution_surface=registered-headless,registered_worker=1,fallback_hop=none,"
+                "attempt_id=att-%d,route_id=%s,route_hash=sha256:h%s,route_node=%s,harness=codex,"
+                "route_file=/r/%s.json,pid=%d%s") % (index, route, route, node, route, 1000 + index, extra)
+        return "2026-10-26T00:00:%02dZ\t%s\t/r\t/w\tslug-%d\t%s" % (index % 60, status, index, meta)
+
+    def _evidence(self, path, *, segments_usable):
+        dispatch._REGISTRY_EVIDENCE_CACHE.clear()
+        dispatch._REGISTRY_MERGED_CACHE.clear()
+        rows = dispatch.parsed_registry_rows(path)
+        if segments_usable:
+            return dispatch._registry_evidence_for_path(path, rows)
+        with mock.patch.dict(dispatch._PARSED_REGISTRY_SEGMENTS, {}, clear=True):
+            return dispatch._registry_evidence_for_path(path, rows)
+
+    @staticmethod
+    def _plain(evidence):
+        result, attempts = evidence
+        return ({route: {node: dict(item) for node, item in nodes.items()} for route, nodes in result.items()},
+                dict(attempts), [list(result), {route: list(nodes) for route, nodes in result.items()}],
+                list(attempts))
+
+    def test_segment_folds_equal_the_row_fold_over_appends_rewrites_and_deletions(self):
+        cache = dispatch._dispatch_registry_cache
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(cache, "_PARSE_CHUNK_LINES", 3):
+            path = Path(directory) / "jobs.log"
+            rows = [self._row(i, "open" if i % 4 == 0 else "done") for i in range(20)]
+            rows.append(self._row(5, "done", route="rt-1", node="test"))      # a route over two segments
+            steps = []
+            steps.append(list(rows))
+            changed = list(rows)
+            changed[8] = changed[8].replace("harness=codex", "harness=claude")   # in place, middle
+            steps.append(changed)
+            appended = changed + [self._row(30, route="rt-2"), self._row(31, "open", route="rt-9")]
+            steps.append(appended)
+            deleted = list(appended)
+            del deleted[2]                                                       # every later order moves
+            steps.append(deleted)
+            noisy = list(deleted)
+            noisy[10] = "not a six field row"
+            noisy.insert(4, "")
+            steps.append(noisy)
+            folds_before = None
+            with dispatch._dispatch_registry_cache.registry_read_scope():
+                pass
+            for index, lines in enumerate(steps):
+                path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                os.utime(path, (1_000_000 + index, 1_000_000 + index))
+                with dispatch._dispatch_registry_cache.registry_read_scope():
+                    wanted = self._plain(self._evidence(path, segments_usable=False))
+                    # Only the partials survive between generations; the row-fold above started clean.
+                    dispatch._REGISTRY_EVIDENCE_CACHE.clear()
+                    dispatch._REGISTRY_MERGED_CACHE.clear()
+                    rows_now = dispatch.parsed_registry_rows(path)
+                    got = self._plain(dispatch._registry_evidence_for_path(path, rows_now))
+                self.assertEqual(got, wanted, "step %d" % index)
+                # The derived lookup tables: per-segment parts merged against one pass over every row.
+                with dispatch._dispatch_registry_cache.registry_read_scope():
+                    rows_now = dispatch.parsed_registry_rows(path)
+                    dispatch._PARSED_REGISTRY_INDEXES.clear()
+                    index = dispatch._registry_derived_index(path, rows_now)
+                    direct = dispatch._build_registry_derived_index(rows_now)
+                self.assertEqual(index["job_order"], direct["job_order"], "step %d job_order" % index_number(steps, lines))
+                for name in ("latest_jobs", "all_by_attempt", "attempt_positions",
+                             "children_by_parent", "latest_by_attempt"):
+                    self.assertEqual(list(index[name]), list(direct[name]), "step %d %s order" % (index_number(steps, lines), name))
+                    self.assertEqual(dict(index[name]), dict(direct[name]), "step %d %s" % (index_number(steps, lines), name))
+            stats = dispatch.registry_fold_metrics()
+            self.assertGreater(stats["segment_fold_reuses"], 0)
+            self.assertGreater(stats["index_segment_reuses"], 0)
+
+    def test_a_recognised_segment_carries_its_converted_rows_whole_after_a_rewrite(self):
+        # A rewrite that keeps the leading bytes recognises those segments again as new objects over
+        # the same records: their rows are carried by segment, not proved one row at a time, and
+        # the rows are the ones a conversion from nothing gives.
+        cache = dispatch._dispatch_registry_cache
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(cache, "_PARSE_CHUNK_LINES", 3):
+            path = Path(directory) / "jobs.log"
+            rows = [self._row(i, "open" if i % 4 == 0 else "done") for i in range(24)]
+            path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+            with cache.registry_read_scope():
+                first = dispatch.parsed_registry_rows(path)
+            changed = list(rows)
+            changed[4] = changed[4].replace("harness=codex", "harness=claude-with-a-longer-name")   # an early row, longer
+            path.write_text("\n".join(changed) + "\n", encoding="utf-8")
+            os.utime(path, (2_000_000, 2_000_000))
+            before = dispatch.registry_fold_metrics()
+            with cache.registry_read_scope():
+                second = dispatch.parsed_registry_rows(path)
+            after = dispatch.registry_fold_metrics()
+            carried = after["rows_carried_by_segment"] - before["rows_carried_by_segment"]
+            proved = after["rows_proved_by_fields"] - before["rows_proved_by_fields"]
+            self.assertEqual(carried + proved, len(rows))
+            # the by-fields lookup holds only what no carried segment stands for, not every old row
+            self.assertLessEqual(after["by_fields_rows"] - before["by_fields_rows"], 6)
+            self.assertGreaterEqual(carried, 18)         # the segment before the edit and every one after it
+            self.assertLessEqual(proved, 6)              # only the segment the edited row is in
+            self.assertEqual([row[:2] for row in second], [row[:2] for row in first[:4]]
+                             + [(4, tuple(changed[4].split("\t")))] + [row[:2] for row in first[5:]])
+            self.assertTrue(all(new is old for new, old in zip(second[6:], first[6:])))
+            # from nothing: the same rows
+            dispatch._PARSED_REGISTRY_ROWS.clear()
+            dispatch._PARSED_REGISTRY_PATH_ORDER.clear()
+            cache.clear_cache()
+            with cache.registry_read_scope():
+                scratch = dispatch.parsed_registry_rows(path)
+            self.assertEqual([(row[0], row[1], dict(row[2])) for row in second],
+                             [(row[0], row[1], dict(row[2])) for row in scratch])
+
+
+if __name__ == '__main__':
     unittest.main()

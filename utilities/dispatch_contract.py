@@ -131,8 +131,8 @@ from dispatch_contract_roots import (  # noqa: F401
     _registry_safe, _REGISTRY_UNSAFE, _validated_registry_path, _versioned_source_layout,
     bytecode_cache_env, DanglingRegistryResolution, dispatch_state_root, dispatch_state_roots,
     ensure_global_registry_writable, git_optional_locks_env, inherited_jobs_argument,
-    launch_mismatch_annotation, LAUNCH_MISMATCH_VALUE_MAX, legacy_read_window_may_close,
-    LEGACY_READ_WINDOW_MIN_SUPPORTED_RELEASES, MIGRATION_ALIAS_DIGEST_PATTERN,
+    launch_mismatch_annotation, LAUNCH_MISMATCH_VALUE_MAX,
+    MIGRATION_ALIAS_DIGEST_PATTERN,
     MIGRATION_ALIAS_RECORD_VERSION, MIGRATION_JOURNAL_FILENAME, read_migration_journal,
     resolve_completed_alias, resolve_dangling_registry, resolve_dispatch_state_root,
     resolve_global_registry, stable_state_root, state_root, validate_dispatch_log_dir,
@@ -172,6 +172,7 @@ from dispatch_contract_process import (  # noqa: F401
     process_launch_identity, process_namespace_identity, process_namespace_pids,
     process_observation, process_start_ticks, process_state, process_table_scan_scope,
     process_unified_cgroup, ProcessTableScan, prove_attempt_quiescence,
+    quiescence_record_scope,
     recorded_pid_namespace_state, remove_supervisor_lease, residue_live_pids,
     resolve_parent_extinction, runtime_ancestry_binding, scan_process_table,
     signal_exact_process_group, supervisor_lease_is_held, supervisor_lease_path,
@@ -248,11 +249,11 @@ from dispatch_contract_rows import (  # noqa: F401
     _row_identity, _settlement_metadata_pipe, annotate_attempt_row, annotate_attempt_row_if,
     attempt_launch_state, attempt_row_terminal_never_started,
     attempt_row_withdrawn_before_launch, close_attempt_row, close_attempt_row_if,
-    close_refused_chain_rows, existing_attempt_launch_state, is_runtime_owner_launch,
+    close_refused_chain_rows, existing_attempt_launch_state, finishes_route, is_runtime_owner_launch,
     launch_orphan_watch, launch_reap_watch, probe_owner_supervision,
     reconcile_attempt_terminal, reconcile_local_registry, RefusedChainClose,
     resolve_attempt_cleanup, resolve_residue_drain, resolve_terminal_conflict,
-    SupervisionProbe, terminal_attempt_never_started, workflow_completion_receipt,
+    SupervisionProbe, terminal_attempt_never_started, workflow_completion_receipt, caller_attempt_receipt, unit_continue_receipt,
 )
 
 # Moved classes report the module they were defined in before the split, so
@@ -915,6 +916,8 @@ def _commit_attempt_row(
         if exclusive_live_metadata:
             matching_terminal_attempts = set()
             replacement_attempts = set()
+            interrupted_unit_turns = set()
+            taken_over = set()
             for entry in rows:
                 if entry is None:
                     continue
@@ -927,6 +930,8 @@ def _commit_attempt_row(
                 validate_attempt_metadata(metadata)
                 if fields[1] in {"open", "running"}:
                     return False
+                taken_over.update(filter(None, (metadata.get("automatic_retry_of"),
+                                                metadata.get("replacement_original_attempt_id"))))
                 if fields[1] == "done" and metadata.get("attempt_id"):
                     # A failed terminal note in replacement_notes counts
                     # against the separate replacement budget instead of the
@@ -938,6 +943,19 @@ def _commit_attempt_row(
                         replacement_attempts.add(metadata["attempt_id"])
                     else:
                         matching_terminal_attempts.add(metadata["attempt_id"])
+                    if (row_metadata.get("capability") == "unit" and metadata.get("capability") == "unit"
+                            and metadata.get("launch_started") == "1"
+                            and (source := metadata.get("replacement_original_attempt_id"))
+                            and metadata.get("continues_attempt_id") == source):
+                        interrupted_unit_turns.add(source)
+            # A replacement finishes the same logical unit turn. It does not spend
+            # an extra turn when the caller later asks its next ordinary question.
+            matching_terminal_attempts -= interrupted_unit_turns
+            if row_metadata.get("continues_attempt_id"):
+                # A later turn counts each earlier turn once: an attempt another row took over (an answer, an
+                # observation, a usage limit, a runtime end) belongs to the turn the row taking it over finished.
+                matching_terminal_attempts -= taken_over
+                replacement_attempts -= taken_over
             if (
                 not automatic_replacement
                 and terminal_attempt_limit is not None

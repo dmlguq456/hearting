@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import argparse
 import importlib.util
 import hashlib
@@ -18,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("progress", ROOT / "utilities/dispatch-progress.py")
 P = importlib.util.module_from_spec(spec); spec.loader.exec_module(P)
 sys.path.insert(0, str(ROOT / "utilities"))
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import dispatch_contract as D  # noqa: E402
 from tools.fleet import model
 from split_module_fixture import patch_split  # noqa: E402
@@ -31,7 +36,7 @@ class ProgressTest(unittest.TestCase):
         start = (Path("/proc") / str(self.proc.pid) / "stat").read_text().split()[21]
         self.proc_start = start
         self.pid_namespace = os.readlink("/proc/self/ns/pid")
-        self.attempt = "att-0123456789abcdef"
+        self.attempt = unique_attempt_id("att-0123456789abcdef")
         self.scope=self.base/"scope";self.scope.mkdir()
         pipe = (
             "attempt_schema_version=2,dispatch_depth=2,transport=headless,"
@@ -209,10 +214,18 @@ class ProgressTest(unittest.TestCase):
              mock.patch.object(P.supervision, "_attempt_human_wait", return_value=False):
             P.supervision.update_attempt_stall_observation(
                 self.jobs, self.attempt, now=10, row=("open", metadata), worktree=str(self.base))
-            running = P.supervision.update_attempt_stall_observation(
-                self.jobs, self.attempt, now=1000, row=("open", metadata), worktree=str(self.base))
+            # PR #1592 R2: the start record alone is not progress past the quiet windows;
+            # the exact tool command started for it still running is.
+            with mock.patch.object(P.supervision, "_running_tool_command", return_value=(11.0, "sleep")):
+                running = P.supervision.update_attempt_stall_observation(
+                    self.jobs, self.attempt, now=1000, row=("open", metadata), worktree=str(self.base))
             self.assertEqual((running["state"], running["reason"]),
                              ("active", "native-tool-active"))
+            with mock.patch.object(P.supervision, "_running_tool_command", return_value=None):
+                pinned = P.supervision.update_attempt_stall_observation(
+                    self.jobs, self.attempt, now=1000, row=("open", metadata), worktree=str(self.base))
+            self.assertEqual((pinned["state"], pinned["reason"]),
+                             ("stalled", "no-comparable-progress"))
             log.write_text(json.dumps({"type": "item.completed", "item": {
                 "id": "cmd-long", "type": "command_execution"}}) + "\n")
             completed = P.supervision.update_attempt_stall_observation(

@@ -5,6 +5,9 @@ Model payloads, runtime bootstrap observations and readiness command observation
 are substituted. The native GPU query is a separate, optional validation caller;
 CI does not assume that its host has NVIDIA devices.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 from contextlib import ExitStack, redirect_stdout, redirect_stderr
 import importlib.util
 import io
@@ -24,6 +27,8 @@ import work_start as W
 from split_module_fixture import patch_split
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 
 
 def load(name, path):
@@ -149,7 +154,7 @@ class GpuOwnerResourceStartTest(unittest.TestCase):
         fields, _row = self.f.row(owner)
         parent = {"parent_harness": "codex", "parent_transport": "headless", "parent_sandbox": "danger-full-access"}
         checked = D.resolve_checked_tuple(route, node, "codex", parent).tuple_row
-        attempt = "att-" + "d" * 32
+        attempt = unique_attempt_id("att-" + "d" * 32)
         argv = ["--start", "--worktree", str(self.f.worktree), "--jobs", str(self.f.jobs),
             "--log-dir", str(self.f.state / "logs"), "--slug", attempt, "--attempt-id", attempt,
             "--capability", "autopilot-lab", "--capability-mode", "setup", "--intensity", "standard", "--qa", "standard",

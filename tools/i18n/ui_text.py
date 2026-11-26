@@ -61,7 +61,16 @@ def text(message: str, lang: str = DEFAULT_LANGUAGE, /, **fields) -> str:
     """One message in `lang`; a missing Korean entry falls back to English."""
     entry = _messages()[message]
     template = entry.get(lang) or entry[DEFAULT_LANGUAGE]
+    # Korean `와`/`과` after a name follows the name's last sound (`기준 모델과`, `배치와`).
+    if lang == "ko" and "{name}와" in template and "name" in fields:
+        template = template.replace("{name}와", "{name}" + with_particle(fields["name"]))
     return template.format(**fields) if fields else template
+
+
+def with_particle(word) -> str:
+    """Korean `와`/`과` after `word`: `과` after a final consonant (batchim), else `와`."""
+    last = str(word or "").rstrip()[-1:]
+    return "과" if last and 0xAC00 <= ord(last) <= 0xD7A3 and (ord(last) - 0xAC00) % 28 else "와"
 
 
 def translator(declared: str | None = None):

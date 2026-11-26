@@ -4,6 +4,7 @@ family: editorial
 role: deep editor
 worker_type: stage
 floor: low
+field: docs
 read_only: false
 stance: none
 io:
@@ -20,15 +21,17 @@ bootstrap:
 
 # Unit: editorial/polish
 
+## 지킬 것
+
+Always carried with the worker text. Every line in this section is a must.
+
 In-place editing of an artifact that already uses the right language but needs natural
 phrasing, consistent terminology, reduced unnecessary language mixing, and better
 readability for its audience. Shared persona, scope, language guidance, catch-net,
 quality check, and return discipline: `roles/units/editorial/_voice.md` (read it before
 acting).
 
-Invocation: `polish <document path>`.
-
-## Invocation gate (single source — every caller follows this)
+### Invocation gate (single source — every caller follows this)
 
 For pipeline calls, both conditions must hold — forcing polish on intermediates the
 user never sees wastes cost:
@@ -42,7 +45,7 @@ user never sees wastes cost:
 Capabilities without an independent rigor flag (such as audit) apply only condition 1.
 A direct editorial call is explicitly user-directed and bypasses this gate entirely.
 
-## Procedure
+### Procedure
 
 1. Read the entire document.
 2. Sentence-level pass: rewrite borrowed or transliterated wording that harms audience
@@ -54,15 +57,23 @@ A direct editorial call is explicitly user-directed and bypasses this gate entir
 4. Edit in place; create no snapshot.
 5. Report per the voice fragment's return discipline.
 
-## Structural catch-net
+### Structural catch-net
 
 Polish is not the authoring stage. Apply the catch-net in the voice fragment: perform
 sentence-level polish only, then list structural signals as separate severity-marked
 items recommending `draft-refine` or `autopilot-refine` — never redesign paragraphs.
 
-## Output
+### Output
 
 - Path of the in-place edited document, summary, terminology decisions, and any
   catch-net findings as separate items — per the voice fragment. Never the body.
 - Verdict: `DONE` on a completed pass (catch-net findings do not block); `BLOCKED` when
   the target is unreadable or an agent-facing surface the unit must decline.
+
+## 참고
+
+Always carried with the worker text. These are defaults you may override: a better method
+is fine. Precedence: this turn's instruction > project conventions > the person's profile >
+the defaults below.
+
+Invocation: `polish <document path>`.

@@ -1,4 +1,6 @@
 #!/usr/bin/env sh
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/../run-tests.py" --direct-run bash "$0" "$@"
 # Phase 1 cross-runtime activation E2E.  One shell owns every environment
 # override so no subprocess can fall back to the real runtime homes.
 set -eu
@@ -107,7 +109,7 @@ make_fixture() {
   chmod +x "$root/adapters/claude/statusline.sh"
   # Owner-name-set union members installed by `harness install claude` but
   # historically outside runtime_activation.py's own native discovery names
-  # (INSTALL_LAYOUT.md "owner-name-set reconciliation").
+  # (docs/INSTALL_LAYOUT.md "owner-name-set reconciliation").
   printf '%s\n' '# fixture root readme' > "$root/README.md"
   printf '%s\n' '{"capabilities":[]}' > "$root/manifest.json"
   mkdir -p "$root/adapters/claude/loops"
@@ -246,14 +248,14 @@ with open(path, "w", encoding="utf-8") as handle:
 PY
 ok "fresh Claude activation reports conflicts and uninstall preserves custom values"
 
-# INSTALL_LAYOUT.md "owner-name-set reconciliation": README.md/manifest.json
+# docs/INSTALL_LAYOUT.md "owner-name-set reconciliation": README.md/manifest.json
 # are installer-owned names outside activation's own historical discovery
 # set. A real `harness install claude` symlink resolves into the checkout
 # ($SRC), which is also `source_roots` for a fresh activation -- so it is
 # never a "foreign" collision, just a name activation has not managed yet.
 # In `packaged` mode `active_root` is a separate bundle copy, so adopting
 # the union here produces a *different* final target than the installer's,
-# exactly the real mixed-layout case INSTALL_LAYOUT.md describes. Simulate
+# exactly the real mixed-layout case docs/INSTALL_LAYOUT.md describes. Simulate
 # the installer's prior projection by pre-creating that exact symlink shape.
 mkdir -p "$HOME/.claude"
 ln -sfn "$SRC/README.md" "$HOME/.claude/README.md"

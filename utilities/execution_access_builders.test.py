@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import argparse
 from dataclasses import replace
@@ -189,6 +192,11 @@ class ExecutionAccessBuilderTest(unittest.TestCase):
                            else " --model-context-window 800000")
             self.assertEqual(current.count(window_flag), 1)
             current = current.replace(window_flag, "", 1)
+            if delivery == "app-server-supervised":
+                # Session persistence changed independently of access grants: a supervised owner keeps its
+                # thread so a later owner of its route can wake it. Remove exactly that one flag.
+                self.assertEqual(current.count(" --keep-session"), 1)
+                current = current.replace(" --keep-session", "", 1)
             self.assertEqual(base, current)
         for delivery in ("one-shot", "session-resume-supervised"):
             with mock.patch.dict(os.environ, self.env, clear=True):

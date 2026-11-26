@@ -30,8 +30,10 @@ small attach template. This is controlled global input, distinct from native
 project instructions, which remain. Codex reads one global file, so when the
 user keeps an `AGENTS.override.md` the worker home gets a read-only copy of the
 user's own text followed by the attach template instead of the main bootstrap. User credentials/config/hooks stay linked;
-launch overrides disable apps, MCP servers, custom agents, native collaboration
-and enabled plugins, and disable discovered system skills by documented path.
+launch overrides disable apps, MCP servers, the user's custom agents, native
+collaboration (an owner keeps it and gets the `light`/`balanced`/`deep` agents,
+see Native Custom Agent Surface) and enabled plugins, and disable discovered
+system skills by documented path.
 The assigned contract remains in the prompt. Native or managed input outside
 these controls must be reported from actual runtime evidence.
 
@@ -309,6 +311,18 @@ as theirs, and a line still holding Hearting's value is removed when the default
 no longer applies and on deactivation. Measured with
 `utilities/harness_behavior_scenarios.py --scenario subagent-model`.
 
+Registered owner workers. A worker's `CODEX_HOME` still leaves out the user's
+own role catalog (the `[agents.<name>]` tables and `agents/` files), but an
+owner's home gets `agents/light.toml`, `balanced.toml` and `deep.toml` as
+regular files, rendered by the same renderer from the `models.conf` the user's
+home selects (`tools/profile/build-home.py`), so an owner that names one of
+them runs that tier. The owner keeps the scalar `[agents]` keys, so the role
+default above reaches it only where activation could write it; elsewhere a
+spawn that names no agent keeps the owner's own model (PG-13). Other worker
+types keep `multi_agent` off and get no agent files. Measured with
+`subagent-model` on Codex 0.163.0: each named spawn in the owner home asked
+for its file's model.
+
 parity caveat: Codex custom agents can carry model/reasoning/sandbox settings,
 but they are not Claude Code Agent frontmatter. Runtime discovery, UI surfacing,
 child approval behavior, config inheritance, and noninteractive/headless
@@ -318,21 +332,12 @@ or surface-dependent, so this adapter treats TOML generation as the source
 projection and keeps runtime validation separate.
 
 permission-model caveat: Claude's per-agent `tools:` frontmatter allowlist
-(for example `editorial-team` and `plan-team` both carry no `Bash` and no
-network tools) has no Codex custom-agent-schema equivalent — Codex custom
-agent TOML exposes no per-agent `tools` field, only `model`,
-`model_reasoning_effort`, and `sandbox_mode`. The closest Codex approximation
-is `sandbox_mode` plus `mcp_servers`, which cannot express a fine-grained tool
-allowlist. Because `editorial-team.toml` and `plan-team.toml` both set
-`sandbox_mode = "workspace-write"`, these two roles are strictly more
-permissive under Codex than under Claude.
-
-write-access caveat: Claude `qa-team` carries `Write` in its tool allowlist
-and creates its durable review-log directly. Codex's `qa-team.toml` sets
-`sandbox_mode = "read-only"` and cannot write at all, so under this adapter
-the review-log for a Codex QA pass must be ghostwritten by the
-orchestrator/dispatch harness on the QA agent's behalf, not written by the QA
-agent itself. This is part of the Codex QA agent contract, not an oversight.
+(for example `memory-scout` lists `Bash, Read, Grep, Glob`) has no Codex
+custom-agent-schema equivalent — Codex custom agent TOML exposes no per-agent
+`tools` field, only `model`, `model_reasoning_effort`, and `sandbox_mode`. The
+closest Codex approximation is `sandbox_mode` plus `mcp_servers`, which cannot
+express a fine-grained tool allowlist; Codex narrows `memory-scout` with
+`sandbox_mode = "read-only"` instead (PG-21).
 
 See Model Mapping below for the corresponding model-tier asymmetry across
 these same custom agents.
@@ -346,8 +351,6 @@ discovery, but it does not expose a `codex debug agent` listing surface; add
 runtime discovery coverage when Codex exposes one.
 
 ## Native Hook Surface
-
-Write-denying hook gates are retired; no write preflight or core-read marker is required.
 
 Do not project Claude `hooks/` or `settings.json` into Codex. Use
 `codex_setting/codex-hooks` as the install source, and keep explicit
@@ -438,7 +441,7 @@ fallback; the client owns question styling.
 | design post-write verification | Run `adapters/codex/bin/preflight.sh design <file>` after design HTML writes |
 | route presence gate | Ordinary edits and commits in the current Git worktree pass without a route; the historical /tmp exemption remains. The recorder independently includes real /tmp Git projects. `hooks.json` `PreToolUse` on `Write|Edit|MultiEdit|apply_patch|functions.apply_patch|Bash|Shell|functions.exec_command` runs `adapters/codex/hooks/route-presence-gate.py` (through `run-hook.sh`), which execs `utilities/route_presence_gate.py --codex`; a refusal is `{"decision":"block","reason":…}`. The payload `session_id` is the thread id the route-chain writer records from `CODEX_THREAD_ID`; `exec_command` is judged in its `workdir`. Like every `hooks.json` change, the new entry needs Codex's current-hash hook trust before it runs (`hook-trust-status.py`); until then the gate is simply absent, never blocking |
 | stage-dispatch reminder (SD-11) | Codex has no Skill-invocation hook, so `preflight.sh route <capability>` prints the text `hooks/stage-dispatch-reminder.sh` gives Claude's `PreToolUse(Skill)`: only for a dispatch-depth-1 conductor (`AGENT_DISPATCH_DEPTH=1`) entering `code-plan`/`code-execute`/`code-test`/`code-report` at standard+ (silent for direct/quick and elsewhere). A reminder, never a refusal |
-| in-turn carrier (owed receipts, mid-turn reports, turn continuation) | `hooks.json` registers `turn-carrier.py post-tool` on every `PostToolUse` (timeout 5 s) and `turn-carrier.py stop` as a second `Stop` hook (timeout 20 s); `userprompt-lifecycle.py` tells it what the prompt delivered. Records owed to this exact thread are handed to the running turn as `PostToolUse` `additionalContext`, or at `Stop` as `{"decision":"block","reason":...}`, which Codex 0.163 documents and was measured (isolated home, real model, `exec` and TUI, 2026-11-10) to continue the same turn with `stop_hook_active=true`. Un-acked steward watch receipts are added at `Stop`. Without an App Server socket (`codex --no-daemon`) a completion is shown in the running turn once and left pending for the prompt carrier. One further `Stop` continuation per turn names a received required action nothing acted on; a completion counts as acted on only when a later tool names its attempt or route. A steward watch armed while the queue socket exists says `wake=queue` and `parent_next=end-turn`: the receipt notice reaches the idle thread through the native queue. The TUI labels a continuation `Blocked by hook`; that is Codex's wording, not a refusal. `stop-lifecycle.py` stays silent with no decision. Shared contract: `core/ADAPTATION.md` §7.3–§7.4. |
+| in-turn carrier (owed receipts, mid-turn reports, turn continuation) | `hooks.json` registers `turn-carrier.py post-tool` on every `PostToolUse` (timeout 5 s) and `turn-carrier.py stop` as a second `Stop` hook (timeout 20 s); `userprompt-lifecycle.py` tells it what the prompt delivered. Records owed to this exact thread are handed to the running turn as `PostToolUse` `additionalContext`, or at `Stop` as `{"decision":"block","reason":...}`, which Codex 0.163 documents and was measured (isolated home, real model, `exec` and TUI, 2026-11-10) to continue the same turn with `stop_hook_active=true`. Un-acked steward watch receipts are added at `Stop`. Without an App Server socket (`codex --no-daemon`) a completion is shown in the running turn once and left pending for the prompt carrier. One further `Stop` continuation per turn names a received required action nothing acted on; a completion counts as acted on only when a later tool names its attempt or route. A steward watch armed while the queue socket exists says `wake=queue` and `parent_next=end-turn`: the receipt notice reaches the idle thread through the native queue. The TUI labels a continuation `Blocked by hook`; that is Codex's wording, not a refusal. `stop-lifecycle.py` stays silent with no decision. Claude now has the same shape (one send, the rewake; `Stop` as the one supplement, no completion at its tool boundary). Shared contract: `core/ADAPTATION.md` §7.3–§7.4. |
 | automatic change record | `userprompt-lifecycle.py` (`UserPromptSubmit`) and `stop-lifecycle.py` (`Stop`) call `utilities/turn_change_record.py` `launch("start"|"end", "codex", payload)`, which starts the detached shared step with the payload thread id and cwd and returns. Codex runs no Stop hook for an interrupted turn, so `hooks.json` `Interrupt` ([official event](https://learn.chatgpt.com/docs/hooks#interrupt)) runs `interrupt-lifecycle.py`, which starts the same `launch("end", "codex", payload)` step and clears the session's Fleet wait (needs the current-hash hook trust like every `hooks.json` change). A turn that fails without an interrupt is still not compared |
 | git index-lock hint | `hooks.json` `PostToolUse(Bash)` runs `git-index-lock-context.py`, the bridge to `hooks/git-index-lock-context.py --harness codex`. Codex runs `PostToolUse` after a Bash command that exits non-zero too ([official](https://learn.chatgpt.com/docs/hooks#posttooluse)), so it is Codex's counterpart of Claude's `PostToolUseFailure`; its `tool_response` is the output text without an exit status, so Git's own `Unable to create '…index.lock': File exists` text is the failure evidence and the hint says no exit status was reported. The same `PostToolUse(*)` `posttooluse-interaction-clear.py` already clears the Fleet wait on that failure path |
 | Fleet wait after the TUI exits | Hooks run in the shared app-server daemon, which keeps the thread after its TUI exits (measured: `exit-wait-clear` fails at base; the docs do not say this); `SessionEnd` comes only when the thread unloads ([official](https://learn.chatgpt.com/docs/hooks#sessionend)). `userprompt-lifecycle.py` starts `utilities/codex_tui_exit.py` once per thread: it proves the live TUI owning the thread (`fleet.collectors.codex.process_for_thread`), sleeps on that process and clears the exact wait when it exits; peer-steward retire also clears the retired session's wait once the exit is seen. An unproven TUI starts nothing and keeps the `SessionEnd` path |
@@ -446,8 +449,7 @@ fallback; the client owns question styling.
 | token/context pressure | `preflight.sh token-budget [cwd] [session-id] [kv|json|hook]` reads an exact Codex rollout session and keeps active context, exact directive bytes, and cumulative raw counters separate. `kv`/`json` are read-only L2 accounting diagnostics. Unknown/degraded signals fail open. `hook` remains transition-only and byte-identical; its parent lifecycle is the single exactly-once accounting authority for success/timeout/error and writes only a bounded content-free sha256-session aggregate under XDG state. `utilities/token-budget-experiment.py` is an explicit isolated `offline-forecast-v1` replay/evaluator: production hooks/preflight do not import or activate it, its maximum verdict is `eligible_for_user_review`, adoption stays `pending_user_decision`, and it never writes config. Native rollout-budget ownership requires `AGENT_TOKEN_BUDGET_NATIVE_VALIDATED=1` only after feature + no-side-effect config probes pass; local Codex 0.144.3 reports the feature under development and disabled, so exact-session rollout observation remains the fallback. The token-budget path never writes `$CODEX_HOME/config.toml` |
 | memory inject | Run `adapters/codex/bin/preflight.sh memory [cwd]` for plain-text memory injection; Codex main SessionStart emits the same bounded summary as Claude/OpenCode by default; `CODEX_SESSION_MEMORY_INJECT=0` disables it (`1` still enables it). Shared app-server daemon hooks inherit the daemon's start environment (native `Hooks::new` snapshot), so the switch is also read from `"codex_session_memory_inject"` in the shared `memory-sync.json` policy at every start (hook environment wins; `--no-daemon` keeps the client environment). Native 0.163 drains queued start sources (resume then compact) before `UserPromptSubmit`; both emit, so that request may carry two summary copies (accepted; no per-session mark) |
 | memory sync | No Codex hook runs memory at session end (D-82; `preflight.sh session-end` is removed). `mem.py` exchanges in the background after writes and stale main-session reads against the local per-server SQLite source of serving truth. `sessionstart-lifecycle.py` calls `mem.py _seen-reset --session-id <id>` when the payload `source` is `compact` or `clear` (candidate display history only). Remote operation exchange is canonical opt-in through `MEM_SYNC_REMOTE=1`; `MEM_DUMP_PUSH=1` is a warned deprecated alias only when the canonical flag is unset and never pushes the compatibility dump. The runtime passes `MEM_SYNC_DIR`, `MEM_SYNC_REMOTE_URL`, and `MEM_SYNC_REF` through to the portable implementation, which requires a private dedicated exchange path outside project/config trees, an active old-writer fence, and either a fresh store or sealed seed epoch. The adapter performs no live migration/fence activation. Exit 1/2 remains visible after bounded curation |
-| memory candidate exposure / recall | Every eligible main `UserPromptSubmit` invokes `mem candidates` through the portable bridge using prompt, cwd, session, and native turn/message ID when available. Only active current-project/global capsule headlines and IDs are exposed (maximum six / 1,200 UTF-8 bytes), with no body read, touch, or semantic classifier. `PreToolUse` requires its same-turn receipt for main-session material mutation. The model reads a relevant record in full; `preflight.sh recall <query> [cwd] [session-id]` remains the deeper-search path and explicit `recall-gate` recovers a failed or unavailable hook |
-| local evidence exposure | The first `UserPromptSubmit` after startup/resume/clear/compact runs `preflight.sh local-evidence [cwd]`, the portable presence probe: research/documents/analysis counts and bounded newest entry paths (2,400 UTF-8 bytes, no body reads or prompt classifier, silent when empty, worker-exempt, fail-open). The existing session-context consumption receipt is committed only after the prompt output; later prompts do not repeat the probe. `SessionStart` records lifecycle and recovers retained work without rendering or consuming the card, delivery or evidence context. Codex supports prompt context through [UserPromptSubmit additionalContext](https://learn.chatgpt.com/docs/hooks#userpromptsubmit); `preflight.sh local-evidence [cwd]` remains the manual path |
+| memory candidate exposure / recall | Every eligible main `UserPromptSubmit` invokes `mem candidates` through the portable bridge using prompt, cwd, session, and native turn/message ID when available. Only active current-project/global capsule headlines and IDs are exposed (maximum three / 600 UTF-8 bytes), with no body read, touch, or semantic classifier. `PreToolUse` requires its same-turn receipt for main-session material mutation. The model reads a relevant record in full; `preflight.sh recall <query> [cwd] [session-id]` remains the deeper-search path and explicit `recall-gate` recovers a failed or unavailable hook |
 | oncall briefing | Run `adapters/codex/bin/preflight.sh briefing [cwd]` before prompt handling on the dedicated agent desk |
 | loop guidance | Run `adapters/codex/bin/preflight.sh loop-info <oncall|note|study|drill|runtime-watch>` before following loop guides; Codex reports manual contracts, missing implementations, and drill auto-run restrictions without executing loop scripts. The `note` loop and note semantics are application-owned; the harness exposes only the optional app-neutral `artifact-sink` port |
 | worklog state signal | Run `adapters/codex/bin/preflight.sh worklog [cwd]` to inspect configured `<agent-notes-root>` / `<worklog-board-app>` paths read-only before Codex updates notes or diagnoses board state |
@@ -497,7 +499,7 @@ Behavioral roles resolve through `preflight.sh role`; registered route profiles 
 | `balanced` | configured light tier / `high` |
 | `light` | configured light tier / `medium` |
 | `mini` | configured mini tier / `low`, lifecycle/micro-only |
-| `top` | configured top tier / `xhigh`; the main-session-only model, only through a route that sealed `top` for its depth-1 owner |
+| `top` | configured top tier / `xhigh`; the main-session-only model, only through a route that sealed `top` for its depth-1 owner, or at `strong`+ for a depth-2 stage worker or review/verification leg the person named |
 
 Non-route role compatibility overrides remain explicit and config-derived:
 
@@ -608,10 +610,12 @@ Do not project the shared `dispatch-liveness.sh`; it is the cross-harness
 registry/wait fallback, while Codex uses the adapter-owned
 `adapters/codex/bin/dispatch-liveness.py`, exposed as
 `adapters/codex/bin/preflight.sh liveness [jobs.log]`, and maps open dispatch
-jobs to `~/.codex/sessions/**/*.jsonl` by transcript `cwd`. Codex harvest is
-adapter-owned under `adapters/codex/bin/preflight.sh harvest` and only updates
-the portable jobs registry from `open` to `done`; it never performs merge or
-worktree cleanup. Do not project material/design helpers such as `extract_web_figures.py` until a Codex
+jobs to `~/.codex/sessions/**/*.jsonl` by transcript `cwd`. Codex
+`adapters/codex/bin/preflight.sh harvest` runs the shared harvest body
+`utilities/dispatch-harvest.py` with the Codex home pointer and default registry;
+completion receipts on every harness name that shared entry point. It only
+updates the portable jobs registry from `open` to `done`; it never performs
+merge or worktree cleanup. Do not project material/design helpers such as `extract_web_figures.py` until a Codex
 capability uses them directly.
 
 ### SD-15 limit-death detection (OPERATIONS §5.10 ⑨) — parity: realized
@@ -728,9 +732,9 @@ adjacent identity checks. PID or PGID reuse is never signalled, same-slug
 retries stay untouched, and completion markers or typed terminal handoffs
 retain precedence.
 
-The shared terminal inspector normalizes Codex `turn.completed` and Claude
-stream-json `result` events into the same three-line handoff contract. Codex
-liveness and harvest accept either registered harness while keeping runtime
+The shared terminal inspector normalizes Codex `turn.completed`, Claude
+stream-json `result` and OpenCode step-finish/`result` events into the same three-line handoff contract. Codex
+liveness and harvest accept any registered harness while keeping runtime
 native subagents, Claude subagents, and agent-team sessions outside this parity
 claim.
 

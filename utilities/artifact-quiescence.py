@@ -17,6 +17,8 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
+from route_plan import is_depth0_leg
+from route_form import one_shot_owner
 SCHEMA_VERSION = 4
 ATTRIBUTION_VERSION = 1
 COUNT_KEYS = ("open_routes", "open_jobs", "open_dispatch_attempts")
@@ -129,6 +131,7 @@ def _sealed_route(
     expected_hash: object = None,
     expected_node: object = None,
     binding: object = None,
+    expected_worker_type: object = None,
 ) -> dict:
     logical = _absolute_path(route_file, "route-file")
     if logical.is_symlink():
@@ -202,7 +205,7 @@ def _sealed_route(
         (node for node in nodes if node.get("id") == expected_node), None
     ) if expected_node is not None else None
     if binding == "quick-owner-route" and (
-        route.get("effective_intensity") != "quick"
+        not one_shot_owner(route)
         or referenced is None
         or referenced.get("id") != "one-shot"
         or referenced.get("kind") != "capability-owner"
@@ -211,10 +214,9 @@ def _sealed_route(
     ):
         raise ValueError("quick-owner-route-axis-invalid")
     if binding == "frame-route" and (
-        referenced is None
-        or referenced.get("dispatch_depth") != 1
-        or referenced.get("worker_type") != "frame"
-        or referenced.get("unit") != "plan/frame"
+        not is_depth0_leg(referenced)
+        # The row names the leg's worker type; a depth-0 leg of another kind is not that row's node.
+        or (expected_worker_type is not None and referenced.get("worker_type") != expected_worker_type)
     ):
         raise ValueError("frame-route-axis-invalid")
     digest = route.get("route_hash")
@@ -291,10 +293,13 @@ def _dispatch_route_references(metadata: dict) -> list[dict]:
             and metadata.get("worker_type") == "owner"
             and metadata.get("unit") == "_kernel/owner"
         )
+        # The one leg of a unit route is the same kind of row: a depth-1 worker that is not the owner,
+        # named by the leg's own unit. The sealed node it names must be a depth-0 leg of that worker type.
         frame_leg = (
             str(metadata.get("dispatch_depth")) == "1"
-            and metadata.get("worker_type") == "frame"
-            and metadata.get("unit") == "plan/frame"
+            and ((metadata.get("worker_type") == "frame" and metadata.get("unit") == "plan/frame")
+                 or (metadata.get("worker_type") in {"review", "stage", "support"}
+                     and bool(metadata.get("unit")) and metadata.get("unit") != "_kernel/owner"))
         )
         if str(metadata.get("dispatch_depth")) != "2" and not (quick_owner or frame_leg):
             raise ValueError("stage-route-binding-axis-invalid")
@@ -310,6 +315,7 @@ def _dispatch_route_references(metadata: dict) -> list[dict]:
             "expected_hash": metadata["route_hash"],
             "expected_node": metadata["route_node"],
             "binding": binding,
+            **({"expected_worker_type": metadata["worker_type"]} if binding == "frame-route" else {}),
         })
     return references
 

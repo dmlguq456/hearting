@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """A verification lease ends everything its command started, and caps its memory."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import importlib.util
 import hashlib
 import io
@@ -17,6 +20,8 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 LEASE = HERE / "verification-background-lease.py"
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import foreground_activity as ACTIVITY
 import owner_route_binding as OWNER_BINDING
 from split_module_fixture import patch_split
@@ -26,7 +31,7 @@ spec.loader.exec_module(L)
 
 
 def owner_registry_fixture(root: Path, *, conflicting_stage_identity=False):
-    attempt = "att-owner-lease"
+    attempt = unique_attempt_id("att-owner-lease")
     route = {
         "route_id": "rt-owner-lease",
         "route_hash": "sha256:rt-owner-lease",

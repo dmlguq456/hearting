@@ -1,4 +1,7 @@
 """Working accents keep changing in the real loop when the model is unchanged."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 import os
 from pathlib import Path
@@ -124,14 +127,14 @@ class ExplorerWorkingBeatPtyTest(unittest.TestCase):
                     capture = tmux("capture-pane", "-p", "-e", "-t", "beat")
                     lines = styled_lines(capture)
                     for y, (text, attributes) in enumerate(lines):
-                        count = re.search(r"ROUTES\s+(\d+ open)", text)
+                        count = re.search(r"│ (\d+) ROUTES", text)        # the OVERVIEW ROUTES head leads with its count
                         if count:
                             targets[(y, count.start(1))] = ("count", count.group(1), set())
                         if "[live]" in text or "[closed]" in text:
-                            x = text.find("⏳ 1")          # the folded session's route count
+                            x = text.find("route 1")          # the folded session's route count
                             if x >= 0:
                                 kind = "live" if "[live]" in text else "closed"
-                                targets[(y, x)] = (kind, "⏳ 1", set())
+                                targets[(y, x)] = (kind, "route 1", set())
                     if {value[0] for value in targets.values()} == {"count", "live", "closed"}:
                         break
                     time.sleep(0.05)

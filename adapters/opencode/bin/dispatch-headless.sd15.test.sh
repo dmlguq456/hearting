@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/../../../tools/run-tests.py" --direct-run bash "$0" "$@"
 # dispatch-headless.sd15.test.sh — SD-15 (OPERATIONS §5.10 ⑨) limit-사망 즉시 감지 회귀 (opencode).
 #   Homomorphic with the claude/codex SD-15 tests. --start 가 preflight projection 게이트를
 #   거치므로 이식된 SD-15 헬퍼를 import 로 직접 구동해 검증한다:

@@ -1,4 +1,7 @@
 """A shared-daemon callback must select its proved TUI, never inherited sockets."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 from pathlib import Path
 from unittest import mock
 import importlib.util
@@ -85,14 +88,18 @@ class SharedCodexTest(unittest.TestCase):
     for width in (410,274,100):
      rows=status_lines(values,width);plan,_=shell._codex_footer_plan(values,self.sid,self.child.pid,rows,rows)
      plain='\n'.join(plan['lines'])
-     for value in (self.sid,'Fixture title','fixture*','42%','fixture high','5h 23%','7d 60%'):
+     for value in (self.sid,'fixture*','42%','fixture high','5h 23%','7d 60%'):
       self.assertIn(value,plain)
+     # The common line carries no session title (spec 2026-11-11 rule 10), so
+     # Codex keeps painting its own thread-title field.
+     self.assertNotIn('Fixture title',plain)
      padded,_=shell._codex_footer_plan(values,self.sid,self.child.pid,rows,rows,padding='  ')
      self.assertEqual(padded['lines'],['  '+line for line in plan['lines']])
      self.assertEqual(plan['config']['items'],list(codex_tui_config.DEFAULT_STATUS_LINE))
      self.assertEqual(len(plan['fields']),7)
-     for index,value in enumerate((self.sid,'Fixture title','fixture','Context 42% used','fixture high','5h 77% left','Weekly 40% left')):
+     for index,value in enumerate((self.sid,self.sid,'fixture','Context 42% used','fixture high','5h 77% left','Weekly 40% left')):
       self.assertIn(value,plan['fields'][index])
+     self.assertNotIn('Fixture title',plan['fields'][1])
      # Unpainted common rows leave only the shell-owned thread-id field concealable.
      partial=shell._codex_footer_plan(values,self.sid,self.child.pid,rows,rows[:-1])[0]
      self.assertFalse(partial['common']);self.assertEqual(partial['fields'],[[self.sid]]+[None]*6)

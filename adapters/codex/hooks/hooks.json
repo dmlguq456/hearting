@@ -129,6 +129,16 @@
             "timeout": 30
           }
         ]
+      },
+      {
+        "matcher": "request_user_input|request_user_input_async|functions\\.request_user_input|functions\\.request_user_input_async",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'for root in \"${AGENT_HOME:-}\" \"$HOME/.codex/hearting\"; do if [ -f \"$root/core/CORE.md\" ] && [ -x \"$root/adapters/codex/hooks/run-hook.sh\" ]; then exec \"$root/adapters/codex/hooks/run-hook.sh\" pretooluse-question-redirect.py; fi; done; echo \"agent harness Codex hook launcher not found\" >&2; exit 69'",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PostToolUse": [

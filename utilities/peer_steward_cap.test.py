@@ -4,6 +4,9 @@
 Sessions, repositories and registry records are injected or built in a temporary
 home; the periodic-check module is replaced by a recording fake.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import contextlib
 import fcntl
 import importlib.util
@@ -101,6 +104,8 @@ class GrantFixture(unittest.TestCase):
         self.rows = []
         for patcher in (mock.patch.object(fleet_steward, "_projection_sessions",
                                           side_effect=lambda: list(self.rows)),
+                        mock.patch.object(fleet_steward, "_registry_sessions",
+                                          side_effect=lambda: list(self.rows)),
                         mock.patch("fleet.collectors.herdr.list_agents", return_value=[])):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -130,6 +135,17 @@ class GrantFixture(unittest.TestCase):
 
 
 class GrantLimitTest(GrantFixture):
+    def test_limited_names_only_counted_holders_and_never_shows_seat_hash(self):
+        holders = [dict(name=name, harness='claude', session_id=name, counted=counted,
+                        seat_key='0123456789abcdef', liveness=live)
+                   for name, counted, live in (('current', True, 'live'),
+                       ('uncertain', True, 'unknown'), ('ended', False, 'ended'),
+                       ('prior-seat', False, 'unknown'))]
+        line = peer_message.format_steward_limited(dict(holders=holders, counted=2, limit=2))
+        self.assertIn('holders=current,uncertain limit=2', line.splitlines()[0])
+        self.assertNotIn('0123456789abcdef', line)
+        self.assertNotIn('seat=', line)
+
     def fill(self, *sids, cwd=None):
         for sid in sids:
             self.session(sid, cwd or self.primary)
@@ -144,7 +160,10 @@ class GrantLimitTest(GrantFixture):
         self.assertFalse(self.marker_exists("s3"))
         line = peer_message.format_steward_limited(result)
         self.assertTrue(line.startswith("steward=limited repo=alpha holders="), line)
-        self.assertTrue(line.endswith("limit=2"), line)
+        self.assertIn("limit=2", line)
+        self.assertIn("liveness=unknown", line)
+        self.assertIn("last_activity=", line)
+        self.assertIn("steward off", line)
 
     def test_linked_worktree_session_counts_against_the_primary(self):
         self.fill("s1")
@@ -387,6 +406,37 @@ class PeerStewardWiringTest(GrantFixture):
         peer_steward._reconcile_obligations(store, [duty], read_context=None)
         self.assertEqual(self.check.calls[-1][0], "advance")
         self.assertIs(self.check.calls[-1][1][0], duty)
+
+    def test_one_round_hands_every_steward_check_the_same_session_reading(self):
+        from peer_read_context import PeerReadContext
+        duties = [{"id": f"steward-check-claude-s{n}", "state": "pending",
+                   "intent": {"kind": "steward-check"}} for n in range(3)]
+        store = mock.MagicMock()
+        store.root = Path(self.base)
+        seen = []
+        with mock.patch("peer_steward_native.end_observation",
+                        side_effect=lambda: object()) as fresh:
+            context = PeerReadContext(registry_append_only=True)
+            peer_steward._reconcile_obligations(store, duties, read_context=context)
+            seen.append([call[2].get("end_observation") for call in self.check.calls
+                         if call[0] == "advance"])
+            self.assertEqual(fresh.call_count, 1)             # one reading for the round
+            self.check.calls.clear()
+            # The next round has its own context, so it reads the process table again.
+            peer_steward._reconcile_obligations(
+                store, duties, read_context=PeerReadContext(registry_append_only=True))
+            seen.append([call[2].get("end_observation") for call in self.check.calls
+                         if call[0] == "advance"])
+            self.assertEqual(fresh.call_count, 2)
+        for readings in seen:
+            self.assertEqual(len(readings), 3)
+            self.assertIsNotNone(readings[0])
+            self.assertTrue(all(reading is readings[0] for reading in readings))
+        self.assertIsNot(seen[0][0], seen[1][0])
+        # Without a round context a check takes its own reading, as before.
+        self.check.calls.clear()
+        peer_steward._reconcile_obligations(store, duties[:1], read_context=None)
+        self.assertEqual(self.check.calls[-1][2], {})
 
 
 if __name__ == "__main__":

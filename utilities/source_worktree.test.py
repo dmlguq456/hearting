@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Focused worktree preparation and compose --start failure/retry boundary tests."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import importlib.util
 import contextlib
 import io
@@ -399,7 +402,8 @@ class ComposeStartPreparationRetryTest(SourceWorktreeFixture):
             "failure_class": "", "checked_worktree": str(project.resolve()),
             "failure_scope": "none", "codex_command": "ok", "retry_on_isolated_worktree": 0,
         }], "native_subagent": []}), encoding="utf-8")
-        for extra in (["--shape", "solo"], ["--shape", "staged"]):
+        for extra in (["--shape", "solo", "--capability", "autopilot-code"],
+                      ["--shape", "staged", "--capability", "autopilot-code"]):
             with self.subTest(extra=extra):
                 argv = ["capability-route.py", "compose", "--start", "--slug", "refused",
                         *extra, "--prompt-file", str(prompt), "--cwd", str(project),

@@ -1,3 +1,6 @@
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 import os
 import sys
@@ -154,6 +157,31 @@ class ComputeHostCollectorTest(unittest.TestCase):
         with self._env():
             timed_out = compute_hosts.collect(timeout=0.05)
         self.assertIn("timed out", timed_out["error"])
+
+    def test_a_stuck_in_process_listing_keeps_the_collection_deadline(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        class ConfigError(Exception):
+            pass
+
+        def stuck(_hosts):
+            release.wait(10)
+            return {"run_root": "/r"}, []
+
+        module = mock.Mock(list_payload=stuck, ConfigError=ConfigError)
+        argv = [sys.executable, str(self.tool)]
+        self.tool.write_text("import json\nprint(json.dumps({'run_root': '/r', 'hosts': []}))\n",
+                             encoding="utf-8")
+        with mock.patch.dict(os.environ, {"COMPUTE_HOSTS_CONFIG": str(self.config)}, clear=False), \
+             mock.patch.object(compute_hosts, "_tool_argv", return_value=argv), \
+             mock.patch.object(compute_hosts, "_inprocess_module", return_value=module):
+            first = compute_hosts.collect(timeout=0.2)
+            self.assertEqual(first["error"], "compute-host probe timed out")
+            # The stuck listing still runs: the next poll uses the subprocess path.
+            second = compute_hosts.collect(timeout=10)
+        self.assertNotIn("error", second)
+        self.assertEqual(second["hosts"], [])
 
     def test_probe_never_reads_the_viewer_terminal(self):
         """GH#840: the probe's ssh read the keys typed into Fleet, including ``q``."""

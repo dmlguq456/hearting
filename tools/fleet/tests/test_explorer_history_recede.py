@@ -9,6 +9,9 @@ keys of rows whose route already ended may change, and those rows must land on
 A_DIM palette rungs. A live route's failed stage ✕ (`g_dead`) and every blocked
 marker (`g_blocked`) stay exactly as strong as before.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import os
 import re
 import sys
@@ -161,8 +164,8 @@ class RecedeDeltaTest(unittest.TestCase):
             with self.subTest(cols=cols), mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}):
                 grid = draw(vm, NavState(scope="repo:" + str(repo["id"])), cols, 45, beat=1)
                 lines = _lines(grid)
-                start = next(y for y, text in enumerate(lines) if "── RECENT RESULTS" in text)
-                end = next(y for y, text in enumerate(lines) if y > start and "── RECENT WORK" in text)
+                start = next(y for y, text in enumerate(lines) if "RECENT RESULTS ─" in text)
+                end = next(y for y, text in enumerate(lines) if y > start and "RECENT WORK ─" in text)
                 rows = [y for y in range(start + 1, end) if "✓ " in lines[y][TABLE_X:]]
                 self.assertEqual(len(rows), 1)
                 self.assertIn(str(done["title"]), lines[rows[0]])

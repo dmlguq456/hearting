@@ -86,6 +86,7 @@ from dispatch_contract import (
 )
 from parent_next_directive import receipt_lines as parent_next_receipt_lines  # noqa: E402
 import launch_receipt  # noqa: E402
+from dispatch_contract_rows import is_unit_leg_launch  # noqa: E402
 import dispatch_wrapper_common as WRAPPER_COMMON  # noqa: E402
 import dispatch_headless_main as DISPATCH_MAIN  # noqa: E402
 import frame_repository
@@ -836,6 +837,9 @@ def prompt(args: argparse.Namespace) -> tuple[str, str]:
     args.replacement_raw_task = task
     args.assignment_sha256 = "sha256:" + hashlib.sha256(task.encode("utf-8")).hexdigest()
     bootstrap = DISPATCH_MAIN.bind_worker_contract(_ADAPTER, args, profile_type=None)
+    unit_prompt = DISPATCH_MAIN.unit_leg_prompt(_ADAPTER, args, task, commit_clause=commit_policy.prompt_clause(args))
+    if unit_prompt is not None:
+        return unit_prompt, source
     heartbeat = runtime_progress_prompt(args)
     return (
         f"{bootstrap}\n"
@@ -854,13 +858,18 @@ def prompt(args: argparse.Namespace) -> tuple[str, str]:
 
 def _supervised_owner(args: argparse.Namespace) -> bool:
     """A sealed route binding supervises its owner; a registered depth-1 owner
-    without one (the quick and solo shape) is supervised too. Route identity
-    stays separate from the reason to supervise."""
+    without one is supervised when it is quick or solo, or when it is bound to its
+    route by its own node (the middle cell's owner: standard, no binding, the route
+    passed as arguments). Route identity stays separate from the reason to supervise.
+
+    The question Claude and Codex ask (any registered depth-1 owner) is not asked here:
+    a standard+ owner with no route would change its one-shot launch."""
     if getattr(args, "owner_route_binding", None):
         return True
     return (getattr(args, "dispatch_depth", None) == 1
             and getattr(args, "worker_type", None) == "owner"
-            and getattr(args, "intensity", None) not in STANDARD_PLUS_INTENSITIES)
+            and (getattr(args, "intensity", None) not in STANDARD_PLUS_INTENSITIES
+                 or WRAPPER_COMMON.supervisor_route(args) is not None))
 
 
 def initialize_supervised_owner_input(args: argparse.Namespace, jobs: Path) -> None:
@@ -880,6 +889,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
             "--runtime-harness", "opencode", "--worktree", args.worktree,
             "--jobs", str(args.jobs_path), "--parent-attempt-id", args.attempt_id or "unassigned",
             "--state-file", str(lease.with_suffix(".json")), "--lease-file", str(lease),
+            *DISPATCH_MAIN.owner_session_arguments(args),
         ]
         route = _supervisor_route(args)
         if route:
@@ -900,6 +910,9 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         variant=(settings["variant"] if settings["source"] != "inherit" else None),
         title=title,
         standalone=standalone,
+        session=(getattr(args, "session_plan", None).session_id
+                 if getattr(args, "session_plan", None) is not None
+                 and args.session_plan.kind == "resumed" else None),
     )
     prompt_arg = f'"$(cat -- {shlex.quote(os.path.abspath(prompt_path))})"'
     # V2 dropped `--dir`: the worker's Location is its process cwd, and a worker left
@@ -1094,11 +1107,15 @@ def main(argv: list[str]) -> int:
         args.artifact_root = resolve_artifact_root(args.worktree)
         args.runtime_dir = WRAPPER_COMMON.prepare_runtime_root(
             args.artifact_root, repository_kind=args.repository_kind, source_root=args.worktree)
+        args.raw_data_dir = WRAPPER_COMMON.prepare_raw_data_root(
+            args.artifact_root, args.runtime_dir, source_root=args.worktree)
         args.report_bundle_root = resolve_report_bundle_root(args.route_file, args.route_node)
         args.opencode_config_content = scoped_external_directory_config(
             args.artifact_root,
             str(args.report_bundle_root) if args.report_bundle_root is not None else None,
-            execution_access_roots=((Path(args.runtime_dir),) if args.runtime_dir else ()),
+            execution_access_roots=((Path(args.runtime_dir),) if args.runtime_dir else ())
+                                   + ((Path(WRAPPER_COMMON.raw_data_grant(args)),)
+                                      if WRAPPER_COMMON.raw_data_grant(args) else ()),
             agent_home=args.agent_home,
             worktree=args.worktree,
             selected_agent=args.agent,
@@ -1185,6 +1202,11 @@ def main(argv: list[str]) -> int:
         registry = resolve_global_registry(agent_home, args.jobs, args.dispatch_depth, action)
         jobs = registry.path
         args.jobs_path = jobs
+        import unit_continue
+        if is_unit_leg_launch(args):
+            unit_continue.plan_for_args(args, jobs, "opencode")   # a unit leg's session lives in OpenCode's own store
+        else:   # an owner taking over from an earlier owner of its route wakes that session through its supervisor
+            unit_continue.owner_plan_for_args(args, jobs, "opencode", keeps_session=_supervised_owner(args))
         from review_input import prepare_request as prepare_review_input
         prepare_review_input(args)
         args.attempt_id = new_attempt_id(args.attempt_id) if action in ("register", "start") else args.attempt_id
@@ -1215,6 +1237,7 @@ def main(argv: list[str]) -> int:
             args.artifact_root,
             str(args.report_bundle_root) if args.report_bundle_root is not None else None,
             (*((Path(args.runtime_dir),) if args.runtime_dir else ()),
+             *((Path(WRAPPER_COMMON.raw_data_grant(args)),) if WRAPPER_COMMON.raw_data_grant(args) else ()),
              *(grant.additional_writable_roots if grant is not None else ())),
             grant.read_roots if grant is not None else (),
             agent_home=args.agent_home,
@@ -1250,7 +1273,7 @@ def main(argv: list[str]) -> int:
     from review_input import prompt_block as review_input_prompt
     prompt_text += review_input_prompt(args)
     from dispatch_replacement import recovery_instructions
-    prompt_text += recovery_instructions(args)
+    prompt_text = DISPATCH_MAIN.owner_continuation_prompt(_ADAPTER, args, prompt_text, recovery_instructions(args))
     rc = DISPATCH_MAIN.rebind_replica_batch(_ADAPTER, args, action, "opencode", assignment_sha256=args.assignment_sha256)
     if rc is not None:
         return rc
@@ -1423,6 +1446,8 @@ def main(argv: list[str]) -> int:
             execution_access_roots=[
                 str(value) for value in (
                     (*((Path(args.runtime_dir),) if args.runtime_dir else ()),
+                     *((Path(WRAPPER_COMMON.raw_data_grant(args)),)
+                       if WRAPPER_COMMON.raw_data_grant(args) else ()),
                      *(args.execution_access_grant.additional_writable_roots
                        if args.execution_access_grant is not None else ()))
                 )

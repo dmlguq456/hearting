@@ -30,7 +30,9 @@ def recipe_selected(recipe):
 
 
 def route_selected(route):
-    return (route.get("effective_intensity") == "quick"
+    # One judgment with the compiler's `form == "solo"`: one owner (A) runs this verification alone.
+    from route_form import one_shot_owner
+    return (one_shot_owner(route)
             and recipe_selected(route.get("composed_recipe"))
             and [n.get("id") for n in route.get("nodes", [])] == ["resume-run", "one-shot"])
 

@@ -6,6 +6,9 @@ Real activate/begin/close/finalize fixtures come from `artifact_producer.test.py
 into a template root and copied per test.  The model is never called and no real artifact root is read
 or written.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import contextlib
 import hashlib
 import importlib.util

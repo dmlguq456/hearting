@@ -56,6 +56,15 @@ two-speaker, multi-reference run without dropout (E2 best48) from a
 0–3-speaker variable run with reference dropout and fine-tuning (var03 FT LAST3);
 retain the original labels as references and leave an unexplained label unresolved.
 
+Register the same Ablation grid in the project's experiment catalog so every later
+report calls each condition by the name the user just saw: put the conditions, the
+goal, the deciding metric with its split and scoring, and the baseline into one spec and run
+`python3 utilities/experiment_catalog.py register --file <spec.json>`
+(`status`, `show`, `rename` and `lint` read and fix it). The user reads and corrects the names on
+this same screen; there is no new question. A `lint` warning names its place in the catalog and
+never blocks the start; fill the gaps before the first result report. An unexplained label is
+left empty, not guessed.
+
 **S1-4. Invoke research plan-review only at standard+.** Dispatch the `research/plan-review` unit and provide the latest five RUNLOG rows, the draft `experiment_spec.md`, and any research directory. Ask it to check:
 
 - whether a completed or pending row already represents the same ablation;
@@ -93,7 +102,7 @@ Required outputs:
 
 Matrix plans default to queueing each completed row's decision-metric evaluation
 on the existing approved queue while the next row trains, then updating the
-leaderboard artifact; successive halving is a default option for many rows.
+leaderboard artifact (`python3 utilities/experiment_catalog.py leaderboard`); successive halving is a default option for many rows.
 Known metric/proxy/rules/time budget/baselines are optional. A long CPU scoring or
 inference stage may call `write_progress(done, "item", total=n)` for an earlier ETA.
 New per-epoch JSON output folders belong beneath a folder containing `CACHEDIR.TAG`;
@@ -124,7 +133,7 @@ Launching requires the route-start approval to include this environment and part
 
 **S3-2. Append one pending row before the run** to `<artifact-root>/experiments/_RUNLOG.md`, leaving the result as `—`. This makes in-flight work and duplicate setup visible during long queues and mirrors `pipeline_state.run: in_progress`.
 
-At the same point, create `experiments/{date}_{slug}/run.json` with `status: "running"`, `skill_mode: "setup"` from `pipeline_state.mode`, `parent`, current ISO 8601 `started_at`, scaffold config path in `config_ref`, and the expected best-checkpoint path in `ckpt_path` under `$AGENT_RUNTIME_DIR/experiments/{slug}/runs/{run}/ckpt/`. Omit `best`, `ended_at`, `ckpt_sha256` and `ckpt_byte_size` while running. Once the checkpoint exists, record its optional SHA256 and byte size and verify its digest at handoff and parent evaluation. E3-4 updates completion fields.
+At the same point, create `experiments/{date}_{slug}/run.json` with `status: "running"`, `skill_mode: "setup"` from `pipeline_state.mode`, `parent`, current ISO 8601 `started_at`, scaffold config path in `config_ref`, and the expected best-checkpoint path in `ckpt_path` under `$AGENT_RAW_DATA_DIR/experiments/{slug}/runs/{run}/ckpt/`. Omit `best`, `ended_at`, `ckpt_sha256` and `ckpt_byte_size` while running. Once the checkpoint exists, record its optional SHA256 and byte size and verify its digest at handoff and parent evaluation. E3-4 updates completion fields.
 
 ```markdown
 | 2026-05-26 | lr_sweep | TF_Enhancer base, lr 1e-3→3e-4 | ⏳ 대기 | — |
@@ -151,6 +160,10 @@ route and input provenance, exact exit and outputs, and a fresh remote process
 group observation before the owner starts verification. Do not treat
 `compute-hosts runs` or `compute-hosts tail <run-id>` as a substitute for that
 handoff or for the independent verifier.
+
+The receiving session reads the run's configuration and, with `experiment_catalog.py register` and
+`link --run <run-id>`, gives the run its condition name in the catalog; a name the configuration
+does not explain stays empty.
 
 **S3-4. Escalate convergence failures on user request.** For prompts such as `loss 가 안 떨어져`, `NaN`, or `수렴 이상`, dispatch the `qa/ml-debug` unit. Provide the experiment directory, symptom, available logs, and `experiment_spec.md`. Check data shape/range/NaN/balance, model initialization/freezing/gradient flow, loss scale/sign/stability, optimizer learning rate/weight decay/warmup, and batch/device/mixed precision. Return the one or two most likely causes plus commands that distinguish them.
 

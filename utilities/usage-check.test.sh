@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# A direct run re-enters under tools/run-tests.py isolation (no real HOME, state, herdr or tmux).
+[ -n "${HEARTING_TEST_ISOLATED:-}" ] || exec python3 "$(dirname -- "$0")/../tools/run-tests.py" --direct-run bash "$0" "$@"
 # usage-check.test.sh — SD-16(a) 사용량 조회 헬퍼 회귀.
 #   증명: dead-limit 마커 → limited(reset), 마커 없음 → ok, jobs.log 부재 → unknown,
 #   reset 없는 window 밖(오래된) 마커 → ok(만료), known future reset → limited, harness 스코프 필터.

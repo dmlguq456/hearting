@@ -78,8 +78,9 @@ class SourceLineage(NamedTuple):
     """One first-parent lineage verdict against a worktree's live HEAD.
 
     `kind` is `"exact"` (HEAD is the sealed commit), `"descendant"` (HEAD is a
-    first-parent descendant of it -- the mutation-worktree, mid-cycle-progress
-    shape SD-67/SD-107 named), `"diverged"` (HEAD is neither), or
+    descendant of it: on its first-parent line -- the mutation-worktree,
+    mid-cycle-progress shape SD-67/SD-107 named -- or merged in through another
+    parent), `"diverged"` (HEAD is neither), or
     `"unverifiable"` (the question could not be asked at all; `reason` names
     why: `git-timeout`, `git-failed`, `unsafe-git-operation`,
     `unsafe-git-state`, `not-a-repo`). `commits[0]` is the observed HEAD
@@ -108,7 +109,10 @@ def source_lineage_verdict(cwd, sealed_commit, *, timeout=SOURCE_LINEAGE_GIT_TIM
     itself, whose first line is the observed commit), and -- only when HEAD is
     not the sealed commit itself -- an in-progress-operation check via the
     git-dir's sidecar files and `rev-parse --abbrev-ref HEAD` (branch;
-    detached HEAD reports the literal string `"HEAD"`).
+    detached HEAD reports the literal string `"HEAD"`). A sealed commit that is
+    not on that first-parent line but is still an ancestor of HEAD (reached
+    through a merge's other parent) is asked once more with `merge-base
+    --is-ancestor`, and reads as `descendant` too.
 
     The safety checks run only for a HEAD that differs from the sealed commit:
     accepting drift as legitimate forward progress is the risky question a
@@ -164,6 +168,22 @@ def source_lineage_verdict(cwd, sealed_commit, *, timeout=SOURCE_LINEAGE_GIT_TIM
     if sealed_commit in commits:
         distance=commits.index(sealed_commit)
         return SourceLineage("descendant",distance,tuple(commits[:distance]),branch,None)
+    # The sealed commit may still be an ancestor of HEAD without being on its first-parent line: HEAD moved on
+    # through a merge that carries the sealed line in as another parent. That is a descendant too (it only
+    # moved forward), counted over every commit the sealed one does not reach.
+    try:
+        ancestor=probe("merge-base","--is-ancestor",sealed_commit,"HEAD")
+        if ancestor.returncode == 0:
+            ahead=probe("rev-list",f"{sealed_commit}..HEAD")
+    except subprocess.TimeoutExpired:
+        return _source_lineage_unverifiable("git-timeout")
+    except (OSError,subprocess.SubprocessError):
+        return _source_lineage_unverifiable("git-failed")
+    if ancestor.returncode == 0:
+        if ahead.returncode != 0:
+            return _source_lineage_unverifiable("git-failed")
+        merged=tuple(ahead.stdout.split())
+        return SourceLineage("descendant",len(merged),merged,branch,None)
     return SourceLineage("diverged",None,tuple(commits),branch,None)
 
 def _grounding_cwd_lineage_ok(path, sealed_release, actual_release):
@@ -1159,6 +1179,21 @@ def _validate_tuple_parent_identity(row, parent_dispatch_depth):
         )
 
 
+def _pass_registry_lines(jobs: Path):
+    """The registry's text lines (``read_text(errors="replace").splitlines()``).
+
+    A runner pass proves hundreds of owner markers against the same jobs log;
+    each read it whole (46 MB on the live store). The shared registry cache
+    returns the same lines from its generation-checked view: the pinned one in
+    an open read pass, otherwise the current stable generation.
+    """
+    import dispatch_registry_cache
+    if dispatch_registry_cache.registry_scope_active():
+        return dispatch_registry_cache.registry_text_lines(jobs)
+    with dispatch_registry_cache.registry_read_scope():
+        return dispatch_registry_cache.registry_text_lines(jobs)
+
+
 def _marker_identity_row(route, node, node_id, gate, *, jobs=None, exact_terminal=False,
                          registry_lines=None):
     """One completion marker's on-disk truth, in the shared gate vocabulary."""
@@ -1218,7 +1253,9 @@ def _marker_identity_row(route, node, node_id, gate, *, jobs=None, exact_termina
             registry = path.parents[2] / "jobs.log"
         if registry_lines is None:
             try:
-                lines = registry.read_text(encoding="utf-8").splitlines()
+                lines = _pass_registry_lines(registry)
+                if lines is None:
+                    lines = registry.read_text(encoding="utf-8").splitlines()
             except FileNotFoundError:
                 lines = []  # Existing semantic-history contract permits archived process rows.
             except OSError:
@@ -1232,7 +1269,9 @@ def _marker_identity_row(route, node, node_id, gate, *, jobs=None, exact_termina
             return {"passed": False, "reason": "completion-marker-not-current"}
         if registry_lines is None:
             try:
-                lines = Path(jobs).read_text(encoding="utf-8", errors="replace").splitlines()
+                lines = _pass_registry_lines(Path(jobs))
+                if lines is None:
+                    lines = Path(jobs).read_text(encoding="utf-8", errors="replace").splitlines()
             except OSError:
                 return {"passed": False, "reason": "registry-unreadable", "current": False,
                         "attempt_id": marker.get("attempt_id")}

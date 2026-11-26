@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import importlib.util
 import json
@@ -1362,11 +1365,12 @@ class ManagedGatewayTest(unittest.TestCase):
         )
         encoded = GATEWAY.canonical(start)
         self.assertIn(
-            "harvest --jobs "
+            "/utilities/dispatch-harvest.py --jobs "
             + str(Path(__file__).resolve())
             + " --attempt-id att-batch-open --status open --mark-done",
             encoded,
         )
+        self.assertNotIn("/adapters/", encoded)
 
     def test_missing_or_unsafe_job_registry_never_reaches_upstream(self) -> None:
         before = self.server.counts()
@@ -1592,6 +1596,17 @@ class ManagedGatewayTest(unittest.TestCase):
             time.sleep(0.01)
         self.assertIn(expected, self.server.approval_responses)
         self.wait_interaction("thread-1", False)
+        import human_wait_state
+        item_id = f"S1:codex:thread-1:{int(marker['waiting_since'] * 1000)}"
+        deadline = time.monotonic() + 5
+        closed = None
+        while time.monotonic() < deadline:
+            closed = human_wait_state.closed_question(item_id)
+            if closed and closed["status"] == "answered":
+                break
+            time.sleep(0.01)
+        self.assertEqual(closed["status"], "answered")
+        self.assertEqual(set(closed), {"status", "at"})
         persisted = "".join(
             path.read_text(encoding="utf-8")
             for path in (self.trace, self.ledger)

@@ -1,4 +1,7 @@
 """Resume/clear current selection and native session directories, without live writes."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import importlib.util
 import json
 import os
@@ -65,6 +68,7 @@ class NativeCurrentTest(unittest.TestCase):
 
         with mock.patch.object(procscan, "read_proc_start", return_value=self.start), \
                 mock.patch.object(procscan, "_comm_of", return_value="claude"), \
+                mock.patch.object(procscan, "provenance", return_value="herdr"), \
                 mock.patch.object(procscan, "_read_cwd", return_value=("/repo", False)), \
                 mock.patch.object(herdr, "list_panes", return_value=[pane]) as list_panes, \
                 mock.patch.object(herdr, "pane_evidence", side_effect=bind_observed_pane):

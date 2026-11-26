@@ -65,8 +65,10 @@ else:  # Existing file-path consumers load this module without a package.
     from fleet.model import current_attempt_rank
     from fleet.work_titles import readable
 
-_CACHE = {}          # {abspath: (mtime, size, record|None)}
-_OUTCOME_CACHE = {}  # {abspath: (mtime, size, outcome|None)} — F-<next> sidecar reader
+_CACHE = {}          # {abspath: (identity, record|None)}; identity = (dev, ino, size, mtime_ns, ctime_ns)
+_OUTCOME_CACHE = {}  # {abspath: (identity, outcome|None)} — F-<next> sidecar reader;
+                     # identity = (dev, ino, size, mtime_ns, ctime_ns), so a rewrite that
+                     # restores size and mtime still reads again
 
 # F-30 retry rounds are display evidence, not route shape. Only these semantic
 # nodes carry the compact marker; every other opaque route node keeps its sealed
@@ -545,6 +547,27 @@ def _load_outcome_uncached(path):
     }
 
 
+_ROUTE_HEADERS = {}
+_ROUTE_HEADER_LIMIT = 2048
+
+
+def _route_header(route_file):
+    """``(route_id, artifact_root, route_id or "")`` of a route document, re-read only when its
+    full file generation changes; the document itself is not retained."""
+    path = os.fspath(route_file)
+    info = os.stat(path)
+    generation = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    cached = _ROUTE_HEADERS.get(path)
+    if cached is not None and cached[0] == generation:
+        return cached[1]
+    route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+    header = (route.get("route_id"), route.get("artifact_root", ""), route.get("route_id", ""))
+    if len(_ROUTE_HEADERS) >= _ROUTE_HEADER_LIMIT and path not in _ROUTE_HEADERS:
+        _ROUTE_HEADERS.pop(next(iter(_ROUTE_HEADERS)))
+    _ROUTE_HEADERS[path] = (generation, header)
+    return header
+
+
 def load_outcome(route_file, expect_id=None, expect_hash=None):
     """`{"present": False}` | `{"present": True, "terminal_gate_proven": True|False|None|"absent",
     "closed_at": str|None, "match": bool}` — read-only sidecar reader for the
@@ -555,26 +578,28 @@ def load_outcome(route_file, expect_id=None, expect_hash=None):
     try:
         path = _outcome_path(route_file)
         st = os.stat(path)
-        key = (st.st_mtime, st.st_size)
+        key = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
     except (OSError, TypeError, ValueError):
         path = _outcome_path(route_file)
         key = None
         outcome = None
     else:
         cached = _OUTCOME_CACHE.get(path)
-        if cached is not None and (cached[0], cached[1]) == key:
-            outcome = cached[2]
+        if cached is not None and cached[0] == key:
+            outcome = cached[1]
         else:
             outcome = _load_outcome_uncached(path)
-            _OUTCOME_CACHE[path] = (key[0], key[1], outcome)
+            _OUTCOME_CACHE[path] = (key, outcome)
     finish_pending = None
     try:
-        route = json.loads(Path(route_file).read_text(encoding="utf-8"))
-        if route.get("route_id") == expect_id or expect_id is None:
+        route_id, artifact_root, pending_route_id = _route_header(route_file)
+        if route_id == expect_id or expect_id is None:
             import sys
-            sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "utilities"))
+            utilities = str(Path(__file__).resolve().parents[2] / "utilities")
+            if utilities not in sys.path:
+                sys.path.insert(0, utilities)
             import inline_finish
-            pending = inline_finish.pending_state(Path(route.get("artifact_root", "")), route.get("route_id", ""))
+            pending = inline_finish.pending_state(Path(artifact_root), pending_route_id)
             if pending and pending.get("state") != "finished":
                 finish_pending = pending.get("state")
     except (OSError, ValueError, TypeError):
@@ -751,15 +776,15 @@ def load(path, expect_hash=None, expect_id=None):
     try:
         abspath = os.path.abspath(path)
         st = os.stat(abspath)
-        key = (st.st_mtime, st.st_size)
+        key = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
     except (OSError, TypeError, ValueError):
         return None
     cached = _CACHE.get(abspath)
-    if cached is not None and (cached[0], cached[1]) == key:
-        record = cached[2]
+    if cached is not None and cached[0] == key:
+        record = cached[1]
     else:
         record = _load_uncached(abspath)
-        _CACHE[abspath] = (key[0], key[1], record)
+        _CACHE[abspath] = (key, record)
     if record is None:
         return None
     if expect_hash is not None and record.get("route_hash") != expect_hash:

@@ -6,6 +6,9 @@ must name a real producer that actually writes that `rejection_class`
 literal at its declared `write_site`, and a fixture test that exists in the
 test file it names.
 """
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import ast
 import csv
 import sys

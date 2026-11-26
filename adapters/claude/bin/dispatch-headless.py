@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "utilities"))
 from worker_runtime_home import prepare_worker_home, claude_worker_arguments
+from foreground_activity import BLOCKING_COMMAND_MAX_SECONDS
 from dispatch_contract import (
     _atomic_registry_replace,
     workflow_completion_receipt,  # noqa: E402
@@ -85,6 +87,7 @@ from dispatch_contract import (
 )
 from parent_next_directive import receipt_lines as parent_next_receipt_lines  # noqa: E402
 import launch_receipt  # noqa: E402
+from dispatch_contract_rows import is_unit_leg_launch  # noqa: E402
 import dispatch_wrapper_common as WRAPPER_COMMON  # noqa: E402
 import dispatch_headless_main as DISPATCH_MAIN  # noqa: E402
 import frame_repository
@@ -373,6 +376,9 @@ def dispatch_prompt(
 ) -> tuple[str, str]:
     task, source = task_input or task_prompt(args)
     bootstrap = DISPATCH_MAIN.bind_worker_contract(_ADAPTER, args, profile_type=profile_worker_type(ROOT, args.profile))
+    unit_prompt = DISPATCH_MAIN.unit_leg_prompt(_ADAPTER, args, task, commit_clause=commit_policy.prompt_clause(args))
+    if unit_prompt is not None:
+        return unit_prompt, source
     profile_note = (
         f"masked specialization profile={args.profile}; its CLAUDE.md contains only the runtime attach layer and selected specialization"
         if args.profile
@@ -490,7 +496,7 @@ PERMISSION_MODE_FLAG_VALUES = {
 HEADLESS_BACKGROUND_OFF = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
 HEADLESS_BASH_TIMEOUT_DEFAULTS = {
     "BASH_DEFAULT_TIMEOUT_MS": "600000",
-    "BASH_MAX_TIMEOUT_MS": "3000000",
+    "BASH_MAX_TIMEOUT_MS": str(int(BLOCKING_COMMAND_MAX_SECONDS * 1000)),
 }
 
 
@@ -889,6 +895,9 @@ _COMPACTION_ENV_KEYS = {
     "disable_auto_compact_env": "DISABLE_AUTO_COMPACT",
     "disable_compact_env": "DISABLE_COMPACT",
     "max_output_env": "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+    # Not a compaction input: it fixes this attempt's own model window at 200K (Fleet's
+    # context gauge before the first turn result).
+    "disable_1m": "CLAUDE_CODE_DISABLE_1M_CONTEXT",
 }
 
 
@@ -933,6 +942,15 @@ def _route_declares_terminal_commit_support(route_file: str) -> bool:
     return route.get("runtime_support", {}).get("terminal_commit") is True
 
 
+def _session_arguments(args: argparse.Namespace) -> list[str]:
+    """A unit leg keeps its session in the worker home (its next turn can wake it); any other one-shot worker keeps none."""
+    session_id = getattr(args, "unit_session_id", "")
+    if not session_id:
+        return ["--no-session-persistence"]
+    plan = getattr(args, "session_plan", None)
+    return ["--resume" if plan is not None and plan.kind == "resumed" else "--session-id", session_id]
+
+
 def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -> str:
     prompt_path, log_path = Path(frame_repository.native_path(prompt_path)), Path(frame_repository.native_path(log_path))
     if getattr(args, "resolved_completion_delivery", "one-shot") == "session-resume-supervised":
@@ -947,9 +965,12 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
             # Refresh permissions on the existing same-session resume path.
             "--turn-transport", "resume-process",
             "--add-dir", str(args.artifact_root),
+            *DISPATCH_MAIN.owner_session_arguments(args),
         ]
         if getattr(args, "runtime_dir", ""):
             command += ["--add-dir", str(args.runtime_dir)]
+        if WRAPPER_COMMON.raw_data_grant(args):
+            command += ["--add-dir", WRAPPER_COMMON.raw_data_grant(args)]
         if getattr(args, "report_bundle_root", None) is not None:
             command += ["--add-dir", str(args.report_bundle_root)]
         if getattr(args, "execution_access_grant", None) is not None:
@@ -986,10 +1007,12 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
     cmd = [
         "claude", "-p", "--add-dir", args.artifact_root,
         "--output-format", "stream-json", "--verbose",
-        "--no-session-persistence",
+        *_session_arguments(args),
     ]
     if getattr(args, "runtime_dir", ""):
         cmd += ["--add-dir", str(args.runtime_dir)]
+    if WRAPPER_COMMON.raw_data_grant(args):
+        cmd += ["--add-dir", WRAPPER_COMMON.raw_data_grant(args)]
     cmd += claude_worker_arguments(getattr(args, "worker_runtime_env", None))
     if getattr(args, "report_bundle_root", None) is not None:
         cmd += ["--add-dir", str(args.report_bundle_root)]
@@ -1146,6 +1169,8 @@ def main(argv: list[str]) -> int:
         args.artifact_root = resolve_artifact_root(args.worktree)
         args.runtime_dir = WRAPPER_COMMON.prepare_runtime_root(
             args.artifact_root, repository_kind=args.repository_kind, source_root=args.worktree)
+        args.raw_data_dir = WRAPPER_COMMON.prepare_raw_data_root(
+            args.artifact_root, args.runtime_dir, source_root=args.worktree)
         args.report_bundle_root = resolve_report_bundle_root(args.route_file, args.route_node)
     except ValueError as e:
         return fail("writable-root-resolution-failed", 64, detail=str(e), worktree=args.worktree)
@@ -1228,6 +1253,11 @@ def main(argv: list[str]) -> int:
         profile_type=profile_worker_type(ROOT, args.profile),
     )
     args.jobs_path = jobs
+    if is_unit_leg_launch(args):
+        # The turn's session: the previous turn's when it can be woken, else a new one the worker home keeps.
+        import unit_continue
+        plan = unit_continue.plan_for_args(args, jobs, "claude")
+        args.unit_session_id = plan.session_id if plan is not None and plan.kind == "resumed" else str(uuid.uuid4())
     try:
         from review_input import prepare_request as prepare_review_input
         prepare_review_input(args)
@@ -1241,6 +1271,10 @@ def main(argv: list[str]) -> int:
             completion_lease_path(args)
     except DispatchContractError as e:
         return fail(e.reason, 69, detail=e.detail, child_spawned="0")
+    import unit_continue
+    # An owner taking over from an earlier owner of its route wakes that session when its supervisor can.
+    unit_continue.owner_plan_for_args(
+        args, jobs, "claude", keeps_session=args.resolved_completion_delivery == "session-resume-supervised")
     try:
         default_roots = adapter_default_roots(args)
         args.execution_access_grant = route_authority.bind_launch_access(
@@ -1264,11 +1298,15 @@ def main(argv: list[str]) -> int:
 
     task_input = task_prompt(args)
     args.replacement_raw_task = task_input[0]
-    prompt_text, prompt_source = dispatch_prompt(args, task_input)
     from review_input import prompt_block as review_input_prompt
-    prompt_text += review_input_prompt(args)
     from dispatch_replacement import recovery_instructions
-    prompt_text += recovery_instructions(args)
+    recovery = recovery_instructions(args)
+
+    def render_prompt():
+        text, source = dispatch_prompt(args, task_input)
+        text += review_input_prompt(args)
+        return DISPATCH_MAIN.owner_continuation_prompt(_ADAPTER, args, text, recovery), source
+    prompt_text, prompt_source = render_prompt()
     assignment_sha256 = "sha256:" + hashlib.sha256(
         task_input[0].encode("utf-8")
     ).hexdigest()
@@ -1325,6 +1363,9 @@ def main(argv: list[str]) -> int:
         args.worker_runtime_env = prepare_worker_home(args.agent_home, 'claude', args.worker_type,
                                                        args.attempt_id, env=env, profile=args.profile)
         env.update(args.worker_runtime_env)
+        if getattr(args, "unit_session_id", "") or unit_continue.owner_predecessor(args):
+            DISPATCH_MAIN.carry_session(_ADAPTER, args, env["CLAUDE_CONFIG_DIR"], jobs=jobs, prompt_path=prompt_path,
+                                        fresh_prompt=lambda: render_prompt()[0])
         # Apply after the masked worker home and all inherited environment
         # updates so every direct/supervised/resumed native child sees this
         # launch's captured operating budget.

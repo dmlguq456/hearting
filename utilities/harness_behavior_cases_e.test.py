@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Offline checks for the four-axis behaviour scenarios (no TUI is launched)."""
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import json
 import os
@@ -19,6 +22,7 @@ import harness_behavior_scenarios as hb  # noqa: E402
 import harness_behavior_cases_a as ca  # noqa: E402
 import harness_behavior_cases_b as cb  # noqa: E402
 import harness_behavior_cases_e as ce  # noqa: E402
+import harness_behavior_cases_unit_explore as cx  # noqa: E402
 
 
 def _post(base, path, payload):
@@ -110,6 +114,62 @@ class OwnerRouteTest(unittest.TestCase):
         self.assertNotIn("HB-NET-unscoped-REACHED", command)
         self.assertNotIn("HB-NET-unscoped-BLOCKED", command)
         self.assertIn("git push origin HEAD:refs/heads/hb-unscoped", command)
+
+
+class RegisteredOwnerTest(unittest.TestCase):
+    """PG-34: the owner the normal start registers runs only on the fixture model."""
+
+    def test_fixture_models_conf_leaves_no_account_model_for_any_owner_profile(self):
+        import model_profile
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            for harness in ("claude", "codex", "opencode"):
+                with self.subTest(harness=harness):
+                    shipped = (root / "adapters" / harness / "config" / "models.conf").read_text()
+                    model = ce.fixture_model_id(harness)
+                    path = Path(tmp) / f"{harness}.conf"
+                    path.write_text(ce.fixture_models_conf(shipped, model))
+                    for profile in ce.OWNER_PROFILES:
+                        self.assertEqual(model_profile.resolve_profile(harness, path, profile)["model"],
+                                         model, profile)
+                    tiers = {line.split("=", 1)[1] for line in shipped.splitlines()
+                             if line.startswith("CFG_TIER_") and "_MODEL=" in line}
+                    for line in path.read_text().splitlines():
+                        if line.lstrip().startswith("#") or line.startswith("CFG_MAIN_SESSION_ONLY_MODELS="):
+                            continue
+                        for tier in tiers:
+                            self.assertNotRegex(line, rf"(?<![\w./-]){tier}(?![\w./-])")
+
+    def test_script_probes_once_then_ends_the_owner_with_a_typed_handoff(self):
+        scenario = ce.OwnerPublishRegisteredScenario()
+        scenario.port = 9
+        answer = scenario.script(None)
+        first = {"text": "Assignment: SCENARIO-OWNER-REG-PUSH-report: push", "last_kind": "user",
+                 "last_text": "Assignment: SCENARIO-OWNER-REG-PUSH-report: push"}
+        reply = answer(first, [])
+        self.assertIn("git push origin HEAD:refs/heads/hb-reg-report", reply.shell)
+        self.assertNotIn("HB-NET-reg-report-REACHED", reply.shell)
+        earlier = [{"reply": reply.as_dict()}]
+        after = answer({**first, "last_kind": "tool", "last_text": "tool output"}, earlier)
+        self.assertEqual(after.text, "artifact: -\nverdict: BLOCKED\nblocker: scenario probe only")
+        self.assertIsNone(after.shell)
+        again = answer({**first, "last_kind": "user", "last_text": "resume"}, earlier)
+        self.assertIsNone(again.shell)
+        self.assertEqual(answer({"text": "title", "last_kind": "user", "last_text": "title"}, []).text,
+                         "OK")
+
+    def test_registry_rows_and_receipt_parsing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs = Path(tmp) / "jobs.log"
+            jobs.write_text("2026-11-12T00:00:00Z\tdone\t/r\t/w\thb-owner-reg-report-owner\t"
+                            "worker_type=owner,attempt_id=att-1,runtime_sandbox=workspace-write\n"
+                            "malformed line\n")
+            rows = ce.registry_rows(jobs)
+        self.assertEqual(rows, [{"status": "done", "slug": "hb-owner-reg-report-owner",
+                                 "worker_type": "owner", "attempt_id": "att-1",
+                                 "runtime_sandbox": "workspace-write"}])
+        self.assertEqual(ce.last_json_object('card text\n{"a": 1}\n{"b": 2}\ntrailer'), {"b": 2})
+        self.assertEqual(ce.last_json_object("no json"), {})
 
 
 class DelinkTest(unittest.TestCase):
@@ -365,6 +425,42 @@ class RegistrationTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         for cls in ce.SCENARIOS:
             self.assertIn(cls.name + "\t", done.stdout)
+
+
+
+class ExploreInOwnerVerdictTest(unittest.TestCase):
+    """`unit-route-explore-in-owner` names the regression it catches (the leg refused as a non-owner start,
+    `owner-route-binding-tuple-invalid`, with no row written) as `fail`, not `inconclusive`."""
+
+    def drive(self, *, base_verdict, rows, requests, bound=True):
+        scenario = cx.ExploreInOwnerScenario()
+        scenario.parent_file, scenario.parent = ("/x/route.json", {"route_hash": "h"}) if bound else ("", {})
+        notes = []
+        run = SimpleNamespace(evidence={}, note=notes.append, main_requests=lambda: requests)
+        scenario.unit_rows = lambda: rows
+        with patch.object(cx.ExploreScenario, "drive", return_value=base_verdict):
+            return scenario.drive(run), notes
+
+    def test_the_refusal_in_the_sessions_tool_output_with_no_row_is_a_fail(self):
+        tool = {"text": "", "last_kind": "tool",
+                "last_text": "capability-route: owner-route-binding-tuple-invalid: route node requires owner"}
+        verdict, notes = self.drive(base_verdict="inconclusive", rows=[], requests=[tool])
+        self.assertEqual(verdict, "fail")
+        self.assertIn("owner-route-binding-tuple-invalid", notes[0])
+
+    def test_no_refusal_in_the_output_stays_inconclusive(self):
+        quiet = {"text": "", "last_kind": "tool", "last_text": "something else"}
+        self.assertEqual(self.drive(base_verdict="inconclusive", rows=[], requests=[quiet])[0], "inconclusive")
+        # The reason named only in a prompt (not in what the tool returned) is not the session's refusal.
+        said = {"text": "owner-route-binding-tuple-invalid", "last_kind": "user", "last_text": "owner-route-binding-tuple-invalid"}
+        self.assertEqual(self.drive(base_verdict="inconclusive", rows=[], requests=[said])[0], "inconclusive")
+
+    def test_a_row_means_the_start_was_not_refused_and_other_verdicts_are_untouched(self):
+        tool = {"text": "", "last_kind": "tool", "last_text": "owner-route-binding-tuple-invalid"}
+        self.assertEqual(self.drive(base_verdict="inconclusive", rows=[{"status": "open"}], requests=[tool])[0], "inconclusive")
+        self.assertEqual(self.drive(base_verdict="pass", rows=[{"status": "done"}], requests=[])[0], "pass")
+        self.assertEqual(self.drive(base_verdict="fail", rows=[], requests=[tool])[0], "fail")
+        self.assertEqual(self.drive(base_verdict="pass", rows=[{"status": "done"}], requests=[], bound=False)[0], "inconclusive")
 
 
 if __name__ == "__main__":

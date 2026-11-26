@@ -43,6 +43,9 @@ class ActivityObservation:
 
 
 OWNER_TURN_IDLE_SECONDS = 7200.0
+# The longest one blocking command may run in a headless worker (Claude's Bash maximum, 50
+# minutes): a command the worker waits on longer than this is no longer a normal wait.
+BLOCKING_COMMAND_MAX_SECONDS = 3000.0
 
 
 class ActivityWindow:

@@ -97,8 +97,7 @@ is_worker_session() {
 
 usage() {
   cat <<'EOF'
-usage: preflight.sh write <file> [session-id] [turn-id]
-       preflight.sh read <file> [session-id]
+usage: preflight.sh read <file> [session-id]
        preflight.sh route <capability> [cwd] [session-id] [mode] [intensity]
        preflight.sh stages [--capability <name>] [--json]
        preflight.sh capability <name> [cwd] [session-id]
@@ -107,7 +106,6 @@ usage: preflight.sh write <file> [session-id] [turn-id]
        preflight.sh token-budget [cwd] [session-id] [kv|json|hook]
        preflight.sh memory [cwd]
        preflight.sh candidates <prompt> <cwd> <session-id> [turn-id]
-       preflight.sh local-evidence [cwd]
        preflight.sh recall <query> [cwd] [session-id]
        preflight.sh recall-gate <cwd> (--decision recall|skip --reason <reason> [--query <query>] | --outcome applied|miss --gate-id <id>) [options]
        preflight.sh briefing [cwd]
@@ -304,18 +302,6 @@ case "$cmd" in
         ;;
     esac
     ;;
-  write)
-    if [ "${2:-}" = "-h" ] || [ "${2:-}" = "--help" ]; then
-      [ "$#" -eq 2 ] || { echo "codex preflight: write help accepts no extra arguments" >&2; exit 64; }
-      printf '%s\n' 'usage: preflight.sh write <file> [session-id] [turn-id]'
-      exit 0
-    fi
-    [ "$#" -ge 2 ] && [ "$#" -le 4 ] || { echo "codex preflight: write expects <file> [session-id] [turn-id]" >&2; exit 64; }
-    file=$2
-    case "$file" in -*) echo "codex preflight: write file must be absolute or ./-prefixed" >&2; exit 64;; esac
-    # Compatibility command: write gates have been retired.
-
-    ;;
   read)
     [ "$#" -ge 2 ] || { echo "codex preflight: read requires a file path" >&2; exit 64; }
     file=$2
@@ -457,10 +443,6 @@ if text:
     set -- --prompt "$prompt" --cwd "$cwd" --session-id "$sid" --runtime codex --format text
     [ -z "$turn" ] || set -- "$@" --turn-id "$turn"
     AGENT_HOME="$AGENT_ROOT" bash "$ROOT/hooks/mem-recall-inject.sh" "$@"
-    ;;
-  local-evidence)
-    cwd=${2:-$PWD}
-    AGENT_HOME="$AGENT_ROOT" bash "$ROOT/hooks/local-evidence-inject.sh" --cwd "$cwd" --format text
     ;;
   recall)
     [ "$#" -ge 2 ] || { echo "codex preflight: recall requires a query" >&2; exit 64; }

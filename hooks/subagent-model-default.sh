@@ -88,16 +88,20 @@ def frontmatter_model(path):
 
 def agent_definition(name):
     """First existing definition file for the agent name, or None (built-in)."""
-    home = os.path.expanduser("~")
+    # The user-scope root is where this Claude actually reads definitions:
+    # $CLAUDE_CONFIG_DIR when set (a worker's masked home carries none, so a
+    # definition under the real ~/.claude is not loaded there), else ~/.claude.
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    root = config_dir or os.path.join(os.path.expanduser("~"), ".claude")
     candidates = []
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
     if project_dir:
         candidates.append(os.path.join(project_dir, ".claude", "agents", name + ".md"))
-    candidates.append(os.path.join(home, ".claude", "agents", name + ".md"))
+    candidates.append(os.path.join(root, "agents", name + ".md"))
     candidates.extend(sorted(glob.glob(
-        os.path.join(home, ".claude", "plugins", "cache", "*", "*", "*", "agents", name + ".md"))))
+        os.path.join(root, "plugins", "cache", "*", "*", "*", "agents", name + ".md"))))
     candidates.extend(sorted(glob.glob(
-        os.path.join(home, ".claude", "plugins", "marketplaces", "*", "plugins", "*", "agents", name + ".md"))))
+        os.path.join(root, "plugins", "marketplaces", "*", "plugins", "*", "agents", name + ".md"))))
     for candidate in candidates:
         if os.path.isfile(candidate):
             return candidate

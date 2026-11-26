@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Shared UI text: language selection follows the existing preference path."""
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import importlib.util
 import json
 import os
@@ -27,6 +30,11 @@ class CatalogShape(unittest.TestCase):
                 self.assertEqual(set(entry), {"en", "ko"})
                 self.assertEqual(set(PLACEHOLDER.findall(entry["en"])),
                                  set(PLACEHOLDER.findall(entry["ko"])))
+
+    def test_a_notice_part_label_is_not_the_metric_header_word(self):
+        # `지표:` heads the results table's metric line; a split notice's third part must not reuse it.
+        messages = json.loads((HERE / "messages.json").read_text(encoding="utf-8"))["messages"]
+        self.assertNotEqual(messages["resource.part.metrics"]["ko"], messages["fleet.lab.metric"]["ko"])
 
     def test_keys_are_sorted_so_merges_stay_small(self):
         messages = json.loads((HERE / "messages.json").read_text(encoding="utf-8"))["messages"]

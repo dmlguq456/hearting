@@ -318,10 +318,16 @@ campaign titles, route details and installation/git metadata fill asynchronously
 Unknown observations stay unknown, and slow details must not stop basic refresh.
 An unknown current parent also defers CWD-based child classification; it cannot
 turn a registered parent or confirmed successor into a child.
-Titles summarize the person's current goal in their language; NOW describes
-progress toward that goal. Internal stage, review and handoff instructions do
+Titles summarize the person's current goal in their language; NOW names what
+changed in the latest conversation step (the step, its object, and its result
+once it ended) and does not restate the request. The previous NOW is offered
+back as data, and when nothing new happened the model returns it unchanged and
+it keeps its original age. Internal stage, review and handoff instructions do
 not replace the goal. Failed generation preserves the last successful text and
-its original age. A folded session exposes its currently executing connected
+its original age. Each changed NOW, with the conversation span its model read,
+and each prompt the person typed (only its first line, secrets masked and
+clipped), is also appended to `<sid>.timeline.jsonl` beside the title file;
+it follows the title file's seven-day sweep. A folded session exposes its currently executing connected
 routes from the same observation; completed history alone is not activity.
 Model choices follow the installed runtime's current catalog through the existing
 bounded refresh. A saved model absent from that catalog remains visible as
@@ -539,6 +545,11 @@ Registry replacement may retain exact-field row conversions from its predecessor
 Whole display projections may also reuse their complete observed input generation.
 Process observations shared by readers belong to one collection pass, with entry
 and byte bounds; each following pass observes PID identity and clock again.
+A collection pass is one snapshot: what it memoizes (a process table, a stall
+observation, a notice's currency) is the same for every reader inside it and a
+change after the first read shows in the next pass. That holds only for passive
+display; a carrier, hook, delivery, settlement or question path never runs inside
+a pass and observes afresh.
 An unchanged display publication may retain its immutable content while fresh
 readiness and action metadata advance independently. Reuse never delays a tick.
 

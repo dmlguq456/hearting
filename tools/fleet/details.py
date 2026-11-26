@@ -658,17 +658,159 @@ def _apply_peer_observation(collect, sessions):
 
 
 def observe_peers(snapshot):
-    """Read only peer detail on copied rows, independently of optional metadata work."""
+    """Read only peer detail on copied rows, independently of optional metadata work.
+
+    The same pass keeps what the session page's MESSAGES and REQUEST lines need
+    (:func:`_peer_requests`): each session's own sent ledger records from the records this
+    collection already read, and the peer requests of the live sessions."""
     from .collectors import peer_messages
     value = copy.copy(snapshot)
     value.sessions = [copy.copy(row) for row in snapshot.sessions]
-    state = _apply_peer_observation(peer_messages.collect, value.sessions)
+    held = {}
+
+    def collect(*args, **kwargs):
+        held["result"] = result = peer_messages.collect(*args, **kwargs)
+        return result
+    state = _apply_peer_observation(collect, value.sessions)
     value.observations = dict(snapshot.observations or {})
     value.observations["optional:peers"] = {
         "state": state, "observed_at": time.time(),
         "roster": tuple((identity(row), binding(row)) for row in value.sessions),
     }
+    if state == "success":
+        result = held.get("result")
+        peer = result[0] if isinstance(result, tuple) else result
+        try:
+            value.observations["optional:peers"]["messages"] = _peer_requests(
+                value.sessions, peer.get("records") if isinstance(peer, Mapping) else ())
+        except Exception:  # noqa: BLE001 -- a display read never costs the peer observation
+            pass
     return DetailSnapshot(state_key(snapshot), value)
+
+
+# A closed request stays readable this long (the shell panel's own bound), and at most this
+# many closed requests are kept per session and side (its ``_REQUEST_VIEWS``).
+_REQUEST_DAYS = 7
+_REQUEST_CLOSED_VIEWS = 24
+_SENT_LIMIT = 8
+
+
+def _peer_requests(sessions, records, now=None):
+    """What the session page words the way the shell panel does, read only (no index repair,
+    no settle, nothing written).
+
+    ``sent``: each live session's own ledger records (``to``, ``summary``, ``kind``, delivery
+    ``status``, ``refs``; a later record of the same message updates its status), newest
+    last, from the records the peer collection already read. ``requests``: the
+    ``peer-request-v1`` records naming a live session (``sides``: which session is on which
+    side), with the pending rows of their messages (``rows``) and every transfer ref they own
+    (``refs``), so a request's own messages leave the message lists."""
+    from datetime import datetime
+    from .collectors import peer_messages
+    from .explorer.output import utility
+    now = time.time() if now is None else now
+    keys = {}
+    for row in sessions:
+        harness, sid = getattr(row, "harness", None), getattr(row, "session_id", None)
+        if not (isinstance(harness, str) and isinstance(sid, str) and sid):
+            continue
+        for ident in (sid, *(getattr(row, "session_aliases", None) or ())):
+            if isinstance(ident, str) and ident:
+                keys.setdefault(harness + ":" + ident, harness + ":" + sid)
+    sent = {}
+    ordered = sorted((record for record in records or () if isinstance(record, Mapping)),
+                     key=lambda record: str(record.get("ts") or ""))
+    for record in ordered:
+        source = record.get("from")
+        target = record.get("to") if isinstance(record.get("to"), Mapping) else {}
+        if (not isinstance(source, Mapping) or not isinstance(record.get("summary"), str)
+                or not isinstance(record.get("ts"), str)):
+            continue
+        key = keys.get(str(source.get("harness") or "") + ":" + str(source.get("session_id") or ""))
+        if key is None:
+            continue
+        try:
+            at = datetime.fromisoformat(record["ts"].replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
+        delivery = record.get("delivery") if isinstance(record.get("delivery"), Mapping) else {}
+        status = delivery.get("status") if isinstance(delivery.get("status"), str) else None
+        message_id = record.get("message_id") if isinstance(record.get("message_id"), str) else None
+        rows = sent.setdefault(key, [])
+        earlier = next((item for item in rows if message_id and item.get("message_id") == message_id), None)
+        if earlier is not None:
+            earlier["status"] = status or earlier.get("status")
+            continue
+        rows.append({"to": dict(target), "summary": record["summary"][:400], "at": at,
+                     "message_id": message_id,
+                     "kind": record.get("kind") if isinstance(record.get("kind"), str) else None,
+                     "status": status,
+                     "refs": [ref for ref in (record.get("refs") or ())[:8] if isinstance(ref, str)]
+                     if isinstance(record.get("refs"), list) else []})
+    observed = {"sent": {key: rows[-_SENT_LIMIT:] for key, rows in sent.items()},
+                "requests": {}, "sides": {}, "rows": {}, "refs": []}
+    # 11-17: a sent message the transport took but the receiving window has not taken in reads `awaiting
+    # delivery` and why, as the shell panel's MESSAGES do: the pending row of each kept (at most
+    # ``_SENT_LIMIT`` a session) message still `sent`, read once here with the requests' own.
+    try:
+        reader = peer_messages._load_peer_message()
+    except Exception:  # noqa: BLE001 -- no reader: the word stays `sent`
+        reader = None
+    if reader is not None:
+        for kept in observed["sent"].values():
+            for item in kept:
+                ref = item.get("message_id")
+                if item.get("status") == "sent" and isinstance(ref, str) and ref and ref not in observed["rows"]:
+                    try:
+                        observed["rows"][ref] = reader._read_pending(ref)
+                    except Exception:  # noqa: BLE001 -- an unreadable row reads as sent
+                        observed["rows"][ref] = None
+    try:
+        peer_request = utility("peer_request")
+        parties, ids = peer_request._index_load(), peer_request._record_ids()
+    except Exception:  # noqa: BLE001 -- no request store: no request lines
+        return observed
+    pm = peer_messages._load_peer_message()
+    listed = {}
+    for request_id in sorted(ids):
+        pair = parties.get(request_id)
+        if pair is not None and not any(key in keys for key in pair):
+            continue
+        record = peer_request.load(request_id)
+        if record is None:
+            continue
+        closed = record["state"] in ("final", "rejected", "cancelled")
+        if closed and now - float(record.get("updated") or 0) > _REQUEST_DAYS * 86400:
+            continue
+        for side, end in (("out", "requester"), ("in", "recipient")):
+            key = keys.get(peer_request._key(record[end]))
+            if key is not None:
+                listed.setdefault((key, side), []).append(record)
+    for (key, side), found in listed.items():
+        found.sort(key=lambda record: (record["state"] not in ("open", "partial", "preparing"),
+                                       -float(record.get("updated") or 0)))
+        closed_views = 0
+        for record in found:
+            if record["state"] in ("final", "rejected", "cancelled"):
+                closed_views += 1
+                if closed_views > _REQUEST_CLOSED_VIEWS:
+                    continue
+            observed["requests"][record["id"]] = record
+            observed["sides"].setdefault(key, []).append([record["id"], side])
+    for record in observed["requests"].values():
+        refs = [revision.get("transfer_ref") for revision in record["revisions"]]
+        refs += [ref for revision in record["revisions"] for ref in revision.get("followups") or ()]
+        refs += [report.get("transfer_ref") for report in record["reports"]]
+        refs.append((record.get("cancel") or {}).get("notice_ref"))
+        for ref in refs:
+            if not isinstance(ref, str) or not ref or ref in observed["rows"]:
+                continue
+            observed["refs"].append(ref)
+            try:
+                observed["rows"][ref] = pm._read_pending(ref) if pm is not None else None
+            except Exception:  # noqa: BLE001 -- an unreadable row reads as not seen
+                observed["rows"][ref] = None
+    return observed
 
 
 def _enrich(snapshot, *, include_report_verification=True, required=True,
@@ -764,6 +906,14 @@ def _enrich(snapshot, *, include_report_verification=True, required=True,
                 only_entities=detail_entities if continued else None)
         except Exception:
             projection_ready = False
+        # This pass tried every row in its scope. A row whose route it did not bring (the read
+        # failed or timed out, or only a part of the rows came) is unread now, not "to come":
+        # the wait marker stands only before the details were tried.
+        for entity in (detail_entities if continued else sessions + jobs + route_entities):
+            work = getattr(entity, "work_projection", None)
+            if getattr(work, "_details_deferred", False) is True:
+                entity.work_projection = replace(
+                    work, _details_deferred=False, _details_unread=True)
         detail_ready = (route_chain_ready and degradations_ready and projection_ready
                         and projection.required_projection_details_complete(
                             sessions + jobs + route_entities))
@@ -842,6 +992,9 @@ def enrich(snapshot, *, include_report_verification=True, required_only=False):
             stack.enter_context(collection_read_scope())
         stack.enter_context(artifact_producer.artifact_index_observation_scope())
         stack.enter_context(dispatch_registry_cache.registry_read_scope())
+        from .pass_scope import collection_pass, install
+        install()
+        stack.enter_context(collection_pass())
         return _enrich(snapshot, include_report_verification=include_report_verification,
                        required=required, required_only=required_only)
 
@@ -959,6 +1112,10 @@ def merge(basic, detail):
                 # to an unchanged observation, but cannot erase current evidence.
                 if not isinstance(row, Session) and current.exec_tool is None:
                     current.exec_tool = getattr(previous, "exec_tool", None)
+                if not isinstance(row, Session) and getattr(current, "last_tool", None) is None:
+                    current.last_tool = getattr(previous, "last_tool", None)
+                if not isinstance(row, Session) and getattr(previous, "_tool_observed", False):
+                    current._tool_observed = True
                 if not getattr(row, "shell_jobs", None):
                     current.shell_jobs = list(getattr(previous, "shell_jobs", None) or [])
                 if (not getattr(row, "shell_job_observation", None)
@@ -1018,6 +1175,7 @@ def merge(basic, detail):
     return replace(basic, sessions=sessions, jobs=jobs, resources=resources,
                    memory=value.memory, governor=value.governor,
                    project_status=getattr(value, "project_status", None),
+                   experiment_status=getattr(value, "experiment_status", None),
                    hearting=value.hearting or basic.hearting,
                    display_snapshot=display_snapshot, observations=observations, **evidence)
 
@@ -1057,6 +1215,8 @@ def retain_optional_last_good(previous, current):
 
     if getattr(new, "project_status", None) is None:      # read once a minute; a pass without it keeps the last
         new.project_status = getattr(old, "project_status", None)
+    if getattr(new, "experiment_status", None) is None:   # the board read keeps its own cache; an absent pass keeps the last
+        new.experiment_status = getattr(old, "experiment_status", None)
 
     old_rows = {}
     for row in old.sessions:

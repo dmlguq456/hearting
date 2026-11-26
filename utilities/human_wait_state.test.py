@@ -1,4 +1,7 @@
 from __future__ import annotations
+import os, sys  # noqa: E401
+if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
+    os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import importlib.util
 import os
@@ -41,6 +44,13 @@ class HumanWaitStateTests(unittest.TestCase):
                                      return_value={"complete": True, "pending": {}})
         rollouts.start()
         self.addCleanup(rollouts.stop)
+        # Tests with an injected clock wait by stat beat; the kernel-notification wake has
+        # its own tests (WakeSourceTests), which turn it back on.
+        for name, value in (("_WAKE_FAILED", True), ("_WAKE_EVENTS", None), ("_NEXT_WAKE", None),
+                            ("_WATCH_STAT", ())):
+            patch = mock.patch.object(state, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
         self.addCleanup(self.tmp.cleanup)
 
     def test_only_explicit_first_line_markers_open_private_signal(self):
@@ -61,6 +71,28 @@ class HumanWaitStateTests(unittest.TestCase):
                                           "[답변 필요] 진행할까요?", sequence=3, now=200))
         self.assertEqual(state.read_signals(now=200)[0]["since"], 100)
 
+    def test_every_wait_but_a_blocked_owner_is_a_persons_to_answer(self):
+        # 11-14: the count holds every wait a person must answer, wherever it is answered (the
+        # panel, a Claude native request in its own window, a marker in that session's input,
+        # a human gate); only a blocked owner, its parent agent's to answer, stays out.
+        owner = {"harness": "claude", "session_id": "sid"}
+        waits = [
+            {"id": "S1:claude:sid:1", "source": "S1", "kind": "approval", "owner": owner},
+            {"id": "S1:codex:sid:2", "source": "S1-question", "kind": "decision",
+             "owner": {"harness": "codex", "session_id": "sid"}},
+            {"id": "S2:gate", "source": "S2", "kind": "decision", "owner": {}},
+            {"id": "S4:marker", "source": "S4", "kind": "marker", "owner": owner},
+            {"id": "S4:message", "source": "S4", "kind": "message", "owner": owner},
+            {"id": "S4:older", "source": "S4", "kind": "marker", "owner": owner, "stale": True},
+        ]
+        owners = [{"id": "S3:att-%d" % n, "source": "S3", "kind": "decision", "owner": owner}
+                  for n in range(8)]
+        self.assertEqual([state.person_wait(item) for item in waits], [True] * len(waits))
+        self.assertEqual({state.person_wait(item) for item in owners}, {False})
+        self.assertFalse(state.person_wait(None))
+        self.assertEqual(state.wait_counts([*owners, *waits]),
+                         {"total": 5, "older": 1, "ownerless": 0})
+
     def test_reader_is_read_only_and_user_prompt_closes_exact_seat(self):
         self.assertTrue(state.open_signal("codex", "sid-2", "seat-2",
                                           "[결정 필요] A 또는 B", sequence=2, now=100))
@@ -69,10 +101,12 @@ class HumanWaitStateTests(unittest.TestCase):
         result = observation.read_answer_waits(jobs_paths=(), now=101)
         after = (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
         self.assertEqual(before, after)
-        self.assertEqual(result["total"], 1)
+        # A marker question, answered in its own session's input, still waits for a person:
+        # listed and counted (11-14).
+        self.assertEqual((len(result["items"]), result["total"]), (1, 1))
         self.assertEqual(result["items"][0]["question"], "A 또는 B")
         self.assertTrue(state.close_signal("seat-2", sequence=3))
-        self.assertEqual(observation.read_answer_waits(jobs_paths=(), now=102)["total"], 0)
+        self.assertEqual(observation.read_answer_waits(jobs_paths=(), now=102)["items"], [])
 
     def test_stale_signal_remains_source_state_and_is_not_deleted_by_reader(self):
         self.assertTrue(state.open_signal("opencode", "sid-3", "seat-3",
@@ -82,7 +116,7 @@ class HumanWaitStateTests(unittest.TestCase):
         result = observation.read_answer_waits(jobs_paths=(), now=10 + 8 * 86400)
         self.assertEqual(len(result["items"]), 1)
         self.assertTrue(result["items"][0]["stale"])
-        self.assertEqual((result["total"], result["stale_total"]), (0, 1))
+        self.assertEqual((result["total"], result["stale_total"]), (0, 1))  # a marker counts, folded
         self.assertEqual(path.read_bytes(), before)
         self.assertTrue(state.close_signal("seat-3"))
         self.assertEqual(observation.read_answer_waits(jobs_paths=(), now=10 + 8 * 86400)["items"], [])
@@ -102,6 +136,8 @@ class HumanWaitStateTests(unittest.TestCase):
         self.assertFalse(by_id["s-current"]["stale"])
         self.assertTrue(by_id["s-older"]["stale"])
         self.assertTrue(by_id["s-expired"]["stale"])
+        # Marker questions fold by the shared rule and, answered in their own input, still
+        # wait for a person: counted (11-14).
         self.assertEqual((result["total"], result["stale_total"]), (1, 2))
 
     def test_s1_windows_kind_mapping_and_stale_activity_fixture(self):
@@ -335,17 +371,22 @@ class HumanWaitStateTests(unittest.TestCase):
         from tools.fleet.refresh import fleet_answer_wait_view
         now = 1_000_000.0
         result = {"observed_at": now, "complete": True, "health": [], "items": [
-            {"id": "S3:live", "source": "S3", "kind": "decision", "since": now - 60,
-             "stale": False, "fold": None, "route_id": "rt-1", "attempt_id": "att-1",
+            {"id": "S4:live", "source": "S4", "kind": "message", "since": now - 60,
+             "stale": False, "fold": None,
              "owner": {"harness": "claude", "session_id": "sid-new"},
              "owner_state": "successor", "attribution": "lineage", "cwd": "/work/repo",
              "registered_owner": {"harness": "claude", "session_id": "sid-old"},
              "question": "PRIVATE-BLOCKER"},
+            # A blocked owner: its parent agent's to answer, kept on the private board only.
+            {"id": "S3:owner", "source": "S3", "kind": "decision", "since": now - 60,
+             "stale": False, "fold": None, "route_id": "rt-1", "attempt_id": "att-1",
+             "owner": {"harness": "claude", "session_id": "sid-new"},
+             "owner_state": "live", "attribution": "lineage", "question": "PRIVATE-BLOCKER"},
             {"id": "S2:gone", "source": "S2", "kind": "decision", "since": now - 60,
              "stale": True, "fold": "ownerless", "route_id": "rt-2", "gate_id": "frame-review",
              "owner": {"harness": "codex", "session_id": "sid-gone"},
              "owner_state": "none", "attribution": "lineage"},
-            {"id": "S4:aged", "source": "S4", "kind": "decision", "since": now - 80 * 3600,
+            {"id": "S4:aged", "source": "S4", "kind": "message", "since": now - 80 * 3600,
              "stale": True, "fold": "older", "owner_state": "unknown", "attribution": "exact",
              "owner": {"harness": "codex", "session_id": "sid-4"}},
         ]}
@@ -353,17 +394,20 @@ class HumanWaitStateTests(unittest.TestCase):
         private = state._read_cache(now=now)
         self.assertEqual((private["total"], private["older"], private["ownerless"]), (1, 2, 1))
         rows = {row["id"]: row for row in private["items"]}
-        self.assertEqual(rows["S3:live"]["registered_owner"],
+        self.assertIn("S3:owner", rows)
+        self.assertEqual(rows["S4:live"]["registered_owner"],
                          {"harness": "claude", "session_id": "sid-old"})
-        self.assertEqual((rows["S3:live"]["owner_state"], rows["S3:live"]["cwd"]),
+        self.assertEqual((rows["S4:live"]["owner_state"], rows["S4:live"]["cwd"]),
                          ("successor", "/work/repo"))
         self.assertEqual((rows["S2:gone"]["owner_state"], rows["S2:gone"]["fold"]),
                          ("none", "ownerless"))
-        self.assertEqual(private["by_session"], {"claude\0sid-new": ["S3:live"]})
+        self.assertEqual(private["by_session"], {"claude\0sid-new": ["S4:live"]})
         fleet = state.cached_fleet_view(now=now, request=False)
         self.assertEqual((fleet["total"], fleet["older"], fleet["ownerless"]), (1, 2, 1))
         by_id = {row["id"]: row for row in fleet["items"]}
-        self.assertEqual((by_id["S3:live"]["registered_session_id"], by_id["S3:live"]["stale"]),
+        # Listed for whoever answers it (Fleet in its parent's own session), never counted.
+        self.assertEqual(by_id["S3:owner"]["kind"], "blocked owner")
+        self.assertEqual((by_id["S4:live"]["registered_session_id"], by_id["S4:live"]["stale"]),
                          ("sid-old", "current"))
         self.assertEqual((by_id["S2:gone"]["fold"], by_id["S2:gone"]["stale"]),
                          ("ownerless", "older"))
@@ -372,7 +416,8 @@ class HumanWaitStateTests(unittest.TestCase):
         self.assertEqual(state.wait_counts(view["items"]),
                          {"total": view["total"], "older": view["older"], "ownerless": 1})
         self.assertEqual({row["id"]: row.get("owner_state") for row in view["items"]},
-                         {"S3:live": "successor", "S2:gone": "none", "S4:aged": "unknown"})
+                         {"S4:live": "successor", "S3:owner": "live", "S2:gone": "none",
+                          "S4:aged": "unknown"})
         self.assertNotIn("PRIVATE-BLOCKER", state._fleet_cache_path().read_text(encoding="utf-8"))
         self.assertNotIn("PRIVATE-BLOCKER", state._cache_path().read_text(encoding="utf-8"))
 
@@ -393,6 +438,36 @@ class HumanWaitStateTests(unittest.TestCase):
         self.assertEqual([question["id"] for question in questions],
                          [FI.UNDERSTANDING_SLOT, "scope", "speed"])
         self.assertEqual([question.get("recommended") for question in questions], [0, 1, None])
+
+    def test_frame_interview_detail_carries_the_route_scope_line_in_the_choice_means_only(self):
+        import frame_interview as FI
+        leg = {"capability": "autopilot-code", "shape": "solo"}
+        options = [{"label": "Go", "means": "Run it"}, {"label": "Go bare"}, {"label": "Later", "means": "Not now"}]
+        interview = {"understanding": "Restated task", "questions": [
+            {"id": "go", "question": "Proceed?", "recommended": 0, "options": options},
+            {"id": "other", "question": "Also?", "options": [{"label": "Go", "means": "x"}]}],
+            "route_proposals": {"question": "go", "by_option": {
+                "Go": {"legs": [leg, leg], "execution_scope": "complete"},
+                "Go bare": {"legs": [leg, leg, leg], "execution_scope": "report"},
+                "Later": {"legs": [leg]}}}}
+        binding = {"route": {"route_id": "rt-x", "nodes": [],
+                             "human_gate_bindings": [{"gate": "frame-review", "node": "owner"}]},
+                   "resolution": {}}
+        for lang, first, second in (
+                ("en", "Run it Runs all 2 legs through to the end, without asking again in between.",
+                 "Stops each time a leg ends; the next leg starts when you say so."),
+                ("ko", "Run it leg 2개를 끝까지 이어서 진행합니다. 중간에 다시 묻지 않습니다.",
+                 "leg가 하나 끝날 때마다 멈춥니다. 다음 leg는 말씀하시면 시작합니다.")):
+            with self.subTest(lang=lang), mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}), \
+                    mock.patch.object(state, "_workflow_gate_interview", return_value=(interview, None)):
+                detail, error = state._workflow_gate_detail(binding, {"gate_id": "frame-review"})
+            self.assertIsNone(error)
+            route, other = detail["detail"]["questions"][1:]
+            self.assertEqual([choice["value"] for choice in route["choices"]], ["Go", "Go bare", "Later"])
+            self.assertEqual([choice["label"] for choice in route["choices"]], ["Go", "Go bare", "Later"])
+            self.assertEqual([choice.get("means") for choice in route["choices"]], [first, second, "Not now"])
+            self.assertEqual(other["choices"], [{"value": "Go", "label": "Go", "means": "x"}])
+            self.assertEqual(route["question"], "Proceed?")
 
     def test_absent_herdr_does_not_leave_a_dedupe_marker(self):
         with mock.patch("human_wait_state.shutil.which", return_value=None):
@@ -450,8 +525,8 @@ class HumanWaitStateTests(unittest.TestCase):
         lines = log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(lines, [
             "tmux [-S] [%s] [list-clients] [-F] [#{client_name}]" % sock,
-            "tmux [-S] [%s] [display-message] [-c] [/dev/pts/9] [-d] [10000] [--] [◑답변 필요: 배포 ##1 진행?]" % sock,
-            "notify-send [-a] [Hearting] [--] [◑답변 필요] [배포 #1 진행?]",
+            "tmux [-S] [%s] [display-message] [-c] [/dev/pts/9] [-d] [10000] [--] [◑답 필요: 배포 ##1 진행?]" % sock,
+            "notify-send [-a] [Hearting] [--] [◑답 필요] [배포 #1 진행?]",
         ])
 
     @mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})   # Korean notification words
@@ -470,7 +545,7 @@ class HumanWaitStateTests(unittest.TestCase):
         lines = log.read_text(encoding="utf-8").splitlines()
         herdr = [line for line in lines if line.startswith("herdr ")]
         self.assertEqual(len(herdr), 3)
-        self.assertTrue(all(line.startswith("herdr notification show ◑답변 필요 · ") and "--sound request" in line
+        self.assertTrue(all(line.startswith("herdr notification show ◑답 필요 · ") and "--sound request" in line
                             for line in herdr))
         self.assertEqual(sum("[display-message] [-c] [/dev/pts/9]" in line for line in lines), 1)
         self.assertFalse(any(line.startswith("notify-send") for line in lines))
@@ -557,6 +632,52 @@ class HumanWaitStateTests(unittest.TestCase):
         self.assertEqual(sleeps, [30.0, 30.0])   # back on the live cadence
         self.assertEqual(refreshes, 2)
 
+    def test_producer_follows_the_installed_release_only_when_the_pointer_moved(self):
+        import parent_next_directive
+        import peer_obligations
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, read_fd)
+        self.addCleanup(os.close, write_fd)
+        os.set_inheritable(write_fd, False)
+        with mock.patch.object(parent_next_directive, "release_moved", return_value=False), \
+             mock.patch.object(peer_obligations, "follow_installed_release") as follow:
+            state._follow_installed_release(write_fd)
+        follow.assert_not_called()
+        self.assertFalse(os.get_inheritable(write_fd))
+        with mock.patch.object(parent_next_directive, "release_moved", return_value=True), \
+             mock.patch.object(peer_obligations, "follow_installed_release") as follow:
+            state._follow_installed_release(write_fd)
+        follow.assert_called_once_with(state.__file__, ["--refresh-cache", "--lock-fd", str(write_fd)])
+        self.assertTrue(os.get_inheritable(write_fd), "the lock descriptor must survive the exec")
+        with mock.patch.object(parent_next_directive, "release_moved", return_value=True), \
+             mock.patch.object(peer_obligations, "follow_installed_release", side_effect=OSError("x")):
+            state._follow_installed_release(write_fd)   # a failed move keeps this code, quietly
+
+    def test_producer_offers_itself_to_the_installed_release_before_any_pass_and_between_passes(self):
+        class Stop(BaseException):
+            pass
+        events = []
+        passes = []
+
+        def refresh():
+            events.append("refresh")
+            passes.append(1)
+            if len(passes) > 1:
+                raise Stop()
+            return (), 0.0
+
+        root = state.state_root()
+        root.mkdir(parents=True, exist_ok=True)
+        (root / ".demand").touch()
+        with mock.patch.object(state, "_follow_installed_release", side_effect=lambda fd: events.append(("follow", fd))), \
+             mock.patch.object(state, "_timed_refresh", side_effect=refresh), \
+             mock.patch.object(state, "_read_cache", return_value={"items": []}), \
+             mock.patch.object(state, "_sleep_until_registry_change"), \
+             mock.patch.object(state.fcntl, "flock"), mock.patch.object(state.os, "close"):
+            with self.assertRaises(Stop):
+                state._producer_loop(77)
+        self.assertEqual(events, [("follow", 77), "refresh", ("follow", 77), "refresh"])
+
     def _run_producer_with(self, *, during_refresh=None, during_sleep=None):
         """Run the real producer loop with an instant observation and an injected wait.
 
@@ -617,6 +738,80 @@ class HumanWaitStateTests(unittest.TestCase):
         self.assertTrue((state.state_root() / "projection.json").is_file())
         self.assertIsNone(state._producer_root)
 
+    def _producer_with_registry(self, *, change_at=None):
+        """Run the real producer loop over a real registry file and an injected wait.
+
+        The registry is appended on the `change_at`-th one-second check (never if
+        None). Returns (refreshes, sleeps); the second pass ends the loop."""
+        root = state.state_root()
+        root.mkdir(parents=True, exist_ok=True)
+        (root / ".demand").touch()
+        registry = Path(self.tmp.name) / "jobs.log"
+        registry.write_text("open\troute-start\n", encoding="utf-8")
+        lock = os.open(Path(self.tmp.name) / "producer.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        refreshes, sleeps, clock = [], [], [1000.0]
+
+        class SecondPass(BaseException):   # not swallowed by the loop's ``except Exception``
+            pass
+
+        def refresh():
+            refreshes.append(len(sleeps))
+            if len(refreshes) > 1:
+                raise SecondPass()
+
+        def wait(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+            if change_at is not None and len(sleeps) == change_at:
+                with registry.open("a", encoding="utf-8") as handle:
+                    handle.write("done\troute-close\n")
+            if sum(sleeps) > 120:
+                raise SecondPass()
+        import tools.fleet.collectors.dispatch as dispatch
+        with mock.patch.object(state, "_refresh_cache", side_effect=refresh), \
+             mock.patch.object(dispatch, "human_gate_registry_paths", return_value=[str(registry)]), \
+             mock.patch.object(state.time, "sleep", side_effect=wait), \
+             mock.patch.object(state.time, "monotonic", side_effect=lambda: clock[0]), \
+             mock.patch.object(state, "_REGISTRY_MIN_GAP", 0.0):
+            with self.assertRaises(SecondPass):
+                state._producer_loop(lock)
+        return refreshes, sleeps
+
+    def test_a_registry_write_starts_the_next_pass_before_the_cadence(self):
+        # A route start, stage change or close is a registry write; the panels'
+        # route state follows it on the next check, not after the 30 second wait.
+        refreshes, sleeps = self._producer_with_registry(change_at=3)
+        self.assertEqual(len(refreshes), 2)
+        self.assertEqual(refreshes[1], 3)
+        self.assertLess(sum(sleeps), 30.0)
+
+    def test_an_unchanged_registry_keeps_the_cadence(self):
+        refreshes, sleeps = self._producer_with_registry()
+        self.assertEqual(len(refreshes), 2)
+        self.assertAlmostEqual(sum(sleeps[:refreshes[1]]), 30.0, delta=1.0)
+
+    def test_a_changing_registry_waits_for_the_previous_pass_duration(self):
+        # A registry that changes again at once still gets no pass sooner than
+        # the previous pass took, so a slow pass is never run back to back.
+        root = state.state_root()
+        root.mkdir(parents=True, exist_ok=True)
+        registry = Path(self.tmp.name) / "jobs.log"
+        registry.write_text("open\n", encoding="utf-8")
+        import tools.fleet.collectors.dispatch as dispatch
+        sleeps, clock = [], [1000.0]
+        def wait(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+        with mock.patch.object(dispatch, "human_gate_registry_paths", return_value=[str(registry)]):
+            generation = state._registry_generation()
+            registry.write_text("open\ndone\n", encoding="utf-8")
+            with mock.patch.object(state.time, "sleep", side_effect=wait), \
+                 mock.patch.object(state.time, "monotonic", side_effect=lambda: clock[0]):
+                state._sleep_until_registry_change(30.0, generation, clock[0] + 5.0)
+        self.assertEqual(sleeps[0], 1.0)
+        self.assertEqual(len(sleeps), 2)
+        self.assertEqual(sleeps[1], 4.0)
+
     def test_notification_claim_is_single_under_concurrent_refresh(self):
         bin_dir = Path(self.tmp.name) / "race-bin"
         bin_dir.mkdir()
@@ -670,6 +865,65 @@ class HumanWaitStateTests(unittest.TestCase):
         self.assertFalse(value["complete"])
         self.assertEqual(value["items"], [])
         self.assertGreater(value["observed_at"], 0)
+
+    def test_an_applied_gate_or_native_answer_stays_out_of_the_counts_until_the_next_collection(self):
+        # Review 1633, follow-up 1: a human gate or an OpenCode/Codex request answered from the
+        # panel or Fleet left the counts while `submitted` and came back once `applied`, until the
+        # next collection dropped it (2 -> 1 -> 2 -> 1). The applied answer keeps its mark until a
+        # collection observed after it is published; that collection decides.
+        owner = {"harness": "opencode", "session_id": "sid-a"}
+        now = time.time()
+        gate = {"id": "S2:rt-1:frame-review:1", "source": "S2", "kind": "decision", "since": now,
+                "stale": False, "owner": owner, "route_id": "rt-1", "gate_id": "frame-review"}
+        native = {"id": "S1:opencode:sid-a:1", "source": "S1", "kind": "approval", "since": now,
+                  "stale": False, "owner": owner, "request_id": "per_1"}
+        def counts():
+            fleet = json.loads(state._fleet_cache_path().read_text())
+            return (state._read_cache_file()["total"], fleet["total"],
+                    state.cached_statusline("opencode", "sid-a")[0])
+        def answer(envelope, action_id):
+            claimed, entry = state._claim_selected_action(envelope, action_id, {"decision": "approve"})
+            self.assertTrue(claimed)
+            sent = counts()
+            self.assertTrue(state._store_selected_entry(envelope, dict(
+                entry, state="applied", result={"status": "applied"})))
+            return sent, counts()
+        self.assertTrue(state.publish_cache({"items": [gate, native], "observed_at": now, "complete": True}))
+        self.assertEqual(counts(), (2, 2, (2, 2)))
+        gate_envelope = {"harness": "opencode", "session_id": "sid-a", "request_id": gate["id"],
+                         "selected_id": gate["id"], "source": "S2", "gate_epoch": 1, "route_id": "rt-1",
+                         "turn_id": None, "native_ref": {"transport": "hearting-human-gate",
+                                                         "gate_epoch": 1, "route_id": "rt-1"}}
+        self.assertEqual(answer(gate_envelope, "act-gate"), ((1, 1, (1, 1)), (1, 1, (1, 1))))
+        # A collection read before the gate was applied may still list it: it stays out.
+        self.assertTrue(state.publish_cache({"items": [gate, native], "observed_at": now, "complete": True}))
+        self.assertEqual(counts(), (1, 1, (1, 1)))
+        # The next collection no longer lists the released gate.
+        self.assertTrue(state.publish_cache({"items": [native], "observed_at": time.time(), "complete": True}))
+        self.assertEqual(counts(), (1, 1, (1, 1)))
+        native_envelope = {"harness": "opencode", "session_id": "sid-a", "request_id": "per_1",
+                           "selected_id": native["id"], "source": "S1", "turn_id": "turn-1",
+                           "kind": "approval"}
+        self.assertEqual(answer(native_envelope, "act-native"), ((0, 0, (0, 0)), (0, 0, (0, 0))))
+        self.assertTrue(state.publish_cache({"items": [], "observed_at": time.time(), "complete": True}))
+        self.assertEqual(counts(), (0, 0, (0, 0)))
+
+    def test_a_changed_set_of_open_questions_asks_no_artifact_root_for_a_refresh(self):
+        """11-22: a question stands on the question screens only; the campaign document does not follow the question list."""
+        import artifact_entrance
+        folder = Path(self.tmp.name) / "mine"
+        (folder / ".agent_reports").mkdir(parents=True)
+        now = time.time()
+
+        def row(name):
+            return {"id": f"S1:{name}", "source": "S1", "kind": "decision", "since": now,
+                    "owner": {"harness": "claude", "session_id": "s-" + name}, "cwd": str(folder)}
+        with mock.patch.object(artifact_entrance, "request_refresh", side_effect=AssertionError("asked")) as refresh:
+            for items in ([row("a")], [row("a"), row("b")], [row("b")], []):    # asked, asked again, answered, all answered
+                self.assertTrue(state.publish_cache({"items": items, "complete": True, "observed_at": time.time()}))
+            refresh.assert_not_called()
+        self.assertEqual(state._read_cache()["items"], [])
+        self.assertFalse(hasattr(state, "_request_documents_for_changed_waits"))
 
 
 class _StrictOpenCodeTransport:
@@ -3145,16 +3399,21 @@ class SessionRouteDisplayCacheTests(unittest.TestCase):
         env = mock.patch.dict(os.environ, XDG_STATE_HOME=self.tmp.name)
         env.start()
         self.addCleanup(env.stop)
+        for name, value in (("_WAKE_FAILED", True), ("_WAKE_EVENTS", None), ("_NEXT_WAKE", None),
+                            ("_WATCH_STAT", ())):
+            patch = mock.patch.object(state, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
 
     def test_wait_and_route_badges_share_one_read_and_keep_exact_sessions(self):
         now = time.time()
         self.assertTrue(state.publish_cache({"items": [], "complete": True, "observed_at": now,
-            "route_status": {"claude\0sid-a": "⏳ route 2 · frame, execute"},
+            "route_status": {"claude\0sid-a": "route 2 · frame, execute"},
             "route_sessions": ["claude\0sid-a", "claude\0sid-b"]}))
         with mock.patch.object(state, "_read_cache", wraps=state._read_cache) as reader, \
              mock.patch.object(state, "_request_producer") as request:
             self.assertEqual(state.cached_statusline("claude", "sid-a"),
-                             ((0, 0), "⏳ route 2 · frame, execute"))
+                             ((0, 0), "route 2 · frame, execute"))
             self.assertEqual(reader.call_count, 1)
             self.assertEqual(state.cached_statusline("claude", "sid-b"), ((0, 0), ""))
             request.assert_not_called()
@@ -3174,7 +3433,7 @@ class SessionRouteDisplayCacheTests(unittest.TestCase):
         def run(*extra):
             out = io.StringIO()
             with mock.patch.object(state, "cached_statusline",
-                                   return_value=((3, 1), "⏳ route 1 · plan")), \
+                                   return_value=((3, 1), "route 1 · plan")), \
                  mock.patch.object(state, "statusline_tidy_notice",
                                    return_value="continue not sent") as notice, \
                  contextlib.redirect_stdout(out):
@@ -3182,10 +3441,10 @@ class SessionRouteDisplayCacheTests(unittest.TestCase):
             return out.getvalue().split("\n"), notice
 
         lines, notice = run()
-        self.assertEqual(lines, ["3 1", "⏳ route 1 · plan", ""])
+        self.assertEqual(lines, ["3 1", "route 1 · plan", ""])
         notice.assert_not_called()
         lines, notice = run("--with-tidy-notice")
-        self.assertEqual(lines, ["3 1", "⏳ route 1 · plan", "continue not sent", ""])
+        self.assertEqual(lines, ["3 1", "route 1 · plan", "continue not sent", ""])
         notice.assert_called_once_with("opencode", "ses_a")
         with mock.patch.dict(sys.modules, {"session_tidy": None}):
             self.assertEqual(state.statusline_tidy_notice("opencode", "ses_a"), "")
@@ -3206,10 +3465,10 @@ class SessionRouteDisplayCacheTests(unittest.TestCase):
         def refresh():
             requests = state._route_demands(now=now)
             refreshes.append(dict(requests))
-            state.publish_cache({"items": [{"id": "S3:fixture", "source": "S3", "since": now,
+            state.publish_cache({"items": [{"id": "S2:fixture", "source": "S2", "since": now,
                 "owner": {"harness": "claude", "session_id": "other-wait"}}],
                 "observed_at": now, "complete": True, "route_sessions": requests,
-                "route_status": {key: "⏳ route 1 · frame" for key in requests}})
+                "route_status": {key: "route 1 · frame" for key in requests}})
         def sleep(seconds):
             sleeps.append(seconds)
             if len(sleeps) == 1:
@@ -3219,7 +3478,7 @@ class SessionRouteDisplayCacheTests(unittest.TestCase):
             stamp = demand.stat().st_mtime_ns
             for _ in range(20):
                 self.assertEqual(state.cached_statusline("claude", "sid-a"),
-                                 ((1, 0), "⏳ route 1 · frame"))
+                                 ((1, 0), "route 1 · frame"))
             self.assertEqual(demand.stat().st_mtime_ns, stamp)
             raise Finished()
         with mock.patch.object(state, "_refresh_cache", side_effect=refresh), \
@@ -3236,10 +3495,10 @@ class SessionRouteDisplayCacheTests(unittest.TestCase):
     def test_active_display_renews_demand_even_while_projection_is_fresh(self):
         now = time.time()
         self.assertTrue(state.publish_cache({"items": [], "complete": True, "observed_at": now,
-            "route_status": {"claude\0sid-a": "⏳ route 1 · frame"},
+            "route_status": {"claude\0sid-a": "route 1 · frame"},
             "route_sessions": {"claude\0sid-a": now - 61}}))
         with mock.patch.object(state, "_request_producer") as request:
-            self.assertEqual(state.cached_statusline("claude", "sid-a"), ((0, 0), "⏳ route 1 · frame"))
+            self.assertEqual(state.cached_statusline("claude", "sid-a"), ((0, 0), "route 1 · frame"))
             request.assert_called_once_with("claude", "sid-a")
 
     def test_existing_demand_marker_is_private_bounded_and_expires(self):
@@ -3283,6 +3542,78 @@ class MessageCompletionTests(unittest.TestCase):
         self.f = self.fixture.__enter__()
         self.addCleanup(self.fixture.__exit__, None, None, None)
 
+    def test_choice_and_note_use_the_private_answer_delivery(self):
+        for harness in ("claude", "codex", "opencode"):
+            signal, envelope = self.f.ask(harness, "mixed-"+harness, "Synthetic choice?", choices=["original-value", "other"])
+            values = ["original-value", "A separate note"]
+            response = {"answers": {"message-response": values}}
+            result = state.submit_selected_response(envelope, response, action_id="mixed-"+harness)
+            self.assertEqual(result["state"], "submitted", result)
+            wire, _, _ = self.f.prepare(signal)
+            self.assertIn(json.dumps(values), wire)
+            self.assertEqual(state._message_answer_error(state._message_body(response)), None)
+        self.assertIsNone(state._message_answer_error("a" * 4096))
+
+    def test_array_shaped_single_answers_are_distinct_from_two_values_in_the_prompt(self):
+        import session_notice
+        pair = ["original-value", "A separate note"]
+        cases = [pair, [json.dumps(pair)], ["[1,2]"], ["[]"], ['["x"]'], ["[plain"]]
+        bodies = []
+        for index, values in enumerate(cases):
+            with self.subTest(values=values):
+                signal, envelope = self.f.ask("claude", f"array-shape-{index}", choices=[pair[0], "other"])
+                result = state.submit_selected_response(envelope, {"answers": {"message-response": values}},
+                                                       action_id="fixture-array")
+                self.assertEqual(result["state"], "submitted")
+                header, body = session_notice.consumer_text(self.f.record(signal)["receipt"]).split("\n", 1)
+                self.assertEqual(header, f"Question answer (request={signal['id']}):")
+                try:
+                    decoded = json.loads(body)
+                except ValueError:
+                    decoded = None
+                self.assertEqual(decoded if isinstance(decoded, list) else [body], values)
+                bodies.append(body)
+        self.assertNotEqual(bodies[0], bodies[1])
+
+    def test_a_preexisting_unwrapped_answer_keeps_its_bound_bytes(self):
+        import session_notice
+        value = '["a","b"]'
+        signal, envelope = self.f.ask()
+        # The receipt was bound before single array-shaped text began to be wrapped.
+        with mock.patch.object(state, "_message_body", return_value=value):
+            self.assertEqual(self.f.submit(envelope, value)["state"], "submitted")
+        receipt = self.f.record(signal)["receipt"]
+        self.assertEqual(session_notice.consumer_text(receipt).split("\n", 1)[1], value)
+        wire, _, recipient = self.f.prepare(signal)
+        self.f.peer.receive_peer_message(wire, recipient)
+        self.assertEqual(self.source(signal)["completion"]["answer"], value)
+
+    def test_choice_and_note_use_separate_decision_fields_and_secret_answers_are_omitted(self):
+        import tidy_decisions
+        choice, note = "original-value", "A separate note"
+        for secret in (False, True):
+            with self.subTest(secret=secret):
+                signal, envelope = self.f.ask("claude", f"split-memory-{secret}",
+                                              choices=[choice, "other"], secret=secret)
+                result = state.submit_selected_response(envelope, {"answers": {"message-response": [choice, note]}},
+                                                       action_id="fixture-note")
+                self.assertEqual(result["state"], "submitted")
+                wire, _, recipient = self.f.prepare(signal)
+                self.f.peer.receive_peer_message(wire, recipient)
+                self.assertEqual(self.source(signal)["lifecycle"], "answered")
+                state.flush_message_decisions()
+                decisions = tidy_decisions.list_pending()
+                self.assertEqual(len(decisions), 1)
+                entry = decisions[0][1]
+                self.assertEqual((entry["answers"], entry["note"]), ([choice], note))
+                body = tidy_decisions.decision_body(entry)
+                self.assertIn("고른 답: " + choice, body)
+                self.assertIn("사용자 메모: " + note, body)
+                if secret:
+                    completion = self.source(signal)["completion"]
+                    self.assertNotIn("answer", completion)
+                    self.assertNotIn("note", completion)
+
     def test_shared_project_questions_remain_open_for_each_exact_session(self):
         import session_tidy as tidy
         for harness in ("claude", "codex", "opencode"):
@@ -3303,6 +3634,351 @@ class MessageCompletionTests(unittest.TestCase):
                 selected = state.read_selected_request({"id": b["id"],
                     "harness": harness, "session_id": b["session_id"]})
                 self.assertEqual(selected["state"], "open", selected)
+
+    def test_an_answered_message_question_leaves_the_published_waits_at_once(self):
+        # Correction 3 (11-13): answering a registered question from the panel completed it, but the
+        # published answer-wait cache kept listing it until the next collection (up to a minute), so
+        # the panel kept `◑ 1` and the question. Completion now drops that one wait from the cache
+        # and Fleet's view right away, the rule the collection applies anyway; other waits stay.
+        a, ea = self.f.ask("claude", "session-a", "question A")
+        b, eb = self.f.ask("claude", "session-b", "question B")
+        def item(signal):
+            return {"id": signal["id"], "source": "S4", "kind": "message", "since": signal["since"],
+                    "owner": {"harness": signal["harness"], "session_id": signal["session_id"]}}
+        self.assertTrue(state.publish_cache({"items": [item(a), item(b)], "complete": True}))
+        before = state._read_cache_file()
+        self.assertEqual(before["total"], 2)
+        self.f.submit(ea, "answer A")
+        wire, _, _ = self.f.prepare(a)
+        self.f.consume(a, wire)
+        self.assertEqual(self.source(a)["lifecycle"], "answered")
+        after = state._read_cache_file()
+        self.assertEqual([row["id"] for row in after["items"]], [b["id"]])
+        self.assertEqual(after["total"], 1)
+        self.assertNotIn("claude\0session-a", after["by_session"])
+        self.assertEqual(after["by_session"]["claude\0session-b"], [b["id"]])
+        fleet = json.loads(state._fleet_cache_path().read_text())
+        self.assertEqual([row["id"] for row in fleet["items"]], [b["id"]])
+        self.assertEqual(fleet["total"], 1)
+        self.assertEqual(state.cached_statusline("claude", "session-a")[0][1], 0)
+        # A direct answer in the session settles the same way.
+        self.f.direct(b, "answer B")
+        self.assertEqual(state._read_cache_file()["items"], [])
+
+    def test_a_sent_answer_leaves_every_count_while_it_travels_and_comes_back_if_it_fails(self):
+        # Rule 5 (11-14): a person answered a busy session's question from the panel; the answer
+        # waited for the turn to end while Fleet, `questions list` and the status line still
+        # counted it. The existing answer record (`submitted`) now marks that wait sent at once:
+        # listed, in no count or session index, its panel row the receipt with what was sent.
+        # The session taking it removes it; a failed delivery counts it again.
+        import contextlib, io
+        import questions as board_cli
+        import session_shell
+        def item(signal):
+            return {"id": signal["id"], "source": "S4", "kind": "message", "since": signal["since"],
+                    "owner": {"harness": signal["harness"], "session_id": signal["session_id"]}}
+        def surfaces(harness, sid):
+            private = state._read_cache_file()
+            fleet = json.loads(state._fleet_cache_path().read_text())
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), mock.patch.object(state, "read_selected_request", return_value=None):
+                board_cli.main(["list"])
+            return {"private": private["total"], "fleet": fleet["total"],
+                    "index": len(private["by_session"].get(harness + "\0" + sid, ())),
+                    "statusline": state.cached_statusline(harness, sid)[0][1],
+                    "list": out.getvalue().splitlines()[0].split(" · ")[0],
+                    "sent": sorted(row["id"] for row in fleet["items"] if row.get("answer") == "sent")}
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                for path in state.state_root().glob("*.json"):
+                    path.unlink()
+                a, ea = self.f.ask(harness, "session-a", "question A", choices=["Alpha", "Beta"])
+                b, _eb = self.f.ask(harness, "session-b", "question B")
+                self.assertTrue(state.publish_cache({"items": [item(a), item(b)], "complete": True}))
+                self.assertEqual(surfaces(harness, "session-a"),
+                                 {"private": 2, "fleet": 2, "index": 1, "statusline": 1,
+                                  "list": "questions: 2 current", "sent": []})
+                self.assertEqual(self.f.submit(ea, "Beta")["state"], "submitted")
+                sent = {"private": 1, "fleet": 1, "index": 0, "statusline": 0,
+                        "list": "questions: 1 current", "sent": [a["id"]]}
+                self.assertEqual(surfaces(harness, "session-a"), sent)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), mock.patch.object(state, "read_selected_request", return_value=None):
+                    board_cli.main(["list"])
+                head = out.getvalue().splitlines()[0]
+                self.assertIn(" · 1 answer on the way", head)
+                self.assertNotIn("blocked owner", head)
+                # The panel still holds it as its receipt, with what was sent.
+                panel = session_shell.session_questions(harness, "session-a", view=state.cached_view(request=False))
+                self.assertEqual([(row["id"], row.get("request_state"), row.get("sent")) for row in panel],
+                                 [(a["id"], "submitted", ["Beta"])])
+                # The next collection says the same (the source is still open while it travels).
+                self.assertTrue(state.publish_cache({"items": [item(a), item(b)], "complete": True}))
+                self.assertEqual(surfaces(harness, "session-a"), sent)
+                # Its session takes the answer: it leaves the list too.
+                wire, _, _ = self.f.prepare(a)
+                self.f.consume(a, wire)
+                self.assertEqual(surfaces(harness, "session-a"),
+                                 {"private": 1, "fleet": 1, "index": 0, "statusline": 0,
+                                  "list": "questions: 1 current", "sent": []})
+                # A delivery that could not be confirmed brings the wait back into every count.
+                c, ec = self.f.ask(harness, "session-c", "question C")
+                self.assertTrue(state.publish_cache({"items": [item(b), item(c)], "complete": True}))
+                self.f.submit(ec, "answer C")
+                self.assertEqual(surfaces(harness, "session-c")["sent"], [c["id"]])
+                entry = state._selected_entry(ec)
+                self.assertTrue(state._store_selected_entry(ec, dict(
+                    entry, state="unknown", result={"reason": "message-answer-delivery-unconfirmed"})))
+                self.assertEqual(surfaces(harness, "session-c"),
+                                 {"private": 2, "fleet": 2, "index": 1, "statusline": 1,
+                                  "list": "questions: 2 current", "sent": []})
+
+    def test_a_collection_read_before_the_answer_does_not_publish_the_answered_question(self):
+        # Review 1597-1 (11-13): one pass read A, A was answered from the panel and the same
+        # session registered B, then the pass published what it had read — the answered A came
+        # back to the cache and Fleet until the next collection. The publish re-reads each
+        # registered question's exact source under the lock its completion settles with.
+        from tools.fleet.collectors import dispatch
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                for path in state.state_root().glob("*.json"):
+                    path.unlink()
+                a, ea = self.f.ask(harness, "session-a", "first")
+                b, _ = self.f.ask(harness, "session-b", "other")
+                original = observation.read_answer_waits
+                def collect():
+                    with mock.patch.object(observation, "_session_liveness_probe",
+                                           return_value=lambda *args: "live"), \
+                         mock.patch.object(observation, "_codex_rollout_waits",
+                                           return_value={"complete": True, "pending": {}}):
+                        return original(jobs_paths=[self.f.jobs])
+                self.assertTrue(state.publish_cache(collect()))
+                later = []
+                def read_then_answer(**kwargs):
+                    seen = collect()
+                    self.f.submit(ea, "answer first")
+                    wire, _, _ = self.f.prepare(a)
+                    self.f.consume(a, wire)
+                    later.append(self.f.ask(harness, "session-a", "second")[0])
+                    return seen
+                with mock.patch.object(observation, "read_answer_waits", side_effect=read_then_answer), \
+                     mock.patch.object(state, "_route_demands", return_value={}), \
+                     mock.patch.object(state, "_notify_result"), \
+                     mock.patch.object(dispatch, "human_gate_registry_paths", return_value=[self.f.jobs]):
+                    self.assertTrue(state._refresh_cache())
+                self.assertEqual(self.source(later[0])["lifecycle"], "open")
+                shared = state._read_cache_file()
+                fleet = json.loads(state._fleet_cache_path().read_text())
+                for view in (shared, fleet):
+                    self.assertEqual([row["id"] for row in view["items"]], [b["id"]])
+                    self.assertEqual(view["total"], 1)
+                self.assertNotIn(harness + "\0session-a", shared["by_session"])
+                # The next collection (registration requests one) shows B beside the other question.
+                with mock.patch.object(observation, "read_answer_waits", side_effect=lambda **kw: collect()), \
+                     mock.patch.object(state, "_route_demands", return_value={}), \
+                     mock.patch.object(state, "_notify_result"), \
+                     mock.patch.object(dispatch, "human_gate_registry_paths", return_value=[self.f.jobs]):
+                    self.assertTrue(state._refresh_cache())
+                self.assertEqual(sorted(row["id"] for row in state._read_cache_file()["items"]),
+                                 sorted([b["id"], later[0]["id"]]))
+
+    def test_a_source_not_read_at_publication_keeps_its_unanswered_question(self):
+        # Review 1597-r2 (11-13): the publication's re-read turned a failed read (`_read` folds an
+        # OSError into None) into "that question ended", so one EIO on the open A's source left A
+        # out of the cache and Fleet with `complete: true` and no health, until the next collection.
+        # Not read is not ended: A stays as the collection read it, and the publication says it is
+        # incomplete through the existing health path. An ended (answered) A still leaves (above).
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                for path in state.state_root().glob("*.json"):
+                    path.unlink()
+                a, _ = self.f.ask(harness, "session-a", "unanswered A")
+                b, _ = self.f.ask(harness, "session-b", "unanswered B")
+                with mock.patch.object(observation, "_session_liveness_probe",
+                                       return_value=lambda *args: "live"), \
+                     mock.patch.object(observation, "_codex_rollout_waits",
+                                       return_value={"complete": True, "pending": {}}):
+                    seen = observation.read_answer_waits(jobs_paths=[self.f.jobs])
+                self.assertTrue(seen["complete"])
+                source = state._signal_path(a)
+                raw = source.read_bytes()
+                original, failed = Path.read_text, []
+                def transient(path, *args, **kwargs):
+                    if path == source and not failed:
+                        failed.append(path)
+                        raise OSError(5, "synthetic transient I/O failure")
+                    return original(path, *args, **kwargs)
+                with mock.patch.object(Path, "read_text", transient):
+                    self.assertTrue(state.publish_cache(seen))
+                self.assertEqual(len(failed), 1)
+                self.assertEqual(source.read_bytes(), raw)
+                self.assertEqual(self.source(a)["lifecycle"], "open")
+                shared = state._read_cache_file()
+                fleet = json.loads(state._fleet_cache_path().read_text())
+                for view in (shared, fleet):
+                    self.assertEqual(sorted(row["id"] for row in view["items"]), sorted([a["id"], b["id"]]))
+                    self.assertEqual(view["total"], 2)
+                    self.assertIs(view["complete"], False)
+                    self.assertIn({"source": "S4", "state": "unknown"}, view["health"])
+                self.assertEqual(shared["by_session"][harness + "\0session-a"], [a["id"]])
+                # The next publication that reads the source is complete again.
+                self.assertTrue(state.publish_cache(seen))
+                shared = state._read_cache_file()
+                self.assertEqual(sorted(row["id"] for row in shared["items"]), sorted([a["id"], b["id"]]))
+                self.assertIs(shared["complete"], True)
+                self.assertEqual(shared["health"], [])
+                # A source that is gone has ended: it still leaves at once.
+                source.unlink()
+                self.assertTrue(state.publish_cache(seen))
+                self.assertEqual([row["id"] for row in state._read_cache_file()["items"]], [b["id"]])
+
+    def test_the_publication_table_for_each_question_state_read_and_collection(self):
+        # Review 1597-r3 (11-13), the third finding at this spot (r1: a late publication brought an
+        # answered question back; r2: a failed read hid an unanswered one; r3: a failed read brought
+        # an answered one back). The whole table is fixed here instead of one cell at a time: the
+        # question's real state x the publication's re-read of its source x what is published (a
+        # collection read before the change, published late, or a new collection). B, an
+        # unanswered question of another session, is read normally and always stays.
+        # Review 1597-r4: a source that is read decides; the completions are used only when it
+        # cannot be read. "reopened" is A answered and settled, then the same id registered again
+        # (another question C, then A, in the same input sequence): read, it shows; not read, its
+        # completion keeps it out until a publication that reads it (checked below).
+        import session_shell
+        LOAD, DROP = "load", "drop"
+        # state -> {read: (late publication of the earlier collection, new collection)}
+        table = {
+            "open":            {"ok": (LOAD, LOAD), "fail": (LOAD, LOAD)},
+            "answered":        {"ok": (DROP, DROP), "fail": (DROP, DROP)},
+            "source-answered": {"ok": (DROP, DROP), "fail": (LOAD, DROP)},
+            "source-expired":  {"ok": (DROP, DROP), "fail": (LOAD, DROP)},
+            "source-cancelled": {"ok": (DROP, DROP), "fail": (LOAD, DROP)},
+            "source-gone":     {"ok": (DROP, DROP), "fail": (DROP, DROP)},
+            "replaced":        {"ok": (DROP, DROP), "fail": (LOAD, DROP)},
+            "reopened":        {"ok": (LOAD, LOAD), "fail": (DROP, DROP)},
+        }
+        def collect():
+            with mock.patch.object(observation, "_session_liveness_probe",
+                                   return_value=lambda *args: "live"), \
+                 mock.patch.object(observation, "_codex_rollout_waits",
+                                   return_value={"complete": True, "pending": {}}):
+                return observation.read_answer_waits(jobs_paths=[self.f.jobs])
+        cell = 0
+        for harness in ("claude", "codex", "opencode"):
+            for change, reads in table.items():
+                for read, expected in reads.items():
+                    for collection, want in zip(("late", "new"), expected):
+                        cell += 1
+                        with self.subTest(harness=harness, state=change, read=read, collection=collection):
+                            for path in state.state_root().glob("*.json"):
+                                path.unlink()
+                            sid = "session-a-%d" % cell
+                            a, ea = self.f.ask(harness, sid, "question A %d" % cell)
+                            b, _ = self.f.ask(harness, "session-b-%d" % cell, "question B %d" % cell)
+                            earlier = collect()
+                            self.assertTrue(state.publish_cache(earlier))
+                            source = state._signal_path(a)
+                            if change in ("answered", "reopened"):
+                                self.f.submit(ea, "answer A")
+                                wire, _, _ = self.f.prepare(a)
+                                self.f.consume(a, wire)
+                                self.assertEqual(self.source(a)["lifecycle"], "answered")
+                                self.assertNotIn(a["id"], [row["id"] for row in state._read_cache_file()["items"]])
+                            if change == "reopened":
+                                self.f.ask(harness, sid, "question C %d" % cell)
+                                again, _ = self.f.ask(harness, sid, "question A %d" % cell)
+                                self.assertEqual(again["id"], a["id"])
+                                self.assertEqual(self.source(a)["lifecycle"], "open")
+                                self.assertIn(a["id"], [row["id"] for row in
+                                                        state._read_cache_file()["settled_waits"]])
+                            elif change.startswith("source-") and change != "source-gone":
+                                # Reflected in the source only; its completion has not settled yet.
+                                signal = self.source(a)
+                                signal["lifecycle"] = change.split("-", 1)[1]
+                                state._write_signal_source(signal)
+                            elif change == "source-gone":
+                                source.unlink()
+                            elif change == "replaced":
+                                replacement, _ = self.f.ask(harness, sid, "next question %d" % cell)
+                                self.assertNotEqual(replacement["id"], a["id"])
+                                self.assertEqual(state._signal_path(replacement), source)
+                            published = earlier if collection == "late" else collect()
+                            original = Path.read_text
+                            def unreadable(path, *args, **kwargs):
+                                if path == source:
+                                    raise OSError(5, "synthetic I/O failure")
+                                return original(path, *args, **kwargs)
+                            with mock.patch.object(Path, "read_text",
+                                                   unreadable if read == "fail" else original):
+                                self.assertTrue(state.publish_cache(published))
+                            shared = state._read_cache_file()
+                            fleet = json.loads(state._fleet_cache_path().read_text())
+                            elsewhere = []
+                            panel = session_shell.session_questions(
+                                harness, sid, view=state.cached_view(request=False), elsewhere=elsewhere)
+                            seen = {"shared": a["id"] in [row["id"] for row in shared["items"]],
+                                    "by_session": a["id"] in shared["by_session"].get(harness + "\0" + sid, ()),
+                                    "fleet": a["id"] in [row["id"] for row in fleet["items"]],
+                                    "panel": a["id"] in [item["id"] for item in panel]}
+                            expect = dict.fromkeys(seen, want == LOAD)
+                            if change == "replaced" and want == LOAD:
+                                # 11-14: the panel's block holds what the person can answer here.
+                                # A late publication still lists the replaced question, which its
+                                # session's next question ended: it is the guidance line instead.
+                                expect["panel"] = False
+                                self.assertIn(a["id"], [item["id"] for item in elsewhere])
+                            self.assertEqual(seen, expect)
+                            for view in (shared, fleet):
+                                self.assertIn(b["id"], [row["id"] for row in view["items"]])
+                                self.assertEqual(view["total"], len(view["items"]))
+                            if change == "open" and read == "fail":
+                                for view in (shared, fleet):
+                                    self.assertIs(view["complete"], False)
+                                    self.assertIn({"source": "S4", "state": "unknown"}, view["health"])
+                            if change == "reopened":
+                                if read == "fail":
+                                    # The next publication that reads the source shows it.
+                                    self.assertTrue(state.publish_cache(published))
+                                    shared = state._read_cache_file()
+                                    self.assertIn(a["id"], [row["id"] for row in shared["items"]])
+                                    self.assertIn(a["id"], [row["id"] for row in json.loads(
+                                        state._fleet_cache_path().read_text())["items"]])
+                                # Read open, its id leaves the completions.
+                                self.assertNotIn(a["id"], [row["id"] for row in
+                                                           shared.get("settled_waits", ())])
+
+    def test_settled_waits_leave_once_a_later_collection_is_published(self):
+        # Review 1597-r3: the remembered completions do not grow. Many answers between two
+        # collections are all remembered; the next collection that started after them clears them.
+        def collect():
+            with mock.patch.object(observation, "_session_liveness_probe",
+                                   return_value=lambda *args: "live"), \
+                 mock.patch.object(observation, "_codex_rollout_waits",
+                                   return_value={"complete": True, "pending": {}}):
+                return observation.read_answer_waits(jobs_paths=[self.f.jobs])
+        asked = [self.f.ask("claude", "session-%d" % n, "question %d" % n) for n in range(5)]
+        earlier = collect()
+        self.assertTrue(state.publish_cache(earlier))
+        for signal, envelope in asked:
+            self.f.direct(signal, "answer")
+            self.assertEqual(self.source(signal)["lifecycle"], "answered")
+        ids = [signal["id"] for signal, _ in asked]
+        self.assertEqual([row["id"] for row in state._read_cache_file()["settled_waits"]], ids)
+        # The same answer settled twice is remembered once.
+        state._settle_published_wait(ids[-1])
+        self.assertEqual([row["id"] for row in state._read_cache_file()["settled_waits"]], ids)
+        # Late publications of the earlier collection publish none of them and keep the list.
+        for _ in range(3):
+            self.assertTrue(state.publish_cache(earlier))
+            value = state._read_cache_file()
+            self.assertEqual(value["items"], [])
+            self.assertEqual(len(value["settled_waits"]), len(ids))
+        # A collection that started after the answers clears the list.
+        self.assertTrue(state.publish_cache(collect()))
+        self.assertNotIn("settled_waits", state._read_cache_file())
+        # The bound holds even if no later collection ever comes.
+        for n in range(state._SETTLED_WAITS_MAX + 10):
+            state._settle_published_wait("S4:%064x" % n)
+        self.assertEqual(len(state._read_cache_file()["settled_waits"]), state._SETTLED_WAITS_MAX)
 
     def test_legacy_question_keeps_its_address_when_another_session_registers(self):
         import session_tidy as tidy
@@ -3402,7 +4078,7 @@ class MessageCompletionTests(unittest.TestCase):
             self.assertEqual(self.source(signal)["completion"], completion)
         self.assertEqual(len(tidy_decisions.list_pending()), 3)
 
-    def test_queued_does_not_answer_direct_wins_and_late_receipt_only_records_delivery(self):
+    def test_queued_fleet_answer_is_not_replaced_by_a_later_prompt(self):
         import tidy_decisions
         import session_notice
         signal, envelope = self.f.ask()
@@ -3410,18 +4086,22 @@ class MessageCompletionTests(unittest.TestCase):
         self.f.submit(envelope, "queued Fleet answer")
         wire, ref, recipient = self.f.prepare(signal)
         self.assertEqual(self.source(signal)["lifecycle"], "open")
-        self.f.direct(signal, "physical wins")
-        completion = self.source(signal)["completion"]
-        self.assertFalse(session_notice.notice_is_current(self.f.record(signal)))
+        self.f.direct(signal, "unrelated prompt while delivery waits")
+        self.assertEqual(self.source(signal)["lifecycle"], "open")
+        self.assertTrue(session_notice.notice_is_current(self.f.record(signal)))
         self.f.peer.receive_peer_message(wire, recipient)
+        completion = self.source(signal)["completion"]
+        self.assertEqual((completion["actor"], completion["answer"], completion["action_id"]),
+                         ("fleet", "queued Fleet answer", "fixture-action"))
+        self.f.direct(signal, "later prompt")
         self.assertEqual(self.source(signal)["completion"], completion)
         entry = state._selected_entry(envelope)
-        self.assertEqual((entry["state"], entry["result"]["status"]), ("received", "answered-elsewhere"))
-        self.assertEqual(entry["action_id"], "fixture-action")
+        self.assertEqual((entry["state"], entry["result"]["status"]), ("applied", "applied"))
         self.assertEqual(self.f.record(signal)["state"], "acked")
+        state.flush_message_decisions()
         decisions = tidy_decisions.list_pending()
         self.assertEqual(len(decisions), 1)
-        self.assertEqual(decisions[0][1]["answers"], ["physical wins"])
+        self.assertEqual(decisions[0][1]["answers"], ["queued Fleet answer"])
         # A new module instance reads the persisted claim; it never resends it.
         spec = importlib.util.spec_from_file_location("question_restart", state.__file__)
         restarted = importlib.util.module_from_spec(spec)
@@ -3429,7 +4109,176 @@ class MessageCompletionTests(unittest.TestCase):
         with mock.patch("session_notice.notify", side_effect=AssertionError("must not resend")):
             result = restarted.submit_selected_response(envelope, {"answers": {"message-response": ["retry"]}})
         self.assertFalse(result["support"]["supported"])
-        self.assertEqual(result["state"], "received")
+        self.assertEqual(result["state"], "applied")
+
+    def prompt(self, signal, text):
+        """The real prompt hook with context rendered, as each harness adapter calls it."""
+        import session_tidy as tidy
+        seat = self.f.seat(signal["harness"], signal["session_id"])
+        lines = []
+        with mock.patch.object(tidy, "resolve_seat", return_value=seat):
+            tidy.run_hook(signal["harness"], "prompt", signal["session_id"], cwd=str(self.f.root),
+                          prompt_text=text, env=os.environ, render_context=True, emit=lines.append)
+        return "\n".join(lines)
+
+    def test_a_question_asked_replaced_or_answered_never_asks_the_entrance_for_a_refresh(self):
+        """The prompt hook holds the seat lock and asks for nothing (11-22: the campaign document does not follow the question list)."""
+        import artifact_entrance
+        (self.f.root / ".agent_reports").mkdir()
+        with mock.patch.object(artifact_entrance, "request_refresh", side_effect=AssertionError("asked")) as refresh:
+            signal, envelope = self.f.ask(text="Which one?", choices=["Alpha", "Beta"])
+            self.prompt(signal, "2")                                    # answered at the prompt
+            self.assertEqual(self.source(signal)["lifecycle"], "answered")
+            self.f.ask(text="First?")
+            self.f.ask(text="Second?")                                  # the first is replaced
+            refresh.assert_not_called()
+        self.assertFalse(hasattr(state, "_refresh_campaign_documents"))
+
+    def test_choice_question_closes_only_on_one_exact_choice_prompt(self):
+        choices = ["Alpha plan", "Beta plan", "Gamma plan"]
+        kept = ("질문 전송 중이라고 뜨고 바로 안가네..", "0", "4", "12", "1 2", "1, 2",
+                "2번으로 하자 근데 왜 안 가지", "Beta plan 말고 Alpha plan", "Beta", "-2", "2-")
+        closed = {"2": "Beta plan", "2번": "Beta plan", "2.": "Beta plan", " 2 번 ": "Beta plan",
+                  "1": "Alpha plan", "3.": "Gamma plan", "Beta plan": "Beta plan",
+                  "  beta PLAN.  ": "Beta plan", "gamma plan。": "Gamma plan"}
+        for harness in ("claude", "codex", "opencode"):
+            for index, text in enumerate(kept):
+                with self.subTest(harness=harness, kept=text):
+                    signal, envelope = self.f.ask(harness, text="kept %d" % index, choices=choices)
+                    context = self.prompt(signal, text)
+                    self.assertEqual(self.source(signal)["lifecycle"], "open")
+                    self.assertIn("[답변 필요] 질문 %s이 아직 열려 있습니다" % signal["id"], context)
+                    self.assertIn("questions answer %s" % signal["id"], context)
+                    self.assertEqual(state.read_selected_request(envelope)["state"], "open")
+            for index, (text, answer) in enumerate(closed.items()):
+                with self.subTest(harness=harness, closed=text):
+                    signal, envelope = self.f.ask(harness, text="closed %d" % index, choices=choices)
+                    context = self.prompt(signal, text)
+                    completion = self.source(signal)["completion"]
+                    self.assertEqual((completion["actor"], completion["answer"]), ("direct", answer))
+                    self.assertNotIn(signal["id"], context)
+
+    def test_ambiguous_choice_wording_or_number_leaves_the_question_open(self):
+        signal, _ = self.f.ask(text="same key", choices=["Ship", "ship."])
+        self.prompt(signal, "ship")
+        self.assertEqual(self.source(signal)["lifecycle"], "open")
+        signal, _ = self.f.ask(text="number wording", choices=["2", "two"])
+        self.prompt(signal, "1")   # number 1 is "2"; wording "1" matches none
+        self.assertEqual(self.source(signal)["completion"]["answer"], "2")
+        signal, _ = self.f.ask(text="number clash", choices=["2", "two"])
+        self.prompt(signal, "2")   # number 2 is "two" but wording "2" is choice 1
+        self.assertEqual(self.source(signal)["lifecycle"], "open")
+
+    def test_claimed_panel_choice_is_kept_against_later_prompts(self):
+        for harness in ("claude", "codex", "opencode"):
+            signal, envelope = self.f.ask(harness, text="panel " + harness, choices=["A", "B", "C"])
+            self.f.submit(envelope, "B")
+            wire, _ref, recipient = self.f.prepare(signal)
+            for text in ("질문 전송 중이라고 뜨고 바로 안가네..", "1", "C"):
+                context = self.prompt(signal, text)
+                self.assertEqual(self.source(signal)["lifecycle"], "open")
+                # The line judges this very input ("not recorded as the answer"): every typed prompt.
+                self.assertIn("Fleet에서 고른 답이 전달 대기 중입니다", context)
+            self.f.peer.receive_peer_message(wire, recipient)
+            completion = self.source(signal)["completion"]
+            self.assertEqual((completion["actor"], completion["answer"]), ("fleet", "B"))
+
+    def _prompt_with_unread_claims(self, signal, text):
+        import errno
+        from unittest import mock
+        read, pending, faults = Path.read_text, state.message_answer_pending, []
+
+        def fail_once(path, *args, **kwargs):
+            if path == state._cache_path() and not faults:
+                faults.append(path)
+                raise OSError(errno.EIO, "claim record unreadable")
+            return read(path, *args, **kwargs)
+
+        def unread(value):
+            # Only the claim check that decides this prompt meets the one failed read.
+            with mock.patch.object(Path, "read_text", fail_once):
+                return pending(value)
+        with mock.patch.object(state, "message_answer_pending", side_effect=unread):
+            context = self.prompt(signal, text)
+        self.assertEqual(len(faults), 1)
+        return context
+
+    def test_unreadable_claim_record_never_lets_a_prompt_take_the_panel_answer(self):
+        for harness in ("claude", "codex", "opencode"):
+            for choices, text in ((["A", "B", "C"], "1"), ([], "ordinary unrelated prompt")):
+                with self.subTest(harness=harness, choices=bool(choices)):
+                    signal, envelope = self.f.ask(harness, text="unread " + harness, choices=choices)
+                    self.f.submit(envelope, "B")
+                    wire, _ref, recipient = self.f.prepare(signal)
+                    self._prompt_with_unread_claims(signal, text)
+                    self.assertEqual(self.source(signal)["lifecycle"], "open")
+                    self.assertEqual(state._selected_entry(envelope)["response"],
+                                     {"answers": {"message-response": ["B"]}})
+                    self.f.peer.receive_peer_message(wire, recipient)
+                    completion = self.source(signal)["completion"]
+                    self.assertEqual((completion["actor"], completion["answer"]), ("fleet", "B"))
+
+    def test_unreadable_claim_record_only_defers_a_prompt_until_the_next_readable_one(self):
+        signal, _ = self.f.ask(text="free unread")
+        self._prompt_with_unread_claims(signal, "first answer")
+        self.assertEqual(self.source(signal)["lifecycle"], "open")
+        self.prompt(signal, "second answer")
+        completion = self.source(signal)["completion"]
+        self.assertEqual((completion["actor"], completion["answer"]), ("direct", "second answer"))
+
+    def _prompt_with_claims_missing_at_lookup(self, signal, text):
+        from unittest import mock
+        pending, seen = state.message_answer_pending, []
+
+        def missing(value):
+            # Storage fault: the record is away only while the prompt checks it.
+            path = state._cache_path()
+            held = path.with_suffix(".held")
+            path.rename(held)
+            try:
+                seen.append(path.exists())
+                return pending(value)
+            finally:
+                held.rename(path)
+        with mock.patch.object(state, "message_answer_pending", side_effect=missing):
+            self.prompt(signal, text)
+        self.assertTrue(seen)
+        self.assertNotIn(True, seen)
+
+    def test_claim_record_missing_at_lookup_never_lets_a_prompt_take_the_panel_answer(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                signal, envelope = self.f.ask(harness, text="missing " + harness, choices=["A", "B", "C"])
+                self.f.submit(envelope, "B")
+                wire, _ref, recipient = self.f.prepare(signal)
+                self._prompt_with_claims_missing_at_lookup(signal, "1")
+                self.assertEqual(self.source(signal)["lifecycle"], "open")
+                self.f.peer.receive_peer_message(wire, recipient)
+                completion = self.source(signal)["completion"]
+                self.assertEqual((completion["actor"], completion["answer"]), ("fleet", "B"))
+                self.assertEqual(state._selected_entry(envelope)["result"]["status"], "applied")
+
+    def test_without_a_claim_a_missing_record_still_lets_the_prompt_answer(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness, record="missing-at-lookup"):
+                signal, _ = self.f.ask(harness, text="no claim " + harness, choices=["A", "B", "C"])
+                self._prompt_with_claims_missing_at_lookup(signal, "1")
+                completion = self.source(signal)["completion"]
+                self.assertEqual((completion["actor"], completion["answer"]), ("direct", "A"))
+            with self.subTest(harness=harness, record="never-written"):
+                signal, _ = self.f.ask(harness, text="no record " + harness, choices=["A", "B", "C"])
+                state._cache_path().unlink(missing_ok=True)
+                self.prompt(signal, "2")
+                completion = self.source(signal)["completion"]
+                self.assertEqual((completion["actor"], completion["answer"]), ("direct", "B"))
+
+    def test_question_without_choices_still_takes_the_next_prompt(self):
+        for harness in ("claude", "codex", "opencode"):
+            signal, _ = self.f.ask(harness, text="free " + harness)
+            context = self.prompt(signal, "아무 말이나 답")
+            completion = self.source(signal)["completion"]
+            self.assertEqual((completion["actor"], completion["answer"]), ("direct", "아무 말이나 답"))
+            self.assertNotIn(signal["id"], context)
 
     def test_verified_answer_provenance_is_body_free_and_does_not_become_physical_input(self):
         import session_tidy as tidy
@@ -3449,26 +4298,20 @@ class MessageCompletionTests(unittest.TestCase):
         self.f.peer.receive_peer_message(wire, recipient)
         self.assertEqual(self.source(signal)["completion"]["actor"], "fleet")
 
-    def test_direct_answer_between_claim_and_notice_write_settles_unsent_transport(self):
+    def test_prompt_between_claim_and_notice_write_keeps_the_claimed_answer(self):
         import session_notice
-        import tidy_decisions
         signal, envelope = self.f.ask()
-        state.write_selected_draft(envelope, "unsent draft")
+        state.write_selected_draft(envelope, "claimed draft")
         notify = session_notice.notify
-        def direct_wins(*args, **kwargs):
-            self.f.direct(signal, "physical answer before carrier")
+        def prompt_first(*args, **kwargs):
+            self.f.direct(signal, "physical prompt before carrier")
             return notify(*args, **kwargs)
-        with mock.patch.object(session_notice, "notify", side_effect=direct_wins):
+        with mock.patch.object(session_notice, "notify", side_effect=prompt_first):
             result = self.f.submit(envelope)
-        self.assertIsNone(self.f.record(signal))
-        self.assertEqual(result["state"], "cancelled")
-        self.assertEqual(result["result"]["transport"], "not-sent")
-        from tools.fleet.render_explorer import _explorer_question_status
-        self.assertIn("not sent", _explorer_question_status(result, "unknown"))
-        entry = state._selected_entry(envelope)
-        self.assertEqual((entry["action_id"], entry["source_terminal"], entry["transport_settled"]),
-                         ("fixture-action", True, True))
-        self.assertEqual(len(tidy_decisions.list_pending()), 1)
+        self.assertEqual(result["state"], "submitted")
+        self.assertIsNotNone(self.f.record(signal))
+        self.assertEqual(self.source(signal)["lifecycle"], "open")
+        self.assertEqual(state._selected_entry(envelope)["action_id"], "fixture-action")
 
     def test_decision_queue_failure_does_not_reverse_answer_and_normal_flush_retries(self):
         import tidy_decisions
@@ -3500,14 +4343,18 @@ class MessageCompletionTests(unittest.TestCase):
             again = self.f.submit(envelope, "retry", "different-action")
         self.assertEqual(again["action_id"], "fixture-action")
         self.assertEqual(self.source(signal)["lifecycle"], "open")
+        # The normal courier recovers the retained notice once through the
+        # recipient's session-shell host (the shared fixture's stand-in).
         calls, _ref, pending = self.f.courier(signal)
         self.assertEqual(len(calls), 1)
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["state"], "queued")
         self.assertEqual(self.source(signal)["lifecycle"], "open")
         self.f.consume(signal, pending["text"])
         self.assertEqual(self.source(signal)["completion"]["action_id"], "fixture-action")
         self.assertEqual(state._selected_entry(envelope)["state"], "applied")
 
-    def test_real_direct_and_exact_receiver_race_apply_one_completion_and_decision(self):
+    def test_real_prompt_and_exact_receiver_race_apply_the_claimed_answer_once(self):
         from concurrent.futures import ThreadPoolExecutor
         import tidy_decisions
         for harness in ("claude", "codex", "opencode"):
@@ -3533,7 +4380,8 @@ class MessageCompletionTests(unittest.TestCase):
                 for future in futures:
                     future.result(timeout=10)
             self.assertEqual(len(applied), 1)
-            self.assertIn(self.source(signal)["completion"]["actor"], {"direct", "fleet"})
+            # The claimed Fleet answer is the answer; the racing prompt never replaces it.
+            self.assertEqual(self.source(signal)["completion"]["actor"], "fleet")
         self.assertEqual(len(tidy_decisions.list_pending()), 3)
 
     def test_consumed_ack_source_and_overlay_write_failures_recover_on_normal_runner(self):
@@ -3630,13 +4478,22 @@ class MessageCompletionTests(unittest.TestCase):
         self.assertEqual(self.source(signal)["lifecycle"], "open")
         self.assertFalse(state.close_signal(signal["seat_key"]))
 
-    def test_incarnation_change_and_proven_clear_leave_old_question_unresolved(self):
-        import session_tidy as tidy
+    def test_the_same_session_in_a_new_process_still_answers_its_question(self):
+        # 11-14: a native resume, a restart or a compaction keeps the session id; the question
+        # stays answerable and its answer reaches that session as it is now.
         signal, envelope = self.f.ask(incarnation={"pid": os.getpid(), "proc_start": state._proc_start_ticks(os.getpid())})
         with mock.patch.object(state, "_proc_start_ticks", return_value="replacement-start"):
-            self.assertFalse(state.read_selected_request(envelope)["support"]["supported"])
-            self.f.submit(envelope)
-        self.assertIsNone(self.f.record(signal))
+            selected = state.read_selected_request(envelope)
+            self.assertEqual((selected["state"], selected["support"]["supported"]), ("open", True))
+            self.assertIn(self.f.submit(envelope)["state"], {"submitted", "received", "applied"})
+            self.assertIsNotNone(self.f.record(signal))
+            wire, _ref, _recipient = self.f.prepare(signal)
+            self.f.consume(signal, wire)
+        self.assertEqual(self.source(signal)["lifecycle"], "answered")
+
+    def test_another_session_on_the_seat_leaves_the_old_question_unresolved(self):
+        import session_tidy as tidy
+        signal, envelope = self.f.ask(incarnation={"pid": os.getpid(), "proc_start": state._proc_start_ticks(os.getpid())})
         seat = self.f.seat()
         tidy._append_ledger_entry(seat, {"event": "succession", "source": "tidy-clear", "harness": "claude",
             "sid": "successor", "from": {"harness": "claude", "sid": signal["session_id"]}, "ts": time.time()})
@@ -3645,6 +4502,709 @@ class MessageCompletionTests(unittest.TestCase):
         self.assertIsNone(self.f.record(signal))
         self.assertEqual(self.source(signal)["lifecycle"], "open")
 
+
+class WakeSourceTests(unittest.TestCase):
+    """The producer wakes on sources outside the registry, and never on its own writes.
+
+    Real descriptors and real time (kernel notifications, pidfd, a real producer loop);
+    every wait is bounded far below the 30 second cadence it replaces.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        env = mock.patch.dict(os.environ, {
+            "XDG_STATE_HOME": str(self.base / "state"),
+            "FLEET_INTERACTION_STATE_DIR": str(self.base / "interactions"),
+            "PATH": str(self.base / "empty-bin")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.root = state.state_root()
+        self.root.mkdir(parents=True, mode=0o700)
+        (self.root / ".demand").touch()
+        self.registry = self.base / "reg" / "jobs.log"
+        self.registry.parent.mkdir()
+        self.registry.write_text("open\n", encoding="utf-8")
+        self.stream = self.base / "reg" / "logs" / "e2e.claude.jsonl"
+        self.stream.parent.mkdir()
+        self.stream.write_text("{}\n", encoding="utf-8")
+        interactions = self.base / "interactions" / "claude"
+        interactions.mkdir(parents=True)
+        self.interactions = interactions
+        import tools.fleet.collectors.dispatch as dispatch
+        for patch in (
+                mock.patch.object(dispatch, "human_gate_registry_paths", return_value=[str(self.registry)]),
+                mock.patch.object(observation, "_codex_rollout_waits",
+                                  return_value={"complete": True, "pending": {}}),
+                mock.patch.object(state, "_request_producer"),
+                mock.patch.object(state, "_WAKE_FAILED", False),
+                mock.patch.object(state, "_WAKE_EVENTS", None),
+                mock.patch.object(state, "_NEXT_WAKE", None),
+                mock.patch.object(state, "_WATCH_STAT", ())):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.addCleanup(state._stop_wake_events)
+        self.sleepers = []
+        self.addCleanup(self._reap)
+
+    def _reap(self):
+        for process in self.sleepers:
+            process.kill()
+            process.wait()
+
+    def sleeper(self):
+        from tools.fleet.collectors.procscan import read_proc_start
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.sleepers.append(process)
+        return process, read_proc_start(process.pid)
+
+    def snapshot(self, *, pid=None, start=None):
+        job = SimpleNamespace(status="open", harness="claude", _transcript_path=str(self.stream),
+                              pid=pid, proc_start=start)
+        return SimpleNamespace(jobs=[job], sessions=[])
+
+    def arm(self, snapshot=None):
+        state._remember_wake_sources(snapshot)
+        state._arm_wake_events()
+        events = state._wake_events()
+        self.assertIsNotNone(events)
+        return events
+
+    def slept(self, cause, *, delay=30.0):
+        """Seconds `_sleep_until_registry_change` took when `cause` ran 0.3 s into it."""
+        generation = state._source_generation()
+        timer = threading.Timer(0.3, cause)
+        timer.start()
+        began = time.monotonic()
+        state._sleep_until_registry_change(delay, generation, 0.0)
+        timer.join()
+        return time.monotonic() - began
+
+    def test_a_worker_stream_append_wakes_the_producer(self):
+        self.arm(self.snapshot())
+        def append():
+            with self.stream.open("a", encoding="utf-8") as handle:
+                handle.write("{}\n")
+        self.assertLess(self.slept(append), 5.0)
+        self.assertEqual(state._LAST_WAKE_REASON, "event")
+
+    def test_an_s4_signal_wakes_the_producer(self):
+        self.arm(self.snapshot())
+        def signal():
+            value = state.signal_value("claude", "sid-wake", "seat-wake", "[답변 필요] 깨움?", sequence=1)
+            self.assertTrue(state.write_signal(value))
+        self.assertLess(self.slept(signal), 5.0)
+        self.assertEqual(state._LAST_WAKE_REASON, "event")
+
+    def test_an_s1_state_file_wakes_the_producer(self):
+        self.arm(self.snapshot())
+        self.assertLess(self.slept(lambda: (self.interactions / "sid-s1.json").write_text("{}")), 5.0)
+        self.assertEqual(state._LAST_WAKE_REASON, "event")
+
+    def test_an_owner_process_ending_wakes_the_producer(self):
+        process, start = self.sleeper()
+        self.arm(self.snapshot(pid=process.pid, start=start))
+        self.assertIn((process.pid, start), state._NEXT_WAKE[2])
+        self.assertLess(self.slept(process.terminate), 5.0)
+        self.assertEqual(state._LAST_WAKE_REASON, "event")
+
+    def test_a_network_file_is_stat_watched_not_notification_watched(self):
+        import claude_process_identity as identity
+        remote = str(self.base / "reg" / "logs")
+        real = identity.is_local_path
+        with mock.patch.object(identity, "is_local_path",
+                               side_effect=lambda path, **kw: not str(path).startswith(remote) and real(path, **kw)):
+            events = self.arm(self.snapshot())
+        self.assertIn(str(self.stream), state._NEXT_WAKE[3])
+        self.assertNotIn(str(self.stream), state._NEXT_WAKE[0])
+        self.assertIn(str(self.stream), state._WATCH_STAT)
+        self.assertNotIn(str(self.stream), events._sources[0])
+        def append():
+            with self.stream.open("a", encoding="utf-8") as handle:
+                handle.write("{}\n")
+        self.assertLess(self.slept(append), 5.0)
+        self.assertEqual(state._LAST_WAKE_REASON, "stat")
+
+    def test_the_producers_own_writes_do_not_wake_it(self):
+        events = self.arm(self.snapshot())
+        self.assertFalse(events.wait_changed(0.3))
+        now = time.time()
+        for index in range(3):
+            self.assertTrue(state.publish_cache({"items": [], "complete": True, "observed_at": now + index,
+                                                 "route_sessions": {}, "route_status": {}}))
+            state._write(self.root / ".demand", {"claude\0sid": now})   # a display's demand
+            (self.root / ".demand").touch()
+            with state._cache_write_lock():
+                pass
+        self.assertTrue((self.root / "fleet.json").exists() or (self.root / "projection.json").exists())
+        self.assertFalse(events.wait_changed(1.0), "a cache write, demand update or lock woke the producer")
+
+    def test_without_a_notification_the_whole_delay_is_slept(self):
+        self.arm(self.snapshot())
+        self.assertGreaterEqual(self.slept(lambda: None, delay=2.0), 1.9)
+        self.assertEqual(state._LAST_WAKE_REASON, "cadence")
+
+    def test_a_missing_kernel_notification_falls_back_to_the_stat_beat(self):
+        from tools.fleet import native_events
+        with mock.patch.object(native_events.ctypes, "CDLL", side_effect=OSError("no inotify")):
+            events = self.arm(self.snapshot())
+            self.assertFalse(events.available)
+            state._remember_wake_sources(self.snapshot())
+        self.assertIn(str(self.stream), state._WATCH_STAT)
+        def append():
+            with self.stream.open("a", encoding="utf-8") as handle:
+                handle.write("{}\n")
+        self.assertLess(self.slept(append), 5.0)
+        self.assertEqual(state._LAST_WAKE_REASON, "stat")
+
+    def test_stopping_leaves_no_thread_or_descriptor(self):
+        process, start = self.sleeper()
+        before = len(os.listdir("/proc/self/fd"))
+        self.arm(self.snapshot(pid=process.pid, start=start))
+        self.assertTrue(any(t.name == "fleet-native-events" for t in threading.enumerate()))
+        state._stop_wake_events()
+        self.assertFalse(any(t.name == "fleet-native-events" and t.is_alive() for t in threading.enumerate()))
+        self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+
+    # (S-d) the source list is a pure, stable function of what the pass read
+    def test_wake_sources_are_stable_sorted_and_keep_missing_streams(self):
+        process, start = self.sleeper()
+        dead = SimpleNamespace(status="open", harness="claude", _transcript_path=str(self.base / "gone" / "x.jsonl"),
+                               pid=process.pid, proc_start="not-its-start")
+        live = SimpleNamespace(status="open", harness="claude", _transcript_path=str(self.stream),
+                               pid=process.pid, proc_start=start)
+        ended = SimpleNamespace(status="done", harness="claude", _transcript_path=str(self.base / "old.jsonl"),
+                                pid=None, proc_start=None)
+        first = state._wake_sources(SimpleNamespace(jobs=[dead, live, ended], sessions=[]))
+        again = state._wake_sources(SimpleNamespace(jobs=[ended, live, dead], sessions=[]))
+        self.assertEqual(first, again)
+        self.assertEqual(first[2], ((process.pid, start),))              # the process that is no longer the one is left out
+        self.assertIn(str(self.base / "gone" / "x.jsonl"), first[0])     # a stream not there yet stays listed
+        self.assertNotIn(str(self.base / "old.jsonl"), first[0])         # a finished job is not watched
+        for part in first:
+            self.assertEqual(list(part), sorted(part))
+        self.assertEqual(state._wake_sources(None), state._wake_sources(None))
+
+    # the cost of naming the sources must not grow with how many directories the pass read
+    def test_a_pass_with_many_directories_reads_the_mount_table_once(self):
+        import claude_process_identity as identity
+        jobs = []
+        for index in range(60):
+            directory = self.base / "many" / f"d{index}"
+            directory.mkdir(parents=True)
+            jobs.append(SimpleNamespace(status="open", harness="claude", pid=None, proc_start=None,
+                                        _transcript_path=str(directory / "s.jsonl")))
+        reads = []
+        real = identity.read_mount_table
+        with mock.patch.object(identity, "read_mount_table", side_effect=lambda *a, **k: reads.append(1) or real(*a, **k)):
+            sources = state._wake_sources(SimpleNamespace(jobs=jobs, sessions=[]))
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(sum(1 for path in sources[0] if "/many/" in path), 60)
+        reads.clear()
+        with mock.patch.object(identity, "read_mount_table", side_effect=lambda *a, **k: reads.append(1) or real(*a, **k)):
+            state._wake_sources(SimpleNamespace(jobs=jobs, sessions=[]))
+        self.assertEqual(len(reads), 1)       # nothing is kept: the next call reads the table again
+
+    def test_the_mount_table_gives_the_same_answer_as_the_one_path_read(self):
+        import claude_process_identity as identity
+        net, inner, spaced = self.base / "net", self.base / "net" / "inner", self.base / "with space"
+        for directory in (net / "x", inner / "y", spaced / "z", self.base / "plain"):
+            directory.mkdir(parents=True, exist_ok=True)
+        mounts = self.base / "mounts"
+        mounts.write_text("\n".join([
+            "rootfs / ext4 rw 0 0", f"srv:/a {net} nfs4 rw 0 0", f"/dev/b {inner} ext4 rw 0 0",
+            f"tmpfs {str(spaced).replace(' ', chr(92) + '040')} tmpfs rw 0 0",
+            f"dup {net} ext4 rw 0 0", "short row", ""]), encoding="utf-8")
+        table = identity.read_mount_table(mounts)
+        link = self.base / "link"
+        link.symlink_to(net / "x")
+        cases = {self.base / "plain": True, net / "x": False, net: False, inner / "y": True, inner: True,
+                 spaced / "z": True, link: False, self.base / "missing" / "q": False}
+        for path, local in cases.items():
+            with self.subTest(path=str(path)):
+                self.assertEqual(identity.is_local_path(path, mounts_path=mounts), local)
+                self.assertEqual(identity.is_local_path(path, mount_table=table), local)
+        # a table that could not be read, and a path no row holds, are not local
+        self.assertIsNone(identity.read_mount_table(self.base / "absent"))
+        self.assertFalse(identity.is_local_path(self.base / "plain", mounts_path=self.base / "absent"))
+        self.assertFalse(identity.is_local_path(self.base / "plain", mount_table={"/nowhere": "ext4"}))
+
+    # the producer's own passes: the number of passes is the cadence's, not the wakes'
+    def _run_producer(self, seconds, *, delay=None, vary=False, snapshot=None):
+        """Run the real producer loop (real passes, real listener) for `seconds`.
+
+        Returns (pass start times, rebuild times). `delay` replaces the sleep length; `vary`
+        makes the next pass's wake sources differ from the last one's every time."""
+        lock = os.open(self.base / "producer.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        began = time.monotonic()
+        passes, rebuilds = [], []
+        original_refresh, original_sleep = state._timed_refresh, state._sleep_until_registry_change
+        original_remember = state._remember_wake_sources
+        from tools.fleet import native_events
+        original_rebuild = native_events.NativeDisplayEvents._rebuild
+        counter = [0]
+
+        def timed():
+            passes.append(time.monotonic() - began)
+            return original_refresh()
+
+        def sleep(wait, generation, ready_at):
+            return original_sleep(wait if delay is None else delay, generation, ready_at)
+
+        def remember(snap=None):
+            original_remember(snapshot if snapshot is not None else snap)
+            if vary:
+                counter[0] += 1
+                local = state._NEXT_WAKE[0] + (str(self.base / ("varying-%d" % counter[0])),)
+                state._NEXT_WAKE = (tuple(sorted(local)),) + state._NEXT_WAKE[1:]
+
+        def rebuild(this, *args):
+            rebuilds.append(time.monotonic() - began)
+            return original_rebuild(this, *args)
+
+        def run():
+            state._producer_loop(lock)
+        with mock.patch.object(state, "_timed_refresh", timed), \
+             mock.patch.object(state, "_sleep_until_registry_change", sleep), \
+             mock.patch.object(state, "_remember_wake_sources", remember), \
+             mock.patch.object(native_events.NativeDisplayEvents, "_rebuild", rebuild):
+            thread = threading.Thread(target=run, daemon=True)
+            thread.start()
+            time.sleep(seconds)
+            kept = (list(passes), list(rebuilds))   # before the teardown below rebuilds too
+            shutil.rmtree(self.root)          # the producer ends when its root is gone
+            thread.join(65)
+            self.assertFalse(thread.is_alive())
+        return kept
+
+    def test_S_b_the_first_listener_setup_starts_no_extra_pass(self):
+        process, start = self.sleeper()
+        passes, _ = self._run_producer(5.0, snapshot=self.snapshot(pid=process.pid, start=start))
+        self.assertEqual(len(passes), 1, passes)
+
+    def test_S_c_changing_sources_do_not_make_wakes_chain(self):
+        # Every pass hands the listener a different source list (a rebuild each time). The pass
+        # count stays the cadence's: 1 + floor(15 / 3).
+        passes, rebuilds = self._run_producer(15.0, delay=3.0, vary=True)
+        self.assertGreaterEqual(len(rebuilds), len(passes) - 1)   # it did rebuild on the passes
+        self.assertLessEqual(len(passes), 1 + 15 // 3, passes)
+
+    def test_S_a_a_resting_producer_runs_only_its_cadence(self):
+        # 59 seconds with nothing changing: passes at t~0 and t~30, the real publish writes
+        # (projection, fleet cache, locks, demand) wake nothing, and the listener is built for the
+        # first pass's sources, then once more when that pass added the stream and the process
+        # (the sources differ); after the second pass's setup it is never rebuilt.
+        process, start = self.sleeper()
+        passes, rebuilds = self._run_producer(59.0, snapshot=self.snapshot(pid=process.pid, start=start))
+        self.assertEqual(len(passes), 2, passes)
+        self.assertLessEqual(len(rebuilds), 2, rebuilds)
+        self.assertEqual([t for t in rebuilds if t > passes[1] + 0.5], [])
+        self.assertLessEqual(len([t for t in rebuilds if t > 1.0]), 1)
+
+
+
+class FinishedRouteWakeTests(unittest.TestCase):
+    """Only open work wakes the producer: a finished route stays history for the periodic pass.
+
+    The real registry reader and listener over synthetic routes that ended normally
+    (``open -> done/PASS``, a matching ``closed_at``/``terminal_gate_proven`` outcome and a
+    completed journal), the way they stay in a registry as its history.
+    """
+
+    def setUp(self):
+        from route_identity import route_hash, route_id_from_hash
+        import tools.fleet.collectors.dispatch as dispatch
+        self.route_hash, self.route_id_from_hash = route_hash, route_id_from_hash
+        self.tmp = tempfile.TemporaryDirectory(prefix="fin-")
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.jobs = self.base / "jobs.log"
+        self.jobs.touch()
+        env = mock.patch.dict(os.environ, {
+            "HOME": str(self.base), "XDG_STATE_HOME": str(self.base / "state"),
+            "FLEET_INTERACTION_STATE_DIR": str(self.base / "interaction"),
+            "AGENT_DISPATCH_JOBS": str(self.jobs), "AGENT_PEER_LEDGER_ROOT": str(self.base),
+            "PATH": str(self.base / "empty-bin")})
+        env.start()
+        self.addCleanup(env.stop)
+        state.state_root().mkdir(parents=True, mode=0o700)
+        for patch in (
+                mock.patch.object(dispatch, "human_gate_registry_paths", return_value=[str(self.jobs)]),
+                mock.patch.object(observation, "_codex_rollout_waits",
+                                  return_value={"complete": True, "pending": {}}),
+                mock.patch.object(observation, "_session_liveness_probe", return_value=lambda *a: "ended"),
+                mock.patch.object(observation, "_LAST_PASS_ROUTE_PATHS", ()),
+                mock.patch.object(state, "_request_producer"),
+                mock.patch.object(state, "_WAKE_FAILED", False),
+                mock.patch.object(state, "_WAKE_EVENTS", None),
+                mock.patch.object(state, "_NEXT_WAKE", None),
+                mock.patch.object(state, "_WATCH_STAT", ())):
+            patch.start()
+            self.addCleanup(patch.stop)
+        observation._WAIT_MEMO.clear()
+        self.addCleanup(observation._WAIT_MEMO.clear)
+        self.addCleanup(state._stop_wake_events)
+        self.count = 0
+
+    def route(self, *, finished=True, journal_complete=True):
+        """One route in the registry; ``finished`` closes it the way a normal completion does."""
+        index = self.count
+        self.count += 1
+        folder = self.base / str(index)
+        (folder / "artifacts").mkdir(parents=True)
+        record = {"artifact_root": str(folder / "artifacts"), "nodes": []}
+        record["route_hash"] = self.route_hash(record)
+        record["route_id"] = self.route_id_from_hash(record["route_hash"])
+        route_file = folder / "route.json"
+        route_file.write_text(json.dumps(record), encoding="utf-8")
+        journal = self.base / "workflow" / record["route_id"] / "journal.jsonl"
+        journal.parent.mkdir(parents=True)
+        journal.write_text("", encoding="utf-8")
+        meta = ",".join(("attempt_id=att-fin-%s-%d" % (self.base.name, index), "worker_type=owner",
+                         "harness=claude", "parent_sid=synthetic", "route_file=" + str(route_file),
+                         "route_id=" + record["route_id"], "route_hash=" + record["route_hash"]))
+        self.append("100\topen\t/synthetic\t/synthetic\towner\t" + meta + "\n")
+        if finished:
+            self.close(record, route_file, journal if journal_complete else None)
+            self.append("200\tdone\t/synthetic\t/synthetic\towner\t" + meta + ",verdict=PASS\n")
+        return {"record": record, "file": route_file, "journal": journal, "meta": meta}
+
+    def close(self, record, route_file, journal):
+        route_file.with_name("route.outcome.json").write_text(json.dumps({
+            "route_id": record["route_id"], "route_hash": record["route_hash"],
+            "closed_at": "2026-11-13T00:00:00Z", "terminal_gate_proven": True}), encoding="utf-8")
+        if journal is not None:
+            journal.write_text(json.dumps({
+                "at": "2026-11-13T00:00:00Z", "route_id": record["route_id"],
+                "route_hash": record["route_hash"], "workflow_state": "COMPLETE"}) + "\n", encoding="utf-8")
+
+    def append(self, line):
+        with self.jobs.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+
+    def pass_once(self):
+        """One producer pass: read the waits, then arm what it would wake on."""
+        observed = observation.read_answer_waits(jobs_paths=[self.jobs], now=time.time())
+        self.assertTrue(observed["complete"])
+        state._remember_wake_sources(SimpleNamespace(jobs=[], sessions=[]))
+        state._arm_wake_events()
+        return observed, set(state._NEXT_WAKE[0])
+
+    def test_finished_routes_add_no_watch_however_many_stay_in_the_registry(self):
+        _observed, idle = self.pass_once()             # nothing open: the base sources only
+        routes = [self.route() for _ in range(30)]
+        observed, after_30 = self.pass_once()
+        self.assertEqual(observed["items"], [])
+        self.assertEqual(observation.last_pass_route_paths(), ())
+        self.assertEqual(after_30, idle)
+        routes += [self.route() for _ in range(30)]
+        _observed, after_60 = self.pass_once()
+        self.assertEqual(after_60, idle)
+        self.assertFalse({str(route["file"]) for route in routes} & after_60)
+
+    def test_only_the_open_routes_sources_are_watched(self):
+        opened = [self.route(finished=False) for _ in range(3)]
+        finished = [self.route() for _ in range(60)]
+        _observed, local = self.pass_once()
+        watched = set(observation.last_pass_route_paths())
+        for route in opened:
+            self.assertIn(str(route["file"]), watched)
+            self.assertIn(str(route["journal"]), watched)
+        for route in finished:
+            self.assertNotIn(str(route["file"]), watched)
+            self.assertNotIn(str(route["journal"]), watched)
+        self.assertTrue(all(path.startswith(tuple(str(route["file"].parent) for route in opened))
+                            or path.startswith(str(self.base / "workflow"))
+                            for path in watched))
+        self.assertLessEqual(len(watched), 4 * len(opened))
+        self.assertTrue({str(route["file"]) for route in opened} <= local)
+
+    def test_a_finished_routes_file_change_does_not_wake_the_producer(self):
+        finished = self.route()
+        opened = self.route(finished=False)
+        self.pass_once()
+        events = state._wake_events()
+        self.assertIsNotNone(events)
+        self.assertFalse(events.wait_changed(0.2))
+        finished["file"].write_text(finished["file"].read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        with finished["journal"].open("a", encoding="utf-8") as handle:
+            handle.write("{}\n")
+        self.assertFalse(events.wait_changed(1.0), "a finished route's file woke the producer")
+        with opened["journal"].open("a", encoding="utf-8") as handle:   # an open route still does
+            handle.write("{}\n")
+        self.assertTrue(events.wait_changed(5.0))
+
+    def test_a_route_opened_again_is_watched_from_the_next_pass_and_wakes(self):
+        # Closed by its outcome (the journal records no end): finished, not watched.
+        route = self.route(journal_complete=False)
+        self.pass_once()
+        self.assertNotIn(str(route["file"]), observation.last_pass_route_paths())
+        # It opens again: the closure is withdrawn and a new attempt starts on the same route.
+        route["file"].with_name("route.outcome.json").unlink()
+        self.append("300\topen\t/synthetic\t/synthetic\towner\t" +
+                    route["meta"].replace("att-fin-", "att-again-") + "\n")
+        _observed, local = self.pass_once()
+        self.assertIn(str(route["file"]), observation.last_pass_route_paths())
+        self.assertIn(str(route["journal"]), local)
+        events = state._wake_events()
+        self.assertFalse(events.wait_changed(0.2))
+        began = time.monotonic()
+        with route["journal"].open("a", encoding="utf-8") as handle:
+            handle.write("{}\n")
+        self.assertTrue(events.wait_changed(5.0))
+        self.assertLess(time.monotonic() - began, 5.0)      # an event, well inside the 30 s cadence
+
+    # Rule B: only a route this pass confirms closed now leaves the watch. A terminal state in its
+    # history, "no answer wait", or a read that failed confirms nothing.
+
+    def assert_watched_and_wakes(self, route, touched, *, observed_waits=None):
+        observed, local = self.pass_once()
+        if observed_waits is not None:
+            self.assertEqual([(item["source"], item["kind"]) for item in observed["items"]], observed_waits)
+        self.assertIn(str(route["file"]), observation.last_pass_route_paths())
+        self.assertIn(str(touched), local | set(observation.last_pass_route_paths()))
+        events = state._wake_events()
+        self.assertFalse(events.wait_changed(0.2))
+        with Path(touched).open("a", encoding="utf-8") as handle:
+            handle.write(" \n")
+        self.assertTrue(events.wait_changed(5.0), "a change on %s did not wake the producer" % touched)
+
+    def test_a_route_reopened_after_complete_is_watched_and_wakes(self):
+        route = self.route()                                   # COMPLETE, closed, done/PASS
+        self.pass_once()
+        self.assertNotIn(str(route["file"]), observation.last_pass_route_paths())
+        # Its closure is withdrawn and a new attempt runs it again; the COMPLETE stays in history.
+        route["file"].with_name("route.outcome.json").unlink()
+        self.append("300\topen\t/synthetic\t/synthetic\towner\t" +
+                    route["meta"].replace("att-fin-", "att-reopen-") + "\n")
+        with route["journal"].open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"at": "2026-11-14T00:00:00Z", "route_id": route["record"]["route_id"],
+                                     "route_hash": route["record"]["route_hash"],
+                                     "workflow_state": "RUNNING"}) + "\n")
+        self.assert_watched_and_wakes(route, route["journal"])
+
+    def test_complete_with_its_closure_pending_is_watched_and_the_finish_wakes(self):
+        route = self.route(finished=False)
+        record = route["record"]
+        finish = Path(record["artifact_root"]) / ".runtime" / "inline-finish" / "v1" / record["route_id"] / "finish.json"
+        finish.parent.mkdir(parents=True)
+        finish.write_text(json.dumps({"schema": "inline_finish_v1", "state": "closure-pending",
+                                      "route_id": record["route_id"]}), encoding="utf-8")
+        route["journal"].write_text(json.dumps({"at": "2026-11-13T00:00:00Z", "route_id": record["route_id"],
+                                                "route_hash": record["route_hash"],
+                                                "workflow_state": "COMPLETE"}) + "\n", encoding="utf-8")
+        self.append("200\tdone\t/synthetic\t/synthetic\towner\t" + route["meta"] + ",verdict=PASS\n")
+        self.assert_watched_and_wakes(route, finish)
+
+    def test_a_failed_route_waiting_for_a_decision_is_watched_and_wakes(self):
+        route = self.route(finished=False)
+        record = route["record"]
+        route["journal"].write_text(json.dumps({"at": "2026-11-13T00:00:00Z", "route_id": record["route_id"],
+                                                "route_hash": record["route_hash"],
+                                                "workflow_state": "FAILED_TERMINAL"}) + "\n", encoding="utf-8")
+        self.append("200\tdone\t/synthetic\t/synthetic\towner\t" + route["meta"] +
+                    ",verdict=FAIL,note=dead-worker-blocked\n")
+        self.assert_watched_and_wakes(route, route["journal"], observed_waits=[("S3", "decision")])
+
+    def test_a_route_that_cannot_be_read_stays_watched_and_its_repair_wakes(self):
+        unreadable = self.route()
+        with mock.patch.object(observation, "_route_outcome", side_effect=OSError("synthetic unreadable")):
+            observed = observation.read_answer_waits(jobs_paths=[self.jobs], now=time.time())
+        self.assertIn(str(unreadable["file"]), observation.last_pass_route_paths())
+        self.assertIn(str(unreadable["journal"]), observation.last_pass_route_paths())
+        self.assertTrue(any(item.get("reason") == "OSError" for item in observed["health"]))
+        observation._WAIT_MEMO.clear()
+        broken = self.route()
+        good = broken["file"].read_text(encoding="utf-8")
+        broken["file"].write_text("{broken", encoding="utf-8")
+        _observed, local = self.pass_once()
+        watched = set(observation.last_pass_route_paths())
+        self.assertIn(str(broken["file"]), watched)            # a broken record is not "closed"
+        self.assertIn(str(broken["journal"]), watched)
+        self.assertNotIn(str(unreadable["file"]), watched)     # readable again and closed: settled
+        events = state._wake_events()
+        self.assertFalse(events.wait_changed(0.2))
+        broken["file"].write_text(good, encoding="utf-8")     # repaired
+        self.assertTrue(events.wait_changed(5.0))
+        _observed, _local = self.pass_once()                   # and settled once it reads closed
+        self.assertNotIn(str(broken["file"]), observation.last_pass_route_paths())
+
+    def test_a_pass_that_could_not_read_a_registry_keeps_the_paths_it_knew(self):
+        opened = self.route(finished=False)
+        self.pass_once()
+        self.assertIn(str(opened["file"]), observation.last_pass_route_paths())
+        import dispatch_registry_cache
+        with mock.patch.object(dispatch_registry_cache, "registry_snapshot",
+                               side_effect=OSError("synthetic registry")):
+            observation.read_answer_waits(jobs_paths=[self.jobs], now=time.time())
+        self.assertIn(str(opened["file"]), observation.last_pass_route_paths())
+
+    def test_settled_routes_add_nothing_and_old_format_routes_stay_watched(self):
+        _observed, idle = self.pass_once()
+        settled = [self.route() for _ in range(60)]
+        old = []
+        for _ in range(60):                                    # closure evidence absent: no outcome, no end
+            route = self.route(finished=False)
+            self.append("200\tdone\t/synthetic\t/synthetic\towner\t" + route["meta"] + ",verdict=PASS\n")
+            old.append(route)
+        _observed, local = self.pass_once()
+        watched = set(observation.last_pass_route_paths())
+        self.assertFalse({str(route["file"]) for route in settled} & (watched | local))
+        self.assertFalse({str(route["journal"]) for route in settled} & watched)
+        for route in old:
+            self.assertIn(str(route["file"]), watched)
+        self.assertLessEqual(len(watched), 4 * len(old))       # at most four files per such route
+
+
+    # Rule 2 (RV-PR1622-R3 §2): a route is settled only when its journal's last record is the
+    # terminal one; a closed outcome does not settle a route whose journal went on after it.
+
+    def journal_row(self, route, at="2026-11-13T01:00:00Z", **row):
+        record = route["record"]
+        with route["journal"].open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"at": at, "route_id": record["route_id"],
+                                     "route_hash": record["route_hash"], **row}) + "\n")
+
+    def raise_gate(self, route, at="2026-11-13T01:00:00Z"):
+        """The reviewer's gate: a frame-review raised on the route (an interview not answered)."""
+        artifact = Path(route["record"]["artifact_root"]) / "interview.json"
+        artifact.write_text("{}", encoding="utf-8")
+        self.journal_row(route, at=at, workflow_state="BLOCKED_HUMAN_GATE",
+                         evidence={"gate": "frame-review", "artifact": str(artifact)})
+        return artifact
+
+    def test_a_gate_raised_after_the_closure_is_watched_and_wakes(self):
+        route = self.route()                                   # COMPLETE, closed, done/PASS
+        self.raise_gate(route)
+        self.assert_watched_and_wakes(route, route["journal"])
+
+    def test_anything_written_after_the_end_keeps_a_closed_route_watched(self):
+        route = self.route()
+        self.journal_row(route, actor="parent-close", evidence={"parent_close_result": {"state": "cancelled"}})
+        self.assert_watched_and_wakes(route, route["journal"])
+
+    def test_a_route_its_outcome_closed_is_watched_once_its_journal_goes_on(self):
+        before = self.route(journal_complete=False)            # outcome closed at 2026-11-13T00:00
+        self.journal_row(before, at="2026-11-12T23:00:00Z", workflow_state="RUNNING")
+        after = self.route(journal_complete=False)
+        self.journal_row(after, at="2026-11-12T23:00:00Z", workflow_state="RUNNING")
+        self.raise_gate(after, at="2026-11-13T01:00:00Z")       # written after the closure
+        self.pass_once()
+        self.assertNotIn(str(before["file"]), observation.last_pass_route_paths())
+        self.assert_watched_and_wakes(after, after["journal"])
+
+    def test_a_route_closed_with_nothing_after_its_end_adds_no_watch(self):
+        _observed, idle = self.pass_once()
+        routes = [self.route() for _ in range(30)]
+        _observed, after = self.pass_once()
+        self.assertEqual(observation.last_pass_route_paths(), ())
+        self.assertEqual(after, idle)
+        self.assertFalse({str(route["journal"]) for route in routes} & after)
+
+    # Rule 3 (RV-PR1622-R3 §3): the wake watch only shortens the delay. An unsettled route nothing
+    # of which moved for a week is left to the periodic pass, unless a person is asked on it now
+    # or work runs on it.
+
+    def age(self, route, days):
+        """Move every file of ``route`` (record, outcome, journal, gate files) ``days`` into the past."""
+        when = time.time() - days * 86400
+        folder = route["file"].parent
+        for path in [*folder.rglob("*"), route["journal"]]:
+            if path.is_file():
+                os.utime(path, (when, when))
+
+    def old_format(self):
+        """A route with no closure evidence (no outcome, an empty journal) whose attempt ended."""
+        route = self.route(finished=False)
+        self.append("200\tdone\t/synthetic\t/synthetic\towner\t" + route["meta"] + ",verdict=PASS\n")
+        return route
+
+    def test_quiet_unsettled_routes_add_no_watch_however_many(self):
+        _observed, idle = self.pass_once()
+        settled = [self.route() for _ in range(60)]
+        old = [self.old_format() for _ in range(60)]
+        for route in old:
+            self.age(route, 30)
+        _observed, at_60 = self.pass_once()
+        self.assertEqual(observation.last_pass_route_paths(), ())
+        self.assertEqual(at_60, idle)
+        more = [self.old_format() for _ in range(140)]
+        missing = self.old_format()                             # its record deleted, then quiet
+        missing["file"].unlink()
+        for route in more + [missing]:
+            self.age(route, 30)
+        _observed, at_200 = self.pass_once()
+        self.assertEqual(observation.last_pass_route_paths(), ())
+        self.assertEqual(at_200, idle)
+        self.assertFalse({str(route["file"]) for route in settled + old + more} & at_200)
+
+    def test_an_old_format_route_that_moved_yesterday_is_watched(self):
+        quiet = self.old_format()
+        self.age(quiet, 30)
+        moved = self.old_format()
+        self.age(moved, 1)
+        _observed, local = self.pass_once()
+        watched = set(observation.last_pass_route_paths())
+        self.assertIn(str(moved["file"]), watched)
+        self.assertIn(str(moved["journal"]), watched)
+        self.assertNotIn(str(quiet["file"]), watched)
+        events = state._wake_events()
+        self.assertFalse(events.wait_changed(0.2))
+        self.journal_row(moved, workflow_state="RUNNING")
+        self.assertTrue(events.wait_changed(5.0))
+
+    def test_a_new_attempt_on_a_quiet_route_wakes_and_is_watched_from_the_next_pass(self):
+        route = self.old_format()
+        self.age(route, 30)
+        _observed, local = self.pass_once()
+        self.assertNotIn(str(route["file"]), observation.last_pass_route_paths())
+        self.assertIn(str(self.jobs), local)                   # the registry wakes the producer
+        events = state._wake_events()
+        self.assertFalse(events.wait_changed(0.2))
+        self.append("300\topen\t/synthetic\t/synthetic\towner\t" +
+                    route["meta"].replace("att-fin-", "att-again-") + "\n")
+        self.assertTrue(events.wait_changed(5.0), "a new attempt in the registry did not wake the producer")
+        _observed, local = self.pass_once()                    # the next pass watches it
+        self.assertIn(str(route["file"]), observation.last_pass_route_paths())
+        self.assertIn(str(route["journal"]), local | set(observation.last_pass_route_paths()))
+        events = state._wake_events()
+        self.assertFalse(events.wait_changed(0.2))
+        began = time.monotonic()
+        self.journal_row(route, workflow_state="RUNNING")
+        self.assertTrue(events.wait_changed(5.0))
+        self.assertLess(time.monotonic() - began, 5.0)          # an event, well inside the 30 s cadence
+
+    def test_an_answer_wait_raised_forty_days_ago_stays_watched_and_its_answer_wakes(self):
+        route = self.route(finished=False)
+        artifact = self.raise_gate(route, at=datetime.fromtimestamp(time.time() - 40 * 86400, timezone.utc)
+                                   .strftime("%Y-%m-%dT%H:%M:%SZ"))
+        self.age(route, 40)
+        observed, local = self.pass_once()
+        self.assertEqual([(item["source"], item["kind"]) for item in observed["items"]], [("S2", "decision")])
+        watched = set(observation.last_pass_route_paths())
+        self.assertIn(str(route["file"]), watched)
+        self.assertIn(str(artifact.parent / "answers.json"), watched)
+        events = state._wake_events()
+        self.assertFalse(events.wait_changed(0.2))
+        began = time.monotonic()
+        (artifact.parent / "answers.json").write_text("{}", encoding="utf-8")   # the answer arrives
+        self.assertTrue(events.wait_changed(5.0), "the answer to a forty-day wait did not wake the producer")
+        self.assertLess(time.monotonic() - began, 5.0)
+
+    def test_a_quiet_routes_change_is_read_by_the_periodic_pass(self):
+        route = self.old_format()
+        self.age(route, 30)
+        observed, _local = self.pass_once()
+        self.assertEqual(observed["items"], [])
+        self.assertNotIn(str(route["file"]), observation.last_pass_route_paths())
+        events = state._wake_events()
+        self.raise_gate(route)                                  # not watched: no event ...
+        self.assertFalse(events.wait_changed(0.5))
+        observed, _local = self.pass_once()                     # ... the next periodic pass reads it
+        self.assertEqual([(item["source"], item["kind"]) for item in observed["items"]], [("S2", "decision")])
+        self.assertIn(str(route["file"]), observation.last_pass_route_paths())
+        self.assertLessEqual(observation._WATCH_QUIET_SECONDS, 7 * 86400)
 
 if __name__ == "__main__":
     unittest.main()

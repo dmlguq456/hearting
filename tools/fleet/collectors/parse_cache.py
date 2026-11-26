@@ -10,7 +10,9 @@ import tempfile
 
 # Parser and projection sources invalidate derived results across installed
 # releases. Shell-job cursors themselves are process-local and are never stored
-# in this cache, which remains metadata-only for bounded attempt parses.
+# in this cache, which remains metadata-only for bounded attempt parses. Codex
+# lifecycle cursors may be stored as identity and boundary digests only: ids,
+# offsets and timestamps, never transcript text or an unfinished line.
 _VERSION_HASH = hashlib.sha256()
 for _name in ("dispatch.py", "codex.py", "claude.py", "opencode.py", "shell_jobs.py"):
     _path = Path(__file__).with_name(_name)
@@ -36,10 +38,59 @@ def _directory():
     return Path(root) / "hearting" / "fleet-parses"
 
 
+def _natural(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _text(value):
+    return isinstance(value, str) and bool(value)
+
+
+def _sha256_hex(value):
+    return (isinstance(value, str) and len(value) == 64
+            and all(char in "0123456789abcdef" for char in value))
+
+
+def _valid_lifecycle(value):
+    return value is None or (
+        isinstance(value, list) and len(value) == 2
+        and value[0] in ("task_started", "task_complete", "turn_aborted") and _text(value[1]))
+
+
+def _valid_pending(item):
+    if not (isinstance(item, list) and len(item) == 5):
+        return False
+    call_id, since, turn_id, questions, ended = item
+    return (_text(call_id)
+            and (since is None or (isinstance(since, (int, float)) and not isinstance(since, bool)
+                                   and math.isfinite(since)))
+            and (turn_id is None or _text(turn_id))
+            and (questions is None or (isinstance(questions, list)
+                                       and all(_natural(index) for index in questions)
+                                       and questions == sorted(set(questions))))
+            and isinstance(ended, bool))
+
+
+def _valid_codex_lifecycle(parser, value):
+    if parser == "codex-lifecycle-exact":
+        return value.keys() == {"lifecycle"} and _valid_lifecycle(value["lifecycle"])
+    fields = ("dev", "ino", "offset", "mtime_ns", "ctime_ns", "boundary_sha256",
+              "head_sha256", "lifecycle", "pending")
+    return (value.keys() == set(fields)
+            and all(_natural(value[field]) for field in fields[:5])
+            and _sha256_hex(value["boundary_sha256"]) and _sha256_hex(value["head_sha256"])
+            and _valid_lifecycle(value["lifecycle"])
+            and isinstance(value["pending"], list)
+            and all(_valid_pending(item) for item in value["pending"])
+            and len({item[0] for item in value["pending"]}) == len(value["pending"]))
+
+
 def _valid_value(parser, value):
     """A valid JSON object may still be a damaged parse result."""
     if not isinstance(value, dict):
         return False
+    if parser in ("codex-lifecycle-cursor", "codex-lifecycle-exact"):
+        return _valid_codex_lifecycle(parser, value)
     if parser == "codex-attempt":
         if not {"token_usage", "thread_id", "thread_ambiguity", "activity", "exec_tool"} <= value.keys():
             return False

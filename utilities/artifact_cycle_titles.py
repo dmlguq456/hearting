@@ -2,13 +2,16 @@
 """Cycle display-title declaration: checkpoints, sealing and retroactive backfill.
 
 Writes `.runtime/artifact-producer/v1/cycle-display-titles.json` (PRD §37.1 B)
-so Cairn can show a human title instead of a folder name. `emit_after_seal_locked`
+so a reader (Fleet, or an external viewer) can show a human title instead of a
+folder name. `emit_after_seal_locked`
 is called once, at the tail of the producer's `_commit_sealed`, and never blocks
 sealing: any failure becomes a deferred marker, drained on a later seal or by
 `backfill`. `backfill` replays the same rule set across every sealed cycle
 already on disk, preserving current checkpoint declarations. Checkpoints refresh
 titles after publishing their interim manifest; title failures never block output.
-Backfill applies only bytes accepted by the deployed Cairn reader.
+Backfill applies bytes that pass the declaration's own closed check
+(`validate_declaration`, the same check Fleet reads with); it runs no external
+reader, so it needs nothing but Hearting.
 """
 from __future__ import annotations
 
@@ -17,15 +20,12 @@ import base64
 import json
 import os
 import re
-import shutil
 import stat
-import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -103,14 +103,6 @@ class Decision:
     rejected: Tuple[Tuple[str, str], ...] = field(default_factory=tuple)
 
 
-@dataclass(frozen=True)
-class ReaderResult:
-    status: str
-    accepted_cycle_ids: FrozenSet[str]
-    detail: str
-    app_dir: Optional[str]
-
-
 # ---------------------------------------------------------------------------
 # small helpers
 # ---------------------------------------------------------------------------
@@ -164,7 +156,8 @@ def _route_task_first_line(route_text: Optional[str]) -> Optional[str]:
     if not isinstance(route_text, str):
         return None
     line = None
-    for raw_line in route_text.splitlines():
+    from work_intent import original_work_request
+    for raw_line in original_work_request(route_text).splitlines():
         stripped = raw_line.strip()
         if stripped:
             line = stripped
@@ -703,73 +696,6 @@ def emit_after_seal_locked(root: Path, record: Mapping[str, Any], document: Mapp
 
 
 # ---------------------------------------------------------------------------
-# Cairn reader gate
-# ---------------------------------------------------------------------------
-
-
-def _resolve_reader_dir(reader_dir: Optional[Path]) -> Optional[Path]:
-    if reader_dir is not None:
-        candidate = Path(reader_dir)
-    else:
-        doc = _read_json(Path.home() / ".config" / "cairn-sync" / "config.json")
-        app_dir = doc.get("app_dir") if isinstance(doc, dict) else None
-        if not isinstance(app_dir, str):
-            return None
-        candidate = Path(app_dir)
-    cli = candidate / "node_modules" / "tsx" / "dist" / "cli.mjs"
-    driver_source = candidate / "lib" / "artifact-projection" / "campaign-metadata-amendments.ts"
-    if not candidate.is_dir() or not cli.is_file() or not driver_source.is_file():
-        return None
-    return candidate
-
-
-def run_cairn_reader(candidate_bytes: bytes, root_id: str, repository_id: str, *,
-                     reader_dir: Optional[Path] = None) -> ReaderResult:
-    app_dir = _resolve_reader_dir(reader_dir)
-    if app_dir is None:
-        return ReaderResult("unavailable", frozenset(), "reader-app-dir-unavailable", None)
-    tmp = tempfile.mkdtemp(prefix="cycle-title-gate-")
-    try:
-        tmp_root = Path(tmp) / "root"
-        declaration_path = tmp_root / CYCLE_TITLES_REL
-        declaration_path.parent.mkdir(parents=True, exist_ok=True)
-        declaration_path.write_bytes(candidate_bytes)
-        driver_source = (app_dir / "lib" / "artifact-projection" / "campaign-metadata-amendments.ts").resolve()
-        driver = Path(tmp) / "gate.mts"
-        driver.write_text(
-            "import { readCycleDisplayTitles } from " + json.dumps(driver_source.as_uri()) + ";\n"
-            "const [root, rootId, repoId] = process.argv.slice(2);\n"
-            "const map = await readCycleDisplayTitles(root, rootId, repoId);\n"
-            "console.log(JSON.stringify([...map.keys()]));\n",
-            encoding="utf-8",
-        )
-        cli = app_dir / "node_modules" / "tsx" / "dist" / "cli.mjs"
-        try:
-            proc = subprocess.run(
-                ["node", str(cli), str(driver), str(tmp_root), root_id, repository_id],
-                cwd=str(app_dir), timeout=120, capture_output=True, text=True,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return ReaderResult("unavailable", frozenset(), f"reader-invoke-failed:{exc}", str(app_dir))
-        if proc.returncode != 0:
-            output = proc.stderr or proc.stdout or ""
-            detail = output.splitlines()[0] if output else "reader-nonzero-exit"
-            return ReaderResult("rejected", frozenset(), detail, str(app_dir))
-        try:
-            accepted = json.loads(proc.stdout)
-        except ValueError:
-            return ReaderResult("rejected", frozenset(), "reader-output-invalid", str(app_dir))
-        if not isinstance(accepted, list):
-            return ReaderResult("rejected", frozenset(), "reader-output-invalid", str(app_dir))
-        return ReaderResult("accepted", frozenset(str(item) for item in accepted), "", str(app_dir))
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-ReaderFn = Callable[..., ReaderResult]
-
-
-# ---------------------------------------------------------------------------
 # backfill
 # ---------------------------------------------------------------------------
 
@@ -782,8 +708,7 @@ def _backfill_journal_path(root: Path, post_digest: str, *, now: Optional[float]
 
 
 def backfill(root: Path, *, apply: bool = False, report_path: Optional[Path] = None,
-             out_path: Optional[Path] = None, reader: Optional[ReaderFn] = None,
-             reader_dir: Optional[Path] = None, expect_post_digest: Optional[str] = None,
+             out_path: Optional[Path] = None, expect_post_digest: Optional[str] = None,
              now: Optional[float] = None) -> Dict[str, Any]:
     root = Path(root).resolve()
     identity = _load_root_identity(root)
@@ -918,14 +843,10 @@ def backfill(root: Path, *, apply: bool = False, report_path: Optional[Path] = N
     candidate_bytes = render_declaration(identity.artifact_root_id, identity.repository_id, new_entries)
     validate_declaration(candidate_bytes, root_id=identity.artifact_root_id, repository_id=identity.repository_id)
     post_digest = record_digest(candidate_bytes)
-    reader_fn = reader or run_cairn_reader
-    reader_result = reader_fn(candidate_bytes, identity.artifact_root_id, identity.repository_id, reader_dir=reader_dir)
     candidate_ids = {row["cycle_id"] for row in new_entries}
 
     result: Dict[str, Any] = {
         "artifact_root": str(root), "pre_digest": pre_digest, "post_digest": post_digest, "counts": counts,
-        "reader": {"status": reader_result.status, "app_dir": reader_result.app_dir,
-                  "accepted_count": len(reader_result.accepted_cycle_ids)},
         "rows": sorted(rows, key=lambda row: (str(row.get("campaign_id")), str(row.get("cycle_id")))),
     }
 
@@ -946,10 +867,6 @@ def backfill(root: Path, *, apply: bool = False, report_path: Optional[Path] = N
 
     if not apply:
         result["status"] = "dry-run"
-        return result
-    if reader_result.status != "accepted" or candidate_ids != reader_result.accepted_cycle_ids:
-        result["status"] = ("refused:reader-unavailable" if reader_result.status == "unavailable"
-                            else "refused:reader-rejected")
         return result
     if post_digest == pre_digest:
         result["status"] = "unchanged"
@@ -1039,7 +956,6 @@ def _render_report(result: Mapping[str, Any]) -> str:
         f"- artifact_root: `{result['artifact_root']}`",
         f"- pre_digest: `{result['pre_digest']}`",
         f"- post_digest: `{result['post_digest']}`",
-        f"- reader: `{json.dumps(result['reader'], sort_keys=True)}`",
         f"- counts: `{json.dumps(result['counts'], sort_keys=True)}`",
         "",
         "| cycle_id | campaign_id | verdict | source | title | reason |",
@@ -1063,7 +979,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--report", type=Path)
     parser.add_argument("--out", type=Path)
-    parser.add_argument("--reader-dir", type=Path)
     parser.add_argument("--expect-post-digest")
     parser.add_argument("--restore-journal", type=Path)
     args = parser.parse_args(argv)
@@ -1072,7 +987,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             result = restore_backfill(args.artifact_root, args.restore_journal)
         else:
             result = backfill(args.artifact_root, apply=args.apply, report_path=args.report, out_path=args.out,
-                              reader_dir=args.reader_dir, expect_post_digest=args.expect_post_digest)
+                              expect_post_digest=args.expect_post_digest)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 2 if str(result.get("status", "")).startswith("refused") else 0
     except CycleTitlesError as exc:
