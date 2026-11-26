@@ -8539,7 +8539,7 @@ class PrimarySupportExclusionTest(unittest.TestCase):
         self.assertEqual(P._choose_primary(rows, None), "artifacts/_internal/dispatch/retrieval_prompt.md")
 
     def test_status_document_directly_under_artifacts_is_the_automatic_primary(self):
-        # The same file Cairn pins as the project's status row and Fleet's project line reads.
+        # The same file Fleet's project line reads.
         rows = [("artifacts/STATUS.md", b""), ("artifacts/final_report.md", b""),
                 ("artifacts/plans/현황.md", b"")]
         self.assertEqual(P._choose_primary(rows, None), "artifacts/STATUS.md")
