@@ -40,6 +40,8 @@ class CellFrame:
     status: str = ""
     pane_scroll: tuple = ()
     tree_scroll: tuple = ()
+    # 11-26: ``(question id, text width)`` of each written answer drawn, so ↑↓ move between its rows as drawn.
+    answer_layout: tuple = ()
 
     def text_rows(self):
         return tuple("".join(cell[0] for cell in row) for row in self.cells)
@@ -405,5 +407,6 @@ def draw(view_model, nav_state=None, cols=140, rows=45, beat=1):
                    max(1, scroll_end - content_top) if scroll_end < body_end else viewport_rows,
                    bool(overflow))
     return CellFrame(grid.snapshot(), tuple(grid.hits), int(cols), int(rows),
-                     _scope_title(vm, state), state.status, pane_layout, tree_layout)
+                     _scope_title(vm, state), state.status, pane_layout, tree_layout,
+                     tuple(getattr(page, "answer_layout", ()) or ()))
 
