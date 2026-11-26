@@ -40,6 +40,10 @@ const REPO_NAME_MIN=8;
 // is a rounded box with its `›` at the right end of its top line (QUESTIONS, ROUTE). The sections at the bottom are their name and a `›` at the right end, no rule, their items one cell in, a message's second row two.
 // Every row a press opens ends in that one `›`. The line between CTX and TITLE is gone; `rule motion`'s light runs over the SESSION head's rule alone. Short of rows the SESSION head takes MODEL's value
 // and row (`SESSION Opus 5.5 xhigh ───`), so the rows give way in the order and at the heights they did. What a row shows is cut by the old rule in the cells the indent leaves.
+// 11-26 (panel B, the person's pick; `core/references/session-shell.md`, *Two groups*): beside the native area the REPO group is the one REPO row
+// (`REPO   trial (main ↑2 ↓5)  wt 12`, the Git words in parentheses; no GIT row), PEERS, `STATUS 5 ›` alone and the BACKLOG head with the items the person
+// ranked; the SESSION head is one rule without a word; one still rule stands over RESOURCES (over USAGE where the equipment is folded); a message is
+// one row with its time at the right end. The rows are still allotted by the forms before B (`heldRows`), so nothing else moves (the pool, below).
 // 11-16 (the person: "메모리도 메시지랑 같은 맥락이야"): MEM shows the newest MEM_MAX records at most, each its
 // dim head row and its headline on up to two rows (spec rule 46 (b)). 11-18 (the person: "MEM는 최대 최근 3개만 띄워도 되겠다"): three at most.
 const MEM_MAX=3;
@@ -699,11 +703,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const title=clean(model.session_title||'').trim(),now=clean(model.now||'').trim();
     const nowKey=state==='working'||state==='submitting'||state==='blocked'?'loc_repo':'dim';
     const tidy=typeof model.tidy_notice==='string'?clean(model.tidy_notice).trim():'';
-    const top=[],spacers=new Set(),metaGaps=new Set(),optional=new Set(),gitRows=new Set(),jobRows=new Set(),topGroups=new Map();
+    const top=[],spacers=new Set(),metaGaps=new Set(),optional=new Set(),gitRows=new Set(),jobRows=new Set(),topGroups=new Map(),heldRows=new Set();
     // 11-21: the STATUS and BACKLOG parts under the REPO group: each a head row and its first items (all of them `listRows`). They are laid out last, after
     // everything else has its rows (the same layout a window without them has): they take the empty rows and, short of those, rows MESSAGES and MEM fold; they are the first to go.
     const lists=[],listRows=new Set(),listHeads=new Map(),listItemAt=new Map();
-    let repoAt=-1,repoButtons=null,sessionAt=-1,modelValueOf=null;
+    let repoAt=-1,repoButtons=null,sessionAt=-1;
     // The width of the rows under a group head: one cell less (`IND`, below) for what is laid out in them.
     const narrow=fn=>{const was=inner;inner=Math.max(1,was-(side?1:0));try{return fn();}finally{inner=was;}};
     // A value that runs over several rows (spec rule 29 (c)): its rows after the first go
@@ -786,6 +790,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       for(let keep=total;keep>=1;keep--){const row=build(keep);if(size(row)<=room)return row;}
       return cut(build(1),room);
     };
+    // (11-26, panel B: STATUS lists nothing and BACKLOG lists the ranked items in the state-first form: `listHeadOf` and `backlogLine`, below.)
     // 11-15 (the person: "현황은 REPO 옆에 버튼을 만드는게 나을거 같은데"), 11-20 ("현황은 미리보기 없이 버튼만 만들자"), 11-21 (the person: "버튼을 REPO의 아래에
     // 각각을 두고 +? 숫자 띄우고 백로그랑 현황을 나열하자" / "각각 3줄 정도씩 목록으로 만들고 추가분을 +? 형식으로"): beside the native area the REPO group ends in a STATUS
     // part and a BACKLOG part, each a section head (` STATUS +2        ›`, one cell in, no rule, a press opens that popup) and its first three items (one row each; a press
@@ -795,8 +800,6 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const docOf=v=>v&&typeof v==='object'&&clean(v.word).trim()?v:null;
     const statusDoc=docOf(model.status_doc),backlogDoc=docOf(model.backlog_doc);
     const topActions=new Map();
-    const ruleRun=n=>({...text('─'.repeat(Math.max(1,n)),'dim'),role:'messages'});
-    const fillEnd=n=>n>=3?[text(' '),ruleRun(n-1)]:[pad(n)];
     // One bottom-layout button of a document at a stage (0: word, count and `›`; 1: word and `›`; 2: `›`), its pieces.
     // `+N` and, where the document has more than was read (a very long backlog), a `+` after it: `+2997+` (`+` alone where nothing is hidden by the rows).
     const countWords=(n,more)=>n>0?'+'+n+(more?'+':''):'+';
@@ -804,22 +807,6 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // 11-22 (the person: "알파벳 하나가 아니라 그래도 적절히 3~4자로 약어든 단어든 붙이는게 맞지"): a BACKLOG item's sort word and its colour (colours of the table the panel has).
     // 11-26 (scheme A): the kinds are FIX, TASK, NOTE (the earlier `improve` is read as TASK by the backend); only the words changed here.
     const KIND_WORDS={fix:{word:'FIX',key:'lvl_y'},task:{word:'TASK',key:'lvl_g'},note:{word:'NOTE',key:'dim'},tbd:{word:'TBD',key:'dim'}};
-    // The BACKLOG head's text after the word, widest first (what is dropped as the width falls; the sorts' words outlast the numbers, as the person wanted a word of 3~4 letters, not one):
-    // `FIX 14 · TASK 26 · +37 /125`, then `/N`, then the ` · `, then `+N` (`FIX 14 TASK 26`), then the words (`14 26`), then nothing. `+N` is the FIX and TASK not shown
-    // (none: left out), `/N` every line of the document, `?` the sorts of a document nothing in is sorted yet; a `+` after the number where the document has more than was read.
-    const kindStages=(k,hidden,doc)=>{
-      const plus=doc.more===true?'+':'',total=Math.max(0,Math.min(Number.isInteger(doc.total)?doc.total:0,99999));
-      const q=unsortedOnly(k),nf=q?'?':String(k.fix),ni=q?'?':String(k.task);
-      const more=hidden>0||plus?[text(countWords(hidden,doc.more===true),'loc_repo')]:[];
-      const sep=text(' · ','dim'),gap=text(' '),word=n=>text(KIND_WORDS[n].word,KIND_WORDS[n].key),num=v=>text(v,'loc_repo');
-      const join=(parts,s)=>parts.flatMap((p,i)=>i?[s,...p]:p);
-      const tail=[text('/'+total+plus,'dim')];
-      const full=join([[word('fix'),gap,num(nf)],[word('task'),gap,num(ni)],...(more.length?[more]:[])],sep);
-      const bare=join([[word('fix'),gap,num(nf)],[word('task'),gap,num(ni)],...(more.length?[more]:[])],gap);
-      const named=join([[word('fix'),gap,num(nf)],[word('task'),gap,num(ni)]],gap);
-      const nums=join([[num(nf)],[num(ni)]],gap);
-      return [[...full,gap,...tail],full,bare,named,nums];
-    };
     // 11-22: a BACKLOG that tells its sorts (`counts`) has its button's number the FIX and TASK together (what is to be done), `?` where nothing in the document is sorted yet;
     // no row of a button is shown, so every one of them is hidden. Any other value is the items' own count.
     const kindsOf=doc=>{const c=doc&&doc.counts;if(!c||typeof c!=='object')return null;const out={};
@@ -831,15 +818,17 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // The REPO row where the two heads do not stand: `REPO hearting · wt 12 ──── STATUS +N ›  BACKLOG +N ›`, the bottom layout's first row's buttons (the same words, the same
     // order of giving way: the counts, then the words, then the name is cut). `offset` cells of the row stand left of `room`; a press on a button opens its popup, on the rest of the row the status popup.
     // 11-22: `fit` is what the value and the buttons must fit in (the cells the row had when its label column stood: what is kept or dropped as the width falls is unchanged), `room` the row's cells.
+    const buttonDocs=()=>[['STATUS',statusDoc],['BACKLOG',backlogDoc]].filter(([,d])=>d);
+    const placeButtons=(docs,stage)=>{const parts=[],spans=[];let used=0;
+      docs.forEach(([n,d],i)=>{const b=listButton(d,stage),gap=i?[text('  ')]:[];parts.push(...gap,...b);used+=size(gap);spans.push({name:n,left:used});used+=size(b);});
+      return {parts,spans,used};};
+    const buildButtons=(lead,made,room,offset)=>{const at=offset+room-made.used;
+      return {parts:[...lead,pad(room-size(lead)-made.used),...made.parts],
+        actions:made.spans.map((sp,i)=>({left:i?at+sp.left:0,right:i===made.spans.length-1?inner-1:at+made.spans[i+1].left-1,action:'popup:'+sp.name}))};};
     const buttonsAt=(room,name,count,offset,fit=room)=>{
-      const docs=[['STATUS',statusDoc],['BACKLOG',backlogDoc]].filter(([,d])=>d);
+      const docs=buttonDocs();
       if(!docs.length)return null;
-      const place=stage=>{const parts=[],spans=[];let used=0;
-        docs.forEach(([n,d],i)=>{const b=listButton(d,stage),gap=i?[text('  ')]:[];parts.push(...gap,...b);used+=size(gap);spans.push({name:n,left:used});used+=size(b);});
-        return {parts,spans,used};};
-      const build=(lead,made)=>{const at=offset+room-made.used;
-        return {parts:[...lead,pad(room-size(lead)-made.used),...made.parts],
-          actions:made.spans.map((sp,i)=>({left:i?at+sp.left:0,right:i===made.spans.length-1?inner-1:at+made.spans[i+1].left-1,action:'popup:'+sp.name}))};};
+      const place=stage=>placeButtons(docs,stage),build=(lead,made)=>buildButtons(lead,made,room,offset);
       for(const stage of [0,1,2]){
         const made=place(stage);
         for(const lead of count.length?[[...name,...count],name]:[name])if(size(lead)+1+made.used<=fit)return build(lead,made);
@@ -849,10 +838,6 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const made=place(2);
       return build(cut(name,Math.max(1,fit-made.used-1)),made);
     };
-    // A group's head row: its name (the title role, as a section's), a thin rule to the row's end.
-    // 11-22: SESSION's rule is the one `rule motion` moves (`ruleParts`); its value (MODEL's, short of rows) stands after the name.
-    const groupHead=(name,value=[])=>{const lead=[{...text(name,'dim'),role:'title',bold:true},...(value.length?[text(' '),...value]:[])],rest=inner-size(lead);
-      return rest>=3?[...lead,text(' '),...ruleParts(rest-1)]:cut(lead,inner);};
     // Spec rule 46: the newest saved memory records (this repository's and the global ones, MEM_MAX at
     // most) stand in their own section under the messages, one row each (below). An older backend
     // sends the newest one as painted pieces only (`3m decision headline`): that one record,
@@ -871,24 +856,58 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       // this session's content (title, NOW, the answer wait and a tidy notice). Spec rule
       // 35 (b): inside the metadata one empty row parts [repository, Git] from [model and
       // effort, context]; without Git it parts the repository from the model.
-      if(sideRepo.length){
-        // The name keeps its color; the count (dim) shows whole or not at all.
-        // 11-20: the REPO group's head is this row: `REPO hearting · wt 12 ────` (the same in every width: the word stands first, `REPO `,
-        // as the other labels do not).
-        const count=worktrees.length?[text(' · ','dim'),...worktrees]:[];
-        // 11-22: a group head is its bold name, one cell, its value, then the rule (no label column: the rows under it are the ones in a column).
-        const word=[{...text('REPO','dim'),role:'title',bold:true},text(' ')],room=inner-5,fit=inner-(labelWidth||5);
-        const withCount=count.length>0&&size(sideRepo)+size(count)<=fit;
-        const value=withCount?[...sideRepo,...count]:cut(sideRepo,fit);
-        const row=[...value,...fillEnd(room-size(value))];
-        // Where the two heads under REPO do not stand the row ends in the two buttons, as the bottom layout's first row does (`buttonsAt`, below).
-        if(statusDoc||backlogDoc){
-          const made=buttonsAt(room,sideRepo,withCount?count:[],5,fit);
-          repoButtons=made&&{parts:[...word,...made.parts],actions:made.actions};
+      // 11-26 (panel B; the person: "REPO에 구분줄 없애고, Session 글자 없애고 그냥 구분선을 하나 두고" / "REPO 명 옆에 있는 GIT 브랜치 명은 GIT이라는
+      // 단어 자체를 날리고 괄호로 써두자" / "크 변경 사항은 화살표를 위 아래로 녹색 빨간색을 표시하던데? 원래 fleet을 봐봐" / "REPO라는 단어 대신에 적절한
+      // 아이콘이 있으면 더 좋고. 애매하면 그냥 REPO를 남겨"): the repository is one row, `REPO   trial (main ↑2 ↓5)  wt 12`: the dim label in the
+      // labels' column (PEERS', MODEL's), the name, then in parentheses the GIT row's words in their order and colours (the branch, `✓` or `↑N`
+      // `↓N` in Fleet's green and red, the warning; `no-git` outside a repository), then the worktree count. Nothing new is read. Short of cells
+      // `wt` goes first, then the label's column (`REPO trial (…)`), then the branch is cut so the arrows and the warning stay, then the name.
+      // The rows are still allotted as they were before B (`held`, below): the GIT row's place is kept and stands empty or holds a BACKLOG item.
+      const repoLead=wide=>[pad(IND),text(wide?'REPO'.padEnd(7):'REPO ','dim')];
+      // (an older backend's Git words, sent without `git_side`, carry their own parentheses: they stand as they are, cut where they do not fit)
+      const wrapped=sideGit.length>0&&/^\s*\(/.test(clean(sideGit[0].text))&&/\)\s*$/.test(clean(sideGit.at(-1).text));
+      const repoGit=!sideGit.length?[]:wrapped?[text(' '),...sideGit]:[text(' (','dim'),...sideGit,text(')','dim')];
+      const repoWt=worktrees.length?[pad(2),...worktrees]:[];
+      const repoWhole=(room,withWt=true)=>{
+        for(const parts of [...(withWt&&repoWt.length?[[...repoLead(true),...sideRepo,...repoGit,...repoWt]]:[]),[...repoLead(true),...sideRepo,...repoGit],[...repoLead(false),...sideRepo,...repoGit]])
+          if(size(parts)<=room)return parts;
+        return null;
+      };
+      const repoFit=room=>{
+        const whole=repoWhole(room);if(whole)return whole;
+        const tight=repoLead(false),[branch,...flags]=wrapped?[]:sideGit;
+        if(branch&&flags.length){
+          const lead=[...tight,...sideRepo,text(' (','dim')],tail=[...flags,text(')','dim')],left=room-size([...lead,...tail]);
+          if(left>=6)return [...lead,...cut([branch],left),...tail];
+          // (then the name gives way, to REPO_NAME_MIN cells at least, so six cells of the branch, the arrows and the warning stay)
+          const name=room-size([...tight,text(' (','dim'),...tail])-6;
+          if(name>=Math.min(size(sideRepo),REPO_NAME_MIN))return [...tight,...cut(sideRepo,name),text(' (','dim'),...cut([branch],6),...tail];
+        }
+        if(branch){const lead=[...tight,...sideRepo,text(' (','dim')];if(room>size(lead)+1)return [...lead,...cut([branch,...flags],room-size(lead)-1),text(')','dim')];}
+        return cut([...tight,...sideRepo,...repoGit],room);
+      };
+      if(sideRepo.length||sideGit.length){
+        // Where the two heads under REPO do not stand the row ends in the two buttons, as the bottom layout's first row does (`listButton`, the same
+        // words and order of giving way): beside the counted buttons, then beside the words alone, then beside `›` alone, the value whole (with `wt`,
+        // then without), else with its branch cut where the name and the Git status still stand whole; only at `›` is the value cut further. A press
+        // on a button opens its popup, on the rest of the row the status popup.
+        const docs=buttonDocs(),[,...gitFlags]=wrapped?[]:sideGit;
+        const keeps=parts=>sideRepo.every(x=>parts.includes(x))&&gitFlags.every(x=>parts.includes(x));
+        if(docs.length){
+          let made=null;
+          for(const stage of [0,1,2]){const placed=placeButtons(docs,stage),room=inner-placed.used-1;
+            for(const withWt of [true,false]){const whole=repoWhole(room,withWt);if(whole){made=buildButtons(whole,placed,inner,0);break;}}
+            if(!made&&gitFlags.length){const fitted=repoFit(room);if(size(fitted)<=room&&keeps(fitted))made=buildButtons(fitted,placed,inner,0);}
+            if(made)break;}
+          if(!made){const placed=placeButtons(docs,2);made=buildButtons(repoFit(Math.max(1,inner-placed.used-1)),placed,inner,0);}
+          repoButtons=made;
         }
         repoAt=top.length;
-        top.push([...word,...row]);mark(top.length-1,'head',...(withCount&&!sideGit.length?['git']:[]));
+        if(!sideRepo.length)gitRows.add(top.length);
+        top.push(repoFit(inner));mark(top.length-1,'head',...(sideGit.length||worktrees.length?['git']:[]));
       }
+      // The GIT row's place, held (`heldRows`: counted as before, drawn as nothing).
+      if(sideRepo.length&&sideGit.length){gitRows.add(top.length);heldRows.add(top.length);top.push([]);}
       // Short of cells the first part (the branch, the model name) gives way so what follows
       // it (the status and a warning, the effort) stays whole.
       const firstGives=(parts,room)=>{
@@ -896,27 +915,26 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const rest=parts.slice(1),left=room-size(rest);
         return left>=6?[...cut(parts.slice(0,1),left),...rest]:cut(parts,room);
       };
-      if(sideGit.length){gitRows.add(top.length);top.push(labelled('GIT',firstGives(sideGit,inner-IND-labelWidth)));mark(top.length-1,'git');}
       {const peerParts=peerRow(inner-IND-labelWidth);if(peerParts.length){gitRows.add(top.length);top.push(labelled('PEERS',peerParts));}}
       // 11-21: the STATUS and BACKLOG parts: each a head and its items (what a part shows is chosen after the layout, below).
+      // 11-26 (panel B; the person: "STATUS는 그냥 버튼만 만들고 목록은 없애는게 좋겠어. 백로그는 사용자가 말한 우선순위로 최대 3개 정도만 띄우고"): STATUS is
+      // its head alone, `STATUS 5 ›`, at every size; BACKLOG its head and the items the backend chose by the person's priority (three at most). The rows
+      // the items took before B are held as they were (STATUS's first three items, BACKLOG's first three, as many as the document has), so the rest
+      // of the panel keeps its rows; the BACKLOG items stand on those held rows (below, `held`).
       for(const [name,doc] of [['STATUS',statusDoc],['BACKLOG',backlogDoc]]){
         if(!doc)continue;
-        const items=(Array.isArray(doc.items)?doc.items:[]).filter(i=>i&&typeof i==='object'&&clean(i.text).trim()).slice(0,3),entry={name,doc,items,total:Math.max(items.length,listTotalOf(doc))};
+        const sent=(Array.isArray(doc.items)?doc.items:[]).filter(i=>i&&typeof i==='object'&&clean(i.text).trim()).slice(0,3);
+        const items=name==='STATUS'?sent:Array.from({length:Math.min(3,Math.max(sent.length,listTotalOf(doc)))},(_,j)=>sent[j]||{});
+        const entry={name,doc,items,chosen:name==='BACKLOG'?sent:[],total:Math.max(sent.length,listTotalOf(doc))};
         listRows.add(top.length);topActions.set(top.length,'popup:'+name);listHeads.set(top.length,entry);top.push([]);
-        items.forEach((item,j)=>{
-          const at=top.length,sorted=name==='BACKLOG'&&kindsOf(doc);
-          // 11-22: a BACKLOG item stands behind its sort's word in four cells (`FIX `, `TASK`, `NOTE`, `TBD `), the word and its colour (the colour table's own: yellow, green, dim) both tell it.
-          const kind=KIND_WORDS[item.kind]||KIND_WORDS.tbd,
-            mark=sorted?[text(kind.word.padEnd(4),kind.key),text(' ')]:[item.mark==='!'?text('! ','lvl_y'):text('· ','dim')];
-          listRows.add(at);listItemAt.set(at,{entry,j});
-          topActions.set(at,'popup:'+name+(typeof item.key==='string'&&item.key?':'+item.key:''));
-          top.push([pad(2),...cut([...mark,text(clean(item.text).trim(),'loc_repo')],inner-2)]);
-        });
+        items.forEach((item,j)=>{const at=top.length;listRows.add(at);heldRows.add(at);listItemAt.set(at,{entry,j});top.push([]);});
         lists.push(entry);
       }
       // 11-20: the SESSION group's head stands where the empty row between the two groups of metadata stood. 11-22: short of rows the head does not
       // go: it takes MODEL's value and MODEL's row (`SESSION Opus 5.5 xhigh ───`), so the group keeps its name and the rows are as many as when it went.
-      metaGaps.add(top.length);top.push(groupHead('SESSION'));sessionAt=top.length-1;
+      // 11-26 (panel B): the head is one rule without a word (`rule motion`'s light runs over it); short of rows, where the head took MODEL's row,
+      // the rule stands over MODEL's own row on a held row, or goes where there is none.
+      metaGaps.add(top.length);top.push(ruleParts(inner));sessionAt=top.length-1;
       if(labelWidth){
         // Spec rule 42: `MODEL` and `CTX` as REPO's and GIT's; `CTX` stands for the word
         // `context` (a backend without `context_side` has its word taken off here).
@@ -924,12 +942,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
           return !first||rest===String(first.text)?parts:rest?[{...first,text:rest},...parts.slice(1)]:parts.slice(1);};
         const gauge=Array.isArray(model.context_side)?painted(model.context_side):word(painted(model.context));
         const value=mcp.length||cost.length?joined([gauge,mcp,cost]):gauge;
-        modelValueOf=room=>size(selected)<=room?firstGives(selected,room):null;
         top.push(labelled('MODEL',firstGives(selected,inner-IND-labelWidth)));
         if(value.length){top.push(labelled('CTX',cut(value,inner-IND-labelWidth)));mark(top.length-1,'context');}
       }else{
         // Narrower than 30 cells inside, the rows as they were, without labels (one cell in, as the rows of the group above).
-        modelValueOf=room=>size(selected)<=room?firstGives(selected,room):null;
         top.push(labelled('MODEL',firstGives(selected,inner-IND)));
         if(contextParts.length){top.push(labelled('CTX',cut(contextParts,inner-IND)));mark(top.length-1,'context');}
       }
@@ -1874,6 +1890,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const body=wrapAll([text(bodyOf(m),'loc_repo')],inner-2),first=body[0]||[];
       return [text('  '),...(body.length>1?cut([...first,text(' '),...body[1].slice(0,1)],inner-2):first)];
     };
+    // 11-26 (panel B): beside the native area a message is one row: the arrow, the other session's number, its first meaningful text, and its time
+    // at the right end (dim); short of cells the text is cut. Its harness, kind and delivery state are in the MESSAGES popup.
+    const messageRow=m=>itemIn(()=>{
+      const lead=[arrowOf(m),text(' '),text(String(m.who||''),'loc_repo'),text(' ')],when=clean(String(m.when||'')).trim(),time=when?[text(when,'dim')]:[];
+      const room=inner-size(lead)-(time.length?1+size(time):0);
+      if(room<4)return cut([...lead,text(bodyOf(m),'loc_repo')],inner);
+      const body=cut([text(bodyOf(m),'loc_repo')],room);
+      return [...lead,...body,pad(inner-size([...lead,...body,...time])),...time];
+    });
     const messageTotal=messages.length;
     const messagesHead=n=>{const hidden=messageTotal-Math.min(n,messageTotal);return sectionHead([],side?'MESSAGES':'messages',hidden>0?[text('+'+hidden,'loc_repo')]:[]);};
     // The newest messages (in their order, the newest last).
@@ -2191,22 +2216,79 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       // A fold can free several rows at once and leave empty ones: the BACKLOG items stand on them again (up to what they were, and the STATUS items stand already).
       else while(need()<budget&&take.BACKLOG_ITEMS<backlogFull)take.BACKLOG_ITEMS++;
     }
+    // 11-26 (panel B; the person: "나머지는 일단 그대로"): beside the native area every row above is allotted as it was before B (the GIT row's place,
+    // STATUS's and BACKLOG's first items and each message's second row counted, `heldRows`), so no other part of the panel stands elsewhere or shows
+    // less or more. B's rows use fewer of them; what they leave (`pool`) goes, in this order, to the messages (one row each, as many as stood before:
+    // they always have those rows), the SESSION rule over MODEL's own row (where the head had taken MODEL's row: it parts the two groups), the
+    // BACKLOG items the person ranked (the first ones; short of rows the last go), then the rule over the equipment (`RESOURCES`, or `USAGE` where
+    // the equipment is folded: a rule gives way before what is read, as the rule above the last row always did). What is left stands empty above
+    // MESSAGES, where the panel's free rows stand (no other part takes it: a message that had folded stays folded, as the route box and the
+    // question come first).
+    let bottomRule=false,sessionRule=false,messagesShown=0,backlogShown=0,topSpare=0,messageHeld=0;
+    if(side){
+      const heldGit=keepGit?[...heldRows].filter(i=>gitRows.has(i)).length:0;
+      const heldItems=keepLists?lists.reduce((n,e)=>n+Math.min(take[e.name+'_ITEMS'],e.items.length),0):0;
+      const before=kept.MESSAGES?Math.min(take.MESSAGES,messageTotal):0;
+      messageHeld=before*(messageOne?1:2);
+      messagesShown=before;
+      let pool=heldGit+heldItems+messageHeld-before;
+      sessionRule=!keepMetaGap&&sessionAt>=0&&pool>0;pool-=sessionRule?1:0;
+      const backlog=lists.find(e=>e.name==='BACKLOG');
+      backlogShown=keepLists&&backlog?Math.min(backlog.chosen.length,pool):0;pool-=backlogShown;
+      bottomRule=(resourceCount()>0||usageOn&&keepUsageHead&&usageLines().length>0)&&pool>0;pool-=bottomRule?1:0;
+      // (the rows the top had before B and does not draw: the section checks below count them, so they decide as they did)
+      topSpare=heldGit+heldItems-backlogShown-(sessionRule?1:0);
+    }
+    // The heads of the two parts (B): ` STATUS 5        ›` (the board's whole count; the word dim, not titled, where its document is not there) and
+    // ` BACKLOG +136 · Discuss 2 ›` (`+N` the items not shown, `Discuss n` the document's; then ` ` for ` · `, then Discuss goes, then `+N`).
+    const listHeadOf=entry=>{
+      const doc=entry.doc,faint=doc.has_doc!==true,total=entry.total;
+      if(entry.name==='STATUS')return [pad(IND),...narrow(()=>sectionHead([],'STATUS',!faint&&total>0?[text(String(total),'loc_repo')]:[],[[]],true,faint))];
+      const hidden=Math.max(0,total-backlogShown),plus=hidden>0||doc.more===true?[text(' '+countWords(hidden,doc.more===true),'loc_repo')]:[];
+      const talk=doc.counts&&Number.isInteger(doc.counts.discuss)&&doc.counts.discuss>=0?String(Math.min(doc.counts.discuss,99999)):null;
+      const word=faint?text('BACKLOG','dim'):{...text('BACKLOG','plain'),bold:true};
+      const tries=faint?[[]]:[...(talk===null?[]:plus.length?[[...plus,text(' · Discuss '+talk,'loc_repo')],[...plus,text(' Discuss '+talk,'loc_repo')]]:[[text(' Discuss '+talk,'loc_repo')]]),plus,[]];
+      return [pad(IND),...narrow(()=>{
+        for(const more of tries){const head=[word,...more],rest=inner-size(head)-2;if(rest>=0)return [...head,pad(rest),text(' '),text('›','dim')];}
+        return cut([word],inner);})];
+    };
+    // A BACKLOG item (B; the person picked "백로그는 상태 첫 열"): `  · Ready   TASK 11-26 Fit long titles`: the dim dot, the state in seven cells
+    // (Discuss and Waiting the caution yellow, bold; Ready dim; none `—`), the kind in four (the colour table's: FIX yellow, TASK green, NOTE and TBD
+    // dim), the date (`MM-DD` this year, `YY-MM-DD` another, `—` none; as wide as the widest the rows show, so the titles stand in one column), from
+    // 55 cells inside the area in eight, then the title. The priority is not drawn.
+    // Short of cells the title is cut (at 30 cells wide `Fi…`, the date kept); under three cells of it the date goes, then the kind.
+    const STATE_WORDS={discuss:{word:'Discuss',key:'lvl_y',bold:true},ready:{word:'Ready',key:'dim'},waiting:{word:'Waiting',key:'lvl_y',bold:true}};
+    const thisYear=backlogDoc&&Number.isInteger(backlogDoc.year)?backlogDoc.year:new Date().getFullYear();
+    const dayOf=item=>{const date=String(item.date||'');return /^\d{4}-\d{2}-\d{2}$/.test(date)?(date.startsWith(thisYear+'-')?date.slice(5):date.slice(2)):'—';};
+    const backlogLine=(item,days=5)=>{
+      const kind=KIND_WORDS[item.kind]||KIND_WORDS.tbd,st=STATE_WORDS[item.state];
+      const state=st?{...text(st.word.padEnd(7)+' ',st.key),...(st.bold?{bold:true}:{})}:text('—'.padEnd(7)+' ','dim');
+      const area=cut([text(clean(String(item.area||'')).trim()||'—','dim')],8);
+      const kindCol=[text(kind.word.padEnd(4),kind.key)],dayCol=[text(' '+dayOf(item).padEnd(days)+' ','dim')],areaCol=inner>=55?[...area,pad(9-size(area))]:[];
+      const title=[text(clean(item.text).trim(),'loc_repo')];
+      for(const cols of [[...kindCol,...dayCol,...areaCol],[...kindCol,...dayCol],[...kindCol,text(' ')]]){
+        const lead=[pad(2),text('· ','dim'),state,...cols],room=inner-size(lead);
+        if(room>=3)return [...lead,...cut(title,room)];
+      }
+      return cut([pad(2),text('· ','dim'),state,...title],inner);
+    };
     const order=[];
     top.forEach((row,i)=>{
+      if(heldRows.has(i))return;
       if(!keepLists&&listRows.has(i))return;
       if(!keepLists&&i===repoAt&&repoButtons){order.push({parts:repoButtons.parts,groups:topGroups.get(i),action:repoButtons.actions});return;}
-      if(!keepMetaGap&&sessionAt>=0&&i===sessionAt+1&&modelValueOf){const value=modelValueOf(Math.max(1,inner-8));if(value){order.push({parts:groupHead('SESSION',value),groups:topGroups.get(i)});return;}}
+      if(!keepMetaGap&&sessionAt>=0&&i===sessionAt+1&&sessionRule)order.push({parts:ruleParts(inner)});
       const at=listItemAt.get(i);
       if(at&&at.j>=take[at.entry.name+'_ITEMS'])return;
       if((keepSpacers||!spacers.has(i))&&(keepMetaGap||!metaGaps.has(i))&&(keepOptional||!optional.has(i))&&(keepGit||!gitRows.has(i))&&(keepMulti||!extra.has(i))){
         const head=listHeads.get(i);
-        // A list part's head: ` STATUS +2        ›` (one cell in; the count of the items not shown, as MESSAGES' head; the word dim, not titled, where its document is not there).
-        const shownRows=head?head.items.slice(0,take[head.name+'_ITEMS']):[],k=head&&head.name==='BACKLOG'?kindsOf(head.doc):null;
-        const hidden=head?(k?k.fix+k.task-shownRows.filter(it=>it&&(it.kind==='fix'||it.kind==='task')).length:head.total-shownRows.length):0;
-        const stages=k?kindStages(k,hidden,head.doc):null;
-        order.push({parts:head?[pad(IND),...narrow(()=>sectionHead([],head.name,stages?stages[0]:hidden>0||head.doc.more===true?[text(countWords(hidden,head.doc.more===true),'loc_repo')]:[],[[]],true,head.doc.has_doc!==true,stages?stages.slice(1):[]))]:!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i)});}});
+        order.push({parts:head?listHeadOf(head):!keepMulti&&oneRow.has(i)?oneRow.get(i):row,groups:topGroups.get(i),action:topActions.get(i)});
+        if(head&&head.name==='BACKLOG'){const shown=head.chosen.slice(0,backlogShown),days=Math.max(5,...shown.map(x=>dayOf(x).length));
+          for(const item of shown)order.push({parts:backlogLine(item,days),action:'popup:BACKLOG'+(typeof item.key==='string'&&item.key?':'+item.key:'')});}
+      }});
     for(const item of order)add(item.parts,item.action,item.groups);
     const headRows=content.length;
+    let lowerSpare=0;
     // Each section stands whole (its head and the rows it kept), one after another from the top; the
     // rows left over stand between the sections above and MESSAGES·MEM (spec rule 14: those two keep to
     // the panel's bottom, right above the last row), or under the last section when there are none.
@@ -2214,7 +2296,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     for(const s of SECTIONS){
       if(!kept[s.name])continue;
       // QUESTIONS never gives its place to the structural rows above it: those go first (`lastRow`).
-      if(s.name!=='QUESTIONS'&&content.length+lower.length+sectionSize(s)+(['MESSAGES','MEM'].includes(s.name)?footRule():0)>budget-1)break;
+      if(s.name!=='QUESTIONS'&&content.length+topSpare+lower.length+lowerSpare+sectionSize(s)+(['MESSAGES','MEM'].includes(s.name)?footRule():0)>budget-1)break;
       if(s.box){
         // The rows the route box takes, for the host's wheel (panel rows, as hits count them).
         const {block,area}=routeBlockOf();
@@ -2230,15 +2312,26 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         add(boxBottom(key).parts,'question');
         continue;
       }
+      // 11-26 (panel B; the person picked "메시지는 본문과 시각을 한 줄에"): beside the native area a message is one row, `← [d2] Review is ready   09:01`.
+      if(side&&s.name==='MESSAGES'){
+        lower.push({parts:messagesHead(messagesShown),action:s.action,groups:s.groups});
+        for(const m of messagesShown>0?messages.slice(-messagesShown):[])lower.push({parts:messageRow(m),action:s.action});
+        lowerSpare=messageHeld-messagesShown;
+        continue;
+      }
       const into=['MESSAGES','MEM'].includes(s.name)?(parts,action,groups)=>lower.push({parts,action,groups}):add;
       into(s.head(),s.action,s.groups);
       sectionRows(s).forEach((row,i)=>into(row,s.rowAction?s.rowAction(i):s.action));
     }
     // 11-16: the USAGE rows stand last in the lower block (the last harness's row, where it fits, on the last row below).
-    if(resourceCount()){lower.push({parts:resourceHead()});for(const line of resourceLines())lower.push({parts:line});}
+    // 11-26 (panel B; the person: "RESOURCES이나 USAGE에 구분선도 없어" / "패널네서 RESOURCES랑 USAGES 글자는 원래 위치로 두지?"): one still rule without
+    // a word right above RESOURCES (above USAGE where the equipment is folded); the names stand where and as they stood.
+    const bottomRuleRow=()=>({parts:[{...text('─'.repeat(inner),'dim'),role:'messages'}]});
+    if(resourceCount()){if(bottomRule)lower.push(bottomRuleRow());lower.push({parts:resourceHead()});for(const line of resourceLines())lower.push({parts:line});}
     let lastUsage=[];
     if(usageOn&&usageLines().length){
       const list=usageLines(),own=u=>u.harness===harness?['quota']:[];
+      if(bottomRule&&!resourceCount())lower.push(bottomRuleRow());
       if(keepUsageHead)lower.push({parts:sectionHead([],'USAGE',[],[[]],false)});
       list.slice(0,-1).forEach(u=>lower.push({parts:usageFit(u,inner).row,groups:own(u)}));
       const end=list.at(-1);

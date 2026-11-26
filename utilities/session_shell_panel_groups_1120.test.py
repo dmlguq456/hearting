@@ -1,4 +1,5 @@
 """11-20 (REPO and SESSION groups, the MEM popup): the panel shows no box and no list of the status document itself; its two groups; MESSAGES and MEM go down first.
+(11-26 panel B: the REPO group is one row, the SESSION head a plain rule, a message one row; the assertions below follow that.)
 (11-21: the REPO group ends in a STATUS part and a BACKLOG part, each a head and its first three items: `session_shell_repo_lists_1121.test.py`; the `STATUS ›` button
 on the REPO row is gone, the bottom layout's first row ends in the two buttons.)
 
@@ -78,8 +79,8 @@ for(const status of [undefined,doc(),doc(GROUPS),doc([]),{word:'STATUS',has_doc:
     else assert.equal(presses.length,0,JSON.stringify(status));
   }
 }
-// The REPO row is the group's head and has no button: `REPO hearting · wt 12 ────`.
-{const ls=lines(draw({status:doc(GROUPS),height:60}));assert(/^│ REPO hearting · wt 12 ─+ │$/.test(ls[1]),ls[1]);assert(!draw({status:doc(GROUPS),height:60}).hits.some(h=>h.row===1));}
+// 11-26 (panel B): the REPO row is one row, `REPO   hearting (branch ✓)  wt 12`, with no button.
+{const ls=lines(draw({status:doc(GROUPS),height:60}));assert(/^│  REPO   hearting \(branch ✓\)  wt 12 +│$/.test(ls[1]),ls[1]);assert(!draw({status:doc(GROUPS),height:60}).hits.some(h=>h.row===1));}
 // The head's word: the section head's title role with a document, plain dim without one; `›` dim in both.
 {const row=v=>{const at=inside(v).findIndex(l=>/^ STATUS/.test(l));return v.rows[at];};
  const a=draw({status:doc(GROUPS),height:60}),b=draw({status:{word:'STATUS',has_doc:false},height:60});
@@ -102,19 +103,20 @@ for(const side of [true,false]){const o={side,width:side?44:100,height:side?40:1
     def test_the_repo_group_and_the_session_group_stand_in_their_order(self):
         self.node(r"""
 const v=draw({status:doc(),question:true,peers:true,height:70}),ls=inside(v),all=lines(v);
-// The REPO group: its row is the head (the rule runs to the end), then GIT and PEERS, the STATUS head, then the SESSION head.
-const g=headAt(ls,/^ GIT /),pe=headAt(ls,/^ PEERS /),st=headAt(ls,/^ STATUS +›$/),se=headAt(ls,/^SESSION ─+$/),mo=headAt(ls,/^ MODEL /);
-assert(/^│ REPO hearting · wt 12 ─+ │$/.test(all[1]),all[1]);
-assert(g===2&&pe===3&&st===4&&se===5&&mo===se+1,ls.join('\n'));   // (index 0 is the frame's top line, 1 the REPO row)
+// 11-26 (panel B): the REPO group: its one row (repo, git words in parentheses, wt), no GIT row, then PEERS, the STATUS head, then the SESSION rule (no word).
+const g=headAt(ls,/^ GIT /),pe=headAt(ls,/^ PEERS /),st=headAt(ls,/^ STATUS +›$/),se=headAt(ls,/^─+$/),mo=headAt(ls,/^ MODEL /);
+assert(/^│  REPO   hearting \(branch ✓\)  wt 12 +│$/.test(all[1]),all[1]);
+assert(g<0&&!ls.some(l=>/SESSION/.test(l)),ls.join('\n'));
+assert(pe===2&&st===3&&se===4&&mo===se+1,ls.join('\n'));   // (index 0 is the frame's top line, 1 the REPO row)
 // The SESSION group: MODEL, CTX, TITLE, NOW, then QUESTIONS, the route box, MESSAGES, MEM.
 const order=[/^ MODEL /,/^ CTX /,/^ TITLE /,/^ NOW /,/^╭─ 1 QUESTIONS/,/^╭─ 2 ROUTE/,/^MESSAGES/,/^MEM +›$/].map(re=>headAt(ls,re));
 assert(order.every((y,k)=>y>se&&(!k||y>order[k-1])),order+'\n'+ls.join('\n'));
 // Only the STATUS head opens the status popup; GIT, PEERS and the SESSION head open nothing.
 assert.deepEqual(v.hits.filter(h=>h.action==='popup:STATUS').map(h=>h.row),[st]);
-assert(!v.hits.some(h=>[1,g,pe,se].includes(h.row)&&h.action!=='fold'),JSON.stringify(v.hits));
-// The group heads' look: the word in the title role, the rule dim in the messages role (a section head's).
-const seRow=v.rows[se],word=seRow.find(p=>p.text==='SESSION');assert(word&&word.role==='title'&&word.dim===true&&seRow.some(p=>p.role==='messages'),JSON.stringify(seRow));
-const repoRule=v.rows[1].find(p=>/^─+$/.test(p.text));assert(repoRule&&repoRule.role==='messages'&&repoRule.dim===true,JSON.stringify(v.rows[1]));
+assert(!v.hits.some(h=>[1,pe,se].includes(h.row)&&h.action!=='fold'),JSON.stringify(v.hits));
+// 11-26 (panel B): the SESSION head is a plain rule in the messages role (no word); the REPO row has no rule and its label is dim, not the title role.
+const seRow=v.rows[se];assert(seRow.some(p=>/^─+$/.test(p.text)&&p.role==='messages')&&!seRow.some(p=>p.text==='SESSION'),JSON.stringify(seRow));
+const repoLabel=v.rows[1].find(p=>p.text.trim()==='REPO');assert(repoLabel&&repoLabel.dim===true&&repoLabel.role!=='title'&&!repoLabel.bold,JSON.stringify(v.rows[1]));
 // The bottom layout has no group heads (its first row carries the repository and the session together): first row with the buttons, GIT, PEERS, the title and NOW row, the route box.
 {const w=draw({status:doc(GROUPS),side:false,width:100,height:20,peers:true}),ws=lines(w);
  const at=re=>ws.findIndex(l=>re.test(l));
@@ -122,25 +124,24 @@ const repoRule=v.rows[1].find(p=>/^─+$/.test(p.text));assert(repoRule&&repoRul
  assert(r0===1&&gi===2&&pe2===3&&ti===4&&ro===5,ws.join('\n'));
  assert(!ws.some(l=>/^│ (REPO|SESSION)/.test(l)),ws.join('\n'));
  assert.deepEqual(w.hits.filter(h=>h.action==='popup:STATUS').map(h=>h.row),[1]);}
-// No PEERS, no Git rows to spare: the same rows the panel had before, the STATUS head after PEERS, the SESSION head in the empty row's place.
+// 11-26 (panel B): REPO (one row), PEERS, the STATUS head, the SESSION rule, then MODEL.
 {const ls=lines(draw({status:{word:'STATUS',has_doc:false},height:40,peers:true}));
- assert(/^│ REPO .* │$/.test(ls[1])&&/^│  GIT /.test(ls[2])&&/^│  PEERS /.test(ls[3])&&/^│  STATUS +› │$/.test(ls[4])&&/^│ SESSION ─+ │$/.test(ls[5])&&/^│  MODEL /.test(ls[6]),ls.join('\n'));}
+ assert(/^│  REPO /.test(ls[1])&&/^│  PEERS /.test(ls[2])&&/^│  STATUS +› │$/.test(ls[3])&&/^│ ─+ │$/.test(ls[4])&&/^│  MODEL /.test(ls[5])&&!ls.some(l=>/ GIT /.test(l)),ls.join('\n'));}
 """)
 
     def test_a_narrow_panel_and_the_session_head_that_folds(self):
         self.node(r"""
-// Narrower than 30 cells inside the REPO row keeps the word first (`REPO `), as the head of its group.
+// 11-26 (panel B): narrower, the REPO row keeps its label first (`REPO` and one space, then the name).
 for(const width of [32,28,20]){const v=draw({status:doc(),width,height:70}),ls=lines(v);
-  assert(/^│ REPO hearting/.test(ls[1])&&ls.every(l=>cells(l)===width),width+'\n'+ls.join('\n'));}
-// The SESSION head takes the empty row's place and costs no row.
-// Short of rows the SESSION head goes with that empty row; the REPO head (the REPO row) never goes.
+  assert(/^│  REPO +hearting/.test(ls[1])&&ls.every(l=>cells(l)===width),width+'\n'+ls.join('\n'));}
+// 11-26 (panel B): the SESSION head is a plain rule that costs no row of the old plan; short of rows it stands over MODEL's own row and goes once no spare row is left; the REPO row never goes.
 const seen=[];
 for(let h=70;h>=12;h--){const ls=lines(draw({status:doc(),height:h,peers:true}));
-  seen.push([h,ls.some(l=>/^│ SESSION ─+ │$/.test(l)),/^│ REPO /.test(ls[1])]);}
+  seen.push([h,ls.some((l,k)=>/^│ ─+ │$/.test(l)&&/MODEL|Opus/.test(ls[k+1]||'')),/^│  REPO /.test(ls[1])]);}
 assert(seen.every(r=>r[2]),JSON.stringify(seen));
 assert(seen[0][1]===true&&seen.some(r=>r[1]===false),JSON.stringify(seen));
 // The SESSION head is gone for every height shorter than the first one that lacks it, within the give-back rule (a height may take it back).
-const firstGone=seen.find(r=>!r[1])[0];assert(firstGone>=24&&firstGone<=34,String(firstGone));
+const firstGone=seen.find(r=>!r[1])[0];assert(firstGone>=14&&firstGone<=20,String(firstGone));
 """)
 
     def test_messages_and_mem_go_down_first_before_the_route_box_or_the_question_give_a_row(self):
@@ -154,6 +155,7 @@ const table=[];
 for(let h=60;h>=14;h--){const v=draw({status:doc(),height:h,question:true});
   const row={h,msg:msgRows(v),mem:memRows(v),route:routeBox(v),q:count(v,/QUESTIONS|시험용 질문\?/)};table.push(row);
   // Anything but MESSAGES and MEM giving a row (a shorter route box, the question's rows) happens only with both at their floor.
+  // (11-26, panel B: a message is one row now; the rows B's forms leave stand empty, they never unfold a message, so the floor holds as it did.)
   const another=row.route<routeFull&&h<40;
   if(another)assert(row.msg<=1&&row.mem<=1,JSON.stringify(row)+'\n'+lines(v).join('\n'));
   assert(row.q>=2,JSON.stringify(row));

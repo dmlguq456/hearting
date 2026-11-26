@@ -7,6 +7,7 @@ the sort of a backlog line in the document's promise, its two readers and the pa
 2. `session_status.parse_backlog` and `artifact_entrance._backlog` read it by one rule (`utilities/backlog_items.py`): on the same documents (a table of cases, and many
    random ones) they give the same count of each sort and of each state.
 3. The panel's BACKLOG head tells the sorts and its rows stand behind a four-cell word; every row of every picture has the panel's width.
+   11-26 (panel B): the head is `BACKLOG +N · Discuss n`, its rows only the ranked ones, state first (`· Ready   TASK 11-26 title`).
 4. (The board, the BACKLOG popup, is tested in `utilities/session_shell_backlog_board_1126.test.py`; the entrance's backlog line,
    `N total · FIX n · TASK n · NOTE n · Discuss n · updated …`, with the entrance's own suite, `utilities/artifact_entrance.test.py`.)
 """
@@ -56,6 +57,12 @@ MIXED = """# 시험용 백로그
 - 시험용 이 창 밖의 고칠 일
   kind: fix
 """
+
+# 11-26 (panel B): the same document with what the panel's chosen rows are made of: `priority:` (the person's order), `state:`, `area:`, `date:`.
+RANKED = (MIXED
+          .replace("- 시험용 목록을 다시 열 때 빠진 항목 복구\n  kind: fix\n", "- 시험용 목록을 다시 열 때 빠진 항목 복구\n  kind: fix\n  state: discuss\n  area: Routing\n  date: 2026-11-20\n  priority: 2\n")
+          .replace("- 시험용 사용 안내 갱신\n  kind: Improve\n", "- 시험용 사용 안내 갱신\n  kind: Improve\n  state: ready\n  area: Docs\n  date: 2025-03-04\n  priority: 1\n")
+          .replace("- 시험용 참고 하나\n  kind: note\n", "- 시험용 참고 하나\n  kind: note\n  priority: 3\n"))
 
 
 KINDS = ("fix", "task", "note", "tbd")
@@ -187,7 +194,7 @@ class PanelPictureTest(unittest.TestCase):
         legacy = re.sub(r"^ +kind:.*\n|^\tKind:.*\n", "", MIXED, flags=re.M)
         many = "## A\n" + "".join("- 시험용 항목 %03d\n  kind: %s\n" % (n, "fix" if n % 3 else "task") for n in range(1, 1300))
         for name, text, own in (("mixed", MIXED, "2026-11-22_this-window"), ("legacy", legacy, ""), ("notes", "## A\n- 참고 하나\n  kind: note\n- 참고 둘\n  kind: note\n", ""),
-                                ("empty", "# T\n", ""), ("big", many, ""), ("tbd_notes", "## A\n- 참고\n  kind: note\n- 못 가른 일\n", "")):
+                                ("ranked", RANKED, ""), ("empty", "# T\n", ""), ("big", many, ""), ("tbd_notes", "## A\n- 참고\n  kind: note\n- 못 가른 일\n", "")):
             parsed = session_status.parse_backlog(text.splitlines(), detail=False)
             items, total = session_status.panel_backlog_items(parsed, own)
             out[name] = {"word": "BACKLOG", "has_doc": True, "items": items, "total": total, "counts": session_status.backlog_counts(parsed)}
@@ -199,63 +206,71 @@ class PanelPictureTest(unittest.TestCase):
         return result.stdout
 
     def test_the_pictures_by_width_and_height_and_the_cells_of_every_row(self):
+        # 11-26 (panel B): the head is `BACKLOG +N · Discuss n`, the rows only the ones the person ranked (`priority:`), state first:
+        # `  · Ready   TASK 11-26 Fit long titles`; the kind words and colours are the table's.
         self.node(r"""
 const docs=JSON.parse(process.argv[2]);
-const host=d=>({...d,items:d.items.map(i=>({mark:'',text:i.text,key:i.key,kind:i.kind}))});
+const host=(d,year=2026)=>({...d,year,items:d.items.map(i=>({mark:'',text:i.text,key:i.key,kind:i.kind,state:i.state,area:i.area,date:i.date}))});
 const at=(o)=>{const v=draw({...o,status:status(),routes:1,messages:2,mem:1});return {v,ls:lines(v),a:inside(v)};};
-const head=a=>a.find(l=>/^ BACKLOG/.test(l)),rows=a=>a.filter(l=>/^  (FIX |TASK|NOTE|TBD ) /.test(l));
+const head=a=>a.find(l=>/^ BACKLOG/.test(l)),rows=a=>a.filter(l=>/^  · /.test(l));
 // every row of every picture has the panel's width (cells counted, Hangul two)
 let pictures=0;
 for(const name of Object.keys(docs))for(const width of [59,44,30])for(const height of [40,24,14]){
   const {ls}=at({width,height,backlog:host(docs[name])});pictures++;
   assert(ls.every(l=>cells(l)===width),name+' '+width+'x'+height+'\n'+ls.map(l=>cells(l)+' '+l).join('\n'));}
-assert.equal(pictures,54);
-// the mixed document at 59 and 44 wide, tall: the head tells the sorts, the three rows stand behind four cells (11-26: the newest first, so the one
-// dated item, then the document's order: FIX, FIX, TASK)
-{const {a,ls}=at({width:44,height:40,backlog:host(docs.mixed)});
- assert(/^ BACKLOG FIX 3 · TASK 2 · \+2 \/9 +›$/.test(head(a)),ls.join('\n'));
+assert.equal(pictures,63);
+// the ranked document at 44 wide, tall: the head tells what is not shown and the Discuss count; the three chosen rows stand in the person's order
+// (priority 1, 2, 3), state first, then the kind word, the date (`YY-MM-DD` another year, `MM-DD` this year, `—` none; the column as wide as the
+// widest date shown, so the titles stand in one column), the title
+{const {a,ls}=at({width:44,height:40,backlog:host(docs.ranked)});
+ assert(/^ BACKLOG \+6 · Discuss 1 +›$/.test(head(a)),ls.join('\n'));
  const r=rows(a);assert.equal(r.length,3,a.join('\n'));
- assert.deepEqual(r.map(l=>l.slice(2,6)),['FIX ','FIX ','TASK'],r.join('\n'));}
-{const {a}=at({width:59,height:40,backlog:{...host(docs.mixed),items:host(docs.mixed).items.slice(0,3)}});
- assert(/^ BACKLOG FIX 3 · TASK 2 · \+2 \/9 +›$/.test(head(a)),a.join('\n'));
- assert(rows(a).every(l=>/^  (FIX |TASK) 시험용/.test(l)),a.join('\n'));}
-// FIX and TASK are told by the word and the colour (the table's own: yellow, green; NOTE and TBD dim)
-{const {v}=at({width:59,height:40,backlog:host({...docs.mixed,items:[{kind:'fix',text:'KIND_A',key:'i:a'},{kind:'task',text:'KIND_B',key:'i:b'},{kind:'note',text:'KIND_C',key:'i:c'}]})});
+ assert(r[0].startsWith('  · Ready   TASK 25-03-04 시험용')&&r[1].startsWith('  · Discuss FIX  11-20    시험용')&&r[2].startsWith('  · —       NOTE —        시험용 참고'),r.join('\n'));}
+// the year the backend names decides which date has no year: in 2025 the old one is `03-04` and this year's is `26-11-20`
+{const {a}=at({width:44,height:40,backlog:host(docs.ranked,2025)});const r=rows(a);
+ assert(r[0].startsWith('  · Ready   TASK 03-04    ')&&r[1].startsWith('  · Discuss FIX  26-11-20 '),r.join('\n'));}
+// from 55 cells inside (59 wide) the area stands in eight cells (nine with its gap) before the title; `—` where there is none
+{const {a}=at({width:59,height:40,backlog:host(docs.ranked)});const r=rows(a);
+ assert(r[0].startsWith('  · Ready   TASK 25-03-04 Docs     시험용 사용')&&r[1].startsWith('  · Discuss FIX  11-20    Routing  시험용 목록')&&r[2].startsWith('  · —       NOTE —        —        시험용 참고 하나'),r.join('\n'));
+ assert(!rows(at({width:44,height:40,backlog:host(docs.ranked)}).a).some(l=>l.includes('Routing')||l.includes('Docs')));}
+// the state, kind and colour words (the table's: Discuss and Waiting yellow bold, Ready dim; FIX yellow, TASK green, NOTE and TBD dim)
+{const {v}=at({width:59,height:40,backlog:host({...docs.ranked,items:[{kind:'fix',state:'discuss',text:'KIND_A',key:'i:a'},{kind:'task',state:'ready',text:'KIND_B',key:'i:b'},{kind:'note',state:'waiting',text:'KIND_C',key:'i:c'}]})});
  const row=txt=>v.rows.find(r=>r.map(p=>p.text).join('').includes(txt));
- const word=(txt,w)=>row(txt).find(p=>p.text===w);
- assert.equal(word('KIND_A','FIX ').foreground,186);assert.equal(word('KIND_B','TASK').foreground,150);assert.equal(word('KIND_C','NOTE').dim,true);}
-// no more width than 30: the ` · ` and the `/N` have given way, the words stay (and `+N`); one stage narrower the `+N` goes before the words do
-{const {a}=at({width:30,height:40,backlog:host(docs.mixed)});assert(/^ BACKLOG FIX 3 TASK 2 \+2 +›$/.test(head(a)),head(a));}
-{const {a}=at({width:28,height:40,backlog:host(docs.mixed)});assert(/^ BACKLOG FIX 3 TASK 2 +›$/.test(head(a)),head(a));}
-{const {a}=at({width:20,height:40,backlog:host(docs.mixed)});assert(/^ BACKLOG 3 2 +›$/.test(head(a)),head(a));}
-// one cell wider never tells less: the stages (nothing, the numbers, the words, `+N`, the ` · `, `/N`) only ever come in that order as the width grows, and `+N` never stands alone
+ const word=(txt,w)=>row(txt).find(p=>p.text.trim()===w);
+ assert.equal(word('KIND_A','FIX').foreground,186);assert.equal(word('KIND_B','TASK').foreground,150);assert.equal(word('KIND_C','NOTE').dim,true);
+ assert(word('KIND_A','Discuss').foreground===186&&word('KIND_A','Discuss').bold===true);
+ assert(word('KIND_C','Waiting').foreground===186&&word('KIND_C','Waiting').bold===true);
+ assert.equal(word('KIND_B','Ready').dim,true);}
+// narrower, the head gives way in order: ` · ` goes (then `Discuss n`, then `+N`)
+{const {a}=at({width:30,height:40,backlog:host(docs.ranked)});assert(/^ BACKLOG \+6 · Discuss 1 +›$/.test(head(a)),head(a));}
+{const {a}=at({width:28,height:40,backlog:host(docs.ranked)});assert(/^ BACKLOG \+6 Discuss 1 +›$/.test(head(a)),head(a));}
+{const {a}=at({width:26,height:40,backlog:host(docs.ranked)});assert(/^ BACKLOG \+6 +›$/.test(head(a)),head(a));}
+{const {a}=at({width:14,height:40,backlog:host(docs.ranked)});assert(/^ BACKLOG +›$/.test(head(a)),head(a));}
+// one cell wider never tells less: the stages (nothing, `+N`, `Discuss n`, ` · `) only ever come in that order as the width grows
 {const rank=h=>{const t=h.replace(/^ BACKLOG/,'').replace(/ *›$/,'').trim();
-   if(!t)return 0;if(!/[A-Z]/.test(t))return 1;if(t.includes('/'))return 5;if(t.includes('·'))return 4;if(/\+\d+\+?$/.test(t))return 3;return 2;};
+   if(!t)return 0;if(t.includes('·'))return 3;if(t.includes('Discuss'))return 2;return 1;};
  let tried=0;
  for(const name of Object.keys(docs)){let last=-1,seen=new Set();
   for(let width=14;width<=80;width++){const {a}=at({width,height:40,backlog:host(docs[name])});const h=head(a);tried++;
-   assert(!/^ BACKLOG \+\d+\+? +›$/.test(h),name+' '+width+': '+h);
    const r=rank(h);assert(r>=last,name+' '+width+': '+h+' tells less than '+last);last=r;seen.add(r);}
-  if(name==='big'||name==='mixed')for(const r of [1,2,3,4,5])assert(seen.has(r),name+' never stands at stage '+r);}
- assert.equal(tried,6*67);}
-// an old document (no sort written): FIX and TASK are `?`, every row is TBD
+  if(name==='big'||name==='ranked')for(const r of [0,1,2,3])assert(seen.has(r),name+' never stands at stage '+r);}
+ assert.equal(tried,7*67);}
+// a document nobody ranked has the head alone (no row): the whole count is `+N`, Discuss 0 is told
 {const {a}=at({width:44,height:40,backlog:host(docs.legacy)});
- assert(/^ BACKLOG FIX \? · TASK \? \/9 +›$/.test(head(a)),a.join('\n'));assert(rows(a).every(l=>l.startsWith('  TBD  ')),a.join('\n'));assert.equal(rows(a).length,3);}
-// only notes: the zeros are told; no `+N`
-{const {a}=at({width:44,height:40,backlog:host(docs.notes)});assert(/^ BACKLOG FIX 0 · TASK 0 \/2 +›$/.test(head(a)),a.join('\n'));assert.equal(rows(a).length,2);assert(rows(a).every(l=>l.startsWith('  NOTE ')));}
-// notes and unsorted but no FIX or TASK: zeros (11-26: the rows in the document's order, no item being dated)
-{const {a}=at({width:44,height:40,backlog:host(docs.tbd_notes)});assert(/^ BACKLOG FIX 0 · TASK 0 \/2 +›$/.test(head(a)),a.join('\n'));assert.deepEqual(rows(a).map(l=>l.slice(2,6)),['NOTE','TBD ']);}
+ assert(/^ BACKLOG \+9 · Discuss 0 +›$/.test(head(a)),a.join('\n'));assert.equal(rows(a).length,0,a.join('\n'));}
+for(const name of ['notes','tbd_notes']){const {a}=at({width:44,height:40,backlog:host(docs[name])});assert(/^ BACKLOG \+2 · Discuss 0 +›$/.test(head(a)),a.join('\n'));assert.equal(rows(a).length,0);}
 // an empty document and no document
-{const {a}=at({width:44,height:40,backlog:host(docs.empty)});assert(/^ BACKLOG FIX 0 · TASK 0 \/0 +›$/.test(head(a)),a.join('\n'));assert.equal(rows(a).length,0);}
+{const {a}=at({width:44,height:40,backlog:host(docs.empty)});assert(/^ BACKLOG Discuss 0 +›$/.test(head(a)),a.join('\n'));assert.equal(rows(a).length,0);}   // (no `+N`: no ` · ` before Discuss)
 {const {a,v}=at({width:44,height:40,backlog:{word:'BACKLOG',has_doc:false,items:[],total:0}});assert(/^ BACKLOG +›$/.test(head(a)),a.join('\n'));
- const at2=a.findIndex(l=>/^ BACKLOG/.test(l));assert(v.rows[at2+1].map(p=>p.text).join('').includes('SESSION'));}
+ const at2=a.findIndex(l=>/^ BACKLOG/.test(l));assert(/^│ ─+ │$/.test(v.rows[at2+1].map(p=>p.text).join(''))&&!v.rows.some(r=>r.some(p=>p.text.includes('SESSION'))));}
 // three-digit counts (and more) stand whole where there is room and give way where there is not
-{const {a}=at({width:59,height:40,backlog:host(docs.big)});assert(/^ BACKLOG FIX 866 · TASK 433 · \+1296 \/1299 +›$/.test(head(a))||/^ BACKLOG FIX 866 · TASK 433 · \+1296 +›$/.test(head(a)),head(a));}
-{const {a}=at({width:30,height:40,backlog:host(docs.big)});assert(/^ BACKLOG 866 433 +›$/.test(head(a)),head(a));}
-{const {a}=at({width:36,height:40,backlog:host(docs.big)});assert(/^ BACKLOG FIX 866 TASK 433 +›$/.test(head(a)),head(a));}
-{const {a}=at({width:37,height:40,backlog:host(docs.big)});assert(/^ BACKLOG FIX 866 TASK 433 \+1296 +›$/.test(head(a)),head(a));}
-// a backend that sends no counts is drawn as it was
-{const {a}=at({width:44,height:40,backlog:backlog()});assert(a.some(l=>/^ BACKLOG \+11 +›$/.test(l)),a.join('\n'));assert(a.some(l=>/^  · 시험용 나중 일 하나/.test(l)));}
+{const {a}=at({width:59,height:40,backlog:host(docs.big)});assert(/^ BACKLOG \+1299 · Discuss 0 +›$/.test(head(a)),head(a));}
+{const {a}=at({width:32,height:40,backlog:host(docs.big)});assert(/^ BACKLOG \+1299 · Discuss 0 +›$/.test(head(a)),head(a));}
+{const {a}=at({width:30,height:40,backlog:host(docs.big)});assert(/^ BACKLOG \+1299 Discuss 0 +›$/.test(head(a)),head(a));}
+{const {a}=at({width:26,height:40,backlog:host(docs.big)});assert(/^ BACKLOG \+1299 +›$/.test(head(a)),head(a));}
+{const {a}=at({width:19,height:40,backlog:host(docs.big)});assert(/^ BACKLOG +›$/.test(head(a)),head(a));}
+// a backend that sends no counts and no state/area/date: `+N` alone in the head, the rows with `—` where a value is missing
+{const {a}=at({width:44,height:40,backlog:backlog()});assert(a.some(l=>/^ BACKLOG \+11 +›$/.test(l)),a.join('\n'));assert(a.some(l=>/^  · —       TBD  — +시험용 나중 일/.test(l)),a.join('\n'));}
 """, self.docs())
 
     def test_short_of_rows_the_buttons_carry_fix_and_task_together(self):
@@ -268,8 +283,11 @@ const at=(o)=>{const v=draw({...o,status:status(),routes:1,messages:2,mem:1});re
  assert(/STATUS \+\d+ ›  BACKLOG \+5 ›│$/.test(a[1])||/BACKLOG \+5 ›/.test(a[1]),a[1]);assert(a.every(l=>cells(l)===120));}
 {const v=draw({side:false,width:120,height:14,status:status(),backlog:host(docs.legacy),routes:1}),a=lines(v);assert(/BACKLOG \? ›/.test(a[1]),a[1]);}
 {const v=draw({side:false,width:120,height:14,status:status(),backlog:host(docs.notes),routes:1}),a=lines(v);assert(/BACKLOG ›/.test(a[1]),a[1]);}
-// beside the native area, short of rows: the REPO row ends in the buttons and no list stands
-{const {a}=at({width:44,height:14,backlog:host(docs.mixed)});assert(a.some(l=>/BACKLOG( \+5)? ›/.test(l))&&!a.some(l=>/^  (FIX|TASK)/.test(l)),a.join('\n'));}
+// beside the native area, short of rows: the REPO row ends in the buttons and no list stands (11-26 panel B: the repository row's own text is
+// longer, so at 44 wide the buttons are folded to `›  ›`; wider, the same words and numbers as before stand after it)
+{const {a}=at({width:44,height:14,backlog:host(docs.ranked)});assert(/^ REPO .* ›  ›$/.test(a[1])&&!a.some(l=>/^  · /.test(l)),a.join('\n'));}
+for(const [name,want] of [['mixed',/STATUS \+5 ›  BACKLOG \+5 ›$/],['legacy',/STATUS \+5 ›  BACKLOG \? ›$/],['notes',/STATUS \+5 ›  BACKLOG ›$/]]){
+ const {a}=at({width:70,height:14,backlog:host(docs[name])});assert(/^ REPO /.test(a[1])&&want.test(a[1])&&!a.some(l=>/^  · /.test(l)),a.join('\n'));}
 """, self.docs())
 
 

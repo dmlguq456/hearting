@@ -708,7 +708,8 @@ BACKLOG_WORDS = {"updated": "updated", "old": "old document", "none": "No backlo
 # the optional indented `kind:`, `state:`, `area:` and `date:` lines (11-26, scheme A) are its kind (`fix`, `task`, `note`; the earlier `improve`
 # is `task`; none, another value or two different values is no kind, drawn `TBD`), its state (`discuss`, `ready`, `waiting`; else none, `—`),
 # its one area (case and runs of blanks folded; the first name written is the group's name; none or two different is `No area`) and its date
-# (`YYYY-MM-DD`, a real one; else none, `—`).  A wrong value leaves that cell undecided and the document opens.
+# (`YYYY-MM-DD`, a real one; else none, `—`); the optional `priority:` line (11-26, panel B) is the order the person gave (a positive whole number,
+# 1 first; else none: the panel does not choose the item).  A wrong value leaves that cell undecided and the document opens.
 KIND_MARKS = {"fix": "FIX", "task": "TASK", "note": "NOTE", None: "TBD"}
 KIND_STYLES = {"fix": "lvl_y", "task": "lvl_g", "note": "dim", None: "dim"}
 STATE_MARKS = {"discuss": "Discuss", "ready": "Ready", "waiting": "Waiting", None: "—"}
@@ -722,7 +723,7 @@ def _backlog_items():
 
 def parse_backlog(lines, detail=True):
     """``{title, updated, groups}`` of a backlog document's lines; ``groups`` is ``[{name, items}]`` and an item
-    ``{text, kind, state, area, area_key, date, source, note, lines, detail, has_detail, at}`` (``utilities/backlog_items.py``'s job, its title
+    ``{text, kind, state, area, area_key, date, priority, source, note, lines, detail, has_detail, at}`` (``utilities/backlog_items.py``'s job, its title
     and heading with the markdown taken off: ``text`` is ``(empty)`` for a bullet with no words).  ``lines`` (with ``detail``) are the
     indented lines under it, ``(name, value)``; ``detail`` the same as plain text (``date: 2026-11-20``), ``DETAIL_LINES`` of them."""
     parsed = _backlog_items().parse(lines, detail=detail)
@@ -925,7 +926,9 @@ def backlog_detail(root, own, key, width, indent=0):
                        (item["area"] or "No area", "soft" if item["area"] else "dim"), (" · ", "dim"),
                        (STATE_MARKS[item["state"]], "soft" if item["state"] else "dim")]]
         out = [_cut_row(out[0], width)]
-        shown = [(BACKLOG_WORDS["campaign"], campaign or "—")] + [(name, value) for name, value in item["lines"] if name not in ("kind", "state", "area", "date")]
+        # (the order the person gave, `priority:`, is the panel's: the board neither shows nor changes it)
+        shown = [(BACKLOG_WORDS["campaign"], campaign or "—")] + [(name, value) for name, value in item["lines"]
+                                                                   if name not in ("kind", "state", "area", "date", "priority")]
         for name, value in shown[:1 + DETAIL_LINES]:
             text = transcript.clean(project_status._plain(value) if value else "")
             rows = _wrapped((name + " " + text) if name else text, room, NOTE_ROWS if name == "note" else DETAIL_ROWS, "soft")
@@ -959,15 +962,17 @@ def panel_items(parsed, first=PANEL_ITEMS):
 
 
 def panel_backlog_items(parsed, own, first=PANEL_ITEMS):
-    """``(items, total)`` of the backlog for the panel's three rows (11-26, scheme A): the newest item in Discuss first, then the other newest
-    ones (the latest date first, the same date in the document's order, no date last); with nothing in Discuss the newest three.
+    """``(items, total)`` of the backlog for the panel's rows (11-26, panel B; the person: "백로그는 사용자가 말한 우선순위로 최대 3개 정도만
+    띄우고"): only the items with a ``priority:`` line (a positive whole number: the order the person gave), the smallest first, the same
+    number in the document's order, ``first`` of them at most.  An item with no priority is never chosen (no date or Discuss fills a place):
+    with none the panel shows the part's head alone.
 
     Each item is ``{mark, kind, state, area, date, text, key}``: ``kind`` is ``fix``, ``task``, ``note`` or ``tbd``; ``state`` ``discuss``,
     ``ready``, ``waiting`` or ``""``; ``area`` the area's name or ``""``; ``date`` ``YYYY-MM-DD`` or ``""`` (the panel's drawing takes the
-    four values as they are); ``key`` is the item's key on the board.  ``own`` is not used: the order is the dates'."""
-    rows = _newest(_backlog_rows(parsed))
-    first_talk = next((row for row in rows if row[1]["state"] == "discuss"), None)
-    chosen = ([first_talk] + [row for row in rows if row is not first_talk])[:first] if first_talk else rows[:first]
+    four values as they are; the priority itself is not drawn, so it is not sent); ``key`` is the item's key on the board.  ``own`` is not
+    used: the order is the person's, the same for every folder."""
+    ranked = [row for row in _backlog_rows(parsed) if row[1].get("priority")]
+    chosen = sorted(ranked, key=lambda row: (row[1]["priority"], row[1]["at"]))[:first]
     items = [{"mark": "", "kind": item["kind"] or "tbd", "state": item["state"] or "", "area": item["area"] or "", "date": item["date"] or "",
               "text": transcript.clean(item["text"])[:PANEL_TEXT], "key": key} for _campaign, item, key in chosen]
     return items, backlog_total(parsed)
@@ -1009,7 +1014,7 @@ def panel_lists(cwd, view, have=None, now=None):
             out["status"] = {"sign": sign, "items": items, "total": total}
         own = own_folder(view)
         sign = _sign(backlog_path(root))
-        # (the sign names this window's folder too, as the read is asked for it; since 11-26 the order is the dates', the same for every folder)
+        # (the sign names this window's folder too, as the read is asked for it; since 11-26 the order is the person's, the same for every folder)
         sign = sign and f"{sign}|{own}"
         if sign is not None and have.get("backlog") == sign:
             out["backlog"] = {"same": True}

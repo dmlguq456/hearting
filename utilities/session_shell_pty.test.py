@@ -199,7 +199,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  const file=path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json');
  await existing(file);
  // A published identity is not yet a completed display/readiness observation.
- await waitFor(/project\/|(?:\]|REPO)(?:\x1b\[[0-9;]*m)* (?:\x1b\[[0-9;]*m)*project/);
+ await waitFor(/project\/|(?:\]|REPO)(?:\x1b\[[0-9;]*m)* +(?:\x1b\[[0-9;]*m)*project/);
  const startup={};
  if(cfg.scenario==='startup-state'){
    // No key, no status request (which would run the readiness observation): the
@@ -461,7 +461,7 @@ function existing(file){return new Promise((resolve,reject)=>{
    lateRoute.done=mark();lateRoute.final=lines().match(/ROUTE_[A-Z]+/g);
  }
  // Registry publication precedes the first complete display observation.
- if(cfg.scenario==='display')await waitFor(/project\/|(?:\]|REPO)(?:\x1b\[[0-9;]*m)* (?:\x1b\[[0-9;]*m)*project/);
+ if(cfg.scenario==='display')await waitFor(/project\/|(?:\]|REPO)(?:\x1b\[[0-9;]*m)* +(?:\x1b\[[0-9;]*m)*project/);
  if(cfg.scenario==='display')for(let index=0;index<4;index++){
    const title='event-title-'+index,before=process.hrtime.bigint();
    const projection=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));projection.observed_at=Date.now()/1000;projection.route_status['claude\0'+cfg.sid]='route 1 · '+title;projection.route_sessions['claude\0'+cfg.sid]=Date.now()/1000;
@@ -534,8 +534,8 @@ function existing(file){return new Promise((resolve,reject)=>{
    const flush=()=>new Promise(resolve=>sideTerm.write('',resolve));
    // The rule's row (`at`: that row however it stands) and the frame's right column, as colors.
    const rule=(at=-1)=>{for(let y=0;y<sideTerm.rows;y++){const row=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y),line=row?.translateToString()||'';
-     const m=line.slice(140).match(/^│ SESSION (─{28}) │$/);   // (11-22: the light runs over the SESSION head's rule alone)
-     const colors=m&&Array.from({length:28},(_,i)=>{const c=row.getCell(150+i);return c.isFgDefault()?'d':c.getFgColor()+(c.isDim()?'d':'');}).join(',');
+     const m=line.slice(140).match(/^│ (─{36}) │$/);   // (11-22: the light runs over the SESSION head's rule alone; 11-26, panel B: the head is that rule, no word)
+     const colors=m&&Array.from({length:36},(_,i)=>{const c=row.getCell(142+i);return c.isFgDefault()?'d':c.getFgColor()+(c.isDim()?'d':'');}).join(',');
      if(m&&(at<0?colors.split(',').some(c=>!c.endsWith('d')):y===at))return {y,native:line.slice(0,138),colors};}return null;};
    const frame=()=>Array.from({length:sideTerm.rows},(_,y)=>{const c=sideTerm.buffer.active.getLine(y)?.getCell(179);return c?(c.isFgDefault()?'d':c.getFgColor())+(c.isDim()?'d':''):'';}).join(',');
    let first=null;const began=Date.now();
