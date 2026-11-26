@@ -526,7 +526,10 @@ class DirectRunEntersIsolation(unittest.TestCase):
             "AGENT_RUNTIME_DIR", "AGENT_ARTIFACT_OUTPUT_DIR", "AGENT_MODEL_GOVERNOR_ROOT",
             "AGENT_DISPATCH_COMPLETION_STATE_FILE", "AGENT_DISPATCH_SUPERVISOR_LEASE_FILE",
             "CLAUDE_CONFIG_DIR", "CODEX_HOME", "HERDR_BIN_PATH", "XDG_RUNTIME_DIR",
-            "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "TMUX_TMPDIR")}
+            "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "TMUX_TMPDIR",
+            "AGENT_ARTIFACT_ROOT", "AGENT_ARTIFACT_CYCLE_DIR", "AGENT_RAW_DATA_DIR", "AGENT_DISPATCH_JOBS",
+            "AGENT_HOME", "AGENT_ROUTE_FILE", "REPORT_BUNDLE_ROOT", "HEARTING_MODEL_CONFIG_HOME",
+            "HEARTING_WORKER_HOME", "HEARTING_SHELL_SOCKET", "HEARTING_SHELL_TOKEN", "CLAUDE_PLUGIN_DATA")}
         worker.update(AGENT_DISPATCH_ATTEMPT_ID="att-real", AGENT_DISPATCH_PARENT_ATTEMPT_ID="att-parent",
                       HERDR_AGENT="claude", HERDR_TAB_ID="tab-real", HERDR_WORKSPACE_ID="ws-real",
                       TMUX_PANE="%0")
@@ -550,8 +553,26 @@ class DirectRunEntersIsolation(unittest.TestCase):
                            if part.startswith("/") and not Path(part).is_relative_to(private)}
                 self.assertEqual(outside, {})
                 self.assertEqual(seen["PYTHONPATH"], str(ROOT))
+                # Only the runner's own private values may carry a caller-state name.
+                rewritten = {"HOME", "TMPDIR", "TMUX_TMPDIR", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"}
+                self.assertEqual([key for key in worker if key not in rewritten and key in seen], [])
+                for key in rewritten & seen.keys():
+                    self.assertTrue(Path(seen[key]).is_relative_to(private), key)
                 self.assertFalse([key for key, value in seen.items()
                                   if str(real) in value or value in ("att-real", "tab-real", "%0")])
+
+    def test_a_one_off_utility_follows_its_working_directory_not_the_callers_artifact_root(self):
+        decoy = self.root / "decoy"
+        project = self.root / "project"
+        decoy.mkdir()
+        project.mkdir()
+        env = dict(self.caller, AGENT_ARTIFACT_ROOT=str(decoy))
+        command = ["sh", str(ROOT / "utilities" / "artifact-root.sh"), "."]
+        plain = subprocess.run(command, cwd=str(project), env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(plain.stdout.strip(), str(decoy), plain.stderr)  # the variable alone moves the root
+        isolated = subprocess.run([sys.executable, str(RUNNER), "--direct-run", *command], cwd=str(project),
+                                  env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(isolated.stdout.strip(), str(project / ".agent_reports"), isolated.stderr)
 
     def test_no_private_root_refuses_in_one_line_and_runs_nothing(self):
         mod = load_runner_module()

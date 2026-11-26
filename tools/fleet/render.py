@@ -197,6 +197,7 @@ from .render_input import (  # noqa: F401
     _base_navigation, _close_job_row_if_registry, _CursesInput, _EXPLORER_MOUSE_MOTION,
     _getmouse_event, _getmouse_xy, _MOUSE_HINT_MIN_WIDTH, _PROCESS_HINT_MIN_WIDTH,
     _prompt_button_segs, _prompt_hit_boxes, _prompt_segs, _prompt_variants,
+    answer_key,
 )
 
 # Moved classes report the module they were defined in before the split, so
@@ -6601,6 +6602,9 @@ def _configure_input(curses_mod, env):
 
 
 _EXPLORER_TEXT = bytearray()   # a partly received UTF-8 character typed into the / search
+# 11-26: curses' newline mode is off in the explorer, so Enter arrives as CR and Ctrl+J as LF: in a written
+# answer LF is a line break. Where it could not be turned off LF stays Enter, as it always was.
+_EXPLORER_CR_ENTER = False
 
 
 def _explorer_searching():
@@ -6726,15 +6730,14 @@ def _explorer_handle(ch, mouse_event=None, size=None, snapshot=None):
             _explorer_apply_effects(_effects, _EXPLORER_MODEL, snapshot=snapshot)
         return
     from .explorer.state import models_finding
-    editing = (state.view == "QUESTIONS" and _explorer_question_writable()
-               and (_explorer_question_editing() or ch not in range(49, 58))) or models_finding(state)
-    if editing and isinstance(ch, int) and (32 <= ch < 127 or 128 <= ch < 256):
-        key = _explorer_text_key(ch)
-    else:
-        key = _explorer_key_name(ch)
-        if key is None and _explorer_question_editing():
-            # 11-22: a typed answer has a place in it; these keys only mean something while it is typed.
-            key = {getattr(curses, "KEY_DC", -1): "delete", 1: "ctrl-a", 5: "ctrl-e"}.get(ch)
+    writable = state.view == "QUESTIONS" and _explorer_question_writable()
+    editing = (writable and (_explorer_question_editing() or ch not in range(49, 58))) or models_finding(state)
+    # 11-26: a paste, a line break and the editing keys of a written answer (render_input.answer_key).
+    key = answer_key(ch, mouse_event, writable=writable, editing=_explorer_question_editing(),
+                     finding=models_finding(state), cr_enter=_EXPLORER_CR_ENTER)
+    if key is None:
+        key = (_explorer_text_key(ch) if editing and isinstance(ch, int) and (32 <= ch < 127 or 128 <= ch < 256)
+               else _explorer_key_name(ch))
     if key:
         from .explorer.runtime import tag_cycle
         order = tag_cycle(getattr(_EXPLORER_MODEL, "ordering", None))
@@ -6818,7 +6821,7 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
     global _EXPLORER_REPLAY_ACTIVE, _EXPLORER_SHOWN, _EXPLORER_DETAIL_CONTINUATION
     global _EXPLORER_READINESS, _EXPLORER_REMOTE_OBSERVATION
     global _EXPLORER_QUESTION_QUEUE, _EXPLORER_QUESTION_PUMP, _EXPLORER_QUESTION_GENERATION
-    global _EXPLORER_NATIVE_DISPLAY
+    global _EXPLORER_NATIVE_DISPLAY, _EXPLORER_CR_ENTER
     curses.curs_set(0)
     _init_colors()
     if _EXPLORER_ENABLED:
@@ -6848,6 +6851,14 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
         keypad(False)
     input_reader = _CursesInput(curses, mouse_enabled=mouse_enabled,
                                 explorer_mode=_EXPLORER_ENABLED)
+    if _EXPLORER_ENABLED and hasattr(curses, "nonl"):
+        # 11-26: Enter as CR and Ctrl+J as LF (newline mode turns CR into LF), so a written answer can take
+        # a line break; Enter is CR, LF and KEY_ENTER alike everywhere else in the explorer.
+        try:
+            curses.nonl()
+            _EXPLORER_CR_ENTER = True
+        except Exception:
+            _EXPLORER_CR_ENTER = False
 
     from . import details
     latest_basic = [None]
@@ -7086,7 +7097,8 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
 
     if _EXPLORER_ENABLED:
         try:
-            os.write(sys.stdout.fileno(), b"\x1b[?1002h\x1b[?1006h")
+            # Bracketed paste (2004): a pasted text arrives marked, so its line breaks are never Enter.
+            os.write(sys.stdout.fileno(), b"\x1b[?1002h\x1b[?1006h\x1b[?2004h")
         except (OSError, AttributeError):
             pass
     try:
@@ -7097,6 +7109,8 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             timeout_ms = max(20, min(100, int((_nb - time.time()) * 1000) + 1))
             stdscr.timeout(timeout_ms)
             if input_reader is not None:
+                # While an answer is written an Alt combination is the answer's (11-26), not Esc then a key.
+                input_reader.alt_keys = bool(_EXPLORER_ENABLED and _explorer_question_editing())
                 ch, mouse_event = input_reader.read(stdscr, timeout_ms=timeout_ms)
             else:
                 ch, mouse_event = stdscr.getch(), None
@@ -7304,7 +7318,7 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
             if callable(settle):
                 settle()
             try:
-                os.write(sys.stdout.fileno(), b"\x1b[?1006l\x1b[?1002l")
+                os.write(sys.stdout.fileno(), b"\x1b[?2004l\x1b[?1006l\x1b[?1002l")
             except (OSError, AttributeError):
                 pass
         if selection_feed is not None:
