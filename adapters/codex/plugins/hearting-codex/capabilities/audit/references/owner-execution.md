@@ -86,6 +86,7 @@ Run `Stage A → B (B.1/B.2) → B.5 → C → D (D.5)` in order. The references
 - **No delegated role invocation** — run `/audit` in the current agent session without dispatching `research/*` or `qa/*` units. A future version may add intensity-derived, agent-backed linting.
 - **Type-specific aspects** — research aspects do not run on documents artifacts and vice versa. `--scope cross-ref` on plans warns and skips.
 - **Suggestions only** — each 🔴 or 🟡 finding may include a "Suggested fix" line; the audit does not dispatch it.
+- **One item per named section** — when the request names several sections, the Stage D report keeps an item for each (its findings and evidence, or none found).
 
 ## When NOT to use
 
