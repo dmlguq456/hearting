@@ -39,6 +39,19 @@ def resize(master,rows,cols):
     except OSError:pass  # A display-size failure does not close the I/O channel.
 
 
+def _pidfd_open(pid):
+    """os.pidfd_open, or the checked syscall fallback where the Python build lacks it.
+
+    Some builds (conda's Python, built against older kernel headers) have no
+    os.pidfd_open on a kernel that supports pidfds; the launcher runs whatever
+    `python3` the shell finds, so it must not depend on that attribute.
+    """
+    native=getattr(os,'pidfd_open',None)
+    if callable(native):return native(pid)
+    from dispatch_contract_process import pidfd_open
+    return pidfd_open(pid)
+
+
 def release_of(path):
     """The installed bundle behind a host path; None while an install is mid-switch."""
     try:return os.path.realpath(path,strict=True)
@@ -116,8 +129,22 @@ def run(harness,original,wrapped,node,host_path,environment,directory):
     def wake(_signal,_frame):
         try:os.write(wake_w,b'1')
         except OSError:pass
-    for sig in (signal.SIGCHLD,signal.SIGWINCH,signal.SIGINT):
-        previous[sig]=signal.signal(sig,signal.SIG_IGN if sig==signal.SIGINT else wake)
+    resumed=False
+    def resume(_signal,_frame):
+        # A job stopped by SIGTSTP and continued (`fg`) finds the outer tty as the shell left it (cooked): the
+        # loop sets it raw again, once this process is the tty's foreground group.
+        nonlocal resumed
+        resumed=True;wake(_signal,_frame)
+    for sig in (signal.SIGCHLD,signal.SIGWINCH,signal.SIGINT,signal.SIGCONT):
+        previous[sig]=signal.signal(sig,signal.SIG_IGN if sig==signal.SIGINT else resume if sig==signal.SIGCONT else wake)
+    def raw_again():
+        nonlocal resumed
+        if not resumed:return
+        # Background (`bg`): tcsetattr would stop this process with SIGTTOU; the later `fg` sends another SIGCONT.
+        try:
+            if os.tcgetpgrp(0)!=os.getpgrp():return
+            resumed=False;tty.setraw(0,when=termios.TCSANOW)
+        except (OSError,termios.error):pass
     cur=None;pending=None;retiring=[];state=None;failures={}
     native_code=None;deadline=None;started=False;relay=False
     incoming=bytearray();outgoing=bytearray();input_eof=False;master_eof=False
@@ -154,9 +181,10 @@ def run(harness,original,wrapped,node,host_path,environment,directory):
             if gen.host.pid<=1:raise ValueError('unsafe display pid')
             try:
                 if birth(gen.host.pid)!=gen.start:return
-                # No pidfd (pidfd_open failed after Popen): the birth check above already proved the pid is ours.
-                if gen.fd is None:gen.host.terminate()
-                else:signal.pidfd_send_signal(gen.fd,signal.SIGTERM)
+                # No pidfd, or a build whose signal module cannot send through one: the birth check above already proved the pid is ours.
+                send=getattr(signal,'pidfd_send_signal',None)
+                if gen.fd is None or not callable(send):gen.host.terminate()
+                else:send(gen.fd,signal.SIGTERM)
                 gen.term_sent=True
             except (FileNotFoundError,ProcessLookupError):pass
     def spawn_display(number,successor,c):
@@ -176,7 +204,7 @@ def run(harness,original,wrapped,node,host_path,environment,directory):
             gen.host=subprocess.Popen([node,str(host_path),harness,*wrapped],env=env,
                                       stderr=subprocess.DEVNULL if successor else None,
                                       pass_fds=(master,c.ready_w,c.status_r,c.display_control.fileno(),held_fd,c.succ_host.fileno()))
-            gen.start=birth(gen.host.pid);gen.fd=os.pidfd_open(gen.host.pid)
+            gen.start=birth(gen.host.pid);gen.fd=_pidfd_open(gen.host.pid)
         except OSError:
             if gen.host is not None and gen.host.poll() is None:
                 try:gen.host.terminate()
@@ -363,6 +391,7 @@ def run(harness,original,wrapped,node,host_path,environment,directory):
                 elif fd==wake_r:
                     try:os.read(fd,4096)
                     except BlockingIOError:pass
+                    raw_again()
                     if relay:
                         size=os.get_terminal_size(1);resize(master,max(1,size.lines),max(1,size.columns))
                 elif fd in [gen.ready_r for gen in (cur,pending) if gen is not None and gen.ready_r is not None]:

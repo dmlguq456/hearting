@@ -1426,6 +1426,14 @@
    "en": "unknown",
    "ko": "미확인"
   },
+  "fleet.session_block.compact_writing": {
+   "en": "Ctrl+J newline",
+   "ko": "Ctrl+J 줄바꿈"
+  },
+  "fleet.session_block.compact_writing_choices": {
+   "en": "Ctrl+J newline · ↑ choices",
+   "ko": "Ctrl+J 줄바꿈 · ↑ 선택지"
+  },
   "fleet.session_block.complete": {
    "en": "answer every field · Tab next",
    "ko": "모든 문항에 답하기 · Tab 다음"
@@ -1538,9 +1546,13 @@
    "en": "not sent · reading the waits · Enter again or answer below",
    "ko": "아직 안 보냄 · 대기 목록 읽는 중 · 다시 Enter 또는 아래 입력창에 답"
   },
+  "fleet.session_block.writing": {
+   "en": "Enter send · Ctrl+J newline",
+   "ko": "Enter 보내기 · Ctrl+J 줄바꿈"
+  },
   "fleet.session_block.writing_choices": {
-   "en": "Enter send · ↑ choices",
-   "ko": "Enter 보내기 · ↑ 선택지"
+   "en": "Enter send · Ctrl+J newline · ↑ choices",
+   "ko": "Enter 보내기 · Ctrl+J 줄바꿈 · ↑ 선택지"
   },
   "fleet.session_page.generation": {
    "en": "generation {count}",

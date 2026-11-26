@@ -294,20 +294,20 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
   await key('draft2',150);
   await key('\x1d',200);s=await until(s=>!!box(s),'the popup for the text question');
   await key('한글 답',100);
-  // An Alt+letter (ESC then a letter) is no key the editor knows: dropped, the popup stands, the
-  // draft stays and the native receives nothing; so for ESC then a control byte (^C, Tab).
+  // An Alt+letter (ESC then a letter) is the popup's: Alt+B/F step a word in the answer (11-26) and any other is
+  // dropped; the popup stands, the draft stays and the native receives nothing; so for ESC then a control byte (^C, Tab).
   await key('\x1bb',250);await key('\x1bf',250);await key('\x1b\x03',250);await key('\x1b\t',250);
   s=await screen();checks.alt_kept=!!box(s)&&has('› 한글 답')(s);
   checks.alt_leaked=s.some(l=>/^❯ draft2\S/.test(l)||/^❯ (?!draft2)\S/.test(l))||s.some(l=>l.includes('NATIVE_ESC_'));
-  // ESC then Enter (Shift+Enter, Alt+Enter): dropped like it; the popup stands, the draft stays, and the
-  // Enter never submits the text standing in the native input.
+  // ESC then Enter (Alt+Enter, a Shift+Enter set up to send it): a line break in the written answer (11-26); the
+  // popup stands, the draft stays, and the Enter never submits the text standing in the native input.
   await key('\x1b\r',300);
   s=await screen();checks.escenter_kept=!!box(s)&&has('› 한글 답')(s);
   checks.escenter_leaked=s.some(l=>l.includes('DONE_draft2'))||!s.some(l=>l.includes('❯ draft2'));
   await key('\x1b[200~붙여넣기\x1b[201~',250);
-  s=await until(has('› 한글 답붙여넣기'),'the typed answer');frames.typing=s;
+  s=await until(s=>has('› 한글 답')(s)&&has('│   붙여넣기')(s),'the typed answer, the paste on its second line');frames.typing=s;
   await key('\x1b',200);await until(s=>!box(s),'closed');
-  await key('\x1d',250);s=await until(has('› 한글 답붙여넣기'),'the draft kept');frames.draft_kept=s;
+  await key('\x1d',250);s=await until(s=>has('› 한글 답')(s)&&has('│   붙여넣기')(s),'the draft kept');frames.draft_kept=s;
   // The Esc that closes it, pressed again 0.2 s later, is the shell's; a letter after it, or an Esc
   // after 1.5 s, is the native's.
   await key('\x1b',200);await until(s=>!box(s),'closed again');
@@ -498,7 +498,8 @@ class SessionShellPopupTest(unittest.TestCase):
                                               'answers': {'shape': ['넓힌 옆 띠 (가)']}}])
         self.assertIn('✓ 답 보냄 · 넓힌 옆 띠 (가)', '\n'.join(frames['answered']))
         self.assertTrue(checks['enter_swallowed'])
-        self.assertIn('› 한글 답붙여넣기', '\n'.join(frames['draft_kept']))
+        self.assertIn('› 한글 답', '\n'.join(frames['draft_kept']))
+        self.assertIn('│   붙여넣기', '\n'.join(frames['draft_kept']), 'Alt+Enter put a line break before the paste')
         self.assertTrue(checks['motion_kept'])
         self.assertTrue(checks['strip_kept'], '\n'.join(frames['strip_popup']))
         self.assertFalse(checks['outside_reached_native'], '\n'.join(frames['strip_popup']))

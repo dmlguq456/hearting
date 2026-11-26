@@ -115,7 +115,7 @@ const b=create({changed(){},answer(){},action(){}}),labels=JSON.parse(process.ar
 b.update([{id:'fixture',revision:'one',answerable:true,questions:[{id:'q',question:'Question',free_text:true,choices:['one','two']}]}],'',{labels});b.enter();
 const last=()=>b.detail({budget:20,columns:92}).at(-1).map(p=>p.text).join('');
 assert.equal(last(),'↑↓ choose · type to write · Enter send · Tab next · Esc/Ctrl+] back');
-b.input(Buffer.from('hello'));assert.equal(last(),'Enter send · ↑ choices · Tab next · Esc/Ctrl+] back');
+b.input(Buffer.from('hello'));assert.equal(last(),'Enter send · Ctrl+J newline · ↑ choices · Tab next · Esc/Ctrl+] back');
 """, json.dumps(labels))
 
     def test_the_backend_sends_the_summary_and_the_count_leads_its_name(self):
@@ -259,21 +259,23 @@ const assert=require('node:assert/strict'),path=require('node:path'),create=requ
 """)
 
     def test_an_alt_letter_in_the_popup_is_dropped_and_a_lone_esc_still_closes_it(self):
-        # ESC then a letter (Alt+b, Alt+f) is no key this editor has: dropped, the popup stands, the
-        # draft stays, nothing goes on to the native. A lone Esc (the host's 25 ms) closes it; so does
-        # Esc then Esc, and nothing else that follows an Esc does.
+        # ESC then a letter is the popup's, never the native's: the popup stands and nothing goes on. 11-26:
+        # Alt+B/F step a word and Alt+Backspace deletes one in the written answer; any other Alt+letter is
+        # dropped and the draft stays. A lone Esc (the host's 25 ms) closes it; so does Esc then Esc, and
+        # nothing else that follows an Esc does.
         self.node(r"""
 const assert=require('node:assert/strict'),path=require('node:path'),create=require(path.join(process.argv[1],'block-input.cjs'));
 (async()=>{
  const make=()=>{const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
   b.update([{id:'x',revision:'r',answerable:true,questions:[{id:'q',question:'Q?'}]}],'',{});b.enter();return b;};
- for(const alt of ['\x1bb','\x1bf','\x1bx','\x1b\x7f','\x1b한']){
+ for(const [alt,after] of [['\x1bb','dabc'],['\x1bf','abcd'],['\x1bx','abcd'],['\x1b\x7f','d'],['\x1b한','abcd']]){
   const b=make();b.input(Buffer.from('abc'));
   const rest=b.input(Buffer.from(alt));
   assert.equal(rest.length,0,'nothing goes on: '+JSON.stringify(alt));
   assert.equal(b.focused,true,'the popup stands: '+JSON.stringify(alt));
   b.input(Buffer.from('d'));
-  assert(b.detail({budget:6,columns:60}).some(row=>row.some(p=>p.text.includes('abcd'))),'the draft stays and goes on: '+JSON.stringify(alt));
+  const shown=b.detail({budget:6,columns:60}).find(row=>row.some(p=>p.answerRow))?.map(p=>p.text).join('');
+  assert.equal(shown,'› '+after,'the draft after '+JSON.stringify(alt));
  }
  {const b=make();b.input(Buffer.from('\x1b'));b.input(Buffer.from('b'));assert.equal(b.focused,true,'split across reads');}
  {const b=make();b.input(Buffer.from('\x1b'));await new Promise(r=>setTimeout(r,60));assert.equal(b.focused,false,'a lone Esc closes it');}
@@ -290,29 +292,33 @@ const assert=require('node:assert/strict'),path=require('node:path'),create=requ
 })().catch(e=>{console.error(e);process.exit(1);});
 """)
 
-    def test_esc_then_enter_is_dropped_and_the_popup_stands(self):
-        # Shift+Enter / Alt+Enter arrive as ESC then CR (or LF), in one read or split within the Esc
-        # window: this editor has no meaning for them, so they are dropped like Alt+letter. They never
-        # close the popup and never reach the native (a CR there submits the native input's text).
-        # A lone Esc still closes it.
+    def test_alt_enter_puts_a_line_break_and_the_popup_stands(self):
+        # 11-26: Alt/Option+Enter (and a terminal's Shift+Enter set up to send it) arrives as ESC then CR (or
+        # LF), in one read or split within the Esc window. In a written answer it puts a line break at the
+        # place; on a question answered only by a choice it is dropped as before. Either way it never closes
+        # the popup and never reaches the native (a CR there submits the native input's text). A lone Esc
+        # still closes it.
         self.node(r"""
 const assert=require('node:assert/strict'),path=require('node:path'),create=require(path.join(process.argv[1],'block-input.cjs'));
 (async()=>{
- const make=()=>{const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
-  b.update([{id:'x',revision:'r',answerable:true,questions:[{id:'q',question:'Q?'}]}],'',{});b.enter();return b;};
- const shows=(b,word)=>b.detail({budget:6,columns:60}).some(row=>row.some(p=>p.text.includes(word)));
+ const make=(extra={})=>{let sent;const b=create({changed(){},answer:async x=>(sent=x,{state:'submitted'}),action(){}});
+  b.update([{id:'x',revision:'r',answerable:true,questions:[{id:'q',question:'Q?',...extra}]}],'',{});b.enter();return {b,get sent(){return sent}};};
+ const answer=b=>b.detail({budget:12,columns:60}).filter(row=>row.some(p=>p.answerRow)).map(row=>row.map(p=>p.text).join(''));
  for(const combo of ['\x1b\r','\x1b\n']){
-  const b=make();b.input(Buffer.from('abc'));
+  const {b}=make();b.input(Buffer.from('abc'));
   const rest=b.input(Buffer.from(combo));
   assert.equal(rest.length,0,'nothing goes on: '+JSON.stringify(combo));
   assert.equal(b.focused,true,'the popup stands: '+JSON.stringify(combo));
   b.input(Buffer.from('d'));await new Promise(r=>setTimeout(r,60));
   assert.equal(b.focused,true,'no stale Esc timer closes it later');
-  assert(shows(b,'abcd'),'the draft stays and goes on');
+  assert.deepEqual(answer(b),['› abc','  d'],'a line break at the place');
  }
- {const b=make();b.input(Buffer.from('abc'));b.input(Buffer.from('\x1b'));const rest=b.input(Buffer.from('\r'));
-  assert.equal(rest.length,0,'split across reads');assert.equal(b.focused,true);await new Promise(r=>setTimeout(r,60));assert.equal(b.focused,true);assert(shows(b,'abc'));}
- {const b=make();b.input(Buffer.from('\x1b'));await new Promise(r=>setTimeout(r,60));assert.equal(b.focused,false,'a lone Esc closes it');}
+ {const x=make();x.b.input(Buffer.from('abc'));x.b.input(Buffer.from('\x1b'));const rest=x.b.input(Buffer.from('\r'));
+  assert.equal(rest.length,0,'split across reads');assert.equal(x.b.focused,true);await new Promise(r=>setTimeout(r,60));assert.equal(x.b.focused,true);
+  x.b.input(Buffer.from('d\r'));await new Promise(r=>setImmediate(r));assert.deepEqual(x.sent.answers.q,['abc\nd'],'Enter sends the lines');}
+ {const x=make({choices:['one','two'],free_text:false});const rest=x.b.input(Buffer.from('\x1b\r'));await new Promise(r=>setTimeout(r,60));
+  assert.equal(rest.length,0);assert.equal(x.b.focused,true,'a choice-only question: dropped, the popup stands');assert.equal(x.sent,undefined,'nothing sent');}
+ {const {b}=make();b.input(Buffer.from('\x1b'));await new Promise(r=>setTimeout(r,60));assert.equal(b.focused,false,'a lone Esc closes it');}
 })().catch(e=>{console.error(e);process.exit(1);});
 """)
 
