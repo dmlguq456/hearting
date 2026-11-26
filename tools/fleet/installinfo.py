@@ -93,10 +93,11 @@ def _release_version(root):
 def _worktree_dirty(root, runner, timeout=_GIT_TIMEOUT):
     """True/False as git answered; None when it could not tell."""
     try:
+        # Only emptiness matters; a non-UTF-8 path (core.quotePath=false) must not raise.
         result = runner(
             list(_DIRTY_ARGV),
             stdin=subprocess.DEVNULL, cwd=str(root), capture_output=True, text=True,
-            timeout=timeout,
+            errors="replace", timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError):
         return None
