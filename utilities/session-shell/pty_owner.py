@@ -129,8 +129,22 @@ def run(harness,original,wrapped,node,host_path,environment,directory):
     def wake(_signal,_frame):
         try:os.write(wake_w,b'1')
         except OSError:pass
-    for sig in (signal.SIGCHLD,signal.SIGWINCH,signal.SIGINT):
-        previous[sig]=signal.signal(sig,signal.SIG_IGN if sig==signal.SIGINT else wake)
+    resumed=False
+    def resume(_signal,_frame):
+        # A job stopped by SIGTSTP and continued (`fg`) finds the outer tty as the shell left it (cooked): the
+        # loop sets it raw again, once this process is the tty's foreground group.
+        nonlocal resumed
+        resumed=True;wake(_signal,_frame)
+    for sig in (signal.SIGCHLD,signal.SIGWINCH,signal.SIGINT,signal.SIGCONT):
+        previous[sig]=signal.signal(sig,signal.SIG_IGN if sig==signal.SIGINT else resume if sig==signal.SIGCONT else wake)
+    def raw_again():
+        nonlocal resumed
+        if not resumed:return
+        # Background (`bg`): tcsetattr would stop this process with SIGTTOU; the later `fg` sends another SIGCONT.
+        try:
+            if os.tcgetpgrp(0)!=os.getpgrp():return
+            resumed=False;tty.setraw(0,when=termios.TCSANOW)
+        except (OSError,termios.error):pass
     cur=None;pending=None;retiring=[];state=None;failures={}
     native_code=None;deadline=None;started=False;relay=False
     incoming=bytearray();outgoing=bytearray();input_eof=False;master_eof=False
@@ -377,6 +391,7 @@ def run(harness,original,wrapped,node,host_path,environment,directory):
                 elif fd==wake_r:
                     try:os.read(fd,4096)
                     except BlockingIOError:pass
+                    raw_again()
                     if relay:
                         size=os.get_terminal_size(1);resize(master,max(1,size.lines),max(1,size.columns))
                 elif fd in [gen.ready_r for gen in (cur,pending) if gen is not None and gen.ready_r is not None]:
