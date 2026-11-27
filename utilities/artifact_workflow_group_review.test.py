@@ -1105,8 +1105,15 @@ class WindowValuesTest(unittest.TestCase):
             "HEARTING_SHELL_TOKEN": "f" * 64,
             "HEARTING_SHELL_NATIVE_MODEL": "fixture-window-model",
         }
+        scrubbed = {
+            "AGENT_DISPATCH_ATTEMPT_ID": "att-window",
+            "AGENT_ROUTE_ID": "rt-window",
+            "AGENT_REVIEW_OUTPUT": str(base / "review-output"),
+            "AGENT_ARTIFACT_WORKFLOW_GROUP_ID": "wg-window",
+        }
         caller = {
             **window,
+            **scrubbed,
             "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"),
             "FAKE_MODEL_ENV_DIR": str(seen),
             "FIXTURE_CARRIED": "kept-by-the-review-model",
@@ -1116,8 +1123,6 @@ class WindowValuesTest(unittest.TestCase):
             "AGENT_MODEL_WORKER_START_BUDGET": "20",
             "XDG_STATE_HOME": str(base / "state"),
             "AGENT_DISPATCH_JOBS": str(base / "jobs.log"),
-            "AGENT_ROUTE_ID": "rt-window",
-            "AGENT_ARTIFACT_WORKFLOW_GROUP_ID": "wg-window",
         }
         rt = R._refresh_title()
 
@@ -1131,7 +1136,12 @@ class WindowValuesTest(unittest.TestCase):
                 self.assertTrue(R.launch_after_seal(root, {"cycle_id": "cyc_" + "3" * 32}))
             popen.assert_called_once()
             self.assertEqual(popen.call_args.args[0][2:4], ["sweep", "--artifact-root"])
-            with mock.patch.dict(os.environ, dict(popen.call_args.kwargs["env"]), clear=True):
+            sweep_env = popen.call_args.kwargs["env"]
+            self.assertEqual(sorted(key for key in sweep_env if key.startswith("HEARTING_SHELL_")), [])
+            self.assertEqual(sweep_env.get("AGENT_DISPATCH_JOBS"), caller["AGENT_DISPATCH_JOBS"])
+            for key in scrubbed:
+                self.assertNotIn(key, sweep_env)
+            with mock.patch.dict(os.environ, sweep_env, clear=True):
                 return R._invoke_model("Synthetic sweep input")
 
         for name, call in (("campaign-title", campaign_title), ("seal-trigger", seal_trigger)):
@@ -1149,8 +1159,8 @@ class WindowValuesTest(unittest.TestCase):
                 # What the review's call already kept or dropped stays as it was.
                 self.assertEqual(received.get("AGENT_SESSION_ROLE"), "worker")
                 self.assertEqual(received.get("AGENT_DISPATCH_JOBS"), caller["AGENT_DISPATCH_JOBS"])
-                self.assertNotIn("AGENT_ROUTE_ID", received)
-                self.assertNotIn("AGENT_ARTIFACT_WORKFLOW_GROUP_ID", received)
+                for key in scrubbed:
+                    self.assertNotIn(key, received)
                 self.assertEqual(received.get("HOME"), os.environ.get("HOME"))
                 self.assertEqual(received.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"), "1")
                 # The window that asked for it keeps its own values.
