@@ -2193,9 +2193,17 @@ def _question_text(spec, envelope):
 
 def _question_choices(spec):
     """``(value, label)`` for each choice, in native order; a value is what is sent."""
+    return [(value, label) for value, label, _words in _question_choice_rows(spec)]
+
+
+def _question_choice_rows(spec):
+    """``(value, label, words)`` for each choice, in native order; ``words`` are what the board draws
+    under its name (11-27, design 가: ``human_wait_state.choice_descriptions``, ``""`` for none)."""
     result = []
     choices = spec.get("choices", spec.get("options", ()))
-    for choice in choices if isinstance(choices, (list, tuple)) else ():
+    choices = list(choices) if isinstance(choices, (list, tuple)) else []
+    described = _choice_words(spec, choices)
+    for at, choice in enumerate(choices):
         if isinstance(choice, Mapping):
             value = choice.get("value")
             if value is None:
@@ -2204,8 +2212,24 @@ def _question_choices(spec):
         else:
             value = label = choice
         if isinstance(value, str) and value:
-            result.append((value, label if isinstance(label, str) else value))
+            result.append((value, label if isinstance(label, str) else value,
+                           described[at] if at < len(described) else ""))
     return result
+
+
+def _choice_words(spec, choices):
+    """The one reading of a choice's words (the panel's too), from the question record's owner."""
+    try:
+        import human_wait_state
+    except ImportError:
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "utilities"))
+        import human_wait_state
+    return human_wait_state.choice_descriptions(
+        {"choices": [dict(choice) if isinstance(choice, Mapping) else choice for choice in choices],
+         "choice_descriptions": dict(spec.get("choice_descriptions"))
+         if isinstance(spec.get("choice_descriptions"), Mapping) else None})
 
 
 def _question_actions(grid, x, right, y, items):
@@ -2296,14 +2320,22 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
         qid = spec["id"]
         values = answers.get(qid, ()) if hasattr(answers, "get") else ()
         values = tuple(values) if isinstance(values, (list, tuple)) else ()
-        choices = _question_choices(spec)
+        rows = _question_choice_rows(spec)
+        choices = [(value, label) for value, label, _words in rows]
+        # 11-27 (design 가): each choice's words on the rows under its name, from its name's first cell
+        # (the mark, a cell, the number and two cells in), wrapped there; a choice and these rows are one.
+        details = [[wrapped for said in str(words).splitlines() if said.strip()
+                    for wrapped in _wrap(" ".join(said.split()), max(1, right - indent - 5))]
+                   for _value, _label, words in rows]
         words = [wrapped for text in _question_text(spec, envelope).splitlines() or [""]
                  for wrapped in _wrap(text, width)]
-        return qid, values, choices, words, len(choices) + (1 if question_free_text_available(envelope, qid, values) else 0)
+        listed = len(choices) + sum(map(len, details))
+        return (qid, values, choices, words,
+                listed + (1 if question_free_text_available(envelope, qid, values) else 0), details, listed)
 
     shapes = [_asked(spec) for spec in asked]
     for index, spec in enumerate(asked):
-        qid, values, choices, words, own = shapes[index]
+        qid, values, choices, words, own, details, listed = shapes[index]
         secret = bool(spec.get("is_secret") or spec.get("isSecret"))
         free = question_free_text_available(envelope, qid, values)
         editing = bool(private.get("editing") and (private.get("editing_question_id") or qid) == qid)
@@ -2334,9 +2366,9 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
         # 11-26: the answer grows within what is left once the question's first words (and their `more` line),
         # its choices, the later questions and the action line have their rows; taller than that, the rows
         # shown follow the place.
-        answer_shown = min(len(answer_rows), max(1, bottom - y - len(choices) - 1 - later - min(len(words), 2)
+        answer_shown = min(len(answer_rows), max(1, bottom - y - listed - 1 - later - min(len(words), 2)
                                                  - (1 if len(words) > 2 else 0))) if free else 0
-        own = len(choices) + answer_shown
+        own = listed + answer_shown
         gap = 2 if choices else 0
         room = bottom - y - own - 1 - later
         while gap and room - gap < min(len(words), 2):
@@ -2353,9 +2385,9 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
         if choices:
             # 11-17: the question's words end, then one empty row and a thin line, then the choices (as the
             # shell's question popup does); short of rows the empty row goes first, never a choice's row.
-            if gap == 2 and bottom - y >= len(choices) + 2:
+            if gap == 2 and bottom - y >= listed + 2:
                 y += 1
-            if gap >= 1 and bottom - y >= len(choices) + 1:
+            if gap >= 1 and bottom - y >= listed + 1:
                 line("─" * width, "line")
         for number, (value, label) in enumerate(choices, 1):
             if y >= bottom:
@@ -2375,6 +2407,14 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
                 # The whole line answers: wherever on it the person presses.
                 grid.add_hit(y, x, right, ("question.choice", qid, value))
             y += 1
+            for detail in details[number - 1]:
+                if y >= bottom:
+                    break
+                grid.put(indent + 5, y, detail, "dim", limit=right)
+                if selectable:
+                    # Its words' rows answer as its name's row does.
+                    grid.add_hit(y, x, right, ("question.choice", qid, value))
+                y += 1
         if not question_values_valid(envelope, qid, values):
             complete = False
         if free and y < bottom:

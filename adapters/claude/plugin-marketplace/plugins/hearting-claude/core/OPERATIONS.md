@@ -3266,7 +3266,9 @@ session. A registered question takes words beside its choices (11-22): the perso
 choice and add text, or send text alone, in the answer forms that already exist (`[value, text]`,
 text only), and the delivery to the asking session shows both; `questions answer --choice N` is
 unchanged. What is to be chosen is registered with `--choice`, not listed in the question's
-text. Existing question IDs, seat addresses and answer bindings remain valid;
+text; what a choice means may go under its name with `--choice-description N=WORDS` (11-27,
+optional, 1-based). A single native question call registers its options' descriptions the same
+way; those words are drawn only and are no part of any answer. Existing question IDs, seat addresses and answer bindings remain valid;
 legacy seat-only sources are read only for their matching session. The exact
 consumed receipt remains distinct from native gate approval. A queued answer or
 ordinary peer notice closes neither kind of wait. Direct input closes a message

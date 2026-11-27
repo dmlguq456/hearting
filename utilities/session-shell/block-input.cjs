@@ -358,8 +358,19 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
       }else scroll=0;
       if(marked.length<=spare)return [head,...top,...marked,...f].slice(0,limit);
       const size=spare>=2?spare-1:spare,lit=Math.max(0,marked.findIndex(parts=>parts[0]?.text==='▸'));
-      const from=Math.max(0,Math.min(marked.length-size,lit-Math.floor(size/2)));
-      return [head,...top,...marked.slice(from,from+size),...(spare>=2?[[span(`+${marked.length-size} · ${text('more_choices','more choices · ↑↓')}`)]]:[]),...f].slice(0,limit);
+      // 11-27 (design 가): a choice slides as one with its rows (its name's wrapped rows and its words): whole
+      // choices, the highlighted one among them (one after it first, then one before, as far as they fit), and
+      // the count of the choices left out. A choice taller than the rows alone shows its first rows.
+      const groups=choiceGroups(options),at=Math.max(0,groups.findIndex(([a,b])=>lit>=a&&lit<b));
+      const rowsOf=([a,b])=>b-a;
+      let first=at,last=at,used=rowsOf(groups[at]||[0,size]);
+      for(let after=true,stuck=0;stuck<2;after=!after){
+        const next=after?last+1:first-1,fits=next>=0&&next<groups.length&&used+rowsOf(groups[next])<=size;
+        if(fits){used+=rowsOf(groups[next]);if(after)last=next;else first=next;stuck=0;}else stuck++;
+      }
+      const from=groups.length?groups[first][0]:0,to=groups.length?Math.min(groups[last][1],from+size):size;
+      const unseen=groups.length?groups.length-(last-first+1):marked.length-size;
+      return [head,...top,...marked.slice(from,to),...(spare>=2?[[span(`+${unseen} · ${text('more_choices','more choices · ↑↓')}`)]]:[]),...f].slice(0,limit);
     }
     if(content.length>space&&gap.length>1){gap=gap.slice(1);content=lines();}
     if(content.length<=space){scroll=0;return [head,...content,...footer].slice(0,limit);}
@@ -389,20 +400,32 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
   // across it (one ground, no other inside it); the answer being typed, and an answer picked, are
   // marked alike while this question is answered here.
   const chosenRow=(parts,on=true)=>on?parts.map(part=>({...part,tint:true})):parts;
+  // The rows of each choice, `[first, end)`: a choice's first row leads with its number, its other rows (its
+  // name's wrapped rows, its words under it) with spaces.
+  function choiceGroups(options){
+    const groups=[];
+    options.forEach((parts,i)=>{const lead=String(parts[0]?.text??'');
+      if(/^\d+\s+$/.test(lead))groups.push([i,i+1]);else if(groups.length&&!lead.trim())groups.at(-1)[1]=i+1;});
+    return groups;
+  }
   // 11-17: the number is the question's rose and bold on every row (the mark `◑`'s own color; where there is no
   // color, its weight tells it from the words), two cells before the words.
+  // 11-27 (design 가): a choice's words under its name (`choice-detail`) read dim on every row, the chosen
+  // choice's too (the popup draws them in its floor gray, on the chosen ground there); and a press on any
+  // row of a choice, its words' rows too, picks that choice.
   function highlight(options,at,choosing,canPick){
     let n=-1;
-    const bold=part=>({...part,bold:true});
+    const bold=part=>({...part,bold:true}),dim=part=>({...part,...(styles.dim||{dim:true}),bold:false});
     return options.map(parts=>{
       const lead=String(parts[0]?.text??''),number=/^(\d+)\s+$/.exec(lead);
       if(number)n=Number(number[1])-1;else if(lead.trim())n=-1;
       const [head,...rest]=number?[bold(parts[0]),...parts.slice(1)]:[null,...parts];
-      const first=head?[{...head,...(canPick?{choiceIndex:n}:{})}]:[];
-      if(!choosing||at<0)return [span('  ',''),...first,...rest];
-      if(n!==at)return [span('  ',''),...first,...rest.map(part=>({...part,...(styles.dim||{dim:true}),bold:false}))];
-      const words=rest.map(part=>({...part,...(styles.loc_repo||{}),bold:true,dim:false}));
-      return chosenRow(number?[{...span('▸','harness'),bold:true,role:'choice-mark'},span(' ',''),...first,...words]:[span('  ',''),...words]);
+      const pick=canPick&&n>=0?{choiceIndex:n}:{};
+      const first=head?[{...head,...pick}]:[],gap={...span('  ',''),...pick};
+      if(!choosing||at<0)return [gap,...first,...rest];
+      if(n!==at)return [gap,...first,...rest.map(dim)];
+      const words=rest.map(part=>part.role==='choice-detail'?dim(part):{...part,...(styles.loc_repo||{}),bold:true,dim:false});
+      return chosenRow(number?[{...span('▸','harness'),bold:true,role:'choice-mark',...pick},span(' ',''),...first,...words]:[gap,...words]);
     });
   }
   // Rule 5: one line per answer on its way, `✓ answer sent · <what was sent>` (11-15 panel polish

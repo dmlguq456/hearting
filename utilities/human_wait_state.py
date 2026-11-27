@@ -562,13 +562,55 @@ def _prune_selected(overlay, needed=1):
     return len(overlay) + needed <= _SELECTED_RESPONSE_MAX
 
 
+def choice_descriptions(question):
+    """Each choice's own words under its name, in choice order (`""` for none): what the board draws.
+
+    11-27 (the person: "답변 선지가 클로드 네이티브 질문창이 좀 더 상세하네?", design 가): a choice given as an
+    object says it in its `description` (a native question), else in its `means` (a frame question,
+    with its scope line already joined); a registered question's plain choices say it in its optional
+    `choice_descriptions` (`{choice value: words}`, written by `register_message`). Display only: no answer
+    value carries these words."""
+    if not isinstance(question, dict):
+        return []
+    choices = question.get("choices") if isinstance(question.get("choices"), list) else []
+    given = question.get("choice_descriptions")
+    given = given if isinstance(given, dict) else {}
+    out = []
+    for choice in choices:
+        if isinstance(choice, dict):
+            words = next((value for value in (choice.get("description"), choice.get("means"))
+                          if isinstance(value, str) and value.strip()), "")
+        else:
+            words = given.get(choice) if isinstance(choice, str) else None
+        # A line break the asker wrote stays (each line's own spaces made one); the board wraps each line.
+        out.append("\n".join(" ".join(line.split()) for line in words.splitlines() if line.strip())
+                   if isinstance(words, str) else "")
+    return out
+
+
+def _message_choice_descriptions(choices, descriptions):
+    """The registered record's `choice_descriptions`: each given choice's words, in choice order, the
+    empty ones left out (None when none is left: the record then reads as it always did)."""
+    if descriptions is None:
+        return None
+    if (not isinstance(descriptions, dict) or any(key not in choices for key in descriptions)
+            or any(not isinstance(value, str) for value in descriptions.values())):
+        raise ValueError("question-choice-descriptions-invalid")
+    kept = {choice: descriptions[choice].strip() for choice in choices
+            if descriptions.get(choice, "").strip()}
+    return kept or None
+
+
 def register_message(harness, session_id, seat, text, *, sequence, choices=(),
-                     recommended=None, secret=False, cwd=None, incarnation=None, replace=True):
+                     recommended=None, secret=False, cwd=None, incarnation=None, replace=True,
+                     descriptions=None):
     """Register one explicit question on the caller's current prompt, without waiting.
 
     A new question replaces this session's earlier waiting one; the returned value then carries
     `replaced` (that question's id and text) so the caller can say so. `replace=False` leaves a
-    different open question in place and refuses instead (`question-open-elsewhere`)."""
+    different open question in place and refuses instead (`question-open-elsewhere`).
+    `descriptions` (`{choice value: words}`, optional) are the words the board draws under those
+    choices (`choice_descriptions`); they count toward the record's size and are never part of an answer."""
     import session_tidy as tidy
     if (tidy.is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower()
             in {"owner", "worker", "auxiliary", "reviewer"}):
@@ -586,8 +628,11 @@ def register_message(harness, session_id, seat, text, *, sequence, choices=(),
     if recommended is not None and (type(recommended) is not int
                                     or not 0 <= recommended < len(choices)):
         raise ValueError("question-recommendation-invalid")
+    described = _message_choice_descriptions(list(choices), descriptions)
     question = {"id": "message-response", "question": text, "choices": list(choices),
                 "recommended": recommended, "is_secret": bool(secret), "is_other": True, "required": True}
+    if described:
+        question["choice_descriptions"] = described
     detail = {"questions": [question]}
     if len(json.dumps(detail, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 4096:
         raise ValueError("question-detail-too-large")

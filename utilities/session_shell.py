@@ -1183,6 +1183,20 @@ def _panel_read_target(harness, sid, native_pid, native_start):
     return sid, native_pid, native_start, None
 
 
+def styled_parts(parts, *, colors=256, no_color=False) -> list:
+    """``(text, key)`` parts as the panel paints them: the text and its key's look, plus a role where
+    the panel reads one."""
+    from fleet.palette import style_components
+    from fleet.session_line import fresh_part
+    from fleet.session_block import CHOICE_DETAIL
+    # Spec E9 rule 50 (d): Git's `↑N`/`↓N` are marked so the panel can read them as the
+    # rest of the Git words where it shows no hue (mono, eight colors). A choice's words under its
+    # name (11-27) are marked so the editor keeps them dim on the chosen choice's rows.
+    return [{"text": text, **style_components(key, colors=colors, no_color=no_color),
+             **({"role": "git-fresh"} if fresh_part(text, key) else
+                {"role": "choice-detail"} if key == CHOICE_DETAIL else {})} for text, key in parts]
+
+
 def block_labels(editor: int) -> dict:
     """The question block's words for a popup of ``editor`` cells (the editor and the tests read the same)."""
     from fleet.config import ui_text
@@ -1219,7 +1233,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     import questions
     from fleet.prompt_line import last_input
     from fleet.session_tags import assigned_tag
-    from fleet.session_line import line_segments, fresh_part
+    from fleet.session_line import line_segments
     from fleet.session_line import status_lines
     from fleet.session_block import block_lines, block_sections, question_presentations
     from fleet.palette import style_components
@@ -1295,10 +1309,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     if os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit"):
         colors = 1 << 24
     def styled(parts):
-        # Spec E9 rule 50 (d): Git's `↑N`/`↓N` are marked so the panel can read them as the
-        # rest of the Git words where it shows no hue (mono, eight colors).
-        return [{"text": text, **style_components(key, colors=colors, no_color=no_color),
-                 **({"role": "git-fresh"} if fresh_part(text, key) else {})} for text, key in parts]
+        return styled_parts(parts, colors=colors, no_color=no_color)
     segments = styled(line_segments(values, columns))
     # Spec E9 rules 37 (b), 46 (c): the repo's newest saved memory records, five at most (11-16; the
     # journal Fleet reads, read again only when it changed); their headlines ride the open-work
