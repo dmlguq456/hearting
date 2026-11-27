@@ -27,9 +27,10 @@ busy step ended did not test the late-report path and is ``inconclusive``.
     is B' 's and B' 's report is accepted. Counter-case: a session with no lineage row
     cannot report (``reporter-not-recipient``) and the request stays with B.
 
-The panel request lines (the requester's ``→`` and the receiver's ``←``, in the route box's own
-form: mark, other session, the request's title (cut with `…` on a narrow panel), `` · ``, state) are read from both whole
-terminal screens, which are written to the output folder; a panel that does not show them is a
+The panel request lines (the requester's ``→`` and the receiver's ``←``) are read from both whole
+terminal screens, which are written to the output folder, inside the panel's route box only (a received
+message wears the same ``←`` in MESSAGES): the mark, the other session, then the request's title (cut with
+`…` on a narrow panel) and state on that row or the next ones; a panel that does not show them is a
 ``gap`` (outside the session shell there is no Hearting panel, so none is asserted: `panel: not-applicable`). Outside the session shell, the declared limits (PG-59: a Claude receiver at rest takes no
 request; PG-4/33: an OpenCode requester is not woken by every report) are ``gap``, not ``fail``.
 """
@@ -67,9 +68,14 @@ def busy_step(seconds):
     return 'python3 -c "import time; time.sleep(%d); print(\'B-WORK-DONE\')"' % seconds
 
 
-# The route box's request line: mark, the other session's `[tag]` (kept when the line is cut), the
-# title (cut with `…` on a narrow panel), ` · `, the state.
-PANEL_REQUEST_LINE = re.compile(r"│\s*([→←✓✕])(?: (\[[^\]│]+\]))?(?: ([^│]*?))? · ([^│]*?)\s*│")
+# The panel's route box (`╭─ 2 ROUTE`, `╭─ ROUTE`, `╭─ route 2`) and its own bottom border (a box drawn inside
+# it, a worker's, closes after the route box's left border: `│ │   ╰─`). A request stands only in it: a
+# received message wears the same `←` in MESSAGES, under the box (11-27).
+ROUTE_BOX_TOP = re.compile(r"│ ╭─ (?:\d+ ROUTE|ROUTE|route)(?=[ ─])")
+ROUTE_BOX_BOTTOM = re.compile(r"(?<!│ )│ ╰[─╯]")
+ROUTE_BOX_ROW = re.compile(r"│ │ ([^│]*) │ │")
+REQUEST_TAG = re.compile(r"\[[^\]│]+\]")
+REQUEST_RULE = re.compile(r"^─ request ─")
 
 
 def turn(record):
@@ -93,14 +99,85 @@ def _title_matches(shown, titles):
     return False
 
 
+def _title_after(words, titles):
+    """The recorded title ``words`` end in, whole or cut with ``…``, after the other session's harness,
+    model and effort (a one-row request: ``codex GPT 5.5 high 검토 제목 9c4f…``); None when it ends in none."""
+    words = " ".join((words or "").split())
+    parts = words.split(" ")
+    for at in range(len(parts)):
+        shown = " ".join(parts[at:])
+        if _title_matches(shown, titles):
+            return shown
+    return None
+
+
+def _route_box_rows(screen):
+    """Each route box's inner rows (between its borders, the panel's border cut off) in screen order,
+    one list per box. Beside the native area the panel's row is the last box row of a screen row, or
+    the first where the panel stands on the left."""
+    boxes, rows, last = [], None, True
+    for row in screen.splitlines():
+        top = ROUTE_BOX_TOP.search(row)
+        if rows is None:
+            if top:
+                rows, last = [], not row[top.end():].split("╮", 1)[-1].replace("│", "").strip()
+            continue
+        if ROUTE_BOX_BOTTOM.search(row):
+            boxes.append(rows)
+            rows = None
+            continue
+        found = ROUTE_BOX_ROW.findall(row)
+        rows.append((found[-1] if last else found[0]).rstrip() if found else "")
+    if rows is not None:
+        boxes.append(rows)
+    return boxes
+
+
 def panel_request_lines(screen, titles, marks):
     """The route box's request lines of the given marks whose title is a recorded request title
-    (whole, or cut with ``…``). ``titles`` is one title or several."""
+    (whole, or cut with ``…``), each as ``mark [tag] title · state``. ``titles`` is one title or several.
+
+    A request reads on one row (``← [b2] codex GPT 5.5 high 검토 제목 9c4f7d · open  2m``, the title cut on a
+    narrow panel) or, beside the native area with rows to spare, as a route's doer: its head row (``← [b2]
+    codex GPT 5.5 high  2m``), then two cells in its title and state on one row or two. Only rows inside
+    the route box count, so a MESSAGES row or the conversation never does. A head row with no title on it
+    is the request's only with the other session's ``[tag]`` or under the box's ``request`` rule (a route's
+    own first row, `✓ code(standard)`, has neither)."""
     found = []
-    for row in screen.splitlines():
-        for match in PANEL_REQUEST_LINE.finditer(row):
-            if match.group(1) in marks and _title_matches(match.group(3), titles):
-                found.append(match.group(0).strip("│ ").strip())
+    for rows in _route_box_rows(screen):
+        in_request_zone = False
+        for at, row in enumerate(rows):
+            if REQUEST_RULE.match(row):
+                in_request_zone = True
+                continue
+            if row.startswith("─ "):
+                in_request_zone = False
+                continue
+            if len(row) < 2 or row[0] not in marks or row[1] != " ":
+                continue
+            mark, rest = row[0], row[2:].strip()
+            tag = REQUEST_TAG.match(rest)
+            who = tag.group(0) if tag else ""
+            after = rest[tag.end():].strip() if tag else rest
+            title, state = None, ""
+            if " · " in after:
+                # (`→ [c2] other-repo · title · state` with no harness between: the split nearest the front that ends in a title.)
+                pieces = after.split(" · ")
+                title, state = next(((shown, " · ".join(pieces[k:])) for k in range(1, len(pieces))
+                                     for shown in [_title_after(" · ".join(pieces[:k]), titles)] if shown), (None, ""))
+            elif who or in_request_zone:
+                below = []
+                for under in rows[at + 1:at + 3]:
+                    if not (under.startswith("  ") and under[2:].strip()):
+                        break
+                    below.append(under[2:].strip())
+                if below:
+                    words, state = below[0].split(" · ", 1) if " · " in below[0] else (below[0], below[1] if len(below) > 1 else "")
+                    title = " ".join(words.split()) if _title_matches(words, titles) else None
+            if title is None:
+                continue
+            state = re.split(r"\s{2,}", state.strip())[0]
+            found.append(" ".join(part for part in (mark, who, title) if part) + (" · " + state if state else ""))
     return found
 
 

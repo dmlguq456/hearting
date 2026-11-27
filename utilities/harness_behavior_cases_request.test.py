@@ -38,6 +38,13 @@ def record(text, last, kind="user", reply=None, turn=None):
     return found
 
 
+def boxed(*rows, raw=False, label="ROUTE"):
+    """``rows`` in a side panel's route box (``│ ╭─ ROUTE ─…╮ │`` … ``│ ╰─…╯ │``), as a real screen holds a
+    request line; ``raw`` rows already carry the box's and the panel's borders."""
+    inner = [row if raw else f"│ │ {row} │ │" for row in rows]
+    return [f"│ ╭─ {label} ──────────── ›─╮ │", *inner, "│ ╰──────────────────────────╯ │"]
+
+
 class RegistrationTest(unittest.TestCase):
     def test_the_scenarios_load_and_are_listed(self):
         hb._load_extra()
@@ -216,12 +223,16 @@ class HostRunR2Test(ScriptedModelTest):
 
     def test_s5_only_the_route_boxs_request_line_counts_not_messages_or_conversation(self):
         n = self.nonce
+        side = " " * 62
         screen = "\n".join([
             f"  [요청 rq-aaaaaa] [df] → [67] │ 검토 제목 {n} │ 판 1 │ 열기: show rq-aaaaaa      │ MESSAGES │",
-            f"  conversation → [67] {n} claude · 01:02 · delivered                              │ → [67] claude · 01:02 · delivered │",
-            f"                                                              │ │ → [67] 검토 제목 {n} · open │ │",
-            f"                                                              │ │ ← [df] 다른 제목 · open │ │",
-            f"                                                              │ │ ✓ [67] 검토 제목 {n} · final │ │",
+            f"  conversation │ │ → [67] 검토 제목 {n} · open │ │ quoted by the agent",
+            *[side + row for row in boxed(f"→ [67] 검토 제목 {n} · open", "← [df] 다른 제목 · open",
+                                          f"✓ [67] 검토 제목 {n} · final")],
+            side + "│ MESSAGES                   › │",
+            # 11-27: a received message wears the same `←` as a received request; MESSAGES is under the box.
+            side + f"│  ← [67] 검토 제목 {n} · open 09:01 │",
+            side + f"│  → [67] 검토 제목 {n} · final 09:02 │",
         ])
         title = f"검토 제목 {n}"
         self.assertEqual(cases.panel_request_lines(screen, title, "→✓✕"),
@@ -234,25 +245,27 @@ class HostRunR2Test(ScriptedModelTest):
         # cut off with the title's end, so the line is found by the recorded title's front part.
         closed = "│ │ ✓ 검토 제목 1c09… · final answer │ │"
         other = "│ │ ✓ 다른 제목 1c09… · final answer │ │"
-        screen = "  ▐▛███▛█   Claude Code   ┌ ● [b6] claude ───┐\n" + closed + "\n" + other
+        screen = "\n".join(["  ▐▛███▛█   Claude Code   ┌ ● [b6] claude ───┐", *boxed(closed, other, raw=True)])
         self.assertEqual(cases.panel_request_lines(screen, ["검토 제목 1c09d3"], "→✓✕"),
                          ["✓ 검토 제목 1c09… · final answer"])
         self.assertEqual(cases.panel_request_lines(screen, "검토 제목 1c09d3", "←"), [])
         pad = " " * 160  # row 9 of the r3 screens, whole (the left pane is blank there)
-        real_closed = pad + "│ │ ✓ 검토 제목 1c09… · final answer │ │"
-        real_receiver = pad + "│ │ ← 검토 제목 1c… · partial answer │ │"
+        real_closed = "\n".join(pad + row for row in boxed("│ │ ✓ 검토 제목 1c09… · final answer │ │", raw=True))
+        real_receiver = "\n".join(pad + row for row in boxed("│ │ ← 검토 제목 1c… · partial answer │ │", raw=True))
         self.assertEqual(cases.panel_request_lines(real_closed, ["검토 제목 1c0908"], "→✓✕"),
                          ["✓ 검토 제목 1c09… · final answer"])
         self.assertEqual(cases.panel_request_lines(real_receiver, ["검토 제목 1c0908"], "←"),
                          ["← 검토 제목 1c… · partial answer"])
         # With the other session's tag and a cut title: `← [b1] 검토 제목 9036… · open`.
-        opened = "│ │ ← [b1] 검토 제목 9036… · open │ │"
+        opened = "\n".join(boxed("← [b1] 검토 제목 9036… · open"))
         self.assertEqual(cases.panel_request_lines(opened, ["검토 제목 9036d9"], "←"),
                          ["← [b1] 검토 제목 9036… · open"])
         self.assertEqual(cases.panel_request_lines(opened, ["검토 제목 aaaaaa"], "←"), [])
         # A whole title and a state with a long word.
-        whole = "│ │ → [6e] 짧은 일 · partial answer │ │"
+        whole = "\n".join(boxed("→ [6e] 짧은 일 · partial answer"))
         self.assertEqual(cases.panel_request_lines(whole, ["짧은 일"], "→"), ["→ [6e] 짧은 일 · partial answer"])
+        # Outside a route box the same row is not a request line.
+        self.assertEqual(cases.panel_request_lines(closed, ["검토 제목 1c09d3"], "→✓✕"), [])
 
     def test_s7_the_handoff_steward_runs_under_the_environment_the_shared_resolver_reads(self):
         import dispatch_parent_completion as parent
@@ -271,6 +284,95 @@ class HostRunR2Test(ScriptedModelTest):
             found = subprocess.run([sys.executable, "-I", "-c", script, str(HERE / "peer-steward.py")],
                                    env={**env, "PATH": os.environ["PATH"]}, capture_output=True, text=True, timeout=60)
             self.assertEqual(found.stdout.strip(), str(("sid-successor-1", harness)), found.stderr)
+
+
+# The panel the session shell draws (`panel-view.cjs`), for the reader below: a request, a message with the
+# same title and a route, at the sizes a scenario's terminal gives the panel.
+PANEL_SCRIPT = r"""
+const path=require('node:path'),view=require(process.argv[1]);
+const cells=s=>[...s].reduce((n,c)=>n+(/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/u.test(c)?2:1),0);
+const t=text=>({text}),title='검토 제목 9c4f7d',paint={harness:t('codex'),model_text:t('GPT 5.5'),effort:t('high')};
+const req=(glyph,kind,status,id='rq-aaaaaa')=>({id,way:glyph==='→'?'→':'←',glyph,who:'[b2]',title,status,age:'2m',kind,paint,details:[],body:[]});
+const route=(state,glyph)=>({id:'rt-a',title,state,kind:state,shape:'one-shot',kind_word:'code',role:'owner',elapsed:'3m',
+  paint:{glyph:t(glyph),harness:t('claude')}});
+const message={way:'←',who:'[b2]',harness:'codex',when:'09:01',kind:'reply',text:title+' · open'};
+const cases={
+ 'message-only':[44,40,true,[],[message],[]],
+ 'request-and-message':[44,40,true,[req('←','request-in','open')],[message],[]],
+ 'short-no-rule':[38,7,true,[req('←','request-in','open')],[message],[]],
+ 'narrow':[32,7,true,[req('←','request-in','open')],[message],[]],
+ 'bottom':[80,24,false,[req('←','request-in','open')],[message],[]],
+ 'requester':[44,40,true,[req('→','request-out','partial answer'),req('✓','request-done','final answer','rq-bbbbbb')],
+   [{...message,way:'→'}],[route('done','✓')]],
+ 'requester-no-request':[44,40,true,[],[{...message,way:'→'}],[route('done','✓')]],
+};
+const out={};
+for(const [name,[width,height,side,requests,messages,routes]] of Object.entries(cases)){
+ const v=view.render({width,height,side,model:{route_count:routes.length,routes,requests,messages,styles:{}},state:'working',
+   frame:1000,since:990,cellWidth:cells,configuration:{side_width:width},background:''});
+ out[name]=v.rows.map(r=>r.map(p=>p.text).join(''));
+}
+console.log(JSON.stringify(out));
+"""
+
+
+class PanelRequestLinesTest(unittest.TestCase):
+    """The scenario reads the request lines from the panel the session shell draws, inside its route box
+    only (11-27: a received message in MESSAGES wears the same `←` as a received request)."""
+
+    TITLE = "검토 제목 9c4f7d"
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        found = subprocess.run(["node", "-e", PANEL_SCRIPT, str(HERE / "session-shell" / "panel-view.cjs")],
+                               capture_output=True, text=True, timeout=60)
+        if found.returncode:
+            raise AssertionError(found.stderr)
+        cls.panels = json.loads(found.stdout)
+
+    def screen(self, name):
+        """The panel beside a conversation (wide letters and the agent quoting a request line in it), as a whole
+        terminal screen; the bottom layout's panel stands alone."""
+        panel = self.panels[name]
+        if not panel[0].startswith("┌") or len(panel[0]) > 60:
+            return "\n".join(panel)
+        talk = [f"  에이전트가 적은 줄: │ │ ← [b2] {self.TITLE} · open │ │", "  ▐▛███▛█   Claude Code"]
+        return "\n".join((talk[i] if i < len(talk) else "").ljust(70) + "  " + row for i, row in enumerate(panel))
+
+    def lines(self, name, marks):
+        return cases.panel_request_lines(self.screen(name), [self.TITLE], marks)
+
+    def test_a_received_message_with_the_request_title_is_not_a_request(self):
+        # (The review's screen: no request, a received message whose text reads like a request line.)
+        self.assertTrue(any(f"← [b2] {self.TITLE} · open" in row for row in self.panels["message-only"]),
+                        "\n".join(self.panels["message-only"]))
+        self.assertEqual(self.lines("message-only", "←"), [])
+
+    def test_the_request_is_counted_once_and_the_message_beside_it_is_not(self):
+        rows = self.panels["request-and-message"]
+        self.assertTrue(any(row.startswith("│ │ ← [b2] codex GPT 5.5 high") for row in rows), "\n".join(rows))
+        self.assertEqual(self.lines("request-and-message", "←"), [f"← [b2] {self.TITLE} · open"])
+
+    def test_a_short_or_narrow_panel_drops_the_rule_and_cuts_the_title(self):
+        for name in ("short-no-rule", "narrow"):
+            rows = self.panels[name]
+            self.assertFalse(any("─ request ─" in row for row in rows), "\n".join(rows))
+            self.assertTrue(any("…" in row and row.startswith("│ │ ← [b2]") for row in rows), "\n".join(rows))
+            found = self.lines(name, "←")
+            self.assertEqual(len(found), 1, (name, found, rows))
+            self.assertTrue(found[0].startswith("← [b2] 검") and "…" in found[0] and found[0].endswith(" · open"),
+                            (name, found))
+
+    def test_the_bottom_layout_reads_the_one_row_form(self):
+        self.assertEqual(self.lines("bottom", "←"), [f"← [b2] {self.TITLE} · open"])
+
+    def test_a_finished_route_with_the_same_title_is_not_a_closed_request(self):
+        self.assertEqual(self.lines("requester", "→✓✕"),
+                         [f"→ [b2] {self.TITLE} · partial answer", f"✓ [b2] {self.TITLE} · final answer"])
+        rows = self.panels["requester-no-request"]
+        self.assertTrue(any(row.startswith("│ │ ✓ ") for row in rows), "\n".join(rows))
+        self.assertEqual(self.lines("requester-no-request", "→✓✕"), [])
 
 
 class FlowVerdictTest(unittest.TestCase):
