@@ -164,7 +164,7 @@ def policy_warnings() -> list[str]:
 
 def _relations() -> list[dict]:
     import dispatch_seat_handover
-    return dispatch_seat_handover.resolved_steward_relations(include_released=False, strict=True)
+    return dispatch_seat_handover.resolved_steward_relations(include_released=False)
 
 
 def _role_held(harness: str, session_id: str) -> dict:
@@ -198,13 +198,9 @@ def _role_flagged(harness: str, session_id: str) -> bool:
         return True  # no collector: keep the existing check rather than go silent
     try:
         # Native registry rows, as in `_observe_role`: the flag never asks Herdr.
-        rows = collector._registry_sessions(strict=True, include_aliases=True)
+        rows = collector._registry_sessions()
         targets = collector.role_targets(harness, session_id, sessions=rows, include_native=True)
-        if function(harness, session_id, sessions=rows, _targets=targets):
-            return True
-        # An unreadable relation must not turn a due check into a missing flag.
-        collector.read_relations(strict=True)
-        return False
+        return bool(function(harness, session_id, sessions=rows, _targets=targets))
     except Exception:  # noqa: BLE001
         return True
 
@@ -668,7 +664,8 @@ def _observe_role(harness: str, session_id: str) -> dict:
     work, decisions = _open_work(harness, session_id, scope)
     lab = _observe_lab(cwds)
     return {"targets": targets, "pending_messages": pending,
-            "open_work": work, "user_decisions": decisions, "lab": lab}
+            "open_work": work, "user_decisions": decisions, "lab": lab,
+            **({} if scope.complete else {"scope_incomplete": True})}
 
 
 def _lengthen_shared_prefixes(targets: list) -> None:
@@ -811,6 +808,8 @@ def _classify(observation: dict) -> str:
     targets = observation["targets"]
     if _remaining(observation):
         return "assign-next" if next_actions(observation) else "run-steward-check"
+    if observation.get("scope_incomplete"):
+        return "run-steward-check"  # this holder's own role record is unreadable: no release advice
     if not targets:
         return "release-if-idle"
     if all(t["state"] == "done" or t["liveness"] == "ended" for t in targets):

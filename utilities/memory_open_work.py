@@ -117,23 +117,46 @@ def _known_foreign_owners(harness, sid, collector, cwd, rows):
         return frozenset()
 
 
-def scoped_owners(harness, sid, collector, *, cwd=None, predecessors=()):
+def _holder(relation):
+    holder = relation.get("holder") or {}
+    return _owner_key(holder.get("harness"), holder.get("sid"))
+
+
+def _own_role(collector, own, seat_keys=()):
+    """Only these sessions' own marker files and their seat ledgers; raises when one is unreadable."""
+    markers = collector.read_markers(only=own)
+    keys = {*seat_keys, *(str(marker["seat_key"]) for marker in markers.values() if marker.get("seat_key"))}
+    return markers, collector.read_relations(seat_keys=keys, markers=markers)
+
+
+def scoped_owners(harness, sid, collector, *, cwd=None, seat=None):
     """Project the existing role and session lineage onto obligation owners.
 
     Confirmed keys can write. An active unresolved relation can retain an
     existing obligation under its exact id, without proving a new same-repo
-    write or a target label. An unavailable read leaves the scope incomplete.
+    write or a target label. Only this chain's own marker files and their seat
+    ledgers can leave the scope incomplete; another session's damaged file is
+    skipped as every role reader skips it. A tidy ``seat`` reads only those own
+    files, and nothing more when they hold no role.
     """
     caller = _owner_key(harness, sid)
     if caller is None:
         return OwnerScope(frozenset())
-    own = {caller, *(key for prior in predecessors if (key := _owner_key(harness, prior)))}
+    own = {caller}
     rows = ()
     try:
-        rows = tuple(collector._registry_sessions(strict=True, include_aliases=True))
-        markers = collector.read_markers(strict=True)
-        relations = collector.read_relations(strict=True, markers=markers)
-
+        if seat is not None:
+            try:
+                import session_tidy
+                own.update(key for prior in session_tidy.confirmed_pane_predecessors(
+                    harness, sid, seat.pane, cwd, endpoint=seat.endpoint) if (key := _owner_key(harness, prior)))
+            except Exception:
+                pass
+            markers, relations = _own_role(collector, own, (seat.key,))
+            if not markers and not any(_holder(relation) in own for relation in relations
+                                       if relation.get("released") is not True):
+                return OwnerScope(frozenset(own))
+        rows = tuple(collector._registry_sessions(include_aliases=True))
         joined = {}
         by_owner = {}
         for row in rows:
@@ -149,12 +172,19 @@ def scoped_owners(harness, sid, collector, *, cwd=None, predecessors=()):
 
         caller_keys = keys(caller)
         own.update(caller_keys)
+        complete = True
+        if seat is None:
+            # A check labels targets against every competing claim, as Fleet does.
+            markers, relations = collector.read_markers(), collector.read_relations()
+            try:
+                _own_role(collector, own)
+            except Exception:
+                complete = False
         # The role reader already selected the current seat holder. Consume its
         # chain, including the origin even if the old native row has ended.
         prior = set()
         for relation in relations:
-            holder = relation.get("holder") or {}
-            if _owner_key(holder.get("harness"), holder.get("sid")) not in own:
+            if _holder(relation) not in own:
                 continue
             origin = relation.get("origin") or {}
             if origin.get("harness") == harness:
@@ -180,7 +210,8 @@ def scoped_owners(harness, sid, collector, *, cwd=None, predecessors=()):
         retained = frozenset(key for target in unresolved
                              if (key := _owner_key(target.get("harness"), target.get("session_id"))))
         confirmed = frozenset(own.union(*(target["owner_keys"] for target in labelled)))
-        return OwnerScope(confirmed, retained, (*labelled, *unresolved), rows)
+        foreign = frozenset() if complete else _known_foreign_owners(harness, sid, collector, cwd, rows)
+        return OwnerScope(confirmed - foreign, retained, (*labelled, *unresolved), rows, complete, foreign)
     except Exception:
         foreign = _known_foreign_owners(harness, sid, collector, cwd, rows)
         return OwnerScope(frozenset(own) - foreign, sessions=rows, complete=False, foreign=foreign)

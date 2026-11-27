@@ -548,9 +548,7 @@ def _obligation_scope(item: dict, seat):
         from fleet.collectors import steward
     except ImportError:
         steward = None
-    harness, sid, cwd = item["harness"], item["sid"], item["cwd"]
-    predecessors = st.confirmed_pane_predecessors(harness, sid, seat.pane, cwd, endpoint=seat.endpoint)
-    return scoped_owners(harness, sid, steward, cwd=cwd, predecessors=predecessors)
+    return scoped_owners(item["harness"], item["sid"], steward, cwd=item["cwd"], seat=seat)
 
 
 def assemble(item: dict, batch: str, run_dir: Path) -> Bundle:
@@ -1173,6 +1171,19 @@ def end_batch_files(item: dict, run_dir: Path, clean: bool) -> None:
         _log(run_dir, "cleanup incomplete: a conversation copy could not be removed or reached")
 
 
+def _keep_for_owner_scope(item: dict, bundle: Bundle, result) -> bool:
+    """Keep the range for an open obligation skipped while this session's own role record
+    was unreadable, unless this session's last tidy already kept one."""
+    skipped = result.get("skipped") if isinstance(result, dict) else None
+    if getattr(bundle, "owner_scope_complete", True) or not any(
+            row.get("reason") == "obligation-owner-unconfirmed" for row in skipped or ()):
+        return False
+    earlier = [other.get("result") for other in list_items() if other.get("id") != item["id"]
+               and other.get("status") == "notified" and other.get("sid") == item["sid"]
+               and other.get("harness") == item["harness"]]
+    return not earlier or earlier[-1] != "partial"
+
+
 def process_item(item: dict) -> None:
     attempts = int(item.get("attempts", 0))
     # An interrupted operation keeps the same tidy-apply batch. The apply journal and
@@ -1219,10 +1230,10 @@ def process_item(item: dict) -> None:
         result = st.read_json(run_dir / "result.json")
         over = int(result.get("discarded_over_budget") or 0) if isinstance(result, dict) else 0
         reason = ""
-        scope_unavailable = not getattr(bundle, "owner_scope_complete", True)
+        scope_unavailable = _keep_for_owner_scope(item, bundle, result)
         if scope_unavailable:
-            # Keep these ranges eligible for the next normal tidy. Only confirmed
-            # writes landed, and replay already deduplicates the applied records.
+            # An unreadable own role record skipped an open obligation: the next tidy
+            # reads this range once more (applied records are deduplicated), not forever.
             reason = "obligation-owner-scope-unavailable"
             line = failure_line(reason, batch, applied_writes(run_dir))
         elif over:

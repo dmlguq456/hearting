@@ -2901,9 +2901,9 @@ using the shared open-work classification) and peer requests still queued for
 delivery to the holder or a live target (an ended target's undeliverable rows are left
 out). The holder and confirmed role targets keep their work across confirmed
 prior identities. An active unresolved target keeps existing work visible by
-exact ID. A waiting target gets its name on the work it owns. Unreadable role
-evidence and records without an owner link leave project work visible without
-an inferred target name. A record awaiting a user
+exact ID. A waiting target gets its name on the work it owns. An unreadable own
+role record or a record without an owner link leaves project work visible without
+an inferred target name; the former also gives no release advice. A record awaiting a user
 decision is shown as one to raise with the user. The check prints each as a `next=` action (for example
 `next=[e7] waiting 42 min · #1425 review → assign now`); the wait time comes from the
 duty's own earlier observations. `changes=none` does not mean nothing remains: while

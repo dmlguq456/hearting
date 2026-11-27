@@ -1916,9 +1916,9 @@ class StewardCheckRoleFlagTest(CheckBase):
 
     def test_real_flag_seam_reads_the_fleet_role_flag(self):
         rows = [SimpleNamespace(harness=HARNESS, session_id=SID, cwd="/repo", runtime_name=None)]
-        collector = role_collector(role_flag=mock.Mock(return_value=False),
-                                   _registry_sessions=mock.Mock(return_value=rows),
-                                   role_targets=mock.Mock(return_value=[]))
+        collector = SimpleNamespace(role_flag=mock.Mock(return_value=False),
+                                    _registry_sessions=mock.Mock(return_value=rows),
+                                    role_targets=mock.Mock(return_value=[]))
         with mock.patch.object(SC, "_collector", return_value=collector):
             self.assertFalse(REAL_ROLE_FLAGGED(HARNESS, SID))
         collector.role_targets.assert_called_once_with(HARNESS, SID, sessions=rows,

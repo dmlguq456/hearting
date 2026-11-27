@@ -954,34 +954,32 @@ def _ledger_generation(path: str):
 
 
 def _seat_transition_rows(st, path: str, key: str, *, strict=False):
-    """This seat ledger's steward rows, or ``None`` for a symlinked ledger."""
+    """This seat ledger's steward rows, or ``None`` for a symlinked ledger.
+
+    ``strict`` reads past the cache and raises when this existing ledger is unusable."""
     def read():
         with st.seat_ledger_readonly_scope():
             entries = st._read_ledger_lines(st.Seat("pane", key))
-            rows = tuple(row for row in entries if row.get("event") in {ROW_EVENT, "steward-release"})
-            return rows, entries.usable
+            if strict and before is not None and not entries.usable:
+                raise OSError("steward-ledger-unreadable")
+            return tuple(row for row in entries if row.get("event") in {ROW_EVENT, "steward-release"})
     link, before = _ledger_generation(path)
     if link:
         if strict:
             raise OSError("steward-ledger-unsafe")
         return None
-    use_cache = st._LEDGER_READ_SCOPE.get() is None and _TRUST_LEDGER_GENERATIONS.get()
-    if use_cache:
-        with _TRANSITION_ROWS_LOCK:
-            held = _TRANSITION_ROWS.get(path)
-        if held is not None and before is not None and held[0] == before:
-            rows, usable = held[1]
+    if strict or st._LEDGER_READ_SCOPE.get() is not None or not _TRUST_LEDGER_GENERATIONS.get():
+        return read()  # an open read pass keeps its own pinned rows
+    with _TRANSITION_ROWS_LOCK:
+        held = _TRANSITION_ROWS.get(path)
+    if held is not None and before is not None and held[0] == before:
+        return held[1]
+    rows = read()
+    with _TRANSITION_ROWS_LOCK:
+        if before is not None and before == _ledger_generation(path)[1]:
+            _TRANSITION_ROWS[path] = (before, rows)
         else:
-            rows, usable = read()
-            with _TRANSITION_ROWS_LOCK:
-                if before is not None and before == _ledger_generation(path)[1]:
-                    _TRANSITION_ROWS[path] = (before, (rows, usable))
-                else:
-                    _TRANSITION_ROWS.pop(path, None)
-    else:
-        rows, usable = read()
-    if strict and before is not None and not usable:
-        raise OSError("steward-ledger-unreadable")
+            _TRANSITION_ROWS.pop(path, None)
     return rows
 
 
@@ -1159,9 +1157,9 @@ def resolved_steward_relations(harness: Optional[str] = None, sid: Optional[str]
         pm = _peer_message()
         if markers is None:
             roots, _source = pm.steward_marker_roots()
-            markers = pm.read_steward_markers(roots, strict=True) if strict else pm.read_steward_markers(roots)
+            markers = pm.read_steward_markers(roots)
         if seat_key is not None:
-            rows = _transition_rows(seat_key, strict=True) if strict else _transition_rows(seat_key)
+            rows = _transition_rows(seat_key, strict=strict)
         else:
             keys = _snapshot_seat_keys()
             legacy_marker = False
@@ -1173,16 +1171,9 @@ def resolved_steward_relations(harness: Optional[str] = None, sid: Optional[str]
                     legacy_marker = True
             if legacy_marker:
                 directory = _st().state_root() / "sessions"
-                if strict:
-                    try:
-                        keys.update(path.stem for path in directory.iterdir() if path.suffix == ".jsonl")
-                    except FileNotFoundError:
-                        pass
-                else:
-                    keys.update(path.stem for path in directory.glob("*.jsonl")
-                                if path.is_file() and not path.is_symlink())
-            rows = (_seat_keys_transition_rows(sorted(keys), strict=True) if strict else
-                    [entry for key in sorted(keys) for entry in _transition_rows(key)])
+                keys.update(path.stem for path in directory.glob("*.jsonl")
+                            if path.is_file() and not path.is_symlink())
+            rows = [entry for key in sorted(keys) for entry in _transition_rows(key)]
         marker_relations = []
         marker_reader = getattr(pm, "steward_evidence_targets", None)
         for (marker_harness, marker_sid), marker in markers.items():

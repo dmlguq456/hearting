@@ -86,7 +86,7 @@ only — no Markdown fence, no prose:
   accepted or adopted by the caller or a confirmed target belongs to that session.
   Leave open records alone when their owner is unclear or absent from the list.
   Save a useful fact from them as an `observation` if it meets the memory criteria.
-  When role information is unreadable, tidy keeps the range for a later run.
+  An unreadable own role record makes tidy read the range once more.
 - Skip chatter, status narration, progress, anything already in `existing_records`,
   anything the user did not decide or correct, and anything that will not matter after
   three weeks. Empty `actions` is a correct answer.

@@ -429,6 +429,42 @@ class StewardObligationContinuityTest(TidyApplyCase):
         self.relation_failure = OSError("fixture ledger unreadable")
         self.assertEqual(self.report_actions(), ["open: Trace the unfinished fixture → assign or do now"])
 
+    def test_only_the_holders_own_damaged_role_record_withholds_release(self):
+        ledger = self.iso.root / "role-ledger"
+        markers = ledger / "peer-steward"
+        own = markers / "claude" / "captain.json"
+        for path, value in (
+                (own, {"session_id": "captain", "targets": {
+                    "sparrow": dict(self.sparrow, source="start", name="Sparrow", ts="1")}}),
+                (markers / "claude" / "other-steward.json", {"session_id": "other-steward",
+                    "seat_key": "other-seat", "targets": {"wren": dict(self.wren, source="start", ts="1")}}),
+                (markers / "codex" / "other-project.json", None),
+                (self.state / "sessions" / "other-seat.jsonl", None)):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(value) if value else '{"event": "handover"\n', encoding="utf-8")
+
+        def observe():
+            with self.iso.patched_environ({"AGENT_PEER_LEDGER_ROOT": str(ledger)}), contextlib.ExitStack() as stack:
+                for patch in (
+                        mock.patch.object(self.steward, "_registry_sessions", return_value=self.census),
+                        mock.patch.object(self.check, "_end_observation", return_value=None),
+                        mock.patch.object(self.check, "_pending_count", return_value=0),
+                        mock.patch.object(self.check, "_observe_lab", return_value={}),
+                        mock.patch.object(self.check, "_session_liveness", return_value="live"),
+                        mock.patch("peer_steward_native.native_agent",
+                                   return_value={"result": {"agent": {"agent_status": "idle"}}})):
+                    stack.enter_context(patch)
+                return self.check._observe_role("claude", "captain")
+
+        seen = observe()  # another project's marker and another steward's ledger are damaged
+        self.assertEqual(([row["name"] for row in seen["targets"]], self.check._classify(seen)),
+                         (["Sparrow"], "run-steward-check"))
+        self.assertNotIn("scope_incomplete", seen)
+        own.write_text("{", encoding="utf-8")
+        seen = observe()
+        self.assertEqual((seen["targets"], seen.get("scope_incomplete"), self.check._classify(seen)),
+                         ([], True, "run-steward-check"))
+
     def test_owner_scope_scene_table(self):
         legacy = self.seed("working", "unresolved-obligation", "Old project work remains")
         conflicting = self.promise("Two different owners are named", self.sparrow, self.kite)

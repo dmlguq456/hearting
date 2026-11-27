@@ -19,6 +19,7 @@ unknown targets remain communication only.
 """
 import os
 import copy
+import json
 import sqlite3
 import threading
 from contextlib import closing
@@ -37,28 +38,47 @@ def _utilities_dir():
     return Path(__file__).resolve().parents[3] / "utilities"
 
 
-def read_markers(*, strict=False):
+def read_markers(*, only=None):
     """``{(harness, session_id): marker}`` over every ledger root the board reads (the
-    F-98d resolver chain plus each installed runtime's own root); empty on any failure."""
+    F-98d resolver chain plus each installed runtime's own root); empty on any failure.
+
+    ``only`` opens just those sessions' own marker files and raises when one exists but
+    cannot be read, so a caller can tell its own unreadable evidence from no role."""
     mod = _peer_message_module()
     if mod is None:
-        if strict:
+        if only is not None:
             raise OSError("steward-marker-reader-unavailable")
         return {}
     try:
         from . import peer_messages as _pm
         roots = _pm._state_roots()
     except Exception:
-        if strict:
-            raise
         roots = None
+    if only is not None:
+        return _own_markers(mod, roots or [mod.peer_state_root()], only)
     try:
-        return (mod.read_steward_markers(roots or None, strict=True) if strict else
-                mod.read_steward_markers(roots or None)) or {}
+        return mod.read_steward_markers(roots or None) or {}
     except Exception:
-        if strict:
-            raise
         return {}
+
+
+def _own_markers(mod, roots, keys):
+    out = {}
+    for root in roots:
+        for harness, sid in sorted(keys):
+            try:
+                with open(Path(root) / "peer-steward" / harness / f"{sid}.json", encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except FileNotFoundError:
+                continue
+            if not isinstance(data, dict):
+                raise ValueError("steward-marker-unreadable")
+            if data.get("session_id") != sid or not mod.is_steward_marker(data):
+                continue
+            previous = out.get((harness, sid))
+            if previous is None or (data.get("updated") or "") > (previous.get("updated") or ""):
+                out[(harness, sid)] = data
+    return out
 
 
 _RELATIONS_OBSERVATION = None
@@ -109,9 +129,11 @@ def _trusts_unchanged_ledgers():
         return False
 
 
-def read_relations(*, strict=False, markers=None):
-    if strict:
-        return _read_relations_uncached(strict=True, markers=markers)
+def read_relations(*, seat_keys=None, markers=None):
+    """Every confirmed role relation, or only those of ``seat_keys`` from ``markers``,
+    whose unreadable own seat ledger then raises instead of reading as no role."""
+    if seat_keys is not None:
+        return _read_relations_uncached(seat_keys=seat_keys, markers=markers)
     from . import dispatch
     if dispatch._COLLECTION_INPUTS.get() is None and not _trusts_unchanged_ledgers():
         return _read_relations_uncached()
@@ -134,7 +156,7 @@ def read_relations(*, strict=False, markers=None):
     return value
 
 
-def _read_relations_uncached(*, strict=False, markers=None):
+def _read_relations_uncached(*, seat_keys=None, markers=None):
     """Read confirmed current holders without projecting a marker onto a successor SID."""
     try:
         import sys
@@ -142,12 +164,13 @@ def _read_relations_uncached(*, strict=False, markers=None):
         if str(utilities) not in sys.path:
             sys.path.insert(0, str(utilities))
         import dispatch_seat_handover
-        if strict:
-            return dispatch_seat_handover.resolved_steward_relations(
-                include_released=True, strict=True, markers=markers)
+        if seat_keys is not None:
+            return [relation for key in sorted(seat_keys)
+                    for relation in dispatch_seat_handover.resolved_steward_relations(
+                        seat_key=key, include_released=True, strict=True, markers=markers)]
         return dispatch_seat_handover.resolved_steward_relations(include_released=True)
     except Exception:
-        if strict:
+        if seat_keys is not None:
             raise
         return []
 
@@ -183,16 +206,15 @@ def _repository_key(cwd):
 _REGISTRY_READ_CACHE = None
 
 
-def _registry_records(harness, *, strict=False):
+def _registry_records(harness):
     """One current metadata census shared by this pass's display consumers."""
     from .. import session_registry
-    args = {"strict": True} if strict else {}
     return _observed_registry_records(harness, session_registry._dir_for(harness),
-                                      session_registry.read, **args)
+                                      session_registry.read)
 
 
 @_observe_once(immutable=True)
-def _observed_registry_records(harness, directory, reader, *, strict=False):
+def _observed_registry_records(harness, directory, reader):
     """Owned read-only metadata; liveness still uses fresh process evidence."""
     from types import MappingProxyType
     from .. import session_registry
@@ -205,33 +227,26 @@ def _observed_registry_records(harness, directory, reader, *, strict=False):
         cache = _REGISTRY_READ_CACHE
     try:
         entries = os.listdir(directory)
-    except FileNotFoundError:
-        return None
     except OSError:
-        if strict:
-            raise
         return None
     records = []
-    options = {"validation_cache": cache} if cache is not None else {}
-    if strict:
-        options["raise_unread"] = True
     for entry in entries:
         if entry.endswith('.json') and entry[:-5].isdigit():
-            record = reader(harness, int(entry[:-5]), **options)
+            record = reader(harness, int(entry[:-5]),
+                            **({'validation_cache': cache} if cache is not None else {}))
             if record:
                 records.append(MappingProxyType(record))
     return tuple(records)
 
 
-def _registry_sessions(*, strict=False, include_aliases=False):
+def _registry_sessions(*, include_aliases=False):
     """Reuse native metadata, optionally joining resume ids from the same live process."""
     from .. import session_registry
     from . import liveness
 
     rows = []
-    args = {"strict": True} if strict else {}
     for harness in ('claude', 'codex', 'opencode'):
-        for record in _registry_records(harness, **args) or ():
+        for record in _registry_records(harness) or ():
             if not record or not record.get("sessionId") or not record.get("cwd"):
                 continue
             row = SimpleNamespace(harness=harness, session_id=record["sessionId"],
