@@ -1834,8 +1834,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const routeStep=routeLimit,routeMax=scrolling?routeRows.length-routeLimit:0;
       const inView=sorted.slice(routeOffset,routeOffset+routeLimit);
       const above=routeOffset,below=routeRows.length-routeOffset-inView.length+unsent;
-      const hiddenNote=n=>[text(n,'loc_repo')];
-      const block=[{...boxTop(routeTitle,key,{action:'popup:ROUTE',note:above?hiddenNote('↑'+above):[],alt:routeTitleAlt,arrow:true}),groups:['route']}];
+      // 11-27 (the eight marks): a hidden count reads `↑ 2 more` / `↓ 22 more`, so it is not read as Git's `↑2 ↓1`
+      // on the REPO row; `boxTop`/`boxBottom` still show it whole or not at all.
+      const hiddenNote=(arrow,n)=>[text(arrow+' '+n+' more','loc_repo')];
+      const block=[{...boxTop(routeTitle,key,{action:'popup:ROUTE',note:above?hiddenNote('↑',above):[],alt:routeTitleAlt,arrow:true}),groups:['route']}];
       let before=null;
       (routeRows.length?inView:routeChecking).forEach(item=>{
         if(routeRule()&&item.zone&&(!before||before.zone!==item.zone))block.push(zoneRow(item.zone,key));
@@ -1843,7 +1845,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         // A press on any row of a route opens the route popup with it unfolded.
         for(const parts of item.two||item.bnow||item.calledRows&&item.calledRows.length?routeForm(item):[item.parts])block.push(boxRow({parts,action:item.action},key));
       });
-      block.push(boxBottom(key,below?hiddenNote('↓'+below):[]));
+      block.push(boxBottom(key,below?hiddenNote('↓',below):[]));
       return {block,area:{offset:routeOffset,max:routeMax,step:routeStep}};
     };
     // MESSAGES (spec rules 31, 45 (b), 58; 11-16, restored from v4.36.4, the person: "메시지 형식은 퇴행했네?
@@ -2640,7 +2642,12 @@ function requestForms(q,{text,measure,width,arrow='loc_repo'}){
   const pad=n=>text(' '.repeat(Math.max(0,n)));
   const paint=q.paint&&typeof q.paint==='object'?q.paint:{};
   const piece=p=>p&&typeof p==='object'&&clean(p.text).trim()?[{...p,text:clean(p.text)}]:[];
-  const mark=text(String(q.glyph||q.way||'→'),q.glyph==='✕'?'lvl_r':q.glyph==='✓'?'lvl_g':arrow);
+  // 11-27 (the person, the eight marks: "여덟 가지 모두 지음"): a closed request keeps which way it went after its result
+  // (`✓ ←`, `✕ →`), the result in green or red and the direction in the request color, a cell between them. A record
+  // without `way` takes it from `side`; with neither the result stands alone.
+  const way=q.way==='→'||q.way==='←'?q.way:q.side==='out'?'→':q.side==='in'?'←':'';
+  const closed=q.glyph==='✕'||q.glyph==='✓';
+  const mark=closed?[text(q.glyph,q.glyph==='✕'?'lvl_r':'lvl_g'),...(way?[text(' '),text(way,arrow)]:[])]:[text(String(q.glyph||way||'→'),arrow)];
   // 11-18 (the person: "세션 id 외에도 repo 위치까지 request는 표시를 해주는게 좋겠네"): the other session's repository name, dim, after its number
   // (`[c2] other-repo`); the backend sends none for a session of this window's own repository or one whose it does not know. It is part
   // of who the request is with, so it stays after the harness, model, effort and age have gone, and the title goes before it does.
@@ -2655,7 +2662,7 @@ function requestForms(q,{text,measure,width,arrow='loc_repo'}){
   // A row with the age at the right edge, one cell at least between them; null where it does not fit.
   const ended=(left,end)=>size(left)+1+size(end)<=width?[...left,pad(width-size(left)-size(end)),...end]:null;
   const drops=[[H,M,F,age],[H,M,F,[]],[H,M,[],[]],[H,[],[],[]]];
-  const lead=w=>[mark,...(w.length?[text(' '),...w]:[])];
+  const lead=w=>[...mark,...(w.length?[text(' '),...w]:[])];
   let head=null;
   for(const [h,m,f,e] of [...drops,[[],[],[],[]]]){
     const left=lead(spaced([who,h,m,f])),row=e.length?ended(left,e):size(left)<=width?left:null;
@@ -2683,7 +2690,7 @@ function requestForms(q,{text,measure,width,arrow='loc_repo'}){
       if(room>=measure(q.status_head))return [...lead(who),...joint,...cut(status,room)];
     }
     const left=width-size(body([],[]))-1;
-    return left>=3?body([],cut(title,left)):cut([mark,text(' '),...title],width);
+    return left>=3?body([],cut(title,left)):cut([...mark,text(' '),...title],width);
   })();
   return {head,title:titleRow,status:statusRow,titled,one};
 }
@@ -2741,8 +2748,9 @@ function messagesBody({model={},columns=72,cellWidth}={}){
   const out=[];
   for(const q of (Array.isArray(model.requests)?model.requests:[]).filter(q=>q&&typeof q.id==='string')){
     if(out.length)out.push([]);
-    // (11-16: its head is the route box's one-row request form, at the popup's width: the same values, one drawing.)
-    out.push(requestForms(q,{text,measure,width:columns}).one);
+    // (11-16: its head is the route box's one-row request form, at the popup's width: the same values, one drawing;
+    // 11-27: its arrow in the route box's request color too.)
+    out.push(requestForms(q,{text,measure,width:columns,arrow:'zone_request'}).one);
     for(const [label,value,tone] of Array.isArray(q.details)?q.details:[])out.push(...wrapText((label?label+': ':'')+String(value||''),({lvl_r:'lvl_r',lvl_g:'lvl_g',dim:'dim'})[tone]||'loc_repo',columns));
     // (11-15: a body's markdown tables come drawn by Fleet as aligned rows, two cells in; its other lines wrap.)
     for(const value of Array.isArray(q.body_parts)?q.body_parts:Array.isArray(q.body)?q.body:[]){

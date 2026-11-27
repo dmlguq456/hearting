@@ -632,7 +632,10 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   A request (11-16, the person: "양식을 맞추자. [6c] claude opus 5.5 xhigh 이런식으로") reads as a
   route's doer: beside the native area its first row is its mark (→ sent, ← received, `✓`/`✕`
   closed; 11-27, the person: "방향만 다르면 화살표 방향만 반대로 하면 되는걸 왜 삼각형을써? 메시지는 안그러잖아":
-  a received request wears the received message's `←`, no longer the small triangle), the other session's Fleet number, then that session's harness, model and effort in
+  a received request wears the received message's `←`, no longer the small triangle; 11-27, the eight marks, the person: "여덟
+  가지 모두 지음": a closed one keeps which way it went after its result, `✓ ←`, `✕ →`, the result in the passing green or the
+  failure red, a cell, then the direction in the request color; a record with no direction of its own takes it from the side it is
+  on, and with neither the result stands alone), the other session's Fleet number, then that session's harness, model and effort in
   a route row's colors (`← [6c] claude Opus 5.5 xhigh`; the model and effort only as far as the
   session values Fleet's shared producer already read for the session displays know them, so
   `[6c] claude` where they are unknown, and a session that is gone keeps its name alone; 11-18, the person: "세션 id 외에도 repo
@@ -774,7 +777,8 @@ route at the same step (v4.36.4, spec rules 34 (b), 38,
 edge), each NOW's first row goes, the workers take one row each, the workers go (the kind row ends with
 `· worker N`), the kind rows go, every route takes one row; then the box shows fewer
 routes and scrolls in place (the wheel over it), down to one, its border counting
-what it hides (`↑2`, `↓3`; it takes the rows of its tallest window, so the wheel moves
+what it hides (11-27, the eight marks: `↑ 2 more`, `↓ 3 more`, so the counts do not read as Git's `↑2 ↓1` on the REPO row; a
+note shows whole or not at all; it takes the rows of its tallest window, so the wheel moves
 nothing else); then Git; then MEM gives its row, then its head, then (11-16) the USAGE section's rows of the
 harnesses that are not this window's (the last first) and its name row, then MESSAGES gives its row and its
 head; then the route box (11-20: after MESSAGES and MEM; v4.36.4 had it before the

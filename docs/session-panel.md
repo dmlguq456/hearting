@@ -66,7 +66,7 @@ machine's other sessions read in Fleet (LAB, SESSIONS), not in the panel. A
 40-row window keeps two or three rows per section; short of rows the other
 sections step down to one row first (`RESOURCES` before any of them), then the route box folds its routes
 (the closed workers' box becomes the open one, each NOW's second row goes, the `CTX` row folds into the first row, each NOW's first row goes, then the kind row, then one row each; a zone's rule stays while one row of the zone shows) and scrolls
-in place under the wheel, its border counting what it hides. A press on a
+in place under the wheel, its borders counting what they hide (`↑ 2 more`, `↓ 22 more`; the REPO row's `↑2 ↓5` is Git's own count). A press on a
 section's head or rows opens its popup (below); a press on any row of a route
 opens the routes popup on that route's page (Fleet's stage boxes; until its own
 reading comes, the stage boxes the panel's values already draw (its top rule ends in the route's form word, `team` or `solo`, as in the route's bracket, never `staged`)), a press on the
@@ -191,13 +191,13 @@ In the panel, every open request has rows in the route box's `request` zone, und
 popup shows it whole, requests first: the
 parties and number, `REV`, `DELIVERY` (`sent`, `delivered`, `seen`; `awaiting delivery` and why while the other window has not taken it in, as `peer-steward show` says), `WORK`
 (`open`, `partial answer`, `final answer`, `rejected`, `cancelled`, with what is
-left), `LAST`, `REPORTS`, and the body. A closed request stays 15 minutes after it closed, sent or received (`✓` answered, `✕` rejected or cancelled); a sent one
+left), `LAST`, `REPORTS`, and the body; its arrow is the route box's request color. A closed request stays 15 minutes after it closed, sent or received, its result first and then the way it went (`✓ ←` answered, `✕ →` rejected or cancelled; the result green or red, the arrow the request color; at 36 cells its time gives way); a sent one
 stays longer until its last answer has been seen.
 
 A message you sent that has not gone into the other window reads the same in `MESSAGES` (`→ [b2] · awaiting delivery · text stands in its input …`): the first words always show, the reason as far as the row reaches, and the `MESSAGES` popup shows it whole.
 
 <p align="center">
-  <img src="fleet/requests.png" alt="Two panels: in its route box, under the request rule, the session that asked shows an arrow to [b2] with its harness, model, and effort, Test run, partial answer, and a finished review; in its route box, under the request rule, the session that was asked shows an arrow from [4f] with its harness, model, and effort, Test run, partial answer." width="80%">
+  <img src="fleet/requests.png" alt="Two panels: in its route box, under the request rule, the session that asked shows an arrow to [b2] with its harness, model, and effort, Test run, partial answer, and a finished review, its check mark followed by the arrow it went; in its route box, under the request rule, the session that was asked shows an arrow from [4f] with its harness, model, and effort, Test run, partial answer." width="80%">
 </p>
 
 **Messages** are short notes, sent with

@@ -135,7 +135,8 @@ def _route_box_rows(screen):
 
 def panel_request_lines(screen, titles, marks):
     """The route box's request lines of the given marks whose title is a recorded request title
-    (whole, or cut with ``…``), each as ``mark [tag] title · state``. ``titles`` is one title or several.
+    (whole, or cut with ``…``), each as ``mark [tag] title · state`` (a closed one ``✓ → [tag] title · state``, its
+    direction after its result). ``titles`` is one title or several.
 
     A request reads on one row (``← [b2] codex GPT 5.5 high 검토 제목 9c4f7d · open  2m``, the title cut on a
     narrow panel) or, beside the native area with rows to spare, as a route's doer: its head row (``← [b2]
@@ -156,6 +157,9 @@ def panel_request_lines(screen, titles, marks):
             if len(row) < 2 or row[0] not in marks or row[1] != " ":
                 continue
             mark, rest = row[0], row[2:].strip()
+            # 11-27: a closed request keeps its direction after its result (`✓ → [b2] …`); it is read with the mark.
+            way = rest[0] if mark in "✓✕" and rest[:2] in ("→ ", "← ") else ""
+            rest = rest[2:].strip() if way else rest
             tag = REQUEST_TAG.match(rest)
             who = tag.group(0) if tag else ""
             after = rest[tag.end():].strip() if tag else rest
@@ -177,7 +181,7 @@ def panel_request_lines(screen, titles, marks):
             if title is None:
                 continue
             state = re.split(r"\s{2,}", state.strip())[0]
-            found.append(" ".join(part for part in (mark, who, title) if part) + (" · " + state if state else ""))
+            found.append(" ".join(part for part in (mark, way, who, title) if part) + (" · " + state if state else ""))
     return found
 
 

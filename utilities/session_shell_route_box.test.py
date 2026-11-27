@@ -199,7 +199,7 @@ context.set({top:4,bottom:12,offset:0,max:0,step:3},0);context.mouse(65,93+1+10,
 const many={...golden.scenes.na,routes:Array.from({length:6},(_,i)=>({...golden.scenes.na.routes[1],id:'rt-'+String(i).repeat(16),title:'route '+i})),route_count:6,route_total:6};
 const at=s=>pv.render({width:40,height:18,side:true,fill:true,model:many,state:'working',configuration:{},routeScroll:s});
 const top=at(0),down=at(2);assert(top.routeArea&&top.routeArea.max>0,JSON.stringify(top.routeArea));
-assert.notDeepEqual(top.rows.map(txt),down.rows.map(txt));assert(down.rows.map(txt).some(s=>/ ↑2 ›─╮/.test(s)),down.rows.map(txt).join('\n'));
+assert.notDeepEqual(top.rows.map(txt),down.rows.map(txt));assert(down.rows.map(txt).some(s=>/ ↑ 2 more ›─╮/.test(s)),down.rows.map(txt).join('\n'));
 assert.equal(down.routeArea.offset,2);
 """)
 
@@ -258,10 +258,10 @@ for(const side of [true,false])for(let height=8;height<=60;height+=side?1:4)for(
   for(let i=b.a+1;i<b.b;i++){assert(/^│ (│ .* │|├─+┤) │$/.test(rows[i]),i+'\n'+label);
    for(const h of v.hits.filter(h=>h.row===i))assert(/^popup:(ROUTE:rt-|MESSAGES$)/.test(h.action),h.action+'\n'+label);}
   const shown=new Set(v.hits.filter(h=>h.row>b.a&&h.row<b.b).map(h=>h.action).filter(a=>a.startsWith('popup:ROUTE:'))).size;
-  const hidden=(rows.slice(b.a,b.b+1).join('').match(/[↑↓](\d+) ─/g)||[]).reduce((n,m)=>n+Number(m.slice(1,-2)),0);
+  const hidden=(rows.slice(b.a,b.b+1).join('').match(/[↑↓] (\d+) more ─/g)||[]).reduce((n,m)=>n+Number(m.match(/\d+/)[0]),0);
   if(hidden)scrolled++;
   // Routes and requests shown plus those the border counts are all of them.
-  const requests=rows.slice(b.a+1,b.b).filter(s=>/^│ │ [→←✓✕] \[/.test(s)).length;
+  const requests=rows.slice(b.a+1,b.b).filter(s=>/^│ │ (?:[→←]|[✓✕](?: [→←])?) \[/.test(s)).length;
   assert.equal(shown+requests+hidden,6,label);
   if(v.routeArea)assert(v.routeArea.top===b.a&&v.routeArea.bottom===b.b,JSON.stringify(v.routeArea)+label);
  }

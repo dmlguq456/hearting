@@ -292,7 +292,8 @@ PANEL_SCRIPT = r"""
 const path=require('node:path'),view=require(process.argv[1]);
 const cells=s=>[...s].reduce((n,c)=>n+(/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/u.test(c)?2:1),0);
 const t=text=>({text}),title='검토 제목 9c4f7d',paint={harness:t('codex'),model_text:t('GPT 5.5'),effort:t('high')};
-const req=(glyph,kind,status,id='rq-aaaaaa')=>({id,way:glyph==='→'?'→':'←',glyph,who:'[b2]',title,status,age:'2m',kind,paint,details:[],body:[]});
+// (11-27: a closed request keeps its direction after its result, so the requester's closed one is sent: `✓ →`.)
+const req=(glyph,kind,status,id='rq-aaaaaa',way=glyph==='→'?'→':'←')=>({id,way,glyph,who:'[b2]',title,status,age:'2m',kind,paint,details:[],body:[]});
 const route=(state,glyph)=>({id:'rt-a',title,state,kind:state,shape:'one-shot',kind_word:'code',role:'owner',elapsed:'3m',
   paint:{glyph:t(glyph),harness:t('claude')}});
 const message={way:'←',who:'[b2]',harness:'codex',when:'09:01',kind:'reply',text:title+' · open'};
@@ -302,7 +303,7 @@ const cases={
  'short-no-rule':[38,7,true,[req('←','request-in','open')],[message],[]],
  'narrow':[32,7,true,[req('←','request-in','open')],[message],[]],
  'bottom':[80,24,false,[req('←','request-in','open')],[message],[]],
- 'requester':[44,40,true,[req('→','request-out','partial answer'),req('✓','request-done','final answer','rq-bbbbbb')],
+ 'requester':[44,40,true,[req('→','request-out','partial answer'),req('✓','request-done','final answer','rq-bbbbbb','→')],
    [{...message,way:'→'}],[route('done','✓')]],
  'requester-no-request':[44,40,true,[],[{...message,way:'→'}],[route('done','✓')]],
 };
@@ -369,7 +370,7 @@ class PanelRequestLinesTest(unittest.TestCase):
 
     def test_a_finished_route_with_the_same_title_is_not_a_closed_request(self):
         self.assertEqual(self.lines("requester", "→✓✕"),
-                         [f"→ [b2] {self.TITLE} · partial answer", f"✓ [b2] {self.TITLE} · final answer"])
+                         [f"→ [b2] {self.TITLE} · partial answer", f"✓ → [b2] {self.TITLE} · final answer"])
         rows = self.panels["requester-no-request"]
         self.assertTrue(any(row.startswith("│ │ ✓ ") for row in rows), "\n".join(rows))
         self.assertEqual(self.lines("requester-no-request", "→✓✕"), [])
