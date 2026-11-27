@@ -66,7 +66,7 @@ Create the document at its stated project path, defaulting to the project cwd. U
 | `analyze` | Step 1 Material Analysis | Inventory references and write mode-specific analysis under `analysis/` | `pipeline-steps.md` |
 | `strategy` | Step 2 `draft-strategy` | Produce the strategy and required `## Style Guide` | `pipeline-steps.md` |
 | `strategy-refine` | Step 3 Strategy Review | Dispatch the `strategy-review` sibling node (`research/fact-check` unit); call `draft-refine` only when revision is needed | `review-and-qa.md` |
-| `draft` | Step 4 Draft Generation | Discover or extract figures and produce the cheatsheet draft through the `research/research-survey` unit; add an audience-language mirror only when required | `pipeline-steps.md` |
+| `draft` | Step 4 Draft Generation | Discover or extract figures and produce the cheatsheet draft through the `editorial/write` unit; add an audience-language mirror only when required | `pipeline-steps.md` |
 | — | Step 4b Factual Detector | Run the orchestrator-side factual scan selected by the graph | `pipeline-steps.md` |
 | `draft-refine` | Step 5 Draft Review | Dispatch the `quality-review` (`editorial/review`) and `fact-verify` (`research/claim-verify`) sibling nodes; call `draft-refine` when revision is needed | `review-and-qa.md` |
 | — | Step 5.5 Editorial Polish | Apply the finalize polish pass (`editorial/report` unit) for `standard+` | `pipeline-steps.md` |

@@ -56,8 +56,7 @@ def native_capacity_terminal(terminal, metadata):
         return False
     if harness == "codex" and terminal.get("state") == "absent":
         # App Server ends on a typed turn.failed event, without a verdict envelope.
-        from dispatch_supervisor_terminal import classify_supervisor_log
-        return classify_supervisor_log(log_path, harness).failure_class == "capacity"
+        return terminal.get("failure_class") == "capacity"
     return (
         terminal.get("state") == "invalid"
         and terminal.get("source") == f"exact-{harness}-result"

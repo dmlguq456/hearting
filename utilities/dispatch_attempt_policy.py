@@ -35,6 +35,42 @@ DEFERRED_COMPLETION_NOTE = "completion-deferred"
 DEFERRED_COMPLETION_SOURCE = "registered-wrapper-completion-transient-v1"
 
 
+# Names from the native wire formats. A bounded token shape alone would also
+# accept a credential or a word copied out of the request.
+_CONTENT_REFUSALS = frozenset({
+    "cyberPolicy", "bioPolicy", "misalignmentPolicyViolation",
+    "refusal", "provider.content-filter",
+})
+_PROVIDER_FAILURE_KINDS = frozenset({
+    # Codex app-server CodexErrorInfo, including the keys of structured variants.
+    "contextWindowExceeded", "sessionBudgetExceeded", "usageLimitExceeded",
+    "rateLimitExceeded", "flexUnavailable", "serverOverloaded", "modelNotFound",
+    "policyCapacityUnavailable", "inferenceHookDenied", "tooManyDenials",
+    "internalServerError", "unauthorized", "badRequest",
+    "threadRollbackFailed", "sandboxError", "other", "httpConnectionFailed",
+    "responseStreamConnectionFailed", "responseStreamDisconnected",
+    "responseTooManyFailedAttempts", "activeTurnNotSteerable",
+    # OpenCode v1's API error name and v2's provider error types.
+    "APIError", "provider.rate-limit", "provider.auth", "provider.quota",
+    "provider.transport", "provider.internal", "provider.invalid-output",
+    "provider.invalid-request", "provider.unsupported-operation", "provider.no-route",
+    "provider.unknown", "provider.timeout",
+}) | _CONTENT_REFUSALS
+
+
+def provider_failure_kind(value: object) -> str:
+    """Return a recorded kind of at most 48 characters, or no evidence."""
+    return value if (isinstance(value, str) and len(value) <= 48
+                     and value in _PROVIDER_FAILURE_KINDS) else ""
+
+
+def content_refusal(kind: object) -> bool:
+    return isinstance(kind, str) and kind in _CONTENT_REFUSALS
+
+
+SAME_PROVIDER_REFUSAL = "Retrying with the same harness and model is likely to return the same refusal."
+
+
 def terminal_conflict_identity(metadata: Mapping[str, str]) -> str:
     keys = ("note", "failure_class", "classifier_source", "conflicting_terminal_note",
             "conflicting_failure_class", "conflicting_classifier_source")
