@@ -220,13 +220,13 @@ class HostRunR2Test(ScriptedModelTest):
             f"  [요청 rq-aaaaaa] [df] → [67] │ 검토 제목 {n} │ 판 1 │ 열기: show rq-aaaaaa      │ MESSAGES │",
             f"  conversation → [67] {n} claude · 01:02 · delivered                              │ → [67] claude · 01:02 · delivered │",
             f"                                                              │ │ → [67] 검토 제목 {n} · open │ │",
-            f"                                                              │ │ ◂ [df] 다른 제목 · open │ │",
+            f"                                                              │ │ ← [df] 다른 제목 · open │ │",
             f"                                                              │ │ ✓ [67] 검토 제목 {n} · final │ │",
         ])
         title = f"검토 제목 {n}"
         self.assertEqual(cases.panel_request_lines(screen, title, "→✓✕"),
                          [f"→ [67] 검토 제목 {n} · open", f"✓ [67] 검토 제목 {n} · final"])
-        self.assertEqual(cases.panel_request_lines(screen, title, "◂"), [])
+        self.assertEqual(cases.panel_request_lines(screen, title, "←"), [])
         self.assertEqual(cases.panel_request_lines(screen, "zzzzzz", "→✓✕"), [])
 
     def test_s8_a_title_cut_on_a_narrow_panel_is_still_found_by_its_front_part(self):
@@ -237,19 +237,19 @@ class HostRunR2Test(ScriptedModelTest):
         screen = "  ▐▛███▛█   Claude Code   ┌ ● [b6] claude ───┐\n" + closed + "\n" + other
         self.assertEqual(cases.panel_request_lines(screen, ["검토 제목 1c09d3"], "→✓✕"),
                          ["✓ 검토 제목 1c09… · final answer"])
-        self.assertEqual(cases.panel_request_lines(screen, "검토 제목 1c09d3", "◂"), [])
+        self.assertEqual(cases.panel_request_lines(screen, "검토 제목 1c09d3", "←"), [])
         pad = " " * 160  # row 9 of the r3 screens, whole (the left pane is blank there)
         real_closed = pad + "│ │ ✓ 검토 제목 1c09… · final answer │ │"
-        real_receiver = pad + "│ │ ◂ 검토 제목 1c… · partial answer │ │"
+        real_receiver = pad + "│ │ ← 검토 제목 1c… · partial answer │ │"
         self.assertEqual(cases.panel_request_lines(real_closed, ["검토 제목 1c0908"], "→✓✕"),
                          ["✓ 검토 제목 1c09… · final answer"])
-        self.assertEqual(cases.panel_request_lines(real_receiver, ["검토 제목 1c0908"], "◂"),
-                         ["◂ 검토 제목 1c… · partial answer"])
-        # With the other session's tag and a cut title: `◂ [b1] 검토 제목 9036… · open`.
-        opened = "│ │ ◂ [b1] 검토 제목 9036… · open │ │"
-        self.assertEqual(cases.panel_request_lines(opened, ["검토 제목 9036d9"], "◂"),
-                         ["◂ [b1] 검토 제목 9036… · open"])
-        self.assertEqual(cases.panel_request_lines(opened, ["검토 제목 aaaaaa"], "◂"), [])
+        self.assertEqual(cases.panel_request_lines(real_receiver, ["검토 제목 1c0908"], "←"),
+                         ["← 검토 제목 1c… · partial answer"])
+        # With the other session's tag and a cut title: `← [b1] 검토 제목 9036… · open`.
+        opened = "│ │ ← [b1] 검토 제목 9036… · open │ │"
+        self.assertEqual(cases.panel_request_lines(opened, ["검토 제목 9036d9"], "←"),
+                         ["← [b1] 검토 제목 9036… · open"])
+        self.assertEqual(cases.panel_request_lines(opened, ["검토 제목 aaaaaa"], "←"), [])
         # A whole title and a state with a long word.
         whole = "│ │ → [6e] 짧은 일 · partial answer │ │"
         self.assertEqual(cases.panel_request_lines(whole, ["짧은 일"], "→"), ["→ [6e] 짧은 일 · partial answer"])
@@ -298,7 +298,7 @@ class FlowVerdictTest(unittest.TestCase):
         scenario.a_requests = lambda run: a_wakes
         scenario.start_a = lambda run, text: None
         scenario.wait_state = lambda run, request_id, state, timeout=90: True
-        shown = {"requester": ["→ [67] x · open"], "receiver": ["◂ [df] x · open"]} if panels else {"requester": [], "receiver": []}
+        shown = {"requester": ["→ [67] x · open"], "receiver": ["← [df] x · open"]} if panels else {"requester": [], "receiver": []}
         scenario.panels = lambda run, tag: ({**shown, "requester": ["✓ [67] x · final"]} if tag == "closed" and panels else shown)
         run = SimpleNamespace(harness=harness, evidence={"session_shell": {}} if shell else {}, notes=[],
                               main_requests=lambda: [], note=lambda text: run.notes.append(text))

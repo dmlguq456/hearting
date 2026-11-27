@@ -3148,11 +3148,11 @@ class RequestPanelTest(unittest.TestCase):
 
     HEAD = r"""
 const assert=require('node:assert/strict'),view=require(process.argv[1]);
-const q=(id,glyph,who,title,status,kind,age='3m')=>({id,way:glyph==='◂'?'◂':'→',glyph,who,title,status,age,kind,
+const q=(id,glyph,who,title,status,kind,age='3m')=>({id,way:glyph==='←'?'←':'→',glyph,who,title,status,age,kind,
  details:[['','e9 → e7 · '+id,'dim'],['판','2 head d2d92ec · 1 대체됨','loc_repo'],['전달','전달됨','dim'],['일','열림','loc_repo'],
   ['변화','3m','dim'],['보고','1 일부 · 1(대체됨) · '+'긴결과 '.repeat(6),'dim']],
  body:['BODY_NONCE 첫 줄','둘째 줄','https://example.com/'+'x'.repeat(60)],body_label:'본문'});
-const requests=[q('rq-aaaaaa','◂','[e7]','같은 시각 요청 A 한글 제목','열림','request-in'),
+const requests=[q('rq-aaaaaa','←','[e7]','같은 시각 요청 A 한글 제목','열림','request-in'),
  q('rq-bbbbbb','→','[52]','같은 시각 요청 B','전달됨','request-out'),q('rq-cccccc','✓','[e1]','끝난 일','최종 답','request-done')];
 const routes=[{id:'rt-a',title:'Actual route',state:'working',kind:'working',paint:{glyph:{text:'⠏'}}}];
 const base={route_count:1,routes,requests,messages:[{way:'←',who:'[e7]',text:'MSG_KEPT',when:'1m',kind:'steer',harness:'claude'}],styles:{dim:{dim:true}}};
@@ -3174,12 +3174,14 @@ for(const [width,height] of [[32,30],[37,30],[38,30],[80,24]]){
  // (11-17, route zones: the title counts the routes alone, the requests are the box's `request` zone.)
  assert(lines.some(s=>width<80?/^│ ╭─ 1 ROUTE ─+ ›─╮ │$/.test(s):/^│ ╭─ route 1 ─+ ›─╮ │$/.test(s)),lines.join('\n'));
  assert(!lines.some(s=>/REQUEST|request \d/.test(s)),lines.join('\n'));
- for(const mark of ['◂','→','✓'])assert(lines.filter(s=>s.includes(mark)).length===1,mark+width+'\n'+lines.join('\n'));
  assert(!lines.join('').includes('⏳')&&!lines.join('').includes('⌛'));
  assert(lines.some(s=>s.includes('MSG_KEPT')),'messages stay at '+width);
  // Requests stand once, in the box: MESSAGES counts and shows the messages alone.
  const m=lines.findIndex(s=>/^│ (MESSAGES +|messages ─+ )› │$/.test(s)),box=lines.findIndex(s=>s.includes('╰'));
- assert(m>box&&box>0&&lines.slice(m+1).every(s=>!/[◂✓]|→ \[52\]/.test(s)),lines.join('\n'));
+ // (11-27: a received request wears the received message's `←`, so each request's mark is counted in the box, above MESSAGES,
+ // and the one `←` under MESSAGES is the message's.)
+ for(const mark of ['←','→','✓'])assert(lines.slice(0,m).filter(s=>s.includes(mark)).length===1,mark+width+'\n'+lines.join('\n'));
+ assert(m>box&&box>0&&lines.slice(m+1).every(s=>!/✓|→ \[52\]/.test(s))&&lines.slice(m+1).filter(s=>s.includes('←')).length===1,lines.join('\n'));
  assert(lines.length<=height);
 }
 const none=text(render(37,30,{},{...base,requests:[]}));
@@ -3196,7 +3198,7 @@ for(const width of [32,38]){
  const count=parts.find(p=>/^\d+ ROUTE$/.test(p.text));
  assert(count&&count.fg===186,JSON.stringify(count));
  // A press on a request's row opens the MESSAGES popup (as the request rows of MESSAGES did).
- const rows=text(v),at=rows.findIndex(s=>s.includes('◂'));
+ const rows=text(v),at=rows.findIndex(s=>s.includes('←'));
  assert(at>0&&v.hits.some(h=>h.row===at&&h.action==='popup:MESSAGES'),JSON.stringify(v.hits));
 }
 """)
@@ -3204,25 +3206,25 @@ for(const width of [32,38]){
     def test_short_of_rows_the_box_scrolls_and_puts_work_to_answer_first(self):
         # Restored 11-15 from v4.36.4 (its press now the MESSAGES popup).
         self.node(r"""
-const many=Array.from({length:9},(_,i)=>q('rq-00000'+i,i===5?'◂':'→','[e'+i+']','일 '+i,'전달됨',i===5?'request-in':'request-out'));
+const many=Array.from({length:9},(_,i)=>q('rq-00000'+i,i===5?'←':'→','[e'+i+']','일 '+i,'전달됨',i===5?'request-in':'request-out'));
 const v=render(37,16,{},{...base,requests:many});
 const lines=text(v);
 assert(lines.some(s=>s.includes('↓')||s.includes('↑')),'the border counts the rows it hides');
-assert(lines.some(s=>s.includes('◂ [e5]')),'the received work to answer is among the first shown\n'+lines.join('\n'));
+assert(lines.some(s=>s.includes('← [e5]')),'the received work to answer is among the first shown\n'+lines.join('\n'));
 assert(lines.some(s=>s.includes('MSG_KEPT')));
 const wheel=render(37,16,{routeScroll:1},{...base,requests:many});
 assert.notDeepEqual(text(wheel),lines);
 """)
     def test_a_long_status_cuts_the_title_first_and_keeps_the_other_session(self):
-        # r3: `◂ 검토 제목 1c… · partial answer` lost its `[6e]`; the title is what gives way.
-        # (11-16: beside the native area a request reads as a route's doer: its head row `◂ [6e]` with the age at
+        # r3: `← 검토 제목 1c… · partial answer` lost its `[6e]`; the title is what gives way.
+        # (11-16: beside the native area a request reads as a route's doer: its head row `← [6e]` with the age at
         # the right edge, then the title, then the status on a row of its own; short of rows the title and the
         # status share a row and the title is the part cut: the other session and the status stay in every form.
         # 11-17: with the zone rules the shortest such panel holds 11 rows, not 9.)
         self.node(r"""
 // (11-17: the route's and the request's named rules take a row each; 11 rows is the shortest panel that still holds the request's head and
 // its title and status row, short of which the box scrolls or the request reads on one row.)
-for(const width of [32,37,38])for(const height of [30,11])for(const status of ['partial answer','final answer','open'])for(const title of ['검토 제목 1c9036d9 길게 이어지는 제목','review title 1c9036d9 and more words'])for(const [glyph,kind] of [['◂','request-in'],['✓','request-done']]){
+for(const width of [32,37,38])for(const height of [30,11])for(const status of ['partial answer','final answer','open'])for(const title of ['검토 제목 1c9036d9 길게 이어지는 제목','review title 1c9036d9 and more words'])for(const [glyph,kind] of [['←','request-in'],['✓','request-done']]){
  const model={...base,messages:[],requests:[q('rq-aaaaaa',glyph,'[6e]',title,status,kind)]};
  const lines=text(render(width,height,{},model));
  const at=lines.findIndex(s=>s.includes(glyph+' [6e]'));
@@ -3234,7 +3236,7 @@ for(const width of [32,37,38])for(const height of [30,11])for(const status of ['
  if(height===11)assert(lines[at+1].includes('· '+status),'short of rows the status joins the title row: '+label);
 }
 // A title that fits stays whole beside the session and the status.
-const whole=text(render(38,11,{},{...base,messages:[],requests:[q('rq-aaaaaa','◂','[6e]','짧은 일','final answer','request-in')]}));
+const whole=text(render(38,11,{},{...base,messages:[],requests:[q('rq-aaaaaa','←','[6e]','짧은 일','final answer','request-in')]}));
 assert(whole.some(s=>s.includes('짧은 일 · final answer')),whole.join('\n'));
 """)
 

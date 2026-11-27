@@ -34,7 +34,7 @@ const directQuick={...direct,id:'d2',intensity:'quick'};
 const dispatch={id:'a',zone:'dispatch',title:'갈래를 route에 기록',kind:'working',state:'working',elapsed:'1h 52m',shape:'staged',stages:six(2),kind_word:'code',intensity:'standard',role:'owner',
   paint:{glyph:P('⠸'),...doer('claude','Opus 5.5','xhigh','41%','━━━━'),now:'검토 지적 둘을 고치고 시험을 다시 돌리는 중'},workers_live:[worker('claude','Sonnet 5.5','high','22%','━━',{tool:'Edit',target:'backend'})]};
 const bare={...dispatch,id:'b',zone:undefined,title:'zone-less route'};
-const requests=[{id:'q1',kind:'request-out',way:'→',who:'[c2]',title:'보낸 요청의 제목',status:'open'},{id:'q2',kind:'request-in',way:'◂',who:'[6c]',title:'받은 요청의 제목',status:'partial'}];
+const requests=[{id:'q1',kind:'request-out',way:'→',who:'[c2]',title:'보낸 요청의 제목',status:'open'},{id:'q2',kind:'request-in',way:'←',who:'[6c]',title:'받은 요청의 제목',status:'partial'}];
 const STYLES={dim:{dim:true},loc_repo:{foreground:253},zone_direct:{foreground:208},zone_dispatch:{foreground:99},zone_request:{foreground:43},
   tag_steward:{foreground:219,bold:true},tag_steward_dim:{foreground:219,dim:true},hb_claude:{foreground:116},hb_codex:{foreground:176},hb_opencode:{foreground:147},
   g_work:{foreground:150,bold:true},g_work_off:{foreground:150,dim:true},lvl_g:{foreground:114},g_spin:{foreground:150}};
@@ -85,7 +85,7 @@ assert.deepEqual(rows,[
  '→ [c2]',
  '  보낸 요청의 제목',
  '  open',
- '◂ [6c]',
+ '← [6c]',
  '  받은 요청의 제목',
  '  partial',
 ]);

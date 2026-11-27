@@ -166,7 +166,7 @@ for(const [side,width,height] of [[true,40,60],[true,54,46],[false,120,20]]){
  const first=id=>v.hits.find(h=>h.action==='popup:ROUTE:'+id).row,last=id=>v.hits.filter(h=>h.action==='popup:ROUTE:'+id).at(-1).row;
  assert(first('rt-1111111111111111')===b.a+2&&last('rt-1111111111111111')<first('rt-2222222222222222'),label);
  assert(v.hits.filter(h=>h.action==='popup:MESSAGES'&&h.row>b.a&&h.row<b.b).length>=2,label);
- assert(rows.slice(b.a+1,b.b).filter(s=>/^│ │ [→◂✓✕] \[/.test(s)).length===2,label);
+ assert(rows.slice(b.a+1,b.b).filter(s=>/^│ │ [→←✓✕] \[/.test(s)).length===2,label);
  // Nothing opens in place any more.
  assert(!v.hits.some(h=>/^(route|request|message|read)[:-]|^route$/.test(h.action)),JSON.stringify(v.hits));
 }
@@ -217,8 +217,8 @@ for(const [side,width,height] of [[true,40,60],[true,32,46],[false,120,20]]){
  // (Short of rows the rules go first: the 32-cell panel here draws none, the others the one `request` rule.)
  const rules=rows.slice(b.a+1,b.b).filter(s=>/^│ │ ─ request ─+ │ │$/.test(s)).length;
  assert(rules<=1&&(width!==40&&width!==120||rules===1),label);
- // The two request rows stand in the box, once each (`◂ [e7] 검토 요청…`, `→ [52] frames…`).
- const requestRow=s=>/^│ │ (◂ \[e7\]|→ \[52\])/.test(s);
+ // The two request rows stand in the box, once each (`← [e7] 검토 요청…`, `→ [52] frames…`).
+ const requestRow=s=>/^│ │ (← \[e7\]|→ \[52\])/.test(s);
  const inBox=rows.slice(b.a+1,b.b).filter(requestRow),outside=[...rows.slice(0,b.a),...rows.slice(b.b+1)].filter(requestRow);
  assert(inBox.length===2&&outside.length===0,label);
  const m=rows.findIndex(s=>/^│ (MESSAGES|messages)/.test(s));
@@ -261,7 +261,7 @@ for(const side of [true,false])for(let height=8;height<=60;height+=side?1:4)for(
   const hidden=(rows.slice(b.a,b.b+1).join('').match(/[↑↓](\d+) ─/g)||[]).reduce((n,m)=>n+Number(m.slice(1,-2)),0);
   if(hidden)scrolled++;
   // Routes and requests shown plus those the border counts are all of them.
-  const requests=rows.slice(b.a+1,b.b).filter(s=>/^│ │ [→◂✓✕] \[/.test(s)).length;
+  const requests=rows.slice(b.a+1,b.b).filter(s=>/^│ │ [→←✓✕] \[/.test(s)).length;
   assert.equal(shown+requests+hidden,6,label);
   if(v.routeArea)assert(v.routeArea.top===b.a&&v.routeArea.bottom===b.b,JSON.stringify(v.routeArea)+label);
  }
@@ -292,7 +292,7 @@ const table=[[{text:'STATE',dim:true},{text:'  ROUTE  ',foreground:-1},{text:'AG
  [{text:'✕',foreground:217,bold:true},{text:' 휠 입력 시험 '},{text:'54m',foreground:242},{text:' code ',dim:true,bold:true}],
  [{text:'⠋',foreground:230},{text:' 팝업 바탕 ',foreground:253},{text:'claude',foreground:116},{text:'cc',foreground:173},{text:' 대기',foreground:150,dim:true}]];
 const question=[[{text:'◑ ',role:'accent'},{text:'route 상자를 이대로 둘까요?'}],[{text:'  '},{text:'▸',foreground:116,bold:true},{text:' 1 네',foreground:253,bold:true}],[{text:'    2 아니오',dim:true}],[{text:'↑↓ · Enter 보내기 · Esc 닫기',dim:true}]];
-const messages=pv.messagesBody({model:{styles,requests:[{id:'rq-a',glyph:'◂',who:'[e7]',title:'검토 요청',status:'열림',details:[['전달','전달됨','dim']],body:['본문']}],
+const messages=pv.messagesBody({model:{styles,requests:[{id:'rq-a',glyph:'←',who:'[e7]',title:'검토 요청',status:'열림',details:[['전달','전달됨','dim']],body:['본문']}],
  messages:[{way:'←',who:'[e1]',harness:'claude',when:'08:10',text:'CI 통과'}]},columns:60});
 const gray=f=>Number.isInteger(f)&&f>=232&&f<=255;
 for(const [name,body,kind] of [['question',question,'text'],['table',table,'table'],['messages',messages,'text']])

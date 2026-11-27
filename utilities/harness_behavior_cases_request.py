@@ -27,7 +27,7 @@ busy step ended did not test the late-report path and is ``inconclusive``.
     is B' 's and B' 's report is accepted. Counter-case: a session with no lineage row
     cannot report (``reporter-not-recipient``) and the request stays with B.
 
-The panel request lines (the requester's ``→`` and the receiver's ``◂``, in the route box's own
+The panel request lines (the requester's ``→`` and the receiver's ``←``, in the route box's own
 form: mark, other session, the request's title (cut with `…` on a narrow panel), `` · ``, state) are read from both whole
 terminal screens, which are written to the output folder; a panel that does not show them is a
 ``gap`` (outside the session shell there is no Hearting panel, so none is asserted: `panel: not-applicable`). Outside the session shell, the declared limits (PG-59: a Claude receiver at rest takes no
@@ -69,7 +69,7 @@ def busy_step(seconds):
 
 # The route box's request line: mark, the other session's `[tag]` (kept when the line is cut), the
 # title (cut with `…` on a narrow panel), ` · `, the state.
-PANEL_REQUEST_LINE = re.compile(r"│\s*([→◂✓✕])(?: (\[[^\]│]+\]))?(?: ([^│]*?))? · ([^│]*?)\s*│")
+PANEL_REQUEST_LINE = re.compile(r"│\s*([→←✓✕])(?: (\[[^\]│]+\]))?(?: ([^│]*?))? · ([^│]*?)\s*│")
 
 
 def turn(record):
@@ -274,7 +274,7 @@ class _RequestScenario(WatchWakeScenario):
 
     def panels(self, run, tag):
         """Both terminals' whole screens (written to the output folder) and the request lines the
-        route box shows: the requester's ``→`` (open) or ``✓`` (closed), the receiver's ``◂``."""
+        route box shows: the requester's ``→`` (open) or ``✓`` (closed), the receiver's ``←``."""
         a, b = run.tui.screen(), self.target_tui.screen()
         folder = Path(run.output) / f"{run.harness}-{self.name}"
         folder.mkdir(parents=True, exist_ok=True)
@@ -285,7 +285,7 @@ class _RequestScenario(WatchWakeScenario):
             files[who + "_screen_file"] = str(path)
         titles = [rec.get("title") or "" for rec in self.records(run).values()]
         return {"requester": panel_request_lines(a, titles, "→✓✕"),
-                "receiver": panel_request_lines(b, titles, "◂"), **files}
+                "receiver": panel_request_lines(b, titles, "←"), **files}
 
     def start_a(self, run, text):
         return run.prompt(f"{A_MARK} {text}")
@@ -389,7 +389,7 @@ class RequestFlowScenario(_RequestScenario):
                  and any(line.startswith("✓") for line in ev["panels_closed"]["requester"]))
         if not shown:
             run.note("the request flow passed; the route box did not show the request on both sides "
-                     "(open → and ◂, then the requester's ✓)")
+                     "(open → and ←, then the requester's ✓)")
             return "gap"
         return "pass"
 

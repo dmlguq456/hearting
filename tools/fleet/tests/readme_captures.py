@@ -241,7 +241,7 @@ def panel_pictures(render, capture, with_gif):
     pictures["panel-question.png"] = panel.screen([[panel.window(
         panel.image(question, 100, 27), "web-api · claude [9c] — the bottom layout")]])
     # One request on both sides: its row in the route box of the session that asked (→) and of the
-    # one asked (◂), the same title and state.
+    # one asked (←), the same title and state.
     pictures["requests.png"] = panel.screen([[
         panel.window(panel.image(panel.cells(panel_rows(world, panel.API, REQUEST_ROWS)), PANEL_COLS, REQUEST_ROWS),
                      "claude [4f] — asked"),
