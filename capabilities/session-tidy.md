@@ -252,19 +252,26 @@ edges. Unclear liveness or lineage remains unresolved.
 
 One fork is recorded. Claude's send-to-background (`/bg`) continues the
 conversation under a new session id in a daemon-run process and leaves the
-window's process as a viewer. When the new session's own start, or its first
-prompt, sees both live facts (the viewer's record holds the background job,
-and that background process resumes the viewer's session), it writes one
-`parked-fork` handover row. The row binds what the original session answered
-for at that moment: its depth-1 jobs and its steward roles and watches. Other
-records addressed to the original session follow the row only while that same
-link is live, so they stay with the original once the window takes its
-conversation back or the background process ends, and they stay unresolved
-while the viewer holds a different background session. A deliberate
-`--fork-session`, a background session started elsewhere, a second background
-fork of the same session, an original that already has a successor, a reused
-process or an unreadable record writes nothing. The row grants no card, seat
-number or release; a message question keeps its exact original recipient. Existing activation,
+window's process as a viewer. A hook of that background session, at its own
+native seat after a `fork` start, writes one `parked-fork` row in that seat's
+ledger when both live facts agree (the viewer's record holds the background
+job, and that background process resumes the viewer's session) and the
+window's session ran no hook after the background process started. The row
+lists what the original session answered for at that moment (its depth-1 jobs
+in every registry the ordinary readers use, and its steward roles and watches)
+and names the two processes. What it lists stays with the background session
+and its own lineage while that background process lives, and returns to the
+window once it is gone. Anything else addressed to the original session
+follows the background session only while the window still holds that job and
+process pair; it stays with the original once the window takes its
+conversation back, and is unresolved while the window holds another
+background session. These live facts are read once per read pass, or afresh.
+A deliberate `--fork-session`, a background session started elsewhere or
+selected later, a second background fork of the same session, an original
+that already has a successor, a reused process or an unreadable record writes
+nothing. The row is not a handover: older readers ignore it, and it grants no
+card, seat number or release. A parked fork takes no seat, so a message
+question keeps its exact original recipient. Existing activation,
 prompt, and runner sweeps discover open records that have no retained duty.
 New notices retain a duty when written so an idle recipient can be woken.
 
