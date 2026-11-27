@@ -40,6 +40,10 @@ _HUE_OF = {
     # request aqua. (An 8-color terminal has no color left over: there the zones read in the default color and the white,
     # still apart from every status and harness color; the names say which zone it is.)
     "zone_direct": ("zd", 0), "zone_dispatch": ("zv", 0), "zone_request": ("zq", 0),
+    # 11-27 (the person: "dispatch랑 request 구분줄에 은은하게 동일 컬러로 해주라"): a zone's named rule draws its line in the
+    # zone's own hue one rung down (dim), so the name stays the brighter mark and two zones' rules no longer read as one gray.
+    # Where no hue is shown (mono, `NO_COLOR`, under 256 colors) the rule's line stays the plain dim line it was.
+    "zoned_direct": ("zd", _A_D), "zoned_dispatch": ("zv", _A_D), "zoned_request": ("zq", _A_D),
     # This window's own number on the PEERS line: its harness hue, bold.
     "hbb_claude": ("cl", _A_B), "hbb_codex": ("cx", _A_B), "hbb_opencode": ("oc", _A_B), "hbb_other": ("d", _A_B),
     "tag_steward_dim": ("p", _A_D),
