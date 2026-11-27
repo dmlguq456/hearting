@@ -75,7 +75,9 @@ class PermissionProfileTest(unittest.TestCase):
             "GIT_CONFIG_KEY_1": "safe.directory",
             "GIT_CONFIG_VALUE_1": str(self.wt),
         }
-        self.env = {"PATH": os.environ["PATH"], **self.git_safety_env}
+        self.env = {"PATH": os.environ["PATH"],
+                    "GIT_CEILING_DIRECTORIES": str(checkout_root),
+                    **self.git_safety_env}
         for key, name in (("HOME", "home"), ("CODEX_HOME", "codex-home"),
                           ("XDG_CACHE_HOME", "cache"), ("XDG_STATE_HOME", "state"),
                           ("XDG_RUNTIME_DIR", "runtime"), ("TMPDIR", "tmp"),
@@ -83,6 +85,10 @@ class PermissionProfileTest(unittest.TestCase):
             path = self.base / name
             path.mkdir(mode=0o700)
             self.env[key] = str(path)
+        # Before init, Git must not discover the surrounding checkout.
+        probe = subprocess.run(["git", "rev-parse", "--git-dir"], cwd=self.base,
+                               env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(probe.returncode, 0, probe.stdout)
         self.git("init", "-q", str(self.repo), cwd=self.base)
         self.git("config", "user.email", "fixture@example.com")
         self.git("config", "user.name", "Fixture")
