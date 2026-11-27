@@ -1113,7 +1113,8 @@ def _advance_progress_tracker(previous, signal, now, planned_seconds=None):
         if rate_time_valid and 0 < duration <= 600:
             rate = delta / duration
         # The stretch this increase ended is a step (from a late first observation, part of one).
-        quiet_from = _number(previous.get("last_increase_at") or previous.get("first_observed_at"))
+        quiet_from = _number(previous.get("last_increase_at"))
+        quiet_from = _number(previous.get("first_observed_at")) if quiet_from is None else quiet_from
         if quiet_from is not None and sample_at > quiet_from:
             tracker["longest_quiet_seconds"] = max(sample_at - quiet_from,
                                                    _step_seconds(previous.get("longest_quiet_seconds")) or 0)
@@ -1139,7 +1140,6 @@ def _advance_progress_tracker(previous, signal, now, planned_seconds=None):
                     "since": anchor_kind, "seconds_since_anchor": seconds,
                     "last_increase_at": tracker.get("last_increase_at"),
                     "first_observed_at": tracker.get("first_observed_at"),
-                    "longest_quiet_seconds": _step_seconds(tracker.get("longest_quiet_seconds")),
                     "episode_id": episode,
                     "generation": signal.get("generation")}
     comparison = {"completed": value, "total": total, "unit": unit}
@@ -1772,7 +1772,6 @@ def _notice_texts(run, event_kind, observation, record_path, sources, name_lines
     summary = observation.get("summary") or {}
     admission = observation.get("admission") if isinstance(observation.get("admission"), dict) else {}
     stagnation = observation.get("stagnation") if isinstance(observation.get("stagnation"), dict) else {}
-    quiet = None  # (entry index, text): the earlier step, added to the stagnation entry if it fits
     latest, best = summary.get("latest"), summary.get("best")
     metric = summary.get("metric")
     def points(field, fallback):
@@ -1831,8 +1830,6 @@ def _notice_texts(run, event_kind, observation, record_path, sources, name_lines
         anchor = t("resource.stagnant.last_increase" if stagnation.get("since") == "last-increase"
                    else "resource.stagnant.first_observation")
         entries.append(t("resource.stagnant", duration=_duration(stagnation.get('seconds_since_anchor'), t), anchor=anchor))
-        step = _step_seconds(stagnation.get("longest_quiet_seconds"))
-        quiet = step and (len(entries) - 1, ", " + t("resource.stagnant.longest_quiet", duration=_duration(step, t)))
     elif stagnation.get("state") == "unknown":
         entries.append(t("resource.stagnation_unknown"))
     # Nothing was read because nothing was declared (or it is not visible here): one phrase.
@@ -1897,10 +1894,8 @@ def _notice_texts(run, event_kind, observation, record_path, sources, name_lines
     entries.extend(source_lines)
     text = "; ".join([*name_lines, *entries])
     if len(text) <= 600:
-        # The catalog's optional pieces (metric line, words, table command), then the earlier step: one part only.
+        # The catalog's optional pieces (metric line, words, table command) only while it stays one part.
         front, end = _fit_optional(name_lines, entries, optional)
-        if quiet and len("; ".join([*name_lines, *front, *entries, *end])) + len(quiet[1]) <= 600:
-            entries[quiet[0]] += quiet[1]
         return ["; ".join([*name_lines, *front, *entries, *end])]
     # Keep every field in immutable bounded parts; numbered chunks can be
     # concatenated in order when a path is longer than one notice.

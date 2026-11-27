@@ -2606,10 +2606,6 @@
    "en": "last actual increase",
    "ko": "마지막 실제 증가"
   },
-  "resource.stagnant.longest_quiet": {
-   "en": "longest earlier wait for an increase {duration}",
-   "ko": "앞서 증가까지 가장 오래 걸린 시간 {duration}"
-  },
   "resource.stagnation_unknown": {
    "en": "progress stagnation=unknown",
    "ko": "정체 여부=미확인"
