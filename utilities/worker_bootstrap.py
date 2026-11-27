@@ -1389,11 +1389,118 @@ def continuation_followup_for_row(metadata, jobs, *, return_fields=False):
         return {} if return_fields else ""
 
 
-def inline_complete_command(node_id: str, evidence: str | None = None) -> str:
+def inline_complete_command(node_id: str, evidence: str | None = None, route_file=None) -> str:
     """The exact command that publishes the completion marker of a stage the owner ran itself."""
     script = entrypoint(_REPO_ROOT, "utilities/capability-route.py")
-    return (f"python3 {shlex.quote(str(script))} complete --inline --node {shlex.quote(str(node_id))}"
+    return (f"python3 {shlex.quote(str(script))} complete"
+            + (f" --route {shlex.quote(str(route_file))}" if route_file else "")
+            + f" --inline --node {shlex.quote(str(node_id))}"
             + (f" --evidence {shlex.quote(str(evidence))}" if evidence else "") + ' --reason "<one line>"')
+
+
+def owner_run_stage(node) -> bool:
+    """A non-terminal stage the route owner runs itself and closes with `inline_complete_command`; a ship deploy
+    keeps its own deploy handback."""
+    return (isinstance(node, dict) and node.get("kind") == "capability-owner" and node.get("unit") == "_kernel/owner"
+            and node.get("dispatch_depth") == 1 and node.get("terminal") is not True
+            and node.get("completion_gate") != "ship-deploy")
+
+
+def sealed_config_may_exist(route, route_file, output_dir) -> bool:
+    """False only when no `<slug>/_internal/configs` (file, directory or link), where the existing `config-seal`
+    writes its manifests, is one level below the cycle's `experiments` or the `experiments` it computes for a node of
+    this route; a missing `experiments` and a file beside the slugs hold none, and any other error while listing or
+    checking means it may."""
+    try:
+        import artifact_context, contextlib, dataclasses, stat  # noqa: E401
+        context = artifact_context.resolve_context(environ={}, route=route, route_file=route_file)
+        paths = [Path(output_dir) / "experiments"]
+        for item in route["nodes"]:
+            with contextlib.suppress(artifact_context.ArtifactContextError):
+                paths.append(dataclasses.replace(context, node=item).resolve_output("config-seal", leaf="experiments").path)
+        for path in paths:
+            with contextlib.suppress(FileNotFoundError):  # no `experiments` here
+                for slug in os.listdir(path):
+                    with contextlib.suppress(FileNotFoundError):  # none in this slug
+                        if not stat.S_ISDIR(os.stat(os.path.join(path, slug)).st_mode):
+                            continue  # a file beside the slugs (`_RUNLOG.md`), not a slug
+                        return os.lstat(os.path.join(path, slug, "_internal", "configs")) is not None  # link not followed
+        return False
+    except Exception:
+        return True
+
+
+def resource_start_command(route, route_file, node, output_dir) -> tuple[str, str]:
+    """`(command, note)`: the exact `resource-runner.py start`, only `<approved command>` left, when this route's
+    cycle is bound, its declared smoke attestation passes the runner's `verify` with an execution environment, no
+    sealed config may exist, and the registry holds no run of this node as the runner matches it; else `("", why)`."""
+    import importlib.util
+    from resource_run_registry import route_registry_path
+    if not output_dir or not route.get("cwd"):
+        return "", "its resource-runner.py start needs this route's bound cycle (run registry and log path)"
+    name = next((n for n in node.get("inputs") or () if isinstance(n, str)
+                 and (n == "smoke-attestation" or Path(n).name == "smoke-attestation.json")), None)
+    source, target = (node.get("input_sources") or {}).get(name), (node.get("part_io") or {}).get(name, name)
+    attestation = (Path(route["artifact_root"]) / source["path"] if isinstance(source, dict) else Path(output_dir)
+                   / target if name and any(target in (n.get("outputs") or ()) for n in route["nodes"]) else None)
+    if attestation is None:
+        return "", "it needs a smoke attestation this route does not produce — pass it as `--smoke-attestation <file>`"
+    try:
+        data = json.loads(attestation.read_text(encoding="utf-8"))
+        spec = importlib.util.spec_from_file_location("worker_smoke_attestation", _REPO_ROOT / "tools/smoke-attestation.py")
+        smoke = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(smoke)
+        smoke.verify(data)
+        if not smoke.RESOURCE_ENV.valid_execution_identity(data.get("execution_environment")):
+            return "", f"it needs a new smoke — {attestation} records no execution environment"
+    except Exception:
+        return "", f"it needs a verified smoke attestation — {attestation}"
+    if "config_sha256" in data:
+        return "", ("a sealed config manifest may exist — if so, pass its run id as `--run-id` and add "
+                    "`--config-manifest <that manifest>`")
+    if sealed_config_may_exist(route, route_file, output_dir):
+        return "", ("if a sealed config manifest exists, make the smoke again bound to that manifest, then start "
+                    "with its run id as `--run-id` and `--config-manifest <that manifest>`")
+    registry, run_id = route_registry_path(output_dir), f"{route['route_id']}-{node['id']}"
+    runner = ["python3", entrypoint(_REPO_ROOT, "utilities/resource-runner.py"), "--registry", str(registry)]
+    try:
+        runs = json.loads(registry.read_text(encoding="utf-8"))["runs"] if registry.exists() else {}
+        mine = str(Path(route_file).resolve())
+        held = {rid: row.get("status") or "state unknown" for rid, row in runs.items() if rid == run_id
+                or (row.get("node") == node["id"] and (row.get("route_id") == route["route_id"]
+                                                       or row.get("route") == mine))}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return "", f"{registry} cannot be read — read its runs of this node there before starting one"
+    if held:
+        return "", (f"this route node already has {', '.join(f'run {r} ({s})' for r, s in held.items())} in "
+                    f"{registry} — read it with `{shlex.join([*runner, 'status', '--run-id', next(iter(held))])}`; "
+                    "start nothing new")
+    return (shlex.join([*runner, "start", "--run-id", run_id, "--cwd", str(route["cwd"]), "--log",
+                        str(Path(output_dir) / "logs" / f"{run_id}.log"), "--route", str(route_file), "--node",
+                        str(node["id"]), "--smoke-attestation", str(attestation)]) + " -- <approved command>",
+            "replace only `<approved command>` with the approved payload command")
+
+
+def human_run_step(route, route_file, node) -> str:
+    """One line for a step the owner runs itself (a resource start, a stage it closes): its exact command when this
+    route's own context fixes every argument, else what is missing; "" for any other node and a GPU-free host node."""
+    try:
+        from gpu_execution_sandbox import host_payload_nodes
+        node_id, resource = node["id"], node.get("kind") == "resource-runner"
+        if not resource and not owner_run_stage(node) or resource and node_id in host_payload_nodes(route):
+            return ""
+        import artifact_context  # this route's own bound cycle: another route's inherited cycle never fills a path
+        output_dir = artifact_context.resolve_context(environ={}, route=route, route_file=route_file).output_dir
+        if resource:
+            command, note = resource_start_command(route, route_file, node, output_dir)
+            return f"start {node_id} yourself: `{command}` ({note})" if command else f"{node_id} has no start command yet: {note}"
+        if not output_dir:
+            return f"{node_id} has no completion command yet: its evidence needs this route's bound cycle"
+        evidence = node_first_evidence(route, node_id, output_dir)
+        return (f"complete {node_id} yourself: `{inline_complete_command(node_id, evidence, route_file)}` (after "
+                "you have done this stage's work" + (f" and written {evidence})" if evidence else ")"))
+    except Exception:  # text only: an unreadable fact leaves the caller's own wording
+        return ""
 
 
 def node_first_evidence(route, node_id: str, output_dir) -> str | None:
@@ -1504,6 +1611,9 @@ def owner_route_steps_prompt(args, environ) -> str:
         tags += "" if _dispatchable_stage(node) else " [you run it yourself]"
         outs = ", ".join(str(o) for o in node.get("outputs") or ()) or "-"
         lines.append(f"{number}. {node['id']}{tags} → {outs}")
+        step = human_run_step(route, route_file, node)
+        if step:
+            lines.append(f"   {step}")
         if _owner_spec_transaction(node) and route.get("artifact_root") and worktree:
             lines.append(f"   Run: `{spec_transaction_command(route, route_file, node['id'], worktree)}`"
                          + (" once every node it runs after is finished" if after else "") + ". "

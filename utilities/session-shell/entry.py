@@ -10,6 +10,14 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
+# The release this window runs from stays visible to the installer's /proc scan
+# for as long as the window lives, as `dispatch_contract._CODE_ROOT_FD` does: an
+# update moves the link the window was started through. The descriptor closes
+# on exec, so the native harness never sees it.
+try:
+    _CODE_ROOT_FD = os.open(ROOT, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+except OSError:
+    _CODE_ROOT_FD = None
 sys.path.insert(0, str(ROOT / "utilities"))
 import session_shell
 
