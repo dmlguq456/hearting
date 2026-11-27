@@ -162,6 +162,8 @@ def _select_artifact_root():
 # The refusals ``artifact-root.sh`` states itself, for which no choice is missing. Any other
 # failure without a path (python3's 1 or 2, exit 0 with no answer, a signal) may come from a
 # choice that failed on the selection module, so that module is probed once.
+# Premise: ``artifact_root_selection.py``'s ``__main__`` never exits 64, 66 or 67, so those codes
+# passed on by the shell are the shell's own; a Python start-up hook exiting so is out of scope.
 _SHELL_REFUSALS = (
     64,  # AGENT_ARTIFACT_ROOT is not an absolute path
     66,  # a path the shell needs is missing (override parent, start folder, resolver link)

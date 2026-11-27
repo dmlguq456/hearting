@@ -494,17 +494,6 @@ class SelectionImportTest(Fixture):
                 "def select_artifact_root(:\n" if how == "broken" else "", encoding="utf-8")
         return tree
 
-    def signalling_python(self):
-        """``PATH`` whose ``python3`` ends the shell resolver that started it with SIGTERM."""
-        bin_dir = self.tmp / "bin-signal"
-        bin_dir.mkdir(exist_ok=True)
-        python = bin_dir / "python3"
-        python.write_text('#!/bin/sh\ncase "$(ps -o args= -p "$PPID")" in\n'
-                          '  *artifact-root.sh*) kill -TERM "$PPID" ;;\nesac\nexit 97\n',
-                          encoding="utf-8")
-        python.chmod(0o755)
-        return {"PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}"}
-
     def shell_project(self, name):
         """A separate-git-dir checkout (the shell resolver answers) and the folder it looks in."""
         top = self.tmp / "work" / name
@@ -582,15 +571,10 @@ class SelectionImportTest(Fixture):
         missing, broken = self.unloadable("missing"), self.unloadable("broken")
         gone, unparsable = self.stripped("missing"), self.stripped("broken")
         empty, emptied = self.unloadable("empty"), self.stripped("empty")
-        killed = self.signalling_python()
-        # The shell's own answers for the last two rows: exit 0 without a path, and a signal.
+        # The shell's own answer for the last row: exit 0 without a path.
         shell = [str(emptied / "utilities" / "artifact-root.sh"), str(two)]
         answer = subprocess.run(["sh", *shell], capture_output=True, text=True, env=self.env)
         self.assertEqual((answer.returncode, answer.stdout), (0, "\n"))
-        shell = [str(gone / "utilities" / "artifact-root.sh"), str(two)]
-        answer = subprocess.run(["sh", *shell], capture_output=True, text=True,
-                                env={**self.env, **killed})
-        self.assertEqual(answer.returncode, -signal.SIGTERM)
         safe = {"PYTHONSAFEPATH": "1", "AGENT_DISPATCH_DEPTH": "-1"}
         relative, parentless = "relative", str(self.tmp / "absent" / "root")
         rows = [
@@ -628,11 +612,10 @@ class SelectionImportTest(Fixture):
              missing, gone, "surfaced"),
             ("selection file broken, two folders (1)", two / "src" / "engine.py", self.tmp,
              broken, unparsable, "surfaced"),
-            # No path and no refusal from the shell: the module is probed as well.
+            # No path and no refusal from the shell: the module is probed as well. A shell
+            # ended by a signal is test_only_the_shells_refusals_skip_the_probe's -15.
             ("selection file empty, two folders (0, no path)", two / "src" / "engine.py",
              self.tmp, empty, emptied, "surfaced"),
-            ("selection file gone, two folders, shell ended by SIGTERM", two / "src" / "engine.py",
-             self.tmp, {**missing, **killed}, gone, "surfaced"),
         ]
         for harness in HOOK_ENTRIES:
             for label, path, cwd, extra, tree, expected in rows:
