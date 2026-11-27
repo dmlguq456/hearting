@@ -62,14 +62,18 @@ process.stdout.write(JSON.stringify(jobs.map(job=>{
 """
 
 
-def usage(sources=SOURCES):
+def usage(sources=SOURCES, *, kinds=True):
+    """The USAGE rows as the backend sends them (``usage_rows``: the parts and, 11-28, each window's kind)."""
     from fleet import palette, session_panel
     with mock.patch("time.time", return_value=NOW):
-        rows = [{"harness": name, "parts": session_panel.quota_row(sources[name])} for name in ("claude", "codex", "opencode")]
+        rows = [{"harness": name, "parts": session_panel.quota_row(sources[name]),
+                 "columns": [kind for kind, _parts in session_panel.quota_windows_parts(sources[name])]}
+                for name in ("claude", "codex", "opencode")]
     styled = lambda parts: [{"text": text, **palette.style_components(key)} for text, key in parts]  # noqa: E731
     keys = ("dim", "loc_repo", "lvl_g", "lvl_y", "lvl_r")
     return {"styles": {key: palette.style_components(key) for key in keys}, "colors": 256,
-            "usage": [{"harness": row["harness"], "parts": styled(row["parts"])} for row in rows],
+            "usage": [{"harness": row["harness"], "parts": styled(row["parts"]), **({"columns": row["columns"]} if kinds else {})}
+                      for row in rows],
             "quota": styled(rows[0]["parts"])}
 
 
@@ -154,6 +158,104 @@ class UsageColumnsTest(unittest.TestCase):
             self.assertEqual(len(lines), 4 if width == 36 else 5)
             # No other press on a usage row.
             self.assertFalse([h for h in drawn["hits"] if at < h["row"] < last])
+
+
+# Review of #1911 (fix 1, 11-28): windows of time the producers name freely (Codex's `4w` and `45s`, Zen Go's `wk` and `mo`) and two model
+# windows. The kinds come from the producer; a window of time with a value never gives way to a model window.
+REVIEW = {
+    "claude": {"quota_windows": [("5h", 9, NOW + 45 * 60), ("7d", 72, NOW + 3 * 86400)], "model_quotas": [("opus", 86), ("sonnet", 40)]},
+    "codex": {"quota_windows": [("5h", 24, NOW + 100 * 60), ("7d", 41, None), ("4w", 55, None), ("45s", 50, None)], "model_quotas": []},
+    "opencode": {"quota_windows": [("wk", 40, NOW + 86400), ("mo", 73, None)], "model_quotas": []},
+}
+
+
+class UsageFix1Test(unittest.TestCase):
+    def test_the_row_reads_as_before_and_the_producer_names_each_windows_kind(self):
+        from fleet import session_panel
+        with mock.patch("time.time", return_value=NOW):
+            row = session_panel.quota_row(REVIEW["claude"])
+            windows = session_panel.quota_windows_parts(REVIEW["codex"])
+        self.assertEqual("".join(t for t, _k in row), "5h 9%(↻ 45m) │ 7d 72%(↻ 3d 0h) │ opus 86% │ sonnet 40%")
+        self.assertEqual([kind for kind, _parts in windows], ["period"] * 4)
+        with mock.patch("time.time", return_value=NOW), mock.patch("fleet.collectors.usage_cache.read",
+                                                                     lambda name: {"payload": {"rl_windows": [["wk", 40, None], ["mo", 73, None]]}}):
+            rows = session_panel.usage_rows("claude", REVIEW["claude"])
+        self.assertEqual([r["columns"] for r in rows], [["period", "period", "model", "model"], ["period", "period"], ["period", "period"]])
+
+    def test_no_window_of_time_with_a_value_leaves_the_screen(self):
+        drawn = paint([{"model": usage(REVIEW), "width": w} for w in (36, 44, 60)])
+        for width, d in zip((36, 44, 60), drawn):
+            _at, lines, _rows = section(d)
+            for name, source in REVIEW.items():
+                line = next(l for l in lines if l.startswith("│ " + name))
+                labels = [label for label, _used, _reset in source["quota_windows"]]
+                if (width, name) == (36, "codex"):
+                    # Four windows of time are more than 32 cells hold on one row (34 cells without a rule between them): the last
+                    # goes, 5h and 7d stay. (A decision for the person, in the report.)
+                    labels = labels[:3]
+                    self.assertNotIn("45s", line)
+                for label, used, _reset in source["quota_windows"]:
+                    if label in labels:
+                        self.assertRegex(line, r"(^|[ │]){} +{}%".format(label, used), (width, line))
+            # The model windows give way first: the second at 36 and 44, the first at none of these widths.
+            claude = next(l for l in lines if l.startswith("│ claude"))
+            self.assertEqual(("opus" in claude, "sonnet" in claude), (True, width == 60), (width, claude))
+
+    def test_a_backend_that_names_no_kinds_draws_each_row_as_before(self):
+        d, = paint([{"model": usage(kinds=False), "width": 60}])
+        _at, lines, _rows = section(d)
+        self.assertEqual(lines[1:4], ["│ claude   5h 9%(↻ 45m) │ 7d 72%(↻ 3d 0h) │ opus 86%       │",
+                                      "│ codex    5h 100%(↻ 1h 40m) │ 7d 12%                      │",
+                                      "│ opencode 7d 8%(↻ 1d 0h)                            ⚙   ▾ │"])
+
+    def test_the_buttons_row_of_its_own_costs_no_other_part_a_row(self):
+        from fleet import palette, session_panel
+        from tools.fleet.tests import readme_captures, readme_demo, readme_panel
+        with mock.patch.dict(os.environ):
+            readme_captures.isolate()
+            snapshot, hosts = readme_demo.snapshot()
+            world = readme_panel.World(snapshot, readme_demo.NOW, hosts)
+            panel = readme_panel.projection(world, "claude", readme_panel.API, columns=44, rows=46, side=True)["panel"]
+        st = lambda parts: [{"text": t, **palette.style_components(k)} for t, k in parts]  # noqa: E731
+        six = [{"name": n, "self": False, "cpu": 30, "mem": 40,
+                "gpus": [{"i": 0, "busy": True, "util": 50, "used": 21, "total": 24, "users": ["4f"]}]} for n in "abcdef"]
+        six = [{"host": st(r["host"]), "stats": [st(i) for i in r["stats"]], "gpus": [{k: st(v) for k, v in g.items()} for g in r["gpus"]],
+                "brief": [st(i) for i in r["brief"]]} for r in session_panel.resource_rows({"observed_at": 1.0, "hosts": six}, 1.0)]
+        ours = usage()["usage"]
+        # What USAGE cost before the shared columns: the same rows, the last beside the buttons (no model window to make it longer).
+        same = usage({**SOURCES, "claude": {**SOURCES["claude"], "model_quotas": []}})["usage"]
+        jobs, keys = [], []
+        for servers, resources in (("0", []), ("1", panel["resources"][:1]), ("2", panel["resources"][:2]), ("6", six)):
+            for width in (44, 60):
+                for height in range(16, 65):
+                    for which, rows in (("ours", ours), ("before", same)):
+                        jobs.append({"model": {**panel, "usage": rows, "quota": rows[0]["parts"], "resources": resources},
+                                     "width": width, "height": height})
+                        keys.append((servers, width, height, which))
+        drawn = dict(zip(keys, paint(jobs)))
+        own_row = set()
+        for servers, width, height, which in keys:
+            if which != "ours":
+                continue
+            ours_d, before_d = drawn[(servers, width, height, "ours")], drawn[(servers, width, height, "before")]
+
+            def rest(d):
+                lines = [text(row) for row in d["rows"]]
+                at = next((i for i, line in enumerate(lines) if line.startswith("│ USAGE")), len(lines) - 1)
+                return [line for line in lines[1:at] if line[1:-1].strip(" ─")]
+            self.assertGreaterEqual(len(rest(ours_d)), len(rest(before_d)), (servers, width, height))
+            # The gear and the fold button: on the panel's last row inside, their cells as before, in either form.
+            last = len(ours_d["rows"]) - 2
+            self.assertEqual(sorted((h["action"], h["left"], h["right"]) for h in ours_d["hits"] if h["row"] == last),
+                             [("fold", width - 4, width - 2), ("settings", width - 8, width - 6)], (servers, width, height))
+            line = text(ours_d["rows"][last])
+            self.assertTrue(line.endswith("⚙   ▾ │"), line)
+            if not line.startswith("│ opencode"):
+                own_row.add((width, height))
+        # Tall enough, the buttons have their own row (the person's form at 44 and 60); short of rows, they share the last.
+        self.assertIn((44, 64), own_row)
+        self.assertIn((60, 64), own_row)
+        self.assertNotIn((44, 16), own_row)
 
 
 if __name__ == "__main__":

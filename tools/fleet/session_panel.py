@@ -838,25 +838,32 @@ def session_memory_items(values, now=None):
     return items
 
 
-def quota_row(values):
-    """``5h 12%(↻ 2h) │ 7d 66%(↻ 5d)`` and per-model quotas; unreported values left out."""
+def quota_windows_parts(values):
+    """The reported windows, each ``(kind, parts)``: ``period`` for a window of time (the producer's ``quota_windows``:
+    5h, 7d, a week, a month …), ``model`` for a model's own quota (``model_quotas``). 11-27 (review of #1911): the USAGE
+    section takes the kind from here; the panel never guesses it from the label."""
     from .session_line import _remaining, _text
-    parts = []
+    out = []
     windows = [window for window in values.get("quota_windows") or () if _percent(window[1]) != "?"]
     if not windows and _percent(values.get("weekly_pct")) != "?":
         windows = [("7d", values["weekly_pct"], None)]
     for label, used, reset in windows:
-        if parts:
-            parts.append((" │ ", "dim"))
-        parts += [(_text(label) + " ", "dim"), (_percent(used), _level(used))]
+        parts = [(_text(label) + " ", "dim"), (_percent(used), _level(used))]
         left = _remaining(reset)
         if left:
             parts.append(("(↻ " + left + ")", "dim"))
+        out.append(("period", parts))
     for label, used in values.get("model_quotas") or ():
         if _percent(used) != "?":
-            if parts:
-                parts.append((" │ ", "dim"))
-            parts += [(_text(label) + " ", _model_key(label)), (_percent(used), _level(used))]
+            out.append(("model", [(_text(label) + " ", _model_key(label)), (_percent(used), _level(used))]))
+    return out
+
+
+def quota_row(values):
+    """``5h 12%(↻ 2h) │ 7d 66%(↻ 5d)`` and per-model quotas; unreported values left out."""
+    parts = []
+    for _kind, window in quota_windows_parts(values):
+        parts += ([(" │ ", "dim")] if parts else []) + window
     return parts
 
 
@@ -883,7 +890,9 @@ def usage_rows(harness, values):
                 payload = {}
             source = {"quota_windows": quota_windows(payload), "weekly_pct": weekly_quota(payload),
                       "model_quotas": payload.get("rl_ms") or []}
-        rows.append({"harness": name, "parts": quota_row(source)})
+        windows = quota_windows_parts(source)
+        # (11-27: ``columns``, each window's kind in its order, for the shared columns; the parts are as they were.)
+        rows.append({"harness": name, "parts": quota_row(source), "columns": [kind for kind, _parts in windows]})
     return rows
 
 

@@ -1983,8 +1983,17 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       for(const part of parts){if(String(part.text)===' │ '){sep=sep||part;if(current.length)groups.push(current);current=[];}else current.push(part);}
       if(current.length)groups.push(current);
       const name=usageName(u),mark=text(name,'dim'),lead=pad=>[{...mark,role:'harness-name',harness:u.harness},text(' '.repeat(Math.max(1,pad)))];
-      const tries=[];
+      const tries=[],kinds=usageKindsOf(u,groups.length);
       if(!groups.length)tries.push([text('?','dim')]);
+      else if(kinds){
+        // 11-28 (review of #1911): the kinds the producer sent: the reset times go, then the model windows from the last; a window of
+        // time goes only where its row cannot hold them all (from the last, so 5h and 7d stay longest).
+        const join=gs=>gs.flatMap((g,i)=>i&&sep?[sep,...g.parts]:g.parts);
+        let left=groups.map((g,i)=>({kind:kinds[i],parts:g.filter(part=>!/^\(↻/.test(String(part.text)))}));
+        tries.push(join(groups.map(g=>({parts:g}))),join(left));
+        for(const kind of ['model','period'])while(left.filter(g=>g.kind===kind).length>(kind==='period'?1:0)){
+          const at=left.map(g=>g.kind).lastIndexOf(kind);left=left.filter((_,i)=>i!==at);tries.push(join(left));}
+      }
       else{
         const kind=g=>{const label=g.map(part=>String(part.text)).join('').trim().split(/\s+/)[0];return label==='7d'?'week':/^\d+[mhd]$/.test(label)?'window':'model';};
         const join=gs=>gs.flatMap((g,i)=>i&&sep?[sep,...g]:g);
@@ -2003,66 +2012,71 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const usageLines=()=>keepQuota&&usageOn?usageData.filter((_u,i)=>keepLine[i]):[];
     // 11-27 (the person: "USAGES는 좀 더 이쁘게 행과열을 맞추고"; of the design's two, "USAGE 공통 열"): the harness rows share one set of columns,
     // chosen once for the three of them (whichever of them short rows leave standing: a row that gives way moves no column). The columns are the
-    // windows any of the three reports (the windows in their order, then the model windows in the order first seen), each the same width in every row: its name left, its value right-aligned in four cells (`?` there, dim, where the row
-    // reports none: no 0 is made up), and, where some row has its reset time, a time column (`(↻ ?)` where the row has a value and no time),
-    // two cells between columns, the names one column. Short of cells the time columns go in every row together, then the model windows from the
-    // last: 5h and 7d stand side by side to the end. Narrower than those two need (no layout), each row is fitted on its own as before. The
-    // last row is not laid out again beside the buttons: it shares their row only where it fits there as it is, else they stand on their own.
+    // windows any of the three reports (the windows of time in their order, then the model windows in the order first seen; 11-28, review of
+    // #1911: which is which is the producer's `columns`, never guessed from a label), each the same width in every row: its name left, its value
+    // right-aligned in four cells (`?` there, dim, where the row reports none: no 0 is made up), and, where some row has its reset time, a time
+    // column (`(↻ ?)` where the row has a value and no time), two cells between columns, the names one column. Short of cells the time columns
+    // go in every row together, then the model windows from the last; a window of time never goes: where those cannot all stand (or the backend
+    // sent no kinds) each row is fitted on its own. The last row is not laid out again beside the buttons: it shares their row where it fits
+    // there as it is, else the buttons stand on a row of their own, only while that row costs nothing else (`usageRoomy`, below): short of rows,
+    // the columns are chosen to fit beside the buttons (the 36-cell form), so no other part shows less for that row.
+    const usageKindsOf=(u,count)=>{const k=Array.isArray(u.columns)?u.columns:null;return k&&k.length===count&&k.every(x=>x==='period'||x==='model')?k:null;};
     const usageGroupsOf=u=>{
       const groups=[];let current=[];
       for(const part of painted(u.parts).filter(p=>p&&typeof p==='object')){if(String(part.text)===' │ '){if(current.length)groups.push(current);current=[];}else current.push(part);}
       if(current.length)groups.push(current);
-      return groups.map(g=>{
+      const kinds=usageKindsOf(u,groups.length);
+      if(!kinds)return null;
+      return groups.map((g,i)=>{
         const at=g.findIndex(part=>clean(String(part.text)).trim());
         if(at<0)return null;
         const reset=g.find(part=>/^\(↻/.test(String(part.text)))||null;
-        return {label:clean(String(g[at].text)).trim(),labelPart:g[at],pct:g.filter((part,i)=>i>at&&part!==reset),reset};
+        return {label:clean(String(g[at].text)).trim(),kind:kinds[i],labelPart:g[at],pct:g.filter((part,j)=>j>at&&part!==reset),reset};
       }).filter(g=>g&&g.label);
     };
-    const usageKind=label=>{const word=label.split(/\s+/)[0];return word==='7d'?'week':/^\d+[mhd]$/.test(word)?'window':'model';};
-    let usageLaid;
+    let usageRoomy=false;
+    const usageLaid={};
     const usageLayout=()=>{
-      if(usageLaid!==undefined)return usageLaid;
-      const list=usageData,rows=list.map(usageGroupsOf),windows=[],models=[];
+      const room=usageRoomy?inner:quotaRoom;
+      if(room in usageLaid)return usageLaid[room];
+      const list=usageData,rows=list.map(usageGroupsOf),periods=[],models=[];
+      usageLaid[room]=null;
+      if(rows.some(r=>!r))return null;
       for(const groups of rows){
         let prev=-1;
         for(const g of groups){
-          if(usageKind(g.label)==='model'){if(!models.includes(g.label))models.push(g.label);continue;}
-          let at=windows.indexOf(g.label);
-          if(at<0){at=prev+1;windows.splice(at,0,g.label);}
+          if(g.kind==='model'){if(!models.includes(g.label))models.push(g.label);continue;}
+          let at=periods.indexOf(g.label);
+          if(at<0){at=prev+1;periods.splice(at,0,g.label);}
           prev=at;
         }
       }
-      const cols=[...windows,...models].map(label=>{
-        const cells=rows.map(groups=>groups.find(g=>g.label===label)||null),shown=cells.filter(Boolean);
-        return {label,model:usageKind(label)==='model',cells,nameW:measure(label),pctW:Math.max(4,...shown.map(g=>size(g.pct))),
+      const cols=[...periods.map(label=>[label,'period']),...models.map(label=>[label,'model'])].map(([label,kind])=>{
+        const cells=rows.map(groups=>groups.find(g=>g.label===label&&g.kind===kind)||null),shown=cells.filter(Boolean);
+        return {label,model:kind==='model',cells,nameW:measure(label),pctW:Math.max(4,...shown.map(g=>size(g.pct))),
           timeW:Math.max(0,...shown.filter(g=>g.reset).map(g=>size([g.reset])))};
       });
       const tries=[cols.map(c=>({...c,time:c.timeW>0}))];
       let kept=cols.map(c=>({...c,time:false}));tries.push(kept);
       while(kept.some(c=>c.model)){const at=kept.map(c=>c.model).lastIndexOf(true);kept=kept.filter((_,i)=>i!==at);tries.push(kept);}
       const wide=cs=>usageWide+1+cs.reduce((n,c,i)=>n+(i?2:0)+c.nameW+1+c.pctW+(c.time?c.timeW:0),0);
-      const chosen=tries.find(cs=>cs.length&&wide(cs)<=inner);
-      let laid=null;
-      if(chosen){
-        laid=new Map(list.map((u,i)=>{
-          const name=usageName(u),out=[{...text(name,'dim'),role:'harness-name',harness:u.harness},pad(usageWide+1-measure(name))];
-          chosen.forEach((c,k)=>{
-            const g=c.cells[i];
-            if(k)out.push(pad(2));
-            out.push(g?{...g.labelPart,text:c.label+' '}:text(c.label+' ','dim'));
-            if(g)out.push(pad(c.pctW-size(g.pct)),...g.pct);else out.push(pad(c.pctW-1),text('?','dim'));
-            if(c.time){
-              const time=g&&g.reset?[g.reset]:g?[text('(↻ ?)','dim')]:[];
-              out.push(...time,pad(c.timeW-size(time)));
-            }
-          });
-          while(out.length&&/^ *$/.test(String(out.at(-1).text)))out.pop();
-          return [u,out];
-        }));
-      }
-      usageLaid=laid;
-      return laid;
+      const chosen=tries.find(cs=>cs.length&&wide(cs)<=room);
+      if(!chosen)return null;
+      return usageLaid[room]=new Map(list.map((u,i)=>{
+        const name=usageName(u),out=[{...text(name,'dim'),role:'harness-name',harness:u.harness},pad(usageWide+1-measure(name))];
+        chosen.forEach((c,k)=>{
+          const g=c.cells[i];
+          if(k)out.push(pad(2));
+          out.push(g?{...g.labelPart,text:c.label+' '}:text(c.label+' ','dim'));
+          if(g)out.push(pad(c.pctW-size(g.pct)),...g.pct);else out.push(pad(c.pctW-1),text('?','dim'));
+          if(c.time){
+            const time=g&&g.reset?[g.reset]:g?[text('(↻ ?)','dim')]:[];
+            out.push(...time,pad(c.timeW-size(time)));
+          }
+        });
+        while(out.length&&/^ *$/.test(String(out.at(-1).text)))out.pop();
+        return [u,out];
+      }));
     };
     // One harness's row: the shared columns' (above), else its own fit within `room`.
     const usageRowOf=(u,room)=>{const laid=usageLayout();return laid&&laid.has(u)?laid.get(u):usageFit(u,room).row;};
@@ -2306,6 +2320,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       // A fold can free several rows at once and leave empty ones: the BACKLOG items stand on them again (up to what they were, and the STATUS items stand already).
       else while(need()<budget&&take.BACKLOG_ITEMS<backlogFull)take.BACKLOG_ITEMS++;
     }
+    // 11-28 (review of #1911: "단추 줄 때문에 다른 칸이 main보다 먼저 빠지지 않는다"): every part above was laid out with USAGE in its form beside
+    // the buttons (as many rows as before the shared columns); its own row for the buttons (the person's form at 44 and 60 cells) stands only
+    // on a row that is left over.
+    if(usageOn){usageRoomy=true;if(need()>budget)usageRoomy=false;}
     // 11-26 (panel B; the person: "나머지는 일단 그대로"): beside the native area every row above is allotted as it was before B (the GIT row's place,
     // STATUS's and BACKLOG's first items and each message's second row counted, `heldRows`), so no other part of the panel stands elsewhere or shows
     // less or more. B's rows use fewer of them; what they leave (`pool`) goes, in this order, to the messages (one row each, as many as stood before:

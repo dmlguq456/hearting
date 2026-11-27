@@ -728,17 +728,23 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   carries the gear and the fold button at its right end; the last harness's row stands there while it fits beside them,
   else it keeps the row above and the buttons stand alone. Every harness window shows the same three rows. 11-27 (the person:
   "USAGES는 좀 더 이쁘게 행과열을 맞추고"; of the design's two, "USAGE 공통 열"): the three rows share one set of columns, chosen once from
-  the windows any of the three reports (the windows in their order, then the model windows in the order seen; a row that gives way
-  for rows moves no column): each window the same width in every row, its name left and its value right-aligned in four cells (a dim
+  the windows any of the three reports (the windows of time in their order, then the model windows in the order seen; a row that gives
+  way for rows moves no column; 11-28, review of #1911: which window is a window of time and which a model's is what the producer knows,
+  `session_panel.quota_windows_parts`, sent as the row's `columns` beside its unchanged `parts`, never guessed from a label such as `wk`,
+  `mo` or `4w`): each window the same width in every row, its name left and its value right-aligned in four cells (a dim
   `?` there where the row reports none: no 0 is made up), then, where some row has that window's reset time, a time column (a dim
   `(↻ ?)` where the row has the value and no time; blank where it has no value), two cells between windows, the harness names one
   column (`claude   5h   9%(↻ 45m)     7d  72%(↻ 3d 0h)  opus  86%` at 60 cells: 5h at column 12, 7d at 31, opus at 49). Short of cells
-  the time columns go in every row together, then the model windows from the last, each value whole; 5h and 7d stand side by side to
-  the end (at 44 cells `5h` 12, `7d` 21, `opus` 30; at 36 the model windows go). The last row is not laid out again beside the buttons
-  (its columns would move): it shares their row only where it fits there as it is (at 36), else the buttons stand on a row of their
-  own (at 44 and 60: one row more than before). Narrower than 5h and 7d need, each row gives way on its own in the last row's order
-  (the reset times, 5h, the model windows from the last, 7d), as before. Values keep their colors. Under the native area it stands as
-  beside it, as rows are left. The folded strip is unchanged.
+  the time columns go in every row together, then the model windows from the last, each value whole; a window of time with a value
+  never gives way to a model window, and 5h and 7d stand side by side to the end (at 44 cells `5h` 12, `7d` 21, `opus` 30; at 36 the
+  model windows go). Where the windows of time cannot all stand in one set of columns (or a backend sends no kinds), each row is fitted
+  on its own: the reset times, then its model windows from the last, then, only where its own windows of time cannot all stand on one
+  row, those from the last (a backend without kinds: the order before, the reset times, 5h, the model windows from the last, 7d). The
+  last row is not laid out again beside the buttons (its columns would move): it shares their row only where it fits there as it is (at
+  36), else the buttons stand on a row of their own (at 44 and 60), and only on a row nothing else needs: the panel is laid out with
+  the columns chosen to fit beside the buttons (the 36-cell form, as many rows as before), and the buttons take their own row only where
+  one is left over, so no other part shows a row less for it. Values keep their colors. Under the native area it stands as beside it,
+  as rows are left. The folded strip is unchanged.
 - RESOURCES (11-18, the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"): beside the
   native area, the section right above USAGE, its name row `RESOURCES` (no rule since 11-22, no `›`: it opens no popup; 11-26, panel B: one still rule
   without a word stands right above the name, above `USAGE` where every equipment row is folded, and short of rows it goes first), then for each host (this
