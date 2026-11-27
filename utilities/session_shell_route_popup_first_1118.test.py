@@ -235,10 +235,12 @@ const measure=async(label,press_=opened)=>{
        // the panel's pass mark `gate: true` is not drawn as a word; an empty `out`/`unit` is `·`
        c.first_true=/\btrue\b/.test(ft);c.first_dot=/out +· +│/.test(ft)&&/unit +· +│/.test(ft);c.first_box=boxGeo(fl);}
       c.first_rule=popupHas('╔═')(first.s);c.first_keys=popupHas('Enter 표로 돌아가기')(first.s);
+      c.first_top=box(first.s).top;
       frames['row_page_'+w+'_first']=plain(first.s);
       // (b) Fleet's page.
       const full=await until(s=>paged(s)&&popupHas('FLEET_R2')(s)&&!staleWords(s),'Fleet\'s page at '+w,cfg.delay*1000+20000);
       c.full_ms=Date.now()-t0;c.full_title=title(full.s);frames['row_page_'+w+'_page']=plain(full.s);
+      c.full_top=box(full.s).top;
       c.full_keys=popupHas('Enter 표로 돌아가기')(full.s);c.page_box=boxGeo(plain(full.s));
       // the page's stage boxes (Fleet's own drawing: a narrow page cuts a name, `plan-che…`), inside the page's `║` frame
       const tops=plain(full.s).filter(l=>/║.*┌─ (plan|execute|impl-r|test|report)/.test(l));
@@ -930,6 +932,7 @@ class RoutePopupFirstTest(unittest.TestCase):
             self.assertGreaterEqual(w['full_ms'], 800, w)
             self.assertNotIn('읽은 내용', w['full_title'], w)
             self.assertTrue(w['full_keys'], w)
+            self.assertEqual(w['first_top'], w['full_top'], w)
             # (the page shows Fleet's stage boxes inside its frame, not the words that the route has no stage record)
             self.assertFalse(w['full_no_record'], w)
             for name in STAGES:
@@ -965,6 +968,7 @@ class RoutePopupFirstTest(unittest.TestCase):
         self.assertEqual(w['first_boxes'], 0, w)
         self.assertIn('다시 읽는 중', w['first_title'], w)
         self.assertTrue(w['full_keys'], w)
+        self.assertEqual(w['first_top'], w['full_top'], w)
         self.assertNotIn('읽은 내용', w['full_title'], w)
 
     def test_the_gaps_of_the_aged_key_a_failed_reread_keys_pressed_under_it_and_a_held_backend_that_died(self):

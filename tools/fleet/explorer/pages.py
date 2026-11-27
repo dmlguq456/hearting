@@ -601,7 +601,7 @@ def _route_page(grid, vm, ident, x, right, bottom, state, whole=False):
     y = _draw_route_subset(grid, vm, ({key: value for key, value in route.items() if key != "called"},), x, y, bottom,
                            opened=ident, no_repo_group=True, view_key="route:" + ident, state=state)
     draw_route_detail(grid, vm, route, x, grid.cols - x - 2, y + 1, state,
-                      bottom=min(bottom, grid.rows - 6))
+                      bottom=min(bottom, grid.rows - 6), fit=whole)
 
 
 _VISIBILITY_TONE = {"good": "done", "bad": "lvl_r", "mixed": "lvl_y", "info": "soft", "dim": "dim"}
@@ -750,7 +750,40 @@ def _rounds_lines(rounds, room):
     return lines
 
 
-def _stage_box(grid, x, y, w, h, index, stage):
+def _stage_lines(stage, room):
+    status = stage.get("st") if stage.get("st") in _STATE_MARK else "todo"
+    gate = stage.get("kind") == "gate"
+    lines = []
+    who = stage.get("who")
+    if who:
+        harness_name, model = who
+        lines.append([_lab("by"), (harness_name, "hb_" + str(harness_name))] +
+                     ([(" " + str(model), "soft")] if model else []))
+    lines.append([_lab("time"), (clip(str(stage.get("when") or "·"), room), "soft" if status != "todo" else "dim")])
+    if gate and stage.get("qa"):
+        for question, answer in stage["qa"]:
+            lines.append([_lab("Q"), (clip(question, room - cell_width(answer) - 5), "soft"),
+                          (" → ", "line"), (answer, "done"), (" ★", "lvl_y")])
+        lines.append([_lab(""), ("★ = recommended · both followed", "dim")])
+    for k, parts in enumerate(_rounds_lines(stage.get("rounds"), room)):
+        if parts and parts[0][0].startswith("R") and len(parts) > 1 and parts[1][0] == "  ":
+            lines.append([_lab(parts[0][0])] + parts[2:])
+        else:
+            lines.append([_lab("rounds" if k == 0 else "")] + parts)
+    if stage.get("rounds_note"):
+        lines.append([_lab("rounds"), (clip(stage["rounds_note"], room), "dim")])
+    if stage.get("gate"):
+        gate_key = "done" if status == "done" else ("work" if status == "active" else "dim")
+        lines.append([_lab("gate"), (clip(stage["gate"], room - 3), "title_dim"),
+                      (" ✓" if status == "done" else "", gate_key)])
+    lines.append([_lab("out"), (clip(str(stage.get("out") or ""), room), "title_dim")])
+    lines.append([_lab("unit"), (clip(str(stage.get("unit") or ""), room), "dim")])
+    if stage.get("says"):
+        lines.append([_lab("says"), (clip(stage["says"], room), "now_sub")])
+    return lines
+
+
+def _stage_box(grid, x, y, w, h, index, stage, lines=None):
     hue = _STAGE_HUE[index % 5]
     status = stage.get("st") if stage.get("st") in _STATE_MARK else "todo"
     verdict_text = str(stage.get("verdict") or status)
@@ -787,34 +820,8 @@ def _stage_box(grid, x, y, w, h, index, stage):
     grid.mark_moved()
     _segs(grid, x + 2, y, title)
     _segs(grid, x + w - 1 - rw, y, right)
-    room = w - 4 - _LW
-    lines = []
-    who = stage.get("who")
-    if who:
-        harness_name, model = who
-        lines.append([_lab("by"), (harness_name, "hb_" + str(harness_name))] +
-                     ([(" " + str(model), "soft")] if model else []))
-    lines.append([_lab("time"), (clip(str(stage.get("when") or "·"), room), "soft" if status != "todo" else "dim")])
-    if gate and stage.get("qa"):
-        for question, answer in stage["qa"]:
-            lines.append([_lab("Q"), (clip(question, room - cell_width(answer) - 5), "soft"),
-                          (" → ", "line"), (answer, "done"), (" ★", "lvl_y")])
-        lines.append([_lab(""), ("★ = recommended · both followed", "dim")])
-    for k, parts in enumerate(_rounds_lines(stage.get("rounds"), room)):
-        if parts and parts[0][0].startswith("R") and len(parts) > 1 and parts[1][0] == "  ":
-            lines.append([_lab(parts[0][0])] + parts[2:])
-        else:
-            lines.append([_lab("rounds" if k == 0 else "")] + parts)
-    if stage.get("rounds_note"):
-        lines.append([_lab("rounds"), (clip(stage["rounds_note"], room), "dim")])
-    if stage.get("gate"):
-        gate_key = "done" if status == "done" else ("work" if status == "active" else "dim")
-        lines.append([_lab("gate"), (clip(stage["gate"], room - 3), "title_dim"),
-                      (" ✓" if status == "done" else "", gate_key)])
-    lines.append([_lab("out"), (clip(str(stage.get("out") or ""), room), "title_dim")])
-    lines.append([_lab("unit"), (clip(str(stage.get("unit") or ""), room), "dim")])
-    if stage.get("says"):
-        lines.append([_lab("says"), (clip(stage["says"], room), "now_sub")])
+    if lines is None:
+        lines = _stage_lines(stage, w - 4 - _LW)
     for k, parts in enumerate(lines[:h - 2]):
         _segs(grid, x + 2, y + 1 + k, parts, x + w - 1)
 
@@ -854,11 +861,12 @@ def _stage_status(stage):
             "todo" if all(value == "todo" for value in states) else "done")
 
 
-def _stage_grid(grid, x0, y, stages, room, bottom, loops=()):
+def _stage_grid(grid, x0, y, stages, room, bottom, loops=(), *, fit=False):
     gap = 4
     graph_known = any(stage.get("graph_known") for stage in stages)
     steps = _flow_steps(stages)
-    units = [sum(2 if "group" in stages[index] else 1 for index in step) for step in steps]
+    groups = [stage.get("group", (stage,)) for stage in stages]
+    units = [sum(len(groups[index]) for index in step) for step in steps]
     per = max(3, min(6, (room + gap) // (36 + gap)))
     if loops and (room + gap) // (_LOOP_MIN_W + gap) >= len(steps):
         per = len(steps)
@@ -869,40 +877,63 @@ def _stage_grid(grid, x0, y, stages, room, bottom, loops=()):
     pitch_gap = 1
     lanes = len(loops) + 1 if loops and nrows == 1 else 0
     listed = len(loops) + 2 if loops and nrows > 1 and not spare else 0
-    avail = bottom - y - lanes - listed
-    if avail - (nrows - 1) < 6 * nrows:
-        pitch_gap = 0
-    h = max(4, min(max(10, 3 * max(units) - 1), (avail - pitch_gap * (nrows - 1)) // nrows))
+    if fit:
+        # Size the boxes from the same rows they draw. A row of the snake takes
+        # the tallest of its steps, including any boxes stacked in one step.
+        bodies = [[_stage_lines(item, w - 4 - _LW) for index in step for item in groups[index]]
+                  for step in steps]
+        heights = [[len(lines) + 2 for lines in step] for step in bodies]
+        step_heights = [sum(step) + len(step) - 1 for step in heights]
+        row_heights = [max(step_heights[i:i + per]) for i in range(0, len(steps), per)]
+        if loops and nrows > 1 and spare:
+            row_heights[-1] = max(row_heights[-1], len(loops) + 2)
+    else:
+        avail = bottom - y - lanes - listed
+        if avail - (nrows - 1) < 6 * nrows:
+            pitch_gap = 0
+        h = max(4, min(max(10, 3 * max(units) - 1), (avail - pitch_gap * (nrows - 1)) // nrows))
+        row_heights = [h] * nrows
+    row_tops = [y]
+    for height in row_heights[:-1]:
+        row_tops.append(row_tops[-1] + height + pitch_gap)
+    end = row_tops[-1] + row_heights[-1]
     pos = [None] * len(stages)
-    step_at, step_of, mids_of = [], {}, {}
+    step_at, step_of, mids_of, bottoms = [], {}, {}, {}
     for number, step in enumerate(steps):
         row, k = divmod(number, per)
         col = k if row % 2 == 0 else per - 1 - k
-        bx, by = x0 + col * (w + gap), y + row * (h + pitch_gap)
+        bx, by = x0 + col * (w + gap), row_tops[row]
         step_at.append((bx, by, row))
-        # Stacked boxes split the step height evenly; a lone stage or 2-way group keeps its old cut.
         count = units[number]
-        unit = (h - (count - 1)) // count
-        tops = [by + j * unit + (j * (h - count * unit)) // max(1, count - 1) for j in range(count)]
-        middle = unit // 2 if unit > 2 else 0
+        if fit:
+            lines, sizes = bodies[number], heights[number]
+            tops = [by]
+            for height in sizes[:-1]:
+                tops.append(tops[-1] + height + 1)
+        else:
+            # A fixed Fleet pane splits the available step height evenly.
+            h = row_heights[row]
+            unit = (h - (count - 1)) // count
+            sizes, lines = [unit] * count, [None] * count
+            tops = [by + j * unit + (j * (h - count * unit)) // max(1, count - 1) for j in range(count)]
         slot = 0
         for index in step:
             stage = stages[index]
             pos[index] = (bx, by, row)
             step_of[index] = number
+            group = groups[index]
+            mids = []
+            for item in group:
+                height = sizes[slot]
+                _stage_box(grid, bx, tops[slot], w, height, index, item, lines[slot])
+                mids.append(tops[slot] + (height // 2 if height > 2 else 0))
+                slot += 1
             if "group" in stage:
-                group = stage["group"]
-                _stage_box(grid, bx, tops[slot], w, unit, index, group[0])
-                _stage_box(grid, bx, tops[slot + 1], w, unit, index, group[1])
-                grid.put(bx + 2, tops[slot] + unit, "∥ 2-way · %s" % (
+                grid.put(bx + 2, tops[slot - 2] + sizes[slot - 2], "∥ 2-way · %s" % (
                     "both pass" if all(item.get("st") == "done" for item in group) else "…"), "dim",
                     limit=bx + w - 1)
-                mids_of[index] = [tops[slot] + middle, tops[slot + 1] + middle]
-                slot += 2
-            else:
-                _stage_box(grid, bx, tops[slot], w, unit, index, stage)
-                mids_of[index] = [tops[slot] + middle]
-                slot += 1
+            mids_of[index] = mids
+            bottoms[index] = tops[slot - 1] + sizes[slot - 1] - 1 if fit else by + row_heights[row] - 1
 
     if graph_known:
         visual_for = {}
@@ -928,7 +959,7 @@ def _stage_grid(grid, x0, y, stages, room, bottom, loops=()):
         for number, (sources, targets) in sorted(links.items()):
             (bx, by, row), (nx, _ny, nrow) = step_at[number], step_at[number + 1]
             if nrow != row:
-                arrow_y, arrow_x = by + h, bx + w // 2
+                arrow_y, arrow_x = by + row_heights[row], bx + w // 2
                 if 0 <= arrow_y < grid.rows and 0 <= arrow_x < grid.cols and \
                         grid.cells[arrow_y][arrow_x][0] in (" ", "─"):
                     grid.put(arrow_x, arrow_y, _ARROWS[2], _edge_style(
@@ -954,23 +985,22 @@ def _stage_grid(grid, x0, y, stages, room, bottom, loops=()):
             for my in targets:
                 grid.put(head_x, my, arrow, _edge_style({"st": targets[my]}))
     if lanes:
-        _loop_lanes(grid, pos, w, y, h, stages, loops)
-        return y + h + lanes
-    end = max(by for _bx, by, _row in pos) + h
+        _loop_lanes(grid, pos, w, bottoms, end + 1, stages, loops)
+        return end + lanes
     back = {}
     for frm, to, label in loops:
         back.setdefault(to, []).append((frm, label))
     for to, items in back.items():
-        bx, by, _row = pos[to]
+        bx, _by, _row = pos[to]
         total = sum(int(label.split()[1]) if label.startswith("↺") else 1 for _frm, label in items)
-        _segs(grid, bx + 2, by + h - 1, [(" ↺ ", "lvl_y"), ("%d back" % total, "soft"), (" ", None)])
+        _segs(grid, bx + 2, bottoms[to], [(" ↺ ", "lvl_y"), ("%d back" % total, "soft"), (" ", None)])
     if not loops:
         return end
     lr = nrows - 1
     if spare:
         cols = range(per - spare, per) if lr % 2 == 0 else range(spare)
-        lx, ly, lw = x0 + min(cols) * (w + gap), y + lr * (h + pitch_gap), spare * w + (spare - 1) * gap
-        _outline(grid, lx, ly, lw, h, ("y", 0, 1))
+        lx, ly, lw = x0 + min(cols) * (w + gap), row_tops[lr], spare * w + (spare - 1) * gap
+        _outline(grid, lx, ly, lw, row_heights[lr], ("y", 0, 1))
         top = ly + 1
     else:
         lx, lw, top = x0, room, end + 1
@@ -993,15 +1023,13 @@ def _stage_grid(grid, x0, y, stages, room, bottom, loops=()):
     return end if spare else end + len(loops) + 2
 
 
-def _loop_lanes(grid, pos, w, y, h, stages, loops):
+def _loop_lanes(grid, pos, w, bottoms, row, stages, loops):
     line, head = ("y", 0, 1), ("y", 1, 0)
-    yb = y + h - 1
     by_to = {}
     for frm, to, label in loops:
         by_to.setdefault(to, []).append((frm, label))
-    row = yb + 2
     for to, items in by_to.items():
-        tx, ey = pos[to][0] - 2, yb - 1
+        tx, ey = pos[to][0] - 2, bottoms[to] - 1
         grid.put(tx, ey, "┌", line)
         grid.put(tx + 1, ey, _ARROWS[0], head)
         for yy in range(ey + 1, row):
@@ -1014,9 +1042,9 @@ def _loop_lanes(grid, pos, w, y, h, stages, loops):
             for xx in range(tx + 1, sx):
                 grid.put(xx, row, "─", line)
             grid.put(sx, row, "┘", line)
-            for yy in range(yb + 1, row):
+            for yy in range(bottoms[frm] + 1, row):
                 grid.put(sx, yy, "│", line)
-            grid.put(sx, yb, "┬", ("d", 0, 1))
+            grid.put(sx, bottoms[frm], "┬", ("d", 0, 1))
             if not last:
                 grid.put(tx, row + 1, "│", line)
             n, why = label.split(" · ", 1) if " · " in label else ("↺ 1", label)
@@ -1121,13 +1149,7 @@ def route_band_shows_title(grid, vm, route, x, use):
     return x + 2 + _width(_route_band_head(route) + [(title, None)]) <= right - 1
 
 
-def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None):
-    """Route frame, node band and the picked node's panel from row y to bottom."""
-    right = min(grid.cols - 1, x + use)
-    bottom = max(y, grid.rows - 5) if bottom is None else bottom
-    ident = str(route.get("id") or "")
-    nodes = tuple((vm.nodes or {}).get(ident, ()))
-    frame_key = ("c", 0, 1)
+def _route_frame_edges(grid, x, right, y, bottom, frame_key):
     for xx in range(x + 1, right):
         grid.put(xx, bottom, "═", frame_key)
     for yy in range(y + 1, bottom):
@@ -1135,6 +1157,27 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None):
         grid.put(right, yy, "║", frame_key)
     for (xx, yy), glyph in (((x, y), "╔"), ((right, y), "╗"), ((x, bottom), "╚"), ((right, bottom), "╝")):
         grid.put(xx, yy, glyph, frame_key)
+
+
+def _route_panel_edges(grid, left, right, y, bottom, style, frame_key):
+    for yy in range(y + 1, bottom):
+        grid.put(left, yy, "│", style)
+        grid.put(right, yy, "│", style)
+    grid.put(left, bottom, "╧", frame_key)
+    grid.put(right, bottom, "╧", frame_key)
+
+
+def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None, *, fit=False):
+    """Draw the route frame. A scrolling reader can close it after the content."""
+    right = min(grid.cols - 1, x + use)
+    bottom = max(y, grid.rows - 5) if bottom is None else bottom
+    ident = str(route.get("id") or "")
+    nodes = tuple((vm.nodes or {}).get(ident, ()))
+    frame_key = ("c", 0, 1)
+    if fit and not nodes:
+        bottom = y + 3
+    if not fit or not nodes:
+        _route_frame_edges(grid, x, right, y, bottom, frame_key)
     if not nodes:
         for xx in range(x + 1, right):
             grid.put(xx, y, "═", frame_key)
@@ -1233,13 +1276,10 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None):
     panel_left, panel_right = x + 2, right - 2
     panel_y = y + _BAND_H + 2
     style = ("d", 0, 0)
-    for yy in range(panel_y + 1, bottom):
-        grid.put(panel_left, yy, "│", style)
-        grid.put(panel_right, yy, "│", style)
+    if not fit:
+        _route_panel_edges(grid, panel_left, panel_right, panel_y, bottom, style, frame_key)
     grid.put(panel_left, panel_y, "┌", style)
     grid.put(panel_right, panel_y, "┐", style)
-    grid.put(panel_left, bottom, "╧", ("c", 0, 1))
-    grid.put(panel_right, bottom, "╧", ("c", 0, 1))
     title = [(" ", None)] + [tuple(item) for item in (node.get("title") or ())] + [(" ", None)]
     tw = _width(title)
     tx = panel_left + 2 if panel_left + 2 + tw < centre - 1 else centre + 2
@@ -1259,21 +1299,33 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None):
     raw_lines = (tuple(attempts.get("lines", ()))
                  if str(attempts.get("route") or "") == ident
                  and node.get("kind") in ("leg", "frame") else ())
-    if raw_lines:
+    raw_rows = _RAW_ROWS
+    if raw_lines and not fit:
         per = min(flow, max(3, min(6, (stage_room + 4) // 40)))
         need = ((flow - 1) // per + 1) * 4
-        raw_rows = min(_RAW_ROWS, stage_bottom - panel_y - 3 - need)
-        if raw_rows >= 2:
-            from .transcript import dialogue_rows
-            layout = dialogue_rows(raw_lines, max(1, (panel_right - 2) - (panel_left + 2) - 3), "claude")
-            head_parts = [("owner raw", "soft"),
-                          (" · attempt-view " + str((vm.attempts or {}).get("att", "·")), "dim")]
+        raw_rows = min(raw_rows, stage_bottom - panel_y - 3 - need)
+    layout, head_parts = [], []
+    if raw_lines and raw_rows >= 2:
+        from .transcript import dialogue_rows
+        layout = dialogue_rows(raw_lines, max(1, panel_right - panel_left - 7), "claude")
+        head_parts = [("owner raw", "soft"), (" · attempt-view " + str(attempts.get("att", "·")), "dim")]
+        if not fit:
             _scroll_strip(grid, state, panel_left + 2, panel_right - 2, stage_bottom - raw_rows - 2,
                           head_parts, layout, raw_rows, "rawoff")
             stage_bottom -= raw_rows + 2
+    end = panel_y + 1
     if stages:
-        _stage_grid(grid, panel_left + 2, panel_y + 1, stages, stage_room, stage_bottom,
-                    tuple(tuple(item) for item in (node.get("loops") or ())))
+        end = _stage_grid(grid, panel_left + 2, end, stages, stage_room, stage_bottom,
+                          tuple(tuple(item) for item in (node.get("loops") or ())), fit=fit)
+    if fit:
+        if any(text.strip() for parts, _tint in layout for text, _key in parts):
+            raw_rows = min(raw_rows, len(layout))
+            _scroll_strip(grid, state, panel_left + 2, panel_right - 2, end + 1,
+                          head_parts, layout, raw_rows, "rawoff")
+            end += raw_rows + 3
+        bottom = end
+        _route_frame_edges(grid, x, right, y, bottom, frame_key)
+        _route_panel_edges(grid, panel_left, panel_right, panel_y, bottom, style, frame_key)
     grid.mark_moved()
     return bottom + 1
 
