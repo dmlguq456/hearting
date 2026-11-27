@@ -350,5 +350,84 @@ class FramedHookupTest(unittest.TestCase):
         self.assertIn("`mem show <id> --no-touch`", after)
 
 
+FAKE_PROVIDER = (
+    "import json, os, sys\n"
+    "path = os.path.join(os.environ['FAKE_MODEL_ENV_DIR'], str(os.getpid()) + '.json')\n"
+    "with open(path + '.part', 'w') as out:\n"
+    "    out.write(json.dumps({'argv': sys.argv[1:], 'env': dict(os.environ)}))\n"
+    "os.replace(path + '.part', path)\n"
+    "print(json.dumps({'code_terms': ['widget_scan']}))\n"
+)
+
+
+class WindowValuesTest(unittest.TestCase):
+    def test_the_scan_model_never_receives_the_starting_windows_session_shell(self):
+        """Work start launches the scan from the person's window (`compose --start`);
+        the model the scan runs gets none of that window's `HEARTING_SHELL_*`, and
+        what else the call carries still arrives.
+
+        Work start's own launch is captured and its environment becomes the scan
+        process's; the real `invoke_model` then reaches a fake `claude` on PATH
+        through the real provider command and cascade. Only the provider choice is
+        fixed. The window values are made up.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name)
+        fake_bin = base / "fake-bin"
+        fake_bin.mkdir()
+        seen = base / "model-environments"
+        seen.mkdir()
+        fake_claude = fake_bin / "claude"
+        fake_claude.write_text("#!" + sys.executable + "\n" + FAKE_PROVIDER, encoding="utf-8")
+        fake_claude.chmod(0o755)
+        window = {
+            "HEARTING_SHELL_SOCKET": str(base / "fixture-shell" / "control.sock"),
+            "HEARTING_SHELL_TOKEN": "e" * 64,
+            "HEARTING_SHELL_NATIVE_MODEL": "fixture-window-model",
+        }
+        caller = {
+            **window,
+            "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"),
+            "FAKE_MODEL_ENV_DIR": str(seen),
+            "FIXTURE_CARRIED": "kept-by-the-scan-model",
+            "AGENT_HOME": str(HERE.parent),
+            "AGENT_MODEL_GOVERNOR_ROOT": str(base / "governor"),
+            "AGENT_MODEL_WORKER_TOTAL": "5",
+            "AGENT_MODEL_WORKER_START_BUDGET": "20",
+            "XDG_STATE_HOME": str(base / "state"),
+            "HEARTING_PRIOR_ART": "",
+            "AGENT_DISPATCH_JOBS": str(base / "jobs.log"),
+            "AGENT_ROUTE_ID": "rt-window",
+        }
+        route = {"route_id": "rt-window", "artifact_root": str(base / "artifacts"), "cwd": str(base),
+                 "work_request": {"text": "Add a widget scan"}}
+        with mock.patch.dict(os.environ, caller):
+            with mock.patch.object(W.subprocess, "Popen") as popen:
+                W._start_prior_art(route, "Add a widget scan")
+            popen.assert_called_once()
+            launched = dict(popen.call_args.kwargs["env"])
+            self.assertTrue(popen.call_args.args[0][1].endswith("utilities/prior-art.py"))
+            rt = PA._refresh_title()
+            with mock.patch.dict(os.environ, launched, clear=True), \
+                    mock.patch.object(rt, "selected_providers", return_value=("claude",)):
+                answer = PA.invoke_model("Add a widget scan", 20, stage="plan")
+            self.assertEqual((answer.reason, answer.harness), ("ok", "claude"), answer)
+            records = [json.loads(path.read_text()) for path in sorted(seen.glob("*.json"))]
+            self.assertEqual(len(records), 1, "the scan never ran its model")
+            self.assertEqual(records[0]["argv"][0], "-p")
+            received = records[0]["env"]
+            self.assertEqual(sorted(key for key in received if key.startswith("HEARTING_SHELL_")), [])
+            self.assertEqual(received.get("FIXTURE_CARRIED"), "kept-by-the-scan-model")
+            # What the scan's call already kept or dropped stays as it was.
+            self.assertEqual(received.get("AGENT_SESSION_ROLE"), "worker")
+            self.assertEqual(received.get("AGENT_DISPATCH_JOBS"), caller["AGENT_DISPATCH_JOBS"])
+            self.assertNotIn("AGENT_ROUTE_ID", received)
+            self.assertEqual(received.get("HOME"), os.environ.get("HOME"))
+            self.assertEqual(received.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"), "1")
+            # The window that started it keeps its own values.
+            self.assertEqual({key: os.environ.get(key) for key in window}, window)
+
+
 if __name__ == "__main__":
     unittest.main()

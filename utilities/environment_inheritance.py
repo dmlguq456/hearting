@@ -2,9 +2,10 @@
 
 One rule for every such start: the registered workers (`dispatch_headless_main`
 re-exports it for the three wrappers and the Codex same-attempt respawn), the
-dispatch summary owner whose title refresh runs a model, and the Claude capacity
-probe. It stays this small, with nothing but `os`, so a light path such as the
-usage check pays nothing for loading it.
+dispatch summary owner whose title refresh runs a model, the Claude capacity
+probe, the prior-art scan's model at work start, and the sealed-cycle review and
+campaign-title model. It stays this small, with nothing but `os`, so a light path
+such as the usage check pays nothing for loading it.
 
 `HEARTING_SHELL_*` (the session-shell window host's socket and token, its display
 state and descriptors) belongs to the one window a person works in; whatever is

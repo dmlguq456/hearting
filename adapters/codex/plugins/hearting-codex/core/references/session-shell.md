@@ -156,7 +156,8 @@ A registered worker does not hold the attachment at all: every worker launch,
 in every harness, leaves the launching window's `HEARTING_SHELL_*` values out of
 the worker's environment, and the person's window keeps them. The same rule
 (`utilities/environment_inheritance.py`) holds for the model an attempt's
-summary owner runs and for the Claude capacity probe.
+summary owner runs, for the Claude capacity probe, and for the models of the
+work-start prior-art scan and the sealed-cycle review and campaign title.
 For a shared Codex daemon callback, reuse the native MCP origin's live TUI
 PID/thread proof and its current unique selection. Read the attachment only
 from that TUI's own initial environment; never inherit the daemon's first
