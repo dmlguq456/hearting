@@ -167,7 +167,7 @@ Existing projects may still use:
 .claude_reports/
 ```
 
-New projects and documentation use `.agent_reports/`. An existing
+New projects use `.agent_reports/`. An existing
 `.claude_reports/` stays in place: a normal producer activation or begin may
 create `.agent_reports` as a relative alias to that physical root. Read-only
 resolution creates nothing. Existing root IDs, absolute references and open
@@ -179,12 +179,16 @@ The artifact root is a **project-wide canonical write surface**, not a
 per-worktree directory. Resolve it with `utilities/artifact-root.sh <cwd>`:
 
 1. an explicit absolute `AGENT_ARTIFACT_ROOT`;
-2. for Git, the primary worktree's `.agent_reports/`, falling back to its
-   existing legacy `.claude_reports/` only when the new root is absent;
+2. for Git, the primary worktree's artifact root;
 3. for non-Git, `cwd`'s own root first (self is not inheritance, no marker
    needed); otherwise a strict ancestor's root is inherited only when that
    ancestor also holds an `.agent-workspace` marker file; otherwise
    `<cwd>/.agent_reports/`.
+
+Where both names exist, use `.claude_reports/` if it is the only active root.
+Otherwise prefer `.agent_reports/`. A single existing root is used regardless
+of activation. The cutover record and matching root identity determine
+whether a root is active.
 
 Linked task worktrees are source-only execution surfaces. A tracked artifact
 directory may appear there as a Git snapshot, but it is read-only shadow state
