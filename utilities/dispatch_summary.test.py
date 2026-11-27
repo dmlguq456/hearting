@@ -1055,6 +1055,141 @@ class DispatchSummaryTest(unittest.TestCase):
                 except ProcessLookupError:
                     pass
 
+    def test_summary_model_never_receives_the_starting_windows_session_shell(self):
+        """The summary owner's title refresh runs a model; the window that started
+        the attempt (a person's session-shell window) hands that model none of its
+        `HEARTING_SHELL_*`, on the first attach the wrappers make and on a reattach.
+
+        The model is a fake `claude` on PATH reached through the real provider
+        path (`FLEET_TITLE_PROVIDER=claude`), so the environment it records is the
+        one a real `claude -p` would start with. The window values are made up.
+        """
+        import dispatch_wrapper_common as WC
+        from types import SimpleNamespace
+        from worker_runtime_home import _builder
+        from claude_project_dir import encode_project_dir
+        base = Path(self.tmp.name)
+        fake_bin = base / "fake-bin"
+        fake_bin.mkdir()
+        seen = base / "model-environments"
+        seen.mkdir()
+        fake_claude = fake_bin / "claude"
+        fake_claude.write_text(
+            "#!" + sys.executable + "\n"
+            "import json, os, sys\n"
+            "path = os.path.join(os.environ['FAKE_MODEL_ENV_DIR'], str(os.getpid()) + '.json')\n"
+            "with open(path + '.part', 'w') as out:\n"
+            "    out.write(json.dumps({'argv': sys.argv[1:], 'env': dict(os.environ)}))\n"
+            "os.replace(path + '.part', path)\n"
+            "print('TITLE: 창 없는 요약\\nNOW: 요약 모델이 창 값을 받지 않는다')\n",
+            encoding="utf-8")
+        fake_claude.chmod(0o755)
+        window = {
+            "HEARTING_SHELL_SOCKET": str(base / "fixture-shell" / "control.sock"),
+            "HEARTING_SHELL_TOKEN": "d" * 64,
+            "HEARTING_SHELL_NATIVE_MODEL": "fixture-window-model",
+        }
+        os.environ.pop("FLEET_TITLE_COMMAND", None)
+        os.environ.update(window)
+        os.environ.update({
+            "FLEET_TITLE_PROVIDER": "claude",
+            "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"),
+            "FAKE_MODEL_ENV_DIR": str(seen),
+            "FIXTURE_CARRIED": "kept-by-the-summary-model",
+            "CLAUDE_CONFIG_DIR": str(base / "producer-home"),
+        })
+        os.environ.pop("AGENT_DISPATCH_JOBS", None)  # the depth-0 window has none
+
+        def attempt_fixture(attempt):
+            dispatch_root = base / attempt
+            jobs = dispatch_root / "jobs.log"
+            dispatch_root.mkdir()
+            home_key = _builder.worker_home_key(str(ROOT), "claude", "owner", attempt)
+            worker_home = dispatch_root / "homes" / "workers" / home_key
+            session_id = "c0ffee00-1234-5678-9abc-" + attempt[-12:].rjust(12, "0")
+            project = worker_home / "projects" / encode_project_dir("/wt/owner")
+            project.mkdir(parents=True)
+            (worker_home / "worker-home.json").write_text(json.dumps({
+                "schema": 2, "identity": attempt, "key": home_key, "harness": "claude",
+                "worker_type": "owner", "source": str(ROOT),
+            }), encoding="utf-8")
+            (project / f"{session_id}.jsonl").write_text(json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "OWNER_TURN one"}]},
+            }) + "\n", encoding="utf-8")
+            log = dispatch_root / f"owner.{attempt}.claude.jsonl"
+            log.write_text(self._announce(session_id, "/wt/owner"), encoding="utf-8")
+            return jobs, worker_home, log
+
+        def first_attach(attempt, child, start):
+            jobs, worker_home, log = attempt_fixture(attempt)
+            jobs.write_text(
+                "2026-11-27T00:00:00Z\topen\t/wt/owner\t/wt/owner\towner\t"
+                "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
+                "execution_surface=registered-headless,registered_worker=1,"
+                "fallback_hop=same-harness-headless,worker_type=owner,"
+                f"attempt_id={attempt},harness=claude,runtime_home={worker_home},log_file={log}\n",
+                encoding="utf-8")
+            args = SimpleNamespace(
+                attempt_id=attempt, review_output_binding=None, worktree="/wt/owner",
+                jobs_path=jobs, review_governed_lease_nonce=None)
+            receipt = WC.attach_summary_owner(
+                args, log, None, {"pid": str(child.pid), "pid_start": start},
+                harness="claude", summary_launcher=S.launch_summary_owner,
+                runtime_home=str(worker_home))
+            return jobs, int(receipt["summary_owner_pid"])
+
+        def reattach(attempt, child, start):
+            jobs, worker_home, log = attempt_fixture(attempt)
+            jobs.write_text(
+                "2026-11-27T00:00:00Z\topen\t/wt/owner\t/wt/owner\towner\t"
+                "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
+                "execution_surface=registered-headless,registered_worker=1,"
+                "fallback_hop=same-harness-headless,worker_type=owner,"
+                f"attempt_id={attempt},harness=claude,pid={child.pid},pid_start={start},"
+                f"runtime_home={worker_home},log_file={log}\n",
+                encoding="utf-8")
+            result = S.ensure_attempt_owner(jobs, attempt)
+            self.assertEqual(result["state"], "started", result)
+            state = json.loads(S.owner_state_path("claude", attempt).read_text())
+            return jobs.resolve(), int(state["pid"])
+
+        for name, attach in (("first-attach", first_attach), ("reattach", reattach)):
+            with self.subTest(path=name):
+                attempt = "att-window-summary-" + name
+                before = set(seen.glob("*.json"))
+                child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                         start_new_session=True)
+                owner_pid = None
+                try:
+                    start = S.process_observation(child.pid)[1]
+                    jobs, owner_pid = attach(attempt, child, start)
+                    deadline = time.monotonic() + 30
+                    while time.monotonic() < deadline and not set(seen.glob("*.json")) - before:
+                        time.sleep(0.1)
+                    records = [json.loads(path.read_text()) for path in sorted(set(seen.glob("*.json")) - before)]
+                    self.assertTrue(records, "the summary owner never ran its title model")
+                    for record in records:
+                        self.assertEqual(record["argv"][0], "-p")
+                        received = record["env"]
+                        self.assertEqual(sorted(k for k in received if k.startswith("HEARTING_SHELL_")), [])
+                        self.assertEqual(received.get("FIXTURE_CARRIED"), "kept-by-the-summary-model")
+                        # What the summary itself needs still arrives.
+                        self.assertEqual(received.get("AGENT_DISPATCH_JOBS"), str(jobs))
+                        self.assertEqual(received.get("HOME"), os.environ["HOME"])
+                        self.assertEqual(received.get("AGENT_SUMMARY_OWNER"), "dispatch")
+                    # The window that started it keeps its own values.
+                    self.assertEqual({key: os.environ.get(key) for key in window}, window)
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                    child.wait()
+                    if owner_pid:
+                        try:
+                            os.killpg(owner_pid, signal.SIGTERM)
+                        except ProcessLookupError:
+                            pass
+
     def test_supervisor_announces_its_child_session_before_the_first_turn(self):
         source = (ROOT / "utilities" / "claude-session-supervisor.py").read_text()
         announce = source.index('"type": "dispatch.supervisor.session"')

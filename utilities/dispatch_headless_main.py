@@ -24,6 +24,9 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 import dispatch_parent_completion as parent_completion
+# The inheritance rule lives in its own small module so the summary owner and the
+# capacity probe apply it without loading this one; re-exported for the wrappers.
+from environment_inheritance import NOT_INHERITED_PREFIXES, inherited_environment  # noqa: F401
 
 
 class AdapterNamespace:
@@ -735,12 +738,12 @@ def worker_environment(h, args, *, harness: str, jobs: Path, governor_root: Path
                        extra: Mapping[str, str] | None = None) -> dict[str, str]:
     """The child environment every wrapper gives its claimed worker.
 
-    The inherited environment minus broker variables, then the dispatch identity,
+    The inherited environment (`inherited_environment`), then the dispatch identity,
     route, artifact, governor and registry values. `permission_env` is the
     harness's runtime permission context, `extra` its own additional variables.
     """
     review = args.review_output_binding
-    env = {key: value for key, value in os.environ.items() if not key.startswith("AGENT_DISPATCH_BROKER_")}
+    env = inherited_environment()
     env.update({
         "AGENT_SESSION_ROLE": "worker",
         "AGENT_DISPATCH_CHILD": "1",
