@@ -554,7 +554,7 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   `질문 변경됨`.
 - The route box (spec rules 23-25, 34, 36, 38, 43, 48, 57): the routes the statusline
   counts, then the recent results the producer keeps after them, then the requests
-  this session sent (→) or received (◂, `✓` closed) with their status and age, every
+  this session sent (→) or received (←, `✓` closed) with their status and age, every
   one of them shown (no `+N more`); laid out at the box's inner width. 11-17: the box is one box
   of three zones, each under a named rule drawn inside it (`─ direct ───`, `─ dispatch ───`,
   `─ request ───`, in this order; the names are English in every language; it replaces the one
@@ -639,9 +639,10 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   `CTX` row (its number joins the session's first row at the right edge, the one-row fold), each NOW's first row, then the stage line
   goes (the workers' count, `· worker 2`, ends it), then the workers go, then every route takes one row.
   A request (11-16, the person: "양식을 맞추자. [6c] claude opus 5.5 xhigh 이런식으로") reads as a
-  route's doer: beside the native area its first row is its mark (→ sent, ◂ received, `✓`/`✕`
-  closed), the other session's Fleet number, then that session's harness, model and effort in
-  a route row's colors (`◂ [6c] claude Opus 5.5 xhigh`; the model and effort only as far as the
+  route's doer: beside the native area its first row is its mark (→ sent, ← received, `✓`/`✕`
+  closed; 11-27, the person: "방향만 다르면 화살표 방향만 반대로 하면 되는걸 왜 삼각형을써? 메시지는 안그러잖아":
+  a received request wears the received message's `←`, no longer the small triangle), the other session's Fleet number, then that session's harness, model and effort in
+  a route row's colors (`← [6c] claude Opus 5.5 xhigh`; the model and effort only as far as the
   session values Fleet's shared producer already read for the session displays know them, so
   `[6c] claude` where they are unknown, and a session that is gone keeps its name alone; 11-18, the person: "세션 id 외에도 repo
   위치까지 request는 표시를 해주는게 좋겠네": the other session's repository name, dim, right after its number
@@ -965,7 +966,10 @@ ends, by `q` or by SIGTERM or SIGHUP. In both a paste whose bytes stop for a sec
 mark not come) has stalled, not ended (review 1861: one paste can come in reads seconds apart
 over a slow link): what came stays in (Fleet puts it in then), and what comes after is still
 its text, a line break, a tab or an Esc of it no key. The popup's key row then reads
-`paste stalled · Enter send · Esc/Ctrl+] back` (its closing key as narrowed above). While a
+`paste stalled · Enter send · Esc/Ctrl+] back` (its closing key as narrowed above); while the
+paste still comes in it reads `pasting · Enter sends once it stops` (its Enter and Esc are its
+bytes until then, so an Enter read a frame before the row changes does what it says; PR 1871).
+While a
 paste is open one rule tells the person's key from its bytes: a read holding one key (one byte,
 one character, or one whole escape sequence such as an arrow or a mouse or focus report), with
 nothing after it for 0.15 s (Fleet: nothing more to read within them). Such an Enter or Esc
@@ -979,10 +983,14 @@ holding one key and a new paste go on their way (to the popup, the native, the p
 The dropping ends at the paste's end mark, at a new paste, or a second after the last read it
 dropped (only those count the second again). A read of the person's that holds several keys
 (an input method's word, keys a slow link brings together, two wheel reports) is the bulk too:
-it is dropped and counts the second again. A paste that never ends holds nothing. Two gaps
+it is dropped and counts the second again. A paste that never ends holds nothing. Three gaps
 remain: a paste that stalls and brings its next CR alone with more than 0.15 s before the rest
-sends what came (the rest is then dropped), and a rest that comes one key per read goes on as
-keys (its CR an Enter there: the native's, or a second sending of an answer not confirmed). One
+sends what came (the rest is then dropped); a rest that comes one key per read goes on as
+keys (its CR an Enter there: the native's, or a second sending of an answer not confirmed); and
+a terminal's report (focus, mouse) within 0.15 s of an Enter pressed in a stalled paste makes
+that Enter its line break and the paste go on, every Enter within the next second a line break
+too, the row reading `pasting · Enter sends once it stops` until a quiet second stalls it (PR 1871: the
+same CR byte comes from a paste and from Enter, so no wait tells them apart). One
 past the limit goes in as far as it fits, with the limit's notice.
 The answer grows a row per line (and per wrap) within the popup or the page while the
 question's first words (and their `more` line), its choices and the key line keep their

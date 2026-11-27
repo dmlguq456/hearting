@@ -296,8 +296,10 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
       const navigate=text(editing?'navigate_write':'navigate','Tab next · Esc/Ctrl+] back');
       const writeHint=local.typing[id]?(choices(row).length?text('writing_choices','Enter send · Ctrl+J newline · ↑ choices'):text('writing','Enter send · Ctrl+J newline')):text('choose_write','↑↓ choose · type to write · Enter send');
       // 11-26 (review 1861): a paste stalled: what comes is still its text; the way out is a key pressed, Enter
-      // (sends what came) or the closing key, named on the same row.
+      // (sends what came) or the closing key, named on the same row. PR 1871: while it still comes in, its Enter and
+      // Esc are its own bytes, so the row says it is under way and that Enter sends once it stops (a frame late too).
       const pieces=pasting&&stalled?[text('paste_stalled','paste stalled'),text('send','Enter send'),String(navigate).split(' · ').at(-1)]
+        :pasting?[text('pasting','pasting · Enter sends once it stops')]
         :[...(active(row)?[writable(row)?writeHint:instruction]:[]),navigate];
       keyLines=keys(pieces,editing?1:Math.max(1,Math.max(2,budget)-2));
       tail.push(...keyLines);
@@ -588,7 +590,7 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
     // stalled; such a read waits (`held`). A byte within the wait makes it the paste's own (a line break, an escape
     // sequence's start, a control character), read on with what came.
     if(held>=0){clearTimeout(heldTimer);heldTimer=undefined;data=Buffer.concat([Buffer.from([held]),data]);held=-1;}
-    else if(pasting&&focused&&oneKey(data)&&data.length===1&&(data[0]===0x1d||stalled&&(data[0]===0x0d||data[0]===0x1b))){
+    else if(pasting&&focused&&data.length===1&&oneKey(data)&&(data[0]===0x1d||stalled&&(data[0]===0x0d||data[0]===0x1b))){
       held=data[0];heldTimer=setTimeout(pressed,keyWait);changed();return Buffer.alloc(0);
     }
     for(let i=0;i<data.length;i++){

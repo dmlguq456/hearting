@@ -1128,7 +1128,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // row; a count the producer did not send rows for shows only in the box's lower border.
     const total=Number.isInteger(model.route_total)&&model.route_total>=countedRoutes.length?model.route_total:countedRoutes.length;
     const listed=shown,unsent=countedRoutes.length?total-countedRoutes.length:0;
-    // Requests this session sent (→) or received (◂): lines in the route box after the routes
+    // Requests this session sent (→) or received (←): lines in the route box after the routes
     // (R27); each opens in place by its own key and reads whole on its own page.
     const requestList=Array.isArray(model.requests)?model.requests.filter(q=>q&&typeof q.id==='string'):[];
     // Under the route (`side:false`) a unit a worker called is a row of its own under its caller's, in the same columns: it is a
@@ -2633,7 +2633,7 @@ function veil(configuration={},{colors=256,noColor=false,background=''}={}){
 }
 // 11-16 (the person: "블록 안에서 구분선을 하나 긋고, 양식을 맞추자. [6c] claude opus 5.5 xhigh 이런식으로"): one peer request's
 // rows, drawn here alone for the route box (beside the native area and under it) and the MESSAGES popup. Its head reads
-// as a route's doer row: the mark (→ sent, ◂ received, ✓/✕ closed), the other session's Fleet number, then its harness,
+// as a route's doer row: the mark (→ sent, ← received, ✓/✕ closed), the other session's Fleet number, then its harness,
 // model and effort in the colors a route's doer takes (the backend's `paint`), and the age at the right edge, where a
 // route keeps its time. Two cells in, the title where a route's title stands, then the status, dim, where a route's kind
 // row stands. `titled` is the title and the status on one row (the kind rows gone), `one` the one-row form. Short of
