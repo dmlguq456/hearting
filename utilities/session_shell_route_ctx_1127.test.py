@@ -183,16 +183,49 @@ class WorkerTimeTest(unittest.TestCase):
             out.append(re.sub(r"^[│ ]+|[│ ]+$", "", line))
         return out
 
-    def test_the_time_fits_one_row_or_takes_the_last_word_to_a_second(self):
+    def test_the_time_fits_one_row_or_the_value_wraps_to_a_second(self):
         scenes = [{"width": w, "height": 64, "model": model_for(w, time_workers(now))}
                   for w, now in ((44, "Read labels"), (44, "Check every sample margin"), (50, "Check every sample margin"))]
         one, two, wide = (self.now_rows(panel, None) for panel in render_panels(scenes))
         self.assertRegex(" / ".join(one), r"^Read labels +12m$")
-        # The value and the time do not fit one row of the closed box at 44: the last word goes on, the value stays whole.
+        # The value and the time do not fit one row of the closed box at 44: it wraps on to a second row and stays whole.
         self.assertEqual(len(two), 2, two)
         self.assertEqual(two[0], "Check every sample")
         self.assertRegex(two[1], r"^margin +12m$")
         self.assertRegex(" / ".join(wide), r"^Check every sample margin +12m$")
+
+    def test_the_value_is_wrapped_again_in_the_cells_the_time_leaves(self):
+        # 11-27, second review of #1885: where the time does not fit the last row, the value is wrapped again by the same
+        # `wrapAll` in the row's cells less the time's: a word as wide as the row goes on by cells, and what `wrapAll` keeps
+        # together (`Atlas 2.5`, `· review`) stays together.
+        room = {36: 22, 44: 28, 50: 34}     # the first worker's NOW cells (36: the open box; 44, 50: the closed one)
+        cases = []
+        for width, n in room.items():
+            cases += [(width, "/lab/" + "abcdefghijklmnopqrstuvwxyz0123456789"[:n - 5], "12m", None),
+                      (width, "https://ex.test/" + "abcdefghijklmnopqrstuvwxyz"[:n - 16], "12m", None),
+                      (width, "가나다라마바사아자차카타파하거너더러머버서어"[:n // 2], "12m", None),
+                      (width, "a" + "가나다라마바사아자차카타파하거너더러"[:(n - 1) // 2], "12m", None)]
+        cases += [(44, "Compareabcdefghijk Atlas 2.5", "12m", ["Compareabcdefghijk", "Atlas 2.5"]),
+                  (44, "Compareabcdefghijkl · review", "12m", ["Compareabcdefghijkl", "· review"]),
+                  (44, "Check every sample margin", "1h 52m", ["Check every sample", "margin"]),
+                  (44, "Check every sample margin", "12d 3h", ["Check every sample", "margin"])]
+        scenes = []
+        for width, now, stamp, _ in cases:
+            model = model_for(width, time_workers(now))
+            model["routes"][0]["workers_live"][0]["elapsed"] = stamp
+            scenes.append({"width": width, "height": 64, "model": model})
+        for (width, now, stamp, want), panel in zip(cases, render_panels(scenes)):
+            rows = self.now_rows(panel, None)
+            with self.subTest(width=width, now=now, time=stamp):
+                self.assertEqual(len(rows), 2, rows)
+                self.assertFalse(any("…" in row for row in rows), rows)
+                self.assertTrue(rows[1].endswith(" " + stamp), rows)
+                values = [rows[0], rows[1][:-len(stamp)].rstrip()]
+                if want:
+                    self.assertEqual(values, want)
+                else:
+                    self.assertEqual("".join(values), now)    # (one word: its cells go on to the second row)
+                self.assertTrue(all(cell_width(line) == width for line in panel))
 
     def test_short_of_rows_the_one_row_is_cut_before_the_time(self):
         heights, kinds = range(16, 65), set()
