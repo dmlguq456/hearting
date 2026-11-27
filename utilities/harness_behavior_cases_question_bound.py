@@ -106,6 +106,20 @@ print(json.dumps({"records": rows}))
 END_REPLY = "QBOUND my turn ends here."
 
 
+def answer_carriers(requests, before):
+    """The requests, from `before` on, that bring the answer as a new person-role input (what the model had not
+    been given yet), whatever the request's last item is: one whose last item is a tool result counts too, and
+    a tool output or an earlier input repeating the answer does not."""
+    found = []
+    for index in range(max(before, 1), len(requests)):
+        earlier = [row["text"] for row in requests[index - 1].get("user_inputs") or []]
+        now = [row["text"] for row in requests[index].get("user_inputs") or []]
+        new = now[len(earlier):] if now[:len(earlier)] == earlier else [text for text in now if text not in earlier]
+        if any(OPTION_A in text for text in new):
+            found.append(requests[index]["main_index"])
+    return found
+
+
 class QuestionBoundBase(Scenario):
     native = None            # the native call the model makes after `questions ask`, or None
     native_labels = ()       # words only that native window shows
@@ -173,13 +187,11 @@ class QuestionBoundBase(Scenario):
         ev["native_window_stood"] = shown
         ev["question_kept"] = kept = self._state(run, qid)
         if wait_for(lambda: self._listed(run, qid), 45):
-            started = time.time()
+            started, before = time.time(), len(run.main_requests())   # counted before the answer is given
             done = subprocess.run([sys.executable, str(Path(run.home.env["AGENT_HOME"]) / "utilities/questions.py"),
                                    "answer", qid, "--choice", "1", "--json"], env=dict(run.home.env),
                                   cwd=str(run.home.workspace), text=True, capture_output=True, timeout=60)
-            before = len(run.main_requests()) if not done.returncode else None
-            hit = before is not None and wait_for(lambda: any(
-                OPTION_A in (r.get("turn_text") or "") for r in run.main_requests()[before:]), WAKE_SECONDS)
+            hit = not done.returncode and wait_for(lambda: answer_carriers(run.main_requests(), before), WAKE_SECONDS)
             # The bind that remains with two different questions: recorded, not judged here.
             ev["board_answer_reached_after_s"] = round(time.time() - started, 1) if hit else None
         run.note(f"native_window={shown} kept={kept.get('lifecycle')} "
@@ -249,9 +261,7 @@ class QuestionBoundBase(Scenario):
             return "fail"
 
         def carriers():
-            # What reached the model since its last output (the whole text also carries the ask itself).
-            return [r["main_index"] for r in run.main_requests()[before:]
-                    if r["last_kind"] != "tool" and OPTION_A in (r.get("turn_text") or "")]
+            return answer_carriers(run.main_requests(), before)
         hit = wait_for(lambda: (carriers() or [None])[0], WAKE_SECONDS)
         ev["answer_request"] = hit
         ev["answer_reached_after_s"] = round(time.time() - started, 1) if hit is not None else None
