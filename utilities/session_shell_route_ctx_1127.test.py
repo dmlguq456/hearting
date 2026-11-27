@@ -53,7 +53,7 @@ def paint(row):
         paint(child)
 
 
-def model_for(width, workers=None, projection=session_panel):
+def model_for(width, workers=None, projection=session_panel, session=None):
     if workers is None:
         workers = [
             worker("codex", "gpt-6.2-sol", "high", 63, "Read labels", 12, called=[
@@ -73,25 +73,25 @@ def model_for(width, workers=None, projection=session_panel):
     }
     values = {"harness": "codex", "model": "gpt-6.2-sol", "effort": "high", "tag": "[ab]", "cwd": "/fixture/sample-kit",
               "branch": "main", "git": {"repo": 1, "operation": "none", "ahead": 0, "behind": 0}, "ctx_pct": 34, "title": "Panel samples",
-              "now": "Compare two placements", "answer_wait": 0, "route_label": "route 1"}
+              "now": "Compare two placements", "answer_wait": 0, "route_label": "route 1", **(session or {})}
     with patch("time.time", return_value=NOW):
         model = projection.presentation(values, {"route_panels": {"codex\0s": [row]}}, "codex", "s", width)
-    for name in ("head", "repo", "repo_side", "git", "git_side", "worktrees", "selected", "context", "context_side"):
-        model[name] = [part(*piece) for piece in model[name]]
+    for name in ("head", "repo", "repo_side", "git", "git_side", "worktrees", "selected", "context", "context_side", "context_gauge5"):
+        model[name] = [part(*piece) for piece in model.get(name, [])]
     paint(model["routes"][0])
     return model
 
 
-def render_panels(scenes, renderer=RENDERER):
+def render_panels(scenes, renderer=RENDERER, parts=False):
     script = r"""
-const fs = require('node:fs'), view = require(process.argv[1]);
+const fs = require('node:fs'), view = require(process.argv[1]), parts = process.argv[2] === 'parts';
 const scenes = JSON.parse(fs.readFileSync(0, 'utf8'));
 console.log(JSON.stringify(scenes.map(({question,...scene}) => view.render({
   side:true, fill:true, state:'working', harness:'codex', frame:2,
   brief:question ? () => question : undefined, ...scene,
-}).rows.map(row => row.map(part => part.text).join('')))));
+}).rows.map(row => parts ? row.map(({text, foreground}) => ({text, foreground})) : row.map(part => part.text).join('')))));
 """
-    result = subprocess.run(["node", "-e", script, str(renderer)], input=json.dumps(scenes), text=True,
+    result = subprocess.run(["node", "-e", script, str(renderer), "parts" if parts else "text"], input=json.dumps(scenes), text=True,
                             capture_output=True, timeout=30, check=True)
     return json.loads(result.stdout)
 
@@ -158,6 +158,70 @@ class RouteContextTest(unittest.TestCase):
                     index = rows.index(doers[4])
                     self.assertNotIn("6m", rows[index + 1])
                     self.assertRegex(rows[index + 2], r"… +6m +│")
+
+
+
+def session_rows(panel):
+    # The SESSION group's rows: from the rule over MODEL to the first box (QUESTIONS or ROUTE).
+    start = next(i for i, line in enumerate(panel) if re.fullmatch(r"│ ─+ │", line))
+    end = next(i for i in range(start + 1, len(panel)) if "╭─" in panel[i])
+    return panel[start + 1:end]
+
+
+class SessionContextTest(unittest.TestCase):
+    """11-27 (the person: "패널에서 MODEL + CTX를 그냥 한줄로 고치자. CTX 단어도 필요 없을듯. 라우팅이랑 일관성을 맞추자는것")."""
+
+    def test_the_session_model_row_ends_in_the_route_rows_reading(self):
+        widths = (36, 44, 49, 50)
+        panels = render_panels([{"width": w, "height": 52, "model": model_for(w)} for w in widths])
+        for width, panel in zip(widths, panels):
+            with self.subTest(width=width):
+                rows = session_rows(panel)
+                model = rows[0]
+                # The percent ends the MODEL row at its right edge (the cell before the panel's border), and TITLE follows it.
+                self.assertTrue(model.startswith("│  MODEL  gpt-6.2-sol"), rows)
+                self.assertEqual(cell_width(model[:model.index("34%") + 3]), width - 2, model)
+                self.assertTrue(rows[1].startswith("│  TITLE  "), rows)
+                self.assertFalse(any(re.search(r"\bCTX\b|context", line) for line in rows), rows)
+                # The same rule as the route's doers: the five-cell gauge from 50 cells, the percent alone narrower.
+                doers = [row for row in route_rows(panel) if re.search(r"\b(owner|worker)\b", row)]
+                gauges = [re.search(r"([━─]+) +\d+%", row) for row in [model, *doers]]
+                if width >= 50:
+                    self.assertEqual([g[1] if g else "" for g in gauges], ["━━───", "━━───", "━━━──", "━━━━─", "─────"])
+                else:
+                    self.assertEqual(gauges, [None] * 5, [model, *doers])
+                self.assertTrue(all(cell_width(row) == width for row in panel))
+
+    def test_the_session_percent_takes_the_route_rows_level_color(self):
+        scenes = [{"width": w, "height": 52, "model": model_for(w, session={"ctx_pct": pct})}
+                  for w in (44, 50) for pct in (9, 63, 82)]
+        for scene, panel in zip(scenes, render_panels(scenes, parts=True)):
+            pct = scene["model"]["context_side"][-1]["text"]
+            with self.subTest(width=scene["width"], percent=pct):
+                text = ["".join(part["text"] for part in row) for row in panel]
+                at = next(i for i, line in enumerate(text) if line.startswith("│  MODEL  "))
+                own = next(part for part in panel[at] if part["text"] == pct)
+                doer = next(part for row in panel[at + 1:] for part in row if part["text"] == pct)
+                self.assertEqual(own["foreground"], doer["foreground"], (own, doer))
+                self.assertIsNotNone(own["foreground"])
+
+    def test_short_of_cells_the_effort_goes_first_and_no_reading_leaves_the_place_empty(self):
+        long = {"model": "Atlas-Preview-XL-Extended", "effort": "xhigh", "ctx_pct": 100}
+        scenes = [{"width": w, "height": 40, "model": model_for(w, session=session)}
+                  for w in (36, 50) for session in (long, {"ctx_pct": None})]
+        for scene, panel in zip(scenes, render_panels(scenes)):
+            width, model = scene["width"], session_rows(panel)[0]
+            with self.subTest(width=width, values=scene["model"]["context_side"]):
+                if scene["model"]["context_side"]:
+                    # The effort goes before a cell of the model name does; the percent stays at the right edge.
+                    self.assertNotIn("xhigh", model)
+                    self.assertEqual(cell_width(model[:model.index("100%") + 4]), width - 2, model)
+                    self.assertRegex(model, r"^│  MODEL  Atlas-Preview-XL-E… +100% │$" if width == 36
+                                     else r"^│  MODEL  Atlas-Preview-XL-Extended +━━━━━ 100% │$")
+                else:
+                    # No reading: nothing stands in its place and no row of its own.
+                    self.assertRegex(model, r"^│  MODEL  gpt-6\.2-sol high +│$")
+                    self.assertTrue(session_rows(panel)[1].startswith("│  TITLE  "))
 
 
 if __name__ == "__main__":

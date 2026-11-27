@@ -401,16 +401,18 @@ cut with `…` within that row and absent without a Git reading; Fleet's own Git
 words are unchanged. Beside the
 native area one empty row then parts the repository, Git and peers from the model
 (without Git, the repository from the model);
-model and effort, then `context` with its gauge and percent (two rows beside
+model and effort, then `context` with its gauge and percent (one row beside
 the native area, one `│`-separated row with the repo row at the bottom). Beside
-the native area these two rows take the same dim labels, `MODEL` and `CTX`
-(`MODEL  Fable 5.2 high`, `MODEL  Checking` before the model is known;
-`CTX    ━━━━──── 41%`, the label standing for the word `context`); short of
-cells the model name is cut with `…` and the effort stays whole, and narrower
-than 30 cells inside they go with the other labels;
+the native area the row takes the dim label `MODEL` (`MODEL  Fable 5.2 high        41%`,
+`MODEL  Checking` before the model is known) and the context reading ends it at the right edge, with no row
+and no word of its own (11-27, the person: "패널에서 MODEL + CTX를 그냥 한줄로 고치자. CTX 단어도 필요 없을듯. 라우팅이랑
+일관성을 맞추자는것"). It is the route doers' rule (the owner's and workers' first row in the route box, below): at 50 panel
+cells and wider a five-cell gauge before the percent, narrower the percent alone, in its level's color; short of cells the effort
+goes first, then the model name is cut with `…`, and the percent stays; with no reading nothing stands there. OpenCode's MCP count and
+cost take the row under it, in the value column. Narrower than 30 cells inside the label goes with the other labels;
 running jobs and the repo's open work (`◌ N open · headline`, giving way with
 the jobs). Beside the native area no rule parts the metadata from this session's content any more
-(11-22, the person: "두칸이 아니라 한칸만 띄우도록 하자 그러면": the line between CTX and TITLE is gone); the SESSION head's rule
+(11-22, the person: "두칸이 아니라 한칸만 띄우도록 하자 그러면": the line that stood between CTX and TITLE is gone); the SESSION head's rule
 (the thin `─` in the messages rules' color, in every state; 11-26, panel B: the head is that rule alone, no word) is the line `rule motion` moves: under the default `rule motion` a light
 passes over it while the session runs (above), otherwise it stands still (the session's state is told by the outer frame and the head's state
 glyph). The
@@ -460,7 +462,7 @@ at no height is a BACKLOG row left short while an empty row is left). B's rows u
 the messages (one row each, as many as stood before), the SESSION rule over MODEL's own row (where the head had taken MODEL's row, below), the
 BACKLOG items the person ranked (the last go first short of rows), then the rule over the equipment (below: a rule gives way before what is read,
 as the rule above the last row always did); what is left stands empty above MESSAGES, where the panel's free rows stand. So NOW, QUESTIONS, the
-route box, PEERS, MODEL, CTX, TITLE, MEM, RESOURCES, USAGE, the notices and the last row have the rows, the places and the form they have without
+route box, PEERS, MODEL, TITLE, MEM, RESOURCES, USAGE, the notices and the last row have the rows, the places and the form they have without
 B, and none has more; a message that had folded stays folded. Where the two heads do not stand the REPO row ends in the two buttons,
 `STATUS 5 ›  BACKLOG +139 ›` (11-26, fix 1 of #1863: the numbers mean what the heads' do, STATUS the board's whole count without `+`, none for zero,
 BACKLOG `+N` every item of the document, none drawn). They give way as step 3 of the repository row's one order (above): beside the counted
@@ -474,7 +476,7 @@ rest of the row opens the status popup). The two parts' items come with the stat
 where a document changed (the host sends the documents' path, modification time, size, inode and change time back as `have` and, for the backlog,
 the folder it was read for; an unchanged one is neither read nor parsed again); the panel's drawing reads no file. SESSION is this session's: its
 head (11-26, panel B) is one rule without a word across the row, standing where the empty row between the two groups of metadata stood; then
-MODEL, CTX, TITLE, NOW (one cell in), QUESTIONS, the route box, MESSAGES, MEM. Short of rows, where the head used to take MODEL's value and row
+MODEL (its context reading at the right end, 11-27), TITLE, NOW (one cell in), QUESTIONS, the route box, MESSAGES, MEM. Short of rows, where the head used to take MODEL's value and row
 (`SESSION Opus 5.5 xhigh ────`), MODEL stands on its own row and the rule over it takes one of the rows B left (above); where none is left the rule
 goes and MODEL stands alone. Beside RESOURCES (11-26, panel B): one still rule without a word right above the `RESOURCES` name (above `USAGE`
 where the equipment's rows are all folded), in a section head's rule color; the names keep their place and shape. **The line forms (11-22, the
@@ -483,7 +485,7 @@ person chose the one-cell indent over the two-cell draft; 11-26, panel B):**
 | Layer | Form | Where |
 |---|---|---|
 | Group head | REPO: its row, the dim label in the labels' column; SESSION: one rule without a word | REPO, SESSION |
-| Dependent row | one cell in | PEERS, STATUS, BACKLOG (under REPO); MODEL, CTX, TITLE, NOW (under SESSION) |
+| Dependent row | one cell in | PEERS, STATUS, BACKLOG (under REPO); MODEL, TITLE, NOW (under SESSION) |
 | Dependent's item | one cell more (two in all) | the BACKLOG items |
 | Activity | rounded box, `›` at the right end of its top line (`╭─ 3 QUESTIONS ───── ›─╮`) | QUESTIONS, ROUTE |
 | Lower section | the name alone (no rule) and `›` at the right end; an item one cell in, one row | MESSAGES, MEM (RESOURCES and USAGE: the name alone, no `›`, their rows as they were; one rule over them) |
@@ -750,8 +752,8 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   painted copy only and keeps reading the native screen (Codex's thread id, OpenCode's context) as before, and Codex's
   `status_line` setting is left as it is. OpenCode has no setting or plugin slot that hides its bottom bar (checked in
   the installed `@opencode-ai/plugin` types and the documentation), so the shell's own paint is the way. Only what the line
-  alone showed moves: OpenCode's cost (from the session record Fleet reads) stands after the context in that window's
-  panel (`CTX ━━━━──── 41% │ $1.23`). A window started without the shell is untouched. The row is found only in the
+  alone showed moves: OpenCode's cost (from the session record Fleet reads) stands in that window's panel on the row under
+  MODEL, in its value column, after the MCP count (`MCP 2/3 │ $1.23`; 11-27: the context reading itself ends the MODEL row). A window started without the shell is untouched. The row is found only in the
   harness's own layout, and what is not found is not covered (review of #1662): Codex's footer is the status row and the help
   row (or the one thread-id status row) after the composer's last `›` row, the status row opening with a word, a number or a
   path, not a sign (`↳ queued`, `⏎ to send`, `■ stream error`) and not a draft line that begins with an id; OpenCode's bar is the
@@ -780,7 +782,7 @@ running jobs and them before MESSAGES); the running jobs; the question's head an
 rows, before the structural rows below them); this window's own usage row last of all. Rows a later step frees beyond its need go back to the steps
 before it, the most important first. A section is placed whole or not at all; the
 rows left over stand above MESSAGES and MEM (which keep to the bottom, with their
-press targets), or under the last section when there are none. A row that gave way and goes back goes back to the next step in this order (MESSAGES, MEM, a list item, a NOW's further row): the line that no longer stands between CTX and TITLE is not one of the steps, so the row it freed goes to whichever of those comes next.
+press targets), or under the last section when there are none. A row that gave way and goes back goes back to the next step in this order (MESSAGES, MEM, a list item, a NOW's further row): the line that no longer stands between CTX and TITLE is not one of the steps, so the row it freed goes to whichever of those comes next (as does the row the CTX row left when it joined the MODEL row, 11-27).
 Groups are divided by `│`, stages joined by `›`. Fixed words are English
 (`context`, `route`, `messages`, stage names, `5h`/`7d`, the section names
 `QUESTIONS`, `ROUTE`, `MESSAGES`, `MEM` with their counts

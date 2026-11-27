@@ -417,13 +417,16 @@ class CommonSessionLineTest(unittest.TestCase):
         side = lambda parts: ("".join(text for text, _key in parts), {key for _text, key in parts})
         self.assertEqual((presented["repo_side"], presented["worktrees"], side(presented["git_side"])),
                          ([("hearting", "loc_repo")], [("wt 12", "dim")], ("main ↑2", {"dim", "lvl_g"})))
-        # 42 (b): beside the native area the `CTX` label stands for the word `context`; the
+        # 42 (b): beside the native area the reading stands without the word `context`; the
         # bottom layout's fragment keeps it, and an unknown reading has neither.
         self.assertEqual(presented["context"][0], ("context ", "dim"))
         self.assertEqual(presented["context_side"], presented["context"][1:])
         self.assertEqual("".join(text for text, _key in presented["context_side"]), "━━━━────── 37%")
+        # 11-27: the open side panel's MODEL row ends in the route doers' five-cell gauge (``doer_paint``'s ``gauge5``).
+        self.assertEqual(presented["context_gauge5"], [tuple(part) for part in session_panel.doer_paint({"ctx_pct": 37})["gauge5"]])
+        self.assertEqual(presented["context_gauge5"], [("━━", "lvl_g"), ("───", "dim"), (" ", "dim"), ("37%", "lvl_g")])
         unknown = session_panel.presentation({**values, "ctx_pct": None}, {}, "claude", "s", 40)
-        self.assertEqual((unknown["context"], unknown["context_side"]), ([], []))
+        self.assertEqual((unknown["context"], unknown["context_side"], unknown["context_gauge5"]), ([], [], []))
         for count in (0, None):
             other = {**values, "git": {**values["git"], "extra_worktrees": count}}
             self.assertEqual(session_panel.session_worktrees(other), [])

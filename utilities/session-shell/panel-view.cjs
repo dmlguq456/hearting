@@ -30,7 +30,7 @@ const WAIT_BLINK=10;
 // 다시 줄이고"): three at most.
 const MESSAGES_MAX=3;
 // 11-20 (the person: "REPO에 엮어서 구분을 하나 더 두는게 맞을듯" / "REPO ---- SESSION ----"): the panel beside the native area has two groups: REPO
-// (the repository's: its row, GIT, PEERS) and SESSION (this session's: MODEL, CTX, TITLE, NOW, QUESTIONS, the route box, MESSAGES, MEM). Each group's head
+// (the repository's: its row, GIT, PEERS) and SESSION (this session's: MODEL, CTX, TITLE, NOW, QUESTIONS, the route box, MESSAGES, MEM; 11-27: CTX ends MODEL's row). Each group's head
 // is one row `REPO ────` / `SESSION ────`. REPO's head is the REPO row itself (`REPO hearting · wt 12 ────`, no row more). SESSION's head stands
 // where the empty row between the two groups' metadata stood, so it costs no row either, and goes with it short of rows. The bottom layout has no group
 // heads: first row, GIT, PEERS, then the title and NOW row and the route box.
@@ -668,6 +668,12 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const pad=n=>text(' '.repeat(Math.max(0,n)));
     const cut=(parts,limit)=>{const all=size(parts);if(all<=limit)return parts;const fit=clip(parts,Math.max(0,limit-1));return [...fit.parts,{...(fit.parts.at(-1)||text('')),text:'…'}];};
     const joined=(groups,sep=' │ ')=>groups.filter(g=>g.length).flatMap((g,i)=>i?[text(sep),...g]:g);
+    // The doers' identity rule (`whoOf`, `alignedWhoRow`, below) draws the session's own MODEL row too (11-27), so its words and the
+    // role column's names are known before the rows above the route box are laid out.
+    const spaced=values=>values.filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x);
+    const ROLE=new Set(['owner','frame','frame-alt','worker']);
+    let unitLabel='';      // the unit's short name on the route being drawn (a unit route's role word)
+    const roled=role=>ROLE.has(role)||(!!unitLabel&&role===unitLabel);
     // A narrow panel gives up the lead rule, then whole words from the end of the label:
     // `route N` (beside the native area `N ROUTE`, spec rule 45 (a)) shows whole or not at
     // all, never as a shorter number.
@@ -902,13 +908,6 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
       // The GIT row's place, held (`heldRows`: counted as before, drawn as nothing).
       if(sideRepo.length&&sideGit.length){gitRows.add(top.length);heldRows.add(top.length);top.push([]);}
-      // Short of cells the first part (the branch, the model name) gives way so what follows
-      // it (the status and a warning, the effort) stays whole.
-      const firstGives=(parts,room)=>{
-        if(size(parts)<=room||parts.length<2)return cut(parts,room);
-        const rest=parts.slice(1),left=room-size(rest);
-        return left>=6?[...cut(parts.slice(0,1),left),...rest]:cut(parts,room);
-      };
       {const peerParts=peerRow(inner-IND-labelWidth);if(peerParts.length){gitRows.add(top.length);top.push(labelled('PEERS',peerParts));}}
       // 11-21: the STATUS and BACKLOG parts: each a head and its items (what a part shows is chosen after the layout, below).
       // 11-26 (panel B; the person: "STATUS는 그냥 버튼만 만들고 목록은 없애는게 좋겠어. 백로그는 사용자가 말한 우선순위로 최대 3개 정도만 띄우고"): STATUS is
@@ -929,19 +928,28 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       // 11-26 (panel B): the head is one rule without a word (`rule motion`'s light runs over it); short of rows, where the head took MODEL's row,
       // the rule stands over MODEL's own row on a held row, or goes where there is none.
       metaGaps.add(top.length);top.push(ruleParts(inner));sessionAt=top.length-1;
-      if(labelWidth){
-        // Spec rule 42: `MODEL` and `CTX` as REPO's and GIT's; `CTX` stands for the word
-        // `context` (a backend without `context_side` has its word taken off here).
+      {
+        // Spec rule 42: `MODEL` as REPO's label (narrower than 30 cells inside, no label, one cell in as the rows of the group above).
+        // 11-27 (the person: "패널에서 MODEL + CTX를 그냥 한줄로 고치자. CTX 단어도 필요 없을듯. 라우팅이랑 일관성을 맞추자는것"): the context
+        // reading is no row of its own and no word: it ends the MODEL row at the right edge, drawn by the route doers' rule
+        // (`alignedWhoRow`): from 50 panel cells the five-cell gauge before the percent, narrower the percent alone, in its level's
+        // color; short of cells the effort goes first, then the model name is cut with `…`, and the percent stays. With no reading
+        // nothing stands there, as on a doer's row. OpenCode's MCP count and cost, which stood after the gauge, take the row under it,
+        // in the value column. (A backend without `context_side` has the word `context` taken off its gauge here.)
         const word=parts=>{const first=parts[0],rest=String(first?.text??'').replace(/^context /,'');
           return !first||rest===String(first.text)?parts:rest?[{...first,text:rest},...parts.slice(1)]:parts.slice(1);};
         const gauge=Array.isArray(model.context_side)?painted(model.context_side):word(painted(model.context));
-        const value=mcp.length||cost.length?joined([gauge,mcp,cost]):gauge;
-        top.push(labelled('MODEL',firstGives(selected,inner-IND-labelWidth)));
-        if(value.length){top.push(labelled('CTX',cut(value,inner-IND-labelWidth)));mark(top.length-1,'context');}
-      }else{
-        // Narrower than 30 cells inside, the rows as they were, without labels (one cell in, as the rows of the group above).
-        top.push(labelled('MODEL',firstGives(selected,inner-IND)));
-        if(contextParts.length){top.push(labelled('CTX',cut(contextParts,inner-IND)));mark(top.length-1,'context');}
+        // The percent is the gauge's last word (its own part from Fleet; an older backend's one part `━━━━──── 41%` ends in it too).
+        const last=gauge.at(-1),value=last?clean(last.text).trim().split(/\s+/).at(-1):'',percent=value?{...last,text:value}:null;
+        // The model and the effort as a doer's `model_text` and `effort` (the native selection's effort comes as ` xhigh`).
+        const [first,...rest]=selected,tail=rest.filter(x=>clean(x.text).trim());
+        const own={model_text:first||null,effort:tail.length?{...tail[0],text:tail.map(x=>clean(x.text)).join('').trim()}:null,
+          ...(percent?{ctx:percent,gauge5:painted(model.context_gauge5)}:{})};
+        const lead=labelled('MODEL',[]);
+        top.push(percent?alignedWhoRow(lead,own,'','',Math.max(3,size([percent]))):whoOf(lead,own,'',inner,true)||cut(lead,inner));
+        if(percent)mark(top.length-1,'context');
+        const more=joined([mcp,cost]);
+        if(more.length)top.push([pad(IND+labelWidth),...cut(more,inner-IND-labelWidth)]);
       }
       if(jobs.length){const from=top.length;const rowsOf=[];narrow(()=>put(rowsOf,jobs,2));top.push(...rowsOf.map(r=>[pad(IND),...r]));mark(from,'jobs');for(let i=from;i<top.length;i++){optional.add(i);jobRows.add(i);}}
       if(work.length){optional.add(top.length);top.push([pad(IND),...cut(work,inner-IND)]);}
@@ -1401,9 +1409,6 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const ctxWidth=Math.max(0,...contexts.map(c=>size([c])));
     const percentWidth=Math.max(3,...contexts.filter(c=>String(c.text).endsWith('%')).map(c=>size([c])));
     const timeWidth=Math.max(0,...allWorkers.map(w=>measure(w.elapsed||'')));   // (an owner has no time of its own: the route's stands on its first line)
-    const ROLE=new Set(['owner','frame','frame-alt','worker']);
-    let unitLabel='';      // the unit's short name on the route being drawn (a unit route's role word)
-    const roled=role=>ROLE.has(role)||(!!unitLabel&&role===unitLabel);
     // A frame leg is `frame`, its alternative `frame-alt`; any other stage worker is `worker`.
     const workerRole=w=>unitLabel?unitLabel:w.role==='frame'?(/alt/.test(String(w.stage||''))?'frame-alt':'frame'):'worker';
     // The role column's width is the route's own (11-17: a frame route's `frame-alt` does not widen another route's rows).
@@ -1411,7 +1416,6 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const setRoles=r=>{unitLabel=unitName(r);roleWidth=side?Math.max(0,roled(leadRole(r))?measure(leadRole(r)):0,...workersOf(r).map(w=>unitRoute(r)&&!unitLabel?0:measure(workerRole(w)))):0;};
     const roleCell=role=>roleWidth?[text((roled(role)?role:'').padEnd(roleWidth),'dim'),text(' ')]:[];
     const rolePart=r=>roleCell(leadRole(r));
-    const spaced=values=>values.filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x);
     // A unit a worker called (`called`: the backend's list, in the order they were called, each with the ones it called in turn) stands
     // on one row under its caller's row, two cells in (a called unit's own calls two more): its mark, the unit's short name in the
     // role word's dim, its harness, model and effort, and its time at the right edge. Short of cells the effort goes first, then the
@@ -1453,11 +1457,12 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       if(shortModel&&keep.length&&size(lead)<room)return [...lead,...cut(keep,room-size(lead))];
       return cut(leads.at(-1),room);
     }
-    // Keep the right edge of the reading fixed before fitting the identity.
-    function alignedWhoRow(lead,p,role,elapsed){
+    // Keep the right edge of the reading fixed before fitting the identity. The session's own MODEL row is drawn by the same rule
+    // (11-27), its percent in a column of its own (`column`).
+    function alignedWhoRow(lead,p,role,elapsed,column=percentWidth){
       const C=[p.ctx],gauge=p.gauge5;
       const gaugeWidth=width>=50&&Array.isArray(gauge)?size(gauge)-size(C):0;
-      const reading=gaugeWidth>0?[...clip(gauge,gaugeWidth).parts,pad(percentWidth-size(C)),...C]:C;
+      const reading=gaugeWidth>0?[...clip(gauge,gaugeWidth).parts,pad(column-size(C)),...C]:C;
       const time=elapsed&&size(lead)+measure(elapsed)+size(reading)+2<=inner;
       const right=time?[text(elapsed,'dim'),text(' '),...reading]:reading;
       const room=inner-size(right)-1;

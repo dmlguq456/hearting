@@ -1004,8 +1004,11 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
             "repo_side": session_repo_side(values),
             "memory": session_memory(values), "memory_items": session_memory_items(values), "selected": selected,
             "context": [("context ", "dim"), *gauge] if gauge else [],
-            # Spec E9 rule 42 (b): beside the native area the `CTX` label stands for the word.
+            # Spec E9 rule 42 (b): beside the native area the reading stands without the word (the folded strip's `CTX`).
             "context_side": gauge,
+            # 11-27: the open side panel ends the MODEL row with the reading, by the route doers' rule (``doer_paint``'s
+            # ``gauge5``: the five-cell gauge from 50 panel cells, the percent alone narrower).
+            "context_gauge5": gauge_parts(values.get("ctx_pct"), cells=5),
             "wait": answer_wait_word() + " " + (str(count) if count is not None else "?")
                     if count is None or type(count) is int and count > 0 else "",
             # A wait this panel cannot answer: one line saying where it is answered (11-14),

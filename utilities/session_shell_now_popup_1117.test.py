@@ -200,10 +200,10 @@ console.log(JSON.stringify(out));
     def test_a_now_that_fills_its_last_row_takes_the_mark_as_an_ellipsis_at_its_end(self):
         script = POLISH.HEAD + """
 const m=model({});m.session_title='제목';m.now=process.argv[2];
-const v=view.render({width:40,height:24,side:true,model:m,state:'working',harness:'claude',frame:1000,since:990,brief:undefined,sent:()=>[],cellWidth:cells,
+const v=view.render({width:40,height:23,side:true,model:m,state:'working',harness:'claude',frame:1000,since:990,brief:undefined,sent:()=>[],cellWidth:cells,
  configuration:{side_width:40,rule_motion:'rule',theme:'terminal',position:'right'},folded:false});
 console.log(JSON.stringify(lines(v)));"""
-        def row(now):    # (24 rows: the NOW is short of rows in its one-row form at this height, as at the 30 it stood at before 11-20)
+        def row(now):    # (23 rows: the NOW is short of rows in its one-row form at this height, as at the 30 it stood at before 11-20 and the 24 before 11-27 took the CTX row into MODEL's)
             out = subprocess.run([NODE, "-e", script, str(SHELL), now], capture_output=True, text=True, check=True)
             # (an empty row is no row of the NOW: 11-26, panel B leaves the rows its forms do not use empty above MESSAGES)
             return [line for line in json.loads(out.stdout) if line.startswith("│  NOW") or line.startswith("│         ") and line.strip("│ ")]
