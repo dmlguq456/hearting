@@ -320,6 +320,19 @@ class ParkedForkOwnership(unittest.TestCase):
         later = self.owned_route("route-after-the-link-ended")
         self.assertEqual(handover.effective_parent(later, self.jobs), OLD)
 
+    def test_a_message_question_keeps_its_exact_recipient_rule(self):
+        # `[답변 필요]` questions belong to their exact session id: a session that took the seat
+        # ends them (the existing rule). While the conversation is held elsewhere that is NEW;
+        # once the link ends the question is the old id's own again. Nothing is rewritten.
+        import human_wait_state
+        signal = {"harness": "claude", "session_id": OLD}
+        self.assertTrue(human_wait_state._message_incarnation_current(signal))
+        self.scene()
+        self.assertIsNotNone(self.hook(NEW_SEAT, NEW))
+        self.assertFalse(human_wait_state._message_incarnation_current(signal))
+        self.record(self.window, sessionId=OLD, kind="interactive", startedAt=1)
+        self.assertTrue(human_wait_state._message_incarnation_current(signal))
+
     def test_a_remembered_holder_does_not_outlive_the_link(self):
         import dispatch_registry_cache
         self.scene()
