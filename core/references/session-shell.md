@@ -780,7 +780,7 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   GPU order, `[4f][b2]`; `[?]` for a busy GPU whose holder is not known), `max 92%` (the highest use the sample observed, `max ?` where it
   observed none: no 0 is made up; none for a host with no GPU), `CPU 34%`, `MEM 61%` (`atlas GPU 2/4 [4f][b2] max 92%` at 36 cells, `CPU` from
   44, `MEM` from 60); the words dim, the values in the body color; which GPU a session holds is read open. The backend sums the sample up
-  (`session_panel.resource_brief`, the host's `brief`); a backend that sends none draws the section open. A press on the `RESOURCES` head opens
+  (`session_panel.resource_brief`, the host's `brief`); a backend that sends none draws the section open and its head takes no press. A press on the `RESOURCES` head opens
   the section (the same cells as the open rows above) and another folds it again: the window holds which while it is up (`host.cjs`
   `resourcesOpen`, as it holds the route box's scroll; no setting, nothing saved, not carried to a successor host), so a new panel stands
   folded. The head's words are unchanged and no key is bound (the panel has no focus on its heads). Folded, the section counts one row a host

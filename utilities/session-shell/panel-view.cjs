@@ -2182,7 +2182,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // the sessions that hold them, `max 92%`, `CPU 34%`, `MEM 61%`), as many as fit from the first, one cell apart (`atlas GPU 2/4 [4f][b2]
     // max 92%`). A press on the RESOURCES head opens the rows above as they stood and folds them again (`resources`; the host keeps which, for
     // this window only: a new panel stands folded). A backend that sends no summary draws the open rows.
-    const resourceFolded=!resourcesOpen&&resourceData.length>0&&resourceData.every(h=>Array.isArray(h.brief));
+    // (11-28, review of #1911: only a section that can fold has the press; a backend that sends no summary draws it open, nothing to turn.)
+    const resourceFoldable=resourceData.length>0&&resourceData.every(h=>Array.isArray(h.brief));
+    const resourceFolded=!resourcesOpen&&resourceFoldable;
     const resourceBriefRow=h=>{
       const name=painted(h.host);
       if(size(name)>inner)return cut(name,inner);
@@ -2435,7 +2437,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // 11-26 (panel B; the person: "RESOURCES이나 USAGE에 구분선도 없어" / "패널네서 RESOURCES랑 USAGES 글자는 원래 위치로 두지?"): one still rule without
     // a word right above RESOURCES (above USAGE where the equipment is folded); the names stand where and as they stood.
     const bottomRuleRow=()=>({parts:[{...text('─'.repeat(inner),'dim'),role:'messages'}]});
-    if(resourceCount()){if(bottomRule)lower.push(bottomRuleRow());lower.push({parts:resourceHead(),action:'resources'});for(const line of resourceLines())lower.push({parts:line});}
+    if(resourceCount()){if(bottomRule)lower.push(bottomRuleRow());lower.push({parts:resourceHead(),...(resourceFoldable?{action:'resources'}:{})});for(const line of resourceLines())lower.push({parts:line});}
     let lastUsage=[];
     if(usageOn&&usageLines().length){
       const list=usageLines(),own=u=>u.harness===harness?['quota']:[];

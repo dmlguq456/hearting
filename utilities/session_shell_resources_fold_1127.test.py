@@ -308,6 +308,8 @@ class ResourcesFoldTest(unittest.TestCase):
                 # Open: the same cells as the section had (the design's `expanded/A`, the rows of a backend without the summary).
                 self.assertEqual(block(opened["lines"])[1], OPEN[width][count], (width, count))
                 self.assertEqual(opened["lines"], older["lines"])
+                # (11-28) A backend that sends no summary: the open rows, and no press on the head (nothing to turn over).
+                self.assertEqual([h for h in older["hits"] if h["action"] == "resources"], [])
                 # The host: a press on the head row turns the window's own state over, and draws again; nothing else opens.
                 script = r"""
 const vm=require('node:vm'),fs=require('node:fs');
