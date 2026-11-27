@@ -628,24 +628,20 @@ def _declares_top(harness):
 
 
 def _usage(jobs, profile=None, recheck=False):
-    cmd = [str(ROOT / "utilities" / "usage-check.sh"), "--harness", "all", *(["--recheck"] if recheck else [])]
-    if profile:
-        cmd += ["--model-profile", profile]
-    if jobs:
-        cmd += ["--jobs", jobs]
-    result = subprocess.run(cmd, text=True, capture_output=True, env=os.environ.copy())
-    if result.returncode != 0:
-        raise OwnerError("usage-check-failed")
-    states = {}
-    for line in result.stdout.splitlines():
-        fields = line.split()
-        if len(fields) == 2 and fields[0] in _defaults.DISPATCHABLE_HARNESSES:
-            if fields[0] in states:
-                raise OwnerError("eligibility-malformed")
-            states[fields[0]] = fields[1]
-    if set(states) != set(_defaults.DISPATCHABLE_HARNESSES):
+    try:
+        from dispatch_capacity_evidence import usage_jobs, usage_states
+
+        window = int(os.environ.get("UNKNOWN_WINDOW_MIN", "60"))
+        states = usage_states(usage_jobs(jobs), profile=profile,
+                              unknown_window_min=window, recheck=recheck)
+    except Exception as exc:  # The former CLI reported an evidence-reader failure as a nonzero exit.
+        raise OwnerError("usage-check-failed") from exc
+    # The CLI required one state token per harness. Keep the same refusal for
+    # malformed legacy labels, even though the selection now consumes a dict.
+    if set(states) != set(_defaults.DISPATCHABLE_HARNESSES) or any(
+            len(state.split()) != 1 for state in states.values()):
         raise OwnerError("eligibility-malformed")
-    return states
+    return {harness: state.strip() for harness, state in states.items()}
 
 
 def _unread_gauges(states, explicit):

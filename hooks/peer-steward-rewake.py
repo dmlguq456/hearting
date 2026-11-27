@@ -30,6 +30,12 @@ from typing import Any
 
 _HOOKS_DIR = Path(__file__).resolve().parent
 _PEER_STEWARD = _HOOKS_DIR.parent / "utilities" / "peer-steward.py"
+# The release this hook runs from stays visible to the installer's /proc scan
+# while it waits (up to six hours), as `dispatch_contract._CODE_ROOT_FD` does.
+try:
+    _CODE_ROOT_FD = os.open(_HOOKS_DIR.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+except OSError:
+    _CODE_ROOT_FD = None
 
 BUDGET_SECONDS = 21_600          # matches the settings.json timeout
 BUDGET_MARGIN_SECONDS = 60       # 21600 - 60 s = 21_540_000 ms
