@@ -21,11 +21,11 @@ a later row handed it elsewhere.  Two ways in: a confirmed clear at the same pan
 or the clear booking's own observation; OpenCode has no start hook, so its first message in
 a new session after the snapshot), or the official seat change across panes and harnesses
 (``peer-steward start --beside`` -> ACK -> ``retire`` from the pane started beside the
-predecessor, :func:`record_retire_handover`).  A third, Claude's send-to-background, is one
-``parked-fork`` row written by :func:`record_parked_fork`; it moves the ownership it binds, and
-other records follow it only while its live link holds (:func:`_parked_step`).  Everything here
-is read-only except :func:`record_locked` / :func:`write_snapshot_locked` (caller holds the seat
-lock), :func:`record_retire_handover` and :func:`record_parked_fork`.
+predecessor, :func:`record_retire_handover`).  Claude's send-to-background is not a handover: one
+``parked-fork`` row (:func:`record_parked_fork`) that two rules read against the live processes
+(:func:`_parked_state`).  Everything here is read-only except :func:`record_locked` /
+:func:`write_snapshot_locked` (caller holds the seat lock), :func:`record_retire_handover` and
+:func:`record_parked_fork`.
 
 Two questions, two functions:
 
@@ -89,10 +89,11 @@ class LineageGraph:
     seat_edges: tuple
     seat_unresolved: frozenset
     binding_conflicts: frozenset = frozenset()
-    # ``(harness, origin) -> (target, evidence)`` for each recorded parked-fork row
-    # (``None`` when one origin has rows naming different targets or processes). Not an
-    # ordinary edge: :func:`_parked_step` follows it only while the live link holds.
+    # ``(harness, OLD) -> entry`` of each recorded parked fork (``None`` when rows for one
+    # origin disagree), and ``job key -> entry`` for the jobs such a row lists when no later
+    # ordinary binding names them. Neither is an ordinary edge; see :func:`_parked_state`.
     parked: object = MappingProxyType({})
+    parked_jobs: object = MappingProxyType({})
 
 
 def _lineage_generation(info):
@@ -369,7 +370,7 @@ def _compact_row_indexes(rows) -> set[int]:
     st = _st()
     keep, first_vertices = set(), set()
     for index, row in enumerate(rows):
-        if row.get("bindings") or row.get("event") == "handover":
+        if row.get("bindings") or row.get("event") in {"handover", PARKED_FORK_EVENT}:
             keep.add(index)
         elif st.tidy_lineage_edge(row) is not None or st._handover_origin(row) is not None:
             keep.add(index)
@@ -477,13 +478,14 @@ def _build_lineage_graph_uncached(signature, contents, compact_rows=None) -> Lin
                 keys_by_vertex.setdefault((row_harness, row_sid), set()).add(ledger_key)
             edge = st.tidy_lineage_edge(row)
             if edge is None:
-                fork = parked_fork_edge(row)
-                if fork is not None:
-                    harness, origin, target, evidence = fork
-                    parked.setdefault((harness, origin), set()).add(
-                        (target, tuple(sorted(evidence.items()))))
-                    keys_by_vertex.setdefault((harness, origin), set()).add(ledger_key)
-                    keys_by_vertex.setdefault((harness, target), set()).add(ledger_key)
+                if row.get("event") == PARKED_FORK_EVENT:
+                    fork = parked_fork_row(row)
+                    if fork is not None:
+                        vertex = (fork["harness"], fork["origin"])
+                        parked.setdefault(vertex, {})[_parked_identity(fork)] = (
+                            (float(row.get("ts", 0) or 0), index, ledger_key), fork)
+                        keys_by_vertex.setdefault(vertex, set()).add(ledger_key)
+                        keys_by_vertex.setdefault((fork["harness"], fork["target"]), set()).add(ledger_key)
             else:
                 harness, origin, target = edge
                 edges.add((harness, origin, target))
@@ -509,13 +511,25 @@ def _build_lineage_graph_uncached(signature, contents, compact_rows=None) -> Lin
                         MappingProxyType({vertex: tuple(sorted(keys))
                                           for vertex, keys in keys_by_vertex.items()}), frozen_rows,
                         frozen_bindings, signature, seat_edges, seat_unresolved)
-    # The same row is kept in more than one ledger (native and physical seat); copies with
-    # one target and one process pair are one link. Anything else is no link to follow.
-    frozen_parked = MappingProxyType({
-        vertex: ((next(iter(found))[0], MappingProxyType(dict(next(iter(found))[1])))
-                 if len(found) == 1 else None)
-        for vertex, found in parked.items()})
-    return replace(graph, binding_conflicts=_binding_conflicts(graph), parked=frozen_parked)
+    # One origin, one parked fork: rows that disagree (another target or process pair) are
+    # no link to follow, and the jobs they list keep their ordinary holder.
+    frozen_parked, parked_jobs = {}, {}
+    for vertex, found in parked.items():
+        if len(found) != 1:
+            frozen_parked[vertex] = None
+            continue
+        order, fork = next(iter(found.values()))
+        frozen_parked[vertex] = MappingProxyType(fork)
+        for binding in fork["jobs"]:
+            key = tuple(binding[field] for field in ("jobs", "route", "hash", "node"))
+            ordinary = latest_bindings.get(key)
+            if ordinary is not None and ordinary[0] > order:
+                continue                    # a later ordinary binding took this job on
+            if key not in parked_jobs or order > parked_jobs[key][0]:
+                parked_jobs[key] = (order, MappingProxyType(fork))
+    return replace(graph, binding_conflicts=_binding_conflicts(graph),
+                   parked=MappingProxyType(frozen_parked),
+                   parked_jobs=MappingProxyType({key: value[1] for key, value in parked_jobs.items()}))
 
 
 
@@ -677,32 +691,40 @@ def _binding_conflicts(graph):
 # `/bg` clones the conversation under a new session id (NEW) in a daemon-run process and leaves
 # the window's process (OLD) as a viewer. Hearting reads that link live from the two processes
 # (``tools/fleet/session_registry.parked_successor``: the viewer's ``parkedJobId`` and the
-# background process's ``--resume``). :func:`record_parked_fork` writes ONE existing transition
-# row for it (``source="parked-fork"``, ``from=OLD``) when NEW's own hook sees both facts. The row
-# carries what OLD answered for at that moment (its depth-1 job bindings and steward roles and
-# watches) the same way a same-seat handover row does, so those stay with NEW. The row is not an
-# ordinary lineage edge: anything else still addressed to OLD follows it only while the live link
-# holds (:func:`_parked_step`), so after the window takes its own conversation back, or once the
-# background process is gone, new work addressed to OLD stays with OLD.
-PARKED_FORK_SOURCE = "parked-fork"
+# background process's ``--resume``). :func:`record_parked_fork` writes ONE row for it, in NEW's
+# own seat ledger, when NEW's hook sees both facts. Its event (``parked-fork``) is not one an
+# older release reads as a handover, so a reader from before this row, or after a rollback,
+# sees no relation at all and keeps everything with OLD.
+#
+# The row lists what OLD answered for at that moment (its depth-1 jobs, steward roles and
+# watches) and records the two processes. Two rules read it, both in :func:`_parked_state`:
+#   * what the row lists stays with NEW (and NEW's own lineage) while that background process
+#     lives, and comes back to OLD, the window, once it is gone;
+#   * anything else addressed to OLD follows NEW only while the window still holds that same
+#     job and process pair; it stays with OLD once the window takes its conversation back, and
+#     is unresolved while the window holds another background session.
+# The live facts are read once per read pass (``PeerReadContext.parked_links``) or afresh.
+PARKED_FORK_EVENT = "parked-fork"
 _PARKED_EVIDENCE = ("job_id", "pid", "proc_start", "viewer_pid", "viewer_start")
+_BINDING_FIELDS = ("jobs", "attempt", "route", "hash", "node", "parent")
 _UNRESOLVED_STEP = object()
-_PARKED_LINKS = {}
-_PARKED_LINKS_LOCK = threading.Lock()
-_PARKED_LINKS_SECONDS = 1.0
+_PARKED_CONSULTED = contextvars.ContextVar("parked_consulted", default=None)
+_CALLER_RUNTIME = {}
 
 
-def parked_fork_edge(row) -> Optional[tuple[str, str, str, dict]]:
-    """``(harness, OLD, NEW, evidence)`` of a well-formed parked-fork row, else None."""
-    if not isinstance(row, (dict, MappingProxyType)) or row.get("event") != ROW_EVENT \
-            or row.get("source") != PARKED_FORK_SOURCE:
+def parked_fork_row(row) -> Optional[dict]:
+    """The normalized parked-fork row, or ``None``: any field in doubt makes it no row at all,
+    for every reader alike (an ordinary address, a job, a steward relation)."""
+    if not isinstance(row, (dict, MappingProxyType)) or row.get("event") != PARKED_FORK_EVENT:
         return None
-    harness, target = row.get("harness"), row.get("sid")
-    origin = _st()._handover_origin(dict(row))
-    evidence = row.get("parked")
-    if (harness != "claude" or origin is None or origin[0] != harness
-            or not isinstance(target, str) or not target or target == origin[1]
-            or not isinstance(evidence, (dict, MappingProxyType))):
+    harness, origin, target = row.get("harness"), row.get("from"), row.get("sid")
+    evidence, jobs = row.get("parked"), row.get("jobs", ())
+    roles, watches = row.get("roles", ()), row.get("watches", ())
+    if (harness != "claude" or not isinstance(origin, str) or not origin
+            or not isinstance(target, str) or not target or target == origin
+            or not isinstance(evidence, (dict, MappingProxyType))
+            or not isinstance(jobs, (list, tuple)) or not isinstance(roles, (list, tuple))
+            or not isinstance(watches, (list, tuple))):
         return None
     values = {field: evidence.get(field) for field in _PARKED_EVIDENCE}
     if (not isinstance(values["job_id"], str) or not values["job_id"]
@@ -711,69 +733,191 @@ def parked_fork_edge(row) -> Optional[tuple[str, str, str, dict]]:
             or any(not isinstance(values[field], str) or not values[field].isdigit()
                    for field in ("proc_start", "viewer_start"))):
         return None
-    return harness, origin[1], target, values
+    bindings = []
+    for binding in jobs:
+        if (not isinstance(binding, (dict, MappingProxyType))
+                or any(not isinstance(binding.get(field), str) for field in _BINDING_FIELDS)):
+            return None
+        bindings.append(MappingProxyType({field: binding[field] for field in _BINDING_FIELDS}))
+    if any(not isinstance(item, str) or not item for item in (*roles, *watches)):
+        return None
+    return {"harness": harness, "origin": origin, "target": target,
+            "evidence": MappingProxyType(values), "jobs": tuple(bindings),
+            "roles": frozenset(roles), "watches": frozenset(watches),
+            "ts": float(row.get("ts", 0) or 0)}
 
 
-def _parked_links_now() -> dict:
-    """One live read of the parked links, reused for a second by this process."""
-    now = time.monotonic()
-    with _PARKED_LINKS_LOCK:
-        held = _PARKED_LINKS.get("table")
-        if held is not None and now - held[0] < _PARKED_LINKS_SECONDS:
-            return held[1]
+def _parked_identity(fork) -> tuple:
+    return (fork["target"], tuple(fork["evidence"][field] for field in _PARKED_EVIDENCE))
+
+
+def _session_registry():
+    tools = str(ROOT / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    from fleet import session_registry
+    return session_registry
+
+
+def _read_parked_links() -> dict:
     try:
-        tools = str(ROOT / "tools")
-        if tools not in sys.path:
-            sys.path.insert(0, tools)
-        from fleet import session_registry
-        table = session_registry.parked_links("claude")
+        return _session_registry().parked_links("claude")
     except Exception:  # noqa: BLE001 - a link that cannot be read is no link
-        table = {"successor": {}, "origin": {}}
-    with _PARKED_LINKS_LOCK:
-        _PARKED_LINKS["table"] = (now, table)
-    return table
+        return {"successor": {}, "origin": {}}
 
 
-def parked_link_state(origin: str, evidence) -> str:
-    """``live`` while the viewer of ``origin`` still holds the very background process the row
-    names (same job, same two processes); ``contested`` when it holds another one now (a second
-    `/bg`, or another background session that resumed it); ``ended`` otherwise, read failure
-    included."""
-    found = (_parked_links_now().get("successor") or {}).get(str(origin).lower())
-    if not found:
-        return "ended"
-    same = all(found.get(field) == evidence.get(field) for field in _PARKED_EVIDENCE)
-    return "live" if same else "contested"
+def _parked_links(read_context=None) -> dict:
+    """The live links, observed once for this read pass, or afresh without one."""
+    reader = getattr(read_context, "parked_links", None)
+    return reader(_read_parked_links) if callable(reader) else _read_parked_links()
 
 
-def _parked_step(graph, harness: str, sid: str):
-    """The live parked successor of a vertex with no ordinary outgoing edge, ``None`` (no link
-    to follow: none recorded, or it ended), or ``_UNRESOLVED_STEP`` (rows disagree, or the viewer
-    now holds another background process)."""
+def _caller_runtime_pid():
+    """The pid of the Claude process this one runs under (a hook's own runtime), or None."""
+    pid = os.getpid()
+    if pid not in _CALLER_RUNTIME:
+        try:
+            from pane_ownership import _caller_runtime
+            record, _service = _caller_runtime(pid, "claude")
+            _CALLER_RUNTIME[pid] = record[0] if record else None
+        except Exception:  # noqa: BLE001
+            _CALLER_RUNTIME[pid] = None
+    return _CALLER_RUNTIME[pid]
+
+
+def _parked_state(origin: str, fork, links) -> tuple[str, bool]:
+    """``(link, background_alive)`` of one recorded parked fork.
+
+    ``link`` is ``linked`` while the viewer of ``origin`` still holds the very job and process
+    pair the row names, ``contested`` while it holds another background session, and ``ended``
+    otherwise (a read failure included, and a viewer that runs its own hooks: it is not viewing).
+    ``background_alive`` is the recorded background process being the same live process."""
+    note = _PARKED_CONSULTED.get()
+    if note is not None:
+        note.append(origin)
+    evidence = fork["evidence"]
+    alive = _session_registry()._proc_start(evidence["pid"]) == evidence["proc_start"]
+    found = (links().get("successor") or {}).get(str(origin).lower())
+    if not found or _caller_runtime_pid() == evidence["viewer_pid"]:
+        return "ended", alive
+    same = all(found.get(field) == evidence[field] for field in _PARKED_EVIDENCE)
+    return ("linked" if same else "contested"), alive
+
+
+class _Links:
+    """Read the live links at most once, and only if a parked fork is consulted."""
+    __slots__ = ("read_context", "table")
+
+    def __init__(self, read_context=None):
+        self.read_context, self.table = read_context, None
+
+    def __call__(self):
+        if self.table is None:
+            self.table = _parked_links(self.read_context)
+        return self.table
+
+
+def _parked_step(graph, harness: str, sid: str, links):
+    """Where something addressed to ``sid`` that no parked row lists goes next: the background
+    session while the link lives, ``None`` (stay), or ``_UNRESOLVED_STEP``."""
     parked = getattr(graph, "parked", None)
     if not isinstance(parked, (dict, MappingProxyType)) or (harness, sid) not in parked:
         return None
-    entry = parked[(harness, sid)]
-    if entry is None:
+    fork = parked[(harness, sid)]
+    if fork is None:
         return _UNRESOLVED_STEP
-    target, evidence = entry
-    state = parked_link_state(sid, evidence)
-    if state == "live":
-        return target
-    return _UNRESOLVED_STEP if state == "contested" else None
+    link, _alive = _parked_state(sid, fork, links)
+    if link == "linked":
+        return fork["target"]
+    return _UNRESOLVED_STEP if link == "contested" else None
+
+
+def _listed_holder(graph, fork, links, *, traversed=None):
+    """Where what a parked row lists is held now: NEW's lineage while the background process
+    lives, else the window's (OLD's own lineage, which no longer follows the ended fork)."""
+    _link, alive = _parked_state(fork["origin"], fork, links)
+    start = fork["target"] if alive else fork["origin"]
+    return _chain_end(graph, fork["harness"], start, traversed=traversed, links=links)
+
+
+def _listed_fork(graph, harness, sid, kind, identity):
+    """The parked row of ``sid`` that lists this steward ``kind`` ("roles"/"watches") identity."""
+    parked = getattr(graph, "parked", None)
+    if not isinstance(parked, (dict, MappingProxyType)):
+        return None
+    fork = parked.get((harness, sid))
+    return fork if fork is not None and str(identity) in fork[kind] else None
+
+
+def steward_holder(holder, kind, identity, *, graph=None, read_context=None):
+    """A steward role's or watch's holder after a parked fork that listed it (else unchanged)."""
+    if not isinstance(holder, dict) or holder.get("harness") != "claude" or not holder.get("sid"):
+        return holder
+    try:
+        graph = graph if graph is not None else _pass_lineage_graph(read_context)
+    except (OSError, ValueError, TypeError):
+        return holder
+    fork = _listed_fork(graph, "claude", holder["sid"], kind, identity)
+    if fork is None:
+        return holder
+    end, state = _listed_holder(graph, fork, _Links(read_context))
+    return holder if state == "unresolved" else {**holder, "sid": end}
+
+
+def _parked_graph(relations):
+    """The lineage graph when a relation is held by a Claude session (the only harness with a
+    parked fork), else ``None``: other holders cost no extra ledger read."""
+    if not any((relation.get("holder") or {}).get("harness") == "claude"
+               for relation in relations if isinstance(relation, dict)):
+        return None
+    try:
+        return _pass_lineage_graph()
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def lineage_edges(graph) -> tuple:
     """Ordinary confirmed edges plus recorded parked forks, for a reverse reader that verifies
-    each origin forward again (its forward check applies the live-link rule)."""
+    each origin forward again (its forward check applies the live rule)."""
     table = getattr(graph, "parked", None)
-    parked = tuple((harness, origin, entry[0])
-                   for (harness, origin), entry in table.items() if entry is not None
+    parked = tuple((harness, origin, fork["target"])
+                   for (harness, origin), fork in table.items() if fork is not None
                    ) if isinstance(table, (dict, MappingProxyType)) else ()
     return tuple(graph.edges) + parked
 
 
-def _seat_end(graph, harness, session):
+def graph_bindings(graph):
+    """``(origin, binding)`` of every exact job binding: ordinary rows, then parked forks."""
+    for rows in graph.ledger_rows.values():
+        for row in rows:
+            origin = _st()._handover_origin(row)
+            for binding in row.get("bindings") or ():
+                if isinstance(binding, (dict, MappingProxyType)):
+                    yield origin, binding
+    table = getattr(graph, "parked", None)
+    if isinstance(table, (dict, MappingProxyType)):
+        for (harness, origin), fork in table.items():
+            for binding in (fork["jobs"] if fork is not None else ()):
+                yield (harness, origin), binding
+
+
+def observed_edges(graph, read_context=None) -> tuple:
+    """The ordinary edges plus each parked fork's current state: a recipient inbox derived
+    from one observation is stale once a link starts, ends or its background process goes."""
+    edges = list(getattr(graph, "edges", ()) or ())
+    table = getattr(graph, "parked", None)
+    if isinstance(table, (dict, MappingProxyType)) and table:
+        links = _Links(read_context)
+        for (harness, origin), fork in sorted(table.items()):
+            if fork is None:
+                edges.append(("parked", harness, origin, "", "unresolved", ""))
+                continue
+            link, alive = _parked_state(origin, fork, links)
+            edges.append(("parked", harness, origin, fork["target"], link, "alive" if alive else "gone"))
+    return tuple(edges)
+
+
+def _seat_end(graph, harness, session, *, links=None, follow_parked=True):
     vertices = {vertex for pair in graph.seat_edges for vertex in pair}
     start = (harness, session)
     if not harness:
@@ -791,7 +935,8 @@ def _seat_end(graph, harness, session):
         if current in outgoing:
             current = outgoing[current]
             continue
-        step = _parked_step(graph, current[0], current[1]) if current[0] else None
+        step = (_parked_step(graph, current[0], current[1], links or _Links())
+                if current[0] and follow_parked else None)
         if step is None:
             break
         following = (current[0], step) if step is not _UNRESOLVED_STEP else None
@@ -811,13 +956,16 @@ def lineage_graph(*, read_context=None) -> LineageGraph:
 def chain_end(harness: str, sid: str, *, read_context=None) -> tuple[str, str]:
     """Return the unique end, or unresolved for ambiguity or unavailable observation."""
     try:
-        return _chain_end(_pass_lineage_graph(read_context), harness, sid)
+        return _chain_end(_pass_lineage_graph(read_context), harness, sid, links=_Links(read_context))
     except (OSError, ValueError, TypeError):
         return sid, "unresolved"
 
 
-def _chain_end(graph: LineageGraph, harness: str, sid: str, *, traversed=None) -> tuple[str, str]:
-    """Resolve once, optionally retaining exact edges for the transition writer."""
+def _chain_end(graph: LineageGraph, harness: str, sid: str, *, traversed=None,
+               links=None) -> tuple[str, str]:
+    """Resolve once, optionally retaining exact edges for the transition writer. ``links`` is
+    the read pass's live-link reader; without one a parked fork reads the processes afresh."""
+    links = links or _Links()
     vertex = (harness, sid)
     if vertex in graph.unresolved:
         return sid, "unresolved"
@@ -833,7 +981,7 @@ def _chain_end(graph: LineageGraph, harness: str, sid: str, *, traversed=None) -
                 return sid, "unresolved"
             target = next(iter(targets))
         else:
-            target = _parked_step(graph, harness, current)
+            target = _parked_step(graph, harness, current, links)
             if target is None:
                 break
             if target is _UNRESOLVED_STEP:
@@ -861,7 +1009,7 @@ def seat_chain_contains(harness: str, origin: str, sid: str, *, read_context=Non
     traversed = set()
     try:
         _end, state = _chain_end(_pass_lineage_graph(read_context), harness, origin,
-                                 traversed=traversed)
+                                 traversed=traversed, links=_Links(read_context))
     except (OSError, ValueError, TypeError):
         return False
     return state != "unresolved" and any(target == sid for _h, _o, target in traversed)
@@ -1325,10 +1473,14 @@ def resolved_steward_relations(harness: Optional[str] = None, sid: Optional[str]
         states, releases = _role_states(rows=rows, marker_relations=marker_relations)
     except Exception:  # noqa: BLE001 - unknown authority is never a new role
         return []
+    graph = _parked_graph(states.values())
     out = []
     for identity, saved in sorted(states.items()):
         relation = dict(saved)
         relation["released"] = relation.get("released") is True or identity in releases
+        if graph is not None:
+            relation["holder"] = steward_holder(relation.get("holder"), "roles",
+                                                relation.get("generation"), graph=graph)
         holder = relation.get("holder") or {}
         if ((harness is not None and holder.get("harness") != harness)
                 or (sid is not None and holder.get("sid") != sid)
@@ -1498,11 +1650,14 @@ def resolved_watch_references(harness: Optional[str] = None, sid: Optional[str] 
                 continue
             states.setdefault(watch_id, (str(value.get("seat_key") or ""), value))
             arms[watch_id] = value
+    graph = _parked_graph(saved for _key, saved in states.values())
     out = []
     for watch_id, (key, saved) in states.items():
         value = dict(saved)
         if not value.get("seat_key") and key:
             value["seat_key"] = key
+        if graph is not None:
+            value["holder"] = steward_holder(value.get("holder"), "watches", watch_id, graph=graph)
         root = Path(str(value.get("storage_root") or pm.peer_state_root()))
         arm = arms.get(watch_id)
         if arm is not None:
@@ -1567,6 +1722,7 @@ def resolve_watch(watch_id: str, *, seat_key: Optional[str] = None,
                                  "until", "armed_ts", "deadline")):
                             return None
                         value = dict(relation)
+                value["holder"] = steward_holder(value.get("holder"), "watches", watch_id)
                 holder = value.get("holder") or {}
                 acked = watch_ack_valid(watch_root / f"{watch_id}.ack.json", watch_id,
                                         holder.get("harness"), holder.get("sid"))
@@ -1968,8 +2124,12 @@ def _lineage_index(read_context=None):
         return {}, "handover-unreadable:" + str(exc)
 
 
-def resolve_recipient(question, *, metadata=None, jobs=None, session="", harness="", read_context=None):
-    """Answer each recipient question from the common qualified observation."""
+def resolve_recipient(question, *, metadata=None, jobs=None, session="", harness="", read_context=None,
+                      follow_parked=True):
+    """Answer each recipient question from the common qualified observation.
+
+    ``follow_parked=False`` asks who took ``session``'s seat: a parked fork takes none (a
+    message question stays with its exact session, see ``human_wait_state``)."""
     metadata = metadata or {}
     notice = question in {"provenance", "attempt-parent", "owner-session"}
     registered = str((metadata.get("session_id") if notice else metadata.get("parent_sid")) or session or "")
@@ -1999,15 +2159,17 @@ def resolve_recipient(question, *, metadata=None, jobs=None, session="", harness
             return resolve_recipient("job-holder", metadata=row.metadata, jobs=jobs,
                 session=registered, harness=original_harness, read_context=read_context)
         graph = _pass_lineage_graph(read_context)
+        links = _Links(read_context)
         if question in {"seat-successor", "provenance"}:
-            current, current_harness, disposition = _seat_end(graph, original_harness, registered)
+            current, current_harness, disposition = _seat_end(
+                graph, original_harness, registered, links=links, follow_parked=follow_parked)
         elif question == "job-holder":
             if not registered or jobs is None or not eligible_row(metadata):
                 current, current_harness, disposition = registered, original_harness, "self"
             else:
                 jobs_key = read_context.jobs_key(jobs) if read_context is not None else _jobs_key(jobs)
                 current, current_harness, disposition = _lineage_holder(graph,
-                    (jobs_key, *route_identity(metadata)), registered, original_harness)
+                    (jobs_key, *route_identity(metadata)), registered, original_harness, links=links)
         else:
             raise ValueError("unknown-recipient-question")
         if disposition == "unresolved":
@@ -2045,32 +2207,42 @@ def job_holders(records, jobs, *, read_context=None) -> list:
     def direct(record):
         return resolve_recipient("job-holder", metadata=record.handover_metadata(), jobs=jobs,
                                  read_context=read_context)
+
+    def resolved(record):
+        """The answer and whether it read a parked fork's live state (then it is not kept)."""
+        consulted = []
+        token = _PARKED_CONSULTED.set(consulted)
+        try:
+            return direct(record), bool(consulted)
+        finally:
+            _PARKED_CONSULTED.reset(token)
     try:
         graph = _pass_lineage_graph(read_context)
         jobs_key = read_context.jobs_key(jobs) if read_context is not None else _jobs_key(jobs)
     except (OSError, ValueError, TypeError):
         return [direct(record) for record in records]
-    parked = getattr(graph, "parked", None)
-    if isinstance(parked, (dict, MappingProxyType)) and parked:
-        # A parked fork is followed while its live link holds: the same graph can answer
-        # differently a moment later, so nothing is remembered on it.
-        return [direct(record) for record in records]
     with _HOLDER_LOCK:
         if _HOLDER_MEMO["graph"] is not graph:
             _HOLDER_MEMO["graph"], _HOLDER_MEMO["answers"] = graph, {}
         answers = _HOLDER_MEMO["answers"]
+    # An answer that read a parked fork's live state holds only for the live links it read:
+    # it is reused within the same read pass (one observation of the links), never across.
+    parked = getattr(graph, "parked", None)
+    observation = (_parked_links(read_context)
+                   if read_context is not None and isinstance(parked, (dict, MappingProxyType)) and parked
+                   else None)
     out = []
     for record in records:
         key = (jobs_key, id(record))
         hit = answers.get(key)
-        if hit is not None and hit[0] is record:
+        if hit is not None and hit[0] is record and (hit[2] is None or hit[2] is observation):
             _HOLDER_METRICS["holder_memo_hits"] += 1
             out.append(hit[1])
             continue
         _HOLDER_METRICS["holder_resolves"] += 1
-        answer = direct(record)
-        if answer.state != "unreadable":
-            answers[key] = (record, answer)
+        answer, live = resolved(record)
+        if answer.state != "unreadable" and (not live or observation is not None):
+            answers[key] = (record, answer, observation if live else None)
         out.append(answer)
     if len(answers) > 2 * len(records) + 64:
         live = {(jobs_key, id(record)) for record in records}
@@ -2101,18 +2273,16 @@ def resolve_attempt_recipient(jobs, attempt, registered, harness="", *, read_con
         graph = _pass_lineage_graph(read_context)
         bindings = set()
         legacy_membership_unknown = False
-        for rows in graph.ledger_rows.values():
-            for row in rows:
-                origin = _st()._handover_origin(row)
-                for binding in row.get("bindings") or ():
-                    parent = str(binding.get("parent") or (origin[1] if origin else ""))
-                    if (binding.get("jobs") == _jobs_key(jobs) and parent == registered
-                            and not binding.get("attempt")):
-                        legacy_membership_unknown = True
-                    if (binding.get("jobs") == _jobs_key(jobs) and binding.get("attempt") == attempt
-                            and parent == registered):
-                        bindings.add((_logical_key(binding), parent))
-        owners = {_lineage_holder(graph, key, parent, harness) for key, parent in bindings}
+        for origin, binding in graph_bindings(graph):
+            parent = str(binding.get("parent") or (origin[1] if origin else ""))
+            if (binding.get("jobs") == _jobs_key(jobs) and parent == registered
+                    and not binding.get("attempt")):
+                legacy_membership_unknown = True
+            if (binding.get("jobs") == _jobs_key(jobs) and binding.get("attempt") == attempt
+                    and parent == registered):
+                bindings.add((_logical_key(binding), parent))
+        links = _Links(read_context)
+        owners = {_lineage_holder(graph, key, parent, harness, links=links) for key, parent in bindings}
         if len(owners) > 1 or any(state == "unresolved" for _sid, _harness, state in owners):
             raise ValueError("handover-conflicting-attempt")
         if owners:
@@ -2143,7 +2313,7 @@ def _lineage_successor(rows_by_seat: dict, sid: str, harness: str) -> str:
 
 
 def _lineage_holder(graph: LineageGraph, key: tuple, registered: str, harness: str, *,
-                    traversed=None) -> tuple[str, str, str]:
+                    traversed=None, links=None) -> tuple[str, str, str]:
     """Who answers for one logical job (jobs, route, hash, node) now.
 
     The latest row that binds the job names its holder (a later hand-off wins).  From there the
@@ -2154,6 +2324,13 @@ def _lineage_holder(graph: LineageGraph, key: tuple, registered: str, harness: s
     cannot restore the registered parent or authorize the ambiguous holder."""
     if key in graph.binding_conflicts:
         return registered, harness, "unresolved"
+    links = links or _Links()
+    listed = (getattr(graph, "parked_jobs", None) or {}).get(key)
+    if listed is not None:
+        # A job the window held when its conversation went to the background: held by that
+        # background session's lineage while its process lives, by the window's once it is gone.
+        end, state = _listed_holder(graph, listed, links, traversed=traversed)
+        return end, listed["harness"], state
     latest = graph.binding_rows.get(key)
     holder = registered
     if latest is not None:
@@ -2165,7 +2342,7 @@ def _lineage_holder(graph: LineageGraph, key: tuple, registered: str, harness: s
     # the shared source-qualified graph can advance that exact holder without
     # another binding. A later legacy binding for a different job is not an
     # unbound edge, nor can chronological rows bypass a fork.
-    end, state = _chain_end(graph, harness, holder, traversed=traversed)
+    end, state = _chain_end(graph, harness, holder, traversed=traversed, links=links)
     return end, harness, state
 
 
@@ -2396,7 +2573,7 @@ def storage_recipients(session: str, env=None, harness: Optional[str] = None, *,
             if expired():
                 return scopes({}, False)
             graph = _pass_lineage_graph(context)
-            observed["edges"] = tuple(getattr(graph, "edges", ()) or ())
+            observed["edges"] = observed_edges(graph, context)
             vertex = (harness, session)
             if (harness and not any(target == vertex for _origin, target in graph.seat_edges)
                     and not any((name, target) == vertex for name, _origin, target in lineage_edges(graph))
@@ -2410,25 +2587,23 @@ def storage_recipients(session: str, env=None, harness: Optional[str] = None, *,
             complete = True
             for rows in graph.ledger_rows.values():
                 for row in rows:
-                    if expired():
-                        complete = False
-                        break
                     origin = _st()._handover_origin(row)
                     if origin is not None:
                         candidates.add(origin)
-                    for binding in row.get("bindings") or ():
-                        parent = str(binding.get("parent") or (origin[1] if origin else ""))
-                        meta = {"dispatch_depth": "1", "worker_type": "owner", "attempt_id": binding.get("attempt") or "candidate",
-                                "parent_sid": parent, "parent_harness": origin[0] if origin else harness or "",
-                                "route_id": binding["route"], "route_hash": binding["hash"], "route_node": binding["node"]}
-                        answer = resolve_recipient("job-holder", metadata=meta, jobs=binding["jobs"], read_context=context)
-                        if (answer.state != "unreadable" and answer.session_id == session
-                                and (not harness or answer.harness == harness)):
-                            owed.setdefault(parent, set())
-                            if binding.get("attempt"):
-                                owed[parent].add(binding["attempt"])
-                if not complete:
+            for origin, binding in graph_bindings(graph):
+                if expired():
+                    complete = False
                     break
+                parent = str(binding.get("parent") or (origin[1] if origin else ""))
+                meta = {"dispatch_depth": "1", "worker_type": "owner", "attempt_id": binding.get("attempt") or "candidate",
+                        "parent_sid": parent, "parent_harness": origin[0] if origin else harness or "",
+                        "route_id": binding["route"], "route_hash": binding["hash"], "route_node": binding["node"]}
+                answer = resolve_recipient("job-holder", metadata=meta, jobs=binding["jobs"], read_context=context)
+                if (answer.state != "unreadable" and answer.session_id == session
+                        and (not harness or answer.harness == harness)):
+                    owed.setdefault(parent, set())
+                    if binding.get("attempt"):
+                        owed[parent].add(binding["attempt"])
             if complete:
                 for source_harness, origin in candidates:
                     if expired():
@@ -2537,8 +2712,8 @@ def record_for_session(record: dict, allowed: Optional[frozenset], *, session=No
             # Missing-row inherited scopes still identify their original parent.
             if row is None and allowed is not None:
                 graph = _pass_lineage_graph(context)
-                parents = {str(b.get("parent") or (_st()._handover_origin(r) or ("", ""))[1])
-                           for rows in graph.ledger_rows.values() for r in rows for b in r.get("bindings") or ()
+                parents = {str(b.get("parent") or (origin or ("", ""))[1])
+                           for origin, b in graph_bindings(graph)
                            if b.get("jobs") == _jobs_key(jobs) and b.get("attempt") == attempt}
                 if len(parents) != 1:
                     return False
@@ -3084,135 +3259,163 @@ def record_retire_handover(predecessor_sid: str, predecessor_harness: str, succe
             return row
 
 
-def _session_registry():
-    tools = str(ROOT / "tools")
-    if tools not in sys.path:
-        sys.path.insert(0, tools)
-    from fleet import session_registry
-    return session_registry
-
-
 def _fork_started(seat, harness: str, sid: str, event: str, source: str) -> bool:
-    """Whether this hook may look for NEW's parked link: its own ``start source=fork``, or the
-    first prompt after such a start (the background record may not be there yet at the start)."""
+    """Whether this hook may look for its parked link: a background session's own seat (its
+    native target), whose latest start was ``source=fork``. A late record or a busy lock is
+    simply read again at its next prompt; the guard against another session lives in
+    :func:`_window_went_quiet`."""
+    if harness != "claude" or seat.kind != "native" or event not in ("start", "prompt"):
+        return False
     if event == "start":
         return source == "fork"
-    if event != "prompt":
-        return False
     st = _st()
-    own = st.session_seat(seat, harness, sid)
-    if st.read_prompt_seq(own) > 1:
-        return False
-    starts = [row for row in st._read_ledger_lines(own, strict=True)
+    starts = [row for row in st._read_ledger_lines(st.session_seat(seat, harness, sid), strict=True)
               if (row.get("harness"), row.get("sid")) == (harness, sid) and row.get("event") == "start"]
     return bool(starts) and starts[-1].get("source") == "fork"
 
 
-def _old_steward_state(harness: str, old: str):
-    """OLD's unreleased steward roles and open watches that have a seat to be recorded in."""
-    roles = [row for row in resolved_steward_relations(harness, old)
-             if row.get("seat_key") and not row.get("released")]
-    watches = [row for row in resolved_watch_references(harness, old) if row.get("seat_key")]
-    return roles, watches
+def _window_went_quiet(graph, harness: str, old: str, link) -> bool:
+    """The window's own session ran no hook after this background process started: the split
+    is this one. A background session the window selects later (or one started elsewhere from
+    the same conversation) began while the window's session was still in use, and is refused."""
+    started = link.get("started_at")
+    if type(started) not in (int, float) or not math.isfinite(started):
+        return False
+    for key in graph.ledger_keys.get((harness, old), ()):
+        for row in graph.ledger_rows.get(key, ()):
+            if ((row.get("harness"), row.get("sid")) == (harness, old)
+                    and row.get("event") in {"start", "prompt"}
+                    and float(row.get("ts", 0) or 0) > float(started)):
+                return False
+    return True
 
 
-def _adopted(relations, old: str, sid: str, snapshot_id: str) -> list[dict]:
-    """The same relations held by ``sid``; their own seat stays (an arm and a marker name it)."""
-    out = []
-    for current in relations:
-        adopted = dict(current)
-        adopted["holder"] = {"harness": (current.get("holder") or {}).get("harness"), "sid": sid}
-        adopted["lineage"] = [*(current.get("lineage") or []),
-                              {"from": old, "to": sid, "snapshot_id": snapshot_id}]
-        adopted.pop("released", None)
-        out.append(adopted)
-    return out
+def _registries(jobs=None) -> list[Path]:
+    """Every dispatch registry an ordinary reader consults (the hook's own, then Fleet's)."""
+    paths = [jobs or _default_jobs()]
+    try:
+        tools = str(ROOT / "tools")
+        if tools not in sys.path:
+            sys.path.insert(0, tools)
+        from fleet.collectors import dispatch as fleet_dispatch
+        paths += [Path(path) for path in fleet_dispatch.human_gate_registry_paths()]
+        paths += [Path(path) for path in fleet_dispatch._installed_registry_paths()]
+    except Exception:  # noqa: BLE001 - the hook's own registry is still read
+        pass
+    found, seen = [], set()
+    for path in paths:
+        if path is None or not Path(path).is_file():
+            continue
+        key = os.path.realpath(path)
+        if key not in seen:
+            seen.add(key)
+            found.append(Path(path))
+    return found
+
+
+def _held_by(harness: str, old: str, registries) -> tuple[list, list, list]:
+    """What ``old`` answers for now: its depth-1 job bindings in every registry, and the
+    identities of its unreleased steward roles and open watches (seat or no seat)."""
+    bindings = []
+    for registry in registries:
+        bindings += current_bindings(harness, old, registry)   # RegistryUnreadable propagates
+    roles = sorted({str(row["generation"]) for row in resolved_steward_relations(harness, old)
+                    if row.get("generation") and not row.get("released")})
+    watches = sorted({str(row["watch_id"]) for row in resolved_watch_references(harness, old)
+                      if row.get("watch_id")})
+    return _deduplicate_bindings(bindings), roles, watches
+
+
+def _same_link(again, sid: str, evidence) -> bool:
+    return bool(again) and again.get("session_id") == sid and all(
+        again.get(field) == evidence[field] for field in _PARKED_EVIDENCE)
 
 
 def record_parked_fork(seat, harness: str, sid: str, event: str, source: str, now: float, *,
-                       held_keys=(), jobs=None) -> Optional[dict]:
-    """Record ``OLD -> sid`` once, when ``sid`` is the background session a window's viewer of OLD
-    holds (Claude's `/bg`). Called from ``sid``'s own start hook, and again on its first prompt
-    when the background record was not there yet. The caller holds ``sid``'s seat lock
-    (``held_keys`` names the keys it holds).
+                       jobs=None) -> Optional[dict]:
+    """Record ``OLD -> sid`` once, when ``sid`` is the background session a window's viewer of
+    OLD holds (Claude's `/bg`). Called from ``sid``'s own hooks at its native seat; the caller
+    holds that seat's lock.
 
-    Both facts (``session_registry.parked_origin``/``parked_successor``) are read again just
-    before the write. Nothing is written when one fact is missing, when OLD already has another
-    successor (a second parked fork of OLD included) or a fork in its ancestry, when ``sid``
-    already has a predecessor or leads back to OLD, or when anything cannot be read: every doubt
-    leaves ownership with OLD. Returns the existing row on a repeated call."""
+    Both live facts (``session_registry.parked_origin``/``parked_successor``) are read first, and
+    again after every lock this write needs, the job locks included, together with what OLD
+    holds. Nothing is written when one fact is missing, when the window's session ran after
+    this background process started (:func:`_window_went_quiet`), when OLD already has a
+    successor or a parked fork (a second `/bg` included), when ``sid`` already continues another
+    session, or when anything cannot be read: every doubt leaves everything with OLD. The row
+    is one record in one ledger, written atomically; a repeated call returns it."""
     st = _st()
-    if (harness != "claude" or seat.kind not in ("pane", "native")
-            or not _fork_started(seat, harness, sid, event, source)):
+    if not _fork_started(seat, harness, sid, event, source):
         return None
+    recorded = next((dict(row) for row in st._read_ledger_lines(st.physical_seat(seat))
+                     if row.get("event") == PARKED_FORK_EVENT and row.get("sid") == sid
+                     and parked_fork_row(row) is not None), None)
+    if recorded is not None:
+        return recorded                                    # this session's own row, written before
     registry = _session_registry()
     link = registry.parked_origin(harness, sid)
     if not link or link.get("session_id") != sid:
         return None
     old = str(link.get("viewer_sid") or "")
     evidence = {field: link.get(field) for field in _PARKED_EVIDENCE}
-    probe = {"event": ROW_EVENT, "source": PARKED_FORK_SOURCE, "harness": harness, "sid": sid,
-             "from": old, "parked": evidence}
-    if not old or parked_fork_edge(probe) is None:
+    if not old or parked_fork_row({"event": PARKED_FORK_EVENT, "harness": harness, "sid": sid,
+                                   "from": old, "parked": evidence}) is None:
         return None
-    roles, watches = _old_steward_state(harness, old)
-    held = set(held_keys) | {seat.key}
-    ledger_keys = sorted({str(row["seat_key"]) for row in (*roles, *watches)} - held)
-    jobs = jobs or _default_jobs()
-    with contextlib.ExitStack() as stack:
-        # The seats whose ledgers name OLD's roles and watches, then the common order:
-        # lineage write -> source -> sorted bindings. A busy seat is tried again next hook.
-        for key in ledger_keys:
-            stack.enter_context(st.seat_lock(key, wait=0.5))
-        stack.enter_context(st.seat_lock(LINEAGE_WRITE_KEY))
-        stack.enter_context(source_session_mutex(harness, old))
-        graph = _pass_lineage_graph()
-        recorded = [dict(row) for rows in graph.ledger_rows.values() for row in rows
-                    if parked_fork_edge(row) is not None]
-        mine = next((row for row in recorded
-                     if row.get("sid") == sid and parked_fork_edge(row)[1] == old), None)
-        if mine is not None:
-            return mine                                    # the same fork, already recorded
-        if any(parked_fork_edge(row)[1] == old or row.get("sid") == sid for row in recorded):
-            return None                                    # a second fork of OLD, or NEW already taken
+    registries = _registries(jobs)
+
+    def refused(graph) -> Optional[str]:
+        if not _window_went_quiet(graph, harness, old, link):
+            return "window-active"
+        parked = getattr(graph, "parked", {}) or {}
+        if (harness, old) in parked or any(fork is not None and fork["target"] == sid
+                                           for fork in parked.values()):
+            return "already-parked"
         if (harness, old) in graph.unresolved or (harness, sid) in graph.unresolved:
-            return None
+            return "unresolved"
         if any((edge_harness, target) == (harness, sid) for edge_harness, _o, target in graph.edges):
-            return None                                    # NEW already continues another session
+            return "continues-another"
         if _chain_end(graph, harness, old) != (old, "self"):
-            return None                                    # OLD already has a successor
+            return "has-successor"
         source_end = resolve_recipient("seat-successor", session=old, harness=harness)
         target_end = resolve_recipient("seat-successor", session=sid, harness=harness)
         if (source_end.state != "no-handover" or target_end.state == "unreadable"
                 or target_end.session_id == old):
+            return "has-successor"
+        return None
+
+    with st.seat_lock(LINEAGE_WRITE_KEY), source_session_mutex(harness, old):
+        graph = _pass_lineage_graph()
+        mine = next((dict(row) for rows in graph.ledger_rows.values() for row in rows
+                     if (parked_fork_row(row) or {}).get("origin") == old
+                     and row.get("sid") == sid), None)
+        if mine is not None:
+            return mine                                    # the same fork, already recorded
+        if refused(graph):
             return None
-        bindings = []
-        if jobs is not None and Path(jobs).is_file():
-            try:
-                bindings = current_bindings(harness, old, jobs)
-            except RegistryUnreadable:
-                return None                                # unknown ownership is not "none"
-        now_roles, now_watches = _old_steward_state(harness, old)
-        if {str(row["seat_key"]) for row in (*now_roles, *now_watches)} - held - set(ledger_keys):
-            return None                                    # a seat appeared that is not locked
-        again = registry.parked_successor(harness, old)
-        if (not again or again.get("session_id") != sid
-                or any(again.get(field) != evidence[field] for field in _PARKED_EVIDENCE)):
-            return None                                    # the link changed before the write
-        snapshot_id = secrets.token_hex(16)
-        row = {"ts": now, "harness": harness, "sid": sid, "event": ROW_EVENT, "from": old,
-               "seat_key": seat.key, "snapshot_id": snapshot_id, "source": PARKED_FORK_SOURCE,
-               "bindings": bindings, "parked": evidence}
-        steward_roles = _adopted(now_roles, old, sid, snapshot_id)
-        steward_watches = _adopted(now_watches, old, sid, snapshot_id)
-        if steward_roles or steward_watches:
-            row["steward"] = {"schema": 1, "roles": steward_roles, "watches": steward_watches}
+        try:
+            bindings, roles, watches = _held_by(harness, old, registries)
+        except RegistryUnreadable:
+            return None                                    # unknown ownership is not "none"
         with binding_mutexes(bindings):
-            for key in sorted({str(item["seat_key"]) for item in (*now_roles, *now_watches)}):
-                if key != seat.key:
-                    _append_transition_row(st.Seat("pane", key), row)
+            # Waiting for a job lock is time in which the window may take its conversation
+            # back or the jobs may move: read both facts, the lineage and the holdings again.
+            graph = _pass_lineage_graph()
+            if refused(graph) or not _same_link(registry.parked_successor(harness, old), sid, evidence):
+                return None
+            try:
+                current = _held_by(harness, old, registries)
+            except RegistryUnreadable:
+                return None
+            if current[0] != bindings:
+                return None                                # the jobs changed; the next hook looks again
+            row = {"ts": now, "harness": harness, "sid": sid, "event": PARKED_FORK_EVENT,
+                   "from": old, "seat_key": seat.key, "parked": evidence, "schema": 1,
+                   "jobs": [{field: binding[field] for field in _BINDING_FIELDS} for binding in bindings],
+                   "roles": current[1], "watches": current[2]}
             _append_transition_row(seat, row)
-            _bump_dispatch_edge_generation(jobs)
+            _bump_dispatch_edge_generation()
+            for registry_path in registries:
+                _bump_dispatch_edge_generation(registry_path)
         return row
 
 
