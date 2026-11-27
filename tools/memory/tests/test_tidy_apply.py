@@ -384,6 +384,16 @@ class StewardObligationContinuityTest(TidyApplyCase):
         self.relation["released"] = True
         self.assertCountEqual(self.report_actions(), own_work)
 
+    def test_two_handovers_keep_every_earlier_holders_work(self):
+        self.relation.update(origin={"harness": "claude", "sid": "first-captain"}, lineage=[
+            {"from": "first-captain", "to": "earlier-captain", "snapshot_id": "mock-clear-1"},
+            {"from": "earlier-captain", "to": "captain", "snapshot_id": "mock-clear-2"}])
+        for body, owner in (("first", {"harness": "claude", "session_id": "first-captain"}),
+                            ("second", self.prior), ("new", self.own)):
+            self.promise(f"Read the {body} sample", owner)
+        self.assertCountEqual(self.report_actions(), [f"open: Read the {body} sample → assign or do now"
+                                                      for body in ("first", "second", "new")])
+
     def test_unresolved_keeps_existing_work_until_the_relation_is_released(self):
         self.promise("Finch still owes the field notes", self.finch)
         self.promise("Finish the other repository task", self.raven)
