@@ -576,7 +576,7 @@ def completion_marker_gate(
                     raise DispatchContractError("saved-resource-output-changed", dep)
                 continue
             missing.append(dep)
-            _resource_predecessor_action(route, dep, resource_actions)
+            _resource_predecessor_action(route, dep, resource_actions, route_file)
             continue
         try:
             marker = json.loads(marker_path.read_text(encoding="utf-8"))
@@ -1485,12 +1485,19 @@ RESOURCE_STAGE_UNSETTLED = "resource-stage-unsettled"
 RESOURCE_STAGE_UNOBSERVABLE = "resource-stage-unobservable"
 
 
-def _resource_predecessor_action(route, dep: str, actions: dict) -> None:
+def _resource_predecessor_action(route, dep: str, actions: dict, route_file=None) -> None:
     """A resource predecessor with no current marker is continued, never waited on."""
     node = next((row for row in route.get("nodes", []) if row.get("id") == dep), None)
+    try:
+        import worker_bootstrap as wb
+        step = wb.human_run_step(route, route_file, node) if route_file else ""
+    except Exception:  # advisory text only: the refusal itself is unchanged
+        step = ""
     if node is not None and node.get("kind") == "resource-runner":
         actions[dep] = resource_stage_next_action(
-            GateCurrency("resource-stage-not-current", RESOURCE_STAGE_UNSETTLED), dep)
+            GateCurrency("resource-stage-not-current", RESOURCE_STAGE_UNSETTLED), dep) + (f"; {step}" if step else "")
+    elif step:
+        actions[dep] = f"{dep} is run by the route owner itself: {step}; then retry this launch"
 
 
 def resource_stage_unsettled(currency: GateCurrency) -> bool:
