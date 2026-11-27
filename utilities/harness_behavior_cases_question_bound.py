@@ -88,6 +88,24 @@ print(json.dumps({"lifecycle": (found or {}).get("lifecycle"),
 """
 
 
+# The answer's own delivery record (session_notice key `question-answer:<id>`): acked once the session took it.
+DELIVERY_CODE = r"""
+import hashlib
+from pathlib import Path
+root = Path(os.environ["AGENT_DISPATCH_JOBS"]).parent
+want = "delivery-" + hashlib.sha256(("notice\0question-answer:" + args["id"]).encode()).hexdigest()
+rows = []
+for path in sorted(root.glob("pending-delivery/*/" + want + ".json")):
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        continue
+    rows.append({"state": data.get("state"), "acked_by": data.get("acked_by")})
+print(json.dumps({"records": rows}))
+"""
+END_REPLY = "QBOUND my turn ends here."
+
+
 class QuestionBoundBase(Scenario):
     native = None            # the native call the model makes after `questions ask`, or None
     native_labels = ()       # words only that native window shows
@@ -107,7 +125,7 @@ class QuestionBoundBase(Scenario):
             if asked and native is not None and not called and record["last_kind"] == "tool":
                 return Reply(text="Asking in the native window too.", shell=native)
             if asked and record["last_kind"] == "tool":
-                return Reply(text="QBOUND my turn ends here.")
+                return Reply(text=END_REPLY)
             return Reply(f"qbound noted {record['main_index']}")
         return answer
 
@@ -174,6 +192,14 @@ class QuestionBoundBase(Scenario):
             return "fail"
         return "pass"
 
+    def _turn_ended(self, run):
+        """The fixture served the turn's last reply (the session rests once the harness has shown it)."""
+        return any(r["reply"]["text"] == END_REPLY for r in run.main_requests())
+
+    def _delivered(self, run, qid):
+        records = (fixture_python(run, DELIVERY_CODE, {"id": qid}) or {}).get("records") or []
+        return records if records and all(row.get("state") == "acked" for row in records) else None
+
     def drive(self, run):
         ev = run.evidence
         run.prompt("SCENARIO-QBOUND ask the person one question")
@@ -198,11 +224,16 @@ class QuestionBoundBase(Scenario):
             ev["screen_after_native"] = screen[-1800:]
         if self.expects_window:
             return self._beside_window(run, qid)
+        if not wait_for(lambda: self._turn_ended(run), 60):
+            run.note("the turn never reached its last reply")
+            return "inconclusive"
         if not self.put_question_up(run):
             return "inconclusive"
-        run.wait_idle(6, 60)
         # The board's own readiness: `questions answer` reads the board, which lists the question once collected.
         ev["listed_on_board"] = bool(wait_for(lambda: self._listed(run, qid), 45))
+        if not ev["listed_on_board"]:
+            run.note("the board never listed the question")
+            return "inconclusive"
         before = len(run.main_requests())
         started = time.time()
         done = subprocess.run([sys.executable, str(Path(run.home.env["AGENT_HOME"]) / "utilities/questions.py"),
@@ -215,49 +246,47 @@ class QuestionBoundBase(Scenario):
             run.note("questions answer refused: " + ev["answer_result"])
             return "fail"
 
-        def reached():
+        def carriers():
             # What reached the model since its last output (the whole text also carries the ask itself).
-            return next((r["main_index"] for r in run.main_requests()[before:]
-                         if r["last_kind"] != "tool" and OPTION_A in (r.get("turn_text") or "")), None)
-        hit = wait_for(reached, WAKE_SECONDS)
+            return [r["main_index"] for r in run.main_requests()[before:]
+                    if r["last_kind"] != "tool" and OPTION_A in (r.get("turn_text") or "")]
+        hit = wait_for(lambda: (carriers() or [None])[0], WAKE_SECONDS)
         ev["answer_request"] = hit
         ev["answer_reached_after_s"] = round(time.time() - started, 1) if hit is not None else None
-        run.wait_idle(6, 60)
-        ev["state_after_answer"] = self._state(run, qid)
+        # Readiness, not a quiet spell: the delivery record is acked and the question record closed.
+        ev["delivery"] = wait_for(lambda: self._delivered(run, qid), 30) if hit is not None else None
+        ev["state_after_answer"] = wait_for(lambda: (lambda value: value if value.get("lifecycle") == "answered"
+                                                     else None)(self._state(run, qid)), 30) or self._state(run, qid)
         ev["screen_after_answer"] = run.tui.screen()[-1800:]
-        if self.native is not None:
-            screen = run.tui.screen()
-            ev["native_window_after_answer"] = any(word in screen for word in self.native_labels) \
-                and self._native_result(run) is None
         # The next typed line: an ordinary prompt, never an answer to the question.
         at = len(run.main_requests())
         run.prompt("SCENARIO-QBOUND-NEXT an ordinary line")
-        wait_for(lambda: any("SCENARIO-QBOUND-NEXT" in r["text"] for r in run.main_requests()[at:]), 30)
-        run.wait_idle(6, 60)
-        # Reached as what the person typed (after a tool result when it cut a native window short).
-        ev["next_prompt_reached"] = any("SCENARIO-QBOUND-NEXT" in (r.get("turn_text") or "")
+        wait_for(lambda: any("SCENARIO-QBOUND-NEXT" in (r.get("turn_text") or "") for r in run.main_requests()[at:]), 30)
+        ev["next_prompt_reached"] = any(r["last_kind"] != "tool" and "SCENARIO-QBOUND-NEXT" in (r.get("turn_text") or "")
                                         for r in run.main_requests()[at:])
+        # Cut into a tool's result (a native window still open took it): the bind, not a prompt.
         ev["next_prompt_cut_native_call"] = any(r["last_kind"] == "tool" and "SCENARIO-QBOUND-NEXT"
                                                 in (r.get("turn_text") or "") for r in run.main_requests()[at:])
         ev["state_after_next"] = self._state(run, qid)
-        carrying = [r["main_index"] for r in run.main_requests()[before:]
-                    if r["last_kind"] != "tool" and OPTION_A in (r.get("turn_text") or "")]
-        ev["answer_carriers"] = carrying
+        ev["answer_carriers"] = carriers()
         state = ev["state_after_answer"] or {}
         run.note(f"native_window={ev.get('native_window_stood')} answer_after_s={ev['answer_reached_after_s']} "
-                 f"lifecycle={state.get('lifecycle')} waiting={len(state.get('waiting_for_this_session') or [])} "
-                 f"next_prompt={ev['next_prompt_reached']}")
+                 f"carriers={len(ev['answer_carriers'])} lifecycle={state.get('lifecycle')} "
+                 f"waiting={len(state.get('waiting_for_this_session') or [])} next_prompt={ev['next_prompt_reached']}")
         if ev.get("native_window_stood"):
             run.note("a native question window stood beside the waiting Hearting question")
             return "fail"
         if hit is None:
             run.note("the answer did not reach the session without a typed prompt")
             return "fail"
+        if len(ev["answer_carriers"]) != 1 or not ev["delivery"]:
+            run.note("the answer did not reach the session exactly once")
+            return "fail"
         if state.get("lifecycle") != "answered" or state.get("waiting_for_this_session"):
             run.note("the question record did not close")
             return "fail"
-        if not ev["next_prompt_reached"]:
-            run.note("the next typed line did not reach the model as a prompt")
+        if not ev["next_prompt_reached"] or ev["next_prompt_cut_native_call"]:
+            run.note("the next typed line did not reach the model as an ordinary prompt")
             return "fail"
         return "pass"
 
@@ -286,7 +315,6 @@ class QuestionBoundPopupScenario(QuestionBoundBase):
 
     def put_question_up(self, run):
         ev = run.evidence
-        run.wait_idle(6, 60)
         if not ev.get("session_shell") or ev["session_shell"].get("status") not in ("ready", "copied"):
             run.note("needs --session-shell with its assets")
             return False
