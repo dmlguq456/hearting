@@ -478,13 +478,13 @@ def _doc_rows_of(view, width, lines, cut):
 # -- the list screen of the generated campaign document (11-21, design C) ----------------------------------------------
 #
 # The screen is the document's own words: the head (title, when it was updated, the one line),
-# what is in progress (three, then ``all N ›``), every other
+# what is in progress (three, then ``all N ▸``), every other
 # heading as a folded line with its count, and ``full document ›``.  Which heading is which is ``_group_kind``'s reading (no
 # new rule); a heading it does not know is a folded group like the rest.  Nothing is invented: a group the document has
 # not is not drawn, a bullet is counted as written, a line that is no bullet is the group's note.
 
 CAMPAIGN_MARKER = project_status.CAMPAIGN_MARKER       # utilities/campaign_document.MARKER (a test holds them equal)
-RUNNING_FIRST = 3      # in-progress items shown before ``all N ›``
+RUNNING_FIRST = 3      # in-progress items shown before ``all N ▸``
 _UPDATED = re.compile(r"^(?:갱신|updated)\s*[:：]?\s*(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})", re.IGNORECASE)
 _ONE_LINE = re.compile(r"^\*\*(?:한 줄|one line)\*\*\s*[:：]\s*(.*)$", re.IGNORECASE)
 _RULE = re.compile(r"^(?:-{3,}|\*{3,}|_{3,})$")
@@ -646,7 +646,8 @@ def listing_entries(parsed, width, old=False, now=None):
         count = len(items)
         head = [(name, "sect"), (f" {count}", "dim")]
         folded = kind == "other"
-        lead_rows, lead_open = ([[_SLOT, ("› ", "soft")] + head], [[_SLOT, ("▾ ", "soft")] + head]) if folded else ([[*head]], None)
+        # 11-27 (the eight marks): a closed group is ``▸``, an open one ``▾`` (``›`` is a press that opens another place).
+        lead_rows, lead_open = ([[_SLOT, ("▸ ", "soft")] + head], [[_SLOT, ("▾ ", "soft")] + head]) if folded else ([[*head]], None)
         out.append(_entry([_cut_row(lead_rows[0], width)], key=("g:" + gid) if folded else None, group=gid if folded else None,
                           alt=[_cut_row(lead_open[0], width)] if lead_open else None))
         taken = {}
@@ -664,7 +665,7 @@ def listing_entries(parsed, width, old=False, now=None):
             out.append(_entry([row], key=key, group=gid if when else None, when=when, text=transcript.clean(text) if cut else None))
         if kind == "running" and count > RUNNING_FIRST:
             label = ui("fleet.status.popup.all", count=count)
-            out.append(_entry([_cut_row([_SLOT, (label + " ›", "soft")], width)], key="a:" + gid, group=gid,
+            out.append(_entry([_cut_row([_SLOT, (label + " ▸", "soft")], width)], key="a:" + gid, group=gid,
                               alt=[_cut_row([_SLOT, (label + " ▾", "soft")], width)]))
         for note in group["notes"]:
             out.append(_entry([[("    ", None)] + row for row in

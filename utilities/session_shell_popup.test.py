@@ -468,7 +468,7 @@ class SessionShellPopupTest(unittest.TestCase):
         # the native as it is now shows where it stood.
         self.assertTrue(checks['synchronized'])
         self.assertTrue(checks['region_kept'])
-        self.assertIn('› ◑ 2 QUESTIONS · 1/2 · 답 필요', checks['title'])
+        self.assertIn('▶ ◑ 2 QUESTIONS · 1/2 · 답 필요', checks['title'])
         # The chosen choice's ground (11-15): one row, the recommended choice, moved by ↓; the cell beside
         # each side line the popup's ground, as every other row's inside and the cell past each side line;
         # none left once it closes.
@@ -479,16 +479,16 @@ class SessionShellPopupTest(unittest.TestCase):
             bottom = next(i for i, line in enumerate(screen) if i > top and '╰─' in line)
             return [line[line.index('│') + 1:].split('│')[0].strip() for line in screen[top + 1:bottom]]
         rows = inside(frames['pressed'])
-        first = next(i for i, row in enumerate(rows) if row.startswith('▸ 1  아래 두 줄 (다)'))
+        first = next(i for i, row in enumerate(rows) if row.startswith('▶ 1  아래 두 줄 (다)'))
         self.assertTrue(rows[first - 1] and set(rows[first - 1]) == {'─'}, rows)
         self.assertEqual(rows[first - 2], '', rows)
         self.assertTrue(rows[first - 3] and set(rows[first - 3]) != {'─'}, rows)
         self.assertTrue(rows[first + 1].startswith('2  넓힌 옆 띠 (가)'), rows)
         self.assertFalse(any(row and set(row) == {'─'} for row in inside(frames['tab'])), inside(frames['tab']))
         self.assertEqual(len(checks['tint_rows']), 1, checks['tint_rows'])
-        self.assertIn('▸ 1  아래 두 줄 (다) (추천)', checks['tint_rows'][0])
+        self.assertIn('▶ 1  아래 두 줄 (다) (추천)', checks['tint_rows'][0])
         self.assertEqual(len(checks['tint_moved']), 1, checks['tint_moved'])
-        self.assertIn('▸ 2  넓힌 옆 띠 (가)', checks['tint_moved'][0])
+        self.assertIn('▶ 2  넓힌 옆 띠 (가)', checks['tint_moved'][0])
         self.assertTrue(checks['tint_beside'] and checks['tint_others'] and checks['margins'], checks)
         self.assertEqual(checks['grounds_left'], 0)
         self.assertEqual(checks['later_after_close'], 12, '\n'.join(frames['output_closed']))

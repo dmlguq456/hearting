@@ -437,8 +437,8 @@ const checks={};
     const spot=await at('BL_ITEM_TWO');await press(spot.x,spot.y,0);
     let r=await until(popupHas('BL_ITEM_ONE'),'the BACKLOG popup');
     const b=box(r.s);checks.title=b.rows[0];checks.band=b.rows.at(-1);
-    checks.stands=body(r.s).some(l=>l.startsWith('> ')&&l.includes('BL_ITEM_TWO'));
-    checks.other_folded=body(r.s).some(l=>l.includes('›')&&l.includes('TBD 2'));
+    checks.stands=body(r.s).some(l=>l.startsWith('▶ ')&&l.includes('BL_ITEM_TWO'));
+    checks.other_folded=body(r.s).some(l=>l.includes('▸')&&l.includes('TBD 2'));
     checks.other_hidden=!popupHas('BL_OTHER_ITEM')(r.s);
     await key('\x1b[A',250);await key('\r',400);r=await screen();
     checks.detail=popupHas('BL_DETAIL_NOTE')(r);
@@ -446,10 +446,10 @@ const checks={};
     for(let i=0;i<4;i++)await key('\x1b[B',200);await key('\r',400);r=await screen();
     checks.group_opened=popupHas('BL_OTHER_ITEM')(r);
     // PgDn/PgUp move the chosen line (the window follows): to the end of what there is, and back to the first line (11-26: the board's first group head).
-    await key('\x1b[6~',300);r=await screen();checks.pgdn_end=body(r).some(l=>l.startsWith('> ')&&l.includes('full document'));
-    await key('\x1b[5~',300);r=await screen();checks.pgup_top=body(r).some(l=>l.startsWith('> ')&&l.includes('FIX 4'));
+    await key('\x1b[6~',300);r=await screen();checks.pgdn_end=body(r).some(l=>l.startsWith('▶ ')&&l.includes('full document'));
+    await key('\x1b[5~',300);r=await screen();checks.pgup_top=body(r).some(l=>l.startsWith('▶ ')&&l.includes('FIX 4'));
     // 11-26 (scheme A): the board's own keys, typed as a person types them. `t` shows the Discuss items only, and Esc undoes that, not the popup.
-    const chosen=s=>body(s).find(l=>l.startsWith('> '))||'';
+    const chosen=s=>body(s).find(l=>l.startsWith('▶ '))||'';
     await key('t',400);r=await screen();
     checks.discuss=popupHas('state Discuss')(r)&&popupHas('showing 1 of 6')(r)&&body(r).some(l=>/Discuss +BL_ITEM_ONE/.test(l))&&!popupHas('BL_ITEM_TWO')(r);
     await key('\x1b',500);r=await screen();checks.esc_filter=!!box(r)&&popupHas('showing 6 ·')(r)&&!popupHas('state Discuss')(r);

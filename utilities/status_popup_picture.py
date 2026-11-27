@@ -9,7 +9,7 @@
 ``--height`` are the popup frame's size in cells (100 x 26 by default). The steps draw, in order: ``first`` the screen the
 popup opens on, ``group`` the same with the first folded group opened, ``item`` with the first item cut at the width opened in place,
 ``short`` with the first item that is not cut pressed (it has nothing to open: the screen stays), ``all`` with
-``all N ›`` opened, ``full`` the document read whole (``full document ›``). A page that is not the generated one has no list
+``all N ▸`` opened, ``full`` the document read whole (``full document ›``). A page that is not the generated one has no list
 screen: ``first`` and ``full`` draw the one screen it always had.
 
 ``--kind backlog`` draws the BACKLOG board (11-26, scheme A) the same way: ``<document>`` is a ``backlog.md`` (or ``-`` for none), and each step is

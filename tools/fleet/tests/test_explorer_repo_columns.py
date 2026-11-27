@@ -57,7 +57,7 @@ class RepoColumnTests(unittest.TestCase):
             self.assertEqual(ef.frame_violations(frame, trace, 80, 45), [])
             link = next(h for h in frame.hits if h.action == ("route", route["id"]))
             line = frame.text_rows()[link.y]
-            self.assertEqual(line[link.x0:link.x1].strip(), "open ▸")
+            self.assertEqual(line[link.x0:link.x1].strip(), "open ›")
             self.assertTrue(line[link.x0].isspace())  # the hit includes the link's leading gap
             self.assertTrue(any(h.action == ("fold", "ropen:repo:lab-project", route["id"])
                                 for h in frame.hits))
