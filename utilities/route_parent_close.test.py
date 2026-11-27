@@ -2423,6 +2423,27 @@ class ParentCloseTest(unittest.TestCase):
             HG._load_route({"route_id": self.route["route_id"], "route_hash": self.route["route_hash"],
                             "job_registry": str(self.jobs), "route_file": str(self.path)})
 
+    def test_a_waiting_parent_reads_a_settled_close_as_ready(self):
+        # RV-PR1881 🟡3: dispatch-attempt-ready answers a settled parent close as an end, not a failure.
+        ready = load("parent_close_attempt_ready_fixture", "dispatch-attempt-ready.py")
+        workers = list(self.full_stop_fixture("unit", "opencode", "opencode-turn"))
+        (meta, *_), = workers
+        rows = lambda: [(fields, row_meta) for fields, row_meta in CLOSE._rows(self.jobs).values()
+                        if row_meta.get("attempt_id") == meta["attempt_id"]]
+        import dispatch_summary
+        with mock.patch.object(dispatch_summary, "owner_process_observation", return_value=("unknown", None)):
+            self.assertEqual(self.close(stop_resources=True)["state"], "termination-pending")
+            (child,) = ready.classify_selection(self.jobs, rows())["children"]
+            self.assertEqual(work_start._outcome(self.jobs, meta["attempt_id"])["classification"], "pending")
+        self.assertEqual((child["readiness"], child["reason"]), ("pending", "termination-pending"))
+        self.assertEqual(self.close(stop_resources=True)["state"], "cancelled")
+        # RV-PR1881 🟡1: `start --route` answers with the same classification the delivery carries.
+        self.assertEqual(work_start._outcome(self.jobs, meta["attempt_id"])["classification"], "cancelled")
+        result = ready.classify_selection(self.jobs, rows())
+        (child,) = result["children"]
+        self.assertEqual((result["state"], child["readiness"], child["required_action"]),
+                         ("ready", "ready", "advance-completed"))
+
     def test_real_cli_close_and_duplicate_close_need_only_existing_command(self):
         owner = self.process("att-owner")
         self.row("att-owner", process=owner)
@@ -2636,6 +2657,160 @@ class ParentCloseTest(unittest.TestCase):
         dispatch_notice_state.project_parent_close(self.jobs.parent, receipt, jobs=self.jobs)
         self.assertEqual(receipt["receipt"]["delivery_classification"], "cancelled")
         self.assert_cancelled_without_replacement(set(value["attempts"]))
+
+    def test_full_stop_of_legs_another_session_already_stopped_needs_no_parent(self):
+        # RV-PR1881 🟡6: a leg the person already stopped holds nothing up, as without the flag.
+        def cli_close(fixture, env=None):
+            return subprocess.run([sys.executable, str(HERE / "capability-route.py"), "close",
+                "--route", fixture.route["route_id"], "--summary", "fixture only", "--stop-resources"],
+                cwd=fixture.base, capture_output=True, text=True, timeout=60, env={**os.environ, **(env or {})})
+        for case in ("all-stopped", "one-running"):
+            with self.subTest(case=case):
+                fixture = ParentCloseTest()
+                fixture.setUp()
+                try:
+                    stopped = fixture.process("att-frame-alt")
+                    fixture.frame_leg("att-frame-alt", stopped, node="frame-alternative", parent_sid="another-session")
+                    with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "another-session"}):
+                        self.assertEqual(CLOSE.stop_attempt(fixture.aid("att-frame-alt"), jobs=fixture.jobs)["state"],
+                                         "cancelled")
+                    stopped.wait(timeout=5)
+                    running = None
+                    if case == "one-running":
+                        running = fixture.process("att-frame")
+                        fixture.frame_leg("att-frame", running)
+                    session = {"CODEX_THREAD_ID": "a-third-session"} if case == "all-stopped" else None
+                    result = cli_close(fixture, session)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(json.loads(result.stdout)["state"], "cancelled", result.stdout)
+                    self.assertTrue(fixture.path.with_suffix(".outcome.json").exists())
+                    fixture.assert_user_stopped("att-frame-alt")
+                    if running is not None:
+                        self.assertIsNotNone(running.wait(timeout=5))
+                        fields, meta = CLOSE._rows(fixture.jobs)[fixture.aid("att-frame")]
+                        self.assertEqual((fields[1], meta["note"]), ("done", CLOSE.NOTE))
+                    # A leg that still runs keeps needing its parent.
+                    if case == "one-running":
+                        continue
+                    other = ParentCloseTest()
+                    other.setUp()
+                    try:
+                        live = other.process("att-frame")
+                        other.frame_leg("att-frame", live, parent_sid="another-session")
+                        refused = cli_close(other)
+                        self.assertNotEqual(refused.returncode, 0, refused.stdout)
+                        self.assertIn("parent-close-owner-not-owned", refused.stderr)
+                        self.assertIsNone(live.poll())
+                    finally:
+                        other.doCleanups()
+                finally:
+                    fixture.doCleanups()
+
+    def cli_full_stop(self):
+        return subprocess.run([sys.executable, str(HERE / "capability-route.py"), "close",
+            "--route", self.route["route_id"], "--summary", "fixture only", "--stop-resources"],
+            cwd=self.base, capture_output=True, text=True, timeout=60)
+
+    def test_full_stop_never_signals_a_process_that_took_the_recorded_summary_pid(self):
+        # RV-PR1881 M3: the summary supervisor is found by its recorded PID and start time only.
+        (first, *_rest), _second = list(self.full_stop_fixture("frame", "claude", "claude-parent-runtime"))
+        CLOSE._signal(int(first["summary_owner_pid"]), first["summary_owner_pid_start"], signal.SIGKILL)
+        for _ in range(250):
+            visible, _start, state = DC.process_observation(int(first["summary_owner_pid"]))
+            if visible == "missing" or state == "Z":
+                break
+            time.sleep(0.02)
+        bystander = subprocess.Popen([sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(120)"],
+            start_new_session=True, stdout=subprocess.PIPE, text=True,
+            env={k: v for k, v in os.environ.items() if not k.startswith("AGENT_DISPATCH_ATTEMPT")})
+        self.processes.append(bystander)
+        self.assertEqual(bystander.stdout.readline().strip(), "ready")
+        DC.annotate_attempt_row(self.jobs, first["attempt_id"], {"summary_owner_pid": str(bystander.pid)})
+        result = self.cli_full_stop()
+        self.assertIsNone(bystander.poll(), "an unrelated process holding the recorded summary PID was signalled")
+        self.assertEqual(json.loads(result.stdout)["state"], "cancelled", result.stdout + result.stderr)
+
+    def test_full_stop_leaves_a_pass_committed_before_the_close(self):
+        # RV-PR1881 M4: only open or person-stopped legs are cancelled; a committed result stands.
+        for shape, harness, carrier in (("frame", "claude", "claude-parent-runtime"),
+                                        ("unit", "codex", "codex-native-queue")):
+            with self.subTest(shape=shape):
+                fixture = ParentCloseTest()
+                fixture.setUp()
+                try:
+                    workers = list(fixture.full_stop_fixture(shape, harness, carrier))
+                    finished, governor, model, summary = workers[0]
+                    for process in (governor, model):
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait(timeout=5)
+                    CLOSE._signal(summary, finished["summary_owner_pid_start"], signal.SIGKILL)
+                    self.assertTrue(DC.close_attempt_row_if(fixture.jobs, finished["attempt_id"], "completed",
+                        lambda fresh: True, evidence={"failure_class": "pass"}))
+                    before = JOIN.exact_attempt_row(fixture.jobs, finished["attempt_id"])
+                    result = fixture.cli_full_stop()
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    after = JOIN.exact_attempt_row(fixture.jobs, finished["attempt_id"])
+                    self.assertEqual(after.raw, before.raw)
+                    self.assertFalse(CLOSE.row_requested(after.metadata, fixture.jobs))
+                    self.assertEqual(DC._terminal_delivery_receipt(after.metadata)["delivery_classification"],
+                                     "success")
+                    for meta, *_ in workers[1:]:
+                        row = JOIN.exact_attempt_row(fixture.jobs, meta["attempt_id"])
+                        self.assertEqual((row.metadata["note"], row.metadata["failure_class"]),
+                                         (CLOSE.NOTE, "cancelled"))
+                finally:
+                    fixture.doCleanups()
+
+    def test_a_settled_full_stop_replays_only_the_attempt_a_recovery_asks_about(self):
+        # RV-PR1881 🟡5: every reader of a cancelled row recovers it; once settled, each replays itself.
+        import dispatch_completion_join as join_module
+        workers = list(self.full_stop_fixture("frame", "codex", "codex-native-queue"))
+        result = self.cli_full_stop()
+        self.assertEqual(json.loads(result.stdout)["state"], "cancelled", result.stdout + result.stderr)
+        registry, outcome = self.jobs.read_bytes(), self.path.with_suffix(".outcome.json").read_bytes()
+        deliveries = sorted(str(p.relative_to(self.jobs.parent)) for p in self.jobs.parent.rglob("delivery-*.json"))
+        self.assertTrue(deliveries)
+        replays = []
+        materialize = join_module.materialize_after_terminal_close
+        with mock.patch.object(join_module, "materialize_after_terminal_close",
+                               side_effect=lambda jobs, aid: replays.append(aid) or materialize(jobs, aid)):
+            for meta, *_ in workers:
+                row = JOIN.exact_attempt_row(self.jobs, meta["attempt_id"])
+                self.assertEqual(CLOSE.recover_attempt(self.jobs, row.metadata)["state"], "cancelled")
+            self.assertEqual(replays, [meta["attempt_id"] for meta, *_ in workers])
+            replays.clear()
+            state = JOIN.current_delivery_state(self.jobs, workers[0][0]["attempt_id"],
+                                                parent_attempt_id="fixture-parent")
+            self.assertEqual(JOIN.delivery_classification(state), "cancelled")
+            self.assertEqual(replays, [workers[0][0]["attempt_id"]])
+            replays.clear()
+            # The close itself still replays the whole route.
+            again = self.cli_full_stop()
+        self.assertEqual(json.loads(again.stdout)["state"], "cancelled")
+        self.assertEqual(self.jobs.read_bytes(), registry)
+        self.assertEqual(self.path.with_suffix(".outcome.json").read_bytes(), outcome)
+        self.assertEqual(sorted(str(p.relative_to(self.jobs.parent)) for p in self.jobs.parent.rglob("delivery-*.json")),
+                         deliveries)
+
+    def test_a_pending_full_stop_names_the_existing_way_on(self):
+        # RV-PR1881 🟡7: the pending answer says what continues it; nothing new is required.
+        owner = self.process("att-owner")
+        self.row("att-owner", process=owner)
+        resource = self.process("att-owner")
+        registry, run = self.resource(resource)
+        run["pid_namespace"] = "pid:[foreign-namespace]"
+        registry.write_text(json.dumps({"schema_version": 1, "runs": {"fixture-run": run}}))
+        pending = self.cli_full_stop()
+        self.assertEqual(pending.returncode, 0, pending.stderr)
+        answer = json.loads(pending.stdout)
+        self.assertEqual(answer["state"], "termination-pending", answer)
+        self.assertIn("run this same close again or that route's resume_command", answer["next_step"])
+        self.assertIn(self.route["route_id"], self.full_stop_status())
+        run["pid_namespace"] = os.readlink("/proc/self/ns/pid")
+        registry.write_text(json.dumps({"schema_version": 1, "runs": {"fixture-run": run}}))
+        settled = json.loads(self.cli_full_stop().stdout)
+        self.assertEqual(settled["state"], "cancelled", settled)
+        self.assertNotIn("next_step", settled)
 
     def assert_user_stopped(self, name):
         fields, meta = CLOSE._rows(self.jobs)[self.aid(name)]

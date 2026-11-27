@@ -41,6 +41,11 @@ JOIN_REASONS = COMPLETION_REASONS | {"process-alive", "process-unverifiable",
                                      "terminal-commit-pending", "workflow-completion-pending"}
 
 
+# Every terminal delivery classification. `cancelled` is a settled parent close:
+# a terminal end like `success`, never a failure to inspect.
+TERMINAL_CLASSIFICATIONS = frozenset({"success", "attention", "cancelled"})
+
+
 def completion_classification(children) -> str:
     classes = {child.get("delivery_classification") for child in children}
     if classes == {"success"}:
@@ -48,6 +53,26 @@ def completion_classification(children) -> str:
     if "cancelled" in classes and classes <= {"cancelled", "success"}:
         return "cancelled"
     return "attention"
+
+
+def legacy_parent_close_receipt(receipt: dict) -> dict | None:
+    """The same parent-close receipt as releases before `cancelled` wrote it, else None.
+
+    Those releases carried a settled parent close as `success` with reason
+    `cancelled-by-parent`, and their receivers render that as settled. Only a
+    receipt whose every non-success child is such a close has this form."""
+    children = receipt.get("children")
+    if (not isinstance(children, list) or not children
+            or not all(isinstance(child, dict) for child in children)):
+        return None
+    cancelled = [child.get("delivery_classification") != "success" for child in children]
+    if not any(cancelled) or any(
+            (child.get("delivery_classification"), child.get("reason"), child.get("required_action"))
+            != ("cancelled", "cancelled-by-parent", "advance-completed")
+            for child, is_cancelled in zip(children, cancelled) if is_cancelled):
+        return None
+    legacy = [dict(child, delivery_classification="success") for child in children]
+    return dict(receipt, children=legacy, delivery_classification="success")
 
 
 def unseal_receipt(encoded: str) -> dict:

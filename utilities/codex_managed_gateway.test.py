@@ -1811,6 +1811,83 @@ class ManagedGatewayTest(unittest.TestCase):
         self.assertEqual(self.gateway._appserver_requests, {})
         self.assertFalse(self.interactions.exists())
 
+    def parent_close_request(self, batch: str) -> dict[str, Any]:
+        request = receipt_request(batch)
+        request["receipt"]["delivery_classification"] = "cancelled"
+        request["receipt"]["children"][0].update(
+            reason="cancelled-by-parent", delivery_classification="cancelled")
+        return request
+
+    def delivered_receipts(self) -> list[dict[str, Any]]:
+        return [json.loads(value["params"]["additionalContext"]["hearting-completion"]["value"].split("\n")[1])
+                for value in self.server.messages if value.get("method") == "turn/start"]
+
+    def test_settled_parent_close_receipt_is_accepted_only_with_its_reason(self) -> None:
+        # RV-PR1881 🟡3: `cancelled` is a settled parent close, never another reason or action.
+        before = self.server.counts()
+        for name, change in (("reason", {"reason": "registry-closed"}),
+                             ("action", {"required_action": "inspect-done-failure"})):
+            request = self.parent_close_request("batch-cancelled-" + name)
+            request["receipt"]["children"][0].update(change)
+            result = control(self.control, request)
+            self.assertEqual((result["status"], result["reason"]),
+                             ("rejected", "receipt-child-contract-invalid"), name)
+        self.assertEqual(self.server.counts(), before)
+        result = control(self.control, self.parent_close_request("batch-cancelled"))
+        self.assertEqual(result["status"], "accepted", result)
+        (receipt,) = self.delivered_receipts()
+        self.assertEqual((receipt["delivery_classification"], receipt["children"][0]["delivery_classification"]),
+                         ("cancelled", "cancelled"))
+        start = next(value for value in self.server.messages if value.get("method") == "turn/start")
+        self.assertIn("Parent-requested close has settled",
+                      start["params"]["additionalContext"]["hearting-completion"]["value"])
+
+    def test_settled_parent_close_reaches_a_gateway_older_than_cancelled_once(self) -> None:
+        # RV-PR1881 🔴2: an opt-in managed session keeps the gateway it started with, while
+        # the completion observer follows the installed release.
+        from types import SimpleNamespace
+        spec = importlib.util.spec_from_file_location(
+            "codex_managed_completion_mixed_release", ROOT / "utilities" / "codex-managed-completion.py")
+        observer = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = observer
+        spec.loader.exec_module(observer)
+        args = SimpleNamespace(control_socket=self.control, delivery_retry_window=0,
+                               delivery_retry_interval=0.05)
+
+        def before_cancelled(children):
+            classes = {child["delivery_classification"] for child in children}
+            return "success" if classes == {"success"} else "attention"
+
+        seen = []
+        validate = self.gateway._validate_delivery
+        def observe(request):
+            seen.append(request["receipt"]["delivery_classification"])
+            return validate(request)
+        with mock.patch.object(self.gateway, "_validate_delivery", side_effect=observe), \
+             mock.patch.object(GATEWAY, "TERMINAL_CLASSIFICATIONS", frozenset({"success", "attention"})), \
+             mock.patch.object(GATEWAY, "completion_classification", side_effect=before_cancelled):
+            result = observer.deliver_receipt(args, self.parent_close_request("batch-old-gateway"))
+            self.assertEqual(result["status"], "accepted", result)
+            self.assertEqual(seen, ["cancelled", "success"])
+            (receipt,) = self.delivered_receipts()
+            child = receipt["children"][0]
+            self.assertEqual((child["delivery_classification"], child["reason"], child["required_action"]),
+                             ("success", "cancelled-by-parent", "advance-completed"))
+            start = next(value for value in self.server.messages if value.get("method") == "turn/start")
+            self.assertIn("Parent-requested close has settled",
+                          start["params"]["additionalContext"]["hearting-completion"]["value"])
+            # Any other refusal is final: only a settled parent close has an older form.
+            seen.clear()
+            other = receipt_request("batch-old-gateway-other")
+            other["receipt"]["children"][0]["readiness"] = "pending"
+            self.assertEqual(observer.deliver_receipt(args, other)["status"], "rejected")
+            self.assertEqual(seen, ["success"])
+        # The current gateway takes `cancelled` as it is, in one request.
+        seen.clear()
+        with mock.patch.object(self.gateway, "_validate_delivery", side_effect=observe):
+            result = observer.deliver_receipt(args, self.parent_close_request("batch-new-gateway"))
+        self.assertEqual((result["status"], seen), ("accepted", ["cancelled"]))
+
     def test_foreign_or_incomplete_receipt_never_reaches_upstream(self) -> None:
         before = self.server.counts()
         foreign = receipt_request()

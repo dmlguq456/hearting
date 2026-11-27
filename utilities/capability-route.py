@@ -2813,7 +2813,7 @@ def main():
                 from work_start import pin_handoff_continuation
                 outcome=pin_handoff_continuation(route, a.route, route_parent_close.jobs_path(),
                                                 {**outcome,"summary":a.summary or outcome.get("summary")})
-                print(json.dumps(outcome,sort_keys=True))
+                print(json.dumps(route_parent_close.explain_pending(outcome,UI_TEXT.translator()),sort_keys=True))
                 return
             print(json.dumps(outcome,sort_keys=True))
             if not created: print("capability-route: route already closed",file=sys.stderr)

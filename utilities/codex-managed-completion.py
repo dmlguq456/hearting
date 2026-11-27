@@ -51,6 +51,7 @@ import dispatch_notice_receipt as notice_receipt  # noqa: E402
 MAX_RESPONSE_BYTES = 16 * 1024
 MAX_RECEIPT_BYTES = 2048
 from dispatch_receipt_identity import COMPLETION_REASONS as ALLOWED_REASONS, COMPLETION_ACTIONS as REQUIRED_ACTIONS
+from dispatch_receipt_identity import legacy_parent_close_receipt
 
 
 class CompletionError(RuntimeError):
@@ -2157,7 +2158,7 @@ def _execute_once(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         request["gateway_epoch"] = args.gateway_epoch
     if args.binding_generation is not None:
         request["binding_generation"] = args.binding_generation
-    result = deliver_with_retry(args, request, stop_check=delivery_stop_check)
+    result = deliver_receipt(args, request, stop_check=delivery_stop_check)
     status = result.get("status")
     return result, {
         "accepted": 0,
@@ -2165,6 +2166,21 @@ def _execute_once(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         "sent-ambiguous": 74,
         "rejected": 65,
     }.get(status, 65)
+
+
+def deliver_receipt(args: argparse.Namespace, request: dict[str, Any], *, stop_check=None) -> dict[str, Any]:
+    """Deliver one completion receipt to the managed gateway.
+
+    A gateway started before `cancelled` existed lives until its Codex session
+    ends, while this observer follows the installed release. Its typed refusal
+    of a settled parent close is answered once with the form it knows
+    (`success`, reason `cancelled-by-parent`), which it renders as settled."""
+    result = deliver_with_retry(args, request, stop_check=stop_check)
+    legacy = legacy_parent_close_receipt(request["receipt"])
+    if (legacy is not None and result.get("status") == "rejected"
+            and result.get("reason") == "receipt-child-contract-invalid"):
+        result = deliver_with_retry(args, {**request, "receipt": legacy}, stop_check=stop_check)
+    return result
 
 
 def _restore_obligation_arguments(record: dict) -> argparse.Namespace:

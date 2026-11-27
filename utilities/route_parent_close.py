@@ -101,13 +101,15 @@ class RegistryObservation:
     """Re-run registry judgments only when their inputs can have changed.
 
     The governed PID stays a per-interval ``/proc`` check. The watched row is
-    re-read when the jobs.log generation changes; the parent-close judgment
-    re-runs when that row changes or the close-intent backstop elapses.
+    re-read when the ``watched`` file's generation changes (jobs.log unless the
+    caller names a narrower file); the parent-close judgment re-runs when that
+    row changes or the close-intent backstop elapses.
     """
 
     def __init__(self, jobs: Path, attempt_id: str, read_attempt, *,
-                 backstop: float = CLOSE_INTENT_BACKSTOP_SECONDS):
+                 backstop: float = CLOSE_INTENT_BACKSTOP_SECONDS, watched: Path | None = None):
         self.jobs, self.attempt_id, self.backstop = jobs, attempt_id, backstop
+        self.watched = jobs if watched is None else watched
         self.read_attempt = read_attempt
         self.generation = None
         self.status: str | None = None
@@ -122,7 +124,9 @@ class RegistryObservation:
 
     def _refresh_scoped(self, *, force: bool):
         try:
-            generation = file_generation(self.jobs)
+            generation = file_generation(self.watched)
+        except FileNotFoundError:
+            generation = "absent"   # nothing recorded yet; its creation is a change
         except OSError:
             generation = None
         row_changed = False
@@ -511,6 +515,13 @@ def explain_stop(receipt, translate):
     return receipt
 
 
+def explain_pending(receipt, translate):
+    """Add the way on to a parent close that is still terminating; it names existing commands only."""
+    if receipt.get("state") == "termination-pending" and receipt.get("reason") == NOTE:
+        receipt["next_step"] = translate("route.close.pending_next")
+    return receipt
+
+
 def stop_route_legs(route, *, jobs=None, grace=0.3, kill_wait=0.5):
     """Route close of a route whose running work is its frame legs: stop those legs first.
 
@@ -574,7 +585,9 @@ def request(route, path, *, jobs=None, stop_resources=False, summary=None, commi
                             and meta.get("dispatch_depth") == "1"
                             and (meta.get("route_id"), meta.get("route_hash")) == identity
                             and Path(fields[3]).resolve() == worktree):
-                        _require_stopper(rows, aid, jobs)
+                        # As in `stop_route_legs`: only a leg with work left needs its parent.
+                        if fields[1] in OPEN or _plan(jobs, rows, aid)[0]:
+                            _require_stopper(rows, aid, jobs)
                         roots.append(aid)
             if not roots:
                 return None
@@ -1298,14 +1311,17 @@ def _stop_resources(value, resources, protected_resources, ledger):
     return pending
 
 
-def continue_close(value, *, jobs=None, grace=0.3, kill_wait=0.5):
-    """Same controller for close, join and post-exit recovery; bounded per pass."""
+def continue_close(value, *, jobs=None, grace=0.3, kill_wait=0.5, attempt_id=None):
+    """Same controller for close, join and post-exit recovery; bounded per pass.
+
+    ``attempt_id``: the one attempt a recovery asks about. Once the close has
+    settled, only that attempt's delivery is replayed; the close itself replays all."""
     jobs = jobs_path(jobs)
     route, path = value["route"], Path(value["route_file"])
     ledger = WS.WorkflowLedger(route["route_id"], route["route_hash"], jobs=jobs)
     prior = settled_result(route, ledger)
     if prior:
-        return _finish_close(value, prior, jobs)
+        return _finish_close(value, prior, jobs, only=attempt_id)
     stop_resources = value["stop_resources"]
     resources = _resources_for_close(value, jobs)
     protected = {(r["kind"], r["run_id"], r.get("registry")): r
@@ -1427,12 +1443,13 @@ def continue_close(value, *, jobs=None, grace=0.3, kill_wait=0.5):
     return _finish_close(value, outcome, jobs)
 
 
-def _finish_close(value, outcome, jobs):
+def _finish_close(value, outcome, jobs, *, only=None):
     _finish_existing_cycle(value["route"], jobs=jobs)
     if value["stop_resources"]:
         from dispatch_completion_join import materialize_after_terminal_close
-        for aid, (_fields, meta) in _rows(jobs, set(value["attempts"])).items():
-            if aid in value["attempts"] and (meta.get("note") == NOTE or _user_stopped(meta)):
+        attempts = set(value["attempts"]) if only is None else {only} & set(value["attempts"])
+        for aid, (_fields, meta) in _rows(jobs, attempts).items():
+            if aid in attempts and (meta.get("note") == NOTE or _user_stopped(meta)):
                 materialize_after_terminal_close(jobs, aid)
     return outcome
 
@@ -1802,7 +1819,7 @@ def recover_attempt(jobs, metadata):
     route = {"route_id": metadata.get("parent_close_route_id") or metadata.get("owner_route_id") or metadata.get("route_id"),
              "route_hash": metadata.get("parent_close_route_hash") or metadata.get("owner_route_hash") or metadata.get("route_hash")}
     value = intent(route, jobs) or _current_owner_intent(metadata, jobs)
-    return continue_close(value, jobs=jobs) if value else None
+    return continue_close(value, jobs=jobs, attempt_id=metadata.get("attempt_id")) if value else None
 
 
 def _resources_for_close(value, jobs):

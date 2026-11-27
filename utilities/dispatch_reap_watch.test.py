@@ -1340,5 +1340,51 @@ class AttemptRecordIndexTest(unittest.TestCase):
         self._check(raw, "att-a", "two")
 
 
+class LegCloseObservationCostTest(unittest.TestCase):
+    """RV-PR1881 🟡4: a frame or unit leg's watcher reads a busy registry only when
+    its route ledger changes, and one leg watcher per route drives a pending close."""
+
+    def setUp(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("dispatch_reap_watch_close_cost", WATCH)
+        self.watcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.watcher)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.jobs = Path(self.tmp.name) / "jobs.log"
+        self.jobs.write_text("")
+        self.journal = Path(self.tmp.name) / "ledger" / "journal.jsonl"
+
+    def test_a_busy_registry_alone_does_not_reread_the_leg_row(self):
+        import route_parent_close as CLOSE
+        reads = []
+        observer = CLOSE.RegistryObservation(self.jobs, "att-leg", lambda jobs, aid: reads.append(aid) or (None, {}),
+                                             watched=self.journal)
+        with mock.patch.object(CLOSE, "row_requested", return_value=False):
+            observer.refresh()
+            for n in range(3):
+                with self.jobs.open("a") as handle:
+                    handle.write(f"t\tdone\t/r\t/w\tother\tattempt_id=att-other-{n}\n")
+                observer.refresh()
+            self.assertEqual(len(reads), 1)
+            self.journal.parent.mkdir()
+            self.journal.write_text('{"evidence": {}}\n')
+            observer.refresh()
+            observer.refresh()
+        self.assertEqual(len(reads), 2)
+
+    def test_one_leg_watcher_drives_a_routes_pending_close(self):
+        self.journal.parent.mkdir()
+        self.journal.write_text("")
+        first = self.watcher.drive_route_close(self.journal)
+        self.assertIsNotNone(first)
+        self.assertIsNone(self.watcher.drive_route_close(self.journal))
+        first.release()
+        second = self.watcher.drive_route_close(self.journal)
+        self.assertIsNotNone(second)
+        second.release()
+        self.assertIsNotNone(self.watcher.drive_route_close(None))
+
+
 if __name__ == "__main__":
     unittest.main()

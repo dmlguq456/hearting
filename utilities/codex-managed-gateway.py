@@ -77,7 +77,8 @@ from dispatch_receipt_identity import CANONICAL_RECEIPT_KEYS, CANONICAL_CHILD_KE
 ALLOWED_RECEIPT_KEYS = CANONICAL_RECEIPT_KEYS | {"delivery_timing"}
 ALLOWED_CHILD_KEYS = CANONICAL_CHILD_KEYS
 from dispatch_receipt_identity import (
-    COMPLETION_REASONS as ALLOWED_REASONS, COMPLETION_ACTIONS as REQUIRED_ACTIONS, completion_classification,
+    COMPLETION_REASONS as ALLOWED_REASONS, COMPLETION_ACTIONS as REQUIRED_ACTIONS,
+    TERMINAL_CLASSIFICATIONS, completion_classification,
 )
 AGENT_HOME = Path(__file__).resolve().parents[1]
 
@@ -2418,7 +2419,7 @@ class ManagedGateway:
                     and status != "done"
                 )
                 or harness not in (*WRAPPER_PARENT_HARNESSES, "unknown")
-                or delivery_state not in {"success", "attention", "cancelled"}
+                or delivery_state not in TERMINAL_CLASSIFICATIONS
                 or (delivery_state in {"success", "cancelled"} and required_action != "advance-completed")
                 or (delivery_state == "cancelled" and raw.get("reason") != "cancelled-by-parent")
                 or (
