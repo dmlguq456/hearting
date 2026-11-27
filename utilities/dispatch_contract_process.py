@@ -1385,7 +1385,7 @@ def scan_process_table() -> ProcessTableScan:
 
 
 @contextmanager
-def process_table_scan_scope():
+def process_table_scan_scope(*, fresh=False):
     """Observe-only batch path: one ``/proc`` walk for observations in one scope.
 
     `attempt_tagged_descendants` and `process_group_observation` are single-shot
@@ -1397,10 +1397,11 @@ def process_table_scan_scope():
     the walk is dropped on exit, so the next pass reads ``/proc`` again. Only
     observe-only passes may hold this scope: a caller that waits for a process
     to disappear must stay outside it, which every existing quiescence caller
-    does. A nested scope joins the enclosing pass.
+    does. A nested scope joins the enclosing pass unless it asks for a fresh
+    observation between cleanup effects.
     """
 
-    if _PROCESS_TABLE_SCAN.get() is not None:
+    if not fresh and _PROCESS_TABLE_SCAN.get() is not None:
         yield
         return
     token = _PROCESS_TABLE_SCAN.set(scan_process_table())

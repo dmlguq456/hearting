@@ -2965,6 +2965,25 @@ class NativeQueueSiblingBatchTest(unittest.TestCase):
             self.assertEqual(result["client_user_message_id"], expected_id)
             self.assertEqual(call.kwargs["expected_body"], [expected_body])
 
+    def test_acked_courier_supplies_the_old_failure_body_to_queue_retirement(self):
+        member = self._create(0, failure=True)
+        self.assertEqual(self._run([member])[0]["status"], "accepted")
+        old_body = self.sent[0]["message"]
+        self.assertNotIn("Provider failure for", old_body)
+        with self.jobs.open("a", encoding="utf-8") as jobs:
+            jobs.write(f"now\tdone\t/r\t/w\tfailure\tattempt_id={member[0]},attempt_schema_version=2,"
+                       "harness=codex,note=dead-runtime-error,provider_failure_kind=cyberPolicy\n")
+        with mock.patch.object(self.module.codex_queue_delivery, "retire_acked_completion") as retire:
+            result = self._run([member])[0]
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(result["deduplicated_by"], "pending-delivery-ledger")
+        retire.assert_called_once()
+        bodies = retire.call_args.kwargs["expected_body"]
+        self.assertEqual(len(bodies), 2)
+        current, accepted_legacy = bodies
+        self.assertIn("was cyberPolicy.", current)
+        self.assertEqual(accepted_legacy, old_body)
+
     def test_only_a_single_sibling_that_was_already_received_queues_nothing(self):
         member = self._create(0)
         results = self._run([member], current=lambda record, jobs=None: False)

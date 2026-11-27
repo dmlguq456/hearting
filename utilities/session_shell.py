@@ -1152,6 +1152,8 @@ def _observe_session(observe, harness, sid, pid, start):
 PANEL_STYLE_KEYS = ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked", "lvl_g", "lvl_y", "lvl_r",
                     "g_spin", "g_work_off", "tag_steward", "tag_steward_dim",
                     "zone_direct", "zone_dispatch", "zone_request",
+                    # 11-27: a zone rule's line, the zone's hue dimmed.
+                    "zoned_direct", "zoned_dispatch", "zoned_request",
                     # 11-18: the five fields' hues for a route's kind word (`kind_`) and its bracket (dim, plain, bold).
                     *("kind%s_%s" % (weight, field) for field in ("code", "lab", "design", "docs", "research")
                       for weight in ("", "q", "s", "b")),
@@ -1190,7 +1192,7 @@ def block_labels(editor: int) -> dict:
     labels = {key: ui_text("fleet.session_block." + key) for key in (
         *states, "choose", "choose_write", "writing", "writing_choices", "send", "navigate", "navigate_write",
         "text", "changed", "complete", "busy", "empty", "full", "more", "more_choose", "more_down",
-        "more_page", "more_choices", "sent", "questions", "paste_stalled")}
+        "more_page", "more_choices", "sent", "questions", "paste_stalled", "pasting")}
     if editor < 64:
         # 11-26: a narrow popup keeps `Enter send` and the line-break key while an answer is written: its
         # closing key's word is short enough that the key packing leaves out `Tab next` (then `↑ choices`)
@@ -2033,14 +2035,8 @@ def _panel_popup(binding, request):
     ids = [str(route.get("id") or "") for route in routes]
     page = request.get("page") is True and opened in ids
     if page:
-        # Fleet's route page with every line of it (the popup reads a longer page on with PgUp/PgDn,
-        # so no line is folded into `+N more`): the grid is as tall as the window's rows and the
-        # visibility lines together; its stage frame takes what the window's rows leave, never less
-        # than a 36-row window leaves (a lower window reads the page on instead).
-        room = request.get("rows") if type(request.get("rows")) is int and 6 <= request["rows"] <= 200 else 30
-        room = max(room, 30)
-        route = next(item for item in routes if str(item.get("id")) == opened)
-        grid = CellGrid(columns, room + 3 + sum(pages._route_visibility_rows(route.get("visibility"), 0, columns - 1)))
+        # The route page draws its content once. The host fits that page to
+        # the window and reads the remaining rows with PgUp/PgDn.
         subset = replace(vm, routes=routes)
         pages._route_page(grid, subset, opened, 0, columns - 1, grid.rows,
                           pages._SubsetState(None, "route:" + opened, opened, True), whole=True)

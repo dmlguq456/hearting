@@ -90,7 +90,9 @@ from dispatch_attempt_policy import decide_attempt, committed_outcome, readable_
 from codex_dispatch_terminal import REVIEW_BLOCKING_NOTE  # noqa: E402
 from review_round_cap import classify_round_row  # noqa: E402
 from dispatch_degradation import record_degradation  # noqa: E402
-from dispatch_allocation_receipt import record_allocation_receipt  # noqa: E402
+from dispatch_allocation_receipt import (  # noqa: E402
+    changed_raw_headroom, raw_headroom_lines, record_allocation_receipt,
+)
 from dispatch_allocation import effective_harness_weights, inert_allocation_keys  # noqa: E402
 import dispatch_launch_tuple as LAUNCH_TUPLE  # noqa: E402
 from dispatch_quality_peer import quality_peer_families  # noqa: E402
@@ -991,6 +993,8 @@ def emit_allocation(context: dict | None) -> None:
                 f"capacity_headroom.{harness}="
                 + ("unknown" if value is None else str(round(value, 1)))
             )
+        for line in raw_headroom_lines(changed_raw_headroom(context["capacity"])):
+            print(line)
         print(f"quality_band={context.get('quality_band') or 'none'}")
         print(f"relief_promoted={int(bool(context.get('relief_promoted')))}")
     print(f"allocation_preferred={context.get('preferred') or '-'}")
@@ -2558,6 +2562,13 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
         prior_rows, jobs=args.jobs, task=request_task)
     if semantic_predecessor:
         args.automatic_retry_of = ""
+    refused_harness = None
+    if args.automatic_retry_of:
+        from dispatch_replacement import SAME_PROVIDER_REFUSAL, refused_profile_harness
+        predecessor = next((row for row in prior_rows if row.get("attempt_id") == args.automatic_retry_of), {})
+        pin = (route.get("selection_pins") or {}).get("worker")
+        refused_harness = refused_profile_harness(
+            predecessor, launch_node.get("model_profile"), pin=pin, source_root=ROOT)
     failed_tuples = set(args.failed_tuple) | set(prior_failures)
     attempts: list[str] = []
     direct_failures: list[dict[str, str]] = []
@@ -2614,7 +2625,7 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                 _candidate_outcome(candidate_outcomes, int(ordered_hop['ordinal']), key,
                                   attempted=False, reason="prior-unchanged-failure")
                 recorded_prior_skips.add(key)
-    pin_skipped = False
+    pin_skipped = refusal_noted = False
     for hop in fallback_hops:
         ordinal = int(hop["ordinal"])
         if hop.get("_worker_pin_skip"):
@@ -2630,6 +2641,14 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                     _candidate_outcome(candidate_outcomes, ordinal, key, attempted=False,
                                       reason="worker-pin")
                     pin_skipped = True
+                    continue
+                if refused_harness and row.get("child_harness") == refused_harness:
+                    if not refusal_noted:
+                        print(f"retry_note={SAME_PROVIDER_REFUSAL}")
+                        refusal_noted = True
+                    attempts.append(f"{ordinal}:{key}:skipped-provider-refusal")
+                    _candidate_outcome(candidate_outcomes, ordinal, key, attempted=False,
+                                       reason="provider-refusal")
                     continue
                 # Re-read after an early failure too: a whole-account quota
                 # cannot be cured by changing models later in this same chain.

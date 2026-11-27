@@ -6166,6 +6166,52 @@ class SettledArmClaimLoopTest(unittest.TestCase):
                     self.assertEqual(counts, (0, 0, 0))
 
 
+class ParentClosedOwnerWakeTest(unittest.TestCase):
+    """RV-PR1881 🔴1: a parent's full close of a watched owner is a terminal wake."""
+
+    def test_parent_closed_owner_wakes_once_and_its_arm_ends_on_every_harness(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "rewake_parent_close_fixture", ROOT / "utilities" / "route_parent_close.test.py")
+        fixtures = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = fixtures
+        spec.loader.exec_module(fixtures)
+        # A Claude parent waits on an owner of any harness through this one carrier.
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                fixture = fixtures.ParentCloseTest()
+                fixture.setUp()
+                try:
+                    (meta, *_), = list(fixture.full_stop_fixture("owner", harness, "claude-parent-runtime"))
+                    aid = meta["attempt_id"]
+                    claim = rewake.claim_arm(fixture.jobs, aid, "fixture-parent", fresh=True)
+                    self.assertIsInstance(claim, rewake.ArmClaim)
+                    closed = subprocess.run([sys.executable, str(ROOT / "utilities" / "capability-route.py"),
+                        "close", "--route", fixture.route["route_id"], "--summary", "fixture only",
+                        "--stop-resources"], cwd=fixture.base, capture_output=True, text=True, timeout=60)
+                    self.assertEqual(json.loads(closed.stdout)["state"], "cancelled", closed.stderr)
+                    launch = rewake.Launch(aid, fixture.jobs, "fixture-parent")
+                    state, message = rewake.classified_receipt(launch, "ready", "terminal-complete", ROOT)
+                    self.assertEqual(state, "cancelled", message)
+                    self.assertIn("reason=cancelled-by-parent required_action=advance-completed", message)
+                    self.assertIn("Parent-requested close has settled", message)
+                    self.assertNotIn("requires attention", message)
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                        code = rewake._emit_with_gates_locked(launch, claim, state, message, block=False)
+                    self.assertEqual(code, 2, "a terminal receipt wakes a resting session")
+                    self.assertIn("Parent-requested close has settled", stderr.getvalue())
+                    self.assertEqual(rewake._read_arm(rewake.arm_path(fixture.jobs, aid))["state"], "ended")
+                    # The next turn end and a new session start see the row and leave it settled.
+                    self.assertIn(aid, [row[0] for row in rewake._session_owner_states(
+                        fixture.jobs, "fixture-parent", rewake.RECEIPT_ROW_STATUSES)])
+                    for event in ("Stop", "SessionStart"):
+                        armed = rewake.boundary_launch({"hook_event_name": event, "session_id": "fixture-parent"})
+                        self.assertNotIsInstance(armed, tuple, event)
+                        self.assertEqual(rewake._read_arm(rewake.arm_path(fixture.jobs, aid))["arms"], 1)
+                finally:
+                    fixture.doCleanups()
+
+
 if __name__ == "__main__":
     # Unit fixtures exercise records without observers racing their cleanup;
     # runner startup is exercised by peer_obligations.test.py.

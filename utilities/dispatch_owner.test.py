@@ -482,7 +482,8 @@ class FrameAlternativeSelectionTest(unittest.TestCase):
                      mock.patch.object(OWNER._allocation, "attempt_counts", return_value={
                          "claude": 0, "codex": 0, "opencode": 0}), \
                      mock.patch.object(OWNER._capacity, "capacity_report", return_value={
-                         "scores": {"claude": 80, "codex": 70, "opencode": 0}, "sources": {}}), \
+                         "scores": {"claude": 80.0, "codex": 70, "opencode": 0}, "sources": {},
+                         "freshness": {"claude": {"raw_headroom": 10.0}}}), \
                      mock.patch.object(OWNER, "derive_frame_route_binding", return_value=binding), \
                      mock.patch.object(artifact_producer, "prepare_route_artifact_env", return_value={}), \
                      mock.patch.object(OWNER.os, "access", return_value=True), \
@@ -491,13 +492,20 @@ class FrameAlternativeSelectionTest(unittest.TestCase):
                      mock.patch.object(OWNER, "record_frame_launch_degradation") as record, \
                      contextlib.redirect_stdout(out):
                     self.assertEqual(OWNER.main([]), launch_result)
-                self.assertIn("reason=frame-other-harness-unusable", out.getvalue())
+                lines = out.getvalue().splitlines()
+                self.assertIn("reason=frame-other-harness-unusable", lines)
+                self.assertIn("capacity_headroom.claude=80.0", lines)
+                self.assertEqual([line for line in lines if line.startswith("capacity_raw_headroom.")],
+                                 ["capacity_raw_headroom.claude=10.0"])
                 self.assertEqual(Path(launch.call_args.args[0][0]).parts[-3], "codex")
                 self.assertEqual(record.called, should_record)
                 if should_record:
                     record.assert_called_once()
                     self.assertEqual(record.call_args.kwargs["reason"], "frame-other-harness-unusable")
-                    self.assertIn("limited(usage-gate)", record.call_args.kwargs["detail"])
+                    detail = json.loads(record.call_args.kwargs["detail"])
+                    self.assertEqual(detail["states"]["claude"], "limited(usage-gate)")
+                    self.assertEqual(detail["capacity"], {"claude": 80.0})
+                    self.assertEqual(detail["capacity_raw_headroom"], {"claude": 10.0})
 
 class FrameTopDeclarationTest(unittest.TestCase):
     """Automatic frame-leg assignment chooses only harnesses whose runtime config declares `top`."""
@@ -505,7 +513,7 @@ class FrameTopDeclarationTest(unittest.TestCase):
     HARNESSES = ("claude", "codex", "opencode")
 
     def run_selector(self, *, declared, explicit=None, profile="top", scores=None,
-                     owner_order=("claude", "opencode", "codex")):
+                     owner_order=("claude", "opencode", "codex"), predecessor=None):
         import artifact_producer
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
@@ -526,6 +534,20 @@ class FrameTopDeclarationTest(unittest.TestCase):
             values = {"--model-profile": profile, "--worker-type": "frame", "--route-node": "frame",
                       "--worktree": str(base), "--capability": "autopilot-code",
                       "--capability-mode": "dev", "--intensity": "standard"}
+            if predecessor:
+                values.update({"--automatic-retry-of": "att-fixture-old", "--attempt-id": "att-fixture-next"})
+                import dispatch_replacement as replacement
+                family = "0" * 64
+                meta = {"harness": "codex", "attempt_id": "att-fixture-old", "attempt_schema_version": "2",
+                        "replacement_family_id": family, "replacement_attempt_id": "att-fixture-next",
+                        "note": "dead-runtime-error", "failure_class": "runtime", **predecessor}
+                fields = ",".join(f"{key}={value}" for key, value in meta.items())
+                jobs.write_text(f"2026-01-01T00:00:00Z\tdone\t/repo\t{base}\tframe\t{fields}\n")
+                claim = replacement._record_path(jobs, family)
+                claim.parent.mkdir(parents=True)
+                claim.write_text(json.dumps({"original_attempt_id": "att-fixture-old",
+                                             "replacement_attempt_id": "att-fixture-next",
+                                             "proof": {"death_kind": "runtime"}}))
             binding = SimpleNamespace(route_file=str(route_file), route_id=route["route_id"],
                 route_hash=route["route_hash"], route_node="frame", registry_digest="sha256:test",
                 write_scope=str(base), completion_gate="test")
@@ -543,6 +565,7 @@ class FrameTopDeclarationTest(unittest.TestCase):
                  mock.patch.object(OWNER._capacity, "capacity_report", return_value={"scores": scores, "sources": {}}), \
                  mock.patch.object(OWNER, "derive_frame_route_binding", return_value=binding), \
                  mock.patch.object(OWNER, "_declares_top", probe), \
+                 mock.patch("model_profile.resolve_runtime_profile", return_value=({"model": "fixture-current"}, {})), \
                  mock.patch.object(artifact_producer, "prepare_route_artifact_env", return_value={}), \
                  mock.patch.object(OWNER.os, "access", return_value=True), \
                  mock.patch.object(OWNER, "select_launch_lifecycle", return_value="detached"), \
@@ -550,6 +573,39 @@ class FrameTopDeclarationTest(unittest.TestCase):
                  contextlib.redirect_stdout(out):
                 code = OWNER.main([])
             return code, out.getvalue(), launch, probe
+
+    def test_policy_refusal_changes_only_the_unchanged_harness_and_model(self):
+        source = {"provider_failure_kind": "cyberPolicy", "model": "fixture-current"}
+        rank = ("codex", "claude", "opencode")
+        for predecessor, expected in (
+            (source, "claude"),
+            ({**source, "model": "fixture-different"}, "codex"),
+            ({**source, "provider_failure_kind": "serverOverloaded"}, "codex"),
+            ({**source, "provider_failure_kind": "usageLimitExceeded", "note": "dead-capacity",
+              "failure_class": "capacity"}, "codex"),
+        ):
+            with self.subTest(predecessor=predecessor):
+                code, out, launch, _probe = self.run_selector(
+                    declared=set(rank), predecessor=predecessor, owner_order=rank)
+                self.assertEqual(code, 0, out)
+                self.assertEqual(Path(launch.call_args.args[0][0]).parts[-3], expected)
+
+    def test_only_rejected_candidate_reports_why_it_cannot_be_replayed(self):
+        code, out, launch, _probe = self.run_selector(
+            declared={"codex"}, predecessor={"provider_failure_kind": "cyberPolicy", "model": "fixture-current"},
+            owner_order=("codex", "claude", "opencode"))
+        self.assertEqual(code, 65, out)
+        launch.assert_not_called()
+        self.assertIn("reason=provider-refusal-no-alternative", out)
+        self.assertIn("same harness and model", out)
+
+    def test_an_explicit_owner_whose_pair_was_refused_is_not_moved_to_another_harness(self):
+        code, out, launch, _probe = self.run_selector(
+            declared=set(self.HARNESSES), explicit="codex",
+            predecessor={"provider_failure_kind": "cyberPolicy", "model": "fixture-current"})
+        self.assertEqual(code, 65, out)
+        launch.assert_not_called()
+        self.assertIn("reason=provider-refusal-no-alternative", out)
 
     def test_a_harness_without_a_top_declaration_is_never_chosen_even_with_the_most_headroom(self):
         code, out, launch, _probe = self.run_selector(declared={"codex", "opencode"})
@@ -1442,6 +1498,7 @@ class DispatchOwnerTests(unittest.TestCase):
             stdout,
         )
         self.assertIn("reason=no-eligible-candidate", stdout)
+        self.assertIn("actual quota from capacity_raw_headroom.* when shown", stdout)
         self.assertIn("child_spawned=0", stdout)
         self.assertEqual(wrapper_calls, [])
 
@@ -2525,6 +2582,23 @@ class RouteOwnerPinTest(unittest.TestCase):
         flag = cmd[cmd.index("--explicit-adapter") + 1] if "--explicit-adapter" in cmd else None
         return SimpleNamespace(rc=rc, out=out, wrapper=wrapper, flag=flag, calls=calls,
                                usage_profile=usage_probe.call_args.args[1] if usage_probe.called else None)
+
+    def test_capacity_wait_candidates_exclude_the_previously_refused_owner_pair(self):
+        path = self._route(sealed=("claude", "codex"))
+        self.addCleanup(shutil.rmtree, path.parent)
+        previous = {"harness": "codex", "model": "fixture-model", "note": "dead-runtime-error",
+                    "provider_failure_kind": "cyberPolicy"}
+        limited = {"claude": "limited(2099-01-01T00:10:00Z)",
+                   "codex": "limited(2099-01-01T00:00:00Z)", "opencode": "ok"}
+        extra = ("--automatic-retry-of", "att-prior", "--attempt-id", "att-next")
+        with mock.patch("dispatch_replacement.replacement_source", return_value=previous), \
+             mock.patch("model_profile.resolve_runtime_profile", return_value=({"model": "fixture-model"}, {})):
+            held = self._launch(path, None, usage=limited, extra=extra)
+            self.assertEqual((held.rc, held.calls), (65, []), held.out)
+            self.assertIn("reason=no-eligible-route-evidence-candidate\n", held.out)
+            self.assertIn("configured_candidates=claude\n", held.out)
+            ready = self._launch(path, None, usage=dict.fromkeys(limited, "ok"), extra=extra)
+            self.assertEqual((ready.rc, ready.wrapper), (0, "claude"), ready.out)
 
     def test_owner_order_uses_sealed_policy_and_keeps_hard_limits_pins_and_candidates(self):
         scores = {"claude": 80, "opencode": 80, "codex": 90}

@@ -2955,6 +2955,26 @@ class FallbackTest(unittest.TestCase):
   self.assertIn("prior-attempt-unverifiable",unknown.stdout)
   self.assertIn("child_spawned=0",unknown.stdout)
   self.assertEqual(self.jobs.read_bytes(),before)
+ def test_provider_refusal_skips_only_the_same_model_on_the_retried_harness(self):
+  from model_profile import resolve_runtime_profile
+  with self.dispatch_env():
+   path=self.route(same_status="supported")
+   route=json.loads(path.read_text())
+   node=next(item for item in route["nodes"] if item["id"]=="plan")
+   model=resolve_runtime_profile("codex",node["model_profile"],source_root=ROOT)[0]["model"]
+  attempt="att-provider-refusal-fixture"
+  base=(f"capability=autopilot-code,route_id={route['route_id']},route_node=plan,"
+        "parent=owner,harness=codex,parent_harness=codex,parent_transport=headless,"
+        "parent_sandbox=workspace-write,child_harness=codex,launch_authority=conductor")
+  self.jobs.write_text(
+   f"2026-07-16T00:00:00Z\tdone\t/repo\t{self.repo}\tworker-refused\t"
+   f"{base},attempt_id={attempt},note=dead-missing-result,provider_failure_kind=cyberPolicy,model={model}\n")
+  result=self.run_observed_chain(path,{attempt})
+  self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+  self.assertIn("selected_hop=cross-harness-headless",result.stdout)
+  self.assertIn("skipped-provider-refusal",result.stdout)
+  self.assertNotIn("skipped-prior-unchanged-failure",result.stdout)
+
  def test_registry_worker_deaths_do_not_spend_a_launch_tuple(self):
   path=self.route(same_status="supported"); route=json.loads(path.read_text())
   base=(f"capability=autopilot-code,route_id={route['route_id']},route_node=plan,"
@@ -3168,6 +3188,50 @@ class FallbackTest(unittest.TestCase):
     self._depth_affinity_route(order,affinity=affinity),
     self._depth_affinity_node(depth),self.jobs)
   return context["rank"]
+ def test_balanced_hops_use_timed_capacity_for_peers_and_raw_usage_for_the_gate(self):
+  now=1_800_000_000
+  week=604800
+  node=self._depth_affinity_node(1)
+  route=self._depth_affinity_route(["claude","codex","opencode"],affinity=False)
+  route["dispatch_allocation"].update(
+    usage_gate_used_percent=85,usage_headroom_exponent=2,
+    harness_weights={"codex":0.5,"opencode":0.2},
+    field_weights={"claude":0.95,"codex":0.85,"opencode":1.0})
+  payloads={"claude":{"rl_7d":50},"codex":{"windows":[["7d",50,now+3600]]}}
+  cache=SimpleNamespace(read=lambda harness,**_: {
+    "payload":payloads[harness],"observed_at":now-1})
+  capacity_scores=F.CAPACITY.capacity_scores
+
+  def rank():
+   hops,context=F.ordered_fallback_hops(route,node,self.jobs)
+   self.assertEqual(hops[0]["candidates"][0]["child_harness"],context["rank"][0])
+   return context["rank"]
+
+  with mock.patch.dict(os.environ,{"HARNESS_CAPACITY_SCORES":"opencode:0",
+                                  "HARNESS_CAPACITY_BIAS":"","AGENT_DISPATCH_JOBS":""}), \
+       mock.patch.object(F,"_usage_states",return_value={h:"ok" for h in F.CAPACITY.HARNESSES}), \
+       mock.patch.object(F.CAPACITY,"_usage_cache",return_value=cache), \
+       mock.patch.object(F.CAPACITY,"_codex_api_score",return_value=None), \
+       mock.patch.object(F.CAPACITY,"capacity_scores",side_effect=lambda: capacity_scores(now=now)):
+   self.assertEqual(rank(),["claude","codex","opencode"])
+   payloads["claude"]["rs_7d"]=now+6*86400
+   payloads["codex"]["window_durations_seconds"]=[week]
+   self.assertEqual(rank(),["codex","claude","opencode"])
+   node["harness_policy"].update(primary=["claude"],last_resort=["codex","opencode"])
+   self.assertEqual(rank(),["claude","codex","opencode"])
+   node["harness_policy"].update(primary=["claude","codex"],last_resort=["opencode"])
+   payloads["codex"]={"windows":[["5h",90,now+600]],"window_durations_seconds":[18000]}
+   hops,context=F.ordered_fallback_hops(route,node,self.jobs)
+   self.assertEqual(context["rank"],["claude","codex","opencode"])
+   self.assertEqual(hops[0]["candidates"][0]["child_harness"],"claude")
+   output=io.StringIO()
+   with contextlib.redirect_stdout(output):
+    F.emit_allocation(context)
+   lines=output.getvalue().splitlines()
+   self.assertIn("capacity_headroom.codex=76.3",lines)
+   self.assertEqual([line for line in lines if line.startswith("capacity_raw_headroom.")],
+                    ["capacity_raw_headroom.claude=50.0","capacity_raw_headroom.codex=10.0"])
+
  def test_depth_affinity_leads_at_its_own_depth_and_flips_at_the_other(self):
   # Equal headroom and an empty registry, so the neutral order is exactly the
   # declared one. The preference is read from the node's own dispatch_depth:
