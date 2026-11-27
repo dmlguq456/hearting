@@ -57,11 +57,12 @@ def terminal_row(lines, code: int) -> dict:
     row = {"type": "result", "runtime": "opencode", "session_id": session,
            "subtype": "success" if success else "error_during_execution",
            "is_error": not success, "result": final_text, "exit_code": code}
-    if runtime_error:
+    if mismatch:
+        row["error"] = {"code": "opencode-session-identity-mismatch"}
+    elif runtime_error:
         row["error"] = runtime_error
     elif not success:
-        row["error"] = {"code": ("opencode-session-identity-mismatch" if mismatch
-                                 else "opencode-session-not-observed" if not session
+        row["error"] = {"code": ("opencode-session-not-observed" if not session
                                  else "opencode-final-text-missing" if code == 0
                                  else "opencode-exit-nonzero")}
     return row

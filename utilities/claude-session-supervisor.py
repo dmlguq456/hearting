@@ -75,6 +75,7 @@ from dispatch_supervisor_terminal import (
     classify_supervisor_error,
     classify_escaped_terminal_commit_error,
     reconcile_supervisor_terminal,
+    refused_without_result,
 )
 import commit_policy
 
@@ -1586,6 +1587,7 @@ def main(argv: list[str] | None = None) -> int:
                 process_rc != 0
                 or result.get("is_error") is True
                 or result.get("subtype") not in {None, "success"}
+                or refused_without_result(result, args.runtime_harness)
             ):
                 if stream_session is not None:
                     teardown_started_ns = time.monotonic_ns()
