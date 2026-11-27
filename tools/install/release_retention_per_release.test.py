@@ -59,6 +59,7 @@ class PerReleaseRetentionTest(unittest.TestCase):
         os.environ.pop("AGENT_DISPATCH_JOBS", None)
         self._row("done", f"artifact_root={self.project}")
         self._row("done", f"artifact_root={self.other}")
+        self._open: set[int] = set()
 
     # -- fixtures -----------------------------------------------------------
     def _release(self, name: str, order: int) -> Path:
@@ -115,12 +116,20 @@ class PerReleaseRetentionTest(unittest.TestCase):
         process = subprocess.Popen(
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, cwd=self.root, env=env)
-        self.addCleanup(process.wait, 5)
-        self.addCleanup(process.communicate, b"\n")
+        self.addCleanup(self._stop, process)
         # Read /proc only after the new program has started (its arguments and
         # environment are empty for a moment around exec).
         self.assertEqual(process.stdout.readline().strip(), b"ready")
         return process
+
+    @staticmethod
+    def _stop(process) -> None:
+        if process.poll() is None:
+            try:
+                process.communicate(b"\n", timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
 
     # -- (나) one unjudgeable record keeps only what it names ---------------
     def test_an_unrecognised_old_shape_record_elsewhere_keeps_only_what_it_names(self):
@@ -144,16 +153,18 @@ class PerReleaseRetentionTest(unittest.TestCase):
         unrelated, routed, newer, newest = self._family("v4.1.0", "v4.2.0", "v4.3.0", "v4.4.0")
         self._route(self.project, ROUTE_A, routed)
         self._row("open", f"route_id={ROUTE_A},attempt_id=att-live")
-        real_names = distribution._installed_release_names
+        real_roots = distribution._open_route_artifact_roots
         scans = []
 
-        def busy_host():
-            # A worker appends its heartbeat row while the scan runs.
+        def busy_host(*args, **kwargs):
+            # A worker appends its heartbeat row while the scan runs (only
+            # then: under the boundary a writer waits for the jobs lock).
             scans.append(1)
-            self._row("running", f"attempt_id=att-{len(scans)},launch_home={newest}")
-            return real_names()
+            if len(scans) == 1:
+                self._row("running", f"attempt_id=att-1,launch_home={newest}")
+            return real_roots(*args, **kwargs)
 
-        with mock.patch.object(distribution, "_installed_release_names", side_effect=busy_host):
+        with mock.patch.object(distribution, "_open_route_artifact_roots", side_effect=busy_host):
             output = self._cleanup()
         self.assertGreaterEqual(len(scans), 1)
         self.assertFalse(unrelated.exists(), output)
@@ -221,125 +232,426 @@ class PerReleaseRetentionTest(unittest.TestCase):
         self.assertTrue(held.is_dir(), output)
         self.assertFalse(unrelated.exists(), output)
 
-    # -- (다) a shell window started through a runtime projection ----------
-    def _bundles(self, releases: list[Path], start: float) -> dict[Path, float]:
-        """One linked claude bundle per release, an hour apart; returns their times."""
-        bundles = self.root / "claude" / ".harness" / "bundles"
-        times = {}
-        for index, release in enumerate(releases):
-            when = start + index * HOUR
-            bundle = bundles / f"release-{release.name}-000000000000-000000000000"
+    # -- 🔴1 a record a writer named first and filled later --------------------
+    def _route_body(self, route_id: str, release: Path) -> bytes:
+        return json.dumps({
+            "route_id": route_id, "schema_version": 2,
+            "launch_compatibility_tuple": {
+                "contract_version": 1,
+                "launch_home": {"kind": "launch_home", "path": str(release)},
+                "jobs_path": {"kind": "jobs_path", "path": str(self.jobs)},
+            },
+            "nodes": [{"id": "plan", "kind": "pipeline-stage", "terminal": True}],
+        }).encode("utf-8")
+
+    def _named_first(self, path: Path) -> int:
+        """Create `path` the way route writers do: the name first, `O_EXCL`, empty."""
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        self.addCleanup(lambda: os.close(descriptor) if descriptor in self._open else None)
+        self._open.add(descriptor)
+        return descriptor
+
+    def _fill(self, descriptor: int, body: bytes) -> None:
+        if descriptor in self._open:
+            os.write(descriptor, body)
+            os.close(descriptor)
+            self._open.discard(descriptor)
+
+    def test_a_record_filled_after_the_scan_read_it_empty_keeps_its_release(self):
+        named, other, newer, newest = self._family("v4.1.0", "v4.2.0", "v4.3.0", "v4.4.0")
+        record = self._routes(self.project) / f"{ROUTE_A}.json"
+        descriptor = self._named_first(record)
+        inode = os.fstat(descriptor).st_ino
+        real_paths = distribution._dispatch_cleanup_boundary_paths
+
+        def writer_finishes(*args, **kwargs):
+            # After the scan read the empty name, before the first boundary.
+            self._fill(descriptor, self._route_body(ROUTE_A, other))
+            return real_paths(*args, **kwargs)
+
+        with mock.patch.object(distribution, "_dispatch_cleanup_boundary_paths",
+                               side_effect=writer_finishes):
+            output = self._cleanup()
+        self.assertEqual(os.stat(record).st_ino, inode, "filled in place, not replaced")
+        self.assertTrue(other.is_dir(), output)
+        self.assertIn(f"open-route:{ROUTE_A}", output)
+        self.assertFalse(named.exists(), output)
+
+    def test_a_record_filled_after_it_was_read_under_the_boundary_keeps_its_release(self):
+        named, target, newer, newest = self._family("v4.1.0", "v4.2.0", "v4.3.0", "v4.4.0")
+        routes = self._routes(self.project)
+        record = routes / f"{ROUTE_A}.json"
+        state: dict = {}
+        real_paths = distribution._dispatch_cleanup_boundary_paths
+        real_carry = distribution._succeed_dispatch_state
+
+        def writer_names(*args, **kwargs):
+            # The name appears after the scan; the boundary reads it empty.
+            if "descriptor" not in state:
+                state["descriptor"] = self._named_first(record)
+            return real_paths(*args, **kwargs)
+
+        def writer_finishes(candidate, **kwargs):
+            # Filled after it was read, before the final check.
+            self._fill(state["descriptor"], self._route_body(ROUTE_A, target))
+            return real_carry(candidate, **kwargs)
+
+        with mock.patch.object(distribution, "_dispatch_cleanup_boundary_paths",
+                               side_effect=writer_names), \
+                mock.patch.object(distribution, "_succeed_dispatch_state",
+                                  side_effect=writer_finishes):
+            output = self._cleanup()
+        self.assertTrue(target.is_dir(), output)
+        self.assertIn(f"open-route:{ROUTE_A}", output)
+        self.assertFalse(named.exists(), output)
+
+    # -- 🔴2 a read that fails leaves the observation as it was ---------------
+    def test_a_directory_whose_read_failed_is_read_again_for_the_next_release(self):
+        named, first, newer, newest = self._family("v4.1.0", "v4.2.0", "v4.3.0", "v4.4.0")
+        routes = self._routes(self.project)
+        real_paths = distribution._dispatch_cleanup_boundary_paths
+        published = []
+
+        def publish(*args, **kwargs):
+            if not published:
+                published.append(self._route(self.project, ROUTE_B, named))
+                (routes / "rt-eeeeeeeeeeeeeeee.json").write_bytes(b"x" * 5000)
+            return real_paths(*args, **kwargs)
+
+        with mock.patch.object(distribution, "_ROUTE_RECORD_SCAN_MAX_BYTES", 4096), \
+                mock.patch.object(distribution, "_dispatch_cleanup_boundary_paths",
+                                  side_effect=publish):
+            output = self._cleanup()
+        # The unbounded record keeps every release it might name, the second
+        # candidate included: its directory is listed again, not skipped.
+        self.assertTrue(first.is_dir(), output)
+        self.assertTrue(named.is_dir(), output)
+        self.assertEqual(output.count("route-record-unreadable:"), 2, output)
+
+    def test_an_explicit_route_whose_read_failed_is_read_again_for_the_next_release(self):
+        named, first, newer, newest = self._family("v4.1.0", "v4.2.0", "v4.3.0", "v4.4.0")
+        elsewhere = self.root / "elsewhere" / f"{ROUTE_C}.json"
+        elsewhere.parent.mkdir()
+        bindings = self.state / "dispatch" / "owner-route-bindings"
+        real_paths = distribution._dispatch_cleanup_boundary_paths
+        calls = []
+
+        def publish(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                elsewhere.write_bytes(b"x" * 5000)
+                bindings.mkdir(parents=True)
+                (bindings / "owner.json").write_text(
+                    json.dumps({"route_file": str(elsewhere)}), encoding="utf-8")
+            elif len(calls) == 2:
+                # The same file, rewritten in place: its directory does not move.
+                with elsewhere.open("r+b") as handle:
+                    handle.truncate(0)
+                    handle.write(self._route_body(ROUTE_C, named))
+            return real_paths(*args, **kwargs)
+
+        with mock.patch.object(distribution, "_ROUTE_RECORD_SCAN_MAX_BYTES", 4096), \
+                mock.patch.object(distribution, "_dispatch_cleanup_boundary_paths",
+                                  side_effect=publish):
+            output = self._cleanup()
+        self.assertTrue(first.is_dir(), output)
+        self.assertIn("route-record-unreadable:", output)
+        self.assertTrue(named.is_dir(), output)
+        self.assertIn(f"open-route:{ROUTE_C}", output)
+
+    # -- 🔴3 an attestation reference appended while it was being read --------
+    def test_an_attestation_reference_appended_after_its_read_keeps_its_release(self):
+        import importlib.util
+        named, attested, newer, newest = self._family("v4.1.0", "v4.2.0", "v4.3.0", "v4.4.0")
+        refs = self.state / "dispatch" / "attestation-refs.jsonl"
+        refs.write_text("", encoding="utf-8")
+        attestation = self.root / "smoke.json"
+        attestation.write_text("{}", encoding="utf-8")
+        spec = importlib.util.spec_from_file_location(
+            "smoke_writer", Path(__file__).resolve().parents[1] / "smoke-attestation.py")
+        smoke = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(smoke)
+        real_snapshot = distribution._attestation_refs_snapshot
+        reads = []
+
+        def read_then_writer_appends(environ):
+            snapshot = real_snapshot(environ)
+            reads.append(1)
+            if len(reads) == 2:
+                # The smoke writer takes no jobs lock: it lands right after the
+                # first boundary's read.
+                smoke._record_release_input_refs(
+                    attestation, [{"path": str(attested / "utilities" / "runner.py")}],
+                    os.environ)
+            return snapshot
+
+        with mock.patch.object(distribution, "_attestation_refs_snapshot",
+                               side_effect=read_then_writer_appends):
+            output = self._cleanup()
+        self.assertIn(str(attested), refs.read_text(encoding="utf-8"))
+        self.assertTrue(attested.is_dir(), output)
+        self.assertIn(f"attested-input:{attestation}", output)
+        self.assertFalse(named.exists(), output)
+
+    # -- 🔴4 what an undecidable record spells, and whose names count ---------
+    def test_an_escaped_release_name_past_one_mebibyte_still_holds(self):
+        unrelated, escaped, broken, newer, newest = self._family(
+            "v4.1.0", "v4.2.0", "v4.3.0", "v4.4.0", "v4.5.0")
+        routes = self._routes(self.project)
+        spelled = str(self.releases) + "/" + escaped.name.replace(".", "\\u002e")
+        record = json.dumps({
+            "route_id": ROUTE_A, "schema_version": 2,
+            "launch_compatibility_tuple": {"contract_version": 1, "launch_home": {
+                "kind": "launch_home", "path": "@@"}},
+            "nodes": [{"id": "plan", "note": "x" * 1_048_576}],
+        }).replace('"@@"', '"' + spelled + '"')
+        (routes / f"{ROUTE_A}.json").write_text(record, encoding="utf-8")
+        self.assertGreater(len(record), distribution._ROUTE_RECORD_MAX_BYTES)
+        self.assertNotIn(escaped.name, record)
+        # A broken record under another name spells its release escaped too.
+        (routes / "2026-08-15_broken.json").write_text(
+            '{"nodes": [{"note": "resumed under ' + broken.name.replace(".", "\\u002e")
+            + '"', encoding="utf-8")
+        output = self._cleanup()
+        self.assertTrue(escaped.is_dir(), output)
+        self.assertIn(f"open-route:{ROUTE_A}", output)
+        self.assertTrue(broken.is_dir(), output)
+        self.assertIn("open-route:2026-08-15_broken", output)
+        self.assertFalse(unrelated.exists(), output)
+
+    def test_release_names_come_from_the_listing_that_found_the_candidates(self):
+        unrelated, named, newer, newest = self._family("v4.1.0", "v4.2.0", "v4.3.0", "v4.4.0")
+        self._old_shape(self._routes(self.other) / "2026-08-14_legacy-held.json",
+                        mention=f"resumed under {named.name}")
+        # A second listing that comes back empty must not empty every record.
+        with mock.patch.object(distribution, "_installed_release_names", return_value={}):
+            output = self._cleanup()
+        self.assertTrue(named.is_dir(), output)
+        self.assertFalse(unrelated.exists(), output)
+
+    def test_a_release_listing_that_fails_keeps_the_single_candidate(self):
+        unrelated, newer, newest = self._family("v4.1.0", "v4.2.0", "v4.3.0")
+        with mock.patch.object(distribution, "_installed_release_names", return_value=None):
+            removed, why = distribution._prune_release_under_writer_boundary(unrelated)
+        self.assertEqual((removed, why), (False, "route-discovery-unreliable:release-names"))
+        self.assertTrue(unrelated.is_dir())
+
+    # -- 🔴5 a process without its descriptor, placed only by exact times -----
+    def _project(self, release: Path, runtime_home: Path | None = None,
+                 when: float | None = None) -> Path:
+        """Point a runtime's `hearting` link at `release` through a linked bundle.
+
+        `when` writes the activation's times as the first round read them: the
+        bundle's `created_at` and the link's mtime (its ctime stays real).
+        """
+        home = runtime_home or self.root / "claude"
+        bundle = home / ".harness" / "bundles" / f"release-{release.name}-000000000000-000000000000"
+        if not bundle.exists():
             bundle.mkdir(parents=True)
             (bundle / "source").symlink_to(release, target_is_directory=True)
-            (bundle / "bundle.json").write_text(json.dumps({
-                "schema": 2, "runtime": "claude", "source_root": str(release),
-                "source_revision": f"release:{release.name}:000000000000",
-                "source_link": True, "checksum": "0" * 64, "external_dependencies": [],
-                "created_at": dt.datetime.fromtimestamp(when, dt.timezone.utc).isoformat(),
-            }), encoding="utf-8")
-            times[release] = when
-        projection = self.root / "claude" / "hearting"
-        projection.symlink_to(bundles / f"release-{releases[-1].name}-000000000000-000000000000"
-                              / "source", target_is_directory=True)
-        moved = start + (len(releases) - 1) * HOUR
-        os.utime(projection, (moved, moved), follow_symlinks=False)
-        os.utime(self.data / "current", (moved, moved), follow_symlinks=False)
-        return times
+            if when is not None:
+                (bundle / "bundle.json").write_text(json.dumps({
+                    "schema": 2, "runtime": home.name, "source_root": str(release),
+                    "source_revision": f"release:{release.name}:000000000000",
+                    "source_link": True, "checksum": "0" * 64,
+                    "created_at": dt.datetime.fromtimestamp(when, dt.timezone.utc).isoformat(),
+                }), encoding="utf-8")
+        link = home / "hearting"
+        staged = link.with_name("hearting.next")
+        staged.symlink_to(bundle / "source", target_is_directory=True)
+        # destructive-ok: reason=move this test's synthetic runtime link the way activation does; boundary=one hearting symlink under this test's temporary root
+        os.replace(staged, link)
+        if when is not None:
+            os.utime(link, (when, when), follow_symlinks=False)
+        return link
 
-    def test_a_long_lived_shell_window_keeps_only_the_release_it_started_under(self):
-        names = ["v4.40.0", "v4.41.0", "v4.42.0", "v4.43.0", "v4.44.0", "v4.45.0", "v4.46.0"]
-        family = self._family(*names)
-        start = 1_790_000_000.0
-        times = self._bundles(family, start)
-        # Started ten minutes after v4.42.0 became the projection target.
-        started_at = times[family[2]] + 600
-        window = self._started([sys.executable,
-                                str(self.root / "claude" / "hearting" / "utilities" / "runner.py")])
+    def _window(self, link: Path):
+        return self._started([sys.executable, str(link / "utilities" / "runner.py")])
+
+    def _held_at(self, process, started_at: float, releases: list[Path]) -> dict[str, bool]:
         real_started = distribution._process_started_at
 
         def started(entry):
-            return started_at if entry.name == str(window.pid) else real_started(entry)
+            return started_at if entry.name == str(process.pid) else real_started(entry)
 
         with mock.patch.object(distribution, "_process_started_at", side_effect=started):
-            held = {release.name: distribution._release_held_by_live_process(release)[0]
-                    for release in family}
-            output = self._cleanup()
-        # The release it started under and one on each side.
-        self.assertEqual(held, {
-            "v4.40.0": False, "v4.41.0": True, "v4.42.0": True, "v4.43.0": True,
-            "v4.44.0": False, "v4.45.0": False, "v4.46.0": False,
-        })
-        for name in ("v4.41.0", "v4.42.0", "v4.43.0", "v4.45.0", "v4.46.0"):
-            self.assertTrue((self.releases / name).is_dir(), f"{name}: {output}")
-        for name in ("v4.40.0", "v4.44.0"):
-            self.assertFalse((self.releases / name).exists(), f"{name}: {output}")
-        # Their dead linked bundles went with them; every other bundle stays.
-        bundles = self.root / "claude" / ".harness" / "bundles"
-        self.assertEqual(sorted(path.name.split("-")[1] for path in bundles.iterdir()),
-                         ["v4.41.0", "v4.42.0", "v4.43.0", "v4.45.0", "v4.46.0"])
+            return {release.name: distribution._release_held_by_live_process(release)[0]
+                    for release in releases}
 
-    def test_a_hook_or_launcher_link_is_placed_like_the_projection(self):
-        # Activation also links hooks through a bundle (21 rewake hooks held
-        # every release on 2026-11-27), and a launcher's text names `current`.
+    # The three scenes of review 2026-11-27: each lost the release an open
+    # window started under, by placing it on the activation history.
+    T0 = 1_790_000_000.0
+
+    def test_a_window_started_while_another_harness_moved_keeps_its_release(self):
         family = self._family("v4.40.0", "v4.41.0", "v4.42.0", "v4.43.0", "v4.44.0")
-        times = self._bundles(family, 1_790_000_000.0)
-        bundles = self.root / "claude" / ".harness" / "bundles"
-        hook = self.root / "claude" / "hooks" / "rewake.py"
-        hook.parent.mkdir(parents=True)
-        hook.symlink_to(bundles / f"release-{family[-1].name}-000000000000-000000000000"
-                        / "source" / "utilities" / "runner.py")
-        os.utime(hook, (times[family[-1]], times[family[-1]]), follow_symlinks=False)
+        a, b, c, d, e = family
+        link = self._project(a, when=self.T0)
+        for hour, release in ((1, b), (2, c), (3, d)):
+            self._project(release, self.root / "codex", when=self.T0 + hour * HOUR)
+        window = self._window(link)
+        self._project(e, when=self.T0 + 4 * HOUR)
+        held = self._held_at(window, self.T0 + 3.5 * HOUR, family)
+        self.assertTrue(held[a.name], held)
+
+    def test_a_window_started_while_its_link_was_moved_back_keeps_its_release(self):
+        family = self._family("v4.40.0", "v4.41.0", "v4.42.0", "v4.43.0", "v4.44.0")
+        a, b, c, d, e = family
+        for hour, release in ((0, a), (1, b), (2, c), (3, d), (4, a)):
+            link = self._project(release, when=self.T0 + hour * HOUR)
+        window = self._window(link)
+        self._project(e, when=self.T0 + 5 * HOUR)
+        held = self._held_at(window, self.T0 + 4.5 * HOUR, family)
+        self.assertTrue(held[a.name], held)
+
+    def test_a_last_move_whose_mtime_lies_in_the_past_does_not_place_a_window(self):
+        family = self._family("v4.40.0", "v4.41.0", "v4.42.0", "v4.43.0")
+        old, mid, under, moved_to = family
+        link = self._project(under, when=self.T0)
+        window = self._window(link)
+        # Moved after the window started, but the link's mtime says two hours
+        # before it: only the rename's ctime is when it moved.
+        self._project(moved_to, when=self.T0 + HOUR)
+        held = self._held_at(window, self.T0 + 2 * HOUR, family)
+        self.assertTrue(held[under.name], held)
+        self.assertTrue(all(held.values()), "an unplaced window keeps the family")
+
+    def test_a_window_started_after_its_link_last_moved_holds_only_that_target(self):
+        family = self._family("v4.40.0", "v4.41.0", "v4.42.0", "v4.43.0")
+        link = self._project(family[2])
         launcher = self.root / "bin" / "tool"
         launcher.parent.mkdir()
         launcher.symlink_to(self.data / "current" / "utilities" / "runner.py")
-        hooked = self._started([sys.executable, str(hook)])
+        after = max(distribution._pointer_moved_at(link),
+                    distribution._pointer_moved_at(self.data / "current"))
+        after += distribution._POINTER_ROTATION_MARGIN_SECONDS + 1
+        window = self._window(link)
+        self.assertEqual(self._held_at(window, after, family),
+                         {"v4.40.0": False, "v4.41.0": False, "v4.42.0": True, "v4.43.0": False})
+        self._stop(window)
         launched = self._started([sys.executable, str(launcher)])
-        real_started = distribution._process_started_at
+        self.assertEqual(self._held_at(launched, after, family),
+                         {"v4.40.0": False, "v4.41.0": False, "v4.42.0": False, "v4.43.0": True})
 
-        def started(entry):
-            if entry.name == str(hooked.pid):
-                return times[family[1]] + 600
-            return real_started(entry)
+    # -- 🔴5 the shell window, its host and the rewake hook show their release --
+    def _install_shell(self, release: Path) -> None:
+        source = Path(__file__).resolve().parents[2]
+        before = release.stat()
+        for relative in ("utilities/session-shell/entry.py", "utilities/session-shell/host.cjs",
+                         "utilities/session_shell.py", "hooks/peer-steward-rewake.py"):
+            target = release / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((source / relative).read_bytes())
+        for directory in (release, release / "utilities", release / "hooks"):
+            os.utime(directory, ns=(before.st_atime_ns, before.st_mtime_ns))
 
-        with mock.patch.object(distribution, "_process_started_at", side_effect=started):
-            held = [distribution._release_held_by_live_process(release)[0] for release in family]
-        # The hook started under v4.41.0 (and holds one on each side); the
-        # launcher started after `current` last moved, so it holds only today's
-        # target. Neither holds v4.43.0.
-        self.assertEqual(held, [True, True, True, False, True])
+    def _loaded(self, module: Path):
+        """A process that imports `module` from the path given, as its launcher would."""
+        return self._started([
+            sys.executable, "-c",
+            "import importlib.util, sys\n"
+            "spec = importlib.util.spec_from_file_location('launched', sys.argv[1])\n"
+            "module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)\n"
+            "print('ready', flush=True); sys.stdin.readline()\n",
+            str(module)])
 
-    def test_a_start_older_than_every_activation_still_keeps_the_family(self):
-        family = self._family("v4.40.0", "v4.41.0", "v4.42.0")
-        times = self._bundles(family, 1_790_000_000.0)
-        window = self._started([sys.executable,
-                                str(self.root / "claude" / "hearting" / "utilities" / "runner.py")])
-        real_started = distribution._process_started_at
+    def _hosted(self, host: Path):
+        import shutil
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        preload = self.root / "hold.cjs"
+        # Stop the host where it would leave (no terminal here) and stay up.
+        preload.write_text(
+            "const leave = process.exit.bind(process);\n"
+            "process.exit = () => { throw new Error('held by the test'); };\n"
+            "process.on('uncaughtException', () => process.stdout.write('ready\\n'));\n"
+            "process.stdin.on('data', () => leave(0));\n", encoding="utf-8")
+        return self._started([node, "--require", str(preload), str(host), "claude", "native"])
 
-        def started(entry):
-            if entry.name == str(window.pid):
-                return times[family[0]] - HOUR
-            return real_started(entry)
+    def test_the_shell_window_host_and_rewake_hook_hold_their_release_by_descriptor(self):
+        family = self._family("v4.40.0", "v4.41.0", "v4.42.0", "v4.43.0", "v4.44.0")
+        started_under = family[0]
+        self._install_shell(started_under)
+        link = self._project(started_under)
+        hearting = self.root / "claude" / "hearting"
+        for name, launch in (
+                ("entry.py", lambda: self._loaded(hearting / "utilities/session-shell/entry.py")),
+                ("host.cjs", lambda: self._hosted(hearting / "utilities/session-shell/host.cjs")),
+                ("peer-steward-rewake.py",
+                 lambda: self._loaded(hearting / "hooks/peer-steward-rewake.py"))):
+            with self.subTest(name):
+                self._project(started_under)
+                process = launch()
+                # An update moves the link after the window started.
+                self._project(family[-1])
+                self.assertEqual(distribution._release_held_by_live_process(started_under),
+                                 (True, f"live-process:{process.pid}"))
+                self.assertEqual(distribution._release_held_by_live_process(family[1]),
+                                 (False, ""))
+                self._stop(process)
+        self._project(started_under)
+        window = self._loaded(hearting / "utilities/session-shell/entry.py")
+        self._project(family[-1])
+        output = self._cleanup()
+        self.assertTrue(started_under.is_dir(), output)
+        self.assertIn(f"live-process:{window.pid}", output)
+        self.assertFalse(family[1].exists(), output)
+        self.assertFalse(family[2].exists(), output)
+        self.assertTrue(link.is_symlink())
 
-        with mock.patch.object(distribution, "_process_started_at", side_effect=started):
-            self.assertEqual(distribution._release_held_by_live_process(family[0]),
-                             (True, f"live-process:{window.pid}:unsealed-projection"))
+    def test_the_native_harness_never_inherits_the_window_descriptor(self):
+        # Outside a terminal the window execs the native harness at once; the
+        # descriptor closes on exec and the argv reaches it unchanged.
+        checkout = Path(__file__).resolve().parents[2]
+        native = self.root / "native"
+        native.write_text(
+            "#!" + sys.executable + "\nimport json, os, sys\n"
+            "fds = {}\n"
+            "for name in os.listdir('/proc/self/fd'):\n"
+            "    try: fds[name] = os.readlink('/proc/self/fd/' + name)\n"
+            "    except OSError: pass\n"
+            "print(json.dumps({'argv': sys.argv[1:], 'fds': fds}))\n", encoding="utf-8")
+        native.chmod(0o700)
+        result = subprocess.run(
+            [sys.executable, str(checkout / "utilities/session-shell/entry.py"), "claude",
+             str(native), "a b", "--native-flag"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=True)
+        seen = json.loads(result.stdout)
+        self.assertEqual(seen["argv"], ["a b", "--native-flag"])
+        self.assertNotIn(str(checkout), seen["fds"].values())
 
-    def test_a_release_the_history_cannot_place_stays_with_old_windows(self):
-        family = self._family("v4.40.0", "v4.41.0", "v4.42.0", "v4.43.0")
-        times = self._bundles(family, 1_790_000_000.0)
-        unplaced = self._release("v4.39.9-hand-made", 10)
-        window = self._started([sys.executable,
-                                str(self.root / "claude" / "hearting" / "utilities" / "runner.py")])
-        real_started = distribution._process_started_at
+    # -- 🔴6 a descriptor the process names, unreadable while it lives --------
+    def test_an_unreadable_named_descriptor_of_a_live_process_keeps_the_release(self):
+        held, newest = self._family("v4.1.0", "v4.2.0")
+        descriptor = os.open(held, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            process = subprocess.Popen(
+                [sys.executable, "-c",
+                 "import sys; print('ready', flush=True); sys.stdin.readline()",
+                 "--worktree", f"/proc/self/fd/{descriptor}"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                pass_fds=(descriptor,), cwd=self.root, env={"PATH": os.environ.get("PATH", "")})
+        finally:
+            # Only the child holds the release; this scanner must not.
+            os.close(descriptor)
+        self.addCleanup(process.wait, 5)
+        self.assertEqual(process.stdout.readline().strip(), b"ready")
+        named = f"/proc/{process.pid}/fd/{descriptor}"
+        real_readlink = os.readlink
 
-        def started(entry):
-            if entry.name == str(window.pid):
-                return times[family[1]] + 60 + 1
-            return real_started(entry)
+        def denied(path, *args, **kwargs):
+            if str(path) == named:
+                raise PermissionError(13, "fixture: descriptor not readable", str(path))
+            return real_readlink(path, *args, **kwargs)
 
-        with mock.patch.object(distribution, "_process_started_at", side_effect=started):
-            self.assertTrue(distribution._release_held_by_live_process(unplaced)[0])
-            self.assertFalse(distribution._release_held_by_live_process(family[3])[0])
+        self.assertEqual(distribution._release_held_by_live_process(held),
+                         (True, f"live-process:{process.pid}"))
+        with mock.patch.object(distribution.os, "readlink", side_effect=denied):
+            self.assertEqual(distribution._release_held_by_live_process(held),
+                             (True, f"live-process:{process.pid}:descriptor-unreadable"))
+        process.communicate(b"\n", timeout=5)
+        with mock.patch.object(distribution.os, "readlink", side_effect=denied):
+            self.assertEqual(distribution._release_held_by_live_process(held), (False, ""))
 
     def test_a_proc_self_argument_is_not_a_projection(self):
         # dispatch passes `--worktree /proc/self/fd/5`; resolved by the scanner
@@ -357,55 +669,6 @@ class PerReleaseRetentionTest(unittest.TestCase):
                                return_value={descriptor: (info.st_dev, info.st_ino)}):
             self.assertEqual(distribution._release_held_by_live_process(held), (False, ""),
                              f"pid {process.pid}")
-
-
-class DeadReleaseBundleTest(unittest.TestCase):
-    def test_only_dead_linked_bundles_of_managed_releases_go(self):
-        with tempfile.TemporaryDirectory(prefix="rb-") as tmp:
-            root = Path(tmp).resolve()
-            releases = root / "data" / "hearting" / "releases"
-            live = releases / "v4.2.0"
-            live.mkdir(parents=True)
-            gone = releases / "v4.1.0"
-            homes = {"claude": root / "claude", "codex": root / "codex",
-                     "opencode": root / "config" / "opencode"}
-
-            def bundle(home: Path, runtime: str, release: Path, **changes) -> Path:
-                path = home / ".harness" / "bundles" / f"release-{release.name}-k-k"
-                path.mkdir(parents=True)
-                (path / "source").symlink_to(release, target_is_directory=True)
-                metadata = {"schema": 2, "runtime": runtime, "source_root": str(release),
-                            "source_revision": f"release:{release.name}:k", "source_link": True,
-                            "checksum": "0" * 64, "created_at": "2026-11-27T00:00:00+00:00"}
-                metadata.update(changes)
-                (path / "bundle.json").write_text(json.dumps(metadata), encoding="utf-8")
-                return path
-
-            dead = {runtime: bundle(home, runtime, gone) for runtime, home in homes.items()}
-            kept_live = bundle(homes["claude"], "claude", live)
-            copied = homes["codex"] / ".harness" / "bundles" / "release-v4.0.0-c-c"
-            (copied / "source").mkdir(parents=True)
-            (copied / "bundle.json").write_text(json.dumps({
-                "runtime": "codex", "source_link": False, "source_root": str(releases / "v4.0.0"),
-                "source_revision": "release:v4.0.0:c"}), encoding="utf-8")
-            foreign = bundle(homes["opencode"], "opencode", releases / "v3.0.0")
-            (foreign / "notes.txt").write_text("someone's file", encoding="utf-8")
-            unmarked = bundle(homes["codex"], "codex", releases / "v3.9.0", source_link=False)
-            projected = bundle(homes["opencode"], "opencode", releases / "v3.8.0")
-            (homes["opencode"] / "hearting").symlink_to(projected / "source")
-            environment = {
-                "HARNESS_DATA_ROOT": str(root / "data" / "hearting"),
-                "CLAUDE_CONFIG_DIR": str(homes["claude"]), "CODEX_HOME": str(homes["codex"]),
-                "XDG_CONFIG_HOME": str(root / "config"),
-            }
-            with mock.patch.dict(os.environ, environment):
-                removed = distribution._remove_dead_release_bundles()
-            self.assertEqual(sorted(removed), sorted(dead.values()))
-            for path in dead.values():
-                self.assertFalse(path.exists())
-            for path in (kept_live, copied, foreign, unmarked, projected):
-                self.assertTrue(path.is_dir(), path)
-
 
 if __name__ == "__main__":
     unittest.main()

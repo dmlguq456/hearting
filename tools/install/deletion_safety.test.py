@@ -664,34 +664,50 @@ class ReleaseHeldByLiveProcessTest(unittest.TestCase):
             self.assertEqual(distribution._release_held_by_live_process(old),
                              (True, f"live-process:{projected.pid}:unsealed-projection"))
 
+    def _starting_at(self, process, when: float):
+        """Report `when` as this one process's start time."""
+        real = distribution._process_started_at
+        return mock.patch.object(
+            distribution, "_process_started_at",
+            side_effect=lambda entry: when if entry.name == str(process.pid) else real(entry))
+
     def test_a_process_started_through_current_after_it_moved_holds_only_its_target(self):
         # A merge-line run started through `current` minutes after an update
         # held every installed release (54 kept on 2026-11-04). Starting after
         # the pointer's last move means it could only load the present target.
         import time
+        margin = distribution._POINTER_ROTATION_MARGIN_SECONDS
         with tempfile.TemporaryDirectory() as tmp:
             old, new, current = self._release_family(tmp)
             rotated = current.with_name("current.next")
             rotated.symlink_to(new, target_is_directory=True)
             # destructive-ok: reason=rotate this test's temporary current pointer; boundary=current symlink under TemporaryDirectory
             os.replace(rotated, current)
+            moved = distribution._pointer_moved_at(current)
             projected = self._started(
                 [sys.executable, str(current / "utilities" / "runner.py")], tmp)
-            moved = time.time() - 3600
-            os.utime(current, (moved, moved), follow_symlinks=False)
-            self.assertEqual(distribution._release_held_by_live_process(old), (False, ""))
+            held = (True, f"live-process:{projected.pid}:unsealed-projection")
+            with self._starting_at(projected, moved + margin + 1):
+                self.assertEqual(distribution._release_held_by_live_process(old), (False, ""))
             # Within the margin of the move, or before it, the family stays held.
-            os.utime(current, (time.time(), time.time()), follow_symlinks=False)
-            self.assertEqual(distribution._release_held_by_live_process(old),
-                             (True, f"live-process:{projected.pid}:unsealed-projection"))
+            with self._starting_at(projected, moved + margin - 1):
+                self.assertEqual(distribution._release_held_by_live_process(old), held)
+            # A move time set into the past is not when the link moved: the
+            # rename set its ctime (review 2026-11-27, a skewed last move).
+            earlier = time.time() - 3600
+            os.utime(current, (earlier, earlier), follow_symlinks=False)
+            with self._starting_at(projected, earlier + margin + 600):
+                self.assertEqual(distribution._release_held_by_live_process(old), held)
             # Any other link into the family keeps it held whatever the times.
-            os.utime(current, (moved, moved), follow_symlinks=False)
             other = Path(tmp).resolve() / "pinned"
             other.symlink_to(new, target_is_directory=True)
             linked = self._started(
                 [sys.executable, str(other / "utilities" / "runner.py")], tmp)
-            self.assertEqual(distribution._release_held_by_live_process(old),
-                             (True, f"live-process:{linked.pid}:unsealed-projection"))
+            # `utime` changed the link's ctime too: place the first process after it.
+            moved = distribution._pointer_moved_at(current)
+            with self._starting_at(projected, moved + margin + 1):
+                self.assertEqual(distribution._release_held_by_live_process(old),
+                                 (True, f"live-process:{linked.pid}:unsealed-projection"))
 
     def test_an_update_keeps_where_current_pointed_before_it_moved_it(self):
         # The update moves `current` right before it prunes, so every process
@@ -699,6 +715,7 @@ class ReleaseHeldByLiveProcessTest(unittest.TestCase):
         # it (remembered first), such a process can only hold that previous
         # target or the new one (RV-BC-P4A R1).
         import time
+        margin = distribution._POINTER_ROTATION_MARGIN_SECONDS
         with tempfile.TemporaryDirectory() as tmp:
             old, new, current = self._release_family(tmp)
             mid = old.parent / "v-mid"
@@ -709,21 +726,25 @@ class ReleaseHeldByLiveProcessTest(unittest.TestCase):
             step.symlink_to(mid, target_is_directory=True)
             # destructive-ok: reason=rotate this test's temporary current pointer; boundary=current symlink under TemporaryDirectory
             os.replace(step, current)
-            earlier = time.time() - 7200
-            os.utime(current, (earlier, earlier), follow_symlinks=False)
             projected = self._started(
                 [sys.executable, str(current / "utilities" / "runner.py")], tmp)
             with mock.patch.dict(distribution._PRIOR_POINTER_MOVES, clear=True):
                 distribution._remember_prior_pointer_move(current)
+                remembered = distribution._PRIOR_POINTER_MOVES[str(current)][0]
+                time.sleep(0.05)
                 step.symlink_to(new, target_is_directory=True)
                 # destructive-ok: reason=rotate this test's temporary current pointer; boundary=current symlink under TemporaryDirectory
                 os.replace(step, current)
-                self.assertEqual(distribution._release_held_by_live_process(old), (False, ""))
-                held = (True, f"live-process:{projected.pid}:unsealed-projection")
-                self.assertEqual(distribution._release_held_by_live_process(mid), held)
-                distribution._PRIOR_POINTER_MOVES.clear()
-                # Without the remembered move the whole family stays held.
-                self.assertEqual(distribution._release_held_by_live_process(old), held)
+                moved = distribution._pointer_moved_at(current)
+                self.assertLess(remembered, moved)
+                # Started after the remembered move, before this one.
+                with self._starting_at(projected, remembered + margin + (moved - remembered) / 2):
+                    self.assertEqual(distribution._release_held_by_live_process(old), (False, ""))
+                    held = (True, f"live-process:{projected.pid}:unsealed-projection")
+                    self.assertEqual(distribution._release_held_by_live_process(mid), held)
+                    distribution._PRIOR_POINTER_MOVES.clear()
+                    # Without the remembered move the whole family stays held.
+                    self.assertEqual(distribution._release_held_by_live_process(old), held)
 
     def test_a_release_cairn_sync_names_is_an_external_pin(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -743,105 +764,42 @@ class ReleaseHeldByLiveProcessTest(unittest.TestCase):
                 config.write_text(json.dumps(["not", "an", "object"]))
                 self.assertEqual(distribution._release_external_pin(pinned), "")
 
-    def test_bytecode_whose_source_is_gone_goes_and_nothing_else(self):
-        # 2026-11-27: 8.3 GB of shared-prefix bytecode, 1.0 GB of it for sources
-        # that no longer exist (deleted /dev/shm copies, removed worktrees and
-        # releases). Python never reads a prefixed .pyc without its source.
+    def test_bytecode_of_a_removed_source_tree_goes_after_seven_quiet_days(self):
         import time
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp).resolve()
             state, data = base / "state", base / "data"
             cache = state / "pycache"
+            live_source = base / "src" / "live"
+            live_source.mkdir(parents=True)
 
-            def mirror(source: Path) -> Path:
+            def cache_of(source: Path) -> Path:
                 path = cache.joinpath(*source.parts[1:])
                 path.mkdir(parents=True, exist_ok=True)
+                (path / "mod.cpython-312.pyc").write_bytes(b"pyc")
                 return path
 
-            live = base / "src" / "live"
-            live.mkdir(parents=True)
-            for name in ("kept.py", "x.test.py"):
-                (live / name).write_text("VALUE = 1\n", encoding="utf-8")
-            live_cache = mirror(live)
-            names = {
-                "kept.cpython-312.pyc": True, "kept.cpython-312.opt-1.pyc": True,
-                "x.test.cpython-312.pyc": True, "gone.cpython-312.pyc": False,
-                "gone.cpython-312.opt-2.pyc": False, "odd.pyc": True,
-                "notes.txt": True,
-            }
-            for name in names:
-                (live_cache / name).write_bytes(b"pyc")
-            (live_cache / "link.cpython-312.pyc").symlink_to(live_cache / "odd.pyc")
-            removed_tree = mirror(base / "src" / "removed-worktree" / "pkg")
-            (removed_tree / "mod.cpython-312.pyc").write_bytes(b"pyc")
-            (removed_tree / "anything.pyc").write_bytes(b"pyc")
-            kept_foreign = mirror(base / "src" / "removed-with-a-note")
-            (kept_foreign / "mod.cpython-312.pyc").write_bytes(b"pyc")
-            (kept_foreign / "README").write_text("not bytecode", encoding="utf-8")
-            gone_release = mirror(data / "releases" / "v-gone" / "tools")
-            (gone_release / "probe.cpython-312.pyc").write_bytes(b"pyc")
-            fresh = time.time()
-            os.utime(removed_tree / "mod.cpython-312.pyc", (fresh, fresh))
-            hung = base / "src" / "hung"
-            (hung / "deeper").mkdir(parents=True)
-            hung_cache = mirror(hung / "deeper")
-            (hung_cache / "lost.cpython-312.pyc").write_bytes(b"pyc")
-            real_listing = distribution._list_source_directory
-
-            def listing(path):
-                if path.startswith(str(hung)):
-                    time.sleep(2)
-                return real_listing(path)
-
+            live = cache_of(live_source)
+            gone_old = cache_of(base / "src" / "removed-worktree")
+            gone_new = cache_of(base / "tmp-root-of-a-running-test")
+            release = cache_of(data / "releases" / "v-gone")
+            quiet = time.time() - distribution._ORPHAN_PYCACHE_QUIET_SECONDS - 3600
+            for path in (live, gone_old, release, *gone_old.iterdir(), *release.iterdir(),
+                         *live.iterdir()):
+                os.utime(path, (quiet, quiet))
+            # The fixture root itself may sit deeper than production's walk depth.
             with patch_split(distribution, "state_root", return_value=state), \
                     mock.patch.object(distribution, "data_root", return_value=data), \
-                    mock.patch.object(distribution, "_ORPHAN_PYCACHE_PROBE_SECONDS", 0.5), \
-                    mock.patch.object(distribution, "_mount_point", side_effect=lambda path: path), \
-                    mock.patch.object(distribution, "_list_source_directory", side_effect=listing):
+                    mock.patch.object(distribution, "_ORPHAN_PYCACHE_DEPTH",
+                                      len(base.parts) + 3):
                 removed = distribution._cleanup_orphan_source_pycache()
-            for name, stays in names.items():
-                self.assertEqual((live_cache / name).exists(), stays, name)
-            self.assertTrue((live_cache / "link.cpython-312.pyc").is_symlink())
-            # A whole tree whose source directory is gone, however recent.
-            self.assertFalse(removed_tree.exists())
-            self.assertFalse(removed_tree.parent.exists())
-            self.assertFalse(gone_release.exists())
-            # Only .pyc files go; a directory still holding something else stays.
-            self.assertFalse((kept_foreign / "mod.cpython-312.pyc").exists())
-            self.assertTrue((kept_foreign / "README").is_file())
-            # A source directory that does not answer keeps its bytecode.
-            self.assertTrue((hung_cache / "lost.cpython-312.pyc").is_file())
-            self.assertTrue(cache.is_dir())
-            self.assertIn(removed_tree / "mod.cpython-312.pyc", removed)
-            self.assertTrue(all(path.name.endswith(".pyc") for path in removed))
-
-    def test_bytecode_sweep_keeps_an_unreadable_source_and_stays_inside_its_root(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp).resolve()
-            state = base / "state"
-            cache = state / "pycache"
-            source = base / "src" / "locked"
-            source.mkdir(parents=True)
-            mirror = cache.joinpath(*source.parts[1:])
-            mirror.mkdir(parents=True)
-            (mirror / "gone.cpython-312.pyc").write_bytes(b"pyc")
-            outside = base / "outside"
-            outside.mkdir()
-            (outside / "gone.cpython-312.pyc").write_bytes(b"pyc")
-            (mirror / "escape").symlink_to(outside, target_is_directory=True)
-            real_listing = distribution._list_source_directory
-
-            def listing(path):
-                if path == str(source):
-                    raise PermissionError("fixture: unreadable source directory")
-                return real_listing(path)
-
-            with patch_split(distribution, "state_root", return_value=state), \
-                    mock.patch.object(distribution, "_list_source_directory", side_effect=listing):
-                distribution._cleanup_orphan_source_pycache()
-            self.assertTrue((mirror / "gone.cpython-312.pyc").is_file())
-            self.assertTrue((outside / "gone.cpython-312.pyc").is_file())
-            self.assertTrue((mirror / "escape").is_symlink())
+            self.assertEqual(removed, [gone_old])
+            self.assertFalse(gone_old.exists())
+            # A live source, a recently used cache and release caches (their own
+            # pin rules) stay.
+            self.assertTrue(live.exists())
+            self.assertTrue(gone_new.exists())
+            self.assertTrue(release.exists())
 
     def test_code_given_with_c_or_m_leaves_the_script_unknown(self):
         script = "/data/releases/v-new/utilities/runner.py"

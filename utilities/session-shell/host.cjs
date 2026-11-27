@@ -6,6 +6,10 @@ const crypto = require('node:crypto');
 const cp = require('node:child_process');
 const path = require('node:path');
 const readline = require('node:readline');
+// The release this host runs from stays visible to the installer's /proc scan for as long as the
+// window lives, as dispatch_contract._CODE_ROOT_FD does; Node opens it close-on-exec, so the
+// native child never sees it. An update moves the link this host was started through.
+try { fs.openSync(path.resolve(__dirname, '..', '..'), 'r'); } catch {}
 const args = process.argv.slice(2), harness = args.shift(), command = args;
 let activated = false, child, inputOwner, mouseInput, backend, server, projectionTimer, frameTimer, ended = false;
 function startupResult(value) {
