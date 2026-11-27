@@ -174,19 +174,35 @@ class KindCell(unittest.TestCase):
         previous, old_tint = dict(render._COLOR), render._TINT_OK
         self.addCleanup(lambda: (render._COLOR.clear(), render._COLOR.update(previous)))
         self.addCleanup(setattr, render, "_TINT_OK", old_tint)
-        for colors in (256, 8):
+        # 11-27 (and review of #1898): the zone rule's line takes the zone's pair dimmed only where that reads as the name's hue one
+        # step down: 256 colors, `NO_COLOR` unset, a terminal that draws a colored cell dimmed (terminfo `dim`, `ncv` without dim).
+        # Elsewhere it is the dim line it was; the zone names' own pairs are the same in every case.
+        dim = 1 << 21
+        for label, colors, no_color, attrs, ncv, tinted in (
+                ("xterm-256color", 256, None, dim | 1 << 20, -1, True),
+                ("xterm-256color NO_COLOR=1", 256, "1", dim | 1 << 20, -1, False),
+                ("rxvt-unicode-256color (no dim)", 256, None, 1 << 20, 0, False),
+                ("256 colors, ncv forbids dim with color", 256, None, dim | 1 << 20, 16, False),
+                ("8 colors", 8, None, dim | 1 << 20, -1, False)):
             final = {}
-            with mock.patch.multiple(render.curses, create=True, COLORS=colors, start_color=mock.Mock(), use_default_colors=mock.Mock(),
-                                     can_change_color=mock.Mock(return_value=False), A_BOLD=1 << 20, A_DIM=1 << 21,
+            env = {key: value for key, value in os.environ.items() if key != "NO_COLOR"}
+            if no_color is not None:
+                env["NO_COLOR"] = no_color
+            with mock.patch.dict(os.environ, env, clear=True), \
+                 mock.patch.multiple(render.curses, create=True, COLORS=colors, start_color=mock.Mock(), use_default_colors=mock.Mock(),
+                                     can_change_color=mock.Mock(return_value=False), A_BOLD=1 << 20, A_DIM=dim,
+                                     termattrs=mock.Mock(return_value=attrs), tigetnum=mock.Mock(return_value=ncv),
                                      init_pair=mock.Mock(side_effect=lambda n, fg, bg: final.__setitem__(n, (fg, bg))),
                                      color_pair=mock.Mock(side_effect=lambda n: n << 8)):
                 render._init_colors()
             for number, (name, hue) in enumerate(palette._ZONE_256.items()):
+                rule = "zoned_" + name[len("zone_"):]
                 if colors == 256:
-                    self.assertEqual(final[render._ZONE_PAIR_START + number], (hue, -1), name)
-                    self.assertEqual(render._key_attr(name), (render._ZONE_PAIR_START + number) << 8, name)   # no tint: the key's own pair
+                    self.assertEqual(final[render._ZONE_PAIR_START + number], (hue, -1), (label, name))
+                    self.assertEqual(render._key_attr(name), (render._ZONE_PAIR_START + number) << 8, (label, name))   # the key's own pair
                 else:
-                    self.assertEqual(render._COLOR.get(name, 0), 0, name)                                       # as before: no hue
+                    self.assertEqual(render._COLOR.get(name, 0), 0, (label, name))                                       # as before: no hue
+                self.assertEqual(render._key_attr(rule), ((render._ZONE_PAIR_START + number) << 8 | dim) if tinted else dim, (label, rule))
 
 
 def session(tag, harness="claude", **values):
