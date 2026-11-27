@@ -669,6 +669,7 @@ def project_parent_close(root, record, *, jobs=None) -> None:
     CompletionDeferred while that close is still terminating.
     """
     from dispatch_completion_join import CompletionDeferred
+    from dispatch_receipt_identity import completion_classification
     receipt = record.get("receipt") or {}
     if receipt.get("kind") in {"human-gate", "supervision", "notice"}:
         return
@@ -686,13 +687,12 @@ def project_parent_close(root, record, *, jobs=None) -> None:
         if settled is True:
             projected = True
             child = dict(child, status="done", readiness="ready", reason="cancelled-by-parent",
-                         required_action="advance-completed", delivery_classification="success")
+                         required_action="advance-completed", delivery_classification="cancelled")
             child.pop("next_leg", None)
         children.append(child)
     if projected:
         record["receipt"] = dict(receipt, children=children,
-            delivery_classification=("attention" if any(c.get("delivery_classification") == "attention"
-                for c in children) else "success"))
+                                 delivery_classification=completion_classification(children))
 
 
 def keep_claim(root, recipient, delivery_id, record, claim_owner, *, jobs=None, notice_context=None) -> bool:

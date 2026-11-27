@@ -510,10 +510,12 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
         if state.cancellation_requested and not state.cancelled:
             return ContinuationDecision(False, "wait", "termination-pending", "complete-open",
                 "The exact cancellation and its owned processes are settled.")
+        if state.cancelled:
+            return ContinuationDecision(True, "cancelled", "cancelled-by-parent", "advance-completed")
         complete = state.workflow_complete and not facts.get("blocked_reason")
         success = (state.quiescent and state.owned_children == 0 and complete and
-                   (state.cancelled or state.completion_proven and state.status == "done"
-                    and state.verdict == "PASS" and not state.terminal_conflict))
+                   state.completion_proven and state.status == "done"
+                   and state.verdict == "PASS" and not state.terminal_conflict)
         return ContinuationDecision(success, "success" if success else "attention",
             facts.get("blocked_reason", ""), "inspect-recovery" if facts.get("blocked_reason") else "advance-completed" if success else
             "finish-workflow" if not complete else "complete-open" if state.status in {"open", "running"}
