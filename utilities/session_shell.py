@@ -1246,7 +1246,7 @@ def block_labels(editor: int) -> dict:
     labels = {key: ui_text("fleet.session_block." + key) for key in (
         *states, "choose", "choose_write", "writing", "writing_choices", "send", "navigate", "navigate_write",
         "text", "changed", "complete", "busy", "empty", "full", "more", "more_choose", "more_down",
-        "more_page", "more_choices", "sent", "questions", "paste_stalled")}
+        "more_page", "more_choices", "sent", "questions", "paste_stalled", "pasting")}
     # A sent answer this window has not taken because its screen is too large to read (host `lastHold`).
     labels["hold_screen_large"] = ui_text("peer.delivery.hold_screen_large")
     if editor < 64:
