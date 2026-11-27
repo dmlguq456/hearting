@@ -1,5 +1,7 @@
 """Bounded shell presentation of Fleet-owned facts, never input authority."""
+import functools
 import re
+from pathlib import Path
 from .config import ui_text
 from .session_line import route_text, status_lines, _clean_model, _model_key, _effort_text, _eff_key, _percent, _level
 from .session_handle import sanitize_title
@@ -748,6 +750,60 @@ def memory_kind(kind):
     return word if len(word) <= 12 else word[:11] + "…"
 
 
+# 11-27 (the person, on the MEM row: "그 앞의 종류가 중요한데 그거 에따라서 컬러를 부여해주고"; of the design's two, "세 무리"): the
+# kind word's color says what that kind of record can be for a worker. ``work``: a preference carrying a ``unit:`` or ``field:`` label
+# (the work-style records a worker's prompt is given by its labels); ``guide``: another type the worker bootstrap's own type fence
+# takes (``mem_base.BOOTSTRAP_TYPE_FENCE``: read from that file and evaluated as it is, never copied); ``""``: every other type, and
+# any type where the fence cannot be read. It is the kind's qualification, not whether a worker was given the record.
+MEMORY_LABEL_KINDS = ("unit:", "field:")
+_MEM_BASE = Path(__file__).resolve().parents[1] / "memory" / "mem_base.py"
+
+
+@functools.lru_cache(maxsize=1)
+def _bootstrap_type_fence():
+    """``mem_base.BOOTSTRAP_TYPE_FENCE`` as that file defines it (its literal, parsed, not imported), or None."""
+    import ast
+    try:
+        tree = ast.parse(_MEM_BASE.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError):
+        return None
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "BOOTSTRAP_TYPE_FENCE" for t in node.targets)):
+            try:
+                value = ast.literal_eval(node.value)
+            except ValueError:
+                return None
+            return value if isinstance(value, str) else None
+    return None
+
+
+@functools.lru_cache(maxsize=256)
+def _bootstrap_type(kind):
+    """True where the fence takes a record of type ``kind``, False where it does not, None where it cannot be asked."""
+    import sqlite3
+    fence = _bootstrap_type_fence()
+    if not fence:
+        return None
+    try:
+        con = sqlite3.connect(":memory:")
+        try:
+            return bool(con.execute("SELECT " + fence + " FROM (SELECT ? AS type) AS r", (kind,)).fetchone()[0])
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+
+
+def memory_group(kind, labels=None):
+    """``work``, ``guide`` or ``""`` for a record of type ``kind`` whose write row carried ``labels`` (see above)."""
+    kind = str(kind or "")
+    if not kind or not _bootstrap_type(kind):
+        return ""
+    labelled = isinstance(labels, (list, tuple)) and any(
+        isinstance(label, str) and label.startswith(MEMORY_LABEL_KINDS) and len(label.split(":", 1)[1]) > 0 for label in labels)
+    return "work" if labelled and "preference" in kind else "guide"
+
+
 # 11-15 (panel polish 5): the memory system's own tier and scope names, as its records carry them.
 MEMORY_TIERS = ("durable", "working")
 MEMORY_SCOPES = ("project", "global")
@@ -769,7 +825,7 @@ def session_memory_items(values, now=None):
             items.append({"kind": memory_kind(kind), "age": age, "text": text,
                           "tier": row.get("tier") if row.get("tier") in MEMORY_TIERS else "",
                           "scope": row.get("scope") if row.get("scope") in MEMORY_SCOPES else "",
-                          "body": _memory_body(row, text)})
+                          "body": _memory_body(row, text), "group": memory_group(kind, row.get("labels"))})
         if len(items) >= MEMORY_ITEMS:
             break
     return items

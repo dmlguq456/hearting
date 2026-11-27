@@ -46,6 +46,10 @@ const MESSAGES_MAX=3;
 // 11-16 (the person: "메모리도 메시지랑 같은 맥락이야"): MEM shows the newest MEM_MAX records at most, each its
 // dim head row and its headline on up to two rows (spec rule 46 (b)). 11-18 (the person: "MEM는 최대 최근 3개만 띄워도 되겠다"): three at most.
 const MEM_MAX=3;
+// 11-27 (MEM's kinds, "세 무리"): the backend's group of a record's kind (`session_panel.memory_group`) as the style its kind word takes: a work-style
+// preference the request zone's teal, another kind a worker's guidance may come from the dispatch zone's violet, the rest dim as before.
+const MEM_GROUP_KEYS={work:'zone_request',guide:'zone_dispatch'};
+const memGroupKey=group=>Object.prototype.hasOwnProperty.call(MEM_GROUP_KEYS,group)?MEM_GROUP_KEYS[group]:'';
 const defaults={layout:'side',side_width:40,side_min_columns:100,narrow:'bottom',auxiliary:'summary',bottom_rows:14,
   position:'right',theme:'terminal',shade:'none',route_line:'time',worker_box:'closed',rule_motion:'rule'};
 // Panel color schemes (spec rule 22: the reviewed set A, the question rose one
@@ -836,7 +840,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const memItems=(()=>{
       if(!side)return [];
       if(Array.isArray(model.memory_items))return model.memory_items.filter(m=>m&&typeof m==='object'&&clean(m.text).trim()).slice(0,MEM_MAX)
-        .map(m=>({kind:clean(m.kind).trim(),age:clean(m.age).trim(),text:clean(m.text).trim(),tier:clean(m.tier).trim(),scope:clean(m.scope).trim()}));
+        .map(m=>({kind:clean(m.kind).trim(),age:clean(m.age).trim(),text:clean(m.text).trim(),tier:clean(m.tier).trim(),scope:clean(m.scope).trim(),group:memGroupKey(m.group)}));
       const old=painted(model.memory),body=old.length?clean(old.at(-1).text).trim():'',first=old.length>1?clean(old[0].text).trim():'';
       return body?[{kind:'',age:/^\d+[mhd](?: \d+[mh])?$/.test(first)?first:'',text:body}]:[];
     })();
@@ -1916,11 +1920,14 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // 11-20 (the person: "메모리 내용은 한줄로 바꾸고 (지금은 두줄이네) 메시지 처럼 팝업이 가능하게"): a record is one row, as a message's one-row form
     // (`messageLine`): its mark, age and kind dim, then the headline in the body color (`…` where it goes on; the kind goes first where the
     // headline would be left under 14 cells). A press on it opens the MEM popup (below, `memoryBody`: the record whole).
+    // 11-27 (the person: "그 앞의 종류가 중요한데 그거 에따라서 컬러를 부여해주고"): the kind word alone takes its group's color (`memGroupKey`); the
+    // mark, the age, the cells and the order are as they were.
     const memLine=m=>itemIn(()=>{
       const mark=m.tier==='durable'?'◆':m.tier==='working'?'◇':'·';
       for(const lead of [[mark,m.age,m.kind],[mark,m.age]]){
-        const head=text(lead.filter(Boolean).join(' ')+' ','dim');
-        if(inner-size([head])>=14||lead.length===2)return cut([head,text(m.text,'loc_repo')],inner);
+        const words=lead.filter(Boolean),key=lead.length===3&&m.kind?m.group:'';
+        const head=key?[text(words.slice(0,-1).join(' ')+' ','dim'),text(m.kind,key),text(' ','dim')]:[text(words.join(' ')+' ','dim')];
+        if(inner-size(head)>=14||lead.length===2)return cut([...head,text(m.text,'loc_repo')],inner);
       }
     });
     const memRows=m=>[memLine(m)];
@@ -2727,8 +2734,14 @@ function memoryBody({model={},columns=72,cellWidth}={}){
     if(out.length)out.push([]);
     out.starts.push(out.length);
     const mark=m.tier==='durable'?'◆':m.tier==='working'?'◇':'·';
-    const head=[mark,...[m.scope,m.kind].map(v=>clean(v).trim()).filter(Boolean),clean(m.age).trim()].filter(Boolean).join(' · ').replace(/^(.) · /,'$1 ');
-    out.push([text(head,'dim')]);
+    const scope=clean(m.scope).trim(),kind=clean(m.kind).trim();
+    const words=[mark,scope,kind,clean(m.age).trim()].filter(Boolean);
+    const head=words.join(' · ').replace(/^(.) · /,'$1 '),key=kind?memGroupKey(m.group):'';
+    // 11-27: the kind word in its group's color (the panel's MEM row's), the rest of the head dim as before.
+    const at=key?(scope?2:1):-1;
+    if(at>0){const before=words.slice(0,at).join(' · ').replace(/^(.) · /,'$1 ')+(at===1?' ':' · '),after=words.slice(at+1);
+      out.push([text(before,'dim'),text(kind,key),text(after.length?' · '+after.join(' · '):'','dim')].filter(part=>part.text));}
+    else out.push([text(head,'dim')]);
     const title=clean(m.text).trim(),body=clean(m.body).trim();
     // (a body that goes on from the headline, a record with no headline of its own, is read once, whole.)
     if(!body.startsWith(title))out.push(...wrapText(title,'loc_repo',columns));

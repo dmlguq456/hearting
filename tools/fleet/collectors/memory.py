@@ -499,7 +499,8 @@ SAVED_KEEP = 6
 # 11-15 (panel polish 5): the global records (`scope` global, written from any project) keep their
 # own group in the same read, under a key no project's grouping key can be.
 GLOBAL_SAVED = "\0global"
-SAVED_FIELDS = ("ts", "action", "type", "tier", "scope", "snippet", "id")
+# 11-27: ``labels``, a record's own ``unit:``/``field:`` topics where its write row carries them (``mem.py`` ``_journal_labels``).
+SAVED_FIELDS = ("ts", "action", "type", "tier", "scope", "snippet", "id", "labels")
 
 
 def _read_saved_journal(path):

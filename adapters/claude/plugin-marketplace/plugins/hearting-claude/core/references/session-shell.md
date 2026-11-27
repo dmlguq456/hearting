@@ -693,11 +693,20 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   메시지 처럼 팝업이 가능하게"): one row a record, as a message's one-row form (spec rule 46 (b) drew two rows from 11-16): its mark (`◆` durable,
   `◇` working, `·` for a record naming no tier), its age and its kind dim, then the stored headline (else the start of its snippet) in the body
   color, `…` where it goes on (`◆ 10m decision headline`; short of cells the kind goes first, where the headline would be left under 14 cells; the
-  mark and the age stay). The head is `MEM                ›` (no rule since 11-22): a press on it, or on a record (`popup:MEM:<n>`), opens the MEM popup. Short of rows MEM shows two
+  mark and the age stay). 11-27 (the person: "그 앞의 종류가 중요한데 그거 에따라서 컬러를 부여해주고"; of the design's two, "세 무리"): the kind word
+  alone takes the color of what that kind of record can be for a worker, here and in the MEM popup's head: the request zone's teal
+  (`zone_request`) for a preference whose journal row carries a `unit:` or `field:` label (the record's own capsule topics, which `mem.py`
+  `_journal_labels` writes into its `add` row; the labels a worker's prompt is given records by), the dispatch zone's violet (`zone_dispatch`)
+  for every other type the worker bootstrap's own type fence takes (`mem_base.BOOTSTRAP_TYPE_FENCE`, read from that file and evaluated as it
+  is, never copied; an unlabelled preference and an older row without labels are this), and dim as before for the rest (reference, fact,
+  project, artifact-pointer, lesson …) and wherever the fence cannot be read. The backend decides the group (`session_panel.memory_group`)
+  and the panel picks the color by it; a label is never guessed from the headline or body, and the color says what the kind can be, not
+  whether a worker was given the record. The cells, words and cuts are unchanged, and a colorless terminal draws the same cells as before.
+  The head is `MEM                ›` (no rule since 11-22): a press on it, or on a record (`popup:MEM:<n>`), opens the MEM popup. Short of rows MEM shows two
   records, then one, after the messages took the one-row form; no section without a journal row.
   The MEM popup is the MESSAGES popup's frame, keys and press rules (the table popup: `←→` section, PgUp/PgDn, Esc), its rows drawn from the records the
   panel already holds (`memory_items`, `panelView.memoryBody`; no reading, no new kind of popup): each record its dim head (`◆ project · decision · 10m`:
-  mark, scope, kind, age), its headline whole in the body color, and its body under it, dim: the snippet the journal keeps (`session_panel.MEMORY_BODY` =
+  mark, scope, kind, age; the kind word in its group's color, as on the row), its headline whole in the body color, and its body under it, dim: the snippet the journal keeps (`session_panel.MEMORY_BODY` =
   600 characters, one line of printable text; nothing where it is the headline itself or a `superseded_by=` pointer; a body that goes on from the headline
   is read once, whole). The record pressed is the first on screen where the popup is longer than its rows. Nothing else is drawn: no session record, no
   other project's text. The popup's name stands on the bottom line after MESSAGES.
