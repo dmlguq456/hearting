@@ -7,11 +7,16 @@ The question is registered on the same board as `hearting run questions ask`, so
 panel, Fleet and the input line can answer it, and the native call is refused with one short
 line: the question id and "end the turn". Nothing else is asked of the agent.
 
+A session keeps one waiting question, on the board. While one waits, a native call opens no
+window beside it (11-27: a question answered on the board never reached a session that stood
+in a native window): the call is refused with the waiting question's id, and nothing is
+registered or replaced. When it asks the same thing the refusal says so; otherwise it says
+this question was not shown, to be asked once that answer arrives.
+
 Registration never blocks a question: when it cannot be written (no seat, no Hearting
-state, a timeout, an invalid shape) the native call goes through untouched, so the person
-always sees the question. A session that already has a different waiting Hearting question keeps it (the native call
-goes through; a new registration would silently cancel it). Registered workers and native
-subagents do nothing here, and a secret question is left to its own surface.
+state, a timeout, an invalid shape) and none waits, the native call goes through untouched,
+so the person always sees the question. Registered workers and native subagents do nothing
+here, and a secret question is left to its own surface.
 
 One native call may carry several questions; a Hearting question record holds one. A single
 plain question keeps its choices and its recommendation (a label ending `(권장)` or
@@ -45,6 +50,14 @@ _TOOLS = {"claude": {"AskUserQuestion"}, "codex": {"request_user_input", "reques
 
 class Skip(Exception):
     """Nothing to register: the native call goes through."""
+
+
+class Waiting(Exception):
+    """This session's Hearting question already waits: the native call is refused with its id."""
+
+    def __init__(self, signal: dict):
+        super().__init__(signal["id"])
+        self.signal = signal
 
 
 def _text(value) -> str:
@@ -127,13 +140,54 @@ def build(rows: list, *, detail: bool = True) -> dict:
     return {"text": "\n\n".join(blocks), "choices": [], "recommend": None}
 
 
+def _words(text) -> str:
+    return " ".join(str(text or "").split()).casefold()
+
+
+def waiting_question(harness: str, session_id: str, *, sequence: int | None = None) -> dict | None:
+    """This session's open Hearting (message) question, read without a lock, or None.
+
+    One whose answer is already on its way waits only within the turn that asked it: once the
+    session took a later prompt (`sequence`) that answer came with it or comes by itself, so a
+    record that has not closed yet never holds back the session's next questions."""
+    import human_wait_state as HWS
+    rows = [signal for signal in HWS.read_signals() if signal.get("mode") == "message"
+            and signal.get("harness") == harness and signal.get("session_id") == session_id
+            and not (sequence is not None and int(signal.get("sequence") or 0) < sequence
+                     and HWS.message_answer_pending(signal))]
+    return rows[-1] if rows else None
+
+
+def same_question(signal: dict, rows: list) -> bool:
+    """Whether the waiting question asks what this native call asks: its words and its choices."""
+    try:
+        asked = ((signal.get("detail") or {}).get("questions") or [{}])[0]
+        words = {_words(build(rows, detail=detail)["text"]) for detail in (True, False)}
+        if len(rows) == 1:
+            words.add(_words(rows[0]["question"]))
+        return (_words(signal.get("question")) in words
+                and list(asked.get("choices") or []) == build(rows)["choices"])
+    except Exception:  # noqa: BLE001 -- unsure is "not the same": the refusal then says it was not shown
+        return False
+
+
 def register(harness: str, session_id: str, rows: list, *, cwd: str | None = None) -> str:
-    """Register the question on this session's seat; the id, or an error that means pass-through."""
+    """Register the question on this session's seat; the id, or an error that means pass-through.
+
+    `Waiting` when this session already has a waiting question (checked first, so a seat or
+    state that cannot be written never puts a native window beside it)."""
     import human_wait_state as HWS
     import session_tidy as tidy
     cwd = cwd or os.getcwd()
-    seat = tidy.resolve_seat(harness, cwd, os.environ, session_id, hook=True)
-    if not seat.key:
+    try:
+        seat = tidy.resolve_seat(harness, cwd, os.environ, session_id, hook=True)
+        sequence = tidy.read_prompt_seq(seat) if seat.key else None
+    except Exception:  # noqa: BLE001 -- no seat: a waiting question still refuses the native window
+        seat, sequence = None, None
+    held = waiting_question(harness, session_id, sequence=sequence)
+    if held is not None:
+        raise Waiting(held)
+    if seat is None or not seat.key:
         raise Skip("question-seat-unproven")
     sys.path.insert(0, str(ROOT / "tools"))
     from fleet.process_identity import current_launch_context
@@ -143,12 +197,16 @@ def register(harness: str, session_id: str, rows: list, *, cwd: str | None = Non
         built = build(rows, detail=detail)
         try:
             value = HWS.register_message(
-                harness, session_id, seat, built["text"], sequence=tidy.read_prompt_seq(seat),
+                harness, session_id, seat, built["text"], sequence=sequence,
                 choices=built["choices"],
                 recommended=built["recommend"] - 1 if built["recommend"] else None,
                 cwd=cwd, incarnation=incarnation, replace=False)
             return value["id"]
         except ValueError as exc:
+            if str(exc) == "question-open-elsewhere":
+                held = waiting_question(harness, session_id, sequence=sequence)  # registered meanwhile
+                if held is not None:
+                    raise Waiting(held) from None
             if str(exc) != "question-detail-too-large" or not detail:
                 raise
     raise Skip("question-detail-too-large")
@@ -159,8 +217,16 @@ def reason_for(question_id: str) -> str:
             "End your turn now. The runtime brings the person's answer as the next prompt.")
 
 
+def reason_waiting(question_id: str, *, same: bool) -> str:
+    if same:
+        return (f"This question is already Hearting question {question_id}, waiting for the person. "
+                "End your turn now. The runtime brings the person's answer as the next prompt.")
+    return (f"Not shown: Hearting question {question_id} still waits for the person. "
+            "End your turn now; its answer comes as the next prompt, then ask this one.")
+
+
 def redirect(harness: str, payload: dict, *, seconds: int = BUDGET_SECONDS) -> str | None:
-    """The refusal text when the question was registered, else None (the native call goes through)."""
+    """The refusal text when the question was registered or one already waits, else None (the native call goes through)."""
     if not isinstance(payload, dict):
         return None
     try:
@@ -183,6 +249,8 @@ def redirect(harness: str, payload: dict, *, seconds: int = BUDGET_SECONDS) -> s
             previous = signal.signal(signal.SIGALRM, _late)
             signal.setitimer(signal.ITIMER_REAL, seconds)
         return reason_for(register(harness, session_id, rows, cwd=cwd))
+    except Waiting as held:
+        return reason_waiting(held.signal["id"], same=same_question(held.signal, rows))
     except BaseException:  # noqa: BLE001 -- registration failed or ran late: show the native question
         return None
     finally:

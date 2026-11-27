@@ -68,6 +68,7 @@ shared-utility-deferred	harness_behavior_cases_followthrough.py
 shared-utility-deferred	harness_behavior_cases_idle_wake.py
 shared-utility-deferred	harness_behavior_cases_lab_warning.py
 shared-utility-deferred	harness_behavior_cases_opencode_plugin.py
+shared-utility-deferred	harness_behavior_cases_question_bound.py
 shared-utility-deferred	harness_behavior_cases_session_upgrade.py
 shared-utility-deferred	harness_behavior_cases_status_footer.py
 shared-utility-deferred	harness_behavior_cases_subagent_model.py

@@ -407,6 +407,40 @@ const assert=require('node:assert/strict'),path=require('node:path'),create=requ
 })().catch(e=>{console.error(e);process.exit(1);});
 """)
 
+    def test_a_question_answered_elsewhere_while_the_popup_reads_it_lets_go_of_the_keys(self):
+        # 11-27: the popup is open on a question that is answered from another place (Fleet, the CLI). With
+        # nothing typed to it and nothing else to answer here it lets go of the keys, as after an answer given
+        # in it: the shell gives a session nothing while the popup holds them, so the answer never arrived.
+        self.node(r"""
+const assert=require('node:assert/strict'),path=require('node:path'),create=require(path.join(process.argv[1],'block-input.cjs'));
+const ask=(id,state)=>({id,revision:id,answerable:state?false:true,...(state?{request_state:state}:{}),
+                         questions:[{id:'q'+id,question:'Question '+id+'?',choices:['one','two']}]});
+for(const [elsewhere,why] of [[[ask('A','submitted')],'its answer on the way'],[[ask('A','applied')],'received'],[[],'gone']]){
+ const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+ b.update([ask('A')],'',{});b.enter();assert.equal(b.focused,true);
+ b.update(elsewhere,'',{});
+ assert.equal(b.focused,false,why);
+ assert.equal(b.answeredEscape(Buffer.from('\r')),false,'an Enter after is the native input’s');
+}
+// Something typed to it, or another question to answer here: the popup stays, as it did.
+const typed=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+typed.update([ask('A')],'',{});typed.enter();typed.input(Buffer.from('1'));
+typed.update([ask('A','submitted')],'',{});assert.equal(typed.focused,true,'a choice was being made');
+const next=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+next.update([ask('A'),ask('B')],'',{});next.enter();
+next.update([ask('A','submitted'),ask('B')],'',{});assert.equal(next.focused,true,'B is left to answer here');
+assert(next.detail({budget:8,columns:80}).map(row=>row.map(p=>p.text).join('')).join('\n').includes('Question B?'));
+// An answer given in the popup itself still lets go once its own send settles, not while it is under way.
+(async()=>{
+ let release;const sent=new Promise(r=>{release=r;});
+ const own=create({changed(){},answer:()=>sent,action(){}});
+ own.update([ask('A')],'',{});own.enter();own.input(Buffer.from('1'));own.input(Buffer.from('\r'));
+ own.update([ask('A','submitted')],'',{});assert.equal(own.focused,true,'its own send is under way');
+ release({state:'submitted'});await new Promise(r=>setTimeout(r,20));
+ assert.equal(own.focused,false);
+})().catch(e=>{console.error(e);process.exit(1);});
+""")
+
     def test_no_guidance_the_question_popup_draws_names_the_arrows_as_sections(self):
         # 11-22: in the question popup ←→ only move the place in the typed text, so none of its guidance
         # (the keys rows `navigate`, `navigate_write`, the writing hints, and `editor_help`, which a popup with no

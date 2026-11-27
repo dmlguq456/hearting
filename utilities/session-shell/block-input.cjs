@@ -169,7 +169,7 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
   function release(){if(!focused)items=items.filter(item=>!settled(item));}
   function update(rows,guidance,presentation={}) {
     labels=presentation.labels||labels;styles=presentation.styles||styles;help=guidance||help;
-    const previous=current();items=Array.isArray(rows)?rows.slice(0,8):[];
+    const previous=current();items=Array.isArray(rows)?rows.slice(0,8):[];let letGo=false;
     for(const item of items){
       if(['submitted','received','applied','expired','cancelled'].includes(item.request_state)){
         const local=state(item);if(local.state!=='applied')local.state=item.request_state;if(item.request_state==='applied')local.notice='';
@@ -191,15 +191,21 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
       frozen=previous;stale=true;state(previous.item).notice=text('changed','question changed · Tab next');
     }else{
       frozen=undefined;stale=false;index=Math.min(index,Math.max(0,listed.length-1));scroll=0;follow=true;
+      const typed=previous&&(state(previous.item).drafts[previous.question.id]||Object.keys(state(previous.item).answers).length||Object.keys(state(previous.item).cursor).length);
+      // 11-27: the question being read was answered (or ended) elsewhere, nothing was typed to it and
+      // none is left to answer here: the popup lets go of the keys, as after an answer given in it,
+      // so the session takes its answer (the shell gives it nothing while the popup holds the keys).
+      if(previous&&focused&&firstOpen<0&&!typed)letGo=true;
       // The question being read left with nothing typed to it and another stands in its place:
       // say so once, and the first Enter after only clears the word, never answers the new one.
-      if(previous&&focused&&listed.length&&!state(previous.item).sending){
+      else if(previous&&focused&&listed.length&&!state(previous.item).sending){
         state(listed[index].item).notice=text('changed','question changed · Tab next');changeArmed=true;
       }
     }
     const active=new Set(listed.map(row=>key(row.item)));if(frozen)active.add(key(frozen.item));
     // Bounded volatile history, never a new question/answer store.
     for(const old of entries.keys())if(!active.has(old)&&entries.size>8)entries.delete(old);
+    if(letGo){leave();return;}
     changed();
   }
   // Ctrl+] opens on a question the person can answer now (11-14): when the one shown is not
