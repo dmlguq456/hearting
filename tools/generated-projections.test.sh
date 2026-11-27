@@ -405,7 +405,7 @@ for bootstrap in \
 a short check or lookup adds `--ephemeral`|unit-route delegation clause
 genuinely non-obvious|genuinely-non-obvious ask clause
 if structured input is unavailable|structured-input fallback clause
-legacy `.claude_reports/` is only a fallback|legacy artifact-root fallback qualifier
+linked worktrees use the primary checkout's canonical artifact root.|primary artifact root in linked worktrees
 depth, tests, safety, and validation on fallback|fallback preservation guarantee
 before committing|expose-change-before-committing clause
 large scope, destructive work, or an external-system outcome|destructive-work structured-input clause
@@ -480,8 +480,10 @@ cmp -s "$ROOT/adapters/codex/skills/analyze-project/SKILL.md" \
   "$ROOT/adapters/codex/plugins/hearting-codex/skills/analyze-project/SKILL.md"
 cmp -s "$ROOT/adapters/claude/skills/analyze-project/SKILL.md" \
   "$ROOT/adapters/claude/plugin-marketplace/plugins/hearting-claude/skills/analyze-project/SKILL.md"
-cmp -s "$ROOT/utilities/artifact-root.sh" \
-  "$ROOT/adapters/claude/plugin-marketplace/plugins/hearting-claude/utilities/artifact-root.sh"
+for utility in artifact-root.sh artifact_root_selection.py artifact_identity.py; do
+  cmp -s "$ROOT/utilities/$utility" \
+    "$ROOT/adapters/claude/plugin-marketplace/plugins/hearting-claude/utilities/$utility"
+done
 python3 "$ROOT/tools/figure-semantic-verify.test.py" >/dev/null
 
 WRAPPER_FIXTURE="$TMP/figure-wrapper"
