@@ -1509,11 +1509,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const key=kind==='working'||kind==='blocked'?'loc_repo':'dim',room=Math.max(1,inner-gap),body=[text(value,key)];
       const stampWidth=measure(elapsed),showTime=stampWidth>0&&room>stampWidth+1;
       const lastRoom=showTime?room-stampWidth-1:room;
-      let rows=wrapAll(body,room);
-      // A worker's time ends the last NOW row: where it does not fit there and another row is allowed, the value is wrapped
-      // again, as it is, in the cells the time leaves (the same `wrapAll`), and taken when it stands whole in `most` rows; only
-      // past them, or where one row is allowed, is the end cut with `…` (11-27, reviews of #1885).
-      if(showTime&&rows.length<most&&size(rows.at(-1))>lastRoom){const fit=wrapAll(body,lastRoom);if(fit.length<=most)rows=fit;}
+      const rows=wrapAll(body,room);
+      // A worker's time ends the last NOW row. The value's rows are always these (as with no time): where the time does not fit
+      // their last one and another row is allowed, it stands alone at the right end of a row of its own; only where no row is
+      // left is the last row cut with `…` before it (11-27, reviews of #1885).
+      if(showTime&&rows.length<most&&size(rows.at(-1))>lastRoom)rows.push([]);
       const shown=rows.slice(0,most),last=shown.length-1;
       if(rows.length>most||size(shown[last])>lastRoom)shown[last]=ellipsis(shown[last],lastRoom);
       if(showTime)shown[last].push(pad(room-size(shown[last])-stampWidth),text(elapsed,'dim'));

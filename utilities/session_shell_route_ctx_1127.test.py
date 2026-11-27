@@ -167,7 +167,9 @@ def time_workers(now):
 
 
 class WorkerTimeTest(unittest.TestCase):
-    """11-27, review of #1885: a worker's time ends its last NOW row without cutting a value that fits in two rows."""
+    """11-27, reviews of #1885: a worker's time ends its last NOW row. The value's rows are the ones it has with no time
+    (`wrapAll` at the row's width, never wrapped again); where the time does not fit their last one and another row is
+    allowed, it stands alone at the right end of a row of its own; only where no row is left is the last row cut."""
 
     @staticmethod
     def now_rows(panel, now):
@@ -183,49 +185,95 @@ class WorkerTimeTest(unittest.TestCase):
             out.append(re.sub(r"^[│ ]+|[│ ]+$", "", line))
         return out
 
-    def test_the_time_fits_one_row_or_the_value_wraps_to_a_second(self):
-        scenes = [{"width": w, "height": 64, "model": model_for(w, time_workers(now))}
-                  for w, now in ((44, "Read labels"), (44, "Check every sample margin"), (50, "Check every sample margin"))]
-        one, two, wide = (self.now_rows(panel, None) for panel in render_panels(scenes))
-        self.assertRegex(" / ".join(one), r"^Read labels +12m$")
-        # The value and the time do not fit one row of the closed box at 44: it wraps on to a second row and stays whole.
-        self.assertEqual(len(two), 2, two)
-        self.assertEqual(two[0], "Check every sample")
-        self.assertRegex(two[1], r"^margin +12m$")
-        self.assertRegex(" / ".join(wide), r"^Check every sample margin +12m$")
+    def panels(self, cases, height=64):
+        # Each case drawn twice: the worker with its time, and the same worker with none.
+        scenes = []
+        for width, now, stamp in cases:
+            for given in (stamp, ""):
+                model = model_for(width, time_workers(now))
+                model["routes"][0]["workers_live"][0]["elapsed"] = given
+                scenes.append({"width": width, "height": height, "model": model})
+        drawn = render_panels(scenes)
+        return [(case, drawn[2 * i], drawn[2 * i + 1]) for i, case in enumerate(cases)]
 
-    def test_the_value_is_wrapped_again_in_the_cells_the_time_leaves(self):
-        # 11-27, second review of #1885: where the time does not fit the last row, the value is wrapped again by the same
-        # `wrapAll` in the row's cells less the time's: a word as wide as the row goes on by cells, and what `wrapAll` keeps
-        # together (`Atlas 2.5`, `· review`) stays together.
+    def test_the_time_fits_one_row_or_takes_a_row_of_its_own(self):
+        cases = [(44, "Read labels", "12m"), (44, "Check every sample margin", "12m"), (50, "Check every sample margin", "12m")]
+        (_, one, _), (_, two, _), (_, wide, _) = self.panels(cases)
+        self.assertRegex(" / ".join(self.now_rows(one, None)), r"^Read labels +12m$")
+        # The value and the time do not fit one row of the closed box at 44: the value keeps its row, the time takes the next.
+        self.assertEqual(self.now_rows(two, None), ["Check every sample margin", "12m"])
+        self.assertRegex(" / ".join(self.now_rows(wide, None)), r"^Check every sample margin +12m$")
+
+    def test_the_value_keeps_the_rows_it_has_with_no_time(self):
+        # The second and third reviews' inputs: a word as wide as the row (path, URL, Hangul, a wide character on the edge),
+        # what `wrapAll` keeps together (`Atlas 2.5`, `· review`, `Atlas-Preview-XXLarge 2.5`), a long time, and a first row
+        # the full width holds. With the time the value's rows are the no-time rows to the letter: nothing cut, nothing split.
         room = {36: 22, 44: 28, 50: 34}     # the first worker's NOW cells (36: the open box; 44, 50: the closed one)
         cases = []
         for width, n in room.items():
-            cases += [(width, "/lab/" + "abcdefghijklmnopqrstuvwxyz0123456789"[:n - 5], "12m", None),
-                      (width, "https://ex.test/" + "abcdefghijklmnopqrstuvwxyz"[:n - 16], "12m", None),
-                      (width, "가나다라마바사아자차카타파하거너더러머버서어"[:n // 2], "12m", None),
-                      (width, "a" + "가나다라마바사아자차카타파하거너더러"[:(n - 1) // 2], "12m", None)]
-        cases += [(44, "Compareabcdefghijk Atlas 2.5", "12m", ["Compareabcdefghijk", "Atlas 2.5"]),
-                  (44, "Compareabcdefghijkl · review", "12m", ["Compareabcdefghijkl", "· review"]),
-                  (44, "Check every sample margin", "1h 52m", ["Check every sample", "margin"]),
-                  (44, "Check every sample margin", "12d 3h", ["Check every sample", "margin"])]
-        scenes = []
-        for width, now, stamp, _ in cases:
-            model = model_for(width, time_workers(now))
-            model["routes"][0]["workers_live"][0]["elapsed"] = stamp
-            scenes.append({"width": width, "height": 64, "model": model})
-        for (width, now, stamp, want), panel in zip(cases, render_panels(scenes)):
-            rows = self.now_rows(panel, None)
+            cases += [(width, "/lab/" + "abcdefghijklmnopqrstuvwxyz0123456789"[:n - 5], "12m"),
+                      (width, "https://ex.test/" + "abcdefghijklmnopqrstuvwxyz"[:n - 16], "12m"),
+                      (width, "가나다라마바사아자차카타파하거너더러머버서어"[:n // 2], "12m"),
+                      (width, "a" + "가나다라마바사아자차카타파하거너더러"[:(n - 1) // 2], "12m"),
+                      (width, "Compareabcdefghijk Atlas 2.5", "12m"),
+                      (width, "Compareabcdefghijkl · review", "12m"),
+                      (width, "Check every sample margin", "1h 52m"),
+                      (width, "Check every sample margin", "12d 3h"),
+                      (width, "Go /lab/abcdefghijklmnopq up", "12m"),
+                      (width, "Atlas-Preview-XXLarge 2.5 OK", "12m"),
+                      (width, "Check abcdefghijklmnopqr log", "1h 52m")]
+        own_rows, past = 0, set()
+        for (width, now, stamp), timed, plain in self.panels(cases):
+            rows, bare = self.now_rows(timed, None), self.now_rows(plain, None)
             with self.subTest(width=width, now=now, time=stamp):
-                self.assertEqual(len(rows), 2, rows)
+                self.assertLessEqual(len(rows), 2, rows)
+                self.assertEqual(sum(row.count(stamp) for row in rows), 1, rows)
+                self.assertTrue(all(cell_width(line) == width for line in timed))
+                if "…" in bare[-1] or len(bare) == 2 and cell_width(bare[-1]) + 1 + cell_width(stamp) > room[width]:
+                    # (the value fills its two rows, as these do in 36's 22 cells: no row is left for the time, so the
+                    # earlier rows stay the same and the last is cut before the time)
+                    past.add(width)
+                    self.assertEqual(rows[:-1], bare[:-1])
+                    self.assertRegex(rows[-1], r"…  *" + re.escape(stamp) + "$")
+                    continue
                 self.assertFalse(any("…" in row for row in rows), rows)
-                self.assertTrue(rows[1].endswith(" " + stamp), rows)
-                values = [rows[0], rows[1][:-len(stamp)].rstrip()]
-                if want:
-                    self.assertEqual(values, want)
+                if rows[-1] == stamp:
+                    own_rows += 1
+                    value = rows[:-1]
                 else:
-                    self.assertEqual("".join(values), now)    # (one word: its cells go on to the second row)
-                self.assertTrue(all(cell_width(line) == width for line in panel))
+                    self.assertTrue(rows[-1].endswith(" " + stamp), rows)
+                    value = rows[:-1] + [rows[-1][:-len(stamp)].rstrip()]
+                self.assertEqual(value, bare)
+        self.assertGreater(own_rows, 0)
+        self.assertEqual(past, {36})    # (at 44 and 50 every one of them stands whole)
+
+    def test_a_value_past_its_rows_is_cut_on_the_last_one_before_the_time(self):
+        now = "Check every sample margin and every label in the sample panel and its rows"
+        for (width, _, stamp), timed, plain in self.panels([(44, now, "12m"), (50, now, "12m")]):
+            rows, bare = self.now_rows(timed, None), self.now_rows(plain, None)
+            with self.subTest(width=width):
+                self.assertEqual(len(rows), 2, rows)
+                self.assertEqual(rows[0], bare[0])
+                self.assertRegex(rows[1], r"…  *12m$")
+                self.assertTrue(bare[1].endswith("…"), bare)
+
+    def test_the_time_row_folds_with_the_value(self):
+        # Short of rows the time's own row goes with the NOW's second row: the time never stands without its value.
+        scenes = [{"width": 44, "height": h, "model": model_for(44, time_workers("Check every sample margin"))} for h in range(16, 41)]
+        seen = set()
+        for scene, panel in zip(scenes, render_panels(scenes)):
+            rows = self.now_rows(panel, None)
+            with self.subTest(height=scene["height"]):
+                if not rows:
+                    continue
+                self.assertTrue(rows[0].startswith("Check"), rows)
+                if len(rows) == 2:
+                    seen.add("own row")
+                    self.assertEqual(rows, ["Check every sample margin", "12m"])
+                else:
+                    seen.add("one row")
+                    self.assertRegex(rows[0], r" 12m$")
+        self.assertEqual(seen, {"own row", "one row"})
 
     def test_short_of_rows_the_one_row_is_cut_before_the_time(self):
         heights, kinds = range(16, 65), set()
@@ -236,7 +284,7 @@ class WorkerTimeTest(unittest.TestCase):
             with self.subTest(width=scene["width"], height=scene["height"]):
                 if not rows or not rows[0].startswith("Check"):
                     continue    # (the NOW rows have gone at this height)
-                self.assertRegex(rows[-1], r" 12m$", rows)
+                self.assertRegex(rows[-1], r"(^| )12m$", rows)
                 if len(rows) == 1 and "…" in rows[0]:
                     kinds.add("cut")
                     self.assertRegex(rows[0], r"^Check every \S.*… +12m$")
@@ -246,7 +294,6 @@ class WorkerTimeTest(unittest.TestCase):
                 self.assertTrue(all(cell_width(line) == scene["width"] for line in panel))
         self.assertIn("cut", kinds)
         self.assertTrue(kinds & {"whole", "two-cut"}, kinds)
-
 
 def session_rows(panel):
     # The SESSION group's rows: from the rule over MODEL to the first box (QUESTIONS or ROUTE).

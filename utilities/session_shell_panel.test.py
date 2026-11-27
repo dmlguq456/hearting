@@ -753,10 +753,10 @@ assert.equal(idleRoute.rows.find(r=>/editing host/.test(r.map(p=>p.text).join(''
 const area=v1.hits.filter(h=>h.action==='popup:ROUTE:w').map(h=>h.row),routeRows=v1.rows.map((r,i)=>/^│ │ /.test(r.map(p=>p.text).join(''))&&!/^│ │ ─ dispatch ─+ │ │$/.test(r.map(p=>p.text).join(''))?i:-1).filter(i=>i>=0);// (11-17: the zone rule `─ dispatch ───` opens nothing)
 assert.equal(routeRows.length,9,JSON.stringify(routeRows));
 for(const i of routeRows)assert(area.includes(i),i+' '+JSON.stringify(area));
-// Two workers still share the stage box and show their own time in NOW. (11-27, reviews of #1885: where the time does not fit
-// the value's last row, the value wraps again in the cells the time leaves, so it stays whole on its two rows.)
+// Two workers still share the stage box and show their own time in NOW. (11-27, reviews of #1885: the value keeps its rows;
+// where the time does not fit the last one, it takes a row of its own at the right end.)
 b=box(draw([two],40,60));const top=b.findIndex(s=>/^│ │   │ ⠋ worker .*34% │ │ │$/.test(s));
-assert(top>0&&/^│ │   │   running the codex +│ │ │$/.test(b[top+1])&&/^│ │   │   review +12m │ │ │$/.test(b[top+2])&&/^│ │   │ ● worker .*71% │ │ │$/.test(b[top+3])
+assert(top>0&&/^│ │   │   running the codex review +│ │ │$/.test(b[top+1])&&/^│ │   │ +12m │ │ │$/.test(b[top+2])&&/^│ │   │ ● worker .*71% │ │ │$/.test(b[top+3])
  &&/^│ │   │   waiting for the owner +8m │ │ │$/.test(b[top+4])&&/^│ │   └─+┘ │ │$/.test(b[top+5])&&b[top+6].startsWith('│ ╰'),b.join('\n'));
 // A worker's NOW is dim when the worker is not working (its own kind), bright while it works.
 const v2=view.render({width:40,height:60,side:true,model:{...head,routes:[two],route_count:1},configuration:{},questions:()=>[]});
