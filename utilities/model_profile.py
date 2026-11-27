@@ -138,13 +138,17 @@ def tier_note_ran(note) -> str:
 
 
 def top_stage_tier_notes(route, *, rows=(), degradations=()) -> list[dict]:
-    """Every attempt or hop where a selected-top stage of ``route`` ran below top, in record order.
+    """Every run where a selected-top stage of ``route`` ran below top, once each, in record order.
 
-    ``rows`` are registry metadata dicts: each registered attempt counts once, by its attempt id, from
-    its latest row. ``degradations`` are degradation-ledger rows; only a hop no registered worker ran
-    (`registered_worker=0`: native-subagent, inline) is read from there, since a registered launch's
-    own ledger row repeats what its registry row says. Each result is ``{"node", "attempt_id" |
-    "fallback_hop", "tier_note"}``; an empty list for a route with no selected-top stage."""
+    A run is a registered attempt, by its attempt id, or a hop no registered worker ran
+    (`registered_worker=0`: native-subagent, inline), by its own ledger record: its `event_id` names
+    the stage and the hop, not the run, so two owners running a stage inline are two runs, and only
+    the same record read twice is one. ``rows`` are registry metadata dicts: an attempt reads from
+    its latest row. ``degradations`` are degradation-ledger rows: a registered launch's own row
+    (its sole-gate row) says what its registry row says, so it is read only for an attempt the
+    registry no longer holds (the archive moved it); a row naming no attempt is left to the
+    registry. Each result is ``{"node", "attempt_id" | "fallback_hop", "tier_note"}``; an empty
+    list for a route with no selected-top stage."""
     nodes = {node["id"]: node for node in (route or {}).get("nodes") or ()
              if isinstance(node, dict) and top_stage_selected(node)}
     if not nodes:
@@ -164,16 +168,23 @@ def top_stage_tier_notes(route, *, rows=(), degradations=()) -> list[dict]:
             if attempt in started else ""
         if note:
             notes.append({"node": meta["route_node"], "attempt_id": attempt, TIER_NOTE_KEY: note})
-    events = set()
+    runs = {("attempt", attempt) for attempt in latest}
     for row in degradations:
         if (not isinstance(row, Mapping) or row.get("route_node") not in nodes
                 or (row.get("route_id"), row.get("route_hash")) != identity
-                or str(row.get("registered_worker")) != "0" or not tier_note_ran(row.get(TIER_NOTE_KEY))
-                or (row.get("event_id") and row["event_id"] in events)):
+                or not tier_note_ran(row.get(TIER_NOTE_KEY))):
             continue
-        events.add(row.get("event_id"))
-        notes.append({"node": row["route_node"], "fallback_hop": row.get("fallback_hop") or "-",
-                      TIER_NOTE_KEY: row[TIER_NOTE_KEY]})
+        if str(row.get("registered_worker")) == "0":
+            run, ran = ("hop", row.get("event_id"), row.get("ts"), row[TIER_NOTE_KEY]), {
+                "fallback_hop": row.get("fallback_hop") or "-"}
+        elif row.get("attempt_id"):
+            run, ran = ("attempt", row["attempt_id"]), {"attempt_id": row["attempt_id"]}
+        else:
+            continue
+        if run in runs:
+            continue
+        runs.add(run)
+        notes.append({"node": row["route_node"], **ran, TIER_NOTE_KEY: row[TIER_NOTE_KEY]})
     return notes
 RESOLVER_VERSION = "profile-demand/v1"
 DEMAND_SCHEMA_VERSION = 1

@@ -946,7 +946,7 @@ def _emit_child_success(args, route, node, context, row, *, attempt_id=None, fal
             context.get("sole_gate") or "ok"
         )
     emit_allocation(context)
-    _persist_parent_cross_ledger(args, route, node, context, note=note)
+    _persist_parent_cross_ledger(args, route, node, context, note=note, attempt_id=attempt_id)
     receipt = _persist_allocation_receipt(
         args, route, node, context, row, attempt_id=attempt_id, fallback_hop=fallback_hop,
     )
@@ -1013,12 +1013,14 @@ def emit_allocation(context: dict | None) -> None:
 TUPLE_FAILURE_CLASS = "launch-tuple"
 
 
-def _persist_parent_cross_ledger(args, route, node, context, *, note=""):
+def _persist_parent_cross_ledger(args, route, node, context, *, note="", attempt_id=None):
     """Record SD-100 quality degradation after a realized child start.
 
     Best-effort (record_degradation swallows failures by design); the stdout
     receipt fields already carry the verdicts, so a ledger write failure cannot
-    change the exit code or the child (AC 17 / R5).
+    change the exit code or the child (AC 17 / R5). A row carrying a `tier_note`
+    names its attempt, so a reader can still tell what ran once the archive has
+    moved that attempt's registry row; a row without one is written as before.
     """
     if context is None:
         return
@@ -1037,6 +1039,7 @@ def _persist_parent_cross_ledger(args, route, node, context, *, note=""):
             sole_gate="degraded",
             leg_class="peer",
             tier_note=note or None,
+            attempt_id=attempt_id if note else None,
         )
 
 
