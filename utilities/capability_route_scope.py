@@ -12,6 +12,7 @@ import json
 import os
 import re
 from pathlib import Path
+from typing import NamedTuple
 
 import artifact_locator as ARTIFACT_LOCATOR
 import route_identity as ROUTE_IDENTITY
@@ -183,9 +184,7 @@ COMPOSE_CAMPAIGN_LIST_CAP = 12
 
 
 def compose_campaign_summaries(artifact_root):
-    """Active campaigns of the root, newest first.  A fresh root has none
-    (empty list); a root that cannot be read returns None so the caller says
-    "unavailable" rather than mislabelling a join as a creation."""
+    """Campaigns of the root in all states, newest first, or None when unavailable."""
     try:
         import artifact_producer
         return artifact_producer.list_campaign_summaries(
@@ -205,6 +204,8 @@ def cwd_campaign_keys(artifact_root, cwd, rows=_CAMPAIGN_ROWS_UNSET):
     route files are read, and the scan stops at `CWD_CAMPAIGN_KEYS_SHOWN` keys)."""
     rows = compose_campaign_summaries(artifact_root) if rows is _CAMPAIGN_ROWS_UNSET else rows
     active = {r.get("key") for r in rows or [] if r.get("state") == "active"} - {None, "_unassigned"}
+    if not active:
+        return []
     here, keys = os.path.realpath(str(cwd)), []
     try:
         with os.scandir(canonical_routes_dir(artifact_root)) as entries:
@@ -226,30 +227,53 @@ def cwd_campaign_keys(artifact_root, cwd, rows=_CAMPAIGN_ROWS_UNSET):
     return keys
 
 
-def first_campaign_key(artifact_root, cwd):
-    """The work stream a root without any active one opens: named after the project folder.
+class CampaignDefault(NamedTuple):
+    key: str | None
+    source: str | None = None
+    skipped: tuple[str, str] | None = None
 
-    With nothing to choose from, the refusal only made the first person to start work in a
-    new repository type `--campaign-key <folder>` (W6-E). A root that already has an active
-    stream, or whose campaigns cannot be read, returns None and keeps the refusal that lists
-    them. The folder is the one that owns the artifact root (the primary checkout for a
-    linked worktree), else `cwd`; the word is the route presence gate's `--campaign-key`."""
+
+def _campaign_default_for_key(rows, key, source):
+    import artifact_producer
+    choice = artifact_producer.classify_campaign_key(rows, key)
+    if choice["mode"] in ("join", "create"):
+        return CampaignDefault(key, source)
+    reason = choice.get("code")
+    if choice["mode"] == "reopen" or reason in ("campaign-not-active", "campaign-key-reopen-ambiguous"):
+        states = sorted({r["state"] for r in rows if r.get("key") == key and r["state"] != "active"})
+        reason = "campaign-closed:" + ",".join(states)
+    return CampaignDefault(None, "unassigned", (key, reason))
+
+
+def compose_campaign_default(artifact_root, cwd, session_key=None):
+    """Select an implicit campaign once, using the same eligibility at every source."""
     rows = compose_campaign_summaries(artifact_root)
-    if rows is None or any(r.get("state") == "active" and r.get("key") not in (None, "_unassigned")
-                           for r in rows):
-        return None
+    if rows is None:
+        if session_key:
+            return CampaignDefault(None, "unassigned", (session_key, "campaign-scan-unavailable"))
+        return CampaignDefault(None)
+
+    session = (_campaign_default_for_key(rows, session_key, "this-session-latest-route")
+               if session_key else CampaignDefault(None))
+    if session.key is not None:
+        return session
+
+    here = cwd_campaign_keys(artifact_root, cwd, rows)
+    if len(here) == 1:
+        folder = _campaign_default_for_key(rows, here[0], "this-folder-only-active-stream")
+        if folder.key is not None:
+            return folder._replace(skipped=session.skipped)
+        return session if session.skipped else folder
+    if session.skipped or any(r.get("state") == "active" and r.get("key") not in (None, "_unassigned")
+                              for r in rows):
+        return session
+
+    # A first campaign can take its name from the project folder. An old campaign
+    # of that name is subject to the same eligibility check as a session default.
     root = Path(artifact_root)
     folder = root.parent if root.name in (".agent_reports", ".claude_reports") else Path(cwd)
     key = re.sub(r"[^a-z0-9]+", "-", folder.name.lower()).strip("-")[:40] or "work"
-    # A closed stream of that name reopens, as `--campaign-key <folder>` would; one that cannot
-    # be joined (abandoned, superseded, ambiguous) keeps the refusal, which lists the streams.
-    try:
-        import artifact_producer
-        if artifact_producer.classify_campaign_key(rows, key).get("mode") == "blocked":
-            return None
-    except (ImportError, AttributeError, TypeError, ValueError):
-        return None
-    return key
+    return _campaign_default_for_key(rows, key, "project-folder-first-stream")
 
 
 def compose_campaign_hint(artifact_root, cwd=None):
