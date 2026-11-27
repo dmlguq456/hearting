@@ -63,7 +63,9 @@ while time.time() < deadline:
         os.replace(out + ".tmp", out)
     time.sleep(0.1)
 """
-JOB = "e675a253"
+# An invented job id in Claude's shape (8 hex digits): the background stand-in's hook resolves
+# its native seat only from a job id of that shape.
+JOB = "5e3a7c1d"
 
 SEED_CODE = r"""
 import json, os, time
