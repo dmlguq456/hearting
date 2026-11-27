@@ -191,7 +191,7 @@ runtime config is written.
 | agent home | Set `AGENT_HOME` to the installed harness directory |
 | permission model | Run `adapters/opencode/bin/preflight.sh permissions`; V1 uses `permission` and V2 uses ordered `permissions` plus plugin hooks; neither consumes Claude `allowedTools` |
 | MCP config | Run `adapters/opencode/bin/preflight.sh mcp [--check]`; use OpenCode native `opencode mcp`/config surfaces, not Claude `settings.json` MCP payloads |
-| artifact root | primary-checkout canonical `.agent_reports` via `utilities/artifact-root.sh`; linked-worktree snapshots are read-only; legacy fallback only at the canonical root |
+| artifact root | primary checkout's canonical root via `utilities/artifact-root.sh`; linked-worktree snapshots are read-only |
 | worktree cleanup | `preflight.sh worktree-cleanup`; dry-run first, apply only after merge + integrated verification + push |
 | routing-contract signal | OpenCode plugin system transform runs `adapters/opencode/bin/preflight.sh prompt-signal [cwd] [session-id]`; run it manually when plugins are unavailable |
 | harness status snapshot | Run `adapters/opencode/bin/preflight.sh status [cwd] [session-id]` for read-only artifact, notes, worktree, and git-risk signals. This does not replace OpenCode native model/context/session UI |
@@ -419,12 +419,10 @@ profile. `external adversary` remains unavailable unless
 
 ## Compatibility
 
-OpenCode should create new project artifacts only under the root returned by
-`utilities/artifact-root.sh`. In a linked task worktree this is the primary
-checkout's `.agent_reports/`, not the tracked local snapshot. The dispatch
-wrapper injects `AGENT_ARTIFACT_ROOT` and adds exact
-`permission.external_directory` allow rules while retaining all other config;
-legacy `.claude_reports/` remains a canonical-root fallback.
+OpenCode creates new project artifacts under the root returned by
+`utilities/artifact-root.sh`. Linked task worktrees use the primary checkout's
+canonical root. The dispatch wrapper injects `AGENT_ARTIFACT_ROOT` and adds
+`permission.external_directory` allow rules for that path.
 
 OpenCode should resolve harness-home paths through `AGENT_HOME` or the
 OpenCode-owned `utilities/agent-home.sh`. Some shared legacy tools still accept

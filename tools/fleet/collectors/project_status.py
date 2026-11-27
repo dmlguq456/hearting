@@ -24,6 +24,7 @@ _UTILITIES = str(Path(__file__).resolve().parents[3] / 'utilities')
 if _UTILITIES not in sys.path:
     sys.path.insert(0, _UTILITIES)
 import artifact_campaign_documents as campaign_documents
+from artifact_root_selection import select_artifact_root
 try:
     from .. import mdescape
 except ImportError:
@@ -63,10 +64,8 @@ def _isdir(path):
 
 
 def _reports(base):
-    for name in (".agent_reports", ".claude_reports"):
-        if _isdir(os.path.join(base, name)):
-            return os.path.join(base, name)
-    return None
+    root = select_artifact_root(base)
+    return str(root) if _isdir(root) else None
 
 
 def _git_common(top):
@@ -116,10 +115,9 @@ def _git_top(folder):
 def artifact_root(cwd):
     """The artifact root ``utilities/artifact-root.sh`` names for ``cwd``, when it exists.
 
-    The same rule from file reads only: inside a Git checkout the primary checkout's
-    ``.agent_reports`` (then ``.claude_reports``), so a linked worktree reads its main
-    checkout's root; elsewhere the folder's own root, or an ancestor's root when that
-    ancestor carries an ``.agent-workspace`` marker. An installed release tree is never one.
+    Inside Git, use the primary checkout's root. Elsewhere, look at the folder
+    itself and ancestors marked with ``.agent-workspace``. Use the shared choice
+    between report directories at each location. Installed release trees are excluded.
     """
     try:
         start = os.path.realpath(str(cwd))
@@ -135,9 +133,8 @@ def artifact_root(cwd):
     else:
         folder = start
         while root is None:
-            found = _reports(folder)
-            if found and (folder == start or os.path.isfile(os.path.join(folder, ".agent-workspace"))):
-                root = found
+            if folder == start or os.path.isfile(os.path.join(folder, ".agent-workspace")):
+                root = _reports(folder)
             parent = os.path.dirname(folder)
             if parent == folder:
                 break

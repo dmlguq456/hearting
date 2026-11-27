@@ -8,10 +8,14 @@ hash, or date -- see docstring on `RootIdentity` and the prefix table below.
 must never be used as a seed here.
 """
 
+import json
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional
+
+ADMISSION_REL = ".runtime/artifact-admission/v1"
 
 ID_BODY_BYTES = 16  # 128-bit
 
@@ -167,3 +171,13 @@ class RootIdentity:
             "issued_at": self.issued_at,
             "producer_contract_version": self.producer_contract_version,
         }
+
+
+def read_root_identity(root: Path) -> RootIdentity | None:
+    """Read the frozen identity without creating a record or a directory."""
+    path = Path(root) / ADMISSION_REL / "root-identity.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    return RootIdentity.parse(payload)
