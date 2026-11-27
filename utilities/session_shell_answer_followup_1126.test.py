@@ -3,9 +3,8 @@
 A paste reads to the same text in the shell's question popup and in Fleet (an escape sequence is left out whole). A
 paste whose bytes stop for a second has stalled, not ended (review 1861): what comes after is still its text, so a
 line break of it never sends a half-written answer; only a key pressed then (a read of its own: Enter, Esc, and
-Ctrl+] at any time, which only the paste's bulk right after it makes the paste's own) ends it and is that key, and the
-rest of that paste is dropped, never typed and never the native's. A read holding one key leaves a stalled paste
-stalled. In a secret every line-break key sends, as Ctrl+J did before; a pasted key keeps its inner line breaks and,
+Ctrl+] at any time) ends it and is that key, and the rest of that paste is dropped, never typed and never the
+native's. In a secret every line-break key sends, as Ctrl+J did before; a pasted key keeps its inner line breaks and,
 pasted in several lines, one of those it ends with. A draw failure that hands the terminal to the plain relay gives it
 back the native's own modes. These run the real editor (and Fleet's real reader and reducer) with synthetic values.
 """
@@ -30,13 +29,12 @@ const wait=ms=>new Promise(r=>setTimeout(r,ms));
 // follow it); a stall is waited for by its state, a key's wait by more than it, never by a fixed second.
 const KEY_WAIT=40;
 // `route`: a read as host.cjs takes it (asked first while a paste's bulk is dropped, then the popup if it has the keys,
-// else the native's, `native`); a read that waited with a held key comes back the same way (`again`).
-function make(extra={},{idle=60,state='submitted',keyWait=KEY_WAIT}={}){let sent;const all=[],native=[];
+// else the native's, `native`).
+function make(extra={},{idle=60,state='submitted',keyWait=KEY_WAIT,labels={}}={}){let sent;const all=[],native=[];const b=create({cellWidth:cells,pasteIdle:idle,keyWait,changed(){},action(){},
+  answer:async x=>(sent=x,all.push(x.answers.q[0]),{state,reason:'kept'})});
+ b.update([{id:'x',revision:'r',answerable:true,questions:[{id:'q',question:'Synthetic question?',free_text:true,...extra}]}],'',{labels});b.enter();
  const route=data=>{if(b.discarding)data=b.swallow(data);if(!data.length)return;
   if(b.focused){const rest=b.input(data);if(rest.length)native.push(rest);}else native.push(data);};
- const b=create({cellWidth:cells,pasteIdle:idle,keyWait,changed(){},action(){},again:route,
-  answer:async x=>(sent=x,all.push(x.answers.q[0]),{state,reason:'kept'})});
- b.update([{id:'x',revision:'r',answerable:true,questions:[{id:'q',question:'Synthetic question?',free_text:true,...extra}]}],'',{labels:{}});b.enter();
  return {b,get sent(){return sent},all,route,get native(){return Buffer.concat(native).toString();},
   async stall(){for(let i=0;i<400&&!b.stalled;i++)await wait(5);assert.equal(b.stalled,true,'the paste stalled');},
   draft(){return b.detail({columns:200,budget:60}).filter(r=>r.some(p=>p.answerRow)).map(r=>r.map(p=>p.text).join('').slice(2)).join('\n');},
@@ -123,45 +121,23 @@ def fleet_answers(steps, *, secret=False):
     return sent
 
 
-# Review 1871: a stalled paste whose rest comes after a held CR (or Esc) in several reads within the key's wait: the end
-# mark cut (`ESC [` | `201~`, or a byte at a time), a CR LF cut, a character cut, a focus report then the bulk or the end
-# mark, an Esc then the end mark's rest in two reads or a byte at a time; a secret too. The person's Enter at the end sends the whole once (`PASTE_SPLIT_WHOLE`).
+# PR 1871 (review RV-PR1871, rounds 1 and 2): a paste alone whose rest comes after a held CR (or Esc) in several reads,
+# a focus report among them, the rest late: the popup sends nothing until the person's Enter, as on main
+# (`SPLIT_WHOLE`: what that Enter sends).
 PASTE_SPLIT = [
-    ("split: CR, the end mark in two reads", ["\x1b[200~before", "STALL", "\r", "\x1b[", "201~", "WAIT", "\r"], {}),
-    ("split: CR, LF, the rest", ["\x1b[200~before", "STALL", "\r", "\n", "after\r\nlast\x1b[201~", "WAIT", "\r"], {}),
-    ("split: CR, a character's first byte, the rest", ["\x1b[200~before", "STALL", "\r", b"\xea", b"\xb0\x80 rest\x1b[201~", "WAIT", "\r"], {}),
-    ("split: CR, a focus report, the bulk", ["\x1b[200~before", "STALL", "\r", "\x1b[I", "rest\x1b[201~", "WAIT", "\r"], {}),
-    ("split: CR, a focus report, the end mark", ["\x1b[200~before", "STALL", "\r", "\x1b[I", "\x1b[201~", "WAIT", "\r"], {}),
-    ("split: Esc, `[`, `201~`", ["\x1b[200~before", "STALL", "\x1b", "[", "201~", "WAIT", "\r"], {}),
-    ("split: secret, CR, the end mark in two reads", ["\x1b[200~k1\nk2", "STALL", "\r", "\x1b[", "201~", "WAIT", "\r"], {"secret": True}),
-    ("split: CR, the end mark a byte at a time", ["\x1b[200~before", "STALL", "\r", "\x1b", "[", "2", "0", "1", "~", "WAIT", "\r"], {}),
-    ("split: Esc, the end mark's rest a byte at a time", ["\x1b[200~before", "STALL", "\x1b", "[", "2", "0", "1", "~", "WAIT", "\r"], {}),
-    # Each one alone decides within the wait, the rest of the paste coming only after it.
-    ("split: CR, `ESC [`, the rest after the wait", ["\x1b[200~before", "STALL", "\r", "\x1b[", "WAIT", "201~", "\r"], {}),
-    ("split: CR, a character's first byte, the rest after the wait", ["\x1b[200~before", "STALL", "\r", b"\xea", "WAIT", b"\xb0\x80 rest\x1b[201~", "\r"], {}),
-    ("split: CR, LF, the rest after the wait", ["\x1b[200~before", "STALL", "\r", "\n", "WAIT", "after\x1b[201~", "\r"], {}),
-    ("split: CR, a bulk with a CR, the end mark after the wait", ["\x1b[200~before", "STALL", "\r", "둘째\r셋째", "WAIT", "\x1b[201~", "\r"], {}),
-    ("split: Esc, `[`, the rest after the wait", ["\x1b[200~before", "STALL", "\x1b", "[", "WAIT", "201~", "\r"], {}),
+    ("CR, its end mark", ["\x1b[200~before", "STALL", "\r", "\x1b[201~", "\r"], {}),
+    ("CR, the end mark in two reads", ["\x1b[200~before", "STALL", "\r", "\x1b[", "201~", "\r"], {}),
+    ("CR, LF, the rest", ["\x1b[200~before", "STALL", "\r", "\n", "after\r\nlast\x1b[201~", "\r"], {}),
+    ("CR, a character's first byte, the rest", ["\x1b[200~before", "STALL", "\r", b"\xea", b"\xb0\x80 rest\x1b[201~", "\r"], {}),
+    ("CR, a focus report, the rest", ["\x1b[200~before", "STALL", "\r", "\x1b[I", "rest\x1b[201~", "\r"], {}),
+    ("CR, a focus report, the rest late", ["\x1b[200~before", "STALL", "\r", "\x1b[I", "WAIT", "rest\x1b[201~", "\r"], {}),
+    ("Esc, `[`, `201~`", ["\x1b[200~before", "STALL", "\x1b", "[", "201~", "\r"], {}),
+    ("secret, CR, the end mark in two reads", ["\x1b[200~k1\nk2", "STALL", "\r", "\x1b[", "201~", "\r"], {"secret": True}),
 ]
-PASTE_SPLIT_WHOLE = {
-    "split: CR, the end mark in two reads": "before\n", "split: CR, LF, the rest": "before\nafter\nlast",
-    "split: CR, a character's first byte, the rest": "before\n가 rest", "split: CR, a focus report, the bulk": "before\nrest",
-    "split: CR, a focus report, the end mark": "before\n", "split: Esc, `[`, `201~`": "before",
-    "split: secret, CR, the end mark in two reads": "k1\nk2\n", "split: CR, the end mark a byte at a time": "before\n",
-    "split: Esc, the end mark's rest a byte at a time": "before",
-    "split: CR, `ESC [`, the rest after the wait": "before\n", "split: CR, a character's first byte, the rest after the wait": "before\n가 rest",
-    "split: CR, LF, the rest after the wait": "before\nafter", "split: CR, a bulk with a CR, the end mark after the wait": "before\n둘째\n셋째",
-    "split: Esc, `[`, the rest after the wait": "before",
-}
-# The trap closed (review 1861, round 3 🟡1): Enter pressed in a stalled paste, then within its wait a focus report, a
-# wheel report, a press, the next key, a second Enter: Enter sends what came, once.
-HELD_THEN_KEY = [
-    ("trap: Enter, a focus report", ["\x1b[200~첫 줄", "STALL", "\r", "\x1b[I", "WAIT"]),
-    ("trap: Enter, a wheel report", ["\x1b[200~첫 줄", "STALL", "\r", "\x1b[<64;10;5M", "WAIT"]),
-    ("trap: Enter, a press", ["\x1b[200~첫 줄", "STALL", "\r", "\x1b[<0;10;5M", "WAIT"]),
-    ("trap: Enter, the next key", ["\x1b[200~첫 줄", "STALL", "\r", "x", "WAIT"]),
-    ("trap: Enter, a second Enter", ["\x1b[200~첫 줄", "STALL", "\r", "\r", "WAIT"]),
-]
+SPLIT_WHOLE = {"CR, its end mark": "before\n", "CR, the end mark in two reads": "before\n",
+               "CR, LF, the rest": "before\nafter\nlast", "CR, a character's first byte, the rest": "before\n가 rest",
+               "CR, a focus report, the rest": "before\nrest", "CR, a focus report, the rest late": "before\nrest",
+               "Esc, `[`, `201~`": "before", "secret, CR, the end mark in two reads": "k1\nk2\n"}
 
 
 class FollowupTest(unittest.TestCase):
@@ -266,47 +242,9 @@ class FollowupTest(unittest.TestCase):
  // Stalled, an Esc then `[` within the wait is an escape sequence of the paste (a late end mark too): the paste goes on.
  {const x=make();await x.send(['\x1b[200~ab']);await x.stall();x.b.input(Buffer.from('\x1b'));x.b.input(Buffer.from('[201~'));
   await wait(KEY_WAIT+30);assert.equal(x.b.focused,true);assert.equal(x.b.pasting,false);assert.equal(x.b.discarding,false);assert.equal(x.draft(),'ab');}
- // A paste that never ends does not hold the popup: stalled again and again, Esc pressed closes it. Once it stalled a
- // read holding one key (a key typed, a mouse report) is its text but leaves it stalled, the key row too (review 1861,
- // round 2 🟡2); only its bulk makes it go on.
- {const x=make();await x.send(['\x1b[200~끝 없음']);await x.stall();await x.send(['x','\x1b[<0;10;5M','\x7f']);
-  assert.equal(x.b.stalled,true,'a read holding one key leaves it stalled');assert.equal(row(x),'paste stalled · Enter send · Esc/Ctrl+] back');
-  await x.send(['yz']);assert.equal(x.b.stalled,false,'its bulk makes it go on');await x.stall();
-  await x.press('\x1b');assert.equal(x.b.focused,false);x.b.enter();assert.equal(x.draft(),'끝 없음xyz');}
- // Review 1861 (round 3 🟡1) and 1871: a key held in a paste is told by the whole of its wait. A read holding one key
- // within it (the person's next key, a second Enter, a focus or mouse report of the terminal) waits with it: at the
- // wait's end the key is the one pressed and acts first, that read after it, its own way (as the host routes it). What
- // goes on with the paste within the wait (its bulk, its end mark, a character's or a sequence's rest) makes the key
- // the paste's own, with the reads that waited.
- {const x=make({},{state:'unknown'});await x.send(['\x1b[200~첫 줄']);await x.stall();
-  x.route(Buffer.from('\r'));x.route(Buffer.from('\x1b[I'));assert.deepEqual(x.all,[],'nothing yet: the wait is not over');
-  await wait(KEY_WAIT+30);assert.deepEqual(x.all,['첫 줄'],'Enter sends what came');assert.equal(x.b.pasting,false);
-  assert.equal(x.b.swallow(Buffer.from('나머지\r끝\x1b[201~')).length,0,'the paste\'s bulk after it is still dropped');
-  await wait(KEY_WAIT+30);assert.deepEqual(x.all,['첫 줄'],'once');assert.equal(x.draft(),'첫 줄','no line break');assert.equal(x.native,'');}
- {const x=make({},{state:'unknown'});await x.send(['\x1b[200~첫 줄']);await x.stall();
-  x.route(Buffer.from('\r'));x.route(Buffer.from('x'));await wait(KEY_WAIT+30);
-  assert.deepEqual(x.all,['첫 줄']);assert.equal(x.draft(),'첫 줄x','the key typed after it goes in after it');}
- {const x=make({},{state:'unknown'});await x.send(['\x1b[200~첫 줄']);await x.stall();
-  x.route(Buffer.from('\r'));x.route(Buffer.from('\x1b[201~'));await wait(KEY_WAIT+30);
-  assert.deepEqual(x.all,[],'its end mark: the paste\'s own line break');assert.equal(x.draft(),'첫 줄\n');}
- {const x=make({},{state:'unknown'});await x.send(['\x1b[200~첫 줄']);await x.stall();
-  for(const read of ['\r','\x1b[I','나머지\x1b[201~'])x.route(Buffer.from(read));await wait(KEY_WAIT+30);
-  assert.deepEqual(x.all,[],'a report, then the paste\'s bulk within the wait: all the paste\'s');assert.equal(x.draft(),'첫 줄\n나머지');}
- {const x=make();await x.send(['\x1b[200~앞 글']);await x.stall();
-  x.route(Buffer.from('\x1b'));assert.equal(x.b.holding,true);x.route(Buffer.from('\x1b[A'));
-  assert.equal(x.b.focused,true,'within the wait the arrow waits with the Esc');await wait(KEY_WAIT+30);
-  assert.equal(x.b.focused,false,'Esc closed first');assert.equal(x.native,'\x1b[A','the arrow then went its way');assert.equal(x.sent,undefined);}
- {const x=make();await x.send(['\x1b[200~앞']);x.route(Buffer.from('\x1d'));x.route(Buffer.from('\x1b[<65;10;5M'));
-  await wait(KEY_WAIT+30);assert.equal(x.b.focused,false,'Ctrl+] closed first');assert.equal(x.native,'\x1b[<65;10;5M','the report after it');
-  x.route(Buffer.from('뒤\x1b[201~'));assert.equal(x.native,'\x1b[<65;10;5M','the rest of the paste dropped');}
- // Review 1871 🟡1: each key held in a paste waits its own wait: a key the paste's bulk made its own leaves no timer
- // behind to cut the next one's short (a Ctrl+] in the same paste, its bulk past the first key's wait but within its own).
- {const x=make({},{state:'unknown',keyWait:400});await x.send(['\x1b[200~첫 줄']);await x.stall();
-  x.route(Buffer.from('\r'));x.route(Buffer.from('둘째\r'));assert.equal(x.b.holding,false,'the bulk made Enter a line break');
-  await wait(200);x.route(Buffer.from('\x1d'));assert.equal(x.b.holding,true,'Ctrl+] in the paste waits');
-  await wait(250);x.route(Buffer.from('셋째\x1b[201~'));
-  assert.equal(x.b.focused,true,'its own wait: the bulk made Ctrl+] the paste\'s own');assert.deepEqual(x.all,[]);
-  assert.equal(x.draft(),'첫 줄\n둘째\n셋째');}
+ // A paste that never ends does not hold the popup: stalled again and again, Esc pressed closes it.
+ {const x=make();await x.send(['\x1b[200~끝 없음']);await x.stall();await x.send(['x']);assert.equal(x.b.stalled,false);await x.stall();
+  await x.press('\x1b');assert.equal(x.b.focused,false);x.b.enter();assert.equal(x.draft(),'끝 없음x');}
  // Ctrl+] pressed (a read of one key, nothing after it) leaves, stalled or not; the paste's bulk after it is dropped.
  {const x=make();await x.send(['\x1b[200~앞 글']);assert.equal(x.b.stalled,false);
   await x.press('\x1d');assert.equal(x.b.focused,false);
@@ -353,26 +291,6 @@ class FollowupTest(unittest.TestCase):
             ("secret of one line, stalled", ["\x1b[200~token\n", STALL, "\r", "WAIT"], {"secret": True}),
             ("secret of several lines, in parts", ["\x1b[200~a\n", STALL, "b\n", STALL, "\x1b[201~", "\r"], {"secret": True}),
             ("secret of one line, in parts", ["\x1b[200~ab", STALL, "c\n\n\x1b[201~", "\r"], {"secret": True}),
-            # Review 1861, round 3 🟡1: a key pressed, then a read holding one key within its wait (a terminal's
-            # report, the person's next key, a second Enter): the key pressed, acting first. Its end mark alone is the
-            # paste's (its CR a line break, as with the bulk above).
-            ("stalled, Enter, a focus report within the wait", ["\x1b[200~첫 줄", STALL, "\r", "\x1b[I", "WAIT"], {}),
-            ("stalled, Enter, a wheel report within the wait", ["\x1b[200~첫 줄", STALL, "\r", "\x1b[<64;10;5M", "WAIT"], {}),
-            ("stalled, Enter, a size reply within the wait", ["\x1b[200~첫 줄", STALL, "\r", "\x1b[8;30;80t", "WAIT"], {}),
-            ("stalled, Enter, a typed key within the wait", ["\x1b[200~첫 줄", STALL, "\r", "x", "WAIT"], {}),
-            ("stalled, Enter pressed twice within the wait", ["\x1b[200~첫 줄", STALL, "\r", "\r", "WAIT"], {}),
-            ("stalled, Esc, a focus report within the wait", ["\x1b[200~앞 글", STALL, "\x1b", "\x1b[O", "WAIT", "QUIET", "REOPEN", "\r"], {}),
-            ("Ctrl+], a wheel report within the wait", ["\x1b[200~앞", "\x1d", "\x1b[<65;10;5M", "WAIT", "뒤\x1b[201~", "REOPEN", "\r"], {}),
-            # Review 1871: a report, then the paste's bulk within the wait: the Ctrl+] was the paste's own byte.
-            ("Ctrl+], a wheel report, the bulk within the wait", ["\x1b[200~앞", "\x1d", "\x1b[<65;10;5M", "뒤\x1b[201~", "\r"], {}),
-            ("secret, stalled, Enter, a focus report within the wait", ["\x1b[200~k1\nk2", STALL, "\r", "\x1b[O", "WAIT"], {"secret": True}),
-            ("stalled, Enter, its end mark alone within the wait", ["\x1b[200~첫 줄", STALL, "\r", "\x1b[201~", "\r"], {}),
-            # Review 1861, round 2 🟡2: once stalled a read holding one key leaves it stalled, so Enter still sends.
-            ("stalled, a typed key, then Enter", ["\x1b[200~시작만", STALL, "z", "\r", "WAIT"], {}),
-            ("stalled, a mouse press, then Enter", ["\x1b[200~ab", STALL, "\x1b[<0;10;5M", "\r", "WAIT"], {}),
-            # Review 1871: a paste only, its rest after the held key in several reads within the wait: nothing is sent
-            # until the person's Enter (``PASTE_SPLIT``, the scenes the shell's own test checks before Enter too).
-            *PASTE_SPLIT,
         ]
         encode = lambda step: base64.b64encode(step if isinstance(step, bytes) else step.encode()).decode()  # noqa: E731
         shell = json.loads(self.node(r"""
@@ -383,7 +301,7 @@ class FollowupTest(unittest.TestCase):
   for(const step of c.steps){
    if(step==='STALL')await x.stall();else if(step==='WAIT')await wait(KEY_WAIT+30);else if(step==='REOPEN')x.b.enter();
    else if(step==='QUIET'){for(let i=0;i<400&&x.b.discarding;i++)await wait(5);assert.equal(x.b.discarding,false);}
-   else{x.route(Buffer.from(step,'base64'));await new Promise(r=>setImmediate(r));}
+   else{const data=Buffer.from(step,'base64');(x.b.focused?x.b.input(data):x.b.swallow(data));await new Promise(r=>setImmediate(r));}
   }
   await wait(20);out.push(x.all);
  }
@@ -409,66 +327,78 @@ class FollowupTest(unittest.TestCase):
         self.assertEqual(named["secret of one line, stalled"], ["token"])
         self.assertEqual(named["secret of several lines, in parts"], ["a\nb\n"])
         self.assertEqual(named["secret of one line, in parts"], ["abc"])
-        for name in ("stalled, Enter, a focus report within the wait", "stalled, Enter, a wheel report within the wait",
-                     "stalled, Enter, a size reply within the wait", "stalled, Enter, a typed key within the wait",
-                     "stalled, Enter pressed twice within the wait"):
-            self.assertEqual(named[name], ["첫 줄"], name)
-        self.assertEqual(named["stalled, Esc, a focus report within the wait"], ["앞 글"])
-        self.assertEqual(named["Ctrl+], a wheel report within the wait"], ["앞"])
-        self.assertEqual(named["Ctrl+], a wheel report, the bulk within the wait"], ["앞뒤"])
-        self.assertEqual(named["secret, stalled, Enter, a focus report within the wait"], ["k1\nk2"])
-        self.assertEqual(named["stalled, Enter, its end mark alone within the wait"], ["첫 줄\n"])
-        self.assertEqual(named["stalled, a typed key, then Enter"], ["시작만z"])
-        self.assertEqual(named["stalled, a mouse press, then Enter"], ["ab"])
-        for name, _steps, extra in PASTE_SPLIT:
-            self.assertEqual(named[name], [PASTE_SPLIT_WHOLE[name]], name)
 
-    def test_a_split_paste_sends_nothing_before_enter_and_a_held_key_still_acts(self):
-        """Review 1871, side by side with the trap of round 3: a paste only, its rest after a held key in several reads
-        within the key's wait, sends nothing (both backend answers, the native gets nothing, the popup stands, a secret
-        keeps its last line break), and the person's Enter sends it whole once; Enter held then a key or a report sends
-        what came, once. Fleet's reader and reducer send the same."""
+    def test_a_split_paste_sends_nothing_and_the_trap_left_is_named_on_the_key_row(self):
+        """PR 1871: whether Enter, Esc or Ctrl+] in a paste is a key pressed is told as on main. A paste alone whose rest
+        comes in several reads after a held key (a focus report among them, the rest late) sends nothing before the
+        person's Enter, with both backend answers, nothing reaching the native; nor does a session change mid paste.
+        The gap left (a report within the key's wait makes Enter the paste's line break, and Enter within the next
+        second too) is named on the key row: `a paste is under way` while it comes in, the stalled row once it stalls."""
         import base64
         encode = lambda step: base64.b64encode(step if isinstance(step, bytes) else step.encode()).decode()  # noqa: E731
         scenes = [{"name": name, "steps": [st if st in ("STALL", "WAIT") else encode(st) for st in steps[:-1]],
                    "last": encode(steps[-1]), "secret": bool(extra.get("secret"))} for name, steps, extra in PASTE_SPLIT]
-        scenes += [{"name": name, "steps": [st if st in ("STALL", "WAIT") else encode(st) for st in steps], "last": None,
-                    "secret": False} for name, steps in HELD_THEN_KEY]
-        shell = json.loads(self.node(r"""
+        out = json.loads(self.node(r"""
 (async()=>{
- const out=[];
+ const labels={pasting:'a paste is under way'};
+ const row=x=>x.b.detail({columns:60,budget:20}).at(-1).map(p=>p.text).join('');
+ const out={split:[],session:[],trap:null};
  for(const state of ['unknown','submitted'])for(const c of JSON.parse(process.argv[2])){
-  const x=make(c.secret?{secret:true}:{},{state});
+  const x=make(c.secret?{secret:true}:{},{state,labels});
   for(const step of c.steps){
    if(step==='STALL')await x.stall();else if(step==='WAIT')await wait(KEY_WAIT+30);
    else{x.route(Buffer.from(step,'base64'));await new Promise(r=>setImmediate(r));}
   }
   await wait(KEY_WAIT+30);
   const before={sent:[...x.all],native:x.native,focused:x.b.focused};
-  if(c.last){x.route(Buffer.from(c.last,'base64'));await wait(KEY_WAIT+30);}
-  out.push({name:c.name,state,before,sent:[...x.all],focused:x.b.focused,native:x.native});
+  x.route(Buffer.from(c.last,'base64'));await wait(KEY_WAIT+30);
+  out.split.push({name:c.name,state,before,sent:[...x.all],native:x.native});
  }
+ // A session change mid paste: a held CR, the paste's second CR within the wait, then the popup let go (as the host
+ // does when another session is chosen): nothing sent, nothing to the native.
+ for(const state of ['unknown','submitted']){
+  const x=make({},{state,labels});await x.send(['\x1b[200~before']);await x.stall();
+  x.route(Buffer.from('\r'));await wait(5);x.route(Buffer.from('\r'));await wait(5);x.b.leave();x.b.update([]);
+  await wait(KEY_WAIT+30);out.session.push({state,sent:[...x.all],native:x.native,focused:x.b.focused});
+ }
+ // The trap left: Enter pressed in a stalled paste, a focus report within its wait: the paste's line break; then Enter
+ // pressed again and again within the stall time: line breaks, nothing sent, the row says the paste is under way. Once
+ // it stalls again the row names Enter, and Enter sends it (with those line breaks).
+ {const x=make({},{state:'unknown',labels});await x.send(['\x1b[200~첫 줄']);await x.stall();
+  x.route(Buffer.from('\r'));x.route(Buffer.from('\x1b[I'));await wait(10);
+  const rows=[row(x)];for(let i=0;i<8;i++){x.route(Buffer.from('\r'));await wait(20);rows.push(row(x));}
+  const during=[...x.all];await x.stall();const stalledRow=row(x);
+  x.route(Buffer.from('\r'));await wait(KEY_WAIT+30);
+  out.trap={rows,during,stalledRow,sent:[...x.all],native:x.native};}
  console.log(JSON.stringify(out));
 })().catch(e=>{console.error(e);process.exit(1)});
 """, json.dumps(scenes)))
-        for row in shell:
-            with self.subTest(scene=row["name"], state=row["state"]):
-                if row["name"] in PASTE_SPLIT_WHOLE:
-                    self.assertEqual(row["before"], {"sent": [], "native": "", "focused": True},
-                                     "a paste only: nothing sent, nothing to the native, the popup stands")
-                    self.assertEqual(row["sent"], [PASTE_SPLIT_WHOLE[row["name"]]], "the person's Enter: the whole, once")
-                    self.assertEqual(row["focused"], row["state"] == "unknown")
-                else:
-                    self.assertEqual(row["sent"], ["첫 줄"], "the pressed Enter sends what came, once")
-                    self.assertEqual(row["focused"], row["state"] == "unknown")
-                self.assertEqual(row["native"], "")
+        for split in out["split"]:
+            with self.subTest(scene=split["name"], state=split["state"]):
+                self.assertEqual(split["before"], {"sent": [], "native": "", "focused": True},
+                                 "a paste alone: nothing sent, nothing to the native, the popup stands")
+                self.assertEqual(split["sent"], [SPLIT_WHOLE[split["name"]]], "the person's Enter: the whole, once")
+                self.assertEqual(split["native"], "")
+        for session in out["session"]:
+            with self.subTest(session=session["state"]):
+                self.assertEqual((session["sent"], session["native"], session["focused"]), ([], "", False))
+        trap = out["trap"]
+        self.assertEqual(trap["during"], [], "the gap left: Enter after a report within its wait sends nothing")
+        self.assertEqual(set(trap["rows"]), {"a paste is under way"}, "the row never says Enter sends meanwhile")
+        self.assertEqual(trap["stalledRow"], "paste stalled · Enter send · Esc/Ctrl+] back")
+        self.assertEqual(trap["sent"], ["첫 줄" + "\n" * 9], "once stalled, Enter sends it, line breaks and all")
+        self.assertEqual(trap["native"], "")
         for name, steps, extra in PASTE_SPLIT:
             with self.subTest(fleet=name):
                 self.assertEqual(fleet_answers(steps[:-1], secret=bool(extra.get("secret"))), [], "Fleet: nothing before Enter")
-                self.assertEqual(fleet_answers(steps, secret=bool(extra.get("secret"))), [PASTE_SPLIT_WHOLE[name]])
-        for name, steps in HELD_THEN_KEY:
-            with self.subTest(fleet=name):
-                self.assertEqual(fleet_answers(steps), ["첫 줄"])
+                self.assertEqual(fleet_answers(steps, secret=bool(extra.get("secret"))), [SPLIT_WHOLE[name]])
+        import session_shell
+        from fleet.config import ui_text
+        self.assertEqual(session_shell.block_labels(70)["pasting"], ui_text("peer.delivery.hold_paste"),
+                         "the words the panel already shows for a paste under way")
+        trap_steps = ["\x1b[200~첫 줄", "STALL", "\r", "\x1b[I", *["\r"] * 8]
+        self.assertEqual(fleet_answers(trap_steps), [], "Fleet: the same gap left")
+        self.assertEqual(fleet_answers(trap_steps + ["STALL", "\r", "WAIT"]), ["첫 줄" + "\n" * 9])
 
     def test_a_secret_takes_every_line_break_key_as_enter_and_a_pasted_key_keeps_its_lines(self):
         self.node(r"""
@@ -527,9 +457,7 @@ console.log('ok');
 class PrivateTmuxEdgesTest(unittest.TestCase):
     """Review 1861, second round, in the real shell on a private tmux (synthetic native and backend, 54 columns): one
     `send-keys` is one read of the host. A paste that stalls and then brings a CR alone keeps it a line break (A); after
-    a key ends a stalled paste the person's next input reaches where it goes, only the paste's bulk is dropped (B).
-    Round 3: a focus report right after a pressed Enter lets it send; a key typed into a stalled paste leaves it
-    stalled."""
+    a key ends a stalled paste the person's next input reaches where it goes, only the paste's bulk is dropped (B)."""
 
     def test_the_edges_of_a_stalled_paste(self):
         import importlib.util, shlex, shutil, signal, tempfile, time  # noqa: E401
@@ -680,76 +608,6 @@ class PrivateTmuxEdgesTest(unittest.TestCase):
                 send("둘째 줄\r셋째" + E, delay=1.0)
                 results.append(dict(scene="lone_cr_late", sent=answers()[count:], native=received()[native:].decode(), popup=shown(screen())))
                 self.assertLessEqual(len(answers()[count:]), 1)
-                self.assertEqual(received()[native:], b"")
-                closed()
-                # Round 3, in one question (a backend that does not confirm, so the popup stays on it; each part
-                # starts once the dropping after the last key is over, the draft wiped).
-                # 🟡1: Enter pressed in a stalled paste, then a focus report of the terminal 50 ms on (within the key's
-                # wait, a read holding one key): Enter sends what came, once; no line break goes in.
-                count, native = ask("round3")
-                send(P + "첫 줄", delay=.1)
-                waitfor(stalled, "the stall")
-                send("\r", delay=.05)
-                send("\x1b[I", delay=.6)
-                results.append(dict(scene="enter_focus", sent=answers()[count:], native=received()[native:].decode(), popup=shown(screen())))
-                self.assertEqual(answers()[count:], [["첫 줄"]], "the pressed Enter sends what came")
-                time.sleep(1.0)
-                send("\x7f" * 150, delay=.4)
-                # Round 2 🟡2: once stalled, a key typed (a read holding one key) is the paste's text and leaves it
-                # stalled, its key row too; the Enter after it sends.
-                send(P + "시작만", delay=.1)
-                waitfor(stalled, "the stall")
-                send("z", delay=.3)
-                self.assertTrue(stalled(screen()), "still stalled after a typed key")
-                send("\r", delay=.6)
-                results.append(dict(scene="never_enter_typed", sent=answers()[count:], native=received()[native:].decode()))
-                self.assertEqual(answers()[count:], [["첫 줄"], ["시작만z"]])
-                time.sleep(1.0)
-                send("\x7f" * 150, delay=.4)
-                # Ctrl+] pressed in a paste, then a wheel report 50 ms on: Ctrl+] closes first, and the report goes to
-                # the mouse (it waited with the key and is given back to the host's input path), never as bytes to the
-                # native.
-                send(P + "앞 글", delay=.3)
-                send("\x1d", delay=.05)
-                send("\x1b[<65;35;12M", delay=.5)
-                results.append(dict(scene="ctrl_wheel", sent=answers()[count:], native=received()[native:].decode(), popup=shown(screen())))
-                self.assertFalse(shown(screen()), "Ctrl+] closed the popup")
-                send("뒤" + E, delay=.5)
-                self.assertEqual(received()[native:], b"", "no report and no rest of a paste reached the native")
-                self.assertEqual(len(answers()[count:]), 2)
-                # Review 1871: a paste only, its rest after the lone CR in reads 30 ms apart (the end mark cut in two;
-                # a focus report, then the bulk): nothing is sent and the popup stands until the person's Enter.
-                time.sleep(1.0)
-                send("\x1d", delay=.4)
-                waitfor(shown, "the popup opened again")
-                send("\x7f" * 150, delay=.4)
-                for name, rest, whole in (("split_end", ["\x1b[", "201~"], "before\n"),
-                                          ("focus_bulk", ["\x1b[I", "rest" + E], "before\nrest")):
-                    so_far = len(answers())
-                    send(P + "before", delay=.1)
-                    waitfor(stalled, "the stall")
-                    send("\r", delay=.03)
-                    for piece in rest:
-                        send(piece, delay=.03)
-                    time.sleep(.6)
-                    results.append(dict(scene=name, sent=answers()[count:], native=received()[native:].decode(), popup=shown(screen())))
-                    self.assertEqual(len(answers()), so_far, name + ": nothing sent by the paste")
-                    self.assertTrue(shown(screen()), name + ": the popup stands")
-                    send("\r", delay=.6)
-                    self.assertEqual(answers()[so_far:], [[whole]], name + ": the person's Enter sends it whole")
-                    time.sleep(1.0)
-                    send("\x7f" * 150, delay=.4)
-                # Enter held, then a press outside the popup 30 ms on: Enter sends what came, then the press goes to the
-                # mouse (given back to the host's input path), which closes the popup; nothing reaches the native.
-                so_far = len(answers())
-                send(P + "before", delay=.1)
-                waitfor(stalled, "the stall")
-                send("\r", delay=.03)
-                send("\x1b[<0;2;2M", delay=.03)
-                send("\x1b[<0;2;2m", delay=.8)
-                results.append(dict(scene="enter_click_outside", sent=answers()[so_far:], native=received()[native:].decode(), popup=shown(screen())))
-                self.assertEqual(answers()[so_far:], [["before"]], "the pressed Enter sends what came")
-                self.assertFalse(shown(screen()), "the press outside closed the popup")
                 self.assertEqual(received()[native:], b"")
                 closed()
                 # B: a key ends a stalled paste; the person types to the native at once: every key reaches it.

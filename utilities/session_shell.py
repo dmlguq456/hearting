@@ -1191,6 +1191,8 @@ def block_labels(editor: int) -> dict:
         *states, "choose", "choose_write", "writing", "writing_choices", "send", "navigate", "navigate_write",
         "text", "changed", "complete", "busy", "empty", "full", "more", "more_choose", "more_down",
         "more_page", "more_choices", "sent", "questions", "paste_stalled")}
+    # PR 1871: while a paste comes in the key row says so, in the words the panel already shows for one.
+    labels["pasting"] = ui_text("peer.delivery.hold_paste")
     if editor < 64:
         # 11-26: a narrow popup keeps `Enter send` and the line-break key while an answer is written: its
         # closing key's word is short enough that the key packing leaves out `Tab next` (then `↑ choices`)

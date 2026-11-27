@@ -1519,9 +1519,7 @@ function queueLayout(){
 }
 const block=require('./block-input.cjs')({changed:queueDisplay,cellWidth,
   answer:async fields=>{const result=await source('answer',fields);queueProjection();return result;},
-  action:key=>blockAction(key),
-  // Review 1871: a read that waited with a key held in a paste goes on from the start of the input path, as it came.
-  again:data=>userInput(data)});
+  action:key=>blockAction(key)});
 let actionLines=[];
 function rebuildDisplay() {
   // The popup layer first: Fleet's screen or the plain relay closes it with the rest.
