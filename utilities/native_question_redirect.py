@@ -154,11 +154,10 @@ def _body(text) -> str:
 
 
 def _open_questions(harness: str, session_id: str) -> list:
-    """This session's signals, newest first, read without a seat or a lock (`same_waiting` keeps the open
-    questions: only a message question has a lifecycle; an answer marker has none)."""
+    """This session's open Hearting (message) questions, newest first, read without a seat or a lock."""
     import human_wait_state as HWS
-    rows = [signal for signal in HWS.read_signals()
-            if signal.get("harness") == harness and signal.get("session_id") == session_id]
+    rows = [signal for signal in HWS.read_signals() if signal.get("mode") == "message"
+            and signal.get("harness") == harness and signal.get("session_id") == session_id]
     return rows[::-1]
 
 
@@ -173,27 +172,19 @@ def _holds(signal: dict, sequence: int | None) -> bool:
         return False  # not on the board yet: the same registration writes it again
     board = HWS.read_selected_request({"id": signal["id"], "harness": signal["harness"],
                                        "session_id": signal["session_id"]})
-    if board.get("state") == "open":
-        return bool(board.get("actions"))
+    if board.get("actions"):
+        return True  # the board takes an answer to it now
     return (board.get("state") == "submitted" and sequence is not None
             and int(signal.get("sequence") or 0) >= sequence)
 
 
 def same_waiting(harness: str, session_id: str, rows: list, *, sequence: int | None = None) -> dict | None:
-    """The open question of this session that asks what this native call asks, or None.
-
-    Decided again under that question's seat lock, so one replaced or answered just after it was
-    read is never the one a refusal names."""
-    import human_wait_state as HWS
-    import session_tidy as tidy
+    """The open question of this session that asks what this native call asks and that the board can
+    take an answer for now (`_holds`, which reads the question's current record by its id, so one
+    replaced or answered just after it was read is never the one a refusal names), or None."""
     for found in _open_questions(harness, session_id):
-        if not same_question(found, rows):
-            continue
-        with tidy.seat_lock(found["seat_key"]):
-            current = HWS._read(HWS._signal_path(found))
-            if (current and current.get("id") == found["id"] and current.get("lifecycle") == "open"
-                    and _holds(current, sequence)):
-                return current
+        if same_question(found, rows) and _holds(found, sequence):
+            return found
     return None
 
 

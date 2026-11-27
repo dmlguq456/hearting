@@ -514,6 +514,15 @@ const take=(b,bytes,why)=>assert.equal(b.input(Buffer.from(bytes)).length,0,why)
   for(const bytes of rest)take(b,bytes,why+': the rest is the popup’s');
   assert.equal(b.focused,false,why+': then it lets go');
  }
+ // A written answer sent with Enter, and a paste begun while it is sent: it is the popup's to its end.
+ let release,watch=()=>{};const sent=new Promise(r=>{release=r;});
+ const b=create({changed(){watch();},answer:()=>sent,action(){}});
+ b.update([written('A')],'',{});b.enter();take(b,'my answer');take(b,'\r');take(b,'\x1b[200~');
+ const ended=new Promise(r=>{watch=r;});
+ release({state:'submitted'});await ended;
+ assert.equal(b.focused,true,'still taking the paste');
+ take(b,'pasted on\x1b[201~','the rest is the popup’s');
+ assert.equal(b.focused,false,'then it lets go, as after any answer');
 })().catch(e=>{console.error(e);process.exit(1);});
 """)
 

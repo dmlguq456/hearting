@@ -382,6 +382,11 @@ class PassThroughTest(Base):
         marker = state.signal_value("claude", SID, seat.key, "[답변 필요] Start now?", sequence=tidy.read_prompt_seq(seat))
         self.assertTrue(state.write_signal(marker))
         self.assertTrue(any(item.get("mode") != "message" for item in state.read_signals()))
+        written = claude_payload([{"question": "Start now?", "options": []}])   # the marker's own words, no choices
+        reason = redirect.redirect("claude", written)
+        self.assertTrue(reason.startswith("Registered as Hearting question"), reason)
+        self.answered("claude")
+        self.assertTrue(state.write_signal(marker))
         reason = redirect.redirect("claude", claude_payload())
         self.assertNotIn(other["id"], reason)
         self.assertNotIn(codex["id"], reason)
@@ -413,6 +418,26 @@ class PassThroughTest(Base):
                  mock.patch.object(state, "register_message", side_effect=ValueError("question-open-elsewhere")):
                 self.assertIsNone(redirect.redirect("claude", claude_payload()))   # the re-read after the race too
             self.assertEqual(decide.call_count, 2)
+        # An answer record that cannot be read confirms nothing: the window opens.
+        cache = state._cache_path()
+        kept = cache.read_bytes()
+        cache.write_text("{not json")
+        try:
+            self.assertIsNone(redirect.redirect("claude", claude_payload()))
+        finally:
+            cache.write_bytes(kept)
+        # An answer under way with no turn known (the seat cannot be read) is no delivery confirmed in this turn.
+        import session_tidy as tidy
+        result = state.submit_selected_response(envelope, {"answers": {"message-response": ["Proceed"]}},
+                                                action_id="board-no-turn")
+        self.assertEqual(result["state"], "submitted", result)
+        with mock.patch.object(tidy, "resolve_seat", return_value=tidy.Seat("none", "", pane="")):
+            self.assertIsNone(redirect.redirect("claude", claude_payload()))
+        self.assertEqual(redirect.redirect("claude", claude_payload()), redirect.reason_already(earlier["id"]))
+        self.answered("claude")
+        tidy.bump_prompt_seq(self.f.seat("claude", SID), "claude", SID, time.time())   # a new registration
+        earlier, envelope = self.f.ask("claude", SID, text="Start now?", choices=["Proceed", "Edit", "Stop"],
+                                       recommended=0)
         # An answer whose delivery is unconfirmed is no delivery under way: the window opens.
         import session_notice
         with mock.patch.object(session_notice, "notify", side_effect=OSError("carrier unavailable")):
