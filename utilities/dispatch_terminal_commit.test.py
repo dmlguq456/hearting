@@ -3552,5 +3552,46 @@ class ProducerFinalizeForkSettlementTest(unittest.TestCase):
                          (before["count"], before["first_ns"]))
 
 
+class TerminalCommitCatalogVerdictTest(unittest.TestCase):
+    """The terminal commit's close computes the reader's catalog verdict, a record only."""
+
+    def test_a_sealed_catalog_path_broken_right_after_the_claim_still_closes_not_current(self):
+        fixture = PRODUCER_FIXTURE.TerminalTransactionIntegrationTest()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        catalog = Path(fixture._tmp.name) / "catalog-a"
+        catalog.mkdir()
+        compile_route = PRODUCER_FIXTURE.R.compile_route
+
+        def sealed_under_catalog_a(*args, **kwargs):
+            route = compile_route(*args, **kwargs)
+            route["validation_basis"]["registry_root"] = str(catalog)
+            route["registry_digest"] = route["capability_registry_digest"] = "sha256:" + "1" * 64
+            route["route_hash"] = T.route_identity.route_hash(route)
+            route["route_id"] = T.route_identity.route_id_from_hash(route["route_hash"])
+            return route
+
+        with mock.patch.object(PRODUCER_FIXTURE.R, "compile_route", sealed_under_catalog_a):
+            route, route_file, jobs, _owner, _cycle, _artifact, request = fixture._prepare_fixture()
+        claim = T.dispatch_contract.claim_terminal_route_locked
+
+        def claim_then_break_catalog(*args, **kwargs):
+            claimed = claim(*args, **kwargs)
+            # A link to itself: Path.resolve() raises RuntimeError on Python 3.12; another
+            # version may raise OSError or not raise. The close records False either way.
+            catalog.rmdir()
+            os.symlink(catalog, catalog)
+            return claimed
+
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}), \
+                mock.patch.object(T.dispatch_contract, "claim_terminal_route_locked", claim_then_break_catalog):
+            settled = T.settle_terminal_commit(request)
+        self.assertTrue(catalog.is_symlink())
+        self.assertEqual(settled.result, "completed", settled)
+        outcome = json.loads(PRODUCER_FIXTURE.R.outcome_path(route_file).read_text(encoding="utf-8"))
+        self.assertIs(outcome["terminal_gate_proven"], True)
+        self.assertIs(outcome["registry_current"], False)
+
+
 if __name__ == "__main__":
     unittest.main()
