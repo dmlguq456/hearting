@@ -513,7 +513,25 @@ class RegistryRegistrationTest(unittest.TestCase):
         self._assert_draft_project_scope_delta_and_restore(layout)
         self._assert_field_delta_and_restore(layout)
         self._assert_borrowed_read_parts_delta_and_restore(layout)
+        self._assert_write_unit_delta_and_restore(layout)
         return layout
+
+    def _assert_write_unit_delta_and_restore(self, registry):
+        # Routing redesign piece 11 (writing half) moves exactly two nodes to editorial/write, with
+        # the role that unit names, and the draft-production gate with them; nothing else.
+        before = {("autopilot-draft", "draft-production"): ("research/research-survey", "deep maker"),
+                  ("autopilot-apply", "apply"): ("dev/refactor", "fast implementer")}
+        for recipe in registry["recipes"]:
+            for node in recipe["standard_plus"]["nodes"]:
+                key = (recipe["capability"], node["id"])
+                if key in before:
+                    self.assertEqual((node["unit"], node["role"]), ("editorial/write", "deep editor"), key)
+                    node["unit"], node["role"] = before[key]
+                else:
+                    self.assertNotEqual(node.get("unit"), "editorial/write", key)
+        gate = registry["completion_gate_contracts"]["draft-production"]
+        self.assertEqual(gate, {"kind": "unit-io", "unit": "editorial/write"})
+        gate["unit"] = "research/research-survey"
 
     def _assert_borrowed_read_parts_delta_and_restore(self, registry):
         # Routing redesign piece 10/11 intentionally adds the analysis unit family, its one

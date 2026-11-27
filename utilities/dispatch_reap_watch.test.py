@@ -622,10 +622,20 @@ class DispatchReapWatchTest(unittest.TestCase):
             self.assertNotIn("attempt_descendant_residue=", row)
 
     def test_open_missing_result_is_closed_after_exact_group_drain(self):
+        for provider_kind in ("", "cyberPolicy"):
+            with self.subTest(provider_kind=provider_kind):
+                self._assert_missing_result_close(provider_kind)
+
+    def _assert_missing_result_close(self, provider_kind):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             jobs = base / "jobs.log"
             attempt = unique_attempt_id("att-detached-missing-result")
+            log = base / "attempt.jsonl"
+            if provider_kind:
+                log.write_text(json.dumps({"type": "dispatch.supervisor.turn.failed",
+                                           "codex_error_info": provider_kind,
+                                           "message": "private-fixture-output"}) + "\n")
             worker = subprocess.Popen(
                 ["sleep", "0.08"],
                 env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: attempt},
@@ -638,7 +648,7 @@ class DispatchReapWatchTest(unittest.TestCase):
                     **identity,
                     "attempt_id": attempt,
                     "launch_lifecycle": "detached",
-                    "log_file": str(base / "missing.jsonl"),
+                    "log_file": str(log),
                     "route_id": "rt-reap-leg",
                     "route_hash": "sha256:reap-leg",
                     "route_node": "impl-review-alternative",
@@ -673,6 +683,9 @@ class DispatchReapWatchTest(unittest.TestCase):
             self.assertIn("\tdone\t", row)
             self.assertIn("note=dead-missing-result", row)
             self.assertIn("terminal_event=dispatch-reap-missing-result", row)
+            metadata = D.parse_registry_metadata(row.rstrip("\n").split("\t")[5])
+            self.assertEqual(metadata.get("provider_failure_kind", ""), provider_kind)
+            self.assertNotIn("private-fixture-output", row)
             ledger = base / "degradations" / "rt-reap-leg.jsonl"
             with ledger.open(encoding="utf-8") as stream:
                 events = [json.loads(line) for line in stream]
