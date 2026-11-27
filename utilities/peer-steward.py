@@ -3156,10 +3156,9 @@ def _write_terminal_watch_receipt(watch_id, arm, reason, *, watcher=None):
         successor_sid = native.get("successor_session_id")
         if not isinstance(successor_sid, str) or not successor_sid:
             try:
-                import dispatch_seat_handover as handover
-                graph = handover.lineage_graph()
-                end, disposition = handover._chain_end(
-                    graph, (agent or {}).get("harness"), (agent or {}).get("session_id"))
+                from peer_steward_watch import replaced_by
+                end, disposition = replaced_by(
+                    (agent or {}).get("harness"), (agent or {}).get("session_id"))
                 successor_sid = end if disposition == "successor" else None
             except Exception:
                 successor_sid = None

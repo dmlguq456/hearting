@@ -11,6 +11,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -230,12 +231,7 @@ class _WatchCloseEvidence:
     def chain_end(self, harness, sid):
         key = (harness, sid)
         if key not in self._chain:
-            try:
-                import dispatch_seat_handover as handover
-                graph = handover.lineage_graph()
-                self._chain[key] = handover._chain_end(graph, harness, sid)
-            except Exception:
-                self._chain[key] = (sid, "unresolved")
+            self._chain[key] = replaced_by(harness, sid)
         return self._chain[key]
 
     def liveness(self, harness, sid, agent=None):
@@ -251,6 +247,30 @@ class _WatchCloseEvidence:
             except Exception:
                 self._liveness[key] = "unknown"
         return self._liveness[key]
+
+
+def replaced_by(harness, sid):
+    """``(end, disposition)`` of a watched session: its confirmed lineage successor, or, for a
+    Claude window whose conversation a background session holds right now (``/bg``, both live
+    facts: ``session_registry.parked_links``, read afresh), that session. The one judgment a
+    watch's end and its receipt's successor share."""
+    try:
+        import dispatch_seat_handover as handover
+        end, disposition = handover._chain_end(handover.lineage_graph(), harness, sid)
+    except Exception:
+        return sid, "unresolved"
+    if disposition == "self" and harness == "claude" and isinstance(sid, str):
+        try:
+            tools = str(Path(__file__).resolve().parents[1] / "tools")
+            if tools not in sys.path:
+                sys.path.insert(0, tools)
+            from fleet import session_registry
+            held = (session_registry.parked_links("claude").get("successor") or {}).get(sid.lower())
+        except Exception:
+            held = None
+        if held and isinstance(held.get("session_id"), str) and held["session_id"] != sid:
+            return held["session_id"], "successor"
+    return end, disposition
 
 
 def _watch_close_reason(watch_id, arm, evidence):
