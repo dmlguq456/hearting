@@ -575,10 +575,12 @@ class AdapterV11Test(unittest.TestCase):
       "failure_scope":"none","codex_command":"ok" if child=="codex" else "not-applicable",
       "retry_on_isolated_worktree":0,
      } for child in ADAPTERS]
+     # The launcher's own temp: a non-Git worker's private temp folder is made below it.
+     launcher_tmp=root/"tmp"; launcher_tmp.mkdir()
      base_env={"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),"HOME":str(home),
        "AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(artifact),
        "AGENT_DISPATCH_JOBS":str(jobs),"OPENCODE_CONFIG_CONTENT":"{}",
-       "XDG_STATE_HOME":str(root/"xdg")}
+       "XDG_STATE_HOME":str(root/"xdg"),"TMPDIR":str(launcher_tmp)}
      with mock.patch.dict(os.environ,{**base_env,"AGENT_DISPATCH_ATTEMPT_ID":attempt},clear=True):
       route=ROUTE_MODULE.compose_route(
        capability="autopilot-code",capability_mode="dev",shape="staged",graph="plan",
@@ -679,6 +681,15 @@ class AdapterV11Test(unittest.TestCase):
       self.assertTrue(any(allows_runtime(config) for config in opencode_configs),opencode_configs)
      else:
       self.assertTrue(any(child["argv"][i]==flag and child["argv"][i+1]==str(expected_runtime)
+                          for i,flag in enumerate(child["argv"][:-1])
+                          if flag in ("--add-dir","--writable-root")),child["argv"])
+     # Every harness gets the same private temp folder; Codex also gets it as its
+     # only extra write root, since its non-Git profile keeps /tmp read-only.
+     worker_temp=str(launcher_tmp/f"hearting-{os.getuid()}")
+     for key in ("TMPDIR","TMP","TEMP","CLAUDE_CODE_TMPDIR"):
+      self.assertEqual(child["env"].get(key),worker_temp,key)
+     if harness=="codex":
+      self.assertTrue(any(child["argv"][i]==flag and child["argv"][i+1]==worker_temp
                           for i,flag in enumerate(child["argv"][:-1])
                           if flag in ("--add-dir","--writable-root")),child["argv"])
      self.assertEqual(set(os.listdir(source)),before_names)
