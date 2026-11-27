@@ -186,6 +186,29 @@ class GaugeCacheChainTest(unittest.TestCase):
         self.assertEqual(self._pick(states, report, ["codex"]), None)
         self.assertEqual(self._pick(states, report, ["codex", "claude"]), "claude")
 
+    def test_owner_reads_the_cli_eligibility_without_a_usage_subprocess(self):
+        now = time.time()
+        self.cache._write("codex", self._limited_until_reset(now), now - 5, now - 5)
+        row = (
+            datetime.fromtimestamp(now - 300, timezone.utc).isoformat()
+            + "\tdone\t/w\t/w\tfixture\tharness=opencode,note=dead-capacity,reset=unknown-reset\n"
+        )
+        self.jobs.write_text(row, encoding="utf-8")
+        with mock.patch.dict(os.environ, {"UNKNOWN_WINDOW_MIN": "3"}):
+            result = subprocess.run([str(ROOT / "utilities" / "usage-check.sh"),
+                                     "--jobs", str(self.jobs)], text=True, capture_output=True, check=True)
+            expected = dict(line.split() for line in result.stdout.splitlines()
+                            if line.split()[0] in self.cap.HARNESSES)
+            with mock.patch.object(OWNER.subprocess, "run", wraps=subprocess.run) as run:
+                states = OWNER._usage(str(self.jobs))
+            run.assert_not_called()
+
+        self.assertEqual(states, expected)
+        self.assertTrue(states["codex"].startswith("limited("))
+        self.assertEqual(states["opencode"], "ok")  # the caller's shorter legacy window
+        gauges = {"scores": {"claude": 60, "codex": 100, "opencode": 80}}
+        self.assertEqual(self._pick(states, gauges, ["codex", "opencode", "claude"]), "opencode")
+
     def test_the_gauge_wiring_of_one_start_shows_in_its_receipt(self):
         # The start passes the unread gauges to `capacity_report`: a pinned, eligible harness leaves only the
         # read-only gauge (claude) unread; the two that refresh the shared cache are read.
@@ -2732,11 +2755,12 @@ class D5LiveOwnerPolicyTest(unittest.TestCase):
                 exact = self._launch(self._route(), "codex", usage=states)
                 self.assertEqual(exact.wrapper, "codex", exact.out)
 
-    def test_usage_profile_reaches_usage_check_argv(self):
-        with mock.patch.object(OWNER.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="claude ok\ncodex ok\nopencode ok\n")) as run:
-            OWNER._usage("/fixture/jobs.log", "deep")
-        argv = run.call_args.args[0]
-        self.assertEqual(argv[argv.index("--model-profile") + 1], "deep")
+    def test_usage_profile_and_recheck_reach_the_evidence_reader(self):
+        states = {"claude": "ok", "codex": "ok", "opencode": "ok"}
+        with mock.patch("dispatch_capacity_evidence.usage_states", return_value=states) as read, \
+             mock.patch.dict(os.environ, {"UNKNOWN_WINDOW_MIN": "17"}):
+            self.assertEqual(OWNER._usage("/fixture/jobs.log", "deep", recheck=True), states)
+        read.assert_called_once_with("/fixture/jobs.log", profile="deep", unknown_window_min=17, recheck=True)
 
     def test_enabled_explicit_target_outside_original_pool_requires_checked_evidence(self):
         with tempfile.TemporaryDirectory() as td:
