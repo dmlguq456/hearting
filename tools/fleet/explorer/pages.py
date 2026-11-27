@@ -346,11 +346,11 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
     session_state = str(session.get("state") or "·")
     ask = bool(session.get("ask"))
     marker, marker_key = {"working": ("⠏", "spin"), "idle": ("●", "g_work_off"),
-                          "blocked": ("●", "g_blocked"), "dead": ("✕", "g_dead"),
+                          "blocked": ("◑", "g_blocked"), "dead": ("✕", "g_dead"),
                           "done": ("✓", "done")}.get(session_state, ("·", "dim"))
     if ask:
         # The answer wait's mark in the shell panel's rose, its word from the word list.
-        marker, marker_key = (session.get("answer_wait_marker") or "●", "g_blocked")
+        marker, marker_key = ("◑", "g_blocked")          # 11-27: an older record's ``●`` reads ``◑`` too
     word = (ui_text("fleet.session_panel.answer") if ask
             else {"dead": "ended", "done": "ended"}.get(session_state, session_state))
     value_x = _field(grid, x, y, "STATE", right)

@@ -832,8 +832,9 @@ row while its rows are not read yet; a count the producer sent no rows for stand
 in the box's lower line). Each current route (the ones the statusline counts) and
 the recent results the producer keeps after them carry Fleet's route marker and
 judgment (`⠏` while anything of it runs, its owner or a worker; `●` waiting, with
-nothing running or on a person; `✕` stopped; `✓` done, a result that did not pass
-`✕`; `◌` no response, nothing of it running). No press in the panel opens Fleet;
+nothing running; `◑` waiting on a person's answer (11-27, the eight marks: the mark the session head, the folded strip and the
+question box already wear; the `●1` of the waiting count above counts both and keeps its dot); `✕` stopped; `✓` done, a result
+that did not pass `✕`; `◌` no response, nothing of it running). No press in the panel opens Fleet;
 Fleet opens only from its own shortcut or the popups' `f`. These values come
 from the answer-wait producer's existing pass: the shared line helper reads
 Fleet's own route records from that pass and adds each row's marker and the

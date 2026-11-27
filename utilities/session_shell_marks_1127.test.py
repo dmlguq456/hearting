@@ -129,6 +129,16 @@ assert(!tiny.some(s=>/[↑↓] \d*$|more\S/.test(s)),tiny.join('\n'));
 """)
 
 
+class AnswerWaitRouteMarkTest(unittest.TestCase):
+    def test_a_blocked_route_reads_half_and_the_waiting_tally_keeps_its_dot(self):
+        from fleet import session_line
+        self.assertEqual(session_line.route_glyph("blocked")[0], "◑")
+        self.assertEqual(session_line.route_glyph("idle")[0], "●")
+        self.assertEqual(session_line.route_glyph("stale")[0], "◌")
+        # idle and blocked are counted together as `waiting`: that count is not an answer wait and keeps `●`.
+        self.assertEqual(dict(session_line._TALLY)["waiting"], "●")
+
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

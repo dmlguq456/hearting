@@ -822,7 +822,7 @@ def _session_unfold(grid, vm, x, use, y, session, c, now_shown=False, title_whol
     mine = [item for item in (vm.questions or ()) if item.get("session_tag") == tag]
     question = next((item for item in mine if not item.get("older")), mine[0] if mine else None)
     if question:
-        marker = str(question.get("marker") or "●")
+        marker = "◌" if question.get("marker") == "◌" else "◑"     # 11-27: an older record's ``●`` too
         lead = [(marker, "blocked"),
                 (" " + str(question_about(question)), "blocked"),
                 (" · waiting " + str(question.get("wait")) + " · ", "dim")]
@@ -873,7 +873,7 @@ def _draw_overview_route(grid, x, use, y, route, steward=False, repo_w=None, sho
         _recede_row(grid, y, x + IND + 1, x + use)
 
 
-_ROUTE_MARK = {"working": ("⠏", "g_spin"), "dead": ("✕", "g_dead"), "blocked": ("●", "g_blocked"),
+_ROUTE_MARK = {"working": ("⠏", "g_spin"), "dead": ("✕", "g_dead"), "blocked": ("◑", "g_blocked"),
                "done": ("✓", "grp_live"), "stale": ("◌", "dim"), "idle": ("●", "g_work_off"),
                "wait": ("·", "dim")}
 
@@ -1249,7 +1249,7 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
     # them, whenever the title keeps its room; otherwise the harness alone, as before.
     state = route_marker_state(route)
     marker, marker_key = {"working": ("⠏", "g_spin"), "dead": ("✕", "g_dead"),
-                          "blocked": ("●", "g_blocked"), "done": ("✓", "grp_live"),
+                          "blocked": ("◑", "g_blocked"), "done": ("✓", "grp_live"),
                           "stale": ("◌", "dim"), "wait": ("·", "dim")}.get(state, ("●", "g_work_off"))
     marker_key = harness_spin(marker_key, route.get("harness"))        # 11-18: the owner's harness names this line
     grid.put(x0, y, marker, marker_key)
@@ -1731,13 +1731,11 @@ def _split_reason(segments, room):
 
 def session_marker(session):
     """The session row's state glyph and its color key."""
-    marker, marker_key = {"working": ("⠏", "spin"), "blocked": ("●", "blocked"),
+    marker, marker_key = {"working": ("⠏", "spin"), "blocked": ("◑", "blocked"),
                           "dead": ("✕", "dead"), "done": ("✓", "done")}.get(
                               session.get("state"), ("●", "idle"))
     marker_key = harness_spin(marker_key, session.get("harness"))      # 11-18: a working spinner in its harness's color
-    if session.get("answer_wait_marker") == "●":
-        marker, marker_key = "●", "blocked"
-    elif session.get("answer_wait_marker") == "◑":
+    if session.get("answer_wait_marker") in ("●", "◑"):          # 11-27: an older record's ``●`` reads ``◑``
         marker, marker_key = "◑", "blocked"
     return marker, marker_key
 
