@@ -582,6 +582,9 @@ def _peers_line(grid, vm, tag, x, y, right):
 
 
 def _route_page(grid, vm, ident, x, right, bottom, state, whole=False):
+    """A route's page. ``whole`` (the shell popup, a reader that scrolls) draws the frame first, to its content, then the
+    route row, then what the page says about the route, so the frame stands in the rows its first screen drew it in
+    (`routePageFirst`); Fleet's own screen keeps its order (the summary, the route row, the frame to the window)."""
     route = next((item for item in vm.routes if str(item.get("id")) == ident), None)
     if route is None:
         return
@@ -589,6 +592,12 @@ def _route_page(grid, vm, ident, x, right, bottom, state, whole=False):
     summary = (system.get("task_summary", {}).get("by_route", {}).get(ident)
                if hasattr(system, "get") and hasattr(system.get("task_summary"), "get") else None)
     y = 3
+    if whole:
+        y = draw_route_detail(grid, vm, route, x, grid.cols - x - 2, y, state,
+                              bottom=min(bottom, grid.rows - 6), fit=True) + 1
+        # (The units a worker of this route called are not drawn on the route page: it reads as it did before the call.)
+        y = _draw_route_subset(grid, vm, ({key: value for key, value in route.items() if key != "called"},), x, y, bottom,
+                               opened=ident, no_repo_group=True, view_key="route:" + ident, state=state) + 1
     if isinstance(summary, Mapping):
         for name, key in (("TODO", "lvl_y"), ("DOING", "g_spin_dim"), ("DONE", "done")):
             values = tuple(summary.get(name.casefold()) or ())
@@ -597,11 +606,13 @@ def _route_page(grid, vm, ident, x, right, bottom, state, whole=False):
                      "soft" if values else "dim", limit=right)
             y += 1
     y = _route_visibility_lines(grid, route.get("visibility"), x, right, y, bottom, whole)
+    if whole:
+        return
     # (The units a worker of this route called are not drawn on the route page: it reads as it did before the call.)
     y = _draw_route_subset(grid, vm, ({key: value for key, value in route.items() if key != "called"},), x, y, bottom,
                            opened=ident, no_repo_group=True, view_key="route:" + ident, state=state)
     draw_route_detail(grid, vm, route, x, grid.cols - x - 2, y + 1, state,
-                      bottom=min(bottom, grid.rows - 6), fit=whole)
+                      bottom=min(bottom, grid.rows - 6))
 
 
 _VISIBILITY_TONE = {"good": "done", "bad": "lvl_r", "mixed": "lvl_y", "info": "soft", "dim": "dim"}

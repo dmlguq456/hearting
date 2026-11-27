@@ -1187,15 +1187,18 @@ function openPopup(name,open='',page=false){
   queueDisplay();
 }
 // What a routes popup shows before its own reading comes: what was read last for this session (same width, same
-// route, table or page as it opens, the panel's route values unchanged since), else for a route's page the stage boxes
+// route, table or page as it opens, the panel's route values unchanged since), else for a route's page the page's frame
 // the panel's values draw (`panelView.routePageFirst`), else the panel's route box at the popup's width; nothing
 // where there is neither (the popup's spinner). Its rows are not this reading's, so it carries `stale`.
 function routeFirst(t){
   const r=routePopup;
   if(r&&r.sid===sid&&r.width===t.width&&r.open===t.open&&r.key===popupKeys.ROUTE&&!!r.page===!!t.page)return {rows:r.rows,hits:r.hits,routes:r.routes,loaded:true,stale:{at:r.at,failed:false}};
   const args={model:panelModel,columns:Math.max(20,Math.min(200,t.width-4)),cellWidth,configuration:displayConfiguration,background:terminalBackground};
-  // A route with no stage line (the owner alone, a unit's) has no stage boxes: its first screen stays the panel's box.
-  const b=(t.page&&panelView.routePageFirst({...args,id:t.open}))||panelView.routesBody(args);
+  // (11-27: every form's page, unit, solo and team, draws its frame from the panel's values; a route the panel holds no leg band for, or a
+  // drawing that throws, stays the panel's box: the first screen is a picture the popup can do without, never the reason the panel is lost.)
+  let page=null;
+  if(t.page)try{page=panelView.routePageFirst({...args,id:t.open});}catch{page=null;}
+  const b=page||panelView.routesBody(args);
   return b?{rows:b.rows,hits:b.hits,routes:b.routes,loaded:true,stale:{at:Number(panelModel.route_read_at)||0,failed:false}}:null;
 }
 // The panel's route order for its popup (failed, running, waiting, finished): the first unfolded route.
