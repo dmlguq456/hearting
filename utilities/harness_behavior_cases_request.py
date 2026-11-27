@@ -44,7 +44,6 @@ import re
 import shlex
 import sys
 import time
-import unicodedata
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -113,40 +112,27 @@ def _title_after(words, titles):
     return None
 
 
-def _cells(row):
-    """``row`` as terminal cells: a wide letter takes two (the second empty), a combining mark none."""
-    out = []
-    for char in row:
-        if unicodedata.combining(char) or char in "\u200b\u200c\u200d\u2060\ufe0e\ufe0f":
-            if out:
-                out[-1] += char
-            continue
-        out.append(char)
-        if unicodedata.east_asian_width(char) in ("W", "F"):
-            out.append("")
-    return out
-
-
-def _panel_columns(cols, configuration=None):
-    """The panel's first column and width in a window ``cols`` wide (``native-display.cjs`` ``layout``): beside the
-    native area on the right (``cols - side_width``) or the left (0) where it fits, else under it, the whole width."""
-    from session_shell import DISPLAY_DEFAULTS
-    shown = {**DISPLAY_DEFAULTS, **(configuration or {})}
-    width = shown.get("side_width")
-    width = width if isinstance(width, int) and 32 <= width <= 80 else 0
-    if shown.get("layout") == "side" and width and cols - width - 2 >= 48:
-        return (0 if shown.get("position") == "left" else cols - width), width
-    return 0, cols
-
-
-def _route_box_rows(screen, cols=None, configuration=None):
-    """Each route box's inner rows in screen order, one list per box: the screen cut to the panel's columns first,
-    then the box right inside the panel's frame (its last frame, `┌…┐` to `└…┘`). ``cols`` is the window's width
-    (the screen's widest row where it is not given: the panel's right border ends every row it stands on)."""
-    rows = [_cells(row) for row in screen.splitlines()]
-    cols = cols or max((len(row) for row in rows), default=0)
-    at, width = _panel_columns(cols, configuration)
-    strip = ["".join(row[at:at + width]).rstrip() for row in rows]
+def _route_box_rows(screen, layout):
+    """Each route box's inner rows in screen order, one list per box: every row cut to the panel's cells where its host
+    placed them (``layout``), counted by the C library's width as the terminal places them, then the box right inside
+    the panel's last frame (`┌…┐` to `└…┘`)."""
+    tools = str(Path(__file__).resolve().parents[1] / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    from fleet.explorer.grid import _terminal_width
+    at, end = layout["panelColumn"], layout["panelColumn"] + layout["panelCols"]
+    strip = []
+    for row in screen.splitlines():
+        kept, used, inside = [], 0, False
+        for char in row:
+            width = _terminal_width(char)
+            if width is None or width < 0:
+                raise ValueError(f"no terminal width for {char!r}")
+            if width:
+                inside, used = at <= used < end, used + width
+            if inside:
+                kept.append(char)
+        strip.append("".join(kept).rstrip())
     tops = [i for i, row in enumerate(strip) if row.startswith("┌") and row.endswith("┐")]
     boxes, inner = [], None
     for row in strip[tops[-1] + 1:] if tops else ():
@@ -167,19 +153,20 @@ def _route_box_rows(screen, cols=None, configuration=None):
     return boxes
 
 
-def panel_request_lines(screen, titles, marks, *, cols=None, configuration=None):
+def panel_request_lines(screen, titles, marks, *, layout):
     """The route box's request lines of the given marks whose title is a recorded request title
     (whole, or cut with ``…``), each as ``mark [tag] title · state``. ``titles`` is one title or several.
 
     A request reads on one row (``← [b2] codex GPT 5.5 high 검토 제목 9c4f7d · open  2m``, the title cut on a
     narrow panel) or, beside the native area with rows to spare, as a route's doer: its head row (``← [b2]
     codex GPT 5.5 high  2m``), then two cells in its title and state on one row or two. Only rows inside
-    the route box count, so a MESSAGES row or the conversation never does: the screen is cut to the panel's columns
-    (``cols`` and the shell's ``configuration``, its defaults where none is given) and the box read right inside its frame. A head row with no title on it
+    the route box count, so a MESSAGES row or the conversation never does. ``layout`` is where the window's host placed
+    its panel (``native-display.cjs`` ``layout``: ``folded``, ``panelColumn``, ``panelCols``), never guessed from the
+    screen: a folded panel shows no box, and a missing value is an error. A head row with no title on it
     is the request's only with the other session's ``[tag]`` or under the box's ``request`` rule (a route's
     own first row, `✓ code(standard)`, has neither)."""
     found = []
-    for rows in _route_box_rows(screen, cols, configuration):
+    for rows in [] if layout["folded"] else _route_box_rows(screen, layout):
         in_request_zone = False
         for at, row in enumerate(rows):
             if REQUEST_RULE.match(row):
@@ -395,9 +382,32 @@ class _RequestScenario(WatchWakeScenario):
             path = folder / f"panel-{tag}-{who}.txt"
             path.write_text(screen, encoding="utf-8")
             files[who + "_screen_file"] = str(path)
-        titles = [rec.get("title") or "" for rec in self.records(run).values()]
-        return {"requester": panel_request_lines(a, titles, "→✓✕"),
-                "receiver": panel_request_lines(b, titles, "←"), **files}
+        records = list(self.records(run).values())
+        titles = [rec.get("title") or "" for rec in records]
+        a_sid, b_sid = records[0]["requester"]["session_id"], records[0]["recipient"]["session_id"]
+        return {"requester": panel_request_lines(a, titles, "→✓✕", layout=self.panel_layout(run, run.tui, a_sid)),
+                "receiver": panel_request_lines(b, titles, "←", layout=self.panel_layout(run, self.target_tui, b_sid)),
+                **files}
+
+    def panel_layout(self, run, tui, sid):
+        """Where ``tui``'s host placed its panel: the host's own ``layout`` (``native-display.cjs``) over the pane size
+        tmux gives the window this scenario made, the host's ``expanded`` (its ``status`` answer for session ``sid``) and
+        the display settings the host reads. A value it cannot get ends the read with an error, never a guess."""
+        import subprocess
+        import session_shell
+        from harness_behavior_cases_session_upgrade import bindings
+        binding = next(found for found in bindings(run.home.env, run.harness) if found.get("sid") == sid)
+        status = session_shell.control(binding, "status")
+        size = (tui._tmux("display", "-p", "-t", "scenario", "#{pane_width} #{pane_height}").stdout or "").split()
+        if not status.get("ok") or "expanded" not in status or len(size) != 2:
+            raise RuntimeError(f"no panel placement for {sid}: status={status} size={size}")
+        place = {"cols": int(size[0]), "rows": int(size[1]), "expanded": status["expanded"],
+                 "configuration": session_shell.display_policy(run.home.env)}
+        script = "console.log(JSON.stringify(require(process.argv[1]).layout(JSON.parse(process.argv[2]))))"
+        module = Path(sys.modules[type(run).__module__].SOURCE) / "utilities" / "session-shell" / "native-display.cjs"
+        done = subprocess.run(["node", "-e", script, str(module), json.dumps(place)],
+                              capture_output=True, text=True, timeout=30, check=True)
+        return json.loads(done.stdout)
 
     def start_a(self, run, text):
         return run.prompt(f"{A_MARK} {text}")
