@@ -677,13 +677,10 @@ def _message_incarnation_current(signal):
     resume, a restart, a compaction) still answers it, and the answer goes to that session as
     it is now (the exact-SID courier keeps its own process proof). Only another session that
     took the seat (a confirmed handover) or an unreadable lineage ends it here (11-14). The
-    recorded process stays part of the question's identity, not of its currency. A window whose
-    conversation went to the background (a parked fork) took no seat: its question stays its
-    own, so the list, a submission and its delivery agree while the link starts or ends.
+    recorded process stays part of the question's identity, not of its currency.
     """
     from dispatch_seat_handover import resolve_recipient
-    resolved = resolve_recipient("provenance", session=signal["session_id"], harness=signal["harness"],
-                                 follow_parked=False)
+    resolved = resolve_recipient("provenance", session=signal["session_id"], harness=signal["harness"])
     return not (resolved.state == "unreadable" or resolved.session_id != signal["session_id"]
                 or resolved.harness != signal["harness"])
 

@@ -248,30 +248,7 @@ substitutes for the current per-record recipient judgment. Derived recipient inb
 previous authority semantics are rebuilt through normal reconciliation.
 Only tidy-created succession and handover rows are lineage edges; manual
 `/clear`, chronological neighbors, pane aliases, and card text do not create
-edges. Unclear liveness or lineage remains unresolved.
-
-One fork is recorded. Claude's send-to-background (`/bg`) continues the
-conversation under a new session id in a daemon-run process and leaves the
-window's process as a viewer. A hook of that background session, at its own
-native seat after a `fork` start, writes one `parked-fork` row in that seat's
-ledger when both live facts agree (the viewer's record holds the background
-job, and that background process resumes the viewer's session) and the
-window's session ran no hook after the background process started. The row
-lists what the original session answered for at that moment (its depth-1 jobs
-in every registry the ordinary readers use, and its steward roles and watches)
-and names the two processes. What it lists stays with the background session
-and its own lineage while that background process lives, and returns to the
-window once it is gone. Anything else addressed to the original session
-follows the background session only while the window still holds that job and
-process pair; it stays with the original once the window takes its
-conversation back, and is unresolved while the window holds another
-background session. These live facts are read once per read pass, or afresh.
-A deliberate `--fork-session`, a background session started elsewhere or
-selected later, a second background fork of the same session, an original
-that already has a successor, a reused process or an unreadable record writes
-nothing. The row is not a handover: older readers ignore it, and it grants no
-card, seat number or release. A parked fork takes no seat, so a message
-question keeps its exact original recipient. Existing activation,
+edges. Unclear liveness or lineage remains unresolved. Existing activation,
 prompt, and runner sweeps discover open records that have no retained duty.
 New notices retain a duty when written so an idle recipient can be woken.
 

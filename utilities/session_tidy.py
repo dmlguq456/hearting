@@ -1382,7 +1382,7 @@ def _summarize_sessions(rows) -> dict[tuple[str, str], dict]:
     out: dict[tuple[str, str], dict] = {}
     for item in rows:
         if item.get("event") in {"handover", "succession", "steward-release", "tidy-claim",
-                                  "real-prompt", "native-address", "resume-notice", "parked-fork"}:
+                                  "real-prompt", "native-address", "resume-notice"}:
             # Relations, revocation and prompt provenance are not session activity.
             continue
         key = (str(item.get("harness") or ""), str(item["sid"]))
@@ -1425,7 +1425,7 @@ def _project_seat_lineage(rows: list[dict], cards: dict, locations: dict,
             outgoing.setdefault((edge_harness, source), set()).add(target)
     for row in rows:
         name, session = str(row.get("harness") or ""), str(row.get("sid") or "")
-        if not name or not session or row.get("event") in {"native-address", "resume-notice", "parked-fork"}:
+        if not name or not session or row.get("event") in {"native-address", "resume-notice"}:
             continue
         key = (name, session)
         edge = None if graph is not None else tidy_lineage_edge(row)
@@ -2213,18 +2213,14 @@ def _fold_ledger(seat: Seat) -> None:
     # A release can suppress an origin marker that remains on its old session
     # after the role moved. Keep these compact tombstones in the same ledger.
     keep_relation_indices.update(index for index, _row in release_rows)
-    # A parked fork (one per background session) stays: it names what the window held.
-    keep_relation_indices.update(index for index, row in enumerate(lines)
-                                 if row.get("event") == "parked-fork")
     relations = [row for index, row in enumerate(lines) if index in keep_relation_indices
-                 and row.get("event") in {"handover", "succession", "steward-release", "parked-fork"}]
+                 and row.get("event") in {"handover", "succession", "steward-release"}]
     claims: dict[str, dict] = {}
     real_frontiers: dict[tuple[str, str], dict] = {}
     native_addresses: dict[tuple[str, str], dict] = {}
     resume_notices: dict[tuple[str, str], dict] = {}
     activity = [l for l in lines if l.get("event") not in {
-        "handover", "succession", "steward-release", "tidy-claim", "real-prompt", "native-address",
-        "resume-notice", "parked-fork"}]
+        "handover", "succession", "steward-release", "tidy-claim", "real-prompt", "native-address", "resume-notice"}]
     for item in lines:
         if item.get("event") == "tidy-claim" and item.get("claim_id"):
             claims[str(item["claim_id"])] = item
@@ -4074,14 +4070,6 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                     # Keep the shared writer's confirmed edge in this exact native ledger
                     # as well as its physical seat ledger for current seat-scoped readers.
                     _append_ledger_entry(physical_seat(seat), handed)
-        if handed is None and harness == "claude" and seat.kind == "native" \
-                and event in ("start", "prompt"):
-            # A window's conversation sent to the background continues here under this new id:
-            # its one parked-fork row, written only when both live facts say so (the shared
-            # writer re-reads them). It is not a clear: no card, number or release follows it.
-            with contextlib.suppress(BaseException):    # a hook never fails for the parked link
-                import dispatch_seat_handover as handover
-                handover.record_parked_fork(seat, harness, sid, event, source, now)
         if (seat.kind in ("pane", "native")
                 and ((event == "start" and source == "clear") or handed or appended)):
             with contextlib.suppress(BaseException):    # a hook never fails for the seat number

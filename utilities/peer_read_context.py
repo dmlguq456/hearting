@@ -42,16 +42,6 @@ class PeerReadContext:
         self._peer_notice_records = None
         self._end_observation = _UNOBSERVED
         self._native_sessions = _UNOBSERVED
-        self._parked_links = _UNOBSERVED
-
-    def parked_links(self, loader):
-        """Reuse one reading of Claude's window/background links for this read pass.
-
-        An observation of live processes like ``native_sessions``: a claim's effect group gets a
-        context of its own, so delivery, authority and a watch's end read them again."""
-        if self._parked_links is _UNOBSERVED:
-            self._parked_links = loader()
-        return self._parked_links
 
     def native_sessions(self, loader):
         """Reuse one native-session census (a ``/proc`` walk) for this read pass.
