@@ -254,7 +254,8 @@ class WriteUnitTest(unittest.TestCase):
             self.assertIn(line, must)
         # An entry the brief skips is listed, not a stop: the apply stage skips unmatched and STRUCT mutations.
         self.assertIn("listed, never guessed): end `verdict: PASS`", must)
-        self.assertIn("`blocked` only\n  when there is nothing to write from", must)
+        self.assertIn("`blocked`\n  when there is nothing to write from", must)
+        self.assertIn("or a precondition the contract names stops the work", must)
 
     def test_each_field_carries_its_own_lines_and_the_whole_must_layer(self):
         must = _must_layer(self.UNIT)
@@ -266,6 +267,13 @@ class WriteUnitTest(unittest.TestCase):
                 self.assertEqual(line in text, field in (None, other), (field, other))
         self.assertIn("## 갈래의 기본 — admin", W.unit_persona_body(ROOT, self.UNIT, "admin"))
         self.assertEqual(W.unit_persona_body(ROOT, self.UNIT, None), _raw(self.UNIT))
+
+    def test_the_common_guidance_preloads_writing_profiles(self):
+        for field in ("docs", "admin"):
+            with self.subTest(field=field):
+                text = W.unit_persona_body(ROOT, self.UNIT, field)
+                self.assertIn("roles/units/_shared/profile-preload.md", text)
+                self.assertIn("02_paper_writing_style", text)
 
     def test_the_rendered_text_stays_small(self):
         sizes = {field: len(W.unit_persona_body(ROOT, self.UNIT, field).encode("utf-8")) for field in FIELDS}
