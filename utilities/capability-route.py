@@ -2730,20 +2730,12 @@ def main():
             if not getattr(a, "route", None) or not getattr(a, "evidence", None):
                 print("capability-route: complete requires --route and --evidence (omit only with --inline)", file=sys.stderr)
                 raise SystemExit(2)
-        requested_id = None
         if a.command == "revise":
             a.route = resolve_route_argument(a.route, a.jobs)
-        elif a.command == "complete" and not Path(a.route).is_file():
-            # `complete` takes a route file or this exact route id, never an attempt alias.
-            if not ROUTE_ID_FORM.fullmatch(str(a.route)):
-                raise ValueError(f"route-argument-not-file-or-id:{a.route}")
-            requested_id, a.route = a.route, resolve_route_argument(a.route, a.jobs)
         route=verify_route(
             json.loads(Path(a.route).read_text()), getattr(a,"cwd",None),
             allow_stale_registry=a.command=="close",
         )
-        if requested_id and route.get("route_id") != requested_id:
-            raise ValueError(f"route-id-mismatch:requested={requested_id}:file={route.get('route_id')}")
         if a.command=="verify":
             if a.launch_phase:
                 compatible,mismatches=revalidate_launch_compatibility(route)
@@ -2853,12 +2845,6 @@ def main():
             if a.command=="node": print(json.dumps(node,sort_keys=True))
             else:
                 if getattr(a, "inline", False):
-                    bound = os.environ.get("AGENT_ROUTE_ID")
-                    if bound and bound != route["route_id"]:
-                        # A session bound to another route closes nothing here (its lineage successor aside).
-                        from route_lineage import verified_route_lineage
-                        if bound not in {g.get("route_id") for g in verified_route_lineage(route)}:
-                            raise ValueError(f"route-binding-mismatch:session-route={bound}")
                     if a.dispatch_depth is None:
                         try:
                             a.dispatch_depth = int(node.get("dispatch_depth"))
@@ -2873,19 +2859,9 @@ def main():
                     if a.fallback_hop is None:
                         a.fallback_hop = "inline"
                     if not a.attempt_id:
-                        # The owner's own attempt names the inline record. A parent session (no attempt of its
-                        # own) gets a route-named one only for a sealed stage the owner runs itself, the stages
-                        # its printed completion names; any other node still needs --attempt-id.
                         owner_attempt = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID") or ""
                         if owner_attempt:
                             a.attempt_id = f"{owner_attempt}-{a.node}-inline"
-                        else:
-                            try:
-                                import worker_bootstrap as _wb
-                                if _wb.owner_run_stage(node):
-                                    a.attempt_id = f"{route['route_id']}-{a.node}-inline"
-                            except Exception:  # without it the call is refused as before: pass --attempt-id
-                                pass
                     if not getattr(a, "evidence", None) and getattr(a, "reason", None):
                         try:
                             import artifact_producer as _ap

@@ -672,8 +672,8 @@ class FallbackTest(unittest.TestCase):
    self.assertTrue(line.startswith("owner_next_command=python3 "),line)
    command=line[len("owner_next_command="):].split("  # ")[0]
    import worker_bootstrap as WB
-   self.assertEqual(command,WB.inline_complete_command("plan","/od/plan.md","/route.json"))
-   self.assertIn("complete --route /route.json --inline --node plan --evidence /od/plan.md --reason",command)
+   self.assertEqual(command,WB.inline_complete_command("plan","/od/plan.md"))
+   self.assertIn("complete --inline --node plan --evidence /od/plan.md --reason",command)
    self.assertIn("write its output to /od/plan.md first",line)
    semantic=F.inline_owner_next_line(route,route["nodes"][1],"/route.json")
    self.assertIn("--node execute --reason",semantic)

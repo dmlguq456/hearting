@@ -1488,7 +1488,7 @@ class OwnerInlineMarkerPromptTest(OPA.OwnerRefineBase):
             "Fix it", {})
         self.assertIn("Route steps (sealed route", text)
         self.assertIn("Start now: `", text)
-        self.assertRegex(text, r"`[^`]*capability-route\.py complete --route \S+ --inline --node plan [^`]*`")
+        self.assertRegex(text, r"`[^`]*capability-route\.py complete --inline --node plan [^`]*`")
         self.assertNotIn("A declared stage (", text)
         self.assertNotIn("Human gate", text)
 
@@ -1566,8 +1566,7 @@ class OwnerRouteStepsPromptTest(unittest.TestCase):
     def test_inline_completion_command_is_concrete_with_the_first_evidence_file(self):
         text = self.steps()
         inline = re.search(r"`([^`]*capability-route\.py complete[^`]*)`", text).group(1)
-        self.assertEqual(shlex.split(inline)[3:11], ["--route", str(self.root / "route with space.json"), "--inline",
-                                                     "--node", "plan", "--evidence", f"{self.output_dir}/plan.md", "--reason"])
+        self.assertEqual(shlex.split(inline)[3:9], ["--inline", "--node", "plan", "--evidence", f"{self.output_dir}/plan.md", "--reason"])
         self.assertNotIn("<node>", text)
         self.assertIn("do not export them or add them to the printed commands", text)
 
@@ -1700,7 +1699,7 @@ class OwnerRouteStepsPromptTest(unittest.TestCase):
         args = self.owner(path)
         text = W.assignment_prompt(args, "Fix it", {"AGENT_ARTIFACT_OUTPUT_DIR": self.output_dir})
         self.assertEqual(text.count("Route steps (sealed route rt-steps"), 1)
-        self.assertEqual(text.count(" --inline --node "), 3)
+        self.assertEqual(text.count("complete --inline"), 3)
         self.assertNotIn("A declared stage (", text)
         self.assertIn("Assignment:\nFix it\n\n", text)
 

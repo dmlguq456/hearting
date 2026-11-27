@@ -617,7 +617,7 @@ def completion_marker_gate(
             if currency.state == "resource-stage-not-current":
                 resource_actions[dep] = resource_stage_next_action(currency, dep)
             else:
-                _resource_predecessor_action(route, dep, resource_actions, route_file)
+                _resource_predecessor_action(route, dep, resource_actions)
             continue
         markers[dep] = marker
         proceeding.append((dep_node, marker_path, marker))
@@ -1486,8 +1486,8 @@ RESOURCE_STAGE_UNOBSERVABLE = "resource-stage-unobservable"
 
 
 def _resource_predecessor_action(route, dep: str, actions: dict, route_file=None) -> None:
-    """A resource predecessor with no current marker is continued, never waited on; a stage the owner
-    runs itself names its exact completion command (nothing else would publish its marker)."""
+    """A resource predecessor with no current marker is continued, never waited on. Given the route file (no
+    marker at all), a step the owner runs itself adds its one line (`worker_bootstrap.human_run_step`)."""
     node = next((row for row in route.get("nodes", []) if row.get("id") == dep), None)
     try:
         import worker_bootstrap as wb

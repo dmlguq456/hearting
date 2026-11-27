@@ -435,7 +435,7 @@ def inline_owner_next_line(route: dict, node: dict, route_file) -> str:
         if not output_dir:
             return ""
         evidence = wb.node_first_evidence(route, node["id"], output_dir)
-        lines = ["owner_next_command=" + wb.inline_complete_command(node["id"], evidence, route_file)
+        lines = ["owner_next_command=" + wb.inline_complete_command(node["id"], evidence)
                  + "  # run this stage yourself" + (f", write its output to {evidence} first" if evidence else "")
                  + ", then run this command"]
         try:
