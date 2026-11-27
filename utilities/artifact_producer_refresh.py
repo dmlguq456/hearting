@@ -34,7 +34,8 @@ import dispatch_lock_order
 
 from artifact_producer_store import (
     _canonical, _digest, _earlier_documents, _ensure_dir, _excluded_by_roots, _json_bytes,
-    _read_json, _record_cycle_manifest_path, _rfc3339, _stream_file_facts, _walk_cycle_files,
+    _read_json, _record_cycle_manifest_path, _request_member_dirs, _rfc3339, _stream_file_facts,
+    _walk_cycle_files,
     _write_atomic, _write_cycle_record, ALGORITHM_VERSION, cycle_dir, cycle_record_path,
     journal_path, producer_dir, ProducerError, read_cycle_record,
 )
@@ -1436,6 +1437,7 @@ class _RefreshScan:
     complete: bool = True
     cursor: Optional[str] = None
     from_top: bool = True
+    kept_roots: List[str] = field(default_factory=list)  # a frame's execution folders, never looked into
 
 
 def _pruned_directory(parts: Sequence[str]) -> bool:
@@ -1487,7 +1489,7 @@ def _walk_sorted(top: str, prefix: Tuple[str, ...], after: Optional[Tuple[str, .
 
 
 def _bounded_scan(directory: Path, *, cursor: Optional[str], known: Mapping[str, Sequence[Any]],
-                  budget: RefreshBudget) -> _RefreshScan:
+                  budget: RefreshBudget, kept_roots: Iterable[str] = ()) -> _RefreshScan:
     """Walk both exact cycle payload roots without a lock, within one shared budget.
 
     Resume positions and file facts use full cycle-relative locators. Older
@@ -1513,7 +1515,7 @@ def _bounded_scan(directory: Path, *, cursor: Optional[str], known: Mapping[str,
             if parts[0] in {"artifacts", "_internal"}:
                 after = parts
     normalized_cursor = "/".join(after) if after else None
-    scan = _RefreshScan(from_top=after is None)
+    scan = _RefreshScan(from_top=after is None, kept_roots=sorted(kept_roots))
     roots_to_walk = []
     for root_name, top in roots:
         observation = artifact_payload.observe_directory(top, payload_root=top)
@@ -1529,6 +1531,8 @@ def _bounded_scan(directory: Path, *, cursor: Optional[str], known: Mapping[str,
     document = _read_json(directory / "manifest.json")
     bundle_directories = _manifest_bundle_directories(document) if isinstance(document, Mapping) else set()
     bundle_parts = {tuple(path.split("/")) for path in bundle_directories}
+    # A frame's execution folders are left out exactly as its first seal left them out.
+    skipped_parts = bundle_parts | {tuple(rel.split("/")) for rel in scan.kept_roots}
     cursor_root = after[0] if after else None
     root_order = {name: index for index, (name, _top) in enumerate(
         (("artifacts", artifacts), ("_internal", internal)))}
@@ -1548,7 +1552,7 @@ def _bounded_scan(directory: Path, *, cursor: Optional[str], known: Mapping[str,
             continue
         root_after = after if cursor_root == root_name else None
         for parts, entry, is_dir in _walk_sorted(
-                str(top), (root_name,), root_after, bundle_parts, marker_callback=inspect_marker):
+                str(top), (root_name,), root_after, skipped_parts, marker_callback=inspect_marker):
             if processed and budget.walk_exhausted():
                 scan.complete = False
                 scan.cursor = "/".join(last_parts) if last_parts else normalized_cursor
@@ -1556,7 +1560,7 @@ def _bounded_scan(directory: Path, *, cursor: Optional[str], known: Mapping[str,
             budget.walked += 1
             processed += 1
             rel = "/".join(parts)
-            if parts in bundle_parts:
+            if parts in skipped_parts:
                 last_parts = parts
                 continue
             if entry.is_symlink():
@@ -1621,7 +1625,8 @@ def _confirmed_absent(directory: Path, document: Mapping[str, Any], scan: _Refre
     for row in document.get("artifact_revisions", []) or []:
         rel = row.get("locator", {}).get("path") if isinstance(row, dict) else None
         if (not isinstance(rel, str) or rel in scan.visited or _outside_inclusion_rule(rel)
-                or any(rel.startswith(path + "/") for path in bundle_directories)):
+                or any(rel.startswith(path + "/") for path in bundle_directories)
+                or _excluded_by_roots(rel, scan.kept_roots)):
             continue
         parts = rel.split("/")
         marker_excluded = False
@@ -1773,7 +1778,8 @@ def _refresh_cycle_observed(root: Path, cycle_id: str, *, trigger: str, clock: f
         return skipped("min-interval", next_eligible_at=_rfc3339(observed_at + checkpoint_interval_seconds()))
     directory = manifest_path.parent
     scan = _bounded_scan(directory, cursor=None if trigger == "explicit" else state.get("cursor"),
-                         known=state.get("files", {}), budget=budget)
+                         known=state.get("files", {}), budget=budget,
+                         kept_roots=_request_member_dirs(directory))
     gone = _confirmed_absent(directory, document, scan, budget)
     alloc = allocator or artifact_identity.IdAllocator()
     facts = [(rel, digest_, size) for rel, (digest_, size, _fp) in sorted(scan.facts.items())]
@@ -1847,6 +1853,12 @@ def _publish_refresh(root: Path, cycle_id: str, manifest_path: Path, raw: bytes,
                 or _record_cycle_manifest_path(root, record) != manifest_path):
             return "superseded"
         if not _recheck_candidate(directory, manifest_path, raw, scan, changes):
+            return "superseded"
+        # An execution begun after the scan read the frame's members owns these files now.
+        later = [rel for rel in (*changes.get("added", []), *changes.get("modified", []))
+                 if rel.startswith("_internal/executions/")]
+        owned = _request_member_dirs(directory) if later else set()
+        if any(_excluded_by_roots(rel, owned) for rel in later):
             return "superseded"
         # An active -> completed candidate was decided from observations taken before this
         # lock; a lease, route or outcome that moved since keeps the document as it is.
