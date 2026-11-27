@@ -3181,7 +3181,12 @@ for(const [width,height] of [[32,30],[37,30],[38,30],[80,24]]){
  // (11-27: a received request wears the received message's `←`, so each request's mark is counted in the box, above MESSAGES,
  // and the one `←` under MESSAGES is the message's.)
  for(const mark of ['←','→','✓'])assert(lines.slice(0,m).filter(s=>s.includes(mark)).length===1,mark+width+'\n'+lines.join('\n'));
- assert(m>box&&box>0&&lines.slice(m+1).every(s=>!/✓|→ \[52\]/.test(s))&&lines.slice(m+1).filter(s=>s.includes('←')).length===1,lines.join('\n'));
+ // Under MESSAGES the message stands alone: the one row with a mark (in the old `◂` or any other) is the message's own `← [e7]`
+ // with its text on it or under it, and no request's title, state or id is drawn there.
+ const below=lines.slice(m+1),marked=below.map((s,i)=>i).filter(i=>/[◂←→✓✕]/.test(below[i]));
+ assert(m>box&&box>0&&marked.length===1&&/← \[e7\]/.test(below[marked[0]])
+  &&[below[marked[0]],below[marked[0]+1]||''].some(s=>s.includes('MSG_KEPT')),lines.join('\n'));
+ assert(below.every(s=>!/같은|끝난 일|열림|전달됨|최종 답|rq-/.test(s)),lines.join('\n'));
  assert(lines.length<=height);
 }
 const none=text(render(37,30,{},{...base,requests:[]}));
