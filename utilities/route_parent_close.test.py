@@ -2434,6 +2434,26 @@ class ParentCloseTest(unittest.TestCase):
         self.assertEqual(replay.returncode, 0, replay.stderr)
         self.assertEqual(json.loads(replay.stdout), json.loads(first.stdout))
 
+    def test_cli_close_stopping_the_owner_records_the_readers_catalog_verdict(self):
+        # The close that stops a running owner writes its own outcome; it keeps the verdict
+        # the `close` CLI computed, so `status` does not show another catalog's route as current.
+        moved = json.loads(json.dumps(self.route))
+        moved["validation_basis"]["registry_root"] = str(self.base / "other-catalog")
+        moved["registry_digest"] = moved["capability_registry_digest"] = "sha256:" + "1" * 64
+        moved["route_hash"] = ROUTE.route_hash(moved)
+        moved["route_id"] = "rt-" + moved["route_hash"].split(":", 1)[1][:16]
+        self.route, self.path = moved, self.path.with_name(moved["route_id"] + ".json")
+        self.path.write_text(json.dumps(moved))
+        owner = self.process("att-owner")
+        self.row("att-owner", process=owner)
+        command = [sys.executable, str(HERE / "capability-route.py"), "close", "--route", str(self.path)]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["state"], "cancelled")
+        self.assertIs(json.loads(ROUTE.outcome_path(self.path).read_text())["registry_current"], False)
+        row = next(r for r in ROUTE.route_status(self.artifacts) if r["route_id"] == moved["route_id"])
+        self.assertIs(row["registry_current"], False)
+
     def test_resource_in_owner_group_survives_and_missing_output_does_not_change_replay(self):
         pidfile = self.base / "child.pid"
         script = ("import os,time; p=os.fork(); "
