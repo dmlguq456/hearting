@@ -498,7 +498,9 @@ class RequestFolderTest(S.SourceRepoStartBase):
         self.assertEqual({p for p in self.frame_paths(frame_dir) if p.startswith("_internal/")}, set())
         self.assert_frame_note_in_and_no_execution_rows(frame_dir, P.refresh_cycle(self.root, frame["cycle_id"]))
 
-    def test_support_files_of_an_ordinary_cycle_in_the_same_shape_are_still_listed(self):
+    def test_support_files_of_an_ordinary_cycle_in_the_same_shape_are_listed_and_refreshed_as_before(self):
+        import time
+        import artifact_producer_refresh as REF
         frame, execution, frame_dir, _ = self.sealed_frame_with_execution()
         route = S.T.compile_for("direct", self.root, slug="ordinary", campaign_key="ordinary-campaign")
         route_path = Path(S.L.admit_runtime_route(self.root, route).route_file)
@@ -513,14 +515,30 @@ class RequestFolderTest(S.SourceRepoStartBase):
         result = P.refresh_cycle(self.root, ordinary["cycle_id"])
         self.assertEqual(result["status"], "emitted", result)
         self.assertIn(f"_internal/executions/{execution['cycle_id']}/support.md", self.frame_paths(Path(ordinary["cycle_dir"])))
+        # Mid copy-move (the record names its new root, the source folder is still here) nothing changed,
+        # and the member check is made in the recorded folder, so nothing is looked up.
+        record = P.read_cycle_record(self.root, ordinary["cycle_id"])
+        P._write_cycle_record(self.root, dict(record, relocation={"artifact_root": "/elsewhere"}), exclusive=False)
+        later = time.time() + REF.checkpoint_interval_seconds() + 1
+        self.assertEqual(P.refresh_cycle(self.root, ordinary["cycle_id"])["status"], "unchanged")
+        self.assertEqual(P.refresh_cycle(self.root, ordinary["cycle_id"], trigger="turn-end", now=later)["status"],
+                         "unchanged")
+        refinalized = P.finalize(self.root, cycle_id=ordinary["cycle_id"])
+        self.assertEqual((refinalized["status"], refinalized["refreshed"]), ("already-sealed", False), refinalized)
 
-    def test_a_frame_moved_in_its_campaign_and_linked_from_its_old_name_leaves_executions_out(self):
-        frame, _execution, frame_dir, _ = self.sealed_frame_with_execution()
+    def test_a_frame_moved_in_its_campaign_and_linked_from_its_old_name_refreshes_as_before(self):
+        # Left as it was: the shared member check refuses the linked recorded folder, so it finds no member
+        # and the refresh lists the execution's files as it did before this change.
+        frame, execution, frame_dir, _ = self.sealed_frame_with_execution()
         moved = frame_dir.with_name(frame_dir.name + "-moved")
         frame_dir.rename(moved)
         frame_dir.symlink_to(moved.name, target_is_directory=True)  # the record still names the old one
         (moved / "_internal" / "frame-note.md").write_bytes(b"the frame's own late file\n")
-        self.assert_frame_note_in_and_no_execution_rows(moved, P.refresh_cycle(self.root, frame["cycle_id"]))
+        result = P.refresh_cycle(self.root, frame["cycle_id"])
+        self.assertEqual(result["status"], "emitted", result)
+        member = f"_internal/executions/{execution['cycle_id']}/"
+        self.assertEqual(sorted(result["changes"]["added"]), sorted(
+            ["_internal/frame-note.md", member + "artifacts/plans/final_report.md", member + "manifest.json"]))
 
     def test_a_linked_artifact_root_and_a_relative_frame_path_leave_executions_out(self):
         import contextlib

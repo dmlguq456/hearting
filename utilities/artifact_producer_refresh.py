@@ -1199,7 +1199,7 @@ def _refresh_cycle_locked(root: Path, record: Mapping[str, Any], *, now: Optiona
         facts = prescan.facts
         refreshed, changes = _refreshed_document(
             root, record, document, facts, allocator=alloc, now=now,
-            excluded_roots=prescan.excluded_roots, kept_roots=_frame_member_roots(root, record, directory))
+            excluded_roots=prescan.excluded_roots, kept_roots=_request_member_dirs(directory))
         deferred = refreshed is not None and not _prescan_holds(directory, prescan, changes)
     else:
         deferred = True
@@ -1439,13 +1439,6 @@ class _RefreshScan:
     cursor: Optional[str] = None
     from_top: bool = True
     kept_roots: List[str] = field(default_factory=list)  # a frame's execution folders, never looked into
-
-
-def _frame_member_roots(root: Path, record: Mapping[str, Any], directory: Path) -> Set[str]:
-    """A frame's execution folders, judged where its first seal judges them (`cycle_dir`)."""
-    if not (directory / "_internal" / "executions").is_dir():
-        return set()
-    return _request_member_dirs(cycle_dir(root, record["campaign_id"], record["cycle_id"], record))
 
 
 def _pruned_directory(parts: Sequence[str]) -> bool:
@@ -1787,7 +1780,7 @@ def _refresh_cycle_observed(root: Path, cycle_id: str, *, trigger: str, clock: f
     directory = manifest_path.parent
     scan = _bounded_scan(directory, cursor=None if trigger == "explicit" else state.get("cursor"),
                          known=state.get("files", {}), budget=budget,
-                         kept_roots=_frame_member_roots(root, record, directory))
+                         kept_roots=_request_member_dirs(directory))
     gone = _confirmed_absent(directory, document, scan, budget)
     alloc = allocator or artifact_identity.IdAllocator()
     facts = [(rel, digest_, size) for rel, (digest_, size, _fp) in sorted(scan.facts.items())]
@@ -1865,7 +1858,7 @@ def _publish_refresh(root: Path, cycle_id: str, manifest_path: Path, raw: bytes,
         # An execution begun after the scan read the frame's members owns these files now.
         later = [rel for rel in (*changes.get("added", []), *changes.get("modified", []))
                  if rel.startswith("_internal/executions/")]
-        owned = _frame_member_roots(root, record, directory) if later else set()
+        owned = _request_member_dirs(directory) if later else set()
         if any(_excluded_by_roots(rel, owned) for rel in later):
             return "superseded"
         # An active -> completed candidate was decided from observations taken before this
