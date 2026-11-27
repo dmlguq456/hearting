@@ -308,6 +308,13 @@ class ArtifactRootParityTest(Fixture):
         from artifact_producer import activate, classify_root, cutover_path
         from tools.fleet.collectors import project_status
 
+        python_bin = self.tmp / "bin"
+        python_bin.mkdir()
+        broken_python = python_bin / "python3"
+        broken_python.write_text("#!/bin/sh\nexit 97\n", encoding="utf-8")
+        broken_python.chmod(0o755)
+        broken_python_path = f"{python_bin}{os.pathsep}{self.env['PATH']}"
+
         choices = [
             ("absent", "absent", ".agent_reports"),
             ("inactive", "absent", ".agent_reports"),
@@ -358,6 +365,11 @@ class ArtifactRootParityTest(Fixture):
                     self.assertEqual(G.artifact_root(checkout, self.env), expected)
                     self.assertEqual(project_status.artifact_root(checkout),
                                      expected if Path(expected).is_dir() else None)
+                    with self.subTest(checkout=checkout.name, PYTHONSAFEPATH="1"):
+                        self.assertEqual(self.resolver(checkout, PYTHONSAFEPATH="1"), expected)
+                    if "absent" in (agent_state, claude_state):
+                        with self.subTest(checkout=checkout.name, python3="fails"):
+                            self.assertEqual(self.resolver(checkout, PATH=broken_python_path), expected)
 
     def test_linked_worktree_shares_the_primary_folder(self):
         linked = self.tmp / "work" / "proj-wt"

@@ -50,6 +50,16 @@ emit() {
 }
 
 emit_project_root() {
+  # With one name (or none) there is nothing to choose, so no interpreter starts.
+  agent=${1%/}/.agent_reports
+  claude=${1%/}/.claude_reports
+  if [ ! -d "$claude" ]; then
+    emit "$(physical_dir "$agent" || printf '%s' "$agent")"
+  fi
+  if [ ! -d "$agent" ]; then
+    emit "$(physical_dir "$claude" || printf '%s' "$claude")"
+  fi
+
   resolver=$0
   while [ -L "$resolver" ]; do
     target=$(readlink "$resolver") || exit 66
@@ -58,7 +68,8 @@ emit_project_root() {
       *) resolver=$(dirname -- "$resolver")/$target ;;
     esac
   done
-  root=$(python3 -B "$(dirname -- "$resolver")/artifact_root_selection.py" "$1") || exit $?
+  # An inherited PYTHONSAFEPATH=1 would hide the script's sibling modules.
+  root=$(PYTHONSAFEPATH= python3 -B "$(dirname -- "$resolver")/artifact_root_selection.py" "$1") || exit $?
   emit "$root"
 }
 
