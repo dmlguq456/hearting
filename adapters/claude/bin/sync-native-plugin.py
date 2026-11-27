@@ -55,7 +55,7 @@ def plugin_skill_sources() -> list[Path]:
 AGENTS = ADAPTER / "agents"
 HOOKS_SOURCE = ROOT / "hooks"
 UTILITIES_SOURCE = ROOT / "utilities"
-UTIL_BUNDLE = ["agent-home.sh", "artifact-root.sh"]
+UTIL_BUNDLE = ["agent-home.sh", "artifact-root.sh", "artifact_root_selection.py", "artifact_identity.py"]
 
 # The two kept write gates, plus non-blocking spec read observations and sync nudges.
 HOOK_ADOPT = [
