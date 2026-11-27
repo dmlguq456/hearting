@@ -886,6 +886,12 @@ class OwnerFinishCorrectionRegressionTest(OwnerInputTest):
         self.assertIn("goes into the owner's running turn", notice)
         self.assertNotIn('are delayed', notice)
 
+    def test_claude_stream_owner_reports_its_running_turn(self):
+        value = json.loads(I._path(self.jobs, self.attempt).read_text())
+        value['transport'] = 'claude-active-turn'
+        self.assertEqual(I._public(value, owner_phase='running-turn').get('delivery_timing'), 'active-turn')
+        self.assertEqual(I._public(value, owner_phase='unknown').get('delivery_timing'), 'phase-unavailable')
+
     def test_queued_claude_and_opencode_remain_next_owner_turn(self):
         for transport in ('claude-next-turn', 'opencode-next-turn'):
             with self.subTest(transport=transport):

@@ -229,11 +229,12 @@ def _owner_waits_on_review(metadata):
 def _public(value, *, live=False, reachable=None, owner_phase=None, metadata=None):
     reachable = live if reachable is None else reachable
     phase = owner_phase or _owner_phase(value["attempt_id"])
-    timing = ("active-turn" if value["transport"] == "codex-active-turn" and phase == "running-turn"
-              else "phase-unavailable" if value["transport"] == "codex-active-turn" and phase == "unknown"
+    active = value["transport"] in {"codex-active-turn", "claude-active-turn"}
+    timing = ("active-turn" if active and phase == "running-turn"
+              else "phase-unavailable" if active and phase == "unknown"
               else "next-owner-turn")
     lead = {"active-turn": ("A queued correction goes into the owner's running turn; if that turn "
-                            "refuses it, it waits for the next owner turn."),
+                            "cannot take it, it waits for the next owner turn."),
             "phase-unavailable": "Queued corrections may wait for the next owner turn."}.get(
                 timing, "Queued corrections are delayed until the next owner turn.")
     notice = (lead + " An owner parked on its children gets that turn at its next wait checkpoint, "

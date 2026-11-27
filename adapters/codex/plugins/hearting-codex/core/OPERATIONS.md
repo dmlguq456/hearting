@@ -1541,9 +1541,11 @@ same command reaches all of them. Registration opens the input channel: a
 correction sent after `--register` and before the first consumer attaches is
 queued and handed to the first turn (a relaunch of a never-claimed row keeps
 that queue). Codex uses its existing App Server connection to steer an active
-turn; Claude and OpenCode retain the input for the next turn of the same
-session. Pending input takes precedence over automatic stage advancement and
-terminal closure. A transport receipt proves delivery, not implementation; an
+turn; Claude writes it into the running turn on its existing stream-json input
+(read after the current tool calls; a turn that ends first gets Claude Code's
+own next turn); a Claude resume-process owner and OpenCode retain the input
+for the next turn of the same session. Pending input takes precedence over
+automatic stage advancement and terminal closure. A transport receipt proves delivery, not implementation; an
 interrupted send remains unknown (`delivery-unknown`) and is handed back through
 the existing supervision notice carrier. A host whose supervisor probe does not
 report support runs the owner as the existing one-shot, creates no input state,

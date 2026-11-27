@@ -466,8 +466,12 @@ An interrupted close is continued by the existing execution observers. No
 adapter adds a cancellation command, reason requirement or approval step.
 
 Owner corrections are accepted independently of delivery. Codex active-turn
-steering is only accepted after a matching turn response; Claude and OpenCode
-next-turn transports deliver on a later owner turn. An owner parked on model
+steering is only accepted after a matching turn response. A Claude stream-json
+owner writes the correction into its running turn, which reads it once its
+current tool calls finish; a result naming the message uuid is the acceptance,
+and a turn that ends first is answered by Claude Code's own next turn. Claude
+resume-process and OpenCode next-turn transports deliver on a later owner
+turn. An owner parked on model
 children receives a queued correction at the next checkpoint of the same
 30-second join pieces that carry resource attention
 (`join_with_resource_attention`): the children are not delivered, keep running

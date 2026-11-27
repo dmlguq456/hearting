@@ -3660,5 +3660,137 @@ class TurnTokenUsageTest(unittest.TestCase):
             args, 2, "resume-process", {"usage": {"input_tokens": True, "output_tokens": -1}}))
 
 
+
+class InTurnCorrectionTest(unittest.TestCase):
+    """A correction queued while a stream-json owner turn runs reaches that turn (OPERATIONS §5.10)."""
+
+    def setUp(self):
+        import dispatch_owner_input as owner_input
+        from dispatch_contract import hold_supervisor_lease, supervisor_lease_path
+        self.I = owner_input
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.jobs = self.root / "jobs.log"
+        lease = supervisor_lease_path(self.jobs, PARENT)
+        self.jobs.write_text(owner_row(lease), encoding="utf-8")
+        held = hold_supervisor_lease(self.jobs, PARENT, lease)
+        held.__enter__()
+        self.addCleanup(held.__exit__, None, None, None)
+        self.control = owner_input.OwnerInput(self.jobs, PARENT, "sess", "claude-active-turn", lambda _e: None)
+        self.seen = self.root / "seen.jsonl"
+        self.args = SimpleNamespace(worktree=str(self.root), state_file=None, turn_timeout=5,
+                                    owner_runtime_turn_ordinal=1)
+
+    def session(self, body):
+        script = self.root / "live.py"
+        script.write_text(
+            "import json,sys\n"
+            f"SEEN={str(self.seen)!r}\n"
+            "def read():\n"
+            "    line=sys.stdin.readline()\n"
+            "    if not line: sys.exit(0)\n"
+            "    value=json.loads(line)\n"
+            "    open(SEEN,'a').write(json.dumps(value)+'\\n')\n"
+            "    return value\n"
+            "def emit(**v):\n"
+            "    print(json.dumps(v),flush=True)\n"
+            "turn=read()['uuid']\n"
+            + textwrap.dedent(body))
+        patch = mock.patch.object(supervisor, "claude_command", return_value=[sys.executable, str(script)])
+        patch.start()
+        self.addCleanup(patch.stop)
+        session = supervisor.ClaudeStreamSession(self.args, "sess")
+        self.addCleanup(session.process.stdout.close)
+        self.addCleanup(session.close)
+        return session
+
+    def owner_turn(self, session):
+        from foreground_activity import ActivityObservation
+        from session_supervisor_decisions import OwnerTurnActivity
+        session.owner_activity = OwnerTurnActivity(
+            lambda: ActivityObservation(True, False, ("tool-running",)), window_seconds=5, sample_seconds=0.05)
+        session.owner_input, session.input_turn = self.control, "1"
+
+    def written(self):
+        return [json.loads(line) for line in self.seen.read_text().splitlines()]
+
+    def receipt(self):
+        return self.I.inspect(self.jobs, PARENT)["requests"][0]
+
+    def test_a_correction_sent_during_the_turn_is_read_by_that_turn(self):
+        session = self.session("""
+            emit(type='assistant', n=1)
+            correction = read()                  # a tool call is running; the message waits for it
+            emit(type='result', subtype='success', result='used it', user_message_uuids=[turn, correction['uuid']])
+            sys.stdin.read()
+        """)
+        self.owner_turn(session)
+        import threading
+        sender = threading.Timer(0.3, self.I.submit, (self.jobs, PARENT, "lead with the result", "fix-1"))
+        sender.start()
+        self.addCleanup(sender.cancel)
+        result, rc = session.run_turn("work", 5)
+        self.assertEqual((result["result"], rc), ("used it", 0))
+        lines = self.written()
+        self.assertEqual(len(lines), 2)
+        self.assertIn("lead with the result", lines[1]["message"]["content"][0]["text"])
+        receipt = self.receipt()
+        self.assertEqual((receipt["state"], receipt["turn_id"]), ("accepted", "1"))
+        self.assertEqual([e.get("mode") for e in receipt["events"] if e["state"] == "sending"], ["active-turn"])
+        self.assertEqual(self.control.prepare("next"), "next")   # never sent twice
+
+    def test_a_turn_that_ends_first_waits_for_claudes_own_turn_and_sends_once(self):
+        self.I.submit(self.jobs, PARENT, "lead with the result", "fix-1")
+        session = self.session("""
+            correction = read()
+            emit(type='result', subtype='success', result='first answer', user_message_uuids=[turn])
+            emit(type='assistant', n=2)
+            emit(type='result', subtype='success', result='after it', user_message_uuids=[correction['uuid']])
+            following = read()
+            emit(type='result', subtype='success', result='next turn', user_message_uuids=[following['uuid']])
+            sys.stdin.read()
+        """)
+        self.owner_turn(session)
+        result, _ = session.run_turn("work", 5)
+        self.assertEqual(result["result"], "after it")
+        self.assertEqual(self.receipt()["state"], "accepted")
+        session.owner_input = None
+        result, _ = session.run_turn(self.control.prepare("continue"), 5)
+        self.assertEqual(result["result"], "next turn")
+        texts = [line["message"]["content"][0]["text"] for line in self.written()]
+        self.assertEqual(sum("lead with the result" in text for text in texts), 1)
+
+    def test_a_written_correction_without_a_receipt_is_delivery_unknown_and_not_replayed(self):
+        self.I.submit(self.jobs, PARENT, "lead with the result", "fix-1")
+        session = self.session("read()\n")       # the runtime dies after taking it
+        self.owner_turn(session)
+        with self.assertRaisesRegex(supervisor.SupervisorError, "claude-result-missing"):
+            session.run_turn("work", 5)
+        receipt = self.receipt()
+        self.assertEqual((receipt["state"], receipt.get("reason")), ("delivery-unknown", "claude-turn-receipt-missing"))
+        self.assertEqual(self.control.prepare("next"), "next")
+
+    def test_only_an_ordinary_owner_turn_writes_into_the_running_turn(self):
+        self.I.submit(self.jobs, PARENT, "lead with the result", "fix-1")
+        session = self.session("""
+            emit(type='result', subtype='success', result='ok', user_message_uuids=[turn])
+            correction = read()
+            emit(type='result', subtype='success', result='used it', user_message_uuids=[turn, correction['uuid']])
+            sys.stdin.read()
+        """)
+        supervisor.run_turn(self.args, "sess", "cleanup", resume=False, stream_session=session,
+                            owner_input=self.control)
+        self.assertEqual(self.receipt()["state"], "queued")       # left for the next owner turn
+        self.assertEqual(len(self.written()), 1)
+
+    def test_a_result_for_another_written_message_does_not_answer_this_prompt(self):
+        self.assertFalse(supervisor.result_answers_turn(
+            {"type": "result", "user_message_uuids": ["correction"]}, "prompt"))
+        self.assertTrue(supervisor.result_answers_turn({"type": "result"}, "prompt"))
+        self.assertTrue(supervisor.result_answers_turn(
+            {"type": "result", "user_message_uuids": ["correction", "prompt"]}, "prompt"))
+
+
 if __name__ == "__main__":
     unittest.main()

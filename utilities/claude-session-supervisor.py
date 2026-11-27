@@ -14,7 +14,7 @@ import selectors
 import shlex
 import subprocess
 import tempfile
-from dispatch_owner_input import OwnerInput
+from dispatch_owner_input import InputError, OwnerInput
 import dispatch_resource_wait as RESOURCE_WAIT
 import sys
 import frame_repository
@@ -761,6 +761,8 @@ def result_answers_turn(result: dict[str, Any], turn_uuid: str | None = None) ->
     if turn_uuid and ((isinstance(echoed, list) and turn_uuid in echoed)
                       or result.get("user_message_uuid") == turn_uuid):
         return True
+    if turn_uuid and isinstance(echoed, list) and echoed:
+        return False   # it answers other messages written to this stream (a correction's own turn)
     return not result.get("origin")
 
 
@@ -816,25 +818,25 @@ class ClaudeStreamSession:
         # fixed deadline its lease is sized for.
         self.idle_reset = False
         self.owner_activity = None
+        # An ordinary owner turn's input receipts (OPERATIONS §5.10): a queued
+        # correction is written into the running turn, which Claude Code reads
+        # once its current tool calls finish (or answers in a turn of its own
+        # when the turn ends first). Message uuid -> request ids until echoed.
+        self.owner_input: OwnerInput | None = None
+        self.input_turn = ""
+        self.injected: dict[str, list[str]] = {}
+        self.held: dict[str, Any] | None = None
+        self.next_input_poll = 0.0
 
-    def run_turn(self, prompt: str, timeout: float) -> tuple[dict[str, Any], int]:
-        if self.closed or self.process.stdin is None or self.process.stdout is None:
-            raise SubmissionNotStarted("claude-stream-closed")
-        turn_uuid = str(uuid.uuid4())
+    def _write_user(self, message_uuid: str, text: str) -> None:
         payload = {
             "type": "user",
-            "uuid": turn_uuid,
-            "message": {
-                "role": "user",
-                "content": [{"type": "text", "text": prompt}],
-            },
+            "uuid": message_uuid,
+            "message": {"role": "user", "content": [{"type": "text", "text": text}]},
             "parent_tool_use_id": None,
         }
         try:
-            data = (
-                    json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-                    + "\n"
-                ).encode("utf-8")
+            data = (json.dumps(payload, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
             written = 0
             while written < len(data):
                 count = self.process.stdin.write(data[written:])
@@ -844,8 +846,53 @@ class ClaudeStreamSession:
             self.process.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
             raise SupervisorError("claude-stream-write-failed") from exc
+
+    def _inject_corrections(self) -> None:
+        control = self.owner_input
+        if control is None or self.held is not None or time.monotonic() < self.next_input_poll:
+            return
+        self.next_input_poll = time.monotonic() + 0.2
+        try:
+            items = control.take("active-turn")
+        except (InputError, OSError, ValueError):
+            # Unreadable receipts stay where they are for the next-turn path.
+            self.owner_input = None
+            return
+        if items:
+            message_uuid = str(uuid.uuid4())
+            self.injected[message_uuid] = [item["id"] for item in items]
+            self._write_user(message_uuid, control.text(items))
+
+    def _record_injected(self, uuids, state: str, **evidence) -> bool:
+        ids = [request for key in uuids for request in self.injected.pop(key, [])]
+        if ids and self.owner_input is not None:
+            try:
+                self.owner_input.record(ids, state, **evidence)
+            except (InputError, OSError, ValueError):
+                pass   # still `sending`: closing the consumer makes it delivery-unknown, never a replay
+        return bool(ids)
+
+    def run_turn(self, prompt: str, timeout: float) -> tuple[dict[str, Any], int]:
+        if self.closed or self.process.stdin is None or self.process.stdout is None:
+            raise SubmissionNotStarted("claude-stream-closed")
+        turn_uuid = str(uuid.uuid4())
+        self._write_user(turn_uuid, prompt)
+        self.injected, self.held = {}, None
+        try:
+            return self._read_turn(turn_uuid, timeout)
+        except SupervisorError:
+            # The turn was answered; only a written correction's own turn is missing.
+            if self.held is not None:
+                return self.held, self.process.poll() or 0
+            raise
+        finally:
+            self._record_injected(list(self.injected), "delivery-unknown",
+                                  reason="claude-turn-receipt-missing")
+
+    def _read_turn(self, turn_uuid: str, timeout: float) -> tuple[dict[str, Any], int]:
         deadline = time.monotonic() + timeout
         while True:
+            self._inject_corrections()
             remaining = deadline - time.monotonic()
             if self.owner_activity is None and remaining <= 0:
                 raise SupervisorError("claude-turn-process-failed")
@@ -886,7 +933,22 @@ class ClaudeStreamSession:
                 ):
                     raise SupervisorError("claude-turn-process-failed")
                 if isinstance(value, dict) and value.get("type") == "result":
-                    if result_answers_turn(value, turn_uuid):
+                    echoed = value.get("user_message_uuids")
+                    echoed = set(echoed) if isinstance(echoed, list) else set()
+                    echoed.add(value.get("user_message_uuid"))
+                    first = self.held is None
+                    taken = self._record_injected(
+                        [key for key in list(self.injected) if key in echoed], "accepted",
+                        thread_id=self.owner_input.thread_id if self.owner_input else "",
+                        turn_id=self.input_turn)
+                    if (result_answers_turn(value, turn_uuid) if first
+                            else taken or not value.get("origin")):
+                        self.held = value
+                        # A correction the turn ended before reading starts Claude's own
+                        # next turn; that result, not this one, closes the owner turn.
+                        if (self.injected and (first or taken) and isinstance(value.get("user_message_uuids"), list)
+                                and value.get("subtype") in {None, "success"} and value.get("is_error") is not True):
+                            continue
                         return value, self.process.poll() or 0
                     origin = value.get("origin")
                     self.skipped_result_origins.append(
@@ -1141,10 +1203,13 @@ def run_turn(
                 args, stream_session.process, harness="claude", session_id=session_id,
                 window_seconds=args.turn_timeout,
             )
+            stream_session.owner_input = owner_input
+            stream_session.input_turn = str(getattr(args, "owner_runtime_turn_ordinal", ""))
         try:
             submission = submit(stream_session)
         finally:
             stream_session.owner_activity = None
+            stream_session.owner_input = None
         if submission.status != "submitted":
             raise SupervisorError(f"turn-{submission.status}")
         return submission.result or {}, submission.rc
@@ -1446,7 +1511,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             input_thread = session_id
         control = OwnerInput(args.jobs, args.parent_attempt_id, input_thread,
-                             args.runtime_harness + "-next-turn", emit)
+                             "claude-active-turn" if turn_transport == "stream-json"
+                             else args.runtime_harness + "-next-turn", emit)
         if turn_transport == "stream-json":
             stream_session = ClaudeStreamSession(args, session_id, resume=bool(saved_session))
         recovered = read_supervisor_phase_state(
@@ -1524,8 +1590,7 @@ def main(argv: list[str] | None = None) -> int:
                            if pending_handoff_intent is not None else {})
             if pending_handoff_intent is None:
                 turn_kwargs["ordinary_owner_turn"] = True
-            if args.runtime_harness == "opencode":
-                turn_kwargs["owner_input"] = control
+            turn_kwargs["owner_input"] = control
             if pending_handoff_intent is None:
                 next_prompt = control.prepare(next_prompt)
             result, process_rc = run_turn(
