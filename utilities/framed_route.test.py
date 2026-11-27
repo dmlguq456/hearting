@@ -259,7 +259,7 @@ class FramedRouteCompileTest(FramedBase):
         self.assertEqual(self.compose(campaign_key=None, unassigned=True)["campaign_unassigned"], True)
         # A root with no active stream opens one named after the folder (W6-E).
         self.assertEqual(self.compose(campaign_key=None)["campaign_key"],
-                         R.first_campaign_key(self.root, R.ROOT))
+                         R.compose_campaign_default(self.root, R.ROOT).key)
         with self.assertRaisesRegex(ValueError, "compose-campaign-selection-conflict"):
             self.compose(campaign_key="k", unassigned=True)
         self.assertEqual(self.compose(campaign_key=None, parent_cycle_id="cyc_" + "a" * 32)["parent_cycle_id"],
