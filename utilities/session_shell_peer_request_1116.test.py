@@ -37,12 +37,12 @@ const styles={dim:{dim:true},loc_repo:{foreground:253},lvl_g:{foreground:150},lv
 const t=(text,key='dim')=>({text,...(styles[key]||{})});
 // A request as Fleet's one request_rows gives it: the other session's paint is the route's (`paint.harness`, `model_text`, `effort`).
 const paintOf=(h,m,e)=>({...(h?{harness:t(h,'hb_'+h)}:{}),...(m?{model_text:t(m,'m_opus')}:{}),...(e?{effort:t(e,'eff_x')}:{})});
-const q=(id,glyph,who,title,status,kind,age,paint)=>({id,way:glyph==='◂'?'◂':'→',glyph,who,title,status,age:age??'3m',kind,paint:paint||{},
+const q=(id,glyph,who,title,status,kind,age,paint)=>({id,way:glyph==='←'?'←':'→',glyph,who,title,status,age:age??'3m',kind,paint:paint||{},
   details:[['','e9 → e7 · '+id,'dim']],body:['BODY']});
 const routes=[0,1].map(i=>({id:'rt-'+i,title:'route '+i,state:'working',kind:'working',shape:'one-shot',kind_word:'code',role:'owner',elapsed:'3m',
   paint:{glyph:t('⠏','g_spin'),harness:t('claude','hb_claude'),model_text:t('Opus 5.5','m_opus'),effort:t('xhigh','eff_x')}}));
 const sent=q('rq-aaaaaa','→','[6c]','review the popup keys','partial answer','request-out','12m',paintOf('claude','Opus 5.5','xhigh'));
-const got=q('rq-bbbbbb','◂','[a3]','popup colors','open','request-in','3m',paintOf('codex','GPT 5.5','high'));
+const got=q('rq-bbbbbb','←','[a3]','popup colors','open','request-in','3m',paintOf('codex','GPT 5.5','high'));
 const done=q('rq-cccccc','✓','[e1]','finished thing','final answer','request-done','1m',paintOf('claude',null,null));
 const base=(o={})=>({styles,colors:o.colors??256,no_color:o.no_color===true,tag:'[e9]',repo_side:[t('hearting','loc_repo')],selected:[t('Opus 5.5','hb_claude')],
   session_title:'panel',now:'x',route_count:o.routes===undefined?2:o.routes.length,route_total:o.routes===undefined?2:o.routes.length,routes:o.routes??routes,
@@ -74,7 +74,7 @@ const rows=lines(both),d=rows.findIndex(s=>zoneRule(s,'dispatch')),at=rows.findI
 assert.equal(rule(both),2,rows.join('\n'));assert.equal(rule(both,'direct'),0);
 assert(d===b.a+1&&at>d&&at<b.b,rows.join('\n'));
 assert(/route 1|Opus/.test(rows[at-1])||rows.slice(b.a,at).some(s=>s.includes('route 1')),rows.join('\n'));
-assert(/^│ │ ◂ \[a3\]/.test(rows[at+1])||/^│ │ → \[6c\]/.test(rows[at+1]),rows[at+1]);
+assert(/^│ │ ← \[a3\]/.test(rows[at+1])||/^│ │ → \[6c\]/.test(rows[at+1]),rows[at+1]);
 // Only routes: the one `dispatch` rule, none for requests. Only requests: the one `request` rule alone (the title `ROUTE`).
 const routesOnly=draw({requests:[]}),requestsOnly=draw({routes:[]});
 assert.equal(rule(routesOnly,'dispatch'),1);assert.equal(rule(routesOnly,'request'),0);
@@ -135,7 +135,7 @@ for(const width of [30,40,50,60]){
 const v=draw({width:60}),rows=lines(v);
 const head=rows.find(s=>/^│ │ → \[6c\] claude Opus 5\.5 xhigh +12m │ │$/.test(s));
 assert(head,rows.join('\n'));
-assert(rows.some(s=>/^│ │ ◂ \[a3\] codex GPT 5\.5 high +3m │ │$/.test(s)),rows.join('\n'));
+assert(rows.some(s=>/^│ │ ← \[a3\] codex GPT 5\.5 high +3m │ │$/.test(s)),rows.join('\n'));
 // Each value wears the color a route row's same value wears (the harness key, the model key, the effort key).
 const at=rows.indexOf(head),part=text=>v.rows[at].find(p=>p.text===text);
 assert.equal(part('claude').foreground,styles.hb_claude.foreground);
@@ -216,7 +216,7 @@ for(const width of [30,31,33,36,40,45,50,55,60])for(let height=20;height<=60;hei
    if(zoneRule(rows[i])){assert.equal(acts.length,0,'the rule has no press '+label);continue;}
    assert.equal(acts.length,1,'one press per row '+i+'\n'+label);
    assert(acts[0].left>=2&&acts[0].right<=width-3,JSON.stringify(acts[0])+label);
-   if(/^│ │ [→◂✓✕] \[/.test(rows[i]))assert.equal(acts[0].action,'popup:MESSAGES',rows[i]);
+   if(/^│ │ [→←✓✕] \[/.test(rows[i]))assert.equal(acts[0].action,'popup:MESSAGES',rows[i]);
    else if(i>b.a&&rows.slice(b.a,i).some(s=>zoneRule(s,'request')))assert.equal(acts[0].action,'popup:MESSAGES','below the request rule every row is a request\'s: '+rows[i]);
   }
   // The title row presses the ROUTE popup, over the cells it was drawn on.
@@ -299,7 +299,7 @@ class RequestLedgerAndSelfMessages(unittest.TestCase):
         now = time.time()
         # The fact the person asked to see first: while the request is open, the receiving window's list has it.
         rows = self._rows(self._views(fx.B, now), now)
-        self.assertEqual([(r["id"], r["glyph"], r["kind"], r["side"]) for r in rows], [(ident, "◂", "request-in", "in")], rows)
+        self.assertEqual([(r["id"], r["glyph"], r["kind"], r["side"]) for r in rows], [(ident, "←", "request-in", "in")], rows)
         # It is answered: the receiving window keeps it (closed, dim), as it keeps a sent one, for the afterglow.
         case.ack(fx.pr.load(ident)["revisions"][-1]["transfer_ref"], fx.B)
         case.report(fx.B, ident, kind="final", result="done")

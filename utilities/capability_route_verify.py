@@ -287,7 +287,22 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
     authority, so the route's own integrity (hash, id, cwd) is the right gate there;
     digest currentness stays required for anything that launches, dispatches, or
     mutates, and the closure records which case it was.
+
+    The result always carries this reader's own catalog verdict in `_registry_current`:
+    True when the route was sealed under the catalog read here, False for another
+    catalog or a basis newer than this reader supports. A value carried in by the
+    route file is dropped first; the key is outside the route hash, so a file copy of
+    it would otherwise pass unnoticed.
     """
+    if isinstance(route, dict) and "_registry_current" in route:
+        route = {key: value for key, value in route.items() if key != "_registry_current"}
+    verified = _verify_route(route, expected_cwd, allow_stale_registry=allow_stale_registry)
+    if "_registry_current" in verified:
+        return verified
+    return dict(verified, _registry_current=True)
+
+
+def _verify_route(route, expected_cwd, *, allow_stale_registry):
     if "work_request" in route:
         from work_start import validate_request
         validate_request(route["work_request"])
