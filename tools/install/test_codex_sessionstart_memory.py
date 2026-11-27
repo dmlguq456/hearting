@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -29,11 +28,8 @@ spec.loader.exec_module(bridge)
 
 class SessionStartMemoryTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="codex-start-memory-")
+        self.tmp = fixture_processes.TemporaryDirectory(prefix="codex-start-memory-")
         self.addCleanup(self.tmp.cleanup)
-        # The hook detaches helpers that write into the state folder late; end them
-        # first (cleanups run last-in first) so the folder can be removed.
-        self.addCleanup(fixture_processes.reap, self.tmp.name)
         self.cwd = Path(self.tmp.name) / "project"
         self.cwd.mkdir()
         env = fixture_env.build_environment(self.tmp.name, ROOT, base={"PATH": os.environ["PATH"]})
