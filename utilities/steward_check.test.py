@@ -749,6 +749,16 @@ class StewardCheckRemainingWorkTest(CheckBase):
         for phrase in ("start no new work", "Start no new work", "steward off"):
             self.assertNotIn(phrase, text)
 
+    def test_waiting_target_leaves_the_holders_first_row_unassigned(self):
+        seen = {"targets": [target("e7", state="idle")], "pending_messages": 0,
+                "open_work": [work_item("holder note", (HARNESS, SID)), work_item("legacy row"),
+                              work_item("#1425 review", (HARNESS, "sid-e7"))]}
+        self.assertEqual(SC.next_actions(seen), [
+            "[e7] waiting · #1425 review → assign now",
+            "open: holder note → assign or do now",
+            "open: legacy row → assign or do now",
+        ])
+
     def test_waiting_target_is_paired_with_open_work_and_its_wait_time(self):
         self.seen = {"targets": [target("e7", state="working")], "pending_messages": 0,
                      "open_work": [work_item("#1425 review", (HARNESS, "sid-e7"))]}
