@@ -100,6 +100,40 @@ class AnswerWaitTest(Base):
             self.assertIn("● 5", header, cols)
 
 
+class OlderAndNewerWaitRecordsTest(Base):
+    def test_the_peers_card_reads_the_session_tables_wait_with_old_and_new_markers(self):
+        # Review of #1905 (🔴2): a session whose state reads idle but carries the reader's answer-wait marker (an older record's
+        # `●`, a newer one's `◑`) waits on the person on every mark: the table, the tree and the PEERS card read one judgment.
+        def markers(values):
+            session(values, "09")["answer_wait_marker"] = "●"       # idle, an older record
+            session(values, "f5")["answer_wait_marker"] = "◑"       # idle, a newer one
+        vm = vm_of(markers)
+        idle = [s["tag"] for s in vm.to_mapping()["sessions"] if s.get("state") == "idle" and not s.get("answer_wait_marker")]
+        for cols in WIDTHS:
+            with self.subTest(cols=cols):
+                peers = rows(vm, NavState(view="PEERS", title="PEERS"), cols, 90)
+                for tag in ("09", "f5", "bb"):
+                    self.assertTrue(any(f"◑ [{tag}]" in line for line in peers), (tag, "\n".join(peers)))
+                    self.assertFalse(any(f"● [{tag}]" in line for line in peers), tag)
+                self.assertTrue(any(f"● [{tag}]" in line for line in peers for tag in idle), "\n".join(peers))   # idle keeps `●`
+                self.assertTrue(any("⠏" in line for line in peers))                                            # working: its spinner
+                shown = rows(vm, NavState(), cols, 60)
+                tree = [line[:32] for line in shown]
+                for tag in ("09", "f5"):
+                    self.assertTrue(any(f"[{tag}]" in line and "◑" in line for line in tree), (tag, "\n".join(tree)))
+                    self.assertTrue(any(f"[{tag}]" in line[33:] and line[33:].lstrip().startswith("◑") for line in shown), tag)
+                tally = next(line for line in shown if "SESSIONS" in line)
+                self.assertRegex(tally, r"●\d")                     # the idle count keeps its dot
+        # No observation keeps `◌`, an older `●` question reads `◑`.
+        def unobserved(values):
+            values["questions"] = [dict(values["questions"][0], owner_state="none", marker="◌", id="S1:none", tag="S1:none"),
+                                   dict(values["questions"][0], marker="●")]
+        board = rows(vm_of(unobserved), NavState(view="QUESTIONS", title="QUESTIONS"), 132, 45)
+        body = [line[33:].lstrip() for line in board]
+        self.assertTrue(any(line.startswith("◌ ") for line in body), "\n".join(board))
+        self.assertTrue(any(line.startswith("◑ [") for line in body), "\n".join(board))
+
+
 class EarlierGenerationTest(Base):
     def test_the_card_border_leads_with_the_arrow(self):
         def recent(values):

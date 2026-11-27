@@ -338,6 +338,10 @@ const cases={
  'requester':[44,40,true,[req('→','request-out','partial answer'),req('✓','request-done','final answer','rq-bbbbbb','→')],
    [{...message,way:'→'}],[route('done','✓')]],
  'requester-no-request':[44,40,true,[],[{...message,way:'→'}],[route('done','✓')]],
+ // (11-27, review of #1905: a closed request whose title begins with an arrow, an older record with no tag and no direction,
+ // and a newer one that carries its direction; the bottom layout at 44 cells.)
+ 'arrow-title-old':[44,24,false,[{id:'rq-cccccc',glyph:'✓',title:'→ Move patch',status:'final answer',age:'2m',kind:'request-done',details:[],body:[]}],[],[]],
+ 'arrow-title-new':[44,24,false,[{id:'rq-cccccc',glyph:'✓',way:'→',title:'→ Move patch',status:'final answer',age:'2m',kind:'request-done',details:[],body:[]}],[],[]],
 };
 const out={};
 for(const [name,[width,height,side,requests,messages,routes]] of Object.entries(cases)){
@@ -414,6 +418,24 @@ class PanelRequestLinesTest(unittest.TestCase):
             self.assertEqual(len(found), 1, (name, found, rows))
             self.assertTrue(found[0].startswith("← [b2] 검") and "…" in found[0] and found[0].endswith(" · open"),
                             (name, found))
+
+    def test_a_title_that_begins_with_an_arrow_is_told_from_the_direction_after_the_result(self):
+        # Review of #1905 (🔴4): the arrow after a closed request's result is its direction only where the words after it still
+        # read as a recorded title; an older record drew none, and its title may begin with an arrow itself.
+        title = ["→ Move patch"]
+        old = on_screen(panel_of("✓ → Move patch · final answer"))
+        self.assertEqual(cases.panel_request_lines(old, title, "→✓✕", layout=RIGHT), ["✓ → Move patch · final answer"])
+        new = on_screen(panel_of("✓ → → Move patch · final answer"))
+        self.assertEqual(cases.panel_request_lines(new, title, "→✓✕", layout=RIGHT), ["✓ → → Move patch · final answer"])
+        tagged = on_screen(panel_of("✓ ← [b2] Move patch · final", "✓ [b2] Move patch · final"))
+        self.assertEqual(cases.panel_request_lines(tagged, ["Move patch"], "→✓✕", layout=RIGHT),
+                         ["✓ ← [b2] Move patch · final", "✓ [b2] Move patch · final"])
+        # The rows the panel draws for them, read as the scenario reads them (44 cells, the bottom layout).
+        for name, want in (("arrow-title-old", "✓ → Move patch · final answer"), ("arrow-title-new", "✓ → → Move patch · final answer")):
+            panel = self.panels[name]
+            self.assertTrue(any(want in row for row in panel), "\n".join(panel))
+            layout = {"folded": False, "panelColumn": 0, "panelCols": cells(panel[0])}
+            self.assertEqual(cases.panel_request_lines(on_screen(panel, (), 44), title, "→✓✕", layout=layout), [want], name)
 
     def test_the_bottom_layout_reads_the_one_row_form_under_the_conversation(self):
         # An 80-column window: the panel stands under the native area, as wide as the window.

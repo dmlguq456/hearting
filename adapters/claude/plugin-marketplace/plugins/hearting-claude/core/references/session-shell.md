@@ -780,8 +780,9 @@ route at the same step (v4.36.4, spec rules 34 (b), 38,
 edge), each NOW's first row goes, the workers take one row each, the workers go (the kind row ends with
 `· worker N`), the kind rows go, every route takes one row; then the box shows fewer
 routes and scrolls in place (the wheel over it), down to one, its border counting
-what it hides (11-27, the eight marks: `↑ 2 more`, `↓ 3 more`, so the counts do not read as Git's `↑2 ↓1` on the REPO row; a
-note shows whole or not at all; it takes the rows of its tallest window, so the wheel moves
+what it hides (11-27, the eight marks: `↑ 2 more`, `↓ 3 more`, so the counts do not read as Git's `↑2 ↓1` on the REPO row; where
+that whole note does not fit its border, or would cost the title the short form leaves, the count stands in the short form `↑2 ›` /
+`↓3` as before, so no width loses it; it takes the rows of its tallest window, so the wheel moves
 nothing else); then Git; then MEM gives its row, then its head, then (11-16) the USAGE section's rows of the
 harnesses that are not this window's (the last first) and its name row, then MESSAGES gives its row and its
 head; then the route box (11-20: after MESSAGES and MEM; v4.36.4 had it before the

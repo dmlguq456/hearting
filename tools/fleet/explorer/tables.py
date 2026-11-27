@@ -1729,13 +1729,20 @@ def _split_reason(segments, room):
     return head, rest
 
 
+def answer_waits(session):
+    """Whether a session waits on the person's answer: the one judgment every session mark of Fleet reads (the session
+    table, the tree, the PEERS card). Its state, or the answer-wait marker the reader put on it (11-27: an older record's
+    ``●`` as well as ``◑``)."""
+    return session.get("state") == "blocked" or session.get("answer_wait_marker") in ("●", "◑")
+
+
 def session_marker(session):
     """The session row's state glyph and its color key."""
     marker, marker_key = {"working": ("⠏", "spin"), "blocked": ("◑", "blocked"),
                           "dead": ("✕", "dead"), "done": ("✓", "done")}.get(
                               session.get("state"), ("●", "idle"))
     marker_key = harness_spin(marker_key, session.get("harness"))      # 11-18: a working spinner in its harness's color
-    if session.get("answer_wait_marker") in ("●", "◑"):          # 11-27: an older record's ``●`` reads ``◑``
+    if answer_waits(session):
         marker, marker_key = "◑", "blocked"
     return marker, marker_key
 

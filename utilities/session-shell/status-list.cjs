@@ -11,7 +11,7 @@
 // lays those out by the host's state and moves it. It reads
 // nothing, asks nothing and starts nothing: a state is `{sel, fold: Set of group ids, items: Set of item keys}`.
 //
-// A row that can be chosen starts with a two-cell slot; the chosen one has `> ` there and stands on the popup's chosen ground
+// A row that can be chosen starts with a two-cell slot; the chosen one has `▶ ` there and stands on the popup's chosen ground
 // (`tint`), so the choice is told by a mark as well as by the colour.
 
 // The screen's rows for a state: `{rows, marks: [{key, at, rows, group, text, open}], sel, at, span, fellBack}` (`at` and `span`: where the chosen line starts and how many rows it has). A chosen key that is not on the

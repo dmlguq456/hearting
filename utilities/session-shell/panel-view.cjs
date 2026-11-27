@@ -636,7 +636,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   // turns in that harness's color, on every face (a deep pair on the light face, as the harness name's own); a mark that is not the
   // spinner (`●`, `✕`, `✓`), a route's first line and a line with no known harness keep the state's own color.
   const harnessSpin=(g,h)=>h&&Number.isInteger(h.foreground)?{...g,foreground:h.foreground,bold:false,dim:false}:g;
-  const routeGlyph=(r,h)=>{const g=r.paint?.glyph||text('·');if(live(r))return h&&Number.isInteger(h.foreground)?harnessSpin({...g,...spinGlyph},h):zonePaint(r,{...g,...spinGlyph,role:'state:working'});return zonePaint(r,{...g,role:'state:'+(r.kind==='done'&&r.outcome_key==='g_dead'?'dead':r.kind||'idle')});};
+  // 11-27 (the eight marks): a route that waits on the person's answer reads `◑` from its state, whatever glyph an older backend
+  // sent for it (`●`); every other state keeps the backend's glyph.
+  const routeGlyph=(r,h)=>{const g0=r.paint?.glyph||text('·'),g=r.kind==='blocked'?{...g0,text:'◑'}:g0;if(live(r))return h&&Number.isInteger(h.foreground)?harnessSpin({...g,...spinGlyph},h):zonePaint(r,{...g,...spinGlyph,role:'state:working'});return zonePaint(r,{...g,role:'state:'+(r.kind==='done'&&r.outcome_key==='g_dead'?'dead':r.kind||'idle')});};
   // A finished route's row leads its title with the result word (`FAIL · title`), so a cut title keeps it.
   const titleOf=(r,fallback='·')=>[...(r.kind==='done'&&r.outcome?[text(r.outcome,r.outcome_key||'lvl_g'),text(' · ','dim')]:[]),...line(r.title||fallback,'loc_repo')];
   const join=(groups,sep=' · ')=>groups.filter(g=>g&&g.length).flatMap((g,i)=>i?[text(sep),...g]:g);
@@ -1366,19 +1368,29 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     };
     // A note on the right of a border (the route box's hidden counts) shows whole or not at all.
     // 11-22: a box that a press on its top line opens (`arrow`) ends that line in `›` at the right end (`╭─ 3 QUESTIONS ───── ›─╮`), after a hidden count where it has one.
-    const boxTop=(label,key,{action,ellipsis=false,note=[],alt=[],arrow=false}={})=>{
-      const room=Math.max(0,inner-2),mark=arrow&&room>=8?[text('›','dim')]:[],
-        tail=note.length&&size(note)+3+(mark.length?2:0)<=room?[L(' ',key),...note,...(mark.length?[L(' ',key),...mark,L('─',key)]:[L(' ─',key)])]:mark.length?[L(' ',key),...mark,L('─',key)]:[];
+    // 11-27 (the eight marks; review of #1905): a note has a short form too (`short`, the hidden count's `↑2`): the whole note
+    // (`↑ 2 more`) stands only where it fits and leaves the title as the short one leaves it, else the short one, so the count
+    // never goes for want of cells and the title and the link stand where they stood.
+    const boxTop=(label,key,{action,ellipsis=false,note=[],short=[],alt=[],arrow=false}={})=>{
+      const room=Math.max(0,inner-2),mark=arrow&&room>=8?[text('›','dim')]:[];
+      const tailOf=n=>n.length&&size(n)+3+(mark.length?2:0)<=room?[L(' ',key),...n,...(mark.length?[L(' ',key),...mark,L('─',key)]:[L(' ─',key)])]:mark.length?[L(' ',key),...mark,L('─',key)]:[];
       // A shorter form of the title (the route box's `REQUEST`, then its route count alone, never a count without its
       // name) stands where the whole one does not fit.
-      const fits=form=>form&&form.length&&size(form)<=room-size(tail)-3;
-      if(!fits(label)){const form=alt.find(fits);if(form)label=form;else if(alt.length)label=alt.filter(x=>x&&x.length).at(-1)||label;}
-      const name=label.length&&room-size(tail)>=4?titled(label,room-size(tail)-3,ellipsis):[];
+      const nameOf=tail=>{
+        const fits=form=>form&&form.length&&size(form)<=room-size(tail)-3;
+        let form=label;
+        if(!fits(form)){const shorter=alt.find(fits);if(shorter)form=shorter;else if(alt.length)form=alt.filter(x=>x&&x.length).at(-1)||form;}
+        return form.length&&room-size(tail)>=4?titled(form,room-size(tail)-3,ellipsis):[];
+      };
+      const words=parts=>parts.map(p=>p.text).join('');
+      const whole=!short.length||note.length&&size(note)+3+(mark.length?2:0)<=room&&words(nameOf(tailOf(note)))===words(nameOf(tailOf(short)));
+      const tail=tailOf(whole?note:short),name=nameOf(tail);
       const head=name.length?[L('─ ',key),...name,L(' ',key)]:[];
       return {parts:[L('╭',key),...head,L('─'.repeat(Math.max(0,room-size(head)-size(tail))),key),...tail,L('╮',key)],action};
     };
-    const boxBottom=(key,note=[],action)=>{
-      const room=Math.max(0,inner-2),tail=note.length&&size(note)+3<=room?[L(' ',key),...note,L(' ─',key)]:[];
+    const boxBottom=(key,note=[],action,short=[])=>{
+      const room=Math.max(0,inner-2),shown=note.length&&size(note)+3<=room?note:short;
+      const tail=shown.length&&size(shown)+3<=room?[L(' ',key),...shown,L(' ─',key)]:[];
       return {parts:[L('╰',key),L('─'.repeat(Math.max(0,room-size(tail))),key),...tail,L('╯',key)],action};
     };
     const boxRow=(item,key)=>{
@@ -1844,8 +1856,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const above=routeOffset,below=routeRows.length-routeOffset-inView.length+unsent;
       // 11-27 (the eight marks): a hidden count reads `↑ 2 more` / `↓ 22 more`, so it is not read as Git's `↑2 ↓1`
       // on the REPO row; `boxTop`/`boxBottom` still show it whole or not at all.
-      const hiddenNote=(arrow,n)=>[text(arrow+' '+n+' more','loc_repo')];
-      const block=[{...boxTop(routeTitle,key,{action:'popup:ROUTE',note:above?hiddenNote('↑',above):[],alt:routeTitleAlt,arrow:true}),groups:['route']}];
+      // (11-27, review of #1905: where `↑ 100 more` does not fit, `↑100` as before.)
+      const hiddenNote=(arrow,n)=>[text(arrow+' '+n+' more','loc_repo')],hiddenShort=(arrow,n)=>[text(arrow+n,'loc_repo')];
+      const block=[{...boxTop(routeTitle,key,{action:'popup:ROUTE',note:above?hiddenNote('↑',above):[],short:above?hiddenShort('↑',above):[],
+        alt:routeTitleAlt,arrow:true}),groups:['route']}];
       let before=null;
       (routeRows.length?inView:routeChecking).forEach(item=>{
         if(routeRule()&&item.zone&&(!before||before.zone!==item.zone))block.push(zoneRow(item.zone,key));
@@ -1853,7 +1867,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         // A press on any row of a route opens the route popup with it unfolded.
         for(const parts of item.two||item.bnow||item.calledRows&&item.calledRows.length?routeForm(item):[item.parts])block.push(boxRow({parts,action:item.action},key));
       });
-      block.push(boxBottom(key,below?hiddenNote('↓',below):[]));
+      block.push(boxBottom(key,below?hiddenNote('↓',below):[],undefined,below?hiddenShort('↓',below):[]));
       return {block,area:{offset:routeOffset,max:routeMax,step:routeStep}};
     };
     // MESSAGES (spec rules 31, 45 (b), 58; 11-16, restored from v4.36.4, the person: "메시지 형식은 퇴행했네?

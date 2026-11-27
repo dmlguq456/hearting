@@ -71,6 +71,8 @@ def _draw_card(grid, session, tag, bx, by, box_w, right, border, extra, owners):
         put(xx, yy, glyph, border)
     harness = str(session.get("harness") or "other")
     glyph, glyph_key = STATE_MARKS.get(str(session.get("state") or ""), ("·", "dim"))
+    if tables.answer_waits(session):        # 11-27: the session table's judgment, an older record's `●` marker too
+        glyph, glyph_key = STATE_MARKS["blocked"]
     steward = bool(session.get("steward"))
     xx = put(bx + 2, by, " ", "branch_s")
     xx = put(xx, by, glyph, harness_spin(glyph_key, harness))      # 11-18: a working spinner in its harness's color

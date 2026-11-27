@@ -4,7 +4,7 @@ import math
 from collections.abc import Mapping
 from ..config import ui_text
 from .grid import CellGrid, cell_width, clip_cells
-from .tables import ROUTE_WORD, answer_wait_word, repo_label, route_count_label, route_tally
+from .tables import ROUTE_WORD, answer_wait_word, answer_waits, repo_label, route_count_label, route_tally
 from .style import steward_flag_key
 from ..palette import harness_spin
 
@@ -900,7 +900,7 @@ def draw_explorer(grid: CellGrid, vm, state):
             marker, marker_key = {"working": ("⠏", "g_spin_dim"), "blocked": ("◑", "lvl_r_dim"),
                                   "dead": ("✕", "dead"), "done": ("✓", "done")}.get(
                                       status, ("●", "idle"))
-            if session.get("answer_wait_marker") in ("●", "◑"):     # 11-27: an older record's ``●`` reads ``◑``
+            if answer_waits(session):                                # 11-27: the session table's own judgment
                 marker, marker_key = "◑", "lvl_r_dim"
             grid.put(hx + 1, y, marker, harness_spin(marker_key, harness))      # 11-18: a working spinner in its harness's color
             if session_lit:

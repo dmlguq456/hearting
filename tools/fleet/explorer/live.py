@@ -3832,7 +3832,7 @@ def _detail_sections(rows, session_index, accepted_detail, now, resolver=None):
 
 def route_marker_state(route):
     """The one route marker every Fleet route row draws: ``working`` (⠏), ``idle`` (● waits),
-    ``blocked`` (● answer), ``dead`` (✕), ``done`` (✓) or ``stale`` (◌ no response).
+    ``blocked`` (◑ answer), ``dead`` (✕), ``done`` (✓) or ``stale`` (◌ no response).
 
     Spec rule 27: while anything of the route runs, its owner or a worker, it reads as
     working. A route its reader found with nothing running reads as no response and never

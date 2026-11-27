@@ -129,6 +129,76 @@ assert(!tiny.some(s=>/[↑↓] \d*$|more\S/.test(s)),tiny.join('\n'));
 """)
 
 
+class HiddenCountShortFormTest(unittest.TestCase):
+    """Review of #1905 (🔴1): where the whole note does not fit (or would cost the title), the count stands in its short form,
+    `↑100 ›` / `↓23`, as before: no width loses it, and the title and the press cells are the ones the short form leaves."""
+
+    def test_a_narrow_bottom_panel_keeps_both_counts_and_its_press_cells(self):
+        node(self, r"""
+const route=i=>({id:'rt-'+String(i).padStart(16,'0'),title:'Route '+i,state:'idle',kind:'idle',paint:{glyph:{text:'●'}}});
+const many=n=>({route_count:n,route_total:n,route_label:'route '+n,routes:Array.from({length:n},(_,i)=>route(i))});
+// The review's window: 20 columns, the bottom layout 14 rows high, 130 routes, scrolled by 100.
+const v=draw(20,14,many(130),{side:false,routeScroll:100}),all=lines(v);
+assert(all.includes('│ ╭────── ↑100 ›─╮ │'),all.join('\n'));         // the short form, the one drawn before
+assert(all.includes('│ ╰── ↓ 23 more ─╯ │'),all.join('\n'));         // the whole one where it fits
+const top=all.indexOf('│ ╭────── ↑100 ›─╮ │');
+assert.deepEqual(v.hits.filter(h=>h.row===top),[{row:top,left:2,right:17,action:'popup:ROUTE'}]);
+assert.deepEqual(v.hits.filter(h=>/^popup:ROUTE:/.test(h.action)).map(h=>h.row),[4,5,6,7,8,9,10]);
+// At 36 cells both whole notes stand at once, the title whole beside the upper one.
+for(const [side,height,n,scroll,upper,lower] of [[true,33,35,2,'│ ╭─ 35 ROUTE ─────── ↑ 2 more ›─╮ │','│ ╰─────────────────── ↓ 7 more ─╯ │'],
+  [false,14,130,100,'│ ╭─ route 130 ──── ↑ 100 more ›─╮ │','│ ╰────────────────── ↓ 23 more ─╯ │']]){
+ const w=lines(draw(36,height,many(n),{side,routeScroll:scroll}));
+ assert(w.includes(upper)&&w.includes(lower),w.join('\n'));
+}
+// Where the whole note would fit only by taking the title, the short one stands and the title stays.
+for(const [width,n,scroll,upper] of [[28,35,2,'│ ╭─ 35 ROUTE ───── ↑2 ›─╮ │'],[31,130,100,'│ ╭─ 130 ROUTE ───── ↑100 ›─╮ │']]){
+ const w=lines(draw(width,33,many(n),{routeScroll:scroll}));
+ assert(w.includes(upper),w.join('\n'));
+}
+// The lower border too: its whole note where it fits, else the short one (a narrow bottom panel, a four-digit count).
+const low=lines(draw(18,14,many(1300),{side:false,routeScroll:2}));
+assert(low.some(s=>/ ↓\d{4} ─╯ │$/.test(s))&&!low.some(s=>s.includes(' more ─╯')),low.join('\n'));
+// No width from 18 on loses a count: the upper one always stands, whole or short.
+for(const [n,scroll,widths] of [[35,2,[18,19,20,21,22,24,26,28,30,33,36,40,44,52,60]],[130,100,[18,19,20,21,22,24,26,28,30,33,36,44,60]],[1300,1234,[20,24,36,60]]])for(const width of widths){
+ const w=lines(draw(width,14,many(n),{side:false,routeScroll:scroll}));
+ assert(w.some(s=>s.includes('↑ '+scroll+' more')||s.includes('↑'+scroll+' ')),width+' '+scroll+'\n'+w.join('\n'));
+}
+""")
+
+
+class OlderBackendWaitTest(unittest.TestCase):
+    """Review of #1905 (🔴2): the route rows pick `◑` from the route's state, so an older backend that sends `●` for a blocked
+    route reads as a new one does; running, idle, the waiting tally and no observation keep their marks."""
+
+    def test_old_and_new_input_together_at_36_44_and_60(self):
+        node(self, r"""
+const st={...styles,g_work_off:{foreground:150},g_work:{foreground:114},g_blocked:{foreground:174}};
+const T=(text,k)=>({text,...(st[k]||{})});
+const r=(id,kind,glyph,key,el,extra={})=>({id:'rt-'+id.padEnd(16,'0'),title:'Route '+id,state:kind,kind,role:'owner',kind_word:'code',kind_form:'team',
+  intensity:'standard',elapsed:el,paint:{glyph:T(glyph,key),harness:T('claude'),model_text:T('Opus 5.5'),effort:T('xhigh')},...extra});
+const routes=[r('run','working','●','g_work','31m',{activity:'running'}),r('idle','idle','●','g_work_off','9m'),
+  r('oldwait','blocked','●','g_blocked','4m'),r('newwait','blocked','◑','g_blocked','5m'),r('stale','stale','◌','dim','2h')];
+for(const width of [36,44,60]){
+ const v=view.render({width,height:60,side:true,fill:true,model:{route_count:5,route_total:5,routes,styles:st},state:'working',sid:'x',configuration:{}});
+ const all=lines(v),head=t=>all.findIndex(s=>s.includes('Route '+t))-1,mark=i=>all[i].slice(4,5);
+ assert.equal(mark(head('run')),'●',all.join('\n'));                     // running: its pulse
+ assert.equal(mark(head('idle')),'●');
+ assert.equal(mark(head('oldwait')),'◑',all.join('\n'));                // an older backend's `●` for a wait
+ assert.equal(mark(head('newwait')),'◑');
+ assert.equal(mark(head('stale')),'◌');
+ // the owner lines under them: the running one its spinner, the waits `◑`, in the wait's own color
+ const owner=t=>all[head(t)+2];
+ assert(/^│ │   [⠀-⣿] owner/.test(owner('run')),owner('run'));
+ for(const t of ['oldwait','newwait']){assert(owner(t).startsWith('│ │   ◑ owner'),owner(t));
+  const part=v.rows[head(t)+2].find(p=>p.text==='◑');assert.equal(part.foreground,174);}
+ assert(owner('idle').startsWith('│ │   ● owner')&&owner('stale').startsWith('│ │   ◌ owner'));
+}
+// The waiting tally counts idle and blocked together: it keeps its dot.
+const tally=lines(view.render({width:36,height:40,side:true,fill:true,model:{route_label:'route 5 ⠏1 ●3 ✕1',styles:st},state:'working',sid:'x',configuration:{}}));
+assert(tally.some(s=>s.includes('5 ROUTE ⠏1 ●3 ✕1')),tally.join('\n'));
+""")
+
+
 class AnswerWaitRouteMarkTest(unittest.TestCase):
     def test_a_blocked_route_reads_half_and_the_waiting_tally_keeps_its_dot(self):
         from fleet import session_line
