@@ -432,12 +432,53 @@ next.update([ask('A','submitted'),ask('B')],'',{});assert.equal(next.focused,tru
 assert(next.detail({budget:8,columns:80}).map(row=>row.map(p=>p.text).join('')).join('\n').includes('Question B?'));
 // An answer given in the popup itself still lets go once its own send settles, not while it is under way.
 (async()=>{
- let release;const sent=new Promise(r=>{release=r;});
- const own=create({changed(){},answer:()=>sent,action(){}});
+ let release,watch=()=>{};const sent=new Promise(r=>{release=r;});
+ const own=create({changed(){watch();},answer:()=>sent,action(){}});
  own.update([ask('A')],'',{});own.enter();own.input(Buffer.from('1'));own.input(Buffer.from('\r'));
  own.update([ask('A','submitted')],'',{});assert.equal(own.focused,true,'its own send is under way');
- release({state:'submitted'});await new Promise(r=>setTimeout(r,20));
+ const left=new Promise(r=>{watch=()=>{if(!own.focused)r();};});
+ release({state:'submitted'});await left;                     // bound to the end of the send, no fixed wait
  assert.equal(own.focused,false);
+})().catch(e=>{console.error(e);process.exit(1);});
+""")
+
+    def test_what_the_popup_is_taking_when_its_question_is_answered_elsewhere_stays_the_popups(self):
+        # 11-27 (review of #1889): a paste begun into an empty answer, a character's first byte or a key's first
+        # bytes, a send under way while the question being read closes: the answer from another place lands
+        # between two reads, and every byte of what follows is still taken by the popup (none goes back to the
+        # native input). Only then does it let go.
+        self.node(r"""
+const assert=require('node:assert/strict'),path=require('node:path'),create=require(path.join(process.argv[1],'block-input.cjs'));
+const written=(id,state)=>({id,revision:id,answerable:state?false:true,...(state?{request_state:state}:{}),
+                            questions:[{id:'q'+id,question:'Question '+id+'?'}]});
+const chosen=(id,state)=>({...written(id,state),questions:[{id:'q'+id,question:'Question '+id+'?',choices:['one','two']}]});
+const take=(b,bytes,why)=>assert.equal(b.input(Buffer.from(bytes)).length,0,why);
+for(const [first,rest,why] of [[['\x1b[200~'],['pasted words',' and more','\x1b[201~'],'a paste begun into an empty answer'],
+                               [[[0xea]],[[0xb0,0x80]],'a character’s first byte'],
+                               [['\x1b['],['C'],'a key’s first bytes']]){
+ const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+ b.update([written('A')],'',{});b.enter();
+ for(const bytes of first)take(b,bytes,why);
+ b.update([written('A','submitted')],'',{});                 // answered from another place, between two reads
+ assert.equal(b.focused,true,why+': still taking it');
+ for(const bytes of rest)take(b,bytes,why+': the rest is the popup’s');
+ assert.equal(b.focused,false,why+': then it lets go');
+}
+// What the paste had already put in the answer keeps the popup, as before.
+const kept=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+kept.update([written('A')],'',{});kept.enter();take(kept,'\x1b[200~half');
+kept.update([written('A','submitted')],'',{});take(kept,'\x1b[201~');assert.equal(kept.focused,true);
+// A is being sent; Tab reads B, and B closes elsewhere: the popup holds every key until A's send settles.
+(async()=>{
+ let release,watch=()=>{};const sent=new Promise(r=>{release=r;});
+ const b=create({changed(){watch();},answer:()=>sent,action(){}});
+ b.update([chosen('A'),chosen('B')],'',{});b.enter();take(b,'1');take(b,'\r');take(b,'\t');
+ b.update([chosen('A','submitted')],'',{});
+ assert.equal(b.focused,true,'a send is under way');
+ take(b,'typed meanwhile','the keys pressed meanwhile are the popup’s');
+ const left=new Promise(r=>{watch=()=>{if(!b.focused)r();};});
+ release({state:'submitted'});await left;
+ assert.equal(b.focused,false);
 })().catch(e=>{console.error(e);process.exit(1);});
 """)
 

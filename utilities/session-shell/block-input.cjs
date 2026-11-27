@@ -169,7 +169,7 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
   function release(){if(!focused)items=items.filter(item=>!settled(item));}
   function update(rows,guidance,presentation={}) {
     labels=presentation.labels||labels;styles=presentation.styles||styles;help=guidance||help;
-    const previous=current();items=Array.isArray(rows)?rows.slice(0,8):[];let letGo=false;
+    const previous=current();items=Array.isArray(rows)?rows.slice(0,8):[];
     for(const item of items){
       if(['submitted','received','applied','expired','cancelled'].includes(item.request_state)){
         const local=state(item);if(local.state!=='applied')local.state=item.request_state;if(item.request_state==='applied')local.notice='';
@@ -195,7 +195,8 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
       // 11-27: the question being read was answered (or ended) elsewhere, nothing was typed to it and
       // none is left to answer here: the popup lets go of the keys, as after an answer given in it,
       // so the session takes its answer (the shell gives it nothing while the popup holds the keys).
-      if(previous&&focused&&firstOpen<0&&!typed)letGo=true;
+      // Not while it is still taking something (`settle`).
+      if(previous&&focused&&firstOpen<0&&!typed)letGoAfter=previous;
       // The question being read left with nothing typed to it and another stands in its place:
       // say so once, and the first Enter after only clears the word, never answers the new one.
       else if(previous&&focused&&listed.length&&!state(previous.item).sending){
@@ -205,19 +206,38 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
     const active=new Set(listed.map(row=>key(row.item)));if(frozen)active.add(key(frozen.item));
     // Bounded volatile history, never a new question/answer store.
     for(const old of entries.keys())if(!active.has(old)&&entries.size>8)entries.delete(old);
-    if(letGo){leave();return;}
+    if(letGoAfter&&settle())return;
     changed();
   }
+  // 11-27 (review of #1889): what the popup is still taking stays its own: a send under way, a paste, the
+  // first bytes of a character or of a key, or a read being worked through. Only once that is all in does it
+  // look again whether to let go, so no byte meant for the answer ever reaches the native input.
+  let letGoAfter=null,reading=false;
+  const receiving=()=>busy||reading||pasting||held>=0||discarding||!!escape||skipTail||
+    (typeof decoder.lastNeed==='number'&&decoder.lastNeed>0);
+  function settle(){
+    const row=letGoAfter;if(!row||receiving())return false;
+    letGoAfter=null;
+    const listed=flat(),local=state(row.item);
+    if(!focused||local.drafts[row.question.id]||Object.keys(local.answers).length||Object.keys(local.cursor).length
+       ||listed.some(r=>key(r.item)===key(row.item)&&r.question.id===row.question.id)
+       ||listed.some(r=>r.item.answerable===true&&!state(r.item).state))return false;
+    leave();return true;
+  }
+  // Every change the popup announces (a paste or a send ending, a timer) is a moment to look again; a read
+  // looks again once all of it is taken.
+  const announce=changed;changed=()=>{settle();announce();};
+  const takeRead=input;input=data=>{reading=true;try{return takeRead(data);}finally{reading=false;settle();}};
   // Ctrl+] opens on a question the person can answer now (11-14): when the one shown is not
   // (a receipt, a changed one), the first answerable one comes up instead.
   function enter(){
-    focused=true;scroll=0;follow=true;answeredAt=0;escapedAt=0;changeArmed=false;
+    letGoAfter=null;focused=true;scroll=0;follow=true;answeredAt=0;escapedAt=0;changeArmed=false;
     const row=current();
     if(!frozen&&(!row||!active(row))){const open=flat().findIndex(r=>active(r));if(open>=0)index=open;}
     changed();
   }
   function forgetPlaces(){for(const entry of entries.values())entry.caret={};}
-  function leave(){forgetPlaces();clearFullNotice(current());focused=false;escapedAt=0;changeArmed=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
+  function leave(){letGoAfter=null;forgetPlaces();clearFullNotice(current());focused=false;escapedAt=0;changeArmed=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
   const seatOf=row=>row?key(row.item)+'\0'+row.question.id:null;
   function move(delta){
     const count=flat().length;index=(index+delta+count+1)%(count+1);
