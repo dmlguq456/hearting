@@ -19,6 +19,7 @@ The oracle is the two readers' own output plus the registry rows. Synthetic data
 from __future__ import annotations
 
 import json
+import os
 from shlex import quote as shlex_quote
 import sys
 import threading
@@ -41,21 +42,14 @@ from tools.fleet.explorer import live
 from tools.fleet.session_line import session_route_status
 harness, sid, rid = args["harness"], args["sid"], args.get("route_id")
 key = harness + "\0" + sid
-# Only this fixture's processes are listed: another session's process (and the registry its environment names)
-# on the same host is never read.
-marker = ("HEARTING_FIXTURE_ROOT=" + os.environ["HEARTING_FIXTURE_ROOT"]).encode()
+# Only the processes this scenario started are listed (``args["pids"]``): another session's process, its
+# environment and the registry it names on the same host are never read.
+launched = {str(pid) for pid in args["pids"]}
 listed = procscan._ps_lines
-
-def own(pid):
-    try:
-        with open("/proc/%s/environ" % pid, "rb") as handle:
-            return marker in handle.read().split(b"\0")
-    except OSError:
-        return False
 
 def fixture_lines():
     rows = listed()
-    kept = [line for line in rows if line.split(None, 1)[:1] and own(line.split(None, 1)[0])]
+    kept = [line for line in rows if line.split(None, 1)[:1] and line.split(None, 1)[0] in launched]
     return procscan._CensusRows(kept, complete=getattr(rows, "census_complete", False),
                                 reasons=getattr(rows, "census_reasons", ()))
 procscan._ps_lines = fixture_lines
@@ -157,8 +151,39 @@ class PanelRouteRunning(solo.SoloReviewScenario):
             shim.chmod(0o755)
         run.home.env["PATH"] = str(shims) + ":" + run.home.env.get("PATH", "")
 
+    def launched_pids(self, run):
+        """The processes this scenario started: its private tmux server's tree, and the processes the
+        route's own registry rows name (a detached worker or supervisor) with theirs. Only parent links
+        (``/proc/<pid>/stat``) are read to follow them; no other process's environment is opened."""
+        roots = set()
+        tmux = getattr(getattr(run, "tui", None), "_tmux", None)
+        if tmux is not None:
+            server = (tmux("display-message", "-p", "#{pid}").stdout or "").strip()
+            if server.isdigit():
+                roots.add(int(server))
+        for row in self.unit_rows():
+            roots.update(int(value) for key, value in row.items() if key.endswith("pid") and str(value).isdigit())
+        children = {}
+        for entry in os.scandir("/proc"):
+            if not entry.name.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry.name}/stat", "rb") as handle:
+                    parent = int(handle.read().rsplit(b")", 1)[1].split()[1])
+            except (OSError, ValueError, IndexError):
+                continue
+            children.setdefault(parent, []).append(int(entry.name))
+        found, todo = set(), list(roots)
+        while todo:
+            pid = todo.pop()
+            if pid not in found:
+                found.add(pid)
+                todo.extend(children.get(pid, ()))
+        return sorted(found)
+
     def read(self, run, label, sid, route_id):
-        value = fixture_python(run, PROBE, {"harness": run.harness, "sid": sid, "route_id": route_id}, timeout=120)
+        value = fixture_python(run, PROBE, {"harness": run.harness, "sid": sid, "route_id": route_id,
+                                            "pids": self.launched_pids(run)}, timeout=120)
         rid = route_id
         panel = [r for r in value.get("panel_rows") or () if r.get("id") == rid] if rid else []
         fleet = [r for r in value.get("fleet_routes") or () if r.get("id") == rid] if rid else []
