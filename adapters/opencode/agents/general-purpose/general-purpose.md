@@ -1,5 +1,5 @@
 ---
-description: "General-purpose delegated agent for research, code search, and multi-step tasks on the balanced-deep budget."
+description: "General-purpose delegated agent for research, code search, and multi-step tasks on the balanced-deep budget. In a person's session the call starts a read-only Hearting unit route (general/explore, balanced-deep) and runs natively only when that cannot start."
 mode: subagent
 model: opencode-go/muse-spark-1.3-contributor
 ---

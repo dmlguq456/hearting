@@ -360,8 +360,11 @@ whose verdict and evidence need keeping (an independent judgment, evidence read 
 command without `--ephemeral`, or `audit`. After one revision, that review is one request naming every section it
 checks (`capabilities/audit.md`). A unit route's one worker starts with the brief, and its end closes
 the route and returns the sealed summary to the session that opened it; a worker opens one the same way (`core/OPERATIONS.md` §5.10c). A unit route has no intensity
-(one unit does one job and nothing checks it; `core/CONVENTIONS.md` §1). This adds a
-way to start; it does not change the choices above. `--prompt-file -` reads the brief
+(one unit does one job and nothing checks it; `core/CONVENTIONS.md` §1). It does not
+change which work is direct, solo or staged; it is how a session hands work to another
+worker, in place of a native subagent: a person's session's native subagent call is
+started this way for it, and runs natively only when the route cannot start
+(`capabilities/unit.md`, A native subagent call). `--prompt-file -` reads the brief
 once from standard input (a heredoc), so no file has to be written first; it means the
 same in every `compose` form that takes `--prompt-file`, and an input that is empty, a
 terminal, or too large ends the command in one line before anything starts.

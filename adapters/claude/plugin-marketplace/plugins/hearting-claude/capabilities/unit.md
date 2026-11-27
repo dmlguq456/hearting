@@ -46,6 +46,26 @@ The node writes only under the cycle's `units/unit/**` (one report). A read-only
 - **Result.** The completion notice that wakes the launching session carries the route's sealed summary: the verdict line, the review's blocking findings (a `Blocking findings` or `병합을 막는 것` section reads as remaining items) and the report path.
 - **A review that finds blocking issues** ends `verdict: FAIL` with its report, which opens (its first non-heading line) on the closed verdict `Final verdict: changes requested — head <sha>` (`최종 판정: 수정 후 병합 — head <sha>`; the worker's first instruction says so; where there is no git repository the ` — head <sha>` is left out and the verdict still counts; the same verdict written in both forms on one line, joined by ` · `, reads as that verdict, two different verdicts as none). The runtime reads that end as it reads a finished audit's negative judgment: a pass whose assessment of the subject is negative, so the route closes, the cycle seals and the notice carries the same summary as any other end (its result line says the review completed with findings). Only a `BLOCKED` end (the work could not be done), an end with no readable report, or a FAIL whose report does not open on that verdict (empty, says no review was done, declares a pass) is offered again as a new route (`compose-again`). In the blocking-findings section of a report, a heading or line that only says there is none (`막는 지적 없음`, `none`) lists nothing; anything else stays a remaining item.
 
+## A native subagent call
+
+A person's session that calls its harness's native subagent tool (Claude `Agent`, Codex `spawn_agent` or multi-agent v2's `collaborationspawn_agent`, OpenCode `subagent`, V1 `task`) gets this route instead. The pre-tool hook (Claude and Codex `PreToolUse`, OpenCode `tool.execute.before`; `utilities/native_subagent_redirect.py`) runs `compose --start --unit general/explore --profile <depth> --ephemeral --prompt-file -` with the call's description and prompt as the brief, and refuses the native call with one line:
+
+> Started as Hearting unit route `<route id>` (general/explore, `<depth>`, no record). Its answer comes back to this session as a completion notice. Do not call it again; go on with other work or end the turn.
+
+The answer is the record-free notice's `Answer:` (below). The leg is read-only: what should change comes back as a diff in the answer. The agent name picks the depth:
+
+| Name in the call | Depth |
+|---|---|
+| `light`, `Explore`, `explorer`, `explore`, `memory-scout` | `light` |
+| `balanced`, `worker`, `default`, OpenCode `general`; no name on Codex and OpenCode | `balanced` |
+| `general-purpose`, `Plan`; no name on Claude | `balanced-deep` |
+| `deep` | `deep` |
+| a model named in the call | the depth the harness's `models.conf` declares that model for (none: left alone) |
+
+Left alone, so the native call runs as before (with the default model of `core/HOOKS.md`): a name the table does not list (an agent that stands in for one tool, such as `web-fetch` or `statusline-setup`, `claude-code-guide`, `claude`, a user or plugin agent), a call that hands over the session's own history (Claude `fork`, which the model hook still refuses; Codex `fork_context`; a v2 call without `fork_turns: "none"`), a Claude call that resumes an agent or asks for `isolation`, an OpenCode call that continues a session, a registered worker's call, and a call made inside a native subagent.
+
+When the route cannot start now — the governor has no slot or start budget (`waiting-capacity`), Hearting is not reachable, the start is refused or fails, or it runs past the hook's budget (150 s; the registrations allow 180 s) — the hook prints nothing and the native call runs. That start arms no later start and its record-free route is closed (`start-refused`), so the route and the native call never both do the work. A session opened before this registration keeps the one it started with (Claude: the model hook without `--redirect`; Codex: no `spawn_agent` hook; OpenCode: the plugin it loaded) and calls natively until it is opened again.
+
 ## A worker that starts a unit route
 
 A registered worker (an owner, a stage worker, another unit worker) may open a unit route as well: the same `compose --start --unit <family/name> --prompt-file <brief>`, run in its shell. The depth of a route is counted from the session that opened it, so the leg of a unit route is a depth-1 leg wherever it was opened from; no depth number forbids the start. What bounds a chain of workers each starting another is the worker governor's `dispatch` class cap and start budget (`utilities/model-worker-governor.py`): the start no slot fits is refused in the governor's own typed form (`waiting-capacity`, `refusal`, `worker_class`), and a refused start arms no automatic later start from inside a worker.

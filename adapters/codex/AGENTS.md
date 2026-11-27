@@ -66,8 +66,9 @@ person or a frame already chose, using `--shape staged --capability
 <kind> --graph <stage,…>` for person-named stages (§0.2.1). Refusals name missing inputs.
 Before unapproved material work, present the §0.4 intent card (진행 / 수정 /
 중단). Peer requests need only compose's `[경로]` line and scope, except for
-destructive or external-facing work. Delegate a read-only job with `--unit <unit>`;
-a short check or lookup adds `--ephemeral` (no record, §0.2.1).
+destructive or external-facing work. Delegate a read-only job with `--unit <unit>`
+(`general/explore`); a short check or lookup adds `--ephemeral` (no record,
+§0.2.1). A native subagent call starts this way when it can.
 
 ## Following the runtime
 
@@ -163,7 +164,6 @@ Portable behavior contract = `roles/response-policy.md`.
 - Completion arrives through Codex's native queue for this thread. Detached
   shell output does not wake you; for other long-running work follow
   `preflight.sh loop-info runtime-watch`.
-- Use native subagents only after `preflight.sh subagent-info --check`.
 - Do not edit runtime-owned credentials, sessions, logs, caches, databases,
   or `$CODEX_HOME/config.toml`.
 - If the memory prompt hook is unavailable, record `recall` or `skip` with

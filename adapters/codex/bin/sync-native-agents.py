@@ -64,9 +64,15 @@ EXTRA_AGENTS = KERNEL_AGENTS
 # Instructions are adapter-owned output, not a Claude Agent copy.
 CATALOG_SANDBOX = "workspace-write"
 
+# A person's session's call of a catalog agent starts a unit route (core/OPERATIONS.md §5.10c); the
+# same definition serves a registered worker, whose call runs natively, so the line names the session.
+_UNIT_ROUTE = (" In a person's session the call starts a read-only Hearting unit route "
+               "(general/explore, {depth}) and runs natively only when that cannot start.")
+
 CATALOG_AGENTS = {
     "balanced": {
-        "description": "Execute an approved decision across multiple steps on the balanced budget.",
+        "description": ("Execute an approved decision across multiple steps on the balanced budget."
+                        + _UNIT_ROUTE.format(depth="balanced")),
         "instructions": """Carry out the approved execution scope and cite its decision handoff.
 Stop and return new important choices or uncertainty to the judgment owner.
 Do not make architecture or policy decisions, widen scope, or spawn further agents.
@@ -76,7 +82,7 @@ Report completed steps, verification and remaining gaps.
     "general-purpose": {
         "description": (
             "General-purpose delegated agent for research, code search, and "
-            "multi-step tasks on the balanced-deep budget."
+            "multi-step tasks on the balanced-deep budget." + _UNIT_ROUTE.format(depth="balanced-deep")
         ),
         "instructions": """You are a delegated general-purpose agent.
 Complete the assigned task fully — don't gold-plate, but don't leave it half-done.
@@ -89,7 +95,7 @@ Finish with a concise report of what was done and the key findings.
     "light": {
         "description": (
             "Breadth fan-out agent on the portable light budget — parallel "
-            "sweeps, audits, comparisons, routine searches."
+            "sweeps, audits, comparisons, routine searches." + _UNIT_ROUTE.format(depth="light")
         ),
         "instructions": """You are one leg of a breadth fan-out on a light execution budget.
 Stay inside the assigned slice; do not widen scope to neighboring questions.
@@ -100,7 +106,7 @@ Do not spawn further agents; escalate by reporting, not delegating.
     "deep": {
         "description": (
             "Deep investigation agent on the portable deep budget — root cause, "
-            "architecture, subtle correctness."
+            "architecture, subtle correctness." + _UNIT_ROUTE.format(depth="deep")
         ),
         "instructions": """You are the deep leg of an investigation on the deep execution budget.
 Ground every claim in files you actually read; quote paths and lines.

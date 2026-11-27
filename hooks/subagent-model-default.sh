@@ -1,5 +1,9 @@
 #!/bin/sh
-# PreToolUse(Agent|Task): give native Claude subagent spawns the config-declared
+# PreToolUse(Agent|Task): with `--redirect`, a person's session's call is first
+# started as a Hearting unit route (utilities/native_subagent_redirect.py; the
+# call is refused with one line naming the route). When it is not started, or
+# without `--redirect` (the registration of a session opened before it), the
+# native call runs as below: give native Claude subagent spawns the config-declared
 # default model tier instead of silently inheriting the interactive session
 # model (core/ADAPTATION.md §3). Injection re-emits the FULL tool_input with a
 # `model` field added. Explicit eligible pins remain untouched; inherited/fork
@@ -187,6 +191,19 @@ def apply_policy(tool_input):
     }}))
 
 
+def started_as_unit_route(payload):
+    """The refusal line when the shared redirect started the call as a unit route, else None."""
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    if not os.path.isfile(os.path.join(root, "utilities", "native_subagent_redirect.py")):
+        return None
+    try:
+        sys.path.insert(0, os.path.join(root, "utilities"))
+        import native_subagent_redirect
+        return native_subagent_redirect.redirect("claude", payload)
+    except BaseException:
+        return None
+
+
 def main():
     try:
         payload = json.loads(sys.stdin.read())
@@ -199,6 +216,11 @@ def main():
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
         return
+    if "--redirect" in sys.argv[1:]:
+        reason = started_as_unit_route(payload)
+        if reason is not None:
+            deny(reason)
+            return
     try:
         apply_policy(tool_input)
     except Exception:

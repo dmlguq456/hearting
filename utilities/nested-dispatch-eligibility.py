@@ -99,10 +99,13 @@ def resolve_parent_sandbox(parent_harness: str, requested: str) -> tuple[str, st
 
 
 def codex_login_status(output: str) -> bool:
-    """Accept a valid status line without letting unrelated warnings reorder it."""
+    """Accept a valid status line without letting unrelated warnings reorder it.
+
+    An account login reads `Logged in using ...`; from Codex 0.171.0 an API key reads
+    `API key configured - <masked key>` (earlier `Logged in using an API key - ...`)."""
 
     return any(
-        line.strip().startswith("Logged in")
+        line.strip().startswith(("Logged in", "API key configured"))
         for line in output.splitlines()
         if line.strip()
     )

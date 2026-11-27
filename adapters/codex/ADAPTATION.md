@@ -285,6 +285,21 @@ spawn as `agent type is currently not available`. The agent keeps its reasoning
 effort and sandbox and follows the session model (PG-52). Keep your own
 agents under other names.
 
+A person's session's `spawn_agent` call starts as a `general/explore` unit route (H1,
+`capabilities/unit.md`, A native subagent call): `hooks.json` registers
+`adapters/codex/hooks/pretooluse-subagent-redirect.py` on `PreToolUse` matcher
+`spawn_agent|collaborationspawn_agent` (timeout 180 s), which runs the shared
+`utilities/native_subagent_redirect.py --codex` and denies the native call with the route's one line
+only when the route started. Measured on Codex 0.171.0 in isolated TUI and `codex exec` homes: the hook
+fires for `spawn_agent` (multi-agent v1, the default; tool input `agent_type`, `message`, optional
+`fork_context`, `items`, `model`, `reasoning_effort`) and for `collaborationspawn_agent` (v2, off by
+default; `fork_turns` defaults to `all`, so a v2 call is redirected only with `fork_turns: "none"`). The
+public reports that the hook is not invoked for `spawn_agent` (openai/codex#49736) did not reproduce here.
+A hook that exits 1, is killed, prints garbage or runs past its timeout lets the native call run; exit 2
+blocks it (the redirect always exits 0). A `hooks.json` from before this registration has no `spawn_agent`
+entry, so a session opened with it calls natively. The `codex login status` line an API key prints from
+0.171.0 (`API key configured - …`) is read as a login (`utilities/nested-dispatch-eligibility.py`).
+
 Sub-agent role default (PG-13). Codex gives a `spawn_agent` call with no `model`
 and an agent whose file names none (the built-in `default`, `worker`, `explorer`,
 and a spawn with no `agent_type`) the parent session's model. Codex reads

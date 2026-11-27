@@ -1,5 +1,5 @@
 name = "balanced"
-description = "Execute an approved decision across multiple steps on the balanced budget."
+description = "Execute an approved decision across multiple steps on the balanced budget. In a person's session the call starts a read-only Hearting unit route (general/explore, balanced) and runs natively only when that cannot start."
 model = "gpt-6-luna"
 model_reasoning_effort = "high"
 sandbox_mode = "workspace-write"

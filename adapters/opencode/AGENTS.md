@@ -71,8 +71,9 @@ person or a frame already chose, using `--shape staged --capability
 <kind> --graph <stage,…>` for person-named stages (§0.2.1). Refusals name missing inputs.
 Before unapproved material work, present the §0.4 intent card (진행 / 수정 /
 중단). Peer requests need only compose's `[경로]` line and scope, except for
-destructive or external-facing work. Delegate a read-only job with `--unit <unit>`;
-a short check or lookup adds `--ephemeral` (no record, §0.2.1).
+destructive or external-facing work. Delegate a read-only job with `--unit <unit>`
+(`general/explore`); a short check or lookup adds `--ephemeral` (no record,
+§0.2.1). A native subagent call starts this way when it can.
 
 ## Following the runtime
 
@@ -169,8 +170,6 @@ Portable behavior contract = `roles/response-policy.md`.
 - While this session is idle, the hearting plugin hands it the completion
   records owed to it as its next turn, so a launch receipt says `end-turn`; a
   server without that carrier gets `bounded-wait`.
-- Before delegating to a native subagent, check it against its
-  `opencode_setting/opencode-agents` file and the runtime's current agent list.
 - If the memory prompt hook is unavailable, record `recall` or `skip` with
   `preflight.sh recall-gate <cwd> ...`.
 - Command surface, tool checks, native projections, edge cases:

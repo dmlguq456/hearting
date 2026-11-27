@@ -427,6 +427,21 @@ tier leaves it where it is. Read it as an explicit pin, not as "the mini tier". 
 native subagent spawn resolves its model through the native-subagent default
 below.
 
+## A Native Subagent Call Starts a Unit Route (H1)
+
+The same `Agent|Task` registration runs `hooks/subagent-model-default.sh --redirect` (timeout
+180 s). `--redirect` first hands a person's session's call to `utilities/native_subagent_redirect.py`,
+which starts it as a `general/explore` unit route (`capabilities/unit.md`, A native subagent call) and
+refuses the native call with the route's one line; Claude shows that line to the model after
+`PreToolUse:Agent hook error:`. One script holds both steps because how two hooks on one matcher combine a
+deny with an `updatedInput` was not verified. When the route does not start (the governor has no slot,
+the start fails or runs past 150 s, a name outside the table, `fork`, a worker, a native subagent) nothing
+is printed by that step and the model default below applies as before. A session opened before this
+registration keeps the old line (no `--redirect`, 15 s) and redirects nothing. Measured in isolated TUIs
+(`harness_behavior_cases_subagent_redirect.py`): the hook sees `Agent` with `description`, `prompt`,
+`subagent_type`; a hook that exits 1, is killed, prints garbage or runs past its timeout lets the native
+call run; exit 2 blocks it (the redirect always exits 0).
+
 ## Native Subagent Default Model (2026-07-23)
 
 Native Claude subagent spawns (Agent/Task tool) no longer silently inherit the

@@ -120,6 +120,11 @@ let resolvedRuntimeConfig = null
 let contextPolicyRuntimeVersion = null
 let contextPolicyRequestedWindow = null
 const nativeQuestionRedirect = path.join(root, "utilities", "native_question_redirect.py")
+const nativeSubagentRedirect = path.join(root, "utilities", "native_subagent_redirect.py")
+// V2 names its subagent tool `subagent` (V1: `task`).
+const subagentTools = new Set(["subagent", "task"])
+// The helper's own budget is 150 s (a start measured at most 74 s); past this cap the native call runs.
+const subagentRedirectMs = 180000
 const startReceipt = path.join(root, "utilities", "start_receipt.py")
 // V2 names its shell tool `shell` (V1: `bash`); both reach the gate's one shell branch.
 const routeGateTools = new Set(["write", "edit", "multiedit", "patch", "apply_patch", "bash", "shell"])
@@ -3662,6 +3667,41 @@ async function rootSessionId(ctx, sid) {
   return current
 }
 
+// A person's session's native subagent call starts as a Hearting unit route
+// (utilities/native_subagent_redirect.py prints the refusal line and exits 1 only when it started).
+// The start takes tens of seconds, so it runs asynchronously and the shared service keeps serving
+// every other window meanwhile. Any failure, an error or the cap resolves to "" and the native call runs.
+function subagentRedirectReason(payload, env) {
+  return new Promise((resolve) => {
+    let stdout = ""
+    let settled = false
+    let child
+    let timer
+    const finish = (code) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      resolve(code === 1 ? stdout.trim() : "")
+    }
+    try {
+      child = spawn("python3", [nativeSubagentRedirect, "--opencode"], {
+        cwd: payload.cwd || undefined, env, stdio: ["pipe", "pipe", "ignore"],
+      })
+      child.stdout?.setEncoding("utf8")
+      child.stdout?.on("data", (chunk) => { stdout += chunk })
+      child.once("error", () => finish(null))
+      child.once("close", (code) => finish(code))
+      timer = setTimeout(() => {
+        try { child.kill("SIGTERM") } catch { /* the native call runs */ }
+        finish(null)
+      }, subagentRedirectMs)
+      child.stdin.end(JSON.stringify(payload))
+    } catch {
+      finish(null)
+    }
+  })
+}
+
 export const AgentHarnessGuards = async (ctx, options = {}) => {
   const initialize = options.initialize !== false
   // Record plugin-load marker once per plugin init. In a headless dispatch the
@@ -4060,6 +4100,27 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
         timeout: 8000,
       })
       if (result.status === 1 && (result.stdout || "").trim()) throw new Error((result.stdout || "").trim())
+    }
+    // A person's session's native subagent call starts as a Hearting unit route
+    // (utilities/native_subagent_redirect.py): the call is refused with the route's one line. A worker, a
+    // child (task) session's own call, or a start that does not happen lets the native subagent run. The
+    // helper's command carries the session identity and completion carrier its tool commands carry
+    // (`shell.env`), so the route's answer comes back to this session.
+    if (subagentTools.has(toolName) && !isWorkerSession() && !knownChildSession(input.sessionID)
+        && (await rootSessionId(ctx, input.sessionID || "")) === (input.sessionID || "")) {
+      let reason = ""
+      try {
+        const sid = input.sessionID || ""
+        const env = { ...process.env }
+        for (const key of inheritedIdentityEnv) delete env[key]
+        if (sid) env.OPENCODE_SESSION_ID = sid
+        env[ROOT_SESSION_ENV] = ""
+        env[CARRIER_ENV] = completionCarrier.env(sid) || ""
+        env[WATCH_WAKE_ENV] = env[CARRIER_ENV] ? "opencode" : ""
+        reason = await subagentRedirectReason(
+          { tool: toolName, args: output.args || {}, sessionID: sid, cwd: baseDir(ctx) }, env)
+      } catch { reason = "" }
+      if (reason) throw new Error(reason)
     }
     // SD-11 stage-dispatch reminder (Claude PreToolUse[Skill]); delivered with the skill's result.
     const skill = skillToolID(toolName, output.args || {})
