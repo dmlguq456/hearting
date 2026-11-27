@@ -554,9 +554,14 @@ class AdapterV11Test(unittest.TestCase):
   ROUTE_MODULE=_ilu.module_from_spec(route_spec); route_spec.loader.exec_module(ROUTE_MODULE)
   from fixtures.opencode_native_context import launch_context
   sandboxes={"claude":"adapter-default","codex":"workspace-write","opencode":"adapter-default"}
+  import dispatch_wrapper_common as wrapper_common
+  import dispatch_replacement
   for harness in ADAPTERS:
-   for artifact_inside in (False,True):
-    with self.subTest(harness=harness,artifact_inside=artifact_inside), tempfile.TemporaryDirectory() as td:
+   # temp_inside: the launcher's TMPDIR lies inside the source, whose folders the
+   # non-Git profile never grants; the worker temp then comes from the fallback base.
+   for artifact_inside,temp_inside in ((False,False),(True,False),(True,True)):
+    with self.subTest(harness=harness,artifact_inside=artifact_inside,temp_inside=temp_inside), \
+         tempfile.TemporaryDirectory() as td:
      root=Path(td); source=root/"original"; source.mkdir(); user_file=source/"user.txt"
      user_file.write_bytes(b"original bytes stay here\n")
      artifact=source/".agent_reports" if artifact_inside else root/"external-artifacts"
@@ -575,10 +580,19 @@ class AdapterV11Test(unittest.TestCase):
       "failure_scope":"none","codex_command":"ok" if child=="codex" else "not-applicable",
       "retry_on_isolated_worktree":0,
      } for child in ADAPTERS]
+     # The launcher's own temp: a non-Git worker's private temp folder is made below it.
+     # With only the artifact inside, TMPDIR is reached through a link
+     # (current-tmp -> a-worker): every place names the real folder the start judged.
+     if temp_inside or not artifact_inside:
+      launcher_tmp=source/"tmp" if temp_inside else root/"tmp"; launcher_tmp.mkdir()
+     else:
+      (root/"a-worker").mkdir(); launcher_tmp=root/"current-tmp"; launcher_tmp.symlink_to(root/"a-worker")
+     # The fallback base stands in for /tmp, so the real /tmp/hearting-<uid> is never made.
+     fallback=root/"fallback"; fallback.mkdir()
      base_env={"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),"HOME":str(home),
        "AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(artifact),
        "AGENT_DISPATCH_JOBS":str(jobs),"OPENCODE_CONFIG_CONTENT":"{}",
-       "XDG_STATE_HOME":str(root/"xdg")}
+       "XDG_STATE_HOME":str(root/"xdg"),"TMPDIR":str(launcher_tmp)}
      with mock.patch.dict(os.environ,{**base_env,"AGENT_DISPATCH_ATTEMPT_ID":attempt},clear=True):
       route=ROUTE_MODULE.compose_route(
        capability="autopilot-code",capability_mode="dev",shape="staged",graph="plan",
@@ -633,7 +647,8 @@ class AdapterV11Test(unittest.TestCase):
       "AGENT_DISPATCH_ATTEMPT_ID":attempt,"AGENT_DISPATCH_CHILD":"1",
       "AGENT_ROUTE_FILE":str(route_path),"AGENT_ROUTE_ID":route["route_id"],
       "AGENT_ROUTE_HASH":route["route_hash"]}
-     patches=[mock.patch.dict(os.environ,runtime_env,clear=True)]
+     patches=[mock.patch.dict(os.environ,runtime_env,clear=True),
+              mock.patch.object(wrapper_common,"WORKER_TEMP_FALLBACK_BASE",fallback)]
      opencode_configs=[]
      if harness=="opencode":
       patches.append(mock.patch.object(wrapper.opencode_context,"prepare_launch_context",
@@ -681,6 +696,26 @@ class AdapterV11Test(unittest.TestCase):
       self.assertTrue(any(child["argv"][i]==flag and child["argv"][i+1]==str(expected_runtime)
                           for i,flag in enumerate(child["argv"][:-1])
                           if flag in ("--add-dir","--writable-root")),child["argv"])
+     # Every harness gets the same private temp folder; Codex also gets it as its
+     # only extra write root, since its non-Git profile keeps /tmp read-only.
+     worker_temp=os.path.join(os.path.realpath(fallback if temp_inside else launcher_tmp),f"hearting-{os.getuid()}")
+     self.assertNotIn("current-tmp"," ".join(child["argv"]))
+     self.assertFalse((source/"tmp"/f"hearting-{os.getuid()}").exists())
+     for key in ("TMPDIR","TMP","TEMP","CLAUDE_CODE_TMPDIR"):
+      self.assertEqual(child["env"].get(key),worker_temp,key)
+     if harness=="codex":
+      self.assertTrue(any(child["argv"][i]==flag and child["argv"][i+1]==worker_temp
+                          for i,flag in enumerate(child["argv"][:-1])
+                          if flag in ("--add-dir","--writable-root")),child["argv"])
+     # The launch record keeps that one value for recovery, and the write record grants it.
+     child_rows=[line.split("\t") for line in jobs.read_text(encoding="utf-8").splitlines()
+                 if f"\truntime-default-{harness}-{int(artifact_inside)}\t" in line]
+     self.assertEqual(len(child_rows),1,child_rows)
+     child_meta=DC.parse_registry_metadata(child_rows[0][5])
+     sealed=dispatch_replacement.launch_input(jobs,child_meta["attempt_id"],child_meta)
+     self.assertEqual(sealed.get("worker_temp_dir"),worker_temp)
+     effective=json.loads(Path(child_meta["execution_access_effective_file"]).read_text(encoding="utf-8"))
+     self.assertIn(worker_temp,effective["writable_roots"])
      self.assertEqual(set(os.listdir(source)),before_names)
      self.assertEqual(hashlib.sha256(user_file.read_bytes()).hexdigest(),before_user_hash)
      self.assertTrue((expected_runtime/".gitignore").is_file())

@@ -302,6 +302,10 @@ def seal_launch_input(args, harness: str, task: str) -> str:
     }
     if getattr(args, 'replacement_retry_brief', ''):
         payload['retry_brief'] = args.replacement_retry_brief
+    # The temp folder a non-Git start chose; recovery reuses only this value
+    # (`dispatch_wrapper_common.recorded_worker_temp_dir`). Absent otherwise.
+    if getattr(args, 'worker_temp_dir', ''):
+        payload['worker_temp_dir'] = str(args.worker_temp_dir)
     path = _directory(jobs)/'inputs'/(aid+'.json')
     try:
         _once(path, payload)

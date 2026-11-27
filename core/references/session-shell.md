@@ -520,7 +520,13 @@ under the native area `route 2`; 11-17: the title counts the routes alone, `ROUT
 stand, and the `PEER REQUEST` word is gone from it, the requests being a zone of the box, below). Nothing opens in place: a press on a
 head or on any row of its section opens its popup (11-19, the person: "라우트를 눌렀을때 fleet에서 처럼 스테이지별 단계가
 시각화되었으면 한다": any row of a route, its workers' box too, that route's page, Fleet's stage boxes; until its own
-reading comes, the stage boxes the panel's values already draw (its top rule ends in the route's form word, `team` or `solo`, as in the route's bracket, never `staged`), and a route with no stage line its panel box; the
+reading comes, Fleet's page frame drawn from the panel's values in the cells the reading fills (`routePageFirst`; 11-27, for every form, unit, solo and team:
+the head, the legs' band with the producer's own count of its stage line, the picked leg's stage boxes in the colors this screen drew them in, the frame
+closed under them; no word of Fleet's frame changes, a team route's head keeps the form word `team`, never `staged`; what only the reading has, a parallel
+pair, a loop, the owner's raw strip, stages past the sixteen the panel holds, moves the rows under the band's panel title down, never the head, the band or
+the top edge). A route the panel holds no leg band for (an older backend's record, more than six legs, a projection that had to shed these values to
+keep every session's route details) is drawn as before 11-27: its stage boxes for a staged route, else its panel box (as is a first screen that cannot be
+drawn); the
 box's top line the routes popup, the table; a request row the MESSAGES popup).
 
 - QUESTIONS (11-16, the person: "질문은 이전처럼 그냥 붉은색 블록으로 감싸는게 모양은 제일 나아" / "붉은 바운더리
@@ -1271,8 +1277,11 @@ question waits, `Ctrl+]` opens the question popup, and another popup is reached 
 from another one by →, is left by Esc or `Ctrl+]`, not by ←→. A popup row reaches the terminal with every control character (C0, DEL and
 C1) as a space. In a table ↑↓, Tab and Shift+Tab unfold the next or
 previous route (Fleet's `▶`) or read on a row; Enter opens the
-unfolded route's page (Fleet's route page: what is to do, the verification lines
-with the route's paths, the stage frame) and again goes back to the table. A route's page keeps its
+unfolded route's page (Fleet's route page, `_route_page(whole=True)`: the stage frame first, then the route row,
+then what is to do and the verification lines with the route's paths, so the frame stands on the rows its first
+screen drew it on, where that first screen showed the frame and the whole page fits the answer's rows and bytes; else the
+answer as before 11-27: the lines first, the frame under them (a long route's reading is as it was; its first screen still stands the frame,
+which the reading replaces); Fleet's own screen keeps its order) and again goes back to the table. A route's page keeps its
 top edge at the upper edge of the popup area while the reading comes in. The stage frame and the
 popup grow down to fit their content. PgUp/PgDn and the wheel read a longer page or table on (its place,
 `3/20`, leads the keys row; ↑↓ and Tab keep the unfolded row in view, and a table longer than the rows the popup carries, or than the answer the host reads, shows the rows that fit and ends with one dim line for the rest in the entrance's words, `외 N개`); `p` folds or opens the panel (the popup closes so
