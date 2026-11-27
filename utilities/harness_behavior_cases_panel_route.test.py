@@ -11,6 +11,7 @@ import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
+import select
 import shutil
 import subprocess
 import tempfile
@@ -26,6 +27,8 @@ sys.path.insert(0, str(ROOT))
 from tools.fleet.collectors import procscan  # noqa: E402
 
 READ = r"""
+import human_wait_state
+human_wait_state._request_producer = lambda *a, **k: None      # no resident producer from this reading
 from tools.fleet.collectors import collect_all
 collect_all(include_report_verification=False)
 quiet = len(foreign_environ)
@@ -97,23 +100,22 @@ class ProcessScope(unittest.TestCase):
             launcher = Path(tmp) / "bin"
             launcher.mkdir()
             (launcher / "node").symlink_to("/bin/sh")
-            shutil.copy2("/bin/sleep", launcher / "claude")       # an executable named claude
-            parent = subprocess.Popen([str(launcher / "node"), "-c", f"'{launcher}/claude' 120 & wait"], cwd=tmp)
-            self.addCleanup(lambda: (parent.kill(), parent.wait()))
-            child = None
-            for _ in range(50):
-                kids = Path(f"/proc/{parent.pid}/task/{parent.pid}/children").read_text().split()
-                if kids:
-                    child = int(kids[0])
-                    break
-                __import__("time").sleep(0.1)
-            self.assertIsNotNone(child)
-            self.addCleanup(lambda: subprocess.run(["kill", str(child)], capture_output=True))
+            # An executable named claude: a copied interpreter that still uses its own stdlib.
+            shutil.copy2(sys.executable, launcher / "claude")
+            hold = "import os, time; os.write(1, b'R'); time.sleep(120)"
+            parent = subprocess.Popen([str(launcher / "node"), "-c", f"'{launcher}/claude' -c \"{hold}\" & wait"],
+                                      cwd=tmp, stdout=subprocess.PIPE, env={**os.environ, "PYTHONHOME": sys.base_prefix})
+            self.addCleanup(lambda: (parent.kill(), parent.wait(), parent.stdout.close()))
+            ready = select.select([parent.stdout], [], [], 30)[0] and parent.stdout.read(1) == b"R"
+            kids = Path(f"/proc/{parent.pid}/task/{parent.pid}/children").read_text().split()
+            for kid in kids:
+                self.addCleanup(lambda kid=int(kid): subprocess.run(["kill", str(kid)], capture_output=True))
+            self.assertTrue(ready and kids, "the fixture's claude child did not start")
+            child = int(kids[0])
             start = str(procscan.read_proc_start(child))
             seen = self.read(tmp, [{"status": "running", "slug": "hb-solo-review-owner", "attempt_id": "att-ours",
                                     "pid": str(child), "pid_start": start}])
         self.assertEqual(seen["during_read"], 0)
-
 
 if __name__ == "__main__":
     unittest.main()
