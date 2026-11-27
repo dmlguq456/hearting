@@ -4035,23 +4035,50 @@ def _panel_route_record(route, route_nodes):
     # 11-27: the leg band of the route page's frame and its head's first words (``repo/ › [tag] ›``), as Fleet draws them, so the
     # shell's first screen for a route draws that frame from the panel's values in the cells its reading fills.
     row["bands"] = _panel_bands(nodes)
+    # (the label of the record's own `repo`, whole: Fleet's head writes it whole and cuts the head at the frame's rule, as
+    # the first screen does; a cut here would move the tag and drop the `/`)
     from .tables import repo_rule_label
-    row["head_repo"] = repo_rule_label(route.get("repo"))[:80]
+    row["head_repo"] = repo_rule_label(row["repo"] or None)
     row["session_tag"] = str(route.get("session_tag") or "")[:16]
     return row
 
 
+PANEL_BANDS = 6        # legs the panel carries; a route with more has none (its first screen stays the panel's box)
+
+
 def _panel_bands(groups):
     """The leg band of Fleet's route page as the panel carries it: each leg's name, state, verdict, kind, its lines and the
-    title of its panel, bounded (at most six legs, two lines of eight pieces, a title of ten; a piece 80 cells and its key 24)."""
+    title of its panel, bounded (two lines of eight pieces, a title of ten; a piece 80 cells and its key 24), and for a leg
+    the values of its stage line as Fleet counts them (`pages.current_leg_values` over the leg's whole detail: the stage
+    that matters now, its place, how many are done of how many). Only values of their own shape are carried: a text that
+    is not a string, a line that is not a list, is left out. A route of more than ``PANEL_BANDS`` legs carries none."""
+    from .pages import current_leg_values
+    groups = [group for group in (groups if isinstance(groups, (list, tuple)) else ()) if isinstance(group, Mapping)]
+    if len(groups) > PANEL_BANDS:
+        return []
+
+    def text(value, limit):
+        return value[:limit] if isinstance(value, str) else ""
+
     def pieces(items, limit):
-        return [[item[0][:80], str(item[1])[:24]] for item in (items or ())
+        return [[item[0][:80], item[1][:24] if isinstance(item[1], str) else ""]
+                for item in (items if isinstance(items, (list, tuple)) else ())
                 if isinstance(item, (list, tuple)) and len(item) >= 2 and isinstance(item[0], str)][:limit]
-    return [{"n": str(group.get("n") or "")[:64], "st": str(group.get("st") or "")[:16],
-             "verdict": str(group.get("verdict") or "")[:16], "kind": str(group.get("kind") or "")[:8],
-             "lines": [pieces(line, 8) for line in (group.get("lines") or ())[:2] if isinstance(line, (list, tuple))],
-             "title": pieces(group.get("title"), 10)}
-            for group in list(groups)[:6] if isinstance(group, Mapping)]
+
+    bands = []
+    for group in groups:
+        lines = group.get("lines") if isinstance(group.get("lines"), (list, tuple)) else ()
+        band = {"n": text(group.get("n"), 64), "st": text(group.get("st"), 16), "verdict": text(group.get("verdict"), 16),
+                "kind": text(group.get("kind"), 8), "lines": [pieces(line, 8) for line in lines[:2] if isinstance(line, (list, tuple))],
+                "title": pieces(group.get("title"), 10)}
+        detail = group.get("detail") if isinstance(group.get("detail"), (list, tuple)) else ()
+        if detail and all(isinstance(item, Mapping) for item in detail):
+            at, stage, done, total = current_leg_values(detail)
+            # (Fleet's own words for it: `str(n or name)`, its state)
+            band["stage"] = {"n": str(stage.get("n") or stage.get("name"))[:64],
+                             "st": stage.get("st") if isinstance(stage.get("st"), str) else "", "at": at, "done": done, "of": total}
+        bands.append(band)
+    return bands
 
 
 def session_route_status(snapshot, now=None, *, include_details=False, records_out=None):

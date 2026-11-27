@@ -2033,23 +2033,48 @@ def _panel_popup(binding, request):
     ids = [str(route.get("id") or "") for route in routes]
     page = request.get("page") is True and opened in ids
     if page:
-        # The route page draws its content once. The host fits that page to
-        # the window and reads the remaining rows with PgUp/PgDn.
-        subset = replace(vm, routes=routes)
-        pages._route_page(grid, subset, opened, 0, columns - 1, grid.rows,
-                          pages._SubsetState(None, "route:" + opened, opened, True), whole=True)
-    elif routes:
+        return _route_page_answer(replace(vm, routes=routes), opened, columns, kind, ids, read_at, colors, no_color)
+    if routes:
         pages._draw_route_subset(grid, vm, routes, 0, 0, grid.rows - 4, opened=opened, no_repo_group=True)
     rows, styles, hits = popup_rows(grid, colors=colors, no_color=no_color)
-    # The route page starts under Fleet's page head: its empty rows above the content go.
-    while page and rows and not rows[0]:
-        rows.pop(0)
-        hits = [{**hit, "row": hit["row"] - 1} for hit in hits if hit["row"] > 0]
-    if page:
-        return {"ok": True, "kind": kind, "rows": rows, "styles": styles, "hits": hits, "routes": ids[:64], "page": page,
-                "read_at": int(read_at)}
     return _popup_table(kind, rows, styles, hits, len(ids), colors=colors, no_color=no_color, page=False,
                         read_at=int(read_at))
+
+
+def _route_page_answer(subset, opened, columns, kind, ids, read_at, colors, no_color):
+    """A route's page as the host reads it: Fleet's page drawn once (the host fits it to the window and reads the rest
+    with PgUp/PgDn), every line under its frame kept within ``POPUP_ROWS`` rows and ``POPUP_ANSWER_BYTES``: a page that
+    would outrun either closes its frame earlier (`_route_page`'s ``+N more``), never losing the route row or its lines."""
+    from fleet.explorer.grid import CellGrid
+    from fleet.explorer import pages
+
+    def draw(limit=None):
+        # (the page starts on row 3, under Fleet's page head: those three empty rows go after `popup_rows` cut it to its rows)
+        grid = CellGrid(columns, POPUP_ROWS)
+        last = pages._route_page(grid, subset, opened, 0, columns - 1, grid.rows,
+                                 pages._SubsetState(None, "route:" + opened, opened, True), whole=True, frame_limit=limit)
+        rows, styles, hits = popup_rows(grid, colors=colors, no_color=no_color)
+        while rows and not rows[0]:
+            rows.pop(0)
+            hits = [{**hit, "row": hit["row"] - 1} for hit in hits if hit["row"] > 0]
+        return {"ok": True, "kind": kind, "rows": rows, "styles": styles, "hits": hits, "routes": ids[:64], "page": True,
+                "read_at": int(read_at)}, last
+
+    def weight(result):
+        return len(json.dumps({"id": 0, **result}, ensure_ascii=False).encode())
+    answer, last = draw()
+    if weight(answer) <= POPUP_ANSWER_BYTES or last is None:
+        return answer
+    low, high = 3, last          # the frame's last row: `low` is the least it can be, `high` does not fit
+    best = None
+    while high - low > 1:
+        middle = (low + high) // 2
+        trial, _last = draw(middle)
+        if weight(trial) <= POPUP_ANSWER_BYTES:
+            low, best = middle, trial
+        else:
+            high = middle
+    return best or draw(low)[0]
 
 
 def _input_readiness(binding, request):

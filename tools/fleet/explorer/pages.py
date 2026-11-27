@@ -581,23 +581,43 @@ def _peers_line(grid, vm, tag, x, y, right):
     return y + 1, {go for _text, _key, go in shown if go} - {tag}, tabbed
 
 
-def _route_page(grid, vm, ident, x, right, bottom, state, whole=False):
+def _route_page(grid, vm, ident, x, right, bottom, state, whole=False, frame_limit=None):
     """A route's page. ``whole`` (the shell popup, a reader that scrolls) draws the frame first, to its content, then the
     route row, then what the page says about the route, so the frame stands in the rows its first screen drew it in
-    (`routePageFirst`); Fleet's own screen keeps its order (the summary, the route row, the frame to the window)."""
+    (`routePageFirst`); Fleet's own screen keeps its order (the summary, the route row, the frame to the window).
+
+    ``whole`` keeps every line under the frame: their rows are counted first and the frame closes above them, a long
+    one with ``+N more`` in place of the rows of stage boxes it has no room for (``bottom``, the rows the reader carries;
+    ``frame_limit``, a lower last row for the frame where the answer must weigh less). Returns the frame's last row."""
     route = next((item for item in vm.routes if str(item.get("id")) == ident), None)
     if route is None:
-        return
+        return None
     system = vm.system if hasattr(vm.system, "get") else {}
     summary = (system.get("task_summary", {}).get("by_route", {}).get(ident)
                if hasattr(system, "get") and hasattr(system.get("task_summary"), "get") else None)
     y = 3
     if whole:
-        y = draw_route_detail(grid, vm, route, x, grid.cols - x - 2, y, state,
-                              bottom=min(bottom, grid.rows - 6), fit=True) + 1
-        # (The units a worker of this route called are not drawn on the route page: it reads as it did before the call.)
-        y = _draw_route_subset(grid, vm, ({key: value for key, value in route.items() if key != "called"},), x, y, bottom,
-                               opened=ident, no_repo_group=True, view_key="route:" + ident, state=state) + 1
+        from .grid import CellGrid
+        below = _route_page_lines(CellGrid(grid.cols, grid.rows), vm, route, ident, summary, x, right, 0, grid.rows, state)
+        limit = bottom - 2 - below
+        if frame_limit is not None:
+            limit = min(limit, frame_limit)
+        end = draw_route_detail(grid, vm, route, x, grid.cols - x - 2, y, state,
+                                bottom=min(bottom, grid.rows - 6), fit=True, limit=max(y + 1, limit))
+        _route_page_lines(grid, vm, route, ident, summary, x, right, end + 1, bottom, state)
+        return end - 1
+    y = _route_summary_lines(grid, summary, x, right, y)
+    y = _route_visibility_lines(grid, route.get("visibility"), x, right, y, bottom, whole)
+    # (The units a worker of this route called are not drawn on the route page: it reads as it did before the call.)
+    y = _draw_route_subset(grid, vm, ({key: value for key, value in route.items() if key != "called"},), x, y, bottom,
+                           opened=ident, no_repo_group=True, view_key="route:" + ident, state=state)
+    draw_route_detail(grid, vm, route, x, grid.cols - x - 2, y + 1, state,
+                      bottom=min(bottom, grid.rows - 6))
+    return None
+
+
+def _route_summary_lines(grid, summary, x, right, y):
+    """The task's TODO / DOING / DONE lines of a route's page (none where the page has no summary)."""
     if isinstance(summary, Mapping):
         for name, key in (("TODO", "lvl_y"), ("DOING", "g_spin_dim"), ("DONE", "done")):
             values = tuple(summary.get(name.casefold()) or ())
@@ -605,14 +625,17 @@ def _route_page(grid, vm, ident, x, right, bottom, state, whole=False):
             grid.put(x + 16, y, clip(", ".join(values[:4]) or "·", right - x - 19),
                      "soft" if values else "dim", limit=right)
             y += 1
-    y = _route_visibility_lines(grid, route.get("visibility"), x, right, y, bottom, whole)
-    if whole:
-        return
+    return y
+
+
+def _route_page_lines(grid, vm, route, ident, summary, x, right, y, bottom, state):
+    """What the popup's page has under its frame, from row ``y``: the route row with its kind and worker lines, one row,
+    the task's summary and every visibility line (none folded). Returns the row under them."""
     # (The units a worker of this route called are not drawn on the route page: it reads as it did before the call.)
     y = _draw_route_subset(grid, vm, ({key: value for key, value in route.items() if key != "called"},), x, y, bottom,
-                           opened=ident, no_repo_group=True, view_key="route:" + ident, state=state)
-    draw_route_detail(grid, vm, route, x, grid.cols - x - 2, y + 1, state,
-                      bottom=min(bottom, grid.rows - 6))
+                           opened=ident, no_repo_group=True, view_key="route:" + ident, state=state) + 1
+    y = _route_summary_lines(grid, summary, x, right, y)
+    return _route_visibility_lines(grid, route.get("visibility"), x, right, y, bottom, True)
 
 
 _VISIBILITY_TONE = {"good": "done", "bad": "lvl_r", "mixed": "lvl_y", "info": "soft", "dim": "dim"}
@@ -872,7 +895,10 @@ def _stage_status(stage):
             "todo" if all(value == "todo" for value in states) else "done")
 
 
-def _stage_grid(grid, x0, y, stages, room, bottom, loops=(), *, fit=False):
+def _stage_grid(grid, x0, y, stages, room, bottom, loops=(), *, fit=False, limit=None, report=None):
+    """The stage boxes from row ``y``; returns the row under them. A fitted grid (``fit``) with a ``limit`` (the row it
+    may not reach) that would run past it keeps the rows of boxes that end above ``limit - 1``, leaving that row for the
+    caller's ``+N more``; ``report["hidden"]`` then counts the stages left out (their loops are not drawn)."""
     gap = 4
     graph_known = any(stage.get("graph_known") for stage in stages)
     steps = _flow_steps(stages)
@@ -907,10 +933,19 @@ def _stage_grid(grid, x0, y, stages, room, bottom, loops=(), *, fit=False):
     row_tops = [y]
     for height in row_heights[:-1]:
         row_tops.append(row_tops[-1] + height + pitch_gap)
-    end = row_tops[-1] + row_heights[-1]
+    shown = len(steps)
+    if fit and limit is not None and row_tops[-1] + row_heights[-1] > limit:
+        kept = sum(1 for top, height in zip(row_tops, row_heights) if top + height <= limit - 1)
+        shown = min(len(steps), kept * per)
+        row_tops, row_heights = row_tops[:kept], row_heights[:kept]
+        if report is not None:
+            report["hidden"] = sum(units[number] for number in range(shown, len(steps)))
+    end = row_tops[-1] + row_heights[-1] if row_tops else y
     pos = [None] * len(stages)
     step_at, step_of, mids_of, bottoms = [], {}, {}, {}
     for number, step in enumerate(steps):
+        if number >= shown:
+            break
         row, k = divmod(number, per)
         col = k if row % 2 == 0 else per - 1 - k
         bx, by = x0 + col * (w + gap), row_tops[row]
@@ -962,6 +997,8 @@ def _stage_grid(grid, x0, y, stages, room, bottom, loops=(), *, fit=False):
                 source_index = visual_for.get(dependency)
                 if source_index is None or source_index == target_index:
                     continue
+                if source_index not in step_of or target_index not in step_of:
+                    continue                  # (a stage a closed-early grid left out)
                 # Only neighbouring steps share a gap; a skipped level stays in the stage's own text.
                 if step_of[target_index] != step_of[source_index] + 1:
                     continue
@@ -997,6 +1034,8 @@ def _stage_grid(grid, x0, y, stages, room, bottom, loops=(), *, fit=False):
                                                   "│"), joint_style)
             for my in targets:
                 grid.put(head_x, my, arrow, _edge_style({"st": targets[my]}))
+    if shown < len(steps):
+        return end
     if lanes:
         _loop_lanes(grid, pos, w, bottoms, end + 1, stages, loops)
         return end + lanes
@@ -1071,13 +1110,20 @@ def _loop_lanes(grid, pos, w, bottoms, row, stages, loops):
             row += 1
 
 
-def _current_leg(grid, x, y, stages, room):
-    """The stage that matters now, in its stage hue, then n/m and a thin progress rule."""
-    x0 = x
+def current_leg_values(stages):
+    """``(index, stage, done, total)``: the stage of a leg that matters now (an active or failed one, else the first not
+    done, else the last) and how many of its stages are done, as the leg band's stage line counts them (the producer hands
+    the panel these very values, `live._panel_bands`)."""
     cur = next((i for i, item in enumerate(stages) if item.get("st") in ("active", "failed")), None)
     if cur is None:
         cur = next((i for i, item in enumerate(stages) if item.get("st") != "done"), len(stages) - 1)
-    stage = stages[cur]
+    return cur, stages[cur], sum(1 for item in stages if item.get("st") == "done"), len(stages)
+
+
+def _current_leg(grid, x, y, stages, room):
+    """The stage that matters now, in its stage hue, then n/m and a thin progress rule."""
+    x0 = x
+    cur, stage, done, total = current_leg_values(stages)
     hue = _STAGE_HUE[cur % 5]
     name_style = ("r", 1, 0) if stage.get("st") == "failed" else (hue, 1, 0)
     if stage.get("st") == "active" and not getattr(grid, "beat", 1):
@@ -1089,10 +1135,9 @@ def _current_leg(grid, x, y, stages, room):
         mark, key = _STATE_MARK.get(stage.get("st"), ("·", "dim"))
         x = grid.put(x + 1, y, mark, key, limit=limit)
     x += 2
-    done = sum(1 for item in stages if item.get("st") == "done")
-    x = grid.put(x, y, "%d/%d" % (done, len(stages)), "soft", limit=limit) + 1
+    x = grid.put(x, y, "%d/%d" % (done, total), "soft", limit=limit) + 1
     cells = max(0, min(12, limit - x))
-    fill = round(cells * done / len(stages))
+    fill = round(cells * done / total)
     for i in range(cells):
         x = grid.put(x, y, "━" if i < fill else "─", (hue, 0, 0) if i < fill else ("d", 0, 1))
     return x
@@ -1181,8 +1226,10 @@ def _route_panel_edges(grid, left, right, y, bottom, style, frame_key, *, keep_c
     grid.put(right, bottom, "╧", frame_key)
 
 
-def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None, *, fit=False):
-    """Draw the route frame. A scrolling reader can close it after the content."""
+def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None, *, fit=False, limit=None):
+    """Draw the route frame. A scrolling reader can close it after the content (``fit``), at ``limit`` at the latest:
+    the rows of stage boxes that would reach it give way to one ``+N more`` row (and the owner's raw strip to the rows
+    left). Returns the row under the frame."""
     right = min(grid.cols - 1, x + use)
     bottom = max(y, grid.rows - 5) if bottom is None else bottom
     ident = str(route.get("id") or "")
@@ -1328,11 +1375,19 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None, *, fi
                           head_parts, layout, raw_rows, "rawoff")
             stage_bottom -= raw_rows + 2
     end = panel_y + 1
+    report = {}
     if stages:
         end = _stage_grid(grid, panel_left + 2, end, stages, stage_room, stage_bottom,
-                          tuple(tuple(item) for item in (node.get("loops") or ())), fit=fit)
+                          tuple(tuple(item) for item in (node.get("loops") or ())), fit=fit,
+                          limit=limit if fit else None, report=report)
+    if report.get("hidden"):
+        grid.put(panel_left + 2, end, clip("+%d more" % report["hidden"], max(0, panel_right - panel_left - 3)),
+                 "dim", limit=panel_right)
+        end += 1
     if fit:
-        if any(text.strip() for parts, _tint in layout for text, _key in parts):
+        if limit is not None:
+            raw_rows = min(raw_rows, limit - end - 3)
+        if raw_rows >= 2 and any(text.strip() for parts, _tint in layout for text, _key in parts):
             raw_rows = min(raw_rows, len(layout))
             _scroll_strip(grid, state, panel_left + 2, panel_right - 2, end + 1,
                           head_parts, layout, raw_rows, "rawoff")

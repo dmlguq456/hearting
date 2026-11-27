@@ -2801,10 +2801,14 @@ function routesBody({model={},columns=72,cellWidth,configuration,background=''}=
 // drawn from the values the panel already holds for the route (`routes[]`, what `session_panel.presentation` made of them: the leg band `bands`, the
 // head's `head_repo` and `session_tag`, the stages), in the same cells: the head rule, the legs' band, the picked leg's panel and its title, the stage
 // boxes (`_stage_grid(fit=True)`: a snake of at most six boxes a row, each as tall as its own value lines, `▶ ◀ ▼` between), the frame closing under
-// the last row of boxes. A value the panel does not hold is an empty place (`·`) the reading fills; no border, title, name or arrow moves. The panel
-// holds no flow level, so the stages stand one a step (a chain); loops, the owner's raw strip and parallel pairs come with the reading. A value cut to
-// its place ends in `…`. No word of Fleet's frame changes; only the head's last word follows the panel (below).
-// A route the panel holds no leg band for (an older backend, an unknown route) is `null`: the popup keeps the panel's box.
+// the last row of boxes. A value the panel does not hold is an empty place (`·`) the reading fills; no border, title, name or arrow moves. The band's
+// stage line is the producer's own count over the leg's whole detail (`band.stage`), not one made again from the sixteen stages the panel holds.
+// The panel holds no flow level, so the stages stand one a step (a chain): what only the reading has moves the rows under the band's panel title,
+// never the head, the band or the top edge (11-27, measured at 132×46: a parallel pair `∥ 2-way` puts the frame's bottom 28 → 35 rows down, a loop
+// `↺ N back` 21 → 24, the owner's raw strip 28 → 34, more than sixteen stages 50 → 56 with `+N` under the sixteen). A value cut to its place ends
+// in `…`. No word of Fleet's frame changes; only the head's last word follows the panel (below), and the stage boxes keep the colors this screen
+// has drawn them in (their state word dim). A route the panel holds no leg band for (an older backend, an unknown route, more than six legs) is
+// `null`: the popup keeps the panel's box.
 // Returns `{rows,hits:[],routes}` as `routesBody` does (the popup's table keys use `routes`). It does not move (no beat).
 function routePageFirst({model={},id,columns=72,cellWidth,configuration,background=''}={}){
   columns=Math.max(1,Math.min(200,Math.trunc(Number(columns))||72));
@@ -2812,15 +2816,18 @@ function routePageFirst({model={},id,columns=72,cellWidth,configuration,backgrou
   const route=list.find(r=>String(r.id)===String(id));
   if(!route)return null;
   const bands=Array.isArray(route.bands)?route.bands.filter(b=>b&&typeof b==='object'):[];
-  if(!bands.length)return null;
+  if(!bands.length||bands.length>6)return null;
   const stages=Array.isArray(route.stages)?route.stages.filter(s=>s&&typeof s==='object'):[];
   const cfg={...defaults,...configuration},styles=model.styles||{};
-  const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
+  // (a text is a string or a number; anything else, an object of any shape, is no text)
+  const clean=s=>(typeof s==='string'?s:typeof s==='number'?String(s):'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
   const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
   const hued=model.no_color!==true&&cfg.theme!=='mono'&&(model.colors??256)>=256;
   const ink=key=>key&&hued?key:'loc_repo';
   // A Fleet key the panel has no style for reads in the panel's own two: its dim words dim, the rest in the body color.
-  const keyOf=key=>{key=String(key||'');return styles[key]?key:/^(dim|line|title_dim|tag_b|branch_s|d)$/.test(key)||!key?'dim':'loc_repo';};
+  const keyOf=key=>{key=typeof key==='string'?key:'';return styles[key]?key:/^(dim|line|title_dim|tag_b|branch_s|d)$/.test(key)||!key?'dim':'loc_repo';};
+  // A band's pieces of text: only `[text, key]` pairs whose text is a string (anything else is no piece).
+  const piecesOf=parts=>(Array.isArray(parts)?parts:[]).filter(p=>Array.isArray(p)&&typeof p[0]==='string').map(([t,key])=>[t,keyOf(key)]);
   // The drawing is a grid of cells (one character and its style key each), written into by place, read back as parts (Fleet's `CellGrid.put`).
   const grid=[];
   const rowAt=y=>{while(grid.length<=y)grid.push(new Array(columns).fill(null));return grid[y];};
@@ -2870,20 +2877,19 @@ function routePageFirst({model={},id,columns=72,cellWidth,configuration,backgrou
   const selected=found>=0?found:bands.length-1;
   const bandY=y+1,room=use-6,bandW=Math.min(BAND_W,Math.floor((room-GAP*(bands.length-1))/bands.length));
   let centre=x+3+Math.floor(bandW/2);
-  // `_current_leg`: the stage that matters now (an active or failed one, else the first not done), its n/m and a thin progress rule.
-  const currentLeg=(x0,yy,room_)=>{
-    const sts=stages.map(stat);
-    let cur=sts.findIndex(v=>v==='active'||v==='failed');
-    if(cur<0){cur=sts.findIndex(v=>v!=='done');if(cur<0)cur=stages.length-1;}
-    const st=sts[cur],limit=x0+Math.max(0,room_);
-    let xx=put(x0,yy,clip(stages[cur].name||'·',Math.max(0,room_)),st==='failed'?'lvl_r':ink(stages[cur].key),limit);
+  // `_current_leg`: the stage that matters now, its n/m and a thin progress rule, from the producer's count (`band.stage`: the stage's words, state
+  // and place, how many are done of how many, `pages.current_leg_values` over the whole leg), its hue the stage's place in the route.
+  const currentLeg=(x0,yy,room_,at)=>{
+    const st=['done','active','failed'].includes(at.st)?at.st:'todo',hue='stg'+(at.at%5)+'_on',limit=x0+Math.max(0,room_);
+    let xx=put(x0,yy,clip(at.n,Math.max(0,room_)),st==='failed'?'lvl_r':ink(hue),limit);
     if(st!=='active')xx=put(xx+1,yy,MARK[st][0],MARK[st][1],limit);
     xx+=2;
-    const done=sts.filter(v=>v==='done').length;
-    xx=put(xx,yy,done+'/'+stages.length,'loc_repo',limit)+1;
-    const cells=Math.max(0,Math.min(12,limit-xx)),fill=pyRound(cells*done/stages.length);
-    for(let i=0;i<cells;i++)xx=put(xx,yy,i<fill?'━':'─',i<fill?ink(stages[cur].key):'dim');
+    xx=put(xx,yy,at.done+'/'+at.of,'loc_repo',limit)+1;
+    const cells=Math.max(0,Math.min(12,limit-xx)),fill=pyRound(cells*at.done/at.of);
+    for(let i=0;i<cells;i++)xx=put(xx,yy,i<fill?'━':'─',i<fill?ink(hue):'dim');
   };
+  const stageOf=band=>{const at=band.stage;return at&&typeof at==='object'&&typeof at.n==='string'&&[at.at,at.done,at.of].every(Number.isInteger)
+    &&at.at>=0&&at.of>0&&at.done>=0&&at.done<=at.of?at:null;};
   bands.forEach((band,index)=>{
     const bx=x+3+index*(bandW+GAP),status=clean(band.st).trim()||'todo',gate=band.kind==='gate',picked=index===selected;
     const edge=picked?'loc_repo':'dim';
@@ -2893,14 +2899,14 @@ function routePageFirst({model={},id,columns=72,cellWidth,configuration,backgrou
     outline(bx,bandY,bandW,BAND_H,edge);
     segs(bx+2,bandY,[...(gate?[[' ◑ ','tag_steward']]:[[' ',null]]),[clip(band.n||'·',Math.max(4,nameRoom)),'loc_repo'],[' ',null]],tailX);
     segs(tailX,bandY,tail);
-    const lines=Array.isArray(band.lines)?band.lines.filter(Array.isArray):[];
-    const bandLines=[...(band.kind==='leg'&&stages.length?[null]:[]),...lines].slice(0,BAND_H-2);
+    const lines=Array.isArray(band.lines)?band.lines.filter(Array.isArray):[],at=band.kind==='leg'?stageOf(band):null;
+    const bandLines=[...(at?[null]:[]),...lines].slice(0,BAND_H-2);
     bandLines.forEach((parts,k)=>{
       if(parts===null){
         const end=bx+bandW-2,labelRoom=Math.max(0,end-(bx+2));
         const labelEnd=put(bx+2,bandY+1+k,labelRoom>=LW?'stage'.padEnd(LW):clip('stage',labelRoom),'dim',end);
-        currentLeg(labelEnd,bandY+1+k,Math.max(0,end-labelEnd));
-      }else segs(bx+2,bandY+1+k,parts.filter(Array.isArray).map(([t,key])=>[t,keyOf(key)]),bx+bandW-1);
+        currentLeg(labelEnd,bandY+1+k,Math.max(0,end-labelEnd),at);
+      }else segs(bx+2,bandY+1+k,piecesOf(parts),bx+bandW-1);
     });
     if(index)put(bx-Math.floor(GAP/2)-1,bandY+Math.floor(BAND_H/2),'▶','dim');
     if(picked){centre=bx+Math.floor(bandW/2);put(centre,bandY+BAND_H-1,'┬',edge);put(centre,bandY+BAND_H,'│',edge);}
@@ -2911,7 +2917,7 @@ function routePageFirst({model={},id,columns=72,cellWidth,configuration,backgrou
   const panelLeft=x+2,panelRight=right-2,panelY=y+BAND_H+2;
   put(panelLeft,panelY,'┌','dim');put(panelRight,panelY,'┐','dim');
   const sel=bands[selected];
-  const title=[[' ',null],...(Array.isArray(sel.title)?sel.title.filter(Array.isArray):[]).map(([t,key])=>[t,keyOf(key)]),[' ',null]];
+  const title=[[' ',null],...piecesOf(sel.title),[' ',null]];
   const tw=width(title);
   const tx=panelLeft+2+tw<centre-1?panelLeft+2:centre+2,tEnd=Math.min(panelRight-1,tx+tw);
   for(let xx=panelLeft+1;xx<panelRight;xx++)if(xx!==centre&&(xx<tx||xx>=tEnd))put(xx,panelY,'─','dim');
@@ -2928,12 +2934,12 @@ function routePageFirst({model={},id,columns=72,cellWidth,configuration,backgrou
     const w=Math.floor((stageRoom-GAP*(per-1))/per),vroom=w-4-LW;
     const by_=(s)=>{const h=clean(s.harness).trim();return h?[[h,'hb_'+h],...(s.model?[[' '+[clean(s.model),clean(s.effort)].filter(Boolean).join(' '),'loc_repo']]:[])]:null;};
     const linesOf=s=>{
-      const st=stat(s),lines=[],who=by_(s);
+      const lines=[],who=by_(s),todo=s.mark===''&&!s.current;
       if(who)lines.push(['by',who]);
-      lines.push(['time',[[clip(s.when||'·',vroom),st!=='todo'?'loc_repo':'dim']]]);
+      lines.push(['time',[[clip(s.when||'·',vroom),todo?'dim':'loc_repo']]]);
       if(s.note)lines.push(['rounds',[[clip(s.note,vroom),'dim']]]);
       // The panel's value for a stage's gate is `true` when it passed (`stage_doer`): a pass mark, not a gate in words; only a gate in words is a line.
-      if(typeof s.gate==='string'&&s.gate.trim())lines.push(['gate',[[clip(s.gate,vroom-3),'dim'],[st==='done'?' ✓':'','lvl_g']]]);
+      if(typeof s.gate==='string'&&s.gate.trim())lines.push(['gate',[[clip(s.gate,vroom-3),'dim'],...(s.mark==='✓'?[[' ✓','lvl_g']]:[])]]);
       lines.push(['out',[[clip(s.out||'·',vroom),'dim']]]);
       lines.push(['unit',[[clip(s.unit||'·',vroom),'dim']]]);
       if(s.says)lines.push(['says',[[clip(s.says,vroom),'dim']]]);
@@ -2947,12 +2953,15 @@ function routePageFirst({model={},id,columns=72,cellWidth,configuration,backgrou
       const {x:bx,y:by}=spots[i],st=stat(s),h=heights[i];
       const verdict=clean(s.verdict).trim()||{done:'done',active:'running',failed:'failed',todo:'pending'}[st];
       const narrow=w<34;
-      const rightParts=st==='active'?[[' ',null],['●','g_work'],[narrow?' ':' '+verdict+' ','loc_repo']]
-        :[[' '+MARK[st][0]+' ',MARK[st][1]],...(narrow?[]:[[verdict+' ',st!=='todo'?'loc_repo':'dim']])];
+      // (the colors this first screen has drawn a box in: its state word dim, its mark in the mark's own color, its edge the stage's while it runs)
+      const rightParts=st==='active'?[[' ',null],['●','g_work'],[narrow?' ':' '+verdict+' ','dim']]
+        :[[' '+MARK[st][0]+' ',MARK[st][1]],...(narrow?[]:[[verdict+' ','dim']])];
       const rw=width(rightParts);
-      outline(bx,by,w,h,st==='failed'?'lvl_r':s.current?(s.key||'dim'):'dim');
-      segs(bx+2,by,[[' ',null],[clip(s.name||'·',w-6-rw),ink(s.key)],[' ',null]]);
-      segs(bx+w-1-rw,by,rightParts);
+      outline(bx,by,w,h,s.current?(s.key||'dim'):st==='failed'?'lvl_r':'dim');
+      put(bx+2,by,' '+clip(s.name||'·',w-6-rw)+' ',ink(s.key));
+      // (as this screen has always written it: the whole end dim, then the space and the mark in the mark's color)
+      put(bx+w-1-rw,by,rightParts.map(([t])=>t).join(''),'dim');
+      put(bx+w-1-rw,by,' '+MARK[st][0],MARK[st][1]);
       bodies[i].forEach(([label,parts],k)=>segs(bx+2,by+1+k,[[label.padEnd(LW),'dim'],...parts],bx+w-1));
     });
     // The arrows of a chain (each stage after the one before it): `▶`/`◀` on a box's third row between the boxes of a row, `▼` under the row's turn.

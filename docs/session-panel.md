@@ -70,7 +70,9 @@ in place under the wheel, its border counting what it hides. A press on a
 section's head or rows opens its popup (below); a press on any row of a route
 opens the routes popup on that route's page (Fleet's route page: the frame first, then the route row, then the lines about it). From the press on, the
 popup shows that frame at once for every form (unit, solo, team), drawn from the values the panel already holds, in the cells the reading fills (only values
-come in; no border, title or name moves, and the reading leaves the frame on its rows); a team route's head keeps the form word `team`, never `staged`), a press on the
+come in; no border, title or name moves, and the reading leaves the frame on its rows; what only the reading knows, a parallel pair, a loop, the owner's raw
+strip, more than sixteen stages, can lengthen the frame below its band; a long frame closes early with `+N more` so the lines under it stay); a team route's head
+keeps the form word `team`, never `staged`), a press on the
 section's head (or Ctrl+], ←→) the routes table, a request's row the MESSAGES
 popup. Values the host could not refresh for a while are shown, not claimed:
 nothing spins, and the frame takes no route state. A value that cannot be read
