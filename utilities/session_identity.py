@@ -106,7 +106,8 @@ def _codex_state_db(home: str) -> str | None:
 
 def _codex_root(session_id: str, env, strict: bool = False) -> str | None:
     """The root thread of a Codex `spawn_agent` thread, else ``session_id``. When the state DB is absent or
-    cannot be read the answer is ``session_id``, or None with ``strict`` (not known)."""
+    cannot be read the answer is ``session_id``, or None with ``strict`` (not known), which also asks the DB
+    to hold the thread itself: a DB without its row says nothing about it."""
     unknown = None if strict else session_id
     home = env.get("CODEX_HOME") or os.path.expanduser("~/.codex")
     key = (home, session_id)
@@ -119,6 +120,8 @@ def _codex_root(session_id: str, env, strict: bool = False) -> str | None:
     try:
         connection = sqlite3.connect("file:" + db + "?mode=ro", uri=True, timeout=0.5)
         try:
+            if strict and connection.execute("SELECT 1 FROM threads WHERE id = ?", (session_id,)).fetchone() is None:
+                return None
             for _ in range(ROOT_WALK_LIMIT):
                 parents = {row[0] for row in connection.execute(
                     "SELECT parent_thread_id FROM thread_spawn_edges WHERE child_thread_id = ?",
@@ -157,7 +160,8 @@ def sub_session_root(harness: str, session_id: str, environ=None) -> str:
 
 def known_sub_session_root(harness: str, session_id: str, environ=None) -> str | None:
     """`sub_session_root`, or None when the harness's sub-session record cannot be read (a Codex state DB
-    that is absent or fails): a caller that must be certain treats that as not a root."""
+    that is absent, fails, or holds no row for the thread): a caller that must be certain treats that as
+    not a root."""
     env = os.environ if environ is None else environ
     if not session_id:
         return None

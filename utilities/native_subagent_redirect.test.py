@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""A person's session's native subagent call starts as a Hearting unit route only when that is certain."""
+"""Whether Hearting takes a person's native subagent call is decided once, before anything is registered;
+once a start receipt says Hearting holds it, the native call is refused."""
 from __future__ import annotations
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -13,7 +14,6 @@ import signal
 import sqlite3
 import subprocess
 import tempfile
-import textwrap
 import time
 import unittest
 from unittest import mock
@@ -22,7 +22,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import native_subagent_redirect as redirect  # noqa: E402
 import session_identity  # noqa: E402
-import work_start  # noqa: E402,F401 -- the real module, before a fixture tree puts its own on the path
 
 SID = "native-subagent-session"
 WORKER_ENV = ("AGENT_SESSION_ROLE", "AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH", "FLEET_TITLE_REFRESH", "MEM_DISTILL")
@@ -38,117 +37,84 @@ def codex(tool="spawn_agent", **args):
             "tool_input": {"message": "Where is the panel rule?", **args}}
 
 
-def gone(pid, seconds=10.0):
-    """True once `pid` no longer exists (reaping a child of this process too)."""
+def ours(harness):
+    """The registration this release ships for the hook (installed as it is)."""
+    path, tool = redirect._REGISTRATION[harness]
+    groups = json.loads((ROOT / "adapters" / harness / path).read_text())["hooks"]["PreToolUse"]
+    [group] = [g for g in groups if tool in g["matcher"].split("|")]
+    return group
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:   # a zombie no one has reaped yet has ended too
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return True
+
+
+def gone(pid, seconds=15.0):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        try:
-            if os.waitpid(pid, os.WNOHANG)[0] == pid:
-                return True
-        except ChildProcessError:
-            pass
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not alive(pid):
             return True
-        try:   # a zombie no one has reaped yet has ended too
-            if Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
-                return True
-        except (OSError, IndexError):
-            pass
         time.sleep(0.05)
     return False
 
 
-def end_group(pid):
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except OSError:
-        pass
-
-
-# A stand-in for `capability-route.py`: it records what the hook gave it (argv, the brief, the internal value,
-# the session identity) and answers the way FAKE_MODE names.
+# A stand-in for `capability-route.py`: it records what the hook gave it (argv, the brief, the session identity)
+# and answers the way FAKE_MODE names.
 FAKE_ROUTE = r'''
 import json, os, sys, time, subprocess
-import work_start
 mode = os.environ.get("FAKE_MODE", "running")
 base = os.environ["FAKE_RECORD"]
 open(base + ".pid", "w").write(str(os.getpid()))
-if mode == "slow-read":
-    time.sleep(3)                                   # the start is slow to take its input
 brief = "" if mode == "no-read" else sys.stdin.read()
-record = {"argv": sys.argv[1:], "brief": brief, "reads_refusal": work_start.CALLER_READS_REFUSAL,
-          "path0": sys.path[0], "cwd_on_path": "" in sys.path or "." in sys.path,
+record = {"argv": sys.argv[1:], "brief": brief,
           "env": {k: os.environ.get(k) for k in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "OPENCODE_SESSION_ID",
-                                                  "AGENT_DISPATCH_CALLER_HARNESS")}}
+                                                  "AGENT_DISPATCH_CALLER_HARNESS", "AGENT_CAPACITY_RESUME_CHAIN")}}
 with open(base, "a") as fh:
     fh.write(json.dumps(record) + "\n")
 
-def route(route_id):
-    path = base + ".route.json"
-    open(path, "w").write(json.dumps({"route_id": route_id, "artifact_root": os.path.dirname(base)}))
-    print("route_file=" + path, file=sys.stderr, flush=True)
-    return path
+def say(**receipt):
+    print(json.dumps({"route_id": "rt-0123456789abcdef", **receipt}), flush=True)
 
-if mode in ("running", "no-read", "slow-read"):
-    print("compose_decision fixture", file=sys.stderr)
-    print(json.dumps({"state": "running", "route_id": "rt-0123456789abcdef", "unit_attempt_id": "att-x",
-                      "parent_next": "end-turn"}))
+if mode in ("running", "no-read"):
+    say(state="running", unit_attempt_id="att-x", parent_next="end-turn")
 elif mode == "linger":
-    # The receipt is flushed; the bookkeeping after it is slow (or stalls past the budget).
-    print(json.dumps({"state": "running", "route_id": "rt-linger", "parent_next": "end-turn"}), flush=True)
+    # The receipt is written; the bookkeeping after it is slow. The hook returns and leaves it running.
+    say(state="running", parent_next="end-turn")
     time.sleep(30)
 elif mode == "late-grandchild":
     # A worker the start launched keeps running (and the output files open) after the start returns.
     late = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3)"], start_new_session=True)
     open(base + ".late", "w").write(str(late.pid))
-    print(json.dumps({"state": "running", "route_id": "rt-0123456789abcdef", "parent_next": "end-turn"}))
+    say(state="running", parent_next="end-turn")
 elif mode == "capacity":
-    route("rt-1")
-    print(json.dumps({"state": "waiting-capacity", "reason": "launch-capacity-wait", "route_id": "rt-1"}))
-elif mode == "registered":
-    path = route("rt-registered")
-    print(json.dumps({"state": "needs-attention", "reason": "OSError", "route_id": "rt-registered",
-                      "route_file": path, "registered_attempts": ["att-r"]}))
-elif mode == "route-then-hang":
-    route("rt-hang")
-    time.sleep(60)
+    # A full worker slot: the runtime's capacity resume is armed and its notice brings the answer later.
+    say(state="waiting-capacity", reason="launch-capacity-wait", required_action="wait-for-auto-resume",
+        parent_next="end-turn", auto_resume={"state": "armed", "cause": "launch-capacity"})
+elif mode == "running-then-fails":
+    say(state="running", parent_next="end-turn")
+    raise SystemExit(1)
+elif mode == "registered-then-raised":
+    # The start raised after the adapter claimed a row: the receipt keeps it (work_start, registered_attempts).
+    say(state="needs-attention", reason="OSError", registered_attempts=["att-r"], parent_next="end-turn")
+elif mode == "ended":
+    say(state="needs-attention", reason="unit-outcome-needs-inspection", result={"classification": "missing"},
+        resume_command="cr start --route r", parent_next="compose", parent_next_command="cr compose ...")
+elif mode == "not-admitted":
+    say(state="needs-attention", reason="unit-launch-not-admitted", unit_attempt_id="att-n",
+        required_action="resume-later")
 elif mode == "refused":
     print("capability-route: quick-headless-unavailable", file=sys.stderr)
     raise SystemExit(64)
 elif mode == "garbage":
     print("not json")
-elif mode == "hang":
-    time.sleep(60)
 '''
-
-
-class FakeTree:
-    """A utilities folder whose `capability-route.py` is FAKE_ROUTE and whose `work_start` carries the value."""
-
-    def __init__(self, test):
-        self.dir = Path(tempfile.mkdtemp(prefix="nsr-"))
-        test.addCleanup(shutil.rmtree, self.dir, True)
-        (self.dir / "capability-route.py").write_text(FAKE_ROUTE)
-        (self.dir / "work_start.py").write_text("CALLER_READS_REFUSAL = False\n")
-        self.record = self.dir / "record.jsonl"
-        test.addCleanup(mock.patch.stopall)
-        mock.patch.object(redirect, "UTILITIES", self.dir).start()
-        test.addCleanup(self.end)
-
-    def path(self, suffix):
-        return Path(str(self.record) + suffix)
-
-    def pid(self):
-        return int(self.path(".pid").read_text()) if self.path(".pid").is_file() else None
-
-    def end(self):
-        if self.pid():
-            end_group(self.pid())
-
-    def records(self):
-        return [json.loads(line) for line in self.record.read_text().splitlines()] if self.record.is_file() else []
 
 
 class Base(unittest.TestCase):
@@ -161,7 +127,8 @@ class Base(unittest.TestCase):
 
 
 class Homes(Base):
-    """Claude and Codex homes and a project folder with nothing in them but what a test puts there."""
+    """Claude and Codex homes and a project folder with nothing in them but what a test puts there, run by a
+    harness started with no arguments."""
 
     def setUp(self):
         super().setUp()
@@ -171,10 +138,11 @@ class Homes(Base):
         self.project = self.tmp / "project" / "sub"
         for folder in (self.claude_home, self.codex_home, self.project):
             folder.mkdir(parents=True)
-        patcher = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.claude_home),
-                                               "CODEX_HOME": str(self.codex_home), "CLAUDE_PROJECT_DIR": ""})
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for patcher in (mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.claude_home),
+                                                     "CODEX_HOME": str(self.codex_home), "CLAUDE_PROJECT_DIR": ""}),
+                        mock.patch.object(redirect, "_harness_argv", return_value=["harness"])):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def write(self, path, text):
         path = Path(path)
@@ -183,10 +151,15 @@ class Homes(Base):
         return path
 
     def ship(self, harness, name):
-        suffix = ".md" if harness == "claude" else ".toml"
+        suffix = redirect._SUFFIX[harness]
         home = self.claude_home if harness == "claude" else self.codex_home
         return self.write(home / "agents" / (name + suffix),
                           (ROOT / "adapters" / harness / "agents" / (name + suffix)).read_text())
+
+    def register(self, harness, *extra, path=None):
+        """The installed registration (exactly once), and any other `PreToolUse` groups."""
+        path = path or (self.claude_home / "settings.json" if harness == "claude" else self.codex_home / "hooks.json")
+        self.write(path, json.dumps({"hooks": {"PreToolUse": [ours(harness), *extra]}}))
 
 
 class NameTableTest(Base):
@@ -200,65 +173,44 @@ class NameTableTest(Base):
         for name, depth in table.items():
             self.assertEqual(self.depth("claude", claude(subagent_type=name)), depth, name)
             self.assertEqual(self.depth("codex", codex(agent_type=name)), depth, name)
-
-    def test_no_name(self):
         self.assertEqual(self.depth("claude", claude()), "balanced-deep")
-        self.assertEqual(self.depth("codex", codex()), "balanced")
-        with self.assertRaises(redirect.Skip):
-            self.depth("claude", claude(subagent_type="general"))
-
-    def test_a_named_model_or_effort_picks_the_depth_it_is_declared_for(self):
-        profiles = {"light": {"model": "luna", "effort": "medium"}, "balanced": {"model": "luna", "effort": "high"},
-                    "balanced-deep": {"model": "sol", "effort": "medium"}, "deep": {"model": "sol", "effort": "xhigh"}}
-        with mock.patch.object(redirect, "_profiles", return_value=profiles):
-            self.assertEqual(self.depth("codex", codex(agent_type="deep", model="sol")), "deep")
-            self.assertEqual(self.depth("codex", codex(agent_type="explorer", model="sol")), "balanced-deep")
-            self.assertEqual(self.depth("codex", codex(agent_type="light", reasoning_effort="high")), "balanced")
-            self.assertEqual(self.depth("codex", codex(agent_type="deep", model="sol", reasoning_effort="medium")),
-                             "balanced-deep")
-            self.assertEqual(self.depth("claude", claude(subagent_type="deep", model="luna")), "light")
-            for payload in (codex(agent_type="light", model="haiku"), codex(agent_type="light", reasoning_effort="low"),
-                            codex(agent_type="light", model="luna", reasoning_effort="xhigh")):
-                with self.subTest(payload=payload["tool_input"]), self.assertRaises(redirect.Skip):
-                    self.depth("codex", payload)       # nothing declares it: the native call keeps it
-
-    def test_the_shipped_models_name_the_depths(self):
-        self.assertEqual({d: p["model"] for d, p in redirect._profiles("claude").items()},
-                         {"light": "sonnet", "balanced": "sonnet", "balanced-deep": "opus", "deep": "opus"})
-        self.assertEqual({d: p["effort"] for d, p in redirect._profiles("codex").items()},
-                         {"light": "medium", "balanced": "high", "balanced-deep": "medium", "deep": "xhigh"})
+        self.assertEqual(self.depth("codex", codex(fork_context=False)), "balanced")
 
     def test_forms_the_brief_cannot_carry_are_left_alone(self):
         for harness, payload in (
+                ("claude", claude(subagent_type="general")),
                 ("claude", claude(subagent_type="fork")),
                 ("claude", claude(subagent_type="web-fetch")),
-                ("claude", claude(subagent_type="statusline-setup")),
-                ("claude", claude(subagent_type="claude-code-guide")),
-                ("claude", claude(subagent_type="claude")),
                 ("claude", claude(subagent_type="my-plugin:reviewer")),
                 ("claude", claude(subagent_type="light", isolation="worktree")),
                 ("claude", claude(subagent_type="light", resume="agent-1")),
+                ("claude", claude(subagent_type="light", model="sonnet")),     # a model the call names stays native
                 ("claude", claude(subagent_type="light", team_name="t")),       # an argument the table does not know
                 ("claude", claude(subagent_type="light", prompt="")),
+                ("claude", {**claude(subagent_type="light"), "session_id": ""}),
+                ("claude", {**claude(subagent_type="light"), "tool_name": "Bash"}),
                 ("codex", codex(agent_type="light", fork_context=True)),
-                ("codex", codex("collaborationspawn_agent", agent_type="light", task_name="t")),
-                ("codex", codex("collaborationspawn_agent", agent_type="light", task_name="t", fork_turns="all")),
-                ("codex", codex(agent_type="light", task_name="t")),            # v2 by its arguments, all turns
-                ("codex", codex("collaborationspawn_agent", agent_type="light", task_name="t", fork_turns="none",
-                                fork_context=False)),                          # v2 refuses fork_context
+                ("codex", codex(agent_type=["light"])),                          # not a name
+                ("codex", codex(agent_type="light", model="gpt-6-luna")),
+                ("codex", codex(agent_type="light", reasoning_effort="high")),
                 ("codex", {**codex(agent_type="light"), "tool_input": {"items": [{"type": "text", "text": "x"}]}}),
                 ("codex", codex(agent_type="light", items=[{"type": "text", "text": "x"}])),   # message and items
-                ("claude", {**claude(subagent_type="light"), "session_id": ""}),
-                ("claude", {**claude(subagent_type="light"), "tool_name": "Bash"})):
+                ("codex", codex(agent_type="light", message=["not", "text"]))):
             with self.subTest(harness=harness, payload=payload):
                 with self.assertRaises(redirect.Skip):
                     self.depth(harness, payload)
 
-    def test_codex_v2_starts_only_when_no_history_is_handed_over(self):
-        for tool in ("collaborationspawn_agent", "spawn_agent"):
-            payload = codex(tool, agent_type="explorer", task_name="look", fork_turns=" none ")
-            call = redirect.normalized("codex", payload)
-            self.assertEqual((call["title"], redirect.depth_for("codex", call)), ("look", "light"))
+    def test_a_codex_v2_call_is_left_native(self):
+        # Only the verified v1 `spawn_agent` form is taken; v2 validates its own arguments after the hook.
+        for payload in (codex("collaborationspawn_agent", agent_type="explorer", task_name="look", fork_turns="none"),
+                        codex("collaborationspawn_agent", agent_type="explorer", fork_turns="none"),   # no task_name
+                        codex(agent_type="explorer", task_name="look", fork_turns="none"),
+                        codex(agent_type="explorer", fork_turns="none")):
+            with self.subTest(payload=payload), self.assertRaises(redirect.Skip):
+                redirect.normalized("codex", payload)
+        registered = [g for g in json.loads((ROOT / "adapters/codex/hooks/hooks.json").read_text())["hooks"]["PreToolUse"]
+                      if "pretooluse-subagent-redirect.py" in g["hooks"][0]["command"]]
+        self.assertEqual([g["matcher"] for g in registered], ["spawn_agent"])    # v2's tool runs no hook of this
 
     def test_opencode_is_not_intercepted(self):
         payload = {"tool": "subagent", "sessionID": SID, "args": {"agent": "explore", "prompt": "x"}}
@@ -275,68 +227,94 @@ class NameTableTest(Base):
 
 
 class DefinitionTest(Homes):
-    """The definition the harness picks for the name, not the name alone (review 🔴5)."""
+    """The definition the harness picks for the name, compared whole (review R2 🔴6)."""
 
     def check(self, harness, name):
         try:
             redirect.require_shipped_definition(harness, name, str(self.project))
             return True
-        except redirect.Skip:
+        except Exception:  # noqa: BLE001 -- the redirect lets the native call run on any doubt
             return False
 
     def test_claude_hearting_definitions_shipped_linked_or_rendered(self):
-        self.ship("claude", "light")
+        for name in ("light", "deep", "general-purpose"):
+            self.ship("claude", name)                    # deep's description mentions light: it is deep's own file
         self.assertTrue(self.check("claude", "light"))
-        (self.claude_home / "agents" / "deep.md").symlink_to(ROOT / "adapters/claude/agents/deep.md")
-        self.assertTrue(self.check("claude", "deep"))
-        # Activation renders the user's own model pin into the file; the rest is Hearting's text.
-        shipped = (ROOT / "adapters/claude/agents/balanced.md").read_text()
-        self.write(self.claude_home / "agents/balanced.md",
-                   shipped.replace("\nmodel: sonnet\n", "\nmodel: haiku\n").replace("\neffort: high\n", "\neffort: low\n"))
+        (self.claude_home / "agents" / "balanced.md").symlink_to(ROOT / "adapters/claude/agents/balanced.md")
         self.assertTrue(self.check("claude", "balanced"))
+        # Activation renders the user's own model pin into the file; the rest is Hearting's text.
+        shipped = (ROOT / "adapters/claude/agents/deep.md").read_text()
+        self.write(self.claude_home / "agents/deep.md", shipped.replace("\nmodel: opus\n", "\nmodel: haiku\n")
+                   .replace("\neffort: xhigh\n", "\neffort: low\n").replace("(tier deep)", "(tier light)"))
+        self.assertTrue(self.check("claude", "deep"))
         self.assertFalse(self.check("claude", "memory-scout"))             # no definition at all: not certain
+
+    def test_claude_a_changed_frontmatter_or_body_is_not_hearting_s(self):
+        shipped = (ROOT / "adapters/claude/agents/light.md").read_text()
+        for changed in (shipped.replace("\nmodel: sonnet\n", "\nmodel: sonnet\nisolation: worktree\n"),  # a field
+                        shipped.replace("\nname: light\n", "\nname: light # local choice\n"),           # a comment
+                        shipped.replace("\nname: light\n", "\nname: 'light'\n"),
+                        shipped + "\nAlso keep notes.\n"):
+            with self.subTest(changed=changed[:120]):
+                self.write(self.claude_home / "agents/light.md", changed)
+                self.assertFalse(self.check("claude", "light"))
+
+    def test_claude_another_definition_of_the_name_in_any_form(self):
+        self.ship("claude", "light")
+        for text in ("---\nname: light\ndescription: The project's own\n---\nProject prompt.\n",
+                     "---\nname: light # local choice\ndescription: x\n---\nMine.\n",
+                     "---\n\"name\": \"light\"\ndescription: x\n---\nMine.\n",
+                     "---\nname: >-\n  light\ndescription: x\n---\nMine.\n"):
+            with self.subTest(text=text):
+                self.write(self.project / ".claude/agents/reviewer.md", text)
+                self.assertFalse(self.check("claude", "light"))
+                self.write(self.claude_home / "agents/mine.md", text)      # the user's own, beside Hearting's
+                (self.project / ".claude/agents/reviewer.md").unlink()
+                self.assertFalse(self.check("claude", "light"))
+                (self.claude_home / "agents/mine.md").unlink()
+        self.assertTrue(self.check("claude", "light"))
 
     def test_claude_built_ins_unless_some_scope_defines_the_name(self):
         for name in ("Explore", "Plan", "general-purpose"):
             self.assertTrue(self.check("claude", name), name)
         self.write(self.project.parent / ".claude/agents/scouts/mine.md", "---\nname: Explore\n---\nMine.\n")
         self.assertFalse(self.check("claude", "Explore"))                 # a project agent walking up wins
-        self.write(self.claude_home / "agents/plan.md", "---\nname: Plan\ndescription: mine\n---\nMine.\n")
-        self.assertFalse(self.check("claude", "Plan"))                    # the user's own
-
-    def test_claude_a_light_name_collision_keeps_the_native_call(self):
-        self.ship("claude", "light")
-        self.write(self.project / ".claude/agents/reviewer.md",
-                   "---\nname: light\ndescription: The project's own\ntools: Read\n---\nProject prompt.\n")
-        self.assertFalse(self.check("claude", "light"))
-        (self.project / ".claude/agents/reviewer.md").unlink()
-        self.write(self.claude_home / "agents/light.md",
-                   "---\nname: light\ndescription: Mine\n---\nMy own light agent.\n")
-        self.assertFalse(self.check("claude", "light"))
-
-    def test_claude_project_dir_and_unreadable_definitions(self):
-        self.ship("claude", "light")
         other = self.tmp / "elsewhere"
-        self.write(other / ".claude/agents/x.md", "---\nname: light\n---\nx\n")
+        self.write(other / ".claude/agents/x.md", "---\nname: Plan\n---\nx\n")
         with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(other)}):
-            self.assertFalse(self.check("claude", "light"))
+            self.assertFalse(self.check("claude", "Plan"))
+        (self.claude_home / "agents/bad.md").parent.mkdir(parents=True, exist_ok=True)
         (self.claude_home / "agents/bad.md").write_bytes(b"---\nname: \xff\n---\n")
-        self.assertFalse(self.check("claude", "light"))
+        self.assertFalse(self.check("claude", "general-purpose"))          # unreadable: not certain
 
-    def test_codex_roles_by_their_name_field(self):
+    def test_codex_roles_by_their_name_and_their_options(self):
         self.ship("codex", "light")
         self.assertTrue(self.check("codex", "light"))
         for name in ("default", "worker", "explorer"):
             self.assertTrue(self.check("codex", name), name)
-        self.write(self.codex_home / "agents/scout.toml",
-                   'name = "explorer"\ndescription = "mine"\ndeveloper_instructions = "Mine."\n')
+        shipped = (ROOT / "adapters/codex/agents/light.toml").read_text()
+        self.write(self.codex_home / "agents/light.toml", shipped.replace('model = "gpt-6-luna"', 'model = "x"'))
+        self.assertTrue(self.check("codex", "light"))                     # the rendered model line
+        self.write(self.codex_home / "agents/light.toml",
+                   shipped.replace('sandbox_mode = "workspace-write"', 'sandbox_mode = "danger-full-access"'))
+        self.assertFalse(self.check("codex", "light"))                    # a role option the user changed
+        self.ship("codex", "light")
+        self.write(self.codex_home / "agents/scout.toml", 'name = "explorer"\ndescription = "mine"\n')
         self.assertFalse(self.check("codex", "explorer"))                 # a user role overrides the built-in
-        self.write(self.project / ".codex/agents/x.toml",
-                   'name = "light"\ndescription = "p"\ndeveloper_instructions = "P."\n')
+        self.write(self.project / ".codex/agents/x.toml", 'name = "light"\ndescription = "p"\n')
         self.assertFalse(self.check("codex", "light"))                    # a project layer comes first
-        self.write(self.codex_home / "config.toml", '[agents.worker]\ndescription = "mine"\n')
+
+    def test_codex_a_declared_role_or_the_file_it_names(self):
+        self.write(self.codex_home / "config.toml", '[agents]\ndefault_subagent_model = "x"\n[agents.worker]\n'
+                   'description = "mine"\n')
         self.assertFalse(self.check("codex", "worker"))                   # a declared role
+        self.assertTrue(self.check("codex", "default"))                   # the installer's own `[agents]` keys
+        self.write(self.codex_home / "private/role.toml", 'name = "explorer"\ndescription = "hidden"\n')
+        self.write(self.codex_home / "config.toml", '[agents.team_scout]\nconfig_file = "private/role.toml"\n')
+        self.assertFalse(self.check("codex", "explorer"))                 # its config_file names it
         self.assertTrue(self.check("codex", "default"))
+        self.write(self.codex_home / "config.toml", '[agents.team_scout]\nconfig_file = "private/missing.toml"\n')
+        self.assertFalse(self.check("codex", "default"))                  # a file that cannot be read
 
     def test_the_redirect_starts_nothing_for_a_collision(self):
         self.ship("claude", "light")
@@ -348,92 +326,132 @@ class DefinitionTest(Homes):
 
 
 class OtherDecisionTest(Homes):
-    """Another hook or a permission rule on the same call (review 🔴4)."""
+    """Another decision on the same call, visible or not (review R2 🔴5)."""
 
-    OURS_CLAUDE = {"matcher": "Agent|Task", "hooks": [{"type": "command", "timeout": 180,
-                   "command": '"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/run-hook.sh" bash subagent-model-default.sh --redirect'}]}
-    OURS_CODEX = {"matcher": "spawn_agent|collaborationspawn_agent", "hooks": [{"type": "command", "timeout": 180,
-                  "command": "sh -c 'exec run-hook.sh pretooluse-subagent-redirect.py'"}]}
+    REFUSE = {"type": "command", "command": "my-refusal"}
 
     def sole(self, harness, tool):
         try:
             redirect.require_sole_decision(harness, tool, str(self.project))
             return True
-        except redirect.Skip:
+        except Exception:  # noqa: BLE001 -- the redirect lets the native call run on any doubt
             return False
 
-    def settings(self, path, *groups, **extra):
-        return self.write(path, json.dumps({"hooks": {"PreToolUse": list(groups)}, **extra}))
-
-    def test_claude_only_this_hook(self):
-        self.settings(self.claude_home / "settings.json", self.OURS_CLAUDE,
-                      {"matcher": "Bash", "hooks": [{"type": "command", "command": "guard"}]},
-                      permissions={"allow": ["Agent"]})
+    def test_claude_only_this_hook_registered_once(self):
+        self.register("claude", {"matcher": "Bash", "hooks": [{"type": "command", "command": "guard"}]})
         self.assertTrue(self.sole("claude", "Agent"))
 
     def test_claude_another_matching_hook_or_rule(self):
-        refuse = {"type": "command", "command": "my-refusal"}
         cases = [
-            (self.claude_home / "settings.json", [self.OURS_CLAUDE, {"matcher": "Agent", "hooks": [refuse]}], {}),
-            (self.claude_home / "settings.json", [self.OURS_CLAUDE, {"matcher": "*", "hooks": [refuse]}], {}),
-            (self.claude_home / "settings.json", [self.OURS_CLAUDE, {"hooks": [refuse]}], {}),
-            (self.claude_home / "settings.json", [self.OURS_CLAUDE, {"matcher": "^Ag", "hooks": [refuse]}], {}),
-            (self.claude_home / "settings.json", [self.OURS_CLAUDE, {"matcher": "Task", "hooks": [refuse]}], {}),
-            (self.claude_home / "settings.json", [self.OURS_CLAUDE],
-             {"permissions": {"deny": ["Agent(Explore)"]}}),
-            (self.claude_home / "settings.json", [self.OURS_CLAUDE], {"permissions": {"ask": ["Task"]}}),
-            (self.project.parent / ".claude/settings.local.json", [{"matcher": "Agent", "hooks": [refuse]}], {}),
-            (self.project / ".claude/settings.json", [], {"permissions": {"deny": ["Agent"]}}),
+            ({"matcher": "Agent", "hooks": [self.REFUSE]}, {}),
+            ({"matcher": "*", "hooks": [self.REFUSE]}, {}),
+            ({"hooks": [self.REFUSE]}, {}),
+            ({"matcher": "^Ag", "hooks": [self.REFUSE]}, {}),
+            ({"matcher": "Task", "hooks": [self.REFUSE]}, {}),
+            (None, {"permissions": {"deny": ["Agent(Explore)"]}}),
+            (None, {"permissions": {"ask": ["Task"]}}),
         ]
-        for path, groups, extra in cases:
-            with self.subTest(path=str(path), groups=groups, extra=extra):
-                self.settings(self.claude_home / "settings.json", self.OURS_CLAUDE)
-                self.settings(path, *groups, **extra)
+        for group, extra in cases:
+            with self.subTest(group=group, extra=extra):
+                self.write(self.claude_home / "settings.json", json.dumps(
+                    {"hooks": {"PreToolUse": [ours("claude"), *([group] if group else [])]}, **extra}))
                 self.assertFalse(self.sole("claude", "Agent"))
-                for leftover in (self.project.parent / ".claude", self.project / ".claude"):
-                    shutil.rmtree(leftover, ignore_errors=True)
-
-    def test_claude_plugin_hooks_and_unreadable_settings(self):
-        plugin = self.claude_home / "plugins/cache/market/tool/1.0.0"
-        self.write(plugin / "hooks/hooks.json", json.dumps({"hooks": {"Stop": [{"hooks": []}]}}))
-        self.assertTrue(self.sole("claude", "Agent"))
-        self.write(plugin / ".claude-plugin/plugin.json", json.dumps(
-            {"name": "tool", "hooks": {"PreToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": "x"}]}]}}))
-        self.assertFalse(self.sole("claude", "Agent"))
-        (plugin / ".claude-plugin/plugin.json").unlink()
-        self.assertTrue(self.sole("claude", "Agent"))
-        self.write(self.claude_home / "settings.json", "{not json")
+        self.register("claude")
+        self.write(self.project.parent / ".claude/settings.local.json",
+                   json.dumps({"hooks": {"PreToolUse": [{"matcher": "Agent", "hooks": [self.REFUSE]}]}}))
         self.assertFalse(self.sole("claude", "Agent"))
 
-    def test_codex_layers_inline_hooks_and_plugins(self):
-        self.write(self.codex_home / "hooks.json", json.dumps({"hooks": {"PreToolUse": [self.OURS_CODEX]}}))
+    def test_our_hook_is_known_by_its_exact_command(self):
+        # A command that only contains the hook's file name is another hook (a wrapper that may refuse).
+        group = ours("claude")
+        wrapped = {**group, "hooks": [{**group["hooks"][0], "command": "my-wrap " + group["hooks"][0]["command"]}]}
+        self.write(self.claude_home / "settings.json", json.dumps({"hooks": {"PreToolUse": [wrapped]}}))
+        self.assertFalse(self.sole("claude", "Agent"))
+        old = {**group, "hooks": [{**group["hooks"][0], "command": group["hooks"][0]["command"].replace(" --redirect", "")}]}
+        self.write(self.claude_home / "settings.json", json.dumps({"hooks": {"PreToolUse": [ours("claude"), old]}}))
+        self.assertFalse(self.sole("claude", "Agent"))                    # the old line beside the new one
+
+    def test_registered_twice_or_not_seen_at_all(self):
+        self.register("claude")
+        self.register("claude", path=self.project / ".claude/settings.json")
+        self.assertFalse(self.sole("claude", "Agent"))                    # two layers: it may run twice
+        (self.project / ".claude/settings.json").unlink()
+        self.assertTrue(self.sole("claude", "Agent"))
+        (self.claude_home / "settings.json").unlink()
+        self.assertFalse(self.sole("claude", "Agent"))                    # registered where no file shows it
+        self.register("codex")
+        self.write(self.codex_home / "config.toml", '[[hooks.PreToolUse]]\nmatcher = "spawn_agent"\n'
+                   '[[hooks.PreToolUse.hooks]]\ntype = "command"\n'
+                   f'command = {json.dumps(ours("codex")["hooks"][0]["command"])}\n')
+        self.assertFalse(self.sole("codex", "spawn_agent"))
+
+    def test_a_layer_given_on_the_harness_command_line(self):
+        self.register("claude")
+        self.register("codex")
+        for harness, tool, argv in (
+                ("claude", "Agent", ["claude", "--settings", "/x/settings.json"]),
+                ("claude", "Agent", ["node", "/x/cli.js", "--agents={\"light\":{}}"]),
+                ("claude", "Agent", ["claude", "--add-dir", "/x"]),
+                ("claude", "Agent", ["claude", "--plugin-dir", "/x"]),
+                ("claude", "Agent", ["claude", "--disallowedTools", "Agent"]),
+                ("codex", "spawn_agent", ["codex", "-c", "hooks.x=1"]),
+                ("codex", "spawn_agent", ["codex", "-chooks.x=1"]),
+                ("codex", "spawn_agent", ["codex", "--config=hooks.x=1"]),
+                ("codex", "spawn_agent", ["codex", "--profile", "work"])):
+            with self.subTest(argv=argv), mock.patch.object(redirect, "_harness_argv", return_value=argv):
+                self.assertFalse(self.sole(harness, tool))
+        for harness, tool, argv in (("claude", "Agent", ["claude", "--model", "x", "-p", "hello --settings"]),
+                                    ("codex", "spawn_agent", ["codex", "--no-alt-screen"])):
+            with self.subTest(argv=argv), mock.patch.object(redirect, "_harness_argv", return_value=argv):
+                self.assertTrue(self.sole(harness, tool))
+        with mock.patch.object(redirect, "_harness_argv", side_effect=OSError("no /proc")):
+            self.assertFalse(self.sole("claude", "Agent"))                # a command line that cannot be read
+
+    def test_the_harness_is_the_nearest_process_that_is_no_shell(self):
+        # `timeout` stands for the harness: it runs a shell, which runs the hook's Python.
+        script = ("import json, sys; sys.path.insert(0, sys.argv[1]); import native_subagent_redirect as r; "
+                  "print(json.dumps(r._harness_argv()))")
+        done = subprocess.run(["timeout", "60", "sh", "-c", '"$2" -c "$0" "$1"; true', script,
+                               str(ROOT / "utilities"), sys.executable], capture_output=True, text=True, timeout=90)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout)[:3], ["timeout", "60", "sh"])
+
+    def test_codex_layers_plugins_and_a_linked_worktree_s_main_checkout(self):
+        self.register("codex")
         self.assertTrue(self.sole("codex", "spawn_agent"))
-        refuse = {"matcher": "spawn_agent", "hooks": [{"type": "command", "command": "my-refusal"}]}
+        refuse = {"matcher": "spawn_agent", "hooks": [self.REFUSE]}
         self.write(self.project / ".codex/hooks.json", json.dumps({"hooks": {"PreToolUse": [refuse]}}))
         self.assertFalse(self.sole("codex", "spawn_agent"))
         shutil.rmtree(self.project / ".codex")
-        self.write(self.codex_home / "config.toml",
-                   '[[hooks.PreToolUse]]\nmatcher = ".*agent"\n[[hooks.PreToolUse.hooks]]\ntype = "command"\n'
-                   'command = "my-refusal"\n')
+        self.write(self.codex_home / "config.toml", '[[hooks.PreToolUse]]\nmatcher = ".*agent"\n'
+                   '[[hooks.PreToolUse.hooks]]\ntype = "command"\ncommand = "my-refusal"\n')
         self.assertFalse(self.sole("codex", "spawn_agent"))
-        self.write(self.codex_home / "config.toml",
-                   '[[hooks.PreToolUse]]\nmatcher = "shell"\n[[hooks.PreToolUse.hooks]]\ntype = "command"\n'
-                   'command = "guard"\n')
-        self.assertTrue(self.sole("codex", "spawn_agent"))
+        (self.codex_home / "config.toml").unlink()
         self.write(self.codex_home / "plugins/cache/m/p/1/hooks/hooks.json",
                    json.dumps({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"command": "x"}]}]}}))
         self.assertFalse(self.sole("codex", "spawn_agent"))
+        shutil.rmtree(self.codex_home / "plugins")
+        # A linked worktree: Codex also reads the main checkout's project layer.
+        main, linked = self.tmp / "main", self.tmp / "wt" / "linked"
+        (main / ".git" / "worktrees" / "linked").mkdir(parents=True)
+        (main / ".git" / "worktrees" / "linked" / "commondir").write_text("../..\n")
+        linked.mkdir(parents=True)
+        (linked / ".git").write_text(f"gitdir: {main / '.git' / 'worktrees' / 'linked'}\n")
+        self.assertTrue(redirect.require_sole_decision("codex", "spawn_agent", str(linked)) is None)
+        self.write(main / ".codex/hooks.json", json.dumps({"hooks": {"PreToolUse": [refuse]}}))
+        with self.assertRaises(redirect.Skip):
+            redirect.require_sole_decision("codex", "spawn_agent", str(linked))
+        (linked / ".git").write_text("not a gitdir line\n")
+        with self.assertRaises(Exception):
+            redirect.require_sole_decision("codex", "spawn_agent", str(linked))   # cannot tell: native
 
     def test_a_call_another_hook_refuses_starts_nothing(self):
-        # Another hook refusing the same call: no compose runs, so no row is registered and no model is asked.
         self.ship("claude", "light")
-        self.settings(self.claude_home / "settings.json", self.OURS_CLAUDE,
-                      {"matcher": "Agent", "hooks": [{"type": "command", "command": "exit 2"}]})
-        tree = FakeTree(self)
-        with mock.patch.object(session_identity, "known_sub_session_root", return_value=SID), \
-                mock.patch.dict(os.environ, {"FAKE_RECORD": str(tree.record)}):
+        self.register("claude", {"matcher": "Agent", "hooks": [{"type": "command", "command": "exit 2"}]})
+        with mock.patch.object(redirect, "start") as start, \
+                mock.patch.object(session_identity, "known_sub_session_root", return_value=SID):
             self.assertIsNone(redirect.redirect("claude", {**claude(subagent_type="light"), "cwd": str(self.project)}))
-        self.assertEqual(tree.records(), [])
+        start.assert_not_called()
 
 
 class WhoIsLeftAloneTest(Base):
@@ -444,20 +462,26 @@ class WhoIsLeftAloneTest(Base):
                 with self.subTest(env=env), mock.patch.dict(os.environ, env):
                     self.assertIsNone(redirect.redirect("claude", claude(subagent_type="light")))
             self.assertIsNone(redirect.redirect("claude", {**claude(subagent_type="light"), "agent_id": "a-1"}))
-            with mock.patch.object(session_identity, "known_sub_session_root", return_value="root-session"):
-                self.assertIsNone(redirect.redirect("codex", codex(agent_type="light")))
-            with mock.patch.object(session_identity, "known_sub_session_root", return_value=None):
-                self.assertIsNone(redirect.redirect("codex", codex(agent_type="light")))
+            for root in ("root-session", None):
+                with mock.patch.object(session_identity, "known_sub_session_root", return_value=root):
+                    self.assertIsNone(redirect.redirect("codex", codex(agent_type="light")))
         start.assert_not_called()
 
-    def test_a_codex_spawn_record_that_cannot_be_read_is_unknown(self):
+    def test_a_codex_thread_the_state_db_cannot_vouch_for_is_unknown(self):
         with tempfile.TemporaryDirectory() as home:
             env = {"CODEX_HOME": home}
-            self.assertIsNone(session_identity.known_sub_session_root("codex", "thread-1", env))
+            self.assertIsNone(session_identity.known_sub_session_root("codex", "thread-1", env))   # no DB
             self.assertEqual(session_identity.sub_session_root("codex", "thread-1", env), "thread-1")
             connection = sqlite3.connect(os.path.join(home, "state_5.sqlite"))
             connection.execute("CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT)")
             connection.execute("INSERT INTO thread_spawn_edges VALUES ('thread-root', 'thread-child')")
+            connection.commit()
+            self.assertIsNone(session_identity.known_sub_session_root("codex", "thread-1", env))   # no threads table
+            connection.execute("CREATE TABLE threads (id TEXT PRIMARY KEY)")
+            connection.commit()
+            self.assertIsNone(session_identity.known_sub_session_root("codex", "thread-1", env))   # no row for it
+            self.assertEqual(session_identity.sub_session_root("codex", "thread-1", env), "thread-1")
+            connection.executemany("INSERT INTO threads VALUES (?)", [("thread-1",), ("thread-child",)])
             connection.commit()
             connection.close()
             self.assertEqual(session_identity.known_sub_session_root("codex", "thread-1", env), "thread-1")
@@ -465,164 +489,126 @@ class WhoIsLeftAloneTest(Base):
 
 
 class StartTest(Base):
-    """The start is decided by its receipt or its launch fence, never by a late or missing answer (review 🔴1)."""
+    """Hearting holds the call once its start receipt says so; a compose that registers nothing leaves it native.
+    The hook never stops a start."""
 
     def setUp(self):
         super().setUp()
-        self.tree = FakeTree(self)
-        os.environ["FAKE_RECORD"] = str(self.tree.record)
-        self.withdrawn = []
-        patcher = mock.patch.object(redirect, "withdraw",
-                                    side_effect=lambda route, path, jobs, api: self.withdrawn.append(route["route_id"]))
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        self.jobs = self.tree.dir / "jobs.log"
-        patcher = mock.patch.object(redirect, "_route_api",
-                                    return_value=mock.Mock(_compose_default_jobs=lambda: self.jobs))
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        self.dir = Path(tempfile.mkdtemp(prefix="nsr-"))
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        (self.dir / "capability-route.py").write_text(FAKE_ROUTE)
+        self.record = self.dir / "record.jsonl"
+        for patcher in (mock.patch.object(redirect, "UTILITIES", self.dir),
+                        mock.patch.dict(os.environ, {"FAKE_RECORD": str(self.record)})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(self.end)
 
-    def start(self, mode, call=None, seconds=redirect.BUDGET_SECONDS):
+    def pid(self):
+        path = Path(str(self.record) + ".pid")
+        return int(path.read_text()) if path.is_file() else None
+
+    def end(self):
+        if self.pid():
+            try:
+                os.killpg(self.pid(), signal.SIGKILL)   # the fake compose ran in its own group
+            except OSError:
+                pass
+
+    def records(self):
+        return [json.loads(line) for line in self.record.read_text().splitlines()] if self.record.is_file() else []
+
+    def start(self, mode, call=None, harness="claude"):
         call = call or redirect.normalized("claude", claude(subagent_type="Explore"))
         with mock.patch.dict(os.environ, {"FAKE_MODE": mode, "CODEX_THREAD_ID": "inherited-thread",
                                           "AGENT_DISPATCH_CALLER_HARNESS": "codex"}):
-            return redirect.start("claude", call, "light", os.getcwd(), seconds=seconds)
+            return redirect.start(harness, call, "light", os.getcwd())
 
-    def row(self, route_id, **meta):
-        fields = {"attempt_schema_version": "2", "attempt_id": "att-h", "route_id": route_id,
-                  "route_node": "unit", **meta}
-        status = fields.pop("status", "running")
-        self.jobs.write_text("\t".join(["2026-11-27T00:00:00Z", status, "/repo", "/repo", "unit",
-                                        ",".join(f"{k}={v}" for k, v in fields.items())]) + "\n")
-
-    def test_a_started_route_gives_its_receipt_and_what_the_compose_process_got(self):
+    def test_a_running_receipt_and_what_the_compose_process_got(self):
         receipt = self.start("running")
-        self.assertEqual(receipt["route_id"], "rt-0123456789abcdef")
-        [record] = self.tree.records()
+        self.assertEqual((receipt["route_id"], receipt["state"]), ("rt-0123456789abcdef", "running"))
+        [record] = self.records()
         self.assertEqual(record["argv"], ["compose", "--start", "--unit", "general/explore", "--profile", "light",
                                           "--ephemeral", "--prompt-file", "-", "--cwd", os.getcwd()])
         self.assertEqual(record["brief"], "Find the panel rule\n\nWhere is the panel rule?\n")
-        self.assertTrue(record["reads_refusal"])          # the compose process reads its own refusal
-        self.assertEqual(record["path0"], str(self.tree.dir))
-        self.assertFalse(record["cwd_on_path"])           # the project folder is never an import root
-        # The session's own identity, as its tool commands carry it: no inherited caller name or other id.
+        # The session's own identity, as its tool commands carry it, and no caller waiting on the start.
         self.assertEqual(record["env"], {"CLAUDE_CODE_SESSION_ID": SID, "CODEX_THREAD_ID": None,
-                                         "OPENCODE_SESSION_ID": None, "AGENT_DISPATCH_CALLER_HARNESS": None})
-
-    def test_codex_names_its_own_session(self):
+                                         "OPENCODE_SESSION_ID": None, "AGENT_DISPATCH_CALLER_HARNESS": None,
+                                         "AGENT_CAPACITY_RESUME_CHAIN": "0"})
         call = redirect.normalized("codex", codex(agent_type="explorer"))
-        with mock.patch.dict(os.environ, {"FAKE_MODE": "running"}):
-            redirect.start("codex", call, "light", os.getcwd())
-        env = self.tree.records()[0]["env"]
+        self.start("running", call=call, harness="codex")
+        env = self.records()[1]["env"]
         self.assertEqual((env["CODEX_THREAD_ID"], env["CLAUDE_CODE_SESSION_ID"]), (SID, None))
 
-    def test_a_receipt_flushed_before_a_slow_finish_is_the_start(self):
-        # Start confirmed, then the rest of the output is late, past the budget: the native call is not let go,
-        # and the compose process is left to finish on its own.
-        began = time.monotonic()
-        receipt = self.start("linger", seconds=1)
-        self.assertEqual((receipt["route_id"], receipt["parent_next"]), ("rt-linger", "end-turn"))
-        self.assertLess(time.monotonic() - began, 5)
-        pid = self.tree.pid()
-        os.kill(pid, 0)                                    # still running: not stopped after it started
-        self.assertEqual(self.withdrawn, [])
+    def test_a_full_worker_slot_waits_in_hearting_s_queue(self):
+        receipt = self.start("capacity")
+        self.assertEqual(receipt["state"], "waiting-capacity")
+        line = redirect.reason_for(receipt, "light")
+        self.assertTrue(line.startswith("Queued as Hearting unit route rt-0123456789abcdef (general/explore, light, "
+                                        "no record). It waits for a free worker and does not run natively."), line)
+        self.assertIn("comes back to this session as a completion notice", line)
 
-    def test_a_route_written_and_then_stalled_is_stopped_and_closed(self):
-        began = time.monotonic()
-        self.assertIsNone(self.start("route-then-hang", seconds=1))
-        self.assertLess(time.monotonic() - began, 10)
-        self.assertTrue(gone(self.tree.pid()))             # the whole group went
-        self.assertEqual(self.withdrawn, ["rt-hang"])      # and its route was closed, nothing left open
+    def test_the_first_capacity_refusal_of_this_start_arms_the_runtime_s_resume(self):
+        # The receipt `_capacity_wait` gives the first refusal; with this start's environment the existing capacity
+        # resume takes the wait (a later start, then the notice) instead of handing the session a wait command.
+        import capacity_auto_resume
+        refusal = {"state": "waiting-capacity", "reason": "launch-capacity-wait", "route_id": "rt-1",
+                   "required_action": "resume-after-capacity", "retry_at": "2099-01-01T00:00:00Z"}
+        spawn = mock.Mock()
+        env = redirect.compose_env("claude", SID)
+        armed = capacity_auto_resume.arm(refusal, self.dir / "rt-1.json", self.dir / "jobs.log", environ=env,
+                                         spawn=spawn, now=lambda: 4070908800 - 60)
+        self.assertEqual((armed["state"], armed["cause"]), ("armed", "launch-capacity"))
+        spawn.assert_called_once()
+        self.assertIsNone(capacity_auto_resume.arm(refusal, self.dir / "rt-1.json", self.dir / "jobs.log",
+                                                   environ={}, spawn=spawn))   # a typing session waits itself
 
-    def test_a_route_past_its_launch_fence_is_the_start_even_without_a_receipt(self):
-        self.row("rt-hang", launch_started="1", parent_completion_delivery="claude-parent-runtime")
-        receipt = self.start("route-then-hang", seconds=1)
-        self.assertEqual((receipt["route_id"], receipt["unit_attempt_id"], receipt["parent_next"]),
-                         ("rt-hang", "att-h", "end-turn"))
-        self.assertEqual(self.withdrawn, [])
-
-    def test_a_registered_row_that_never_crossed_the_fence_is_no_start(self):
-        for meta in ({"launch_claimed": "1"}, {"launch_started": "1", "status": "done"}):
-            with self.subTest(meta=meta):
-                self.withdrawn.clear()
-                self.row("rt-hang", **meta)
-                self.assertIsNone(self.start("route-then-hang", seconds=1))
-                self.assertEqual(self.withdrawn, ["rt-hang"])
-
-    def test_needs_attention_with_a_registered_attempt_is_settled_by_its_row(self):
-        self.row("rt-registered", launch_claimed="1")
-        self.assertIsNone(self.start("registered"))
-        self.assertEqual(self.withdrawn, ["rt-registered"])
-        self.withdrawn.clear()
-        self.row("rt-registered", launch_started="1")     # handed over: the start stands, bounded wait
-        receipt = self.start("registered")
-        self.assertEqual((receipt["route_id"], receipt["parent_next"]), ("rt-registered", "bounded-wait"))
-        self.assertTrue(receipt["parent_next_command"].endswith(" --wait"))
-        self.assertEqual(self.withdrawn, [])
-
-    def test_the_budget_counts_from_the_input(self):
-        # The start is slow to take its input: the budget still ends it (a pipe write would have waited first).
-        began = time.monotonic()
-        self.assertIsNone(self.start("slow-read", seconds=1))
-        self.assertLess(time.monotonic() - began, 2.5)
-        self.assertTrue(gone(self.tree.pid()))
-
-    def test_a_large_brief_never_waits_on_a_start_that_does_not_read_it(self):
-        call = redirect.normalized("claude", claude(subagent_type="Explore", prompt="x" * 400_000))
-        began = time.monotonic()
-        self.assertEqual(self.start("no-read", call=call, seconds=5)["route_id"], "rt-0123456789abcdef")
-        self.assertLess(time.monotonic() - began, 5)
-
-    def test_every_start_that_did_not_happen_lets_the_native_call_run(self):
-        for mode in ("capacity", "refused", "garbage"):
+    def test_a_compose_that_registers_nothing_leaves_the_native_call(self):
+        for mode in ("refused", "garbage", "not-admitted"):
             with self.subTest(mode=mode):
                 self.assertIsNone(self.start(mode))
-        self.assertEqual(self.withdrawn, [])               # the refused start closed its own route
 
-    def test_a_start_past_its_budget_is_stopped_with_its_group(self):
+    def test_once_registered_a_later_failure_still_refuses_the_native_call(self):
+        # The receipt said Hearting holds it; what follows (the compose failing, an attempt that ended or a row
+        # claimed before the start raised) reaches the session through the runtime's notice, never natively.
+        for mode in ("running-then-fails", "registered-then-raised", "ended"):
+            with self.subTest(mode=mode):
+                receipt = self.start(mode)
+                self.assertTrue(redirect.registered(receipt), mode)
+        line = redirect.reason_for(self.start("registered-then-raised"), "light")
+        self.assertIn("Its answer, or what stopped it, comes back to this session as a completion notice", line)
+        line = redirect.reason_for(self.start("ended"), "light")
+        self.assertIn("It has already ended; read its result once with: cr start --route r", line)
+        self.assertNotIn("cr compose", line)
+
+    def test_the_hook_returns_at_the_receipt_and_never_stops_the_start(self):
         began = time.monotonic()
-        self.assertIsNone(self.start("hang", seconds=1))
+        receipt = self.start("linger")
         self.assertLess(time.monotonic() - began, 10)
-        self.assertTrue(gone(self.tree.pid()))
-
-    def test_the_start_ends_when_the_hook_process_is_killed(self):
-        driver = self.tree.dir / "driver.py"
-        driver.write_text(textwrap.dedent(f"""
-            import os, sys
-            sys.path.insert(0, {str(ROOT / 'utilities')!r})
-            from pathlib import Path
-            import native_subagent_redirect as r
-            r.UTILITIES = Path({str(self.tree.dir)!r})
-            call = {{"session": "s", "name": "Explore", "prompt": "p", "title": "", "model": "", "effort": ""}}
-            r.start("claude", call, "light", os.getcwd())
-        """))
-        helper = subprocess.Popen([sys.executable, str(driver)], env={**os.environ, "FAKE_MODE": "hang"},
-                                  start_new_session=True)
-        self.addCleanup(end_group, helper.pid)
-        deadline = time.monotonic() + 20
-        while self.tree.pid() is None and time.monotonic() < deadline:
-            time.sleep(0.05)
-        compose = self.tree.pid()
-        self.assertIsNotNone(compose)
-        os.kill(helper.pid, signal.SIGKILL)
-        helper.wait()
-        self.assertTrue(gone(compose))                     # its own group ended it: nothing runs on alone
+        self.assertEqual(receipt["state"], "running")
+        self.assertTrue(alive(self.pid()))                 # its bookkeeping goes on, alone
 
     def test_a_worker_the_start_launched_does_not_hold_the_hook(self):
         began = time.monotonic()
         self.assertIsNotNone(self.start("late-grandchild"))
         self.assertLess(time.monotonic() - began, 15)
-        self.assertTrue(gone(int(self.tree.path(".late").read_text()), 15))
+        self.assertTrue(gone(int(Path(str(self.record) + ".late").read_text()), 15))
+
+    def test_a_large_brief_never_waits_on_a_start_that_does_not_read_it(self):
+        call = redirect.normalized("claude", claude(subagent_type="Explore", prompt="x" * 400_000))
+        began = time.monotonic()
+        self.assertEqual(self.start("no-read", call=call)["route_id"], "rt-0123456789abcdef")
+        self.assertLess(time.monotonic() - began, 10)
 
     def test_a_missing_cwd_or_a_broken_payload_runs_natively(self):
         self.assertIsNone(redirect.redirect("claude", {**claude(subagent_type="light"), "cwd": "/nonexistent/x"}))
         self.assertIsNone(redirect.redirect("claude", "not a dict"))
         self.assertIsNone(redirect.redirect("unknown", claude(subagent_type="light")))
-        self.assertEqual(self.tree.records(), [])
+        self.assertEqual(self.records(), [])
 
 
 class ReasonTest(Base):
-    """The line follows the start receipt's own way back (review 🔴6)."""
+    """The line follows the start receipt's own way back."""
 
     def test_end_turn_promises_the_notice(self):
         line = redirect.reason_for({"route_id": "rt-1", "state": "running", "parent_next": "end-turn"}, "light")
@@ -631,13 +617,12 @@ class ReasonTest(Base):
                                "again; go on with other work or end the turn.")
 
     def test_bounded_wait_gives_the_wait_command_and_promises_no_notice(self):
-        line = redirect.reason_for({"route_id": "rt-1", "state": "running", "parent_next": "bounded-wait",
-                                    "parent_next_command": "python3 cr.py start --route r --wait"}, "light")
-        self.assertIn("No completion notice reaches this session", line)
-        self.assertIn("python3 cr.py start --route r --wait", line)
-        self.assertNotIn("as a completion notice", line)
-        line = redirect.reason_for({"route_id": "rt-1", "state": "running", "resume_command": "resume"}, "light")
-        self.assertIn("run this once to receive its answer: resume", line)
+        for state in ("running", "waiting-capacity"):
+            line = redirect.reason_for({"route_id": "rt-1", "state": state, "parent_next": "bounded-wait",
+                                        "parent_next_command": "python3 cr.py start --route r --wait"}, "light")
+            self.assertIn("No completion notice reaches this session", line)
+            self.assertIn("python3 cr.py start --route r --wait", line)
+            self.assertNotIn("as a completion notice", line)
 
     def test_a_finished_receipt_carries_its_answer(self):
         line = redirect.reason_for({"route_id": "rt-1", "state": "completed", "summary": "Answered: x"}, "light")
@@ -666,36 +651,25 @@ class EntryTest(Base):
             self.assertEqual(redirect.main(["--claude"], io.StringIO("{}")), 0)
         self.assertEqual(redirect.main(["--claude"], io.StringIO("{not json")), 0)
 
-    def test_the_codex_bridge_and_its_registration(self):
+    def test_the_registrations_this_hook_counts_as_its_own(self):
+        claude_group, codex_group = ours("claude"), ours("codex")
+        self.assertTrue(claude_group["hooks"][0]["command"].endswith("subagent-model-default.sh --redirect"))
+        self.assertIn("pretooluse-subagent-redirect.py", codex_group["hooks"][0]["command"])
+        self.assertEqual([len(claude_group["hooks"]), len(codex_group["hooks"])], [1, 1])
         bridge = ROOT / "adapters/codex/hooks/pretooluse-subagent-redirect.py"
         self.assertTrue(os.access(bridge, os.X_OK))
         self.assertIn("pretooluse-subagent-redirect.py", (ROOT / "adapters/codex/hooks/run-hook.sh").read_text())
-        hooks = json.loads((ROOT / "adapters/codex/hooks/hooks.json").read_text())["hooks"]["PreToolUse"]
-        [group] = [g for g in hooks if "spawn_agent" in g["matcher"]]
-        self.assertEqual(group["matcher"], "spawn_agent|collaborationspawn_agent")
-        self.assertIn("pretooluse-subagent-redirect.py", group["hooks"][0]["command"])
         done = subprocess.run([sys.executable, str(bridge)], input=json.dumps(codex(agent_type="light")), text=True,
                               capture_output=True, timeout=60,
                               env={"PATH": "/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp"),
                                    "PYTHONDONTWRITEBYTECODE": "1", "AGENT_SESSION_ROLE": "worker"})
         self.assertEqual((done.returncode, done.stdout), (0, ""))
-
-    def test_the_budget_is_inside_every_registration_timeout(self):
-        claude_hooks = json.loads((ROOT / "adapters/claude/settings.json").read_text())["hooks"]["PreToolUse"]
-        [group] = [g for g in claude_hooks if g["matcher"] == "Agent|Task"]
-        self.assertTrue(group["hooks"][0]["command"].endswith("subagent-model-default.sh --redirect"))
-        timeouts = [group["hooks"][0]["timeout"]]
-        codex_hooks = json.loads((ROOT / "adapters/codex/hooks/hooks.json").read_text())["hooks"]["PreToolUse"]
-        timeouts += [g["hooks"][0]["timeout"] for g in codex_hooks if "spawn_agent" in g["matcher"]]
-        self.assertEqual(len(timeouts), 2)
-        for timeout in timeouts:
-            self.assertLess(redirect.BUDGET_SECONDS + 15, timeout)
         plugin = (ROOT / "adapters/opencode/plugins/hearting-guards.js").read_text()
         self.assertNotIn("native_subagent_redirect", plugin)   # OpenCode leaves its subagent calls native
 
 
 class CodexRunnerTest(unittest.TestCase):
-    """`adapters/codex/hooks/run-hook.sh`: no failure of the redirect bridge reaches Codex as exit 2 (review 🔴3)."""
+    """`adapters/codex/hooks/run-hook.sh`: no failure of the redirect bridge reaches Codex as exit 2."""
 
     def run_hook(self, script, bridge_text=None):
         root = Path(tempfile.mkdtemp(prefix="nsr-codex-"))
@@ -764,7 +738,7 @@ class ClaudeHookTest(Base):
         self.assertEqual((out["permissionDecision"], out["permissionDecisionReason"]),
                          ("deny", "Started as Hearting unit route rt-1"))
 
-    def test_a_call_that_was_not_started_gets_the_model_as_before(self):
+    def test_a_call_that_was_not_taken_gets_the_model_as_before(self):
         out = self.run_hook(["--redirect"], claude(subagent_type="Explore"), None)
         self.assertEqual(out["updatedInput"]["model"], "sonnet")
         self.assertNotIn("permissionDecision", out)

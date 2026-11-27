@@ -135,16 +135,6 @@ class FollowingCalledWorkTest(U.UnitLegBase):
                 self.slot()
         self.assertEqual(raised.exception.reason, "work-parent-recovery-required")
 
-    def test_a_capacity_pause_met_by_the_native_subagent_hook_arms_no_later_start(self):
-        # The compose process the pre-tool hook runs (utilities/native_subagent_redirect.py) reads its own
-        # refusal: its native call runs instead, so a later start would do the same work twice.
-        import capacity_auto_resume
-        result = {"state": "waiting-capacity", "reason": "launch-capacity-wait"}
-        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_CHILD": ""}), mock.patch.object(W, "CALLER_READS_REFUSAL", True), \
-                mock.patch.object(capacity_auto_resume, "arm") as arm:
-            self.assertIs(W._arm_capacity_resume(result, self.path, self.root), result)
-        arm.assert_not_called()
-
     def test_a_capacity_pause_met_inside_a_worker_arms_no_later_start(self):
         import capacity_auto_resume
         result = {"state": "waiting-capacity", "reason": "launch-capacity-wait"}
@@ -508,11 +498,6 @@ class RefusedRecordFreeStartTest(unittest.TestCase):
     def test_a_refused_start_with_no_row_and_no_resume_is_closed(self):
         self.assertTrue(self.closes({"state": "waiting-capacity", "launches": []}))
         self.assertTrue(self.closes({"state": "needs-attention", "reason": "noncanonical-model-governor-root", "launches": []}))
-
-    def test_the_native_subagent_hooks_refused_start_is_closed_too(self):
-        import work_start
-        with mock.patch.object(work_start, "CALLER_READS_REFUSAL", True):
-            self.assertTrue(self.closes({"state": "waiting-capacity", "launches": []}, child=None))
 
     def test_a_start_with_a_row_a_resume_or_a_depth_zero_caller_is_left_alone(self):
         self.assertFalse(self.closes({"state": "needs-attention", "launches": [], "registered_attempts": ["att-1"]}))

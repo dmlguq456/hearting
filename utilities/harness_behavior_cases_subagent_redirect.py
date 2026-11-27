@@ -26,9 +26,11 @@ Loaded by ``harness_behavior_scenarios.py`` (``_load_extra``).
     The same, but the worker ends with an empty answer: what the session is told when no answer comes.
 
 ``subagent-redirect-capacity``
-    The dispatch class cap is one and another unit route holds that slot: the hook's start is refused by
-    the governor, the native subagent runs as before, no later start is armed, no route is left open,
-    and none starts after the slot frees.
+    The dispatch class cap is one and another unit route holds that slot: Hearting still takes the call
+    (it was registered), the native call is refused with the queued line and never runs, the runtime's
+    capacity resume is armed, and once the slot frees the route starts and its answer comes back: as the
+    completion notice to the resting session, or (a session that rested before the queued start ran, which
+    no carrier watches) with its next turn; ``answer_by`` records which.
 
 ``subagent-redirect-untouched``
     Calls the hook leaves alone: a user agent (a name not in the table), the user's own definition of a
@@ -50,7 +52,9 @@ Loaded by ``harness_behavior_scenarios.py`` (``_load_extra``).
     One open session, one prompt and one fixture model: the call made under the registration from before
     this change (native), then, with the hook settings rewritten while the session stays open, the same
     call again. It records for each the call, the first subagent or worker request, the parent's tool
-    result and the answer's arrival, and whether the open session took the new registration.
+    result and the answer's arrival (the native answer when the call ran natively, the notice's
+    ``Answer:`` when Hearting took it), and whether the open session took the new registration; a
+    comparison with a missing side is marked incomplete.
 
 ``subagent-redirect-faults`` (Claude, Codex)
     The registered redirect command is replaced, one at a time, by a command that fails the way a hook
@@ -332,6 +336,7 @@ class SubagentHookSeamV2Scenario(SubagentHookSeamScenario):
 
 LIGHT_NAME = {"claude": "Explore", "codex": "explorer", "opencode": "explore"}
 STARTED = "Started as Hearting unit route"
+QUEUED = "Queued as Hearting unit route"
 QUESTION = "where does the fixture README say what the fixture is for? Answer with the file and line."
 ANSWER_HEAD = "Answered: the fixture README line 1 says what it is for"
 USER_AGENT = "hb-user-agent"
@@ -429,8 +434,9 @@ class SubagentRedirectScenario(unit.UnitRouteScenario):
             # with its prompt as the newest input.
             forked = (record["last_kind"] == "user" and self.main not in last and _label_of(last, subs))
             if (self.main not in text and _label_of(text, subs)) or forked:
-                self.native.append((record["at"], _label_of(last if forked else text, subs)))
-                return Reply(f"native subagent answer {self.nonce}")
+                seen = _label_of(last if forked else text, subs)
+                self.native.append((record["at"], seen))
+                return Reply(f"native subagent answer {self.nonce} for {seen}")
             label = _label_of(text, markers)
             if label is None:
                 return Reply("Nothing new.")
@@ -573,9 +579,11 @@ class SubagentRedirectNoAnswerScenario(SubagentRedirectScenario):
 
 class SubagentRedirectCapacityScenario(SubagentRedirectScenario):
     name = "subagent-redirect-capacity"
-    summary = ("The dispatch cap is one and another unit route holds it: the hook's start is refused, the native "
-               "subagent runs as before, no later start is armed, no route is left open and none starts later.")
+    summary = ("The dispatch cap is one and another unit route holds it: Hearting still takes the call, the native "
+               "call is refused with the queued line and never runs, and once the slot frees the route starts and "
+               "its answer comes back as the completion notice.")
     HOLD = "SUBREDIR-HOLD"
+    WAIT = 420
 
     def prepare(self, run):
         super().prepare(run)
@@ -586,29 +594,15 @@ class SubagentRedirectCapacityScenario(SubagentRedirectScenario):
             return self.report_then_end(record, earlier, self.HOLD, gate=self.hold_end)
         return super().other_worker(run, record, earlier)
 
-    def scratch_state(self):
-        """Open routes without a row, and armed resumes, in the scratch roots and beside the registry."""
-        rows = registry_rows(self.jobs)
-        routed = {r.get("route_id") for r in rows}
-        roots = {Path(r.get("artifact_root")) for r in rows if r.get("artifact_root")}
-        open_routes = []
-        for root in roots:
-            for path in (root / ".runtime" / "routes").glob("rt-*.json"):
-                if path.name.endswith(".outcome.json") or ".superseded" in path.name:
-                    continue
-                if path.stem not in routed and not path.with_name(path.stem + ".outcome.json").exists():
-                    open_routes.append(path.name)
+    def armed_resumes(self):
         resume_dir = self.jobs.resolve().parent / "capacity-resume"
-        resumes = sorted(p.name for p in resume_dir.glob("*.json")) if resume_dir.is_dir() else []
-        return {"open_routes_without_row": open_routes, "armed_resumes": resumes,
-                "closed_unstarted": sorted(p.name for root in roots
-                                           for p in (root / ".runtime" / "routes").glob("rt-*.outcome.json")
-                                           if "start-refused" in p.read_text(encoding="utf-8", errors="replace"))}
+        return sorted(p.name for p in resume_dir.glob("*.json")) if resume_dir.is_dir() else []
 
     def run_redirect(self, run, ev):
         if run.harness == "opencode":
-            run.note("OpenCode does not intercept the call: there is no start for the cap to refuse")
+            run.note("OpenCode does not intercept the call: there is no start for the cap to hold")
             return "not-applicable"
+        self.worker_end.set()                       # the queued route's worker answers as soon as it runs
         ev["hold"] = self.compose_other(run, self.HOLD, "hb-hold-slot")
         held = wait_for(lambda: [r for r in registry_rows(self.jobs) if "hb-hold-slot" in r.get("slug", "")
                                  and r["status"] not in TERMINAL_STATES], 60, 1)
@@ -620,25 +614,40 @@ class SubagentRedirectCapacityScenario(SubagentRedirectScenario):
             return "inconclusive"
         at, text = self.results["light"]
         ev["call_to_tool_result_seconds"] = round(at - self.spawned["light"], 1)
-        ev["tool_result"] = text[-800:]
-        wait_for(lambda: self.native, 60, 1)
+        ev["refusal"] = text[-1200:]
+        run.wait_idle(6, 60)
+        wait_for(lambda: self.native, 15, 1)        # a native subagent would have asked the model by now
+        ev["explore_rows_while_held"] = len(explore_rows(self.jobs))
+        ev["armed_resumes_while_held"] = self.armed_resumes()
+        freed = time.time()
+        self.hold_end.set()
+        rows = wait_for(lambda: [r for r in explore_rows(self.jobs) if r["status"] in TERMINAL_STATES], self.WAIT, 2) or []
+
+        def answered():
+            return [r for r in self.resting(run, "light") if r["last_kind"] != "tool" and r["at"] > at
+                    and "Answer:" in r["text"][-6000:] and self.nonce in r["text"][-6000:]]
+        notice = wait_for(answered, 90, 1)
+        ev["answer_by"] = "notice" if notice else None
+        if rows and not notice:
+            # The session rested before the queued start ran: its next turn carries the answer.
+            before = len(run.main_requests())
+            run.prompt(f"{self.main}-light any result yet?")
+            run.wait_requests(before + 1, 30)
+            notice = wait_for(answered, 60, 1)
+            ev["answer_by"] = "next-turn" if notice else None
         run.wait_idle(6, 60)
         ev["native_subagent_requests"] = len(self.native)
-        ev["explore_rows_while_held"] = len(explore_rows(self.jobs))
-        ev["after_refusal"] = self.scratch_state()
-        self.hold_end.set()
-        wait_for(lambda: all(r["status"] in TERMINAL_STATES for r in registry_rows(self.jobs)
-                             if "hb-hold-slot" in r.get("slug", "")), self.WAIT, 2)
-        wait_for(lambda: False, 75, 5)     # a later start would come once the slot frees
-        ev["explore_rows_after_free"] = len(explore_rows(self.jobs))
-        ev["after_free"] = self.scratch_state()
-        run.note(f"native={len(self.native)}; refused-line={STARTED in ev['tool_result']}; "
-                 f"rows held/after={ev['explore_rows_while_held']}/{ev['explore_rows_after_free']}; "
-                 f"open={ev['after_free']['open_routes_without_row']}; resumes={ev['after_free']['armed_resumes']}; "
-                 f"closed-unstarted={len(ev['after_free']['closed_unstarted'])}")
-        ok = (self.native and STARTED not in ev["tool_result"] and not ev["explore_rows_while_held"]
-              and not ev["explore_rows_after_free"] and not ev["after_free"]["open_routes_without_row"]
-              and not ev["after_free"]["armed_resumes"])
+        ev["rows_after_free"] = [{k: r.get(k) for k in ("status", "model_profile", "harness", "route_id")}
+                                 for r in explore_rows(self.jobs)]
+        if notice:
+            ev["free_to_notice_seconds"] = round(notice[0]["at"] - freed, 1)
+            ev["notice"] = notice[0]["last_text"][-2500:]
+        run.note(f"queued-line={QUEUED in ev['refusal']}; native={len(self.native)}; "
+                 f"rows held/after={ev['explore_rows_while_held']}/{len(rows)}; "
+                 f"resumes={ev['armed_resumes_while_held']}; answer by={ev['answer_by']}; "
+                 f"free-to-answer={ev.get('free_to_notice_seconds')}s")
+        ok = (QUEUED in ev["refusal"] and not self.native and not ev["explore_rows_while_held"]
+              and len(rows) == 1 and bool(notice))
         return "pass" if ok else "fail"
 
 
@@ -783,7 +792,7 @@ class SubagentRedirectFaultsScenario(SubagentRedirectScenario):
         """The hook file with the redirect entry replaced for `label`."""
         data = json.loads(self.hook_text)
         groups = data["hooks"]["PreToolUse"]
-        matcher = "Agent|Task" if run.harness == "claude" else "spawn_agent|collaborationspawn_agent"
+        matcher = "Agent|Task" if run.harness == "claude" else "spawn_agent"
         group = next(g for g in groups if g.get("matcher") == matcher)
         entry = group["hooks"][0]
         if label == "old-line":
@@ -841,7 +850,7 @@ class SubagentRedirectOtherHookScenario(SubagentRedirectScenario):
             matcher = "Agent"
         elif run.harness == "codex":
             path = Path(run.home.env["CODEX_HOME"]) / "hooks.json"
-            matcher = "spawn_agent|collaborationspawn_agent"
+            matcher = "spawn_agent"
         else:
             return
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -955,11 +964,15 @@ class SubagentRedirectCostScenario(SubagentRedirectScenario):
         if run.harness == "codex":
             run.evidence["trust_old"] = (run.home.trust_codex_hooks(run.binary) or {}).get("status")
 
-    def arrived(self, run, label, since):
-        """The parent's first request that holds this call's answer: a fast native subagent's result can ride
-        in the same request as the tool result; the unit route's answer is its notice (or a finished receipt)."""
-        word = f"native subagent answer {self.nonce}" if label == "old" else ANSWER_HEAD
-        return [r for r in self.resting(run, label) if r["at"] >= since and word in r["text"]]
+    def arrived(self, run, label, since, redirected):
+        """The parent's first request that holds this call's answer, as the call actually ran: a native
+        subagent's result (it can ride in the same request as the tool result, or come in Codex's own
+        notification), or the unit route's notice ``Answer:`` (or a finished receipt)."""
+        if redirected:
+            return [r for r in self.resting(run, label) if r["at"] >= since and ANSWER_HEAD in r["text"]]
+        # Named for this call: the earlier call's native answer stays in the conversation's history.
+        return [r for r in self.resting(run, label)
+                if r["at"] >= since and f"native subagent answer {self.nonce} for {label}" in r["text"]]
 
     def run_redirect(self, run, ev):
         if not self.hook_file:
@@ -979,7 +992,7 @@ class SubagentRedirectCostScenario(SubagentRedirectScenario):
                 continue
             call = self.spawned[label]
             at, text = self.results[label]
-            done = wait_for(lambda: self.arrived(run, label, at), 200, 1)
+            done = wait_for(lambda: self.arrived(run, label, at, STARTED in text), 200, 1)
             workers = [r["at"] for r in run.main_requests()
                        if "Dispatch metadata:" in r["text"] and f"{self.sub}-{label}" in r["text"]]
             firsts = [t for t, seen in self.native if seen == label] + workers
@@ -998,8 +1011,15 @@ class SubagentRedirectCostScenario(SubagentRedirectScenario):
         run.note(f"old: {old.get('call_to_answer_seconds')}s native={old.get('native')}; new: "
                  f"{new.get('call_to_answer_seconds')}s redirected={new.get('redirected')}; "
                  f"more={ev.get('more_seconds')}s")
-        ok = (old.get("native") and not old.get("rows") and old.get("call_to_answer_seconds") is not None
-              and new.get("tool_result") is not None)
+        ev["comparison"] = ("complete" if old.get("call_to_answer_seconds") is not None
+                            and new.get("call_to_answer_seconds") is not None else "incomplete")
+        if ev["comparison"] == "incomplete":
+            run.note("no answer time on one side: the comparison is incomplete")
+            return "inconclusive"
+        # The new call ran one way only: natively (an open session that kept its hook set) or as the route.
+        ok = (old.get("native") and not old.get("rows")
+              and (bool(new.get("native")) != bool(new.get("rows")) if not new.get("redirected")
+                   else not new.get("native") and new.get("rows") == 1))
         return "pass" if ok else "fail"
 
 

@@ -54,17 +54,6 @@ _PRIOR_ART_MODULE = None
 # The first frame leg's prompt waits this long, from the scan's start, for the advisory list.
 PRIOR_ART_WAIT_SECONDS = 30
 START_WINDOW_SECONDS = 600
-# A caller that reads a refused start of a unit route itself, so the runtime arms no later start for it:
-# a registered worker (`AGENT_DISPATCH_CHILD=1`), or the compose process the pre-tool hook runs when it
-# starts a person's native subagent call as a unit route (`utilities/native_subagent_redirect.py`), whose
-# native call runs instead when the route cannot start. Set by that process only; nobody chooses it.
-CALLER_READS_REFUSAL = False
-
-
-def caller_reads_refusal() -> bool:
-    return CALLER_READS_REFUSAL or os.environ.get("AGENT_DISPATCH_CHILD") == "1"
-
-
 # A concurrency-cap refusal (class-cap/global-cap) carries no timestamp
 # evidence to size a wait from -- this is the one bounded guess `--wait`
 # spends on it, matching the join timeout's own bound.
@@ -3637,10 +3626,9 @@ def _arm_capacity_resume(result, path, jobs):
     """A usage-limit pause with a known reset time, or an owner launch that did not start,
     resumes itself once (audit §4 #17)."""
     import capacity_auto_resume as capacity_resume
-    if caller_reads_refusal() and _is_unit_route_file(path):
+    if os.environ.get("AGENT_DISPATCH_CHILD") == "1" and _is_unit_route_file(path):
         # A worker that started a unit leg is no session to notice: it reads this refusal itself, and a
-        # resume the runtime made later would start the leg after its caller may be gone. A native
-        # subagent call the hook could not start runs natively instead: a later start would do it twice.
+        # resume the runtime made later would start the leg after its caller may be gone.
         return result
     try:
         armed = capacity_resume.arm(result, path, jobs)

@@ -1,8 +1,8 @@
 #!/bin/sh
 # PreToolUse(Agent|Task): the native call's model policy below decides first. With
-# `--redirect`, a call the policy lets through may then start as a Hearting unit
+# `--redirect`, Hearting may then take a call the policy lets through as a unit
 # route (utilities/native_subagent_redirect.py, only when that is certain; the
-# call is refused with one line naming the route). When it is not started, or
+# call is refused with one line naming the route). When Hearting does not, or
 # without `--redirect` (the registration of a session opened before it), the
 # native call runs as below: give native Claude subagent spawns the config-declared
 # default model tier instead of silently inheriting the interactive session
@@ -182,7 +182,7 @@ def apply_policy(tool_input):
 
 
 def started_as_unit_route(payload):
-    """The refusal line when the shared redirect started the call as a unit route, else None."""
+    """The refusal line when the shared redirect took the call as a unit route, else None."""
     root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     if not os.path.isfile(os.path.join(root, "utilities", "native_subagent_redirect.py")):
         return None

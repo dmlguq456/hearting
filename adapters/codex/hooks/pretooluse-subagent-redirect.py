@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Codex PreToolUse(spawn_agent): start a person's session's native subagent call as a Hearting unit
-route when that is certain, and refuse the native call (utilities/native_subagent_redirect.py). When the
-route did not start the native subagent runs as before; `run-hook.sh` turns any failure of this bridge
-into a silent exit 0."""
+"""Codex PreToolUse(spawn_agent): a person's session's native subagent call becomes a Hearting unit route
+when that is certain, and the native call is refused (utilities/native_subagent_redirect.py). When Hearting
+did not take it the native subagent runs as before; `run-hook.sh` turns any failure of this bridge into a
+silent exit 0."""
 
 import os
 import sys

@@ -1,61 +1,55 @@
 #!/usr/bin/env python3
-"""A person's session's native subagent call starts as a Hearting unit route when that is certain.
+"""A person's session's native subagent call becomes a Hearting unit route when that is certain.
 
-Claude `Agent` (older `Task`) and Codex `spawn_agent` (multi-agent v2: `collaborationspawn_agent`) are
-intercepted before they run (`PreToolUse`). The agent name picks the depth (`NAMES`; a model or effort named
-in the call picks the depth it is declared for), the call's prompt is the brief, and
+Claude `Agent` (older `Task`) and Codex `spawn_agent` (multi-agent v1) are intercepted before they run
+(`PreToolUse`). Whether Hearting takes the call is decided once, before anything is registered; anything
+that is not certain leaves the native call exactly as it was, with nothing printed and nothing registered:
+- The definition the harness picks for the name is Hearting's shipped one (apart from the lines activation
+  renders for the user's models) or the harness's built-in, and the call carries nothing a brief cannot.
+- Nothing else decides the same call: no other hook or permission rule in a configuration the hook reads,
+  no layer added on the harness's command line, and Hearting's own hook registered exactly once.
+- The caller is a person's session: not a registered worker, not a native subagent (unknown counts as not).
+
+Then the hook runs, as a session that typed it would,
 
     capability-route.py compose --start --unit general/explore --profile <depth> --ephemeral --prompt-file -
 
-starts the route, as a session that typed it would. When the route started, the native call is refused with
-one line naming it and telling how its answer comes back (`capabilities/unit.md`, A native subagent call).
+and reads its start receipt. Once the receipt says Hearting holds the call (running, waiting for a free
+worker, or ended) the native call is refused with one line naming the route and how its answer comes back
+(`capabilities/unit.md`, A native subagent call). A usage limit or a failed start after that reaches the
+session through the runtime's existing wait and its completion or attention notice, never as the native
+call. A compose that registers nothing (no receipt, or a refusal) leaves the native call to run. The hook
+never stops a start: one window is left, a hook ended from outside (killed, the harness's timeout) between
+the registration and its refusal line, where both can run.
 
-The route starts only when all of this is known; anything else leaves the native call exactly as it was,
-with nothing printed:
-- Hearting started it: the start's own receipt, or a registry row of the route past its launch fence
-  (`launch_started=1`) whose worker still runs. A start that did not get there is stopped with its whole
-  process group, its route and any attempt it registered are closed the way the runtime closes a refused
-  start, and nothing arms a later start (`work_start.CALLER_READS_REFUSAL`). The budget counts from the
-  brief's writing; when the hook itself goes away first, the compose process ends its own group.
-- The definition the harness picks for the name is Hearting's shipped one or the harness's built-in, and
-  the call carries nothing a brief cannot (`_ARGUMENTS`): a project or user definition of the same name,
-  history handed over (`fork`, `fork_context`, `fork_turns`), attachments (`items`), `resume`, `isolation`.
-- No other hook or permission rule decides the same call: the harness runs matching hooks side by side and
-  applies deny/ask rules after them, so a refusal there would come after the route started.
-- The caller is a person's session: not a registered worker, and not a native subagent (a Codex thread
-  whose spawn record cannot be read counts as unknown).
-
-OpenCode is not intercepted: its `subagent` permission (`ask` when no rule matches) and other plugins'
-before-hooks decide inside the tool, where the plugin cannot see them (`adapters/opencode/ADAPTATION.md`).
+OpenCode is not intercepted (`adapters/opencode/ADAPTATION.md`).
 
 Usage (stdin: the harness payload):
-  native_subagent_redirect.py --claude|--codex   print the PreToolUse deny JSON when started
+  native_subagent_redirect.py --claude|--codex   print the PreToolUse deny JSON when Hearting took the call
 """
 from __future__ import annotations
 
 import json
 import os
 import re
-import signal
 import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 UTILITIES = ROOT / "utilities"
 UNIT = "general/explore"
-# The hook's own timeout is 180 s; a start measured at most 74 s (design 3.4). Past this budget the start
-# is stopped and closed, which takes a few seconds more, and the native call runs instead.
-BUDGET_SECONDS = 150
-# How often the waiting hook reads the start's receipt (within the budget).
+# How often the hook reads the start's receipt; the compose process finishes its bookkeeping on its own.
 POLL_SECONDS = 0.05
-_TOOLS = {"claude": {"Agent", "Task"}, "codex": {"spawn_agent", "collaborationspawn_agent"}}
-# The arguments a unit route takes over: the brief, its title, the agent name and the depth's model/effort.
-_ARGUMENTS = {"claude": {"description", "prompt", "subagent_type", "model", "run_in_background"},
-              "codex": {"agent_type", "message", "task_name", "model", "reasoning_effort", "fork_context",
-                        "fork_turns"}}
+_TOOLS = {"claude": {"Agent", "Task"}, "codex": {"spawn_agent"}}
+# The arguments a unit route takes over: the brief, its title and the agent name. Anything else stays
+# native: Codex multi-agent v2 (`task_name`, `fork_turns`), attachments (`items`), a model or an effort,
+# Claude `resume` or `isolation`, and any argument this table does not know.
+_ARGUMENTS = {"claude": {"description", "prompt", "subagent_type", "run_in_background"},
+              "codex": {"agent_type", "message", "fork_context"}}
 # The agent name a call gives, and the depth its route runs at (capabilities/unit.md, the name table).
 NAMES = {
     "light": "light", "Explore": "light", "explorer": "light", "explore": "light", "memory-scout": "light",
@@ -67,28 +61,21 @@ UNNAMED = {"claude": "balanced-deep", "codex": "balanced"}
 # The agent a call without a name runs as, and the agents the harness itself defines.
 DEFAULT_AGENT = {"claude": "general-purpose", "codex": "default"}
 BUILT_IN = {"claude": {"Explore", "Plan", "general-purpose"}, "codex": {"default", "worker", "explorer"}}
-DEPTHS = ("light", "balanced", "balanced-deep", "deep")
-# The compose process the hook runs: the same command a session types, told that its caller reads a refused
-# start itself (no option a person or an agent chooses). It holds one end of a pipe the hook keeps open: the
-# hook writes `1` once it took the start; if the hook goes away first, the start's whole group goes too.
-_BOOT = ("import os, runpy, signal, sys, threading\n"
-         "sys.path[:] = [sys.argv[1]] + [p for p in sys.path if p not in ('', '.')]\n"
-         "def _hold(fd):\n"
-         "    try:\n"
-         "        taken = os.read(fd, 1) == b'1'\n"
-         "    except OSError:\n"
-         "        taken = False\n"
-         "    if not taken:\n"
-         "        os.killpg(0, signal.SIGKILL)\n"
-         "threading.Thread(target=_hold, args=(int(sys.argv[2]),), daemon=True).start()\n"
-         "import work_start\n"
-         "work_start.CALLER_READS_REFUSAL = True\n"
-         "sys.argv = sys.argv[3:]\n"
-         "runpy.run_path(sys.argv[0], run_name='__main__')\n")
+_SUFFIX = {"claude": ".md", "codex": ".toml"}
+# Lines activation renders into a shipped definition for the user's models (`sync-native-agents.py`).
+_RENDERED = {"claude": re.compile(r"(# profile:|model:|effort:)"),
+             "codex": re.compile(r"(model|model_reasoning_effort)\s*=")}
+# Harness command-line arguments that add definitions, settings, hooks or permission rules no file shows.
+_LAUNCH_LAYERS = {"claude": {"--settings", "--agents", "--add-dir", "--plugin-dir", "--setting-sources",
+                             "--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools",
+                             "--permission-prompt-tool"},
+                  "codex": {"-c", "--config", "-p", "--profile", "--enable", "--disable"}}
+# Where this release registers the hook, and the tool name its matcher names.
+_REGISTRATION = {"claude": ("settings.json", "Agent"), "codex": ("hooks/hooks.json", "spawn_agent")}
 
 
 class Skip(Exception):
-    """Not a call to start here: the native call goes through."""
+    """Not a call Hearting takes: the native call goes through."""
 
 
 def _text(value) -> str:
@@ -96,200 +83,146 @@ def _text(value) -> str:
 
 
 def normalized(harness: str, payload: dict) -> dict:
-    """`{session, name, prompt, title, model, effort}` of a subagent call to start, or `Skip`."""
+    """`{session, name, prompt, title}` of a subagent call Hearting can take, or `Skip`."""
     tool, session, args = payload.get("tool_name"), payload.get("session_id"), payload.get("tool_input")
-    tool = str(tool or "").rsplit(".", 1)[-1]
-    if tool not in _TOOLS.get(harness, ()) or not isinstance(args, dict):
+    if str(tool or "").rsplit(".", 1)[-1] not in _TOOLS.get(harness, ()) or not isinstance(args, dict):
         raise Skip("not-a-subagent-call")
-    if not isinstance(session, str) or not session:
-        raise Skip("no-session")
-    if set(args) - _ARGUMENTS[harness]:
-        # Codex `items` (attachments, or attachments beside a message, which the native tool refuses), Claude
-        # `resume`/`isolation`, or any argument this table does not know: the brief alone cannot carry it.
+    if not isinstance(session, str) or not session or set(args) - _ARGUMENTS[harness]:
         raise Skip("form-not-carried")
     if harness == "claude":
         name, prompt, title = args.get("subagent_type"), args.get("prompt"), args.get("description")
-        if name == "fork":   # the whole conversation
-            raise Skip("claude-form-kept")
     else:
-        name, prompt, title = args.get("agent_type"), args.get("message"), args.get("task_name")
-        # The thread's history handed over: v1 `fork_context`; v2 (`task_name`/`fork_turns`) forks all turns
-        # unless `fork_turns` is `none`, and refuses `fork_context`.
-        v2 = tool == "collaborationspawn_agent" or "task_name" in args or "fork_turns" in args
-        if (args.get("fork_context") not in (None, False)
-                or (v2 and ("fork_context" in args or _text(args.get("fork_turns")) != "none"))):
-            raise Skip("codex-history-kept")
-    prompt = _text(prompt)
-    if not prompt:
+        name, prompt, title = args.get("agent_type"), args.get("message"), ""
+    # The session's history handed over (Claude `fork`, Codex `fork_context`), or a name that is no name.
+    if name == "fork" or args.get("fork_context") not in (None, False) or not isinstance(name, (str, type(None))):
+        raise Skip("form-not-carried")
+    if not _text(prompt):
         raise Skip("no-prompt")
-    return {"session": session, "name": _text(name), "prompt": prompt, "title": _text(title),
-            "model": _text(args.get("model")), "effort": _text(args.get("reasoning_effort"))}
-
-
-def _profiles(harness: str) -> dict:
-    """`{depth: {"model", "effort"}}` this harness's model configuration declares for each depth."""
-    sys.path.insert(0, str(UTILITIES))
-    from model_config import resolve_config
-    values, _receipt = resolve_config(harness, source_root=ROOT)
-    profiles = {}
-    for depth in DEPTHS:
-        tier, _, effort = values.get("CFG_MODEL_PROFILE_" + depth.upper().replace("-", "_"), "").partition(":")
-        key = "CFG_TIER_" + tier.upper().replace("-", "_")
-        model = tier[len("model/"):] if tier.startswith("model/") else values.get(key + "_MODEL", "")
-        if model:
-            profiles[depth] = {"model": model.lower(), "effort": (effort or values.get(key + "_EFFORT", "")).lower()}
-    return profiles
+    return {"session": session, "name": _text(name), "prompt": _text(prompt), "title": _text(title)}
 
 
 def depth_for(harness: str, call: dict) -> str:
-    """The depth of the route a call starts; `Skip` when the call names no depth this table knows."""
-    name = call["name"]
-    if not name:
-        depth = UNNAMED[harness]
-    elif name in NAMES:
-        depth = NAMES[name]
-    else:
+    """The depth of the route a call starts; `Skip` when the name is not in the table."""
+    if not call["name"]:
+        return UNNAMED[harness]
+    if call["name"] not in NAMES:
         raise Skip("name-not-in-table")
-    model, effort = call["model"].lower(), call.get("effort", "").lower()
-    if not model and not effort:
-        return depth
-    profiles = _profiles(harness)
-
-    def fits(candidate):
-        declared = profiles.get(candidate) or {}
-        return ((not model or declared.get("model") == model)
-                and (not effort or declared.get("effort") == effort))
-
-    for candidate in (depth, *DEPTHS):
-        if fits(candidate):
-            return candidate
-    raise Skip("model-not-declared")
+    return NAMES[call["name"]]
 
 
 # --- The definition the harness picks for a name ------------------------------------------------------------
 
-def _claude_home() -> Path:
-    return Path(os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or Path.home() / ".claude")
-
-
-def _codex_home() -> Path:
+def _home(harness: str) -> Path:
+    if harness == "claude":
+        return Path(os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or Path.home() / ".claude")
     return Path(os.environ.get("CODEX_HOME", "").strip() or Path.home() / ".codex")
 
 
-def _project_folders(cwd: str, folder: str, home: Path) -> list[Path]:
-    """`<dir>/<folder>` for the working directory and every directory above it (Claude walks up for project
-    agents; a wider walk only finds more reasons to stay native), except the user's own home folder."""
+def _walk(cwd: str, folder: str, home: Path) -> list[Path]:
+    """`<dir>/<folder>` for `cwd` and every directory above it, except the user's own home folder (a wider walk
+    only finds more reasons to stay native)."""
     start = Path(cwd).resolve()
     seen, found = {home.resolve()}, []
     for base in (start, *start.parents):
-        candidate = (base / folder).resolve()
-        if candidate not in seen:
-            seen.add(candidate)
+        if (base / folder).resolve() not in seen:
+            seen.add((base / folder).resolve())
             found.append(base / folder)
     return found
 
 
-def _frontmatter(text: str):
-    """`({key: value}, body)` of an agent Markdown file, or None when it has no frontmatter."""
-    lines = text.split("\n")
-    if not lines or lines[0].strip() != "---":
-        return None
-    for index in range(1, len(lines)):
-        if lines[index].strip() in ("---", "..."):
-            fields = {}
-            for row in lines[1:index]:
-                key, sep, value = row.partition(":")
-                if sep and key and not key[0].isspace() and not key.startswith("#"):
-                    fields[key.strip()] = value.strip().strip("\"'")
-            return fields, "\n".join(lines[index + 1:])
+def _main_checkout(cwd: str) -> str | None:
+    """The main checkout of the linked git worktree `cwd` is in (Codex reads its project layers too)."""
+    for base in (Path(cwd).resolve(), *Path(cwd).resolve().parents):
+        marker = base / ".git"
+        if marker.is_file():
+            gitdir = (base / marker.read_text(encoding="utf-8").split("gitdir:", 1)[1].strip()).resolve()
+            return str((gitdir / (gitdir / "commondir").read_text(encoding="utf-8").strip()).resolve().parent)
+        if marker.exists():
+            return None
     return None
 
 
-def _toml(path: Path) -> dict:
-    import tomllib
-    return tomllib.loads(path.read_text(encoding="utf-8"))
+def _projects(harness: str, cwd: str) -> list[Path]:
+    """The project folders the harness reads: `.claude` walking up from the working directory (and from
+    CLAUDE_PROJECT_DIR); `.codex` walking up, and from a linked worktree's main checkout too."""
+    roots = [cwd]
+    if harness == "claude" and os.environ.get("CLAUDE_PROJECT_DIR", "").strip():
+        roots.append(os.environ["CLAUDE_PROJECT_DIR"].strip())
+    if harness == "codex" and _main_checkout(cwd):
+        roots.append(_main_checkout(cwd))
+    return [folder for root in roots for folder in _walk(root, "." + harness, _home(harness))]
 
 
-def _defined_names(harness: str, path: Path) -> set:
-    """The agent name(s) one definition file declares (Claude: frontmatter `name`; Codex: `name`)."""
-    if harness == "claude":
-        parsed = _frontmatter(path.read_text(encoding="utf-8"))
-        return {parsed[0]["name"]} if parsed and parsed[0].get("name") else set()
-    name = _toml(path).get("name")
-    return {name.strip()} if isinstance(name, str) and name.strip() else set()
+def _comparable(harness: str, text: str) -> str:
+    """A definition's text apart from the lines activation renders (Claude: in the frontmatter; Codex: before
+    `developer_instructions`)."""
+    head, sep, rest = text.partition("\n---\n" if harness == "claude" else "\ndeveloper_instructions")
+    return "\n".join(line for line in head.split("\n") if not _RENDERED[harness].match(line)) + sep + rest
 
 
 def _is_shipped(harness: str, path: Path, name: str) -> bool:
-    """The definition file is Hearting's own: a link into this release, or its text apart from the model pin
-    activation renders for the user's model configuration."""
-    shipped = ROOT / "adapters" / harness / "agents" / (name + (".md" if harness == "claude" else ".toml"))
-    try:
-        if path.is_symlink():
-            return path.resolve() == shipped.resolve()
-        if not shipped.is_file():
-            return False
-        if harness == "claude":
-            mine, ours = _frontmatter(path.read_text(encoding="utf-8")), _frontmatter(shipped.read_text(encoding="utf-8"))
-            return bool(mine and ours) and mine[1] == ours[1] and all(
-                mine[0].get(key) == ours[0].get(key) for key in ("name", "description"))
-        mine, ours = _toml(path), _toml(shipped)
-        return all(mine.get(key) == ours.get(key) for key in ("name", "description", "developer_instructions"))
-    except (OSError, ValueError):
-        return False
+    """The file is Hearting's shipped definition of `name`: a link to it, or the same text apart from the
+    rendered lines (an added field, a comment or any other change is not)."""
+    shipped = ROOT / "adapters" / harness / "agents" / (name + _SUFFIX[harness])
+    if path.is_symlink():
+        return path.resolve() == shipped.resolve()
+    return shipped.is_file() and (_comparable(harness, path.read_text(encoding="utf-8"))
+                                  == _comparable(harness, shipped.read_text(encoding="utf-8")))
 
 
-def _definitions(harness: str, cwd: str, name: str) -> tuple[list[Path], list]:
-    """`(user_files, other_definitions)` naming `name`: the user's own scope, and every other scope the
-    harness reads (managed or system, project, a config declaration). An unreadable file raises."""
-    if harness == "claude":
-        home, suffix = _claude_home(), "*.md"
-        others = [Path("/etc/claude-code"), Path("/Library/Application Support/ClaudeCode")]
-        folders = [root / "agents" for root in others] + [root / ".claude" / "agents" for root in others]
-        project = [folder / "agents" for folder in _project_folders(cwd, ".claude", home)]
-        if os.environ.get("CLAUDE_PROJECT_DIR", "").strip():
-            project += [folder / "agents" for folder in
-                        _project_folders(os.environ["CLAUDE_PROJECT_DIR"].strip(), ".claude", home)]
-    else:
-        home, suffix = _codex_home(), "*.toml"
-        folders = [Path("/etc/codex/agents")]
-        project = [folder / "agents" for folder in _project_folders(cwd, ".codex", home)]
-    user = [path for path in sorted((home / "agents").rglob(suffix)) if name in _defined_names(harness, path)] \
-        if (home / "agents").is_dir() else []
-    other = []
-    for folder in (*folders, *project):
-        if folder.is_dir():
-            other += [path for path in sorted(folder.rglob(suffix)) if name in _defined_names(harness, path)]
+def _gives(harness: str, path: Path, name: str) -> bool:
+    """The definition file can give the agent `name`. Hearting's own file gives its own name; Codex reads the
+    TOML `name` (the file name without one); any other Claude file counts when the name stands anywhere in
+    its frontmatter, so a comment, quotes or another YAML form cannot hide it."""
+    if _is_shipped(harness, path, path.stem):
+        return path.stem == name
+    text = path.read_text(encoding="utf-8")
     if harness == "codex":
-        # A role declared in a config layer (`[agents.<name>]`), in any layer this caller can see.
-        for config in [Path("/etc/codex/config.toml"), home / "config.toml",
-                       *[folder / "config.toml" for folder in _project_folders(cwd, ".codex", home)]]:
-            if config.is_file() and isinstance((_toml(config).get("agents") or {}).get(name), dict):
-                other.append(config)
-    return user, other
+        found = tomllib.loads(text).get("name", path.stem)
+        return isinstance(found, str) and found.strip() == name
+    return re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text.split("\n---", 1)[0]) is not None
+
+
+def _definitions(harness: str, cwd: str, name: str) -> tuple[list[Path], list[Path]]:
+    """`(user_files, others)` that can give the agent `name`: the user's own folder, and every other place the
+    harness reads (managed or system, projects, a Codex `[agents.*]` role or the `config_file` it names)."""
+    home = _home(harness)
+    if harness == "claude":
+        managed = [Path("/etc/claude-code"), Path("/Library/Application Support/ClaudeCode")]
+        folders = [root / sub for root in managed for sub in ("agents", ".claude/agents")]
+    else:
+        folders = [Path("/etc/codex/agents")]
+    folders += [project / "agents" for project in _projects(harness, cwd)]
+
+    def giving(folder):
+        return [path for path in sorted(folder.rglob("*" + _SUFFIX[harness]))
+                if _gives(harness, path, name)] if folder.is_dir() else []
+    user, others = giving(home / "agents"), [path for folder in folders for path in giving(folder)]
+    if harness == "codex":
+        for config in (Path("/etc/codex"), home, *_projects(harness, cwd)):
+            config = config / "config.toml"
+            roles = tomllib.loads(config.read_text(encoding="utf-8")).get("agents") if config.is_file() else {}
+            for key, role in (roles or {}).items():
+                if isinstance(role, dict) and (key == name or (
+                        "config_file" in role and _gives(harness, config.parent / role["config_file"], name))):
+                    others.append(config)
+    return user, others
 
 
 def require_shipped_definition(harness: str, name: str, cwd: str) -> None:
     """`Skip` unless the definition the harness picks for `name` is Hearting's shipped one or its built-in."""
-    try:
-        user, other = _definitions(harness, cwd, name)
-    except (OSError, ValueError) as exc:
-        raise Skip("definition-unreadable") from exc
-    if other:
+    user, others = _definitions(harness, cwd, name)
+    if others:
         raise Skip("definition-elsewhere")          # a project, managed or declared definition comes first
-    if len(user) == 1 and _is_shipped(harness, user[0], name):
-        return
-    if not user and name in BUILT_IN[harness]:
-        return
-    raise Skip("definition-not-shipped")
+    if not ((len(user) == 1 and _is_shipped(harness, user[0], name)) or (not user and name in BUILT_IN[harness])):
+        raise Skip("definition-not-shipped")
 
 
 # --- Other decisions on the same call -----------------------------------------------------------------------
 
 def _hook_matches(harness: str, matcher, tools: set) -> bool:
     """The harness's matcher rule: empty or `*` is every tool, a plain list is exact names, else a regex."""
-    if matcher in (None, "", "*"):
-        return True
-    if not isinstance(matcher, str):
+    if matcher in (None, "", "*") or not isinstance(matcher, str):
         return True
     plain = r"[A-Za-z0-9_|]+" if harness == "codex" else r"[A-Za-z0-9_\-, |]+"
     if re.fullmatch(plain, matcher):
@@ -300,35 +233,11 @@ def _hook_matches(harness: str, matcher, tools: set) -> bool:
         return True
 
 
-def _ours(harness: str, handler) -> bool:
-    command = handler.get("command") if isinstance(handler, dict) else None
-    if not isinstance(command, str) or handler.get("type", "command") != "command":
-        return False
-    if harness == "claude":
-        return "subagent-model-default.sh --redirect" in command
-    return "pretooluse-subagent-redirect.py" in command
-
-
-def _hooks_decide(harness: str, hooks, tools: set) -> bool:
-    """A `PreToolUse` handler other than this hook matches the call."""
-    if not isinstance(hooks, dict):
-        return False
-    for group in hooks.get("PreToolUse") or []:
-        if not isinstance(group, dict) or not _hook_matches(harness, group.get("matcher"), tools):
-            continue
-        if any(not _ours(harness, handler) for handler in group.get("hooks") or []):
-            return True
-    return False
-
-
 def _rules_decide(settings: dict) -> bool:
     """A Claude deny or ask rule names the subagent tool: it applies whatever a hook returns."""
     permissions = settings.get("permissions") if isinstance(settings.get("permissions"), dict) else {}
-    for kind in ("deny", "ask"):
-        for rule in permissions.get(kind) or []:
-            if isinstance(rule, str) and re.match(r"\s*(Agent|Task)\s*(\(|$)", rule):
-                return True
-    return False
+    return any(isinstance(rule, str) and re.match(r"\s*(Agent|Task)\s*(\(|$)", rule)
+               for kind in ("deny", "ask") for rule in permissions.get(kind) or [])
 
 
 def _json(path: Path) -> dict:
@@ -339,73 +248,72 @@ def _json(path: Path) -> dict:
 
 
 def _plugin_hooks(root: Path) -> list:
-    """The hook sets an installed plugin declares: `hooks/hooks.json` and its manifest's `hooks`."""
-    found = []
-    if (root / "hooks" / "hooks.json").is_file():
-        found.append(_json(root / "hooks" / "hooks.json").get("hooks"))
+    """The hook sets an installed plugin declares: `hooks/hooks.json` (or `hooks.json`) and its manifest's."""
+    found = [_json(path).get("hooks") for path in (root / "hooks" / "hooks.json", root / "hooks.json")
+             if path.is_file()]
     for manifest in (root / ".claude-plugin" / "plugin.json", root / ".codex-plugin" / "plugin.json"):
-        if not manifest.is_file():
-            continue
-        declared = _json(manifest).get("hooks")
-        for entry in declared if isinstance(declared, list) else [declared]:
-            if isinstance(entry, dict):
-                found.append(entry.get("hooks", entry))
-            elif isinstance(entry, str):
-                found.append(_json((root / entry).resolve()).get("hooks"))
+        declared = _json(manifest).get("hooks") if manifest.is_file() else None
+        for entry in declared if isinstance(declared, list) else [declared] if declared else []:
+            found.append(entry.get("hooks", entry) if isinstance(entry, dict)
+                         else _json((root / entry).resolve()).get("hooks"))
     return found
 
 
 def _decision_sources(harness: str, cwd: str) -> list:
-    """`[(hooks, settings)]` of every configuration this harness reads that this hook can see."""
-    sources = []
+    """`[(hooks, settings)]` of every configuration file this harness reads that the hook can see."""
+    home = _home(harness)
     if harness == "claude":
-        home = _claude_home()
         files = [home / "settings.json", home / "settings.local.json"]
         for managed in (Path("/etc/claude-code"), Path("/Library/Application Support/ClaudeCode")):
-            files.append(managed / "managed-settings.json")
-            if (managed / "managed-settings.d").is_dir():
-                files += sorted((managed / "managed-settings.d").glob("*.json"))
-        projects = _project_folders(cwd, ".claude", home)
-        if os.environ.get("CLAUDE_PROJECT_DIR", "").strip():
-            projects += _project_folders(os.environ["CLAUDE_PROJECT_DIR"].strip(), ".claude", home)
-        for folder in projects:
-            files += [folder / "settings.json", folder / "settings.local.json"]
-        for path in files:
-            if path.is_file():
-                settings = _json(path)
-                sources.append((settings.get("hooks"), settings))
-        for plugin in sorted((home / "plugins" / "cache").glob("*/*/*")):
-            sources += [(hooks, {}) for hooks in _plugin_hooks(plugin)]
-        return sources
-    home = _codex_home()
-    layers = [Path("/etc/codex"), home, *_project_folders(cwd, ".codex", home)]
-    for layer in layers:
-        if (layer / "hooks.json").is_file():
-            sources.append((_json(layer / "hooks.json").get("hooks"), {}))
-        for name in ("config.toml", "requirements.toml"):
-            if (layer / name).is_file():
-                sources.append((_toml(layer / name).get("hooks"), {}))
-    plugins = home / "plugins"
-    for pattern in ("*", "*/*", "*/*/*", "*/*/*/*"):
-        for plugin in sorted(plugins.glob(pattern)) if plugins.is_dir() else []:
-            if plugin.is_dir():
-                sources += [(hooks, {}) for hooks in _plugin_hooks(plugin)]
-                if (plugin / "hooks.json").is_file():
-                    sources.append((_json(plugin / "hooks.json").get("hooks"), {}))
-    return sources
+            files += [managed / "managed-settings.json", *sorted((managed / "managed-settings.d").glob("*.json"))]
+        files += [folder / name for folder in _projects(harness, cwd) for name in ("settings.json", "settings.local.json")]
+        sources = [(settings.get("hooks"), settings) for settings in (_json(path) for path in files if path.is_file())]
+        plugins = sorted((home / "plugins" / "cache").glob("*/*/*"))
+    else:
+        sources = []
+        for layer in (Path("/etc/codex"), home, *_projects(harness, cwd)):
+            sources += [(_json(layer / "hooks.json").get("hooks"), {})] if (layer / "hooks.json").is_file() else []
+            sources += [(tomllib.loads((layer / name).read_text(encoding="utf-8")).get("hooks"), {})
+                        for name in ("config.toml", "requirements.toml") if (layer / name).is_file()]
+        plugins = [path for pattern in ("*", "*/*", "*/*/*", "*/*/*/*") for path in sorted((home / "plugins").glob(pattern))]
+    return sources + [(hooks, {}) for plugin in plugins if plugin.is_dir() for hooks in _plugin_hooks(plugin)]
+
+
+def _harness_argv() -> list[str]:
+    """The command line of the harness that runs this hook: the nearest ancestor that is not a shell or Python
+    (`/proc`; where it cannot be read this raises and the call stays native)."""
+    pid = os.getppid()
+    for _ in range(12):
+        argv = [arg.decode("utf-8", "replace") for arg in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")[:-1]]
+        if argv and not re.fullmatch(r"-?(sh|bash|dash|zsh|ash|fish|env|python[0-9.]*)", Path(argv[0]).name):
+            return argv
+        pid = int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+    raise OSError("no harness process above this hook")
 
 
 def require_sole_decision(harness: str, tool: str, cwd: str) -> None:
-    """`Skip` when another hook or a permission rule can also decide this call: the harness runs matching
-    hooks side by side and applies deny/ask rules after them, so this hook cannot see that decision."""
-    tools = {tool, tool.rsplit(".", 1)[-1]} | ({"Agent", "Task"} if harness == "claude" else set())
-    try:
-        sources = _decision_sources(harness, cwd)
-    except (OSError, ValueError) as exc:
-        raise Skip("configuration-unreadable") from exc
-    for hooks, settings in sources:
-        if _hooks_decide(harness, hooks, tools) or (harness == "claude" and _rules_decide(settings)):
+    """`Skip` unless this hook is the only decision on the call it can see: the harness runs matching hooks
+    side by side and applies deny/ask rules after them, so another decision would come after the start."""
+    for arg in _harness_argv()[1:]:
+        if arg.split("=", 1)[0] in _LAUNCH_LAYERS[harness] or (harness == "codex" and re.match(r"-[cp].", arg)):
+            raise Skip("launch-layer")
+    path, name = _REGISTRATION[harness]
+    ours = {handler.get("command") for group in _json(ROOT / "adapters" / harness / path)["hooks"]["PreToolUse"]
+            if name in str(group.get("matcher")).split("|") for handler in group["hooks"]}
+    tools, registered = {tool} | ({"Agent", "Task"} if harness == "claude" else set()), 0
+    for hooks, settings in _decision_sources(harness, cwd):
+        if harness == "claude" and _rules_decide(settings):
             raise Skip("another-decision")
+        for group in (hooks.get("PreToolUse") or []) if isinstance(hooks, dict) else []:
+            if not isinstance(group, dict) or not _hook_matches(harness, group.get("matcher"), tools):
+                continue
+            for handler in group.get("hooks") or []:
+                if not (isinstance(handler, dict) and handler.get("type", "command") == "command"
+                        and handler.get("command") in ours):
+                    raise Skip("another-decision")
+                registered += 1
+    if registered != 1:
+        raise Skip("registered-twice-or-unseen")    # twice may run twice; unseen means a layer this hook cannot read
 
 
 # --- Who calls --------------------------------------------------------------------------------------------
@@ -427,7 +335,9 @@ def brief(call: dict) -> str:
 
 def compose_env(harness: str, session: str) -> dict:
     """The session's own identity, as its tool commands carry it: no inherited caller name or other
-    harness's session id (core/OPERATIONS.md), and this harness's id set from the payload."""
+    harness's session id (core/OPERATIONS.md), and this harness's id set from the payload. Nobody waits on
+    this start's own bounded wait (the session is told to go on), as inside an automatic resume, so a full
+    worker slot arms the runtime's capacity resume (`capacity_auto_resume.py`) and the answer comes later."""
     from harness_capabilities import session_env
     env = dict(os.environ)
     env.pop("AGENT_DISPATCH_CALLER_HARNESS", None)
@@ -435,6 +345,7 @@ def compose_env(harness: str, session: str) -> dict:
         for name in names:
             env.pop(name, None)
     env[session_env()[harness][0]] = session
+    env["AGENT_CAPACITY_RESUME_CHAIN"] = "0"
     return env
 
 
@@ -442,177 +353,52 @@ def compose_env(harness: str, session: str) -> dict:
 
 def _last_json(text: str) -> dict:
     for line in reversed(text.splitlines()):
-        line = line.strip()
-        if line.startswith("{"):
-            try:
-                value = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(value, dict):
-                return value
+        try:
+            value = json.loads(line) if line.strip().startswith("{") else None
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            return value
     return {}
 
 
-def _receipt(out) -> dict | None:
-    out.seek(0)
-    return _last_json(out.read().decode("utf-8", "replace")) or None
+def registered(receipt: dict) -> bool:
+    """The start receipt says Hearting holds the call: running, waiting for a worker, or already ended."""
+    return bool(receipt.get("route_id")) and (receipt.get("state") in {"running", "waiting-capacity", "completed"}
+                                              or bool(receipt.get("registered_attempts") or receipt.get("result")))
 
 
-def _started(receipt) -> bool:
-    return bool(receipt) and receipt.get("state") in {"running", "completed"} and bool(receipt.get("route_id"))
-
-
-def _interrupted(_number, _frame):
-    raise TimeoutError("native-subagent-redirect-interrupted")
-
-
-def _stop(child) -> None:
-    """End the start's whole process group (its launcher too; a launch fence not yet released dies with it)."""
-    try:
-        os.killpg(child.pid, signal.SIGKILL)
-    except OSError:
-        pass
-    child.wait()
-
-
-def start(harness: str, call: dict, depth: str, cwd: str, *, seconds: float = BUDGET_SECONDS) -> dict | None:
-    """Run the start; its receipt when the route started, else None (the native call runs, nothing stays)."""
-    deadline = time.monotonic() + seconds           # the budget counts from the brief's writing
-    caller = os.getppid()
+def start(harness: str, call: dict, depth: str, cwd: str) -> dict | None:
+    """Run the start as a session would; its receipt when Hearting holds the call, else None. The hook returns
+    once the receipt is written and never stops the start: the compose process finishes on its own."""
     env = compose_env(harness, call["session"])
-    with tempfile.TemporaryFile() as given, tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-        # Files, not pipes: no write waits on the start, and a worker it launches keeps no handle the
-        # harness waits on.
+    with tempfile.TemporaryFile() as given, tempfile.TemporaryFile() as out:
+        # Files, not pipes: no write waits on the start, and a worker it launches holds nothing the harness
+        # waits on.
         given.write(brief(call).encode("utf-8"))
         given.seek(0)
-        hold, held = os.pipe()
-        try:
-            child = subprocess.Popen(
-                [sys.executable, "-B", "-c", _BOOT, str(UTILITIES), str(hold), str(UTILITIES / "capability-route.py"),
-                 "compose", "--start", "--unit", UNIT, "--profile", depth, "--ephemeral", "--prompt-file", "-",
-                 "--cwd", cwd],
-                stdin=given, stdout=out, stderr=err, cwd=cwd, env=env, start_new_session=True, pass_fds=(hold,))
-        except BaseException:
-            os.close(held)
-            raise
-        finally:
-            os.close(hold)
-        receipt, previous = None, {}
-        try:
-            # The harness ends a hook past its own timeout with a signal: the start ends with it.
-            for number in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-                previous[number] = signal.signal(number, _interrupted)
-            while True:
-                ended = child.poll() is not None
-                receipt = _receipt(out)
-                if receipt is not None or ended:
-                    break
-                if time.monotonic() >= deadline or os.getppid() != caller:
-                    raise TimeoutError("native-subagent-redirect-late")
-                time.sleep(POLL_SECONDS)
-        except BaseException:
-            _stop(child)
-            receipt = _receipt(out)                   # one flushed just before the stop still counts
-        finally:
-            for number, handler in previous.items():
-                signal.signal(number, handler)
-        if _started(receipt):
-            try:
-                os.write(held, b"1")                  # taken: the compose process finishes on its own
-            except OSError:
-                pass                                  # it has already ended
-            finally:
-                os.close(held)
-            return receipt
-        _stop(child)
-        os.close(held)
-        err.seek(0)
-        return settle(receipt, err.read().decode("utf-8", "replace"), env)
-
-
-def _closed_by_the_start(receipt: dict) -> bool:
-    """The compose process closed its own refused start (`capability-route.py _close_unstarted_record_free`)."""
-    return (receipt.get("state") in ("waiting-capacity", "needs-attention")
-            and not receipt.get("registered_attempts") and not receipt.get("auto_resume"))
-
-
-def _route_api():
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("native_subagent_redirect_route", UTILITIES / "capability-route.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def handed_over(route: dict, route_file: str, jobs: Path) -> dict | None:
-    """A receipt for the route's attempt that crossed its launch fence and still runs, else None."""
-    import work_start
-    from parent_next_directive import parent_next, resume_command
-    for aid, (status, meta) in work_start._rows(jobs).items():
-        if (meta.get("route_id") == route["route_id"] and meta.get("launch_started") == "1"
-                and status in ("open", "running")):
-            directive, reason, _ = parent_next(meta.get("parent_completion_delivery", ""), aid, agent_home=ROOT)
-            resume = resume_command(Path(route_file).resolve(), Path(jobs).resolve(), agent_home=ROOT)
-            return {"state": "running", "route_id": route["route_id"], "unit_attempt_id": aid,
-                    "parent_next": directive, "parent_next_reason": reason, "resume_command": resume,
-                    "parent_next_command": resume + " --wait" if directive == "bounded-wait" else ""}
-    return None
-
-
-def withdraw(route: dict, route_file: str, jobs: Path, api) -> None:
-    """Close a start that did not get there: stop each attempt it registered, then close the route the way
-    the runtime closes a refused start. Each step is the existing one and repeating it is harmless."""
-    import route_autoclose
-    import route_parent_close
-    import work_start
-    for aid, (status, meta) in work_start._rows(jobs).items():
-        if meta.get("route_id") == route["route_id"] and status in ("open", "running"):
-            try:
-                route_parent_close.stop_attempt(aid, jobs=jobs)
-            except Exception:  # noqa: BLE001 -- the route still closes; a live attempt is read again below
-                pass
-    route_autoclose.close_one(Path(route["artifact_root"]), Path(route_file), route, "start-refused", api,
-                              trigger="compose", now=time.time())
-
-
-def settle(receipt: dict | None, errors: str, env: dict) -> dict | None:
-    """After a start that did not confirm: the attempt it handed over keeps it (its receipt); otherwise
-    nothing of it stays open or starts later, and the native call runs (None)."""
-    receipt = receipt or {}
-    if _closed_by_the_start(receipt):
-        return None
-    route_file = receipt.get("route_file") or next(
-        (line[len("route_file="):].strip() for line in reversed(errors.splitlines())
-         if line.startswith("route_file=")), "")
-    if not route_file:
-        return None                                   # no route was written
-    saved = dict(os.environ)
-    os.environ.clear()
-    os.environ.update(env)                            # the session the route belongs to stops and closes it
-    try:
-        route = json.loads(Path(route_file).read_text(encoding="utf-8"))
-        api = _route_api()
-        jobs = Path(api._compose_default_jobs())
-        found = handed_over(route, route_file, jobs)
-        if found is None:
-            try:
-                withdraw(route, route_file, jobs, api)
-            finally:
-                found = handed_over(route, route_file, jobs)   # one the close could not stop keeps the start
-        return found
-    finally:
-        os.environ.clear()
-        os.environ.update(saved)
+        child = subprocess.Popen(
+            [sys.executable, "-B", str(UTILITIES / "capability-route.py"), "compose", "--start", "--unit", UNIT,
+             "--profile", depth, "--ephemeral", "--prompt-file", "-", "--cwd", cwd],
+            stdin=given, stdout=out, stderr=subprocess.DEVNULL, cwd=cwd, env=env, start_new_session=True)
+        while True:
+            ended = child.poll() is not None
+            out.seek(0)
+            receipt = _last_json(out.read().decode("utf-8", "replace"))
+            if receipt.get("state") or ended:
+                return receipt if registered(receipt) else None
+            time.sleep(POLL_SECONDS)
 
 
 def reason_for(receipt: dict, depth: str) -> str:
     """The refusal line: the route, and how its answer reaches this session (the receipt's own directive)."""
-    head = f"Started as Hearting unit route {receipt['route_id']} ({UNIT}, {depth}, no record)."
-    if receipt.get("state") == "completed":
-        summary = str(receipt.get("summary") or "").strip()
-        if summary:
-            return f"{head} It has already finished; its answer:\n{summary}\nDo not call it again."
-        return (f"{head} It has already finished; read its result once with: {receipt.get('resume_command', '')} "
+    waiting = receipt.get("state") == "waiting-capacity"
+    head = (f"{'Queued' if waiting else 'Started'} as Hearting unit route {receipt['route_id']} ({UNIT}, {depth}, "
+            "no record)." + (" It waits for a free worker and does not run natively." if waiting else ""))
+    if receipt.get("state") == "completed" and str(receipt.get("summary") or "").strip():
+        return f"{head} It has already finished; its answer:\n{str(receipt['summary']).strip()}\nDo not call it again."
+    if receipt.get("state") == "completed" or receipt.get("result"):
+        return (f"{head} It has already ended; read its result once with: {receipt.get('resume_command', '')} "
                 "Do not call it again.")
     if receipt.get("parent_next") == "end-turn":
         return (f"{head} Its answer, or what stopped it, comes back to this session as a completion notice. "
@@ -622,8 +408,8 @@ def reason_for(receipt: dict, depth: str) -> str:
             "Do not call it again.")
 
 
-def redirect(harness: str, payload: dict, *, seconds: float = BUDGET_SECONDS) -> str | None:
-    """The refusal text when the route started, else None (the native call goes through)."""
+def redirect(harness: str, payload: dict) -> str | None:
+    """The refusal text when Hearting took the call, else None (the native call goes through)."""
     if harness not in _TOOLS or not isinstance(payload, dict):
         return None
     try:
@@ -637,9 +423,12 @@ def redirect(harness: str, payload: dict, *, seconds: float = BUDGET_SECONDS) ->
             return None
         require_shipped_definition(harness, call["name"] or DEFAULT_AGENT[harness], cwd)
         require_sole_decision(harness, str(payload.get("tool_name") or ""), cwd)
-        receipt = start(harness, call, depth, cwd, seconds=seconds)
+    except BaseException:  # noqa: BLE001 -- any doubt or failure before the start lets the native call run
+        return None
+    try:
+        receipt = start(harness, call, depth, cwd)
         return None if receipt is None else reason_for(receipt, depth)
-    except BaseException:  # noqa: BLE001 -- any doubt, failure or interruption lets the native call run
+    except BaseException:  # noqa: BLE001 -- a start that cannot be read registered nothing this hook knows of
         return None
 
 
@@ -649,13 +438,11 @@ def main(argv=None, stdin=None) -> int:
         harness = next((flag[2:] for flag in argv if flag in ("--claude", "--codex")), "")
         if harness not in _TOOLS:
             return 0
-        payload = json.loads((stdin or sys.stdin).read() or "{}")
-        reason = redirect(harness, payload)
-        if reason is None:
-            return 0
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                                 "permissionDecisionReason": reason}},
-                         ensure_ascii=False, separators=(",", ":")))
+        reason = redirect(harness, json.loads((stdin or sys.stdin).read() or "{}"))
+        if reason is not None:
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                     "permissionDecisionReason": reason}},
+                             ensure_ascii=False, separators=(",", ":")))
         return 0
     except BaseException:  # noqa: BLE001 -- the hook never fails the call: the native subagent runs
         return 0
