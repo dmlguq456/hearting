@@ -102,8 +102,9 @@ class RegistryObservation:
 
     The governed PID stays a per-interval ``/proc`` check. The watched row is
     re-read when the ``watched`` file's generation changes (jobs.log unless the
-    caller names a narrower file); the parent-close judgment re-runs when that
-    row changes or the close-intent backstop elapses.
+    caller names its route's ledger journal); the parent-close judgment re-runs
+    when that row changes, when a watched journal changes (a close records its
+    intent there before it marks any row), or when the close-intent backstop elapses.
     """
 
     def __init__(self, jobs: Path, attempt_id: str, read_attempt, *,
@@ -130,13 +131,14 @@ class RegistryObservation:
         except OSError:
             generation = None
         row_changed = False
+        intent_changed = self.watched != self.jobs and generation != self.generation
         if force or generation is None or generation != self.generation:
             self.generation = generation
             status, metadata = self.read_attempt(self.jobs, self.attempt_id)
             row_changed = (status, metadata) != (self.status, self.metadata)
             self.status, self.metadata = status, metadata
         now = time.monotonic()
-        if (force or row_changed or self.judged_at is None
+        if (force or row_changed or intent_changed or self.judged_at is None
                 or now - self.judged_at >= self.backstop):
             self.close_requested = row_requested(self.metadata, self.jobs)
             self.judged_at = now
@@ -585,9 +587,10 @@ def request(route, path, *, jobs=None, stop_resources=False, summary=None, commi
                             and meta.get("dispatch_depth") == "1"
                             and (meta.get("route_id"), meta.get("route_hash")) == identity
                             and Path(fields[3]).resolve() == worktree):
-                        # As in `stop_route_legs`: only a leg with work left needs its parent.
-                        if fields[1] in OPEN or _plan(jobs, rows, aid)[0]:
-                            _require_stopper(rows, aid, jobs)
+                        # A full stop also ends what a stopped leg left (its summary owner,
+                        # linked resources), so every leg needs its parent. Without the flag,
+                        # `stop_route_legs` closes stopped legs from any session.
+                        _require_stopper(rows, aid, jobs)
                         roots.append(aid)
             if not roots:
                 return None

@@ -80,7 +80,8 @@ from dispatch_attempt_policy import (
     DEFERRED_COMPLETION_NOTE, DEFERRED_COMPLETION_SOURCE, terminal_conflict_pending,
 )
 from dispatch_receipt_identity import (
-    CANONICAL_RECEIPT_KEYS, CANONICAL_CHILD_KEYS, canonical_receipt, receipt_digest, unseal_receipt,
+    CANONICAL_RECEIPT_KEYS, CANONICAL_CHILD_KEYS, canonical_receipt, receipt_digest, settled_parent_close,
+    unseal_receipt,
 )
 from dispatch_contract import (  # noqa: E402
     AUTOMATIC_RECEIPTLESS_CLASSIFIER,
@@ -1457,8 +1458,7 @@ def unit_leg_reason_line(metadata) -> str:
 
 
 def completion_followup_text(receipt: dict, *, jobs: str) -> str:
-    if receipt.get("children") and all(child.get("reason") == "cancelled-by-parent"
-            and child.get("required_action") == "advance-completed" for child in receipt["children"]):
+    if settled_parent_close(receipt.get("children")):
         return ("Parent-requested close has settled. No harvest, next-stage launch, "
                 "route restart, or manual finalization is required.")
     # A submitted work request already owns preparation and continuation. Give

@@ -1882,11 +1882,78 @@ class ManagedGatewayTest(unittest.TestCase):
             other["receipt"]["children"][0]["readiness"] = "pending"
             self.assertEqual(observer.deliver_receipt(args, other)["status"], "rejected")
             self.assertEqual(seen, ["success"])
+            # A close that has not ended has no older form either (RV-PR1881 2nd 🟡).
+            seen.clear()
+            running = self.parent_close_request("batch-old-gateway-running")
+            running["receipt"]["children"][0]["status"] = "running"
+            self.assertEqual(observer.deliver_receipt(args, running)["status"], "rejected")
+            self.assertEqual(seen, ["cancelled"])
         # The current gateway takes `cancelled` as it is, in one request.
         seen.clear()
         with mock.patch.object(self.gateway, "_validate_delivery", side_effect=observe):
             result = observer.deliver_receipt(args, self.parent_close_request("batch-new-gateway"))
         self.assertEqual((result["status"], seen), ("accepted", ["cancelled"]))
+
+    def test_a_close_after_a_committed_pass_is_told_once_as_the_close_on_both_releases(self) -> None:
+        # RV-PR1881 2nd 🔴1: one frame passed, the parent closed the route before the other ended.
+        from types import SimpleNamespace
+        spec = importlib.util.spec_from_file_location(
+            "codex_managed_completion_mixed_close", ROOT / "utilities" / "codex-managed-completion.py")
+        observer = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = observer
+        spec.loader.exec_module(observer)
+        args = SimpleNamespace(control_socket=self.control, delivery_retry_window=0,
+                               delivery_retry_interval=0.05)
+
+        def mixed(batch):
+            request = self.parent_close_request(batch)
+            passed = dict(receipt_request(batch)["receipt"]["children"][0], attempt_id=f"att-{batch}-passed")
+            request["receipt"]["children"].insert(0, passed)
+            return request
+
+        def sent():
+            # The second completion steers the turn the first one started.
+            return [value["params"]["additionalContext"]["hearting-completion"]["value"]
+                    for value in self.server.messages if value.get("method") in {"turn/start", "turn/steer"}]
+
+        def before_cancelled(children):
+            classes = {child["delivery_classification"] for child in children}
+            return "success" if classes == {"success"} else "attention"
+
+        followup = GATEWAY.completion_followup_text
+
+        def before_mixed_close(receipt, *, jobs):
+            # Releases before `cancelled` settled a close only when every child was one.
+            if all(child.get("reason") == "cancelled-by-parent" for child in receipt["children"]):
+                return followup(receipt, jobs=jobs)
+            return "Completion bookkeeping for the listed attempts:\n(no harvest command; advance the route)"
+
+        seen = []
+        validate = self.gateway._validate_delivery
+        def observe(request):
+            seen.append([child["delivery_classification"] for child in request["receipt"]["children"]])
+            return validate(request)
+        with mock.patch.object(self.gateway, "_validate_delivery", side_effect=observe):
+            result = observer.deliver_receipt(args, mixed("batch-mixed-new"))
+            self.assertEqual((result["status"], seen), ("accepted", [["success", "cancelled"]]), result)
+            (context,) = sent()
+            receipt = json.loads(context.split("\n")[1])
+            self.assertEqual([c["delivery_classification"] for c in receipt["children"]], ["success", "cancelled"])
+            self.assertEqual(context.count("Parent-requested close has settled"), 1)
+            self.assertNotIn("advance the route", context)
+            seen.clear()
+            with mock.patch.object(GATEWAY, "TERMINAL_CLASSIFICATIONS", frozenset({"success", "attention"})), \
+                 mock.patch.object(GATEWAY, "completion_classification", side_effect=before_cancelled), \
+                 mock.patch.object(GATEWAY, "completion_followup_text", side_effect=before_mixed_close):
+                result = observer.deliver_receipt(args, mixed("batch-mixed-old"))
+        self.assertEqual(result["status"], "accepted", result)
+        self.assertEqual(seen, [["success", "cancelled"], ["success"]])
+        context = sent()[1]
+        receipt = json.loads(context.split("\n")[1])
+        self.assertEqual([(c["attempt_id"], c["delivery_classification"], c["reason"]) for c in receipt["children"]],
+                         [("att-batch-mixed-old", "success", "cancelled-by-parent")])
+        self.assertEqual(context.count("Parent-requested close has settled"), 1)
+        self.assertNotIn("advance the route", context)
 
     def test_foreign_or_incomplete_receipt_never_reaches_upstream(self) -> None:
         before = self.server.counts()

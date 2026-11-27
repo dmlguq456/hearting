@@ -5,8 +5,6 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
-import fcntl
-import os
 from pathlib import Path
 import sys
 import time
@@ -182,39 +180,6 @@ def residue_terminal_basis(fields: list[str], metadata: dict[str, str]) -> str:
     return ""
 
 
-class RouteCloseLease:
-    """This watcher drives its route's pending close; ``fd`` holds the route journal, if shared."""
-
-    def __init__(self, fd: int | None = None) -> None:
-        self.fd = fd
-
-    def release(self) -> None:
-        if self.fd is not None:
-            os.close(self.fd)
-            self.fd = None
-
-
-def drive_route_close(journal: Path | None) -> RouteCloseLease | None:
-    """The lease of the one leg watcher that drives a route's pending close, or None.
-
-    One pass closes the whole route, so the leg watchers of one route share it
-    through a non-blocking ``flock`` on the route's append-only ledger journal,
-    which nothing else locks; process death releases it. Without a journal to
-    share, this watcher drives alone."""
-    if journal is None:
-        return RouteCloseLease()
-    try:
-        fd = os.open(journal, os.O_RDONLY | os.O_CLOEXEC)
-    except OSError:
-        return RouteCloseLease()
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        os.close(fd)
-        return None
-    return RouteCloseLease(fd)
-
-
 def watch(args: argparse.Namespace) -> int:
     initial = attempt_record(args.jobs, args.attempt_id)
     metadata = initial[1] if initial is not None else {}
@@ -240,7 +205,7 @@ def watch(args: argparse.Namespace) -> int:
     # depth-1 frame or unit leg has this watcher in its launch namespace.
     observes_close = metadata.get("dispatch_depth") == "1" and (
         metadata.get("worker_type") == "frame" or metadata.get("capability") == "unit")
-    observer = journal = lease = None
+    observer = None
     if observes_close:
         # Its route's ledger records a parent close before any row is marked, and it
         # changes far less often than a busy registry, which is re-read only then.
@@ -251,25 +216,22 @@ def watch(args: argparse.Namespace) -> int:
     closing = False
     recheck = args.parent_recheck_interval
     while True:
+        ended = process_start_ticks(args.pid) != args.pid_start
         if observer is not None:
-            _status, metadata, closing = observer.refresh(force=closing)
+            # An ended worker is judged once more: a close recorded as it ended is still this watcher's.
+            _status, metadata, closing = observer.refresh(force=closing or ended)
             if closing:
-                # One leg's watcher drives the route's close; another takes over if it ends first.
-                lease = lease or drive_route_close(journal)
-                if lease is not None:
-                    outcome = recover_attempt(args.jobs, metadata)
-                    if outcome and outcome.get("state") == "cancelled":
-                        break
+                outcome = recover_attempt(args.jobs, metadata)
+                if outcome and outcome.get("state") == "cancelled":
+                    break
                 # A close that stays pending is looked at again less and less often,
                 # at least once per close-intent backstop.
                 time.sleep(recheck)
                 recheck = min(recheck * 2, max(args.parent_recheck_interval, CLOSE_INTENT_BACKSTOP_SECONDS))
                 continue
-        if process_start_ticks(args.pid) != args.pid_start:
+        if ended:
             break
         time.sleep(args.interval)
-    if lease is not None:
-        lease.release()
 
     # The worker has ended: a unit worker it started that still runs would report to no one.
     stop_called_workers(args.jobs, args.attempt_id)

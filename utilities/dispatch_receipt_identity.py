@@ -55,24 +55,37 @@ def completion_classification(children) -> str:
     return "attention"
 
 
-def legacy_parent_close_receipt(receipt: dict) -> dict | None:
-    """The same parent-close receipt as releases before `cancelled` wrote it, else None.
+def parent_close_child(child: dict) -> bool:
+    """A child its parent's close ended, as `cancelled` or, before that existed, `success`."""
+    return child.get("reason") == "cancelled-by-parent" and child.get("required_action") == "advance-completed"
 
-    Those releases carried a settled parent close as `success` with reason
-    `cancelled-by-parent`, and their receivers render that as settled. Only a
-    receipt whose every non-success child is such a close has this form."""
+
+def settled_parent_close(children) -> bool:
+    """True when a receipt tells of its parent's settled close: at least one child the close
+    ended, every other one a success committed before it. The route is closed, so none advances.
+
+    The same judgment as `completion_classification`'s `cancelled`, also for the older form."""
+    return bool(children) and any(parent_close_child(child) for child in children) and all(
+        parent_close_child(child) or (child.get("delivery_classification") == "success"
+                                      and child.get("required_action") == "advance-completed")
+        for child in children)
+
+
+def legacy_parent_close_receipt(receipt: dict) -> dict | None:
+    """The settled parent close of ``receipt`` as releases before `cancelled` wrote it, else None.
+
+    Those releases carried such a close as `success` with reason `cancelled-by-parent`, and
+    render it as settled only when every child is one. A success committed before the close
+    stays out of that form, as it is: the older receiver is told the close alone, once.
+    Only an ended receipt carrying `cancelled` has this form."""
     children = receipt.get("children")
     if (not isinstance(children, list) or not children
-            or not all(isinstance(child, dict) for child in children)):
+            or not all(isinstance(child, dict) and child.get("status") == "done" for child in children)
+            or not any(child.get("delivery_classification") == "cancelled" for child in children)
+            or not settled_parent_close(children)):
         return None
-    cancelled = [child.get("delivery_classification") != "success" for child in children]
-    if not any(cancelled) or any(
-            (child.get("delivery_classification"), child.get("reason"), child.get("required_action"))
-            != ("cancelled", "cancelled-by-parent", "advance-completed")
-            for child, is_cancelled in zip(children, cancelled) if is_cancelled):
-        return None
-    legacy = [dict(child, delivery_classification="success") for child in children]
-    return dict(receipt, children=legacy, delivery_classification="success")
+    closed = [dict(child, delivery_classification="success") for child in children if parent_close_child(child)]
+    return dict(receipt, children=closed, delivery_classification="success")
 
 
 def unseal_receipt(encoded: str) -> dict:

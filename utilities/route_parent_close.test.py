@@ -7,6 +7,7 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
 from types import SimpleNamespace
 import base64
 import contextlib
+import fcntl
 import io
 import hashlib
 import time
@@ -2658,53 +2659,117 @@ class ParentCloseTest(unittest.TestCase):
         self.assertEqual(receipt["receipt"]["delivery_classification"], "cancelled")
         self.assert_cancelled_without_replacement(set(value["attempts"]))
 
-    def test_full_stop_of_legs_another_session_already_stopped_needs_no_parent(self):
-        # RV-PR1881 🟡6: a leg the person already stopped holds nothing up, as without the flag.
-        def cli_close(fixture, env=None):
-            return subprocess.run([sys.executable, str(HERE / "capability-route.py"), "close",
-                "--route", fixture.route["route_id"], "--summary", "fixture only", "--stop-resources"],
-                cwd=fixture.base, capture_output=True, text=True, timeout=60, env={**os.environ, **(env or {})})
-        for case in ("all-stopped", "one-running"):
-            with self.subTest(case=case):
-                fixture = ParentCloseTest()
-                fixture.setUp()
-                try:
-                    stopped = fixture.process("att-frame-alt")
-                    fixture.frame_leg("att-frame-alt", stopped, node="frame-alternative", parent_sid="another-session")
-                    with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "another-session"}):
-                        self.assertEqual(CLOSE.stop_attempt(fixture.aid("att-frame-alt"), jobs=fixture.jobs)["state"],
-                                         "cancelled")
-                    stopped.wait(timeout=5)
-                    running = None
-                    if case == "one-running":
-                        running = fixture.process("att-frame")
-                        fixture.frame_leg("att-frame", running)
-                    session = {"CODEX_THREAD_ID": "a-third-session"} if case == "all-stopped" else None
-                    result = cli_close(fixture, session)
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(json.loads(result.stdout)["state"], "cancelled", result.stdout)
-                    self.assertTrue(fixture.path.with_suffix(".outcome.json").exists())
-                    fixture.assert_user_stopped("att-frame-alt")
-                    if running is not None:
-                        self.assertIsNotNone(running.wait(timeout=5))
-                        fields, meta = CLOSE._rows(fixture.jobs)[fixture.aid("att-frame")]
-                        self.assertEqual((fields[1], meta["note"]), ("done", CLOSE.NOTE))
-                    # A leg that still runs keeps needing its parent.
-                    if case == "one-running":
-                        continue
-                    other = ParentCloseTest()
-                    other.setUp()
-                    try:
-                        live = other.process("att-frame")
-                        other.frame_leg("att-frame", live, parent_sid="another-session")
-                        refused = cli_close(other)
-                        self.assertNotEqual(refused.returncode, 0, refused.stdout)
-                        self.assertIn("parent-close-owner-not-owned", refused.stderr)
-                        self.assertIsNone(live.poll())
-                    finally:
-                        other.doCleanups()
-                finally:
-                    fixture.doCleanups()
+    def test_a_full_stop_of_a_stopped_leg_still_needs_its_parent(self):
+        # RV-PR1881 2nd 🔴4: the parent's stop of a frame leg leaves its summary owner and a linked
+        # resource. A full stop ends those too, so only that leg's parent asks for it.
+        workers = list(self.full_stop_fixture("frame", "claude", "claude-parent-runtime"))
+        resource = self.process("att-frame")
+        self.resource(resource, aid="att-frame")
+        for meta, governor, model, _summary in workers:
+            self.assertEqual(CLOSE.stop_attempt(meta["attempt_id"], jobs=self.jobs)["state"], "cancelled")
+            self.assertIsNotNone(governor.wait(timeout=5))
+            self.assertIsNotNone(model.wait(timeout=5))
+            self.assertEqual(CLOSE._rows(self.jobs)[meta["attempt_id"]][1]["note"], CLOSE.STOP_NOTE)
+        summaries = [summary for *_rest, summary in workers if DC.process_observation(summary)[2] not in {"", "Z"}]
+        refused = subprocess.run([sys.executable, str(HERE / "capability-route.py"), "close",
+            "--route", self.route["route_id"], "--summary", "fixture only", "--stop-resources"],
+            cwd=self.base, capture_output=True, text=True, timeout=60,
+            env={**os.environ, "CODEX_THREAD_ID": "a-third-session"})
+        self.assertNotEqual(refused.returncode, 0, refused.stdout)
+        self.assertIn("parent-close-owner-not-owned", refused.stderr)
+        self.assertIsNone(resource.poll())
+        for summary in summaries:
+            self.assertNotIn(DC.process_observation(summary)[2], {"", "Z"})
+        self.assertFalse(self.path.with_suffix(".outcome.json").exists())
+        result = self.cli_full_stop()
+        self.assertEqual(json.loads(result.stdout)["state"], "cancelled", result.stdout + result.stderr)
+        self.assertIsNotNone(resource.wait(timeout=5))
+        for *_rest, summary in workers:
+            self.assertIn(DC.process_observation(summary)[2], {"", "Z"})
+
+    def watch_leg(self, meta, *, waits=(), at_end_check=None, limit=40):
+        """Run one leg's launch watcher in this process; ``waits`` run in its first waits, in order,
+        and ``at_end_check`` just before its second look at the worker. It waits ``limit`` times at most."""
+        watcher = load("parent_close_leg_watch_fixture", "dispatch-reap-watch.py")
+        waits, checks, ticks, waited = list(waits), [], watcher.process_start_ticks, []
+
+        def wait(seconds):
+            waited.append(seconds)
+            if len(waited) > limit:
+                raise AssertionError("the leg watcher kept waiting instead of finishing the close")
+            time.sleep(min(seconds, 0.05))
+            if waits:
+                waits.pop(0)()
+
+        def look(pid):
+            checks.append(pid)
+            if at_end_check is not None and len(checks) == 2:
+                at_end_check()
+            return ticks(pid)
+        args = SimpleNamespace(jobs=self.jobs.resolve(), attempt_id=meta["attempt_id"], pid=int(meta["pid"]),
+            pid_start=meta["pid_start"], pgid=int(meta["pgid"]), interval=0.2, parent_recheck_interval=1.0,
+            drain_interval_max=2.0, residue_grace=30.0)
+        with mock.patch.object(watcher, "time", SimpleNamespace(sleep=wait, monotonic=time.monotonic)), \
+             mock.patch.object(watcher, "process_start_ticks", side_effect=look):
+            return watcher.watch(args)
+
+    def record_close_then_stop(self):
+        """A full stop that records its intent and stops before it marks any row."""
+        with mock.patch.object(DC, "_atomic_registry_replace", side_effect=OSError("close command stopped")), \
+             self.assertRaises(OSError):
+            CLOSE.request(self.route, self.path, jobs=self.jobs, stop_resources=True)
+        self.assertIsNotNone(CLOSE.intent(self.route, self.jobs))
+
+    def assert_leg_watcher_closed(self, meta, summary):
+        row = JOIN.exact_attempt_row(self.jobs, meta["attempt_id"])
+        self.assertEqual((row.status, row.metadata.get("note")), ("done", CLOSE.NOTE))
+        self.assertEqual(json.loads(self.path.with_suffix(".outcome.json").read_text())["state"], "cancelled")
+        self.assertIn(DC.process_observation(summary)[2], {"", "Z"})
+        self.assertNotIn(self.route["route_id"], self.full_stop_status())
+
+    def test_a_leg_watcher_closes_once_the_ledger_shows_the_close(self):
+        # RV-PR1881 2nd 🔴2: the watcher sees the ledger change while no row is marked yet, and the
+        # close command stops there. The watcher finishes the close at once, its worker still running.
+        (meta, governor, model, summary), = self.full_stop_fixture("unit", "claude", "claude-parent-runtime")
+
+        def worker_ends():
+            for process in (governor, model):
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+        self.assertEqual(self.watch_leg(meta, waits=(self.record_close_then_stop, worker_ends)), 0)
+        self.assertEqual(model.wait(timeout=5), -signal.SIGTERM, "the worker ended before the close reached it")
+        self.assert_leg_watcher_closed(meta, summary)
+
+    def test_a_lock_failure_on_the_route_ledger_never_stops_a_leg_watcher(self):
+        # RV-PR1881 2nd 🔴3: no lock on the route's journal can be taken (ENOLCK). The leg's
+        # watcher still finishes the close under the close's own locks; it waits on no one to lead.
+        import errno
+        (meta, _governor, model, summary), = self.full_stop_fixture("unit", "opencode", "opencode-turn")
+        flock = fcntl.flock
+
+        def no_lock_on_the_journal(fd, operation):
+            target = Path(os.readlink(f"/proc/self/fd/{fd if isinstance(fd, int) else fd.fileno()}"))
+            if (target.name, target.parent.name) == ("journal.jsonl", self.route["route_id"]):
+                raise OSError(errno.ENOLCK, "No locks available")
+            return flock(fd, operation)
+        with mock.patch.object(fcntl, "flock", side_effect=no_lock_on_the_journal):
+            self.assertEqual(self.watch_leg(meta, waits=(self.record_close_then_stop,), limit=15), 0)
+        self.assertEqual(model.wait(timeout=5), -signal.SIGTERM)
+        self.assert_leg_watcher_closed(meta, summary)
+
+    def test_a_leg_watcher_looks_once_more_when_its_worker_ends(self):
+        # RV-PR1881 2nd 🔴2: the close is recorded, and the worker ends on its own, right after the
+        # watcher last looked. The watcher still finishes that close before it moves on.
+        (meta, governor, model, summary), = self.full_stop_fixture("unit", "codex", "codex-native-queue")
+
+        def close_then_worker_ends():
+            self.record_close_then_stop()
+            for process in (governor, model):
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+        self.assertEqual(self.watch_leg(meta, at_end_check=close_then_worker_ends), 0)
+        self.assert_leg_watcher_closed(meta, summary)
 
     def cli_full_stop(self):
         return subprocess.run([sys.executable, str(HERE / "capability-route.py"), "close",
@@ -2811,6 +2876,21 @@ class ParentCloseTest(unittest.TestCase):
         settled = json.loads(self.cli_full_stop().stdout)
         self.assertEqual(settled["state"], "cancelled", settled)
         self.assertNotIn("next_step", settled)
+
+    def test_a_pending_close_without_the_flag_names_no_way_on(self):
+        # RV-PR1881 2nd 🔴5: without --stop-resources the answer stays as it was; its
+        # resume_command would relaunch stopped legs.
+        owner = self.process("att-owner")
+        elsewhere = "pid:[" + str(int(os.readlink("/proc/self/ns/pid")[5:-1]) + 7) + "]"
+        self.row("att-owner", process=owner, pid_observer_ns=elsewhere, pid_ns=elsewhere)
+        pending = subprocess.run([sys.executable, str(HERE / "capability-route.py"), "close",
+            "--route", self.route["route_id"], "--summary", "fixture only"],
+            cwd=self.base, capture_output=True, text=True, timeout=60)
+        self.assertEqual(pending.returncode, 0, pending.stderr)
+        answer = json.loads(pending.stdout)
+        self.assertEqual((answer["state"], answer["reason"]), ("termination-pending", CLOSE.NOTE), answer)
+        self.assertNotIn("next_step", answer)
+        self.assertIsNone(owner.poll())
 
     def assert_user_stopped(self, name):
         fields, meta = CLOSE._rows(self.jobs)[self.aid(name)]
