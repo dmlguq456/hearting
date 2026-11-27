@@ -162,18 +162,20 @@ def _open_questions(harness: str, session_id: str) -> list:
 
 
 def _holds(signal: dict, sequence: int | None) -> bool:
-    """Whether this open question still stands for the native call: the person can answer it, or
-    the answer given in the turn that asked it is on its way (it comes as the next prompt).
-
-    One whose board record was never written (its registration stopped after the source) stands for
-    nothing: the same registration writes it again, and when that fails too the native question shows."""
+    """Whether the board can take this question's answer now, as the board itself judges it
+    (`read_selected_request`: open and answerable there), or the answer given in the turn that asked
+    it is being delivered (`submitted`). Anything not confirmed (no board record yet, a session
+    lineage or an answer record that cannot be read, a delivery unconfirmed, no turn known) is no."""
     import human_wait_state as HWS
     entry, known = HWS._selected_lookup(HWS._message_envelope(signal))
-    if known and entry is None:
-        return False
-    if known and not (entry.get("action_id") and not entry.get("source_terminal")):
-        return True
-    return sequence is None or int(signal.get("sequence") or 0) >= sequence
+    if not known or entry is None:
+        return False  # not on the board yet: the same registration writes it again
+    board = HWS.read_selected_request({"id": signal["id"], "harness": signal["harness"],
+                                       "session_id": signal["session_id"]})
+    if board.get("state") == "open":
+        return bool(board.get("actions"))
+    return (board.get("state") == "submitted" and sequence is not None
+            and int(signal.get("sequence") or 0) >= sequence)
 
 
 def same_waiting(harness: str, session_id: str, rows: list, *, sequence: int | None = None) -> dict | None:

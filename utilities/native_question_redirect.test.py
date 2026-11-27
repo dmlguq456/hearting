@@ -270,8 +270,11 @@ class PassThroughTest(Base):
             (dict(text=redirect.build(redirect._normalized("claude", multi)[1])["text"]), multi, True),
             (dict(text=redirect.build(redirect._normalized("claude", several)[1])["text"]), several, True),
         ]
+        import session_tidy as tidy
         for number, (asked, payload, held) in enumerate(cases):
             with self.subTest(case=number):
+                # Each case its own registration: an identical one in the same turn would be the same id.
+                tidy.bump_prompt_seq(self.f.seat("claude", SID), "claude", SID, time.time())
                 earlier, _ = self.f.ask("claude", SID, **asked)
                 reason = redirect.redirect("claude", payload)
                 if held:
@@ -395,6 +398,27 @@ class PassThroughTest(Base):
         tidy.bump_prompt_seq(self.f.seat("claude", SID), "claude", SID, time.time())
         self.assertIsNone(redirect.redirect("claude", claude_payload()))     # the native question shows
         self.assertEqual(state._read(state._signal_path(earlier))["id"], earlier["id"])  # nothing replaced
+
+    def test_a_same_question_the_board_cannot_take_an_answer_for_lets_the_native_window_open(self):
+        """Only "the same question, answerable on the board now" holds the window back (review 2 of #1889)."""
+        earlier, envelope = self.f.ask("claude", SID, text="Start now?", choices=["Proceed", "Edit", "Stop"],
+                                       recommended=0)
+        with mock.patch.object(state, "_message_incarnation_current", return_value=False):   # lineage unreadable
+            self.assertFalse(state.read_selected_request(
+                {"id": earlier["id"], "harness": "claude", "session_id": SID}).get("actions"))
+            self.assertIsNone(redirect.redirect("claude", claude_payload()))
+            with mock.patch.object(redirect, "same_waiting", wraps=redirect.same_waiting) as decide, \
+                 mock.patch.object(state, "register_message", side_effect=ValueError("question-open-elsewhere")):
+                self.assertIsNone(redirect.redirect("claude", claude_payload()))   # the re-read after the race too
+            self.assertEqual(decide.call_count, 2)
+        # An answer whose delivery is unconfirmed is no delivery under way: the window opens.
+        import session_notice
+        with mock.patch.object(session_notice, "notify", side_effect=OSError("carrier unavailable")):
+            result = state.submit_selected_response(envelope, {"answers": {"message-response": ["Proceed"]}},
+                                                    action_id="board-unconfirmed")
+        self.assertEqual(result["state"], "unknown", result)
+        self.assertIsNone(redirect.redirect("claude", claude_payload()))
+        self.assertEqual([item["id"] for item in state.read_signals() if item["harness"] == "claude"], [earlier["id"]])
 
     def test_the_same_question_registered_meanwhile_is_the_one_the_refusal_names(self):
         earlier, _ = self.f.ask("claude", SID, text="Start now?", choices=["Proceed", "Edit", "Stop"])
