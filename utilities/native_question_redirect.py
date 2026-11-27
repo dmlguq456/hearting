@@ -153,10 +153,11 @@ def _body(text) -> str:
 
 
 def _open_questions(harness: str, session_id: str) -> list:
-    """This session's open Hearting (message) questions, newest first, read without a seat or a lock."""
+    """This session's signals, newest first, read without a seat or a lock (`same_waiting` keeps the open
+    questions: only a message question has a lifecycle; an answer marker has none)."""
     import human_wait_state as HWS
-    rows = [signal for signal in HWS.read_signals() if signal.get("mode") == "message"
-            and signal.get("harness") == harness and signal.get("session_id") == session_id]
+    rows = [signal for signal in HWS.read_signals()
+            if signal.get("harness") == harness and signal.get("session_id") == session_id]
     return rows[::-1]
 
 
@@ -187,8 +188,8 @@ def same_waiting(harness: str, session_id: str, rows: list, *, sequence: int | N
             continue
         with tidy.seat_lock(found["seat_key"]):
             current = HWS._read(HWS._signal_path(found))
-            if (current and current.get("id") == found["id"] and current.get("mode") == "message"
-                    and current.get("lifecycle") == "open" and _holds(current, sequence)):
+            if (current and current.get("id") == found["id"] and current.get("lifecycle") == "open"
+                    and _holds(current, sequence)):
                 return current
     return None
 

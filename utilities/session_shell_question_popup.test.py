@@ -464,6 +464,14 @@ for(const [first,rest,why] of [[['\x1b[200~'],['pasted words',' and more','\x1b[
  for(const bytes of rest)take(b,bytes,why+': the rest is the popup’s');
  assert.equal(b.focused,false,why+': then it lets go');
 }
+// Meanwhile the question came back (its delivery unconfirmed) or another one arrived to be answered: it stays.
+for(const [later,why] of [[[written('A','unknown')],'the question came back'],[[written('B')],'another one to answer']]){
+ const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
+ b.update([written('A')],'',{});b.enter();take(b,'\x1b[200~');
+ b.update([{...written('A','submitted')}],'',{});
+ b.update(later,'',{});take(b,'words\x1b[201~');
+ assert.equal(b.focused,true,why);
+}
 // What the paste had already put in the answer keeps the popup, as before.
 const kept=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
 kept.update([written('A')],'',{});kept.enter();take(kept,'\x1b[200~half');

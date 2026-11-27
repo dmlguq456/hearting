@@ -346,6 +346,16 @@ class PassThroughTest(Base):
             self.assertIsNone(redirect.redirect("claude", claude_payload()))   # a different question: shown
         self.assertEqual(state._read(state._signal_path(later))["id"], later["id"])
 
+    def test_a_question_answered_just_after_it_was_read_is_never_the_one_named(self):
+        earlier, envelope = self.f.ask("claude", SID, text="Start now?", choices=["Proceed", "Edit", "Stop"])
+        read = state._read(state._signal_path(earlier))
+        source = dict(read, lifecycle="answered")                           # answered meanwhile
+        state._write_signal_source(source)
+        with mock.patch.object(redirect, "_open_questions", return_value=[read]):
+            reason = redirect.redirect("claude", claude_payload())
+        self.assertTrue(reason.startswith("Registered as Hearting question"), reason)
+        self.assertNotIn(earlier["id"], reason)
+
     def test_the_same_open_question_refuses_the_native_call_even_when_registration_cannot_run(self):
         """A seat or a state that cannot be written never puts a native window beside the same open question."""
         import session_tidy as tidy

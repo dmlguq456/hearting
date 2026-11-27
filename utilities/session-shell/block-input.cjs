@@ -218,9 +218,9 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
   function settle(){
     const row=letGoAfter;if(!row||receiving())return false;
     letGoAfter=null;
-    const listed=flat(),local=state(row.item);
-    if(!focused||local.drafts[row.question.id]||Object.keys(local.answers).length||Object.keys(local.cursor).length
-       ||listed.some(r=>key(r.item)===key(row.item)&&r.question.id===row.question.id)
+    // It came back meanwhile, or another one now stands to be answered here: the popup stays, as before.
+    const listed=flat();
+    if(!focused||listed.some(r=>key(r.item)===key(row.item)&&r.question.id===row.question.id)
        ||listed.some(r=>r.item.answerable===true&&!state(r.item).state))return false;
     leave();return true;
   }
