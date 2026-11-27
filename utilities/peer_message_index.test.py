@@ -32,11 +32,12 @@ import re
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
+
+from tools import fixture_processes
 
 WORKTREE = Path(__file__).resolve().parent.parent
 _TOOLS = str(WORKTREE / "tools")
@@ -139,7 +140,7 @@ class IndexTestCase(unittest.TestCase):
     other = {"harness": "claude", "session_id": "index-other"}
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp = fixture_processes.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.tmp_root = Path(self._tmp.name)
         state = self.tmp_root / "state"

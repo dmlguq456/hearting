@@ -4821,6 +4821,22 @@ def cmd_status(args):
     payload["owner_completion_delivery"] = (
         owner_completion_delivery(route, route_file, registry_path, rows=registry_rows)
         if registry_rows is not None else None)
+    from dispatch_attempt_policy import provider_failure_kind
+    provider_failures = []
+    identity = (route["route_id"], route.get("route_hash"))
+    for row in registry_rows or ():
+        if row["status"] != "done":
+            continue
+        meta = row["meta"]
+        if identity not in ((meta.get("route_id"), meta.get("route_hash")),
+                            (meta.get("owner_route_id"), meta.get("owner_route_hash"))):
+            continue
+        kind = provider_failure_kind(meta.get("provider_failure_kind"))
+        if kind:
+            provider_failures.append({"attempt_id": meta.get("attempt_id"), "node": meta.get("route_node"),
+                                      "harness": meta.get("harness"), "provider_failure_kind": kind})
+    if provider_failures:
+        payload["provider_failures"] = provider_failures
     if args.json:
         print(json.dumps(payload, sort_keys=True, indent=2))
     else:

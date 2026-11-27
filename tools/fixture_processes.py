@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -166,6 +168,33 @@ def reap(marker: str, *, fifo: str | None = None, timeout: float = 10.0) -> list
                 pass
             os.close(fd)
     return sorted(killed)
+
+
+def remove_temporary_directory(directory: str | os.PathLike[str]) -> None:
+    """Settle fixture writers before removing the private root they use."""
+    root = os.fspath(directory)
+    if not os.path.isabs(root) or os.path.normpath(root) == os.path.sep:
+        raise ValueError("fixture cleanup requires an absolute private directory path")
+    reap(root)
+    if os.path.lexists(root):
+        shutil.rmtree(root)
+
+
+class TemporaryDirectory:
+    """A private fixture directory that outlives its detached writers."""
+
+    def __init__(self, *, prefix: str | None = None, dir: str | os.PathLike[str] | None = None):
+        self.name = os.path.abspath(tempfile.mkdtemp(prefix=prefix, dir=dir))
+
+    def __enter__(self) -> str:
+        return self.name
+
+    def __exit__(self, *_exc) -> None:
+        self.cleanup()
+
+    def cleanup(self) -> None:
+        # No finalizer: a failure to settle the writers must leave the root intact.
+        remove_temporary_directory(self.name)
 
 
 class NativeSession:

@@ -18,14 +18,14 @@ spec.loader.exec_module(supervisor)
 
 
 class OwnerStatusTest(unittest.TestCase):
-    def render(self, process='live', status='open', journal='CREATED'):
-        route = {'route_id':'rt-fixture', 'nodes':[{'id':'one-shot'}]}
+    def render(self, process='live', status='open', journal='CREATED', extra_rows=()):
+        route = {'route_id':'rt-fixture', 'route_hash':'sha256:fixture', 'nodes':[{'id':'one-shot'}]}
         state = {'nodes':{}, 'workflow_state':journal, 'updated_at':None}
         ledger = mock.Mock()
         ledger.read_only_state.return_value = state
         ledger.claims.return_value = []
         rows = [{'time':'now','status':status,'meta':{'attempt_id':'new-owner',
-                 'owner_route_id':'rt-fixture','dispatch_depth':'1','worker_type':'owner'}}]
+                 'owner_route_id':'rt-fixture','dispatch_depth':'1','worker_type':'owner'}}, *extra_rows]
         with contextlib.ExitStack() as stack:
             for name, value in [('route_module', SimpleNamespace(resolve_route_argument=lambda *a:'route.json')),
                                 ('load_route',route),('ledger_for',ledger),('read_armed',{}),
@@ -69,6 +69,20 @@ class OwnerStatusTest(unittest.TestCase):
         for process,status in [('quiescent','open'),('live','done')]:
             with self.subTest(process=process,status=status):
                 self.assertEqual(self.render(process,status)['workflow_state'],'CREATED')
+
+    def test_status_projects_only_provider_kinds_from_the_exact_terminal_route(self):
+        meta = {"route_id": "rt-fixture", "route_hash": "sha256:fixture", "route_node": "review",
+                "harness": "codex", "attempt_id": "att-fixture", "provider_failure_kind": "cyberPolicy"}
+        rows = [
+            {"status": "done", "meta": meta},
+            {"status": "done", "meta": {**meta, "route_hash": "sha256:different"}},
+            {"status": "open", "meta": meta},
+            {"status": "done", "meta": {**meta, "provider_failure_kind": "private-fixture-output"}},
+        ]
+        self.assertEqual(self.render(extra_rows=rows)["provider_failures"], [
+            {"attempt_id": "att-fixture", "node": "review", "harness": "codex",
+             "provider_failure_kind": "cyberPolicy"},
+        ])
 
     def test_human_gate_state_survives_live_owner(self):
         self.assertEqual(self.render(journal='BLOCKED_HUMAN_GATE')['workflow_state'],'BLOCKED_HUMAN_GATE')

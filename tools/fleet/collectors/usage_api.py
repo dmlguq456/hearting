@@ -118,6 +118,9 @@ def _quota(document):
             label = name.split()[0].lower() if isinstance(name, str) and name.strip() else "model"
             if not any(row[0] == label for row in out["rl_ms"]):
                 out["rl_ms"].append([label, percent])
+                reset = _epoch(limit.get("resets_at"))
+                if reset is not None:
+                    out.setdefault("rs_ms", {})[label] = reset
     for key, suffix in (("five_hour", "5h"), ("seven_day", "7d")):
         bucket = document.get(key)
         if out["rl_" + suffix] is None and isinstance(bucket, dict):
