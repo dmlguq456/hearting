@@ -2001,6 +2001,71 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return {row:cut([{...mark,role:'harness-name',harness:u.harness}],room),values:false};
     };
     const usageLines=()=>keepQuota&&usageOn?usageData.filter((_u,i)=>keepLine[i]):[];
+    // 11-27 (the person: "USAGES는 좀 더 이쁘게 행과열을 맞추고"; of the design's two, "USAGE 공통 열"): the harness rows share one set of columns,
+    // chosen once for the three of them (whichever of them short rows leave standing: a row that gives way moves no column). The columns are the
+    // windows any of the three reports (the windows in their order, then the model windows in the order first seen), each the same width in every row: its name left, its value right-aligned in four cells (`?` there, dim, where the row
+    // reports none: no 0 is made up), and, where some row has its reset time, a time column (`(↻ ?)` where the row has a value and no time),
+    // two cells between columns, the names one column. Short of cells the time columns go in every row together, then the model windows from the
+    // last: 5h and 7d stand side by side to the end. Narrower than those two need (no layout), each row is fitted on its own as before. The
+    // last row is not laid out again beside the buttons: it shares their row only where it fits there as it is, else they stand on their own.
+    const usageGroupsOf=u=>{
+      const groups=[];let current=[];
+      for(const part of painted(u.parts).filter(p=>p&&typeof p==='object')){if(String(part.text)===' │ '){if(current.length)groups.push(current);current=[];}else current.push(part);}
+      if(current.length)groups.push(current);
+      return groups.map(g=>{
+        const at=g.findIndex(part=>clean(String(part.text)).trim());
+        if(at<0)return null;
+        const reset=g.find(part=>/^\(↻/.test(String(part.text)))||null;
+        return {label:clean(String(g[at].text)).trim(),labelPart:g[at],pct:g.filter((part,i)=>i>at&&part!==reset),reset};
+      }).filter(g=>g&&g.label);
+    };
+    const usageKind=label=>{const word=label.split(/\s+/)[0];return word==='7d'?'week':/^\d+[mhd]$/.test(word)?'window':'model';};
+    let usageLaid;
+    const usageLayout=()=>{
+      if(usageLaid!==undefined)return usageLaid;
+      const list=usageData,rows=list.map(usageGroupsOf),windows=[],models=[];
+      for(const groups of rows){
+        let prev=-1;
+        for(const g of groups){
+          if(usageKind(g.label)==='model'){if(!models.includes(g.label))models.push(g.label);continue;}
+          let at=windows.indexOf(g.label);
+          if(at<0){at=prev+1;windows.splice(at,0,g.label);}
+          prev=at;
+        }
+      }
+      const cols=[...windows,...models].map(label=>{
+        const cells=rows.map(groups=>groups.find(g=>g.label===label)||null),shown=cells.filter(Boolean);
+        return {label,model:usageKind(label)==='model',cells,nameW:measure(label),pctW:Math.max(4,...shown.map(g=>size(g.pct))),
+          timeW:Math.max(0,...shown.filter(g=>g.reset).map(g=>size([g.reset])))};
+      });
+      const tries=[cols.map(c=>({...c,time:c.timeW>0}))];
+      let kept=cols.map(c=>({...c,time:false}));tries.push(kept);
+      while(kept.some(c=>c.model)){const at=kept.map(c=>c.model).lastIndexOf(true);kept=kept.filter((_,i)=>i!==at);tries.push(kept);}
+      const wide=cs=>usageWide+1+cs.reduce((n,c,i)=>n+(i?2:0)+c.nameW+1+c.pctW+(c.time?c.timeW:0),0);
+      const chosen=tries.find(cs=>cs.length&&wide(cs)<=inner);
+      let laid=null;
+      if(chosen){
+        laid=new Map(list.map((u,i)=>{
+          const name=usageName(u),out=[{...text(name,'dim'),role:'harness-name',harness:u.harness},pad(usageWide+1-measure(name))];
+          chosen.forEach((c,k)=>{
+            const g=c.cells[i];
+            if(k)out.push(pad(2));
+            out.push(g?{...g.labelPart,text:c.label+' '}:text(c.label+' ','dim'));
+            if(g)out.push(pad(c.pctW-size(g.pct)),...g.pct);else out.push(pad(c.pctW-1),text('?','dim'));
+            if(c.time){
+              const time=g&&g.reset?[g.reset]:g?[text('(↻ ?)','dim')]:[];
+              out.push(...time,pad(c.timeW-size(time)));
+            }
+          });
+          while(out.length&&/^ *$/.test(String(out.at(-1).text)))out.pop();
+          return [u,out];
+        }));
+      }
+      usageLaid=laid;
+      return laid;
+    };
+    // One harness's row: the shared columns' (above), else its own fit within `room`.
+    const usageRowOf=(u,room)=>{const laid=usageLayout();return laid&&laid.has(u)?laid.get(u):usageFit(u,room).row;};
     // 11-18 (the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"; then, on v4.54.0,
     // "RESOURCE는 세로로 차지하는 공간이 너무 많은데, 이걸 게이지는 없애자 그리고 가로로 나열이 가능하면 가로로 나열을 좀 하자"): RESOURCES stands
     // right above USAGE. One row for each host: its name and `CPU 34%  MEM 61%`. Under it every GPU of the host in its number's order, side by
@@ -2127,7 +2192,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const resourceCount=()=>side&&resHosts>0?1+resourceLines().length:0;
     const resourceGpuTotal=()=>resourceFolded?0:resourceData.reduce((n,h)=>n+resourceGpuRows(h).length,0);
     // The last row beside the buttons: that harness's row when its values fit there.
-    const usageShared=u=>u&&usageFit(u,quotaRoom).values;
+    const usageShared=u=>{if(!u)return false;const laid=usageLayout();return laid&&laid.has(u)?size(laid.get(u))<=quotaRoom:usageFit(u,quotaRoom).values;};
     const footBase=()=>{
       if(usageOn){const list=usageLines();return list.length?(keepUsageHead?1:0)+list.length-1+(usageShared(list.at(-1))?0:1):0;}
       return side&&keepFootRule&&(kept.MESSAGES||kept.MEM)?1:0;
@@ -2358,9 +2423,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const list=usageLines(),own=u=>u.harness===harness?['quota']:[];
       if(bottomRule&&!resourceCount())lower.push(bottomRuleRow());
       if(keepUsageHead)lower.push({parts:sectionHead([],'USAGE',[],[[]],false)});
-      list.slice(0,-1).forEach(u=>lower.push({parts:usageFit(u,inner).row,groups:own(u)}));
+      list.slice(0,-1).forEach(u=>lower.push({parts:usageRowOf(u,inner),groups:own(u)}));
       const end=list.at(-1);
-      if(usageShared(end))lastUsage=usageFit(end,quotaRoom).row;else lower.push({parts:usageFit(end,inner).row,groups:own(end)});
+      if(usageShared(end))lastUsage=usageRowOf(end,quotaRoom);else lower.push({parts:usageRowOf(end,inner),groups:own(end)});
     }
     const ruled=!usageOn&&lower.length&&footBase()?1:0;
     if(fill&&lower.length)while(content.length+lower.length+ruled<height-2-1)add([]);

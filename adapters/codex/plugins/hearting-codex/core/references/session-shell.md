@@ -721,9 +721,19 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   by `usage_cache`; this window's own harness keeps the values its panel observed, a Claude callback included); nothing is
   fetched, and a change to any of the three records redraws the section where the 5h/7d row was redrawn. The last row
   carries the gear and the fold button at its right end; the last harness's row stands there while it fits beside them,
-  else it keeps the row above and the buttons stand alone. Every harness window shows the same three rows. A row
-  gives way short of cells in the last row's order (the reset times, 5h, the model windows from the last, 7d), each value
-  whole. Under the native area it stands as beside it, as rows are left. The folded strip is unchanged.
+  else it keeps the row above and the buttons stand alone. Every harness window shows the same three rows. 11-27 (the person:
+  "USAGES는 좀 더 이쁘게 행과열을 맞추고"; of the design's two, "USAGE 공통 열"): the three rows share one set of columns, chosen once from
+  the windows any of the three reports (the windows in their order, then the model windows in the order seen; a row that gives way
+  for rows moves no column): each window the same width in every row, its name left and its value right-aligned in four cells (a dim
+  `?` there where the row reports none: no 0 is made up), then, where some row has that window's reset time, a time column (a dim
+  `(↻ ?)` where the row has the value and no time; blank where it has no value), two cells between windows, the harness names one
+  column (`claude   5h   9%(↻ 45m)     7d  72%(↻ 3d 0h)  opus  86%` at 60 cells: 5h at column 12, 7d at 31, opus at 49). Short of cells
+  the time columns go in every row together, then the model windows from the last, each value whole; 5h and 7d stand side by side to
+  the end (at 44 cells `5h` 12, `7d` 21, `opus` 30; at 36 the model windows go). The last row is not laid out again beside the buttons
+  (its columns would move): it shares their row only where it fits there as it is (at 36), else the buttons stand on a row of their
+  own (at 44 and 60: one row more than before). Narrower than 5h and 7d need, each row gives way on its own in the last row's order
+  (the reset times, 5h, the model windows from the last, 7d), as before. Values keep their colors. Under the native area it stands as
+  beside it, as rows are left. The folded strip is unchanged.
 - RESOURCES (11-18, the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"): beside the
   native area, the section right above USAGE, its name row `RESOURCES` (no rule since 11-22, no `›`: it opens no popup; 11-26, panel B: one still rule
   without a word stands right above the name, above `USAGE` where every equipment row is folded, and short of rows it goes first), then for each host (this
