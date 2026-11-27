@@ -172,7 +172,7 @@ read-only unless the user explicitly opts into a separately validated feature.
 | agent home | A valid explicit `AGENT_HOME` wins. Otherwise Codex-owned wrappers resolve `$HOME/.codex/hearting`, canonical `$HOME/hearting`, or legacy `$HOME/agent_setting` before falling back to their source checkout; invoking `preflight.sh` through a linked feature worktree therefore does not activate that worktree as the runtime harness root |
 | permission model | Run `adapters/codex/bin/preflight.sh permissions`; use Codex native approval policy and sandbox settings, not Claude `allowedTools` |
 | MCP config | Run `adapters/codex/bin/preflight.sh mcp [--check]`; use Codex native `codex mcp`/config surfaces, not Claude `settings.json` MCP payloads |
-| artifact root | primary-checkout canonical `.agent_reports` via `utilities/artifact-root.sh`; linked-worktree snapshots are read-only; legacy fallback only at the canonical root |
+| artifact root | primary checkout's canonical root via `utilities/artifact-root.sh`; linked-worktree snapshots are read-only |
 | worktree cleanup | `preflight.sh worktree-cleanup`; dry-run first, apply only after merge + integrated verification + push |
 | routing-contract signal | `adapters/codex/bin/preflight.sh prompt-signal [cwd] [session-id]` is a worker-startup/manual subcommand (not a per-turn injection) whose output includes `routing_contract=core/WORKFLOW.md`, `routing_action=read-workflow-and-select-codex-skill`, `capability_entrypoints=codex-native-skills`, and git dirty/worktree/dead-branch risk fields (re-derived from the harness status snapshot); run it manually or at worker startup |
 | harness status snapshot | Run `adapters/codex/bin/preflight.sh status [cwd] [session-id]` for read-only artifact, notes, worktree, and git-risk signals, including tracked-dirty vs untracked counts and sibling worktree counts. This does not replace Codex `/statusline` for model/context/token/session fields |
@@ -498,7 +498,7 @@ the route profile passed by the wrapper.
 
 ## Compatibility
 
-Codex should create new project artifacts only under the root returned by `utilities/artifact-root.sh`. In a linked task worktree this is the primary checkout's `.agent_reports/`, not the tracked local snapshot. The dispatch wrapper injects `AGENT_ARTIFACT_ROOT` and grants exactly that path with Codex `--add-dir`; legacy `.claude_reports/` remains a canonical-root fallback.
+Codex creates new project artifacts under the root returned by `utilities/artifact-root.sh`. Linked task worktrees use the primary checkout's canonical root. The dispatch wrapper injects `AGENT_ARTIFACT_ROOT` and grants that path with Codex `--add-dir`.
 
 Codex should resolve harness-home paths through `AGENT_HOME` or the Codex-owned `utilities/agent-home.sh`. Some shared legacy tools still accept `CLAUDE_HOME` as a migration alias, but Codex-owned wrappers should not use it as their runtime-home fallback.
 
