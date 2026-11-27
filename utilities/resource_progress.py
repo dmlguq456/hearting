@@ -51,9 +51,7 @@ PROGRESS_FRESH_SECONDS = 600
 ETA_ATTENTION_RATIO = 1.5
 ETA_ATTENTION_UNPLANNED_SECONDS = 6 * 3600
 ETA_ATTENTION_KINDS = frozenset({"eta-over-plan", "eta-over-six-hours"})
-# A comparable counter with no increase for this long is stagnant (`progress-stagnation`) until
-# the run has shown a longer step (`_stagnation_seconds`).
-STAGNATION_SECONDS = 2.0 * 3600
+STAGNATION_SECONDS = 2.0 * 3600  # no increase this long is stagnant, unless the run's step is longer
 ATTENTION_IDENTITY_KEYS = ("kind", "metric", "epoch", "op", "threshold", "episode_id",
                            "generation", "since", "source_value_hash")
 _SAFE_RUN_ID = re.compile(r"[A-Za-z0-9._-]{1,160}\Z")
@@ -1037,19 +1035,25 @@ def _progress_signal(progress, samples, metric_root, run, decision_metric, now):
     return streams[chosen]
 
 
-def _stagnation_seconds(tracker, planned_seconds=None):
-    """How long this comparison may go without an increase before it is stagnant.
+def _step_seconds(value):
+    """`value` as a finite positive number of seconds, or None: anything else is no value."""
+    try:
+        seconds = float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+    except OverflowError:
+        return None
+    return seconds if 0 < seconds < math.inf else None
 
-    Two hours, stretched by the time rule's own 1.5x (`ETA_ATTENTION_RATIO`) over the longest
-    stretch this run already went without an increase before one came; before any, over the
-    plan's time per unit (planned seconds / total). A step longer than two hours is then not a
-    stall at every step, while a counter that stops past that margin still is, once."""
-    tracker = tracker if isinstance(tracker, dict) else {}
-    step = _number(tracker.get("longest_quiet_seconds"))
-    plan, total = _number(planned_seconds), tracker.get("total")
-    if step is None and plan is not None and plan > 0 and type(total) is int and total > 0:
+
+def _stagnation_seconds(tracker, planned_seconds=None):
+    """Two hours, or 1.5x (the time rule's own margin) the longest stretch this comparison already
+    went without an increase before one came; before any, the plan's time per unit (planned / total).
+    Never shorter than two hours, and two hours whenever the stretched value is not finite."""
+    step, plan = _step_seconds(tracker.get("longest_quiet_seconds")), _step_seconds(planned_seconds)
+    total = _step_seconds(tracker["total"]) if type(tracker.get("total")) is int else None
+    if step is None and plan and total:
         step = plan / total
-    return max(STAGNATION_SECONDS, ETA_ATTENTION_RATIO * step) if step else STAGNATION_SECONDS
+    threshold = ETA_ATTENTION_RATIO * step if step else 0.0
+    return threshold if STAGNATION_SECONDS < threshold < math.inf else STAGNATION_SECONDS
 
 
 def _advance_progress_tracker(previous, signal, now, planned_seconds=None):
@@ -1108,14 +1112,11 @@ def _advance_progress_tracker(previous, signal, now, planned_seconds=None):
         duration = sample_at - float(last_sample_at)
         if rate_time_valid and 0 < duration <= 600:
             rate = delta / duration
-        # The stretch just ended by this increase is a step this run takes (from the first
-        # observation, a part of one): the stagnation threshold follows the longest.
-        quiet_from = _number(previous.get("last_increase_at"))
-        if quiet_from is None:
-            quiet_from = _number(previous.get("first_observed_at"))
+        # The stretch this increase ended is a step (from a late first observation, part of one).
+        quiet_from = _number(previous.get("last_increase_at") or previous.get("first_observed_at"))
         if quiet_from is not None and sample_at > quiet_from:
             tracker["longest_quiet_seconds"] = max(sample_at - quiet_from,
-                _number(previous.get("longest_quiet_seconds")) or 0.0)
+                                                   _step_seconds(previous.get("longest_quiet_seconds")) or 0)
         tracker.update(last_increase_at=sample_at, active_episode_id=None)
     tracker.update(last_sample=value, last_sample_at=sample_at)
     anchor = tracker.get("last_increase_at")
@@ -1129,9 +1130,8 @@ def _advance_progress_tracker(previous, signal, now, planned_seconds=None):
         if seconds >= 0:
             episode = tracker.get("active_episode_id")
             if seconds >= threshold and not isinstance(episode, str):
-                # One stretch without an increase is one episode: an admission wait and its
-                # grace inside it do not make it a new one (and a second notice).
-                episode_material = f"{identity!r}|{anchor_kind}|{float(anchor):.6f}"
+                grace = tracker.get("stagnation_grace_until")
+                episode_material = f"{identity!r}|{anchor_kind}|{float(anchor):.6f}|{grace!r}"
                 episode = hashlib.sha256(episode_material.encode()).hexdigest()[:20]
                 tracker["active_episode_id"] = episode
             if seconds >= threshold:
@@ -1139,7 +1139,7 @@ def _advance_progress_tracker(previous, signal, now, planned_seconds=None):
                     "since": anchor_kind, "seconds_since_anchor": seconds,
                     "last_increase_at": tracker.get("last_increase_at"),
                     "first_observed_at": tracker.get("first_observed_at"),
-                    "longest_quiet_seconds": tracker.get("longest_quiet_seconds"),
+                    "longest_quiet_seconds": _step_seconds(tracker.get("longest_quiet_seconds")),
                     "episode_id": episode,
                     "generation": signal.get("generation")}
     comparison = {"completed": value, "total": total, "unit": unit}
@@ -1772,6 +1772,7 @@ def _notice_texts(run, event_kind, observation, record_path, sources, name_lines
     summary = observation.get("summary") or {}
     admission = observation.get("admission") if isinstance(observation.get("admission"), dict) else {}
     stagnation = observation.get("stagnation") if isinstance(observation.get("stagnation"), dict) else {}
+    quiet = None  # (entry index, text): the earlier step, added to the stagnation entry if it fits
     latest, best = summary.get("latest"), summary.get("best")
     metric = summary.get("metric")
     def points(field, fallback):
@@ -1829,12 +1830,9 @@ def _notice_texts(run, event_kind, observation, record_path, sources, name_lines
     if stagnation.get("state") == "stagnant":
         anchor = t("resource.stagnant.last_increase" if stagnation.get("since") == "last-increase"
                    else "resource.stagnant.first_observation")
-        entry = t("resource.stagnant", duration=_duration(stagnation.get('seconds_since_anchor'), t), anchor=anchor)
-        if _number(stagnation.get("longest_quiet_seconds")) is not None:
-            # The step this run already took, which the threshold was stretched to.
-            entry += ", " + t("resource.stagnant.longest_quiet",
-                              duration=_duration(stagnation["longest_quiet_seconds"], t))
-        entries.append(entry)
+        entries.append(t("resource.stagnant", duration=_duration(stagnation.get('seconds_since_anchor'), t), anchor=anchor))
+        step = _step_seconds(stagnation.get("longest_quiet_seconds"))
+        quiet = step and (len(entries) - 1, ", " + t("resource.stagnant.longest_quiet", duration=_duration(step, t)))
     elif stagnation.get("state") == "unknown":
         entries.append(t("resource.stagnation_unknown"))
     # Nothing was read because nothing was declared (or it is not visible here): one phrase.
@@ -1899,8 +1897,10 @@ def _notice_texts(run, event_kind, observation, record_path, sources, name_lines
     entries.extend(source_lines)
     text = "; ".join([*name_lines, *entries])
     if len(text) <= 600:
-        # The catalog's optional pieces (metric line, words, table command) only while it stays one part.
+        # The catalog's optional pieces (metric line, words, table command), then the earlier step: one part only.
         front, end = _fit_optional(name_lines, entries, optional)
+        if quiet and len("; ".join([*name_lines, *front, *entries, *end])) + len(quiet[1]) <= 600:
+            entries[quiet[0]] += quiet[1]
         return ["; ".join([*name_lines, *front, *entries, *end])]
     # Keep every field in immutable bounded parts; numbered chunks can be
     # concatenated in order when a path is longer than one notice.
@@ -2019,8 +2019,7 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
     does not read as a lost observation. Without that evidence nothing is refreshed and a silent
     run still turns stale; so does a run whose tracked progress source can no longer be read.
     The observed time is never the progress time: the last increase (`stagnation`) is kept
-    apart and a value that stopped turns stagnant under the two-hour rule, stretched to the
-    longest step this run already showed (`_stagnation_seconds`).
+    apart and a value that stopped turns stagnant under the two-hour rule (`_stagnation_seconds`).
     """
     run = run if isinstance(run, dict) else {}
     run_id = run.get("run_id")
@@ -2203,8 +2202,7 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
             tracker_result["stagnation"] = None
         elif isinstance(progress_tracker, dict) and was_waiting:
             progress_tracker["active_episode_id"] = None
-            progress_tracker["stagnation_grace_until"] = float(now) + _stagnation_seconds(
-                progress_tracker, plan)
+            progress_tracker["stagnation_grace_until"] = float(now) + 7200.0
             tracker_result["stagnation"] = None
         elif (isinstance(progress_tracker, dict)
               and isinstance(progress_tracker.get("stagnation_grace_until"), (int, float))

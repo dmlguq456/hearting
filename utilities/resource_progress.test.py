@@ -912,6 +912,9 @@ class ExperimentObservationTest(unittest.TestCase):
             tracker, {**signal, "completed": 5}, 7300)
         episode = due["stagnation"]["episode_id"]
         self.assertEqual(due["stagnation"]["since"], "last-increase")
+        # The episode is made from the same material as before the threshold followed the step.
+        material = f"{('counter', 'generation-a', 'item', 20)!r}|last-increase|{100.0:.6f}|None"
+        self.assertEqual(episode, hashlib.sha256(material.encode()).hexdigest()[:20])
         tracker, _, repeated = progress._advance_progress_tracker(
             tracker, {**signal, "completed": 5}, 7400)
         self.assertEqual(repeated["stagnation"]["episode_id"], episode)
@@ -1289,23 +1292,26 @@ class ExperimentObservationTest(unittest.TestCase):
             self.assertIn("progress-stagnation",
                 {item["kind"] for item in after_grace["observation"]["attention"]})
 
-    def _stall_notice_times(self, *, increases, until, planned=None, waits=(), poll=300):
+    def _stall_notices(self, *, increases, until, planned=None, waits=(), poll=300, total=10,
+                       base=None, start=0, pad=("artifact",)):
         """One fake run's real observer on a virtual clock: its counter (the `write_progress` shape,
         no metric source) rises at each time in `increases`, and admission waits in each
-        `(start, end)` of `waits`. Returns when a waking notice told a stall."""
-        told, clock = [], [0]
+        `(start, end)` of `waits`. Returns `(time, parts, text)` of each waking notice that told a
+        stall. `base` keeps the observer's state across calls (a later call takes it over)."""
+        told, clock = {}, [0]
 
         def notify(harness, session_id, **kw):
-            if kw["key"].split(":")[2] == "attention" and "progress-stagnation" in kw["text"]:
-                told.append(clock[0])
+            key = kw["key"].split(":")
+            if key[2] == "attention":
+                told.setdefault(":".join(key[:5]), [clock[0], []])[1].append(kw["text"])
             return {"state": "acked"}
 
         with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            artifact = base / "artifact"
-            artifact.mkdir()
+            base = Path(base or tmp)
+            artifact = base.joinpath(*pad)
+            artifact.mkdir(parents=True, exist_ok=True)
             bundle = base / "registry" / "bundle"
-            bundle.mkdir(parents=True)
+            bundle.mkdir(parents=True, exist_ok=True)
             registry = base / "registry" / "index.json"
             registry.write_text("{}\n")
             (bundle / "run-record.json").write_text(json.dumps({"run_id": "step-run", "started_at": 0}))
@@ -1314,18 +1320,22 @@ class ExperimentObservationTest(unittest.TestCase):
                    **({"planned_seconds": planned} if planned else {})}
             with mock.patch.object(progress, "_observation_state_path", return_value=base / "state.json"), \
                     mock.patch("session_notice.notify", side_effect=notify):
-                for now in range(0, until + 1, poll):
+                for now in range(start, until + 1, poll):
                     clock[0] = now
                     if waits:
                         (bundle / "decision.json").write_text(json.dumps({
-                            "admitted": not any(start <= now < end for start, end in waits),
+                            "admitted": not any(begin <= now < end for begin, end in waits),
                             "snapshot": {"t": now}, "first_snapshot": {"t": 0}}))
                     written = max([0, *(at for at in increases if at <= now)])
                     progress.observe_experiment(run, registry, now, row_key="run", started_at=0,
                         status="running", alive=True,
-                        progress={"completed": sum(at <= now for at in increases), "total": 10,
+                        progress={"completed": sum(at <= now for at in increases), "total": total,
                                   "unit": "epoch", "updated_at": written, "age_s": now - written})
-        return told
+        return [(at, len(texts), " ".join(texts)) for at, texts in told.values()
+                if "progress-stagnation" in " ".join(texts)]
+
+    def _stall_notice_times(self, **kwargs):
+        return [at for at, _, _ in self._stall_notices(**kwargs)]
 
     def test_a_step_longer_than_two_hours_is_told_only_when_the_counter_stops(self):
         step = 130 * 60
@@ -1339,13 +1349,70 @@ class ExperimentObservationTest(unittest.TestCase):
         self.assertEqual(self._stall_notice_times(increases=increases, until=last + 4 * 3600,
                                                   planned=10 * step), [last + 1.5 * step])
 
-    def test_one_stretch_without_an_increase_is_told_once_through_admission_waits(self):
-        # The first step, with no step seen and no plan, keeps the two hours and is told there once;
-        # an admission wait and the grace after it inside the same stretch do not tell it again.
+    def test_admission_waits_keep_the_two_hour_grace_and_the_episode_they_had(self):
+        # Only the threshold changed: the grace after an admission wait is still two hours and still
+        # makes a new episode, so these notices come when the observer before this change sent them.
         self.assertEqual(self._stall_notice_times(increases=[], until=350 * 60), [7200])
-        self.assertEqual(self._stall_notice_times(increases=[], until=350 * 60,
-                                                  waits=[(150 * 60, 160 * 60), (300 * 60, 310 * 60)]),
+        self.assertEqual(self._stall_notice_times(increases=[], until=540 * 60,
+                                                  waits=[(150 * 60, 160 * 60), (350 * 60, 380 * 60)]),
+                         [7200, 160 * 60 + 7200, 380 * 60 + 7200])
+        # One 130-minute step, then a stop with a one-minute wait every three hours: told at 6h01m,
+        # the end of the first two-hour grace, already past the 195-minute threshold.
+        self.assertEqual(self._stall_notice_times(increases=[130 * 60], until=420 * 60, poll=60,
+            waits=[(minute * 60, minute * 60 + 60) for minute in range(240, 421, 180)]), [7200, 361 * 60])
+        # A state that told the first step at two hours is taken over by an observer that now knows a
+        # plan (a longer threshold): the same stretch keeps its episode and is not told again.
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self._stall_notice_times(increases=[], until=7500, base=tmp), [7200])
+            self.assertEqual(self._stall_notice_times(increases=[], until=350 * 60, base=tmp, start=7800,
+                                                      planned=10 * 130 * 60), [])
+
+    def test_the_threshold_is_finite_and_never_below_two_hours(self):
+        threshold = progress._stagnation_seconds
+        self.assertEqual(threshold({"total": 10}, 10 * 7800), 11700)
+        self.assertEqual(threshold({"total": 10, "longest_quiet_seconds": 7800}), 11700)
+        self.assertEqual(threshold({"total": 1}, 1.2e308), 7200)  # 1.5x a finite plan overflows
+        self.assertEqual(threshold({"total": 10 ** 400}, 1e6), 7200)
+        for bad in (10 ** 309, float("nan"), float("inf"), -5, 0, "7800", True, None, [7800]):
+            with self.subTest(bad=bad):
+                self.assertIsNone(progress._step_seconds(bad))
+                self.assertEqual(threshold({"total": 10, "longest_quiet_seconds": bad}), 7200)
+                signal = {"completed": 1, "total": 10, "unit": "epoch", "stream_id": "counter",
+                          "generation": "generation-a"}
+                tracker = {"stream_id": "counter", "generation": "generation-a", "unit": "epoch",
+                           "total": 10, "first_observed_at": 0.0, "last_sample": 1, "last_sample_at": 0.0,
+                           "last_increase_at": None, "active_episode_id": None, "longest_quiet_seconds": bad}
+                _, _, stalled = progress._advance_progress_tracker(tracker, signal, 7200)
+                self.assertIsNone(stalled["stagnation"]["longest_quiet_seconds"])
+                learned, _, _ = progress._advance_progress_tracker(tracker, {**signal, "completed": 2}, 600)
+                self.assertEqual(learned["longest_quiet_seconds"], 600)
+                text = "; ".join(progress._notice_texts({"run_id": "r"}, "attention", {
+                    "reached": 1, "stagnation": {"state": "stagnant", "since": "first-observation",
+                                                 "seconds_since_anchor": 7200, "longest_quiet_seconds": bad}},
+                    None, []))
+                self.assertIn("no observed increase for 2h00m", text)
+                self.assertNotIn("longest earlier", text)
+        self.assertEqual(self._stall_notice_times(increases=[], until=350 * 60, planned=1.2e308, total=1),
                          [7200])
+
+    def test_the_earlier_step_is_added_only_while_the_notice_stays_one_part(self):
+        # One 130-minute step, then a stop told at 5h25m with the earlier step. The record path is
+        # lengthened so the notice ends at the 600-character edge, in both languages.
+        for language, words in (("English", "longest earlier wait"), ("Korean", "가장 오래 걸린")):
+            with self.subTest(language=language), mock.patch.dict(os.environ, {"FLEET_NOW_LANG": language}):
+                def stop(extra):
+                    pad = ["a" * (1 + extra)] if extra < 250 else ["a" * 200, "a" * (extra - 200)]
+                    return self._stall_notices(increases=[130 * 60], until=325 * 60, pad=pad)[-1]
+                at, parts, text = stop(0)
+                self.assertEqual((at, parts), (325 * 60, 1))
+                self.assertIn(words, text)
+                room = 600 - len(text)
+                at, parts, text = stop(room)
+                self.assertEqual((parts, len(text)), (1, 600))
+                self.assertIn(words, text)
+                at, parts, text = stop(room + 1)  # with the step it would be 601: left out, still one part
+                self.assertEqual(parts, 1)
+                self.assertNotIn(words, text)
 
     def test_virtual_checkpoint_schedule_and_independent_matrix_rows(self):
         rows = []
