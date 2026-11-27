@@ -1,12 +1,15 @@
 """11-27 (the person, on the MEM row: "그러면 그 앞의 종류가 중요한데 그거 에따라서 컬러를 부여해주고"; of the design's two, "MEM 가(세 무리)").
 
 The kind word of a MEM record (the panel's row and the MEM popup's head) takes the color of its group, nothing else changes:
-* ``work``: a preference whose write row carries a ``unit:``/``field:`` label (the record's own capsule topics, ``mem.py``
-  ``_journal_labels``; the labels a worker's prompt is given records by): the request zone's teal (``zone_request``);
+* ``work``: a preference carrying a ``unit:``/``field:`` label in its capsule topics (the labels a worker's prompt is given
+  records by): the request zone's teal (``zone_request``);
 * ``guide``: another type the worker bootstrap's own type fence takes (``mem_base.BOOTSTRAP_TYPE_FENCE``, read and evaluated as
-  it is): the dispatch zone's violet (``zone_dispatch``); an unlabelled preference (and an older row without labels) is one;
+  it is): the dispatch zone's violet (``zone_dispatch``); an unlabelled preference is one;
 * every other type (``reference``, ``fact``, ``project``, ``artifact-pointer``, ``lesson`` …) and any type the fence cannot be
   read for: dim, as before.
+The evidence is the shown record as stored now (fix 1, 11-28): the read-only query that gives its headline gives its stored type
+and topics too, for the record the row shows (the replacement of a superseded one); the type is judged whole, only the word drawn is
+cut. Where the read has no such record, the journal row's type with no labels. The memory system's writes and journal are untouched.
 The cells, the words, the cuts (``correction``, ``artifact-po…``), the narrow rule that drops the kind, and a colorless terminal
 are as they were. The expected rows are the design's ``mem/A`` and ``popup/A`` renders (PANEL-MEM-RESOURCES-USAGE-RENDERS-1127).
 """
@@ -14,6 +17,8 @@ import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
+import re
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -178,65 +183,148 @@ class MemGroupTest(unittest.TestCase):
 
     def test_the_three_groups(self):
         group = self.panel.memory_group
-        for kind in ("preference",):
-            self.assertEqual(group(kind, ["unit:qa/code-review"]), "work")
-            self.assertEqual(group(kind, ["field:code"]), "work")
-            self.assertEqual(group(kind, []), "guide")
-            self.assertEqual(group(kind, None), "guide")
-            # Only a label of the two kinds is a work-style label; an empty name is none.
-            self.assertEqual(group(kind, ["topic:charts", "unit:", "field"]), "guide")
-        for kind in ("feedback", "decision", "convention", "user-correction", "ui-preference", "team-convention"):
+        for kind in ("preference", "Preference", "ui-preference"):
+            self.assertEqual(group(kind, ["unit:qa/code-review"]), "work", kind)
+            self.assertEqual(group(kind, ["Field:Code"]), "work", kind)
+            self.assertEqual(group(kind, []), "guide", kind)
+            self.assertEqual(group(kind, None), "guide", kind)
+            # Only a label of the two kinds is a work-style label; an empty name, or none after the colon, is none.
+            self.assertEqual(group(kind, ["topic:charts", "unit:", "field", "unit", "field: "]), "guide", kind)
+        for kind in ("feedback", "decision", "convention", "user-correction", "team-convention"):
             self.assertEqual(group(kind, None), "guide", kind)
         # A labelled record of another candidate type is a candidate, not a work-style preference (the design's table).
         self.assertEqual(group("decision", ["field:code"]), "guide")
-        for kind in ("reference", "fact", "project", "artifact-pointer", "lesson", "completion", "handoff", ""):
+        for kind in ("reference", "fact", "project", "artifact-pointer", "lesson", "completion", "handoff", "", None):
             self.assertEqual(group(kind, ["field:code"]), "", kind)
+        # The type as stored, whole: a long one the fence takes, spaces the fence refuses.
+        self.assertEqual(group("fixture-0123456789-0123456789-SELECT-preference", ["field:code"]), "work")
+        self.assertEqual(group(" decision ", None), "")
 
     def test_a_fence_that_cannot_be_read_leaves_every_kind_as_it_was(self):
         with mock.patch.object(self.panel, "_MEM_BASE", Path("/nonexistent/mem_base.py")):
             self.assertEqual(self.panel.memory_group("preference", ["field:code"]), "")
             self.assertEqual(self.panel.memory_group("decision"), "")
 
-    def test_the_items_carry_the_group_from_the_rows_own_values(self):
-        rows = [{"type": "preference", "tier": "durable", "scope": "global", "ts": "", "snippet": "A labelled one.", "labels": ["field:code"]},
+    def test_the_items_take_the_shown_records_stored_values(self):
+        long = "fixture-0123456789-0123456789-SELECT-preference"
+        rows = [{"type": "preference", "tier": "durable", "scope": "global", "ts": "", "snippet": "A labelled one.",
+                 "record": {"type": "preference", "topics": ["field:code"]}},
                 # Only the record's own value counts: a title naming a label is no label.
-                {"type": "preference", "tier": "durable", "scope": "global", "ts": "", "snippet": "unit:qa/code-review field:code"},
-                {"type": "user-correction", "tier": "durable", "scope": "global", "ts": "", "snippet": "A correction."}]
+                {"type": "preference", "tier": "durable", "scope": "global", "ts": "", "snippet": "unit:qa/code-review field:code",
+                 "record": {"type": "preference", "topics": []}},
+                # The stored type wins over the write row's; the word drawn is the stored one.
+                {"type": "preference", "tier": "durable", "scope": "global", "ts": "", "snippet": "Same body.",
+                 "record": {"type": "decision", "topics": ["field:code"]}}]
         items = self.panel.session_memory_items({"memory_recent": rows})
-        self.assertEqual([(i["kind"], i["group"]) for i in items], [("preference", "work"), ("preference", "guide"), ("correction", "guide")])
+        self.assertEqual([(i["kind"], i["group"]) for i in items], [("preference", "work"), ("preference", "guide"), ("decision", "guide")])
+        # The type judged whole, the word cut (32 cells, then the short word's twelve); spaces are no part of the word.
+        rows = [{"type": "fact", "ts": "", "snippet": "Long.", "record": {"type": long, "topics": []}},
+                {"type": "fact", "ts": "", "snippet": "Spaced.", "record": {"type": " decision ", "topics": []}},
+                # No stored record (the store unreadable, the record gone): the write row's type, no labels.
+                {"type": "preference", "ts": "", "snippet": "Not found.", "record": None, "labels": ["field:code"]}]
+        items = self.panel.session_memory_items({"memory_recent": rows})
+        self.assertEqual([(i["kind"], i["group"]) for i in items], [("fixture-012…", "guide"), ("decision", ""), ("preference", "guide")])
+
+    def test_a_long_kind_word_is_colored_whole_in_the_row_and_the_popup(self):
+        drawn = render({"5": [("fixture-012…", "durable", "global", "2m", "Long kinds are judged whole.", "guide")]}, widths=(60,))
+        got = drawn["5:60"]
+        self.assertEqual([(p["text"], p["fg"]) for row in got["rows"] for p in row if p["fg"] in (43, 99)], [("fixture-012…", 99)])
+        self.assertEqual([(p["text"], p["fg"]) for row in got["heads"] for p in row if p["fg"] in (43, 99)], [("fixture-012…", 99)])
 
 
-class JournalLabelsTest(unittest.TestCase):
-    def test_a_write_row_carries_the_records_own_labels_and_the_collector_keeps_them(self):
-        with tempfile.TemporaryDirectory(prefix="mem-kind-") as tmp:
-            store, project = Path(tmp) / "store", Path(tmp) / "project"
-            store.mkdir()
-            project.mkdir()
-            env = {**os.environ, "MEM_STORE": str(store), "MEM_RECALL_EVENTS": str(Path(tmp) / "recall.jsonl"),
-                   "MEM_RECALL_RECEIPTS": str(Path(tmp) / "receipts"), "PYTHONDONTWRITEBYTECODE": "1"}
-            env.pop("MEM_WRITE_EVENTS", None)
+MEM = ROOT / "tools/memory/mem.py"
+# The keys a write row has (the memory system's own, unchanged by the panel).
+JOURNAL_KEYS = {"ts", "action", "id", "tier", "scope", "type", "actor", "sid", "snippet", "cwd"}
 
-            def add(*args):
-                done = subprocess.run([sys.executable, str(ROOT / "tools/memory/mem.py"), "add", *args], cwd=project, env=env,
-                                      capture_output=True, text=True, timeout=120)
-                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-            add("durable", "preference", "Keep review comments to blocking issues first.", "--scope", "global", "--topic", "Field:Code",
-                "--topic", "unit:qa/code-review", "--topic", "charts")
-            add("durable", "decision", "Keep the limiter in the gateway.", "--scope", "global")
-            # The same body again (a reinforce) carries the labels the record has.
-            add("durable", "preference", "Keep review comments to blocking issues first.", "--scope", "global")
-            journal = store / "write-events.jsonl"
-            events = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines() if line.strip()]
-            writes = [e for e in events if e.get("type") in ("preference", "decision")]
-            self.assertEqual([(e["type"], e.get("labels")) for e in writes],
-                             [("preference", ["field:code", "unit:qa/code-review"]), ("decision", None),
-                              ("preference", ["field:code", "unit:qa/code-review"])])
-            from tools.fleet.collectors import memory
-            memory._latest_cache.clear()
-            with mock.patch.dict(os.environ, {"MEM_WRITE_EVENTS": str(journal)}):
-                rows, _path = memory.recent_saved_global()
-            self.assertIn(["field:code", "unit:qa/code-review"], [row.get("labels") for row in rows])
-            memory._latest_cache.clear()
+
+class StoredRecordTest(unittest.TestCase):
+    """The real memory CLI in a private store; the panel reads the shown record through Fleet's own read."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="mem-kind-")
+        root = Path(self.tmp.name)
+        self.store, self.project = root / "store", root / "project"
+        self.store.mkdir()
+        self.project.mkdir()
+        self.env = {**os.environ, "MEM_STORE": str(self.store), "MEM_RECALL_EVENTS": str(root / "recall.jsonl"),
+                    "MEM_RECALL_RECEIPTS": str(root / "receipts"), "PYTHONDONTWRITEBYTECODE": "1"}
+        self.env.pop("MEM_WRITE_EVENTS", None)
+        self.environ = mock.patch.dict(os.environ, {"MEM_STORE": str(self.store)})
+        self.environ.start()
+        os.environ.pop("MEM_WRITE_EVENTS", None)
+        from tools.fleet.collectors import memory
+        self.memory = memory
+        self.clear()
+
+    def tearDown(self):
+        self.clear()
+        self.environ.stop()
+        self.tmp.cleanup()
+
+    def clear(self):
+        self.memory._latest_cache.clear()
+        self.memory._project_cache.clear()
+
+    def mem(self, *args):
+        done = subprocess.run([sys.executable, str(MEM), *args], cwd=self.project, env=self.env, capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        return done.stdout
+
+    def add(self, *args):
+        found = re.search(r"(?:→|strength:) (\S+)", self.mem("add", *args))
+        return found.group(1)
+
+    def shown(self):
+        from tools.fleet import session_panel, session_work
+        self.clear()
+        rows, _paths = session_work.recent_memory(str(self.project), session_panel.MEMORY_ITEMS)
+        work, _paths = session_work.observe(str(self.project), tuple(row["headline_id"] for row in rows if row.get("headline_id")))
+        return session_panel.session_memory_items({"memory_recent": session_work.shown_records(rows, work)})
+
+    def journal(self):
+        text = (self.store / "write-events.jsonl").read_text(encoding="utf-8")
+        return text, [json.loads(line) for line in text.split("\n") if line.strip()]
+
+    def test_the_same_body_written_as_another_type_reads_as_stored(self):
+        self.add("durable", "decision", "Keep the limiter in the gateway.", "--scope", "global", "--topic", "field:code")
+        self.add("durable", "preference", "Keep the limiter in the gateway.", "--scope", "global")
+        _text, events = self.journal()
+        self.assertEqual(events[-1]["type"], "preference")   # the write row names the asked type ...
+        items = self.shown()
+        self.assertEqual([(i["kind"], i["group"]) for i in items], [("decision", "guide")])   # ... the record stays a decision
+
+    def test_a_labelled_replacement_reads_teal(self):
+        old = self.add("durable", "preference", "Write the summary first.", "--scope", "global")
+        new = self.add("durable", "preference", "Write the summary first, then the numbers.", "--scope", "global", "--topic", "field:code")
+        self.mem("supersede", old, "--by", new)
+        items = self.shown()
+        self.assertEqual(items[0]["group"], "work", items)
+        self.assertTrue(items[0]["text"].startswith("Write the summary first, then"), items)
+
+    def test_an_existing_record_labelled_later_reads_teal_without_a_new_write(self):
+        rid = self.add("durable", "preference", "Use short chart captions.", "--scope", "global")
+        self.assertEqual([i["group"] for i in self.shown()], ["guide"])
+        con = sqlite3.connect(self.store / "memory.db")
+        con.execute("UPDATE records SET topics=? WHERE id=?", (json.dumps(["unit:docs/write"]), rid))
+        con.commit()
+        con.close()
+        self.assertEqual([i["group"] for i in self.shown()], ["work"])
+
+    def test_a_label_with_a_line_separator_leaves_the_journal_and_the_log_as_they_are(self):
+        rid = self.add("durable", "preference", "Keep a plain body that reads well on its own.", "--scope", "global", "--topic", "field:demo\u2028split")
+        text, events = self.journal()
+        self.assertNotIn("\u2028", text)
+        self.assertEqual(set(events[-1]), JOURNAL_KEYS)
+        self.assertIn(rid, self.mem("log", "--limit", "5"))
+        self.assertEqual([i["group"] for i in self.shown()], ["work"])
+
+    def test_a_store_that_cannot_be_read_leaves_the_write_rows_type(self):
+        self.add("durable", "preference", "Prefer a short summary.", "--scope", "global", "--topic", "field:code")
+        self.add("durable", "decision", "Keep limits in the gateway.", "--scope", "global")
+        self.add("durable", "fact", "The fixture has four GPUs.", "--scope", "global")
+        self.assertEqual([i["group"] for i in self.shown()], ["", "guide", "work"])
+        (self.store / "memory.db").rename(self.store / "memory.db.away")
+        self.assertEqual([(i["kind"], i["group"]) for i in self.shown()], [("fact", ""), ("decision", "guide"), ("preference", "guide")])
 
 
 if __name__ == "__main__":

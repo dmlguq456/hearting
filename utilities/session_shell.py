@@ -1225,7 +1225,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     from fleet.palette import style_components
     from fleet.config import ui_text
     from fleet.session_view import observe
-    from fleet.session_work import observe as observe_work, open_count, recent_memory
+    from fleet.session_work import observe as observe_work, open_count, recent_memory, shown_records
     from fleet.session_panel import MEMORY_ITEMS, presentation, request_rows, resource_rows, usage_rows
     from fleet.session_line import peer_message_rows
     read_sid, read_pid, read_start, parked = _panel_read_target(harness, sid, native_pid, native_start)
@@ -1307,8 +1307,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     work, work_paths = observe_work(values.get("cwd"),
                                     tuple(row["headline_id"] for row in memory_rows if row.get("headline_id")))
     if memory_rows:
-        values["memory_recent"] = [{**row, "headline": work.headlines.get(str(row.get("headline_id")), "")}
-                                   for row in memory_rows]
+        values["memory_recent"] = shown_records(memory_rows, work)
         values["memory_latest"] = values["memory_recent"][0]
     watched.extend(work_paths)
     watched.extend(memory_paths)

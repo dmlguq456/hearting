@@ -1459,8 +1459,7 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
             if journal_action and not journal_insert_only:
                 _append_write_event(journal_action, existing, tier=tier, scope=scope,
                                      rtype=rtype, actor=journal_actor,
-                                     cwd=journal_cwd, snippet=_first_line(body),
-                                     labels=_journal_labels(con, existing))
+                                     cwd=journal_cwd, snippet=_first_line(body))
             return existing
         dup = find_dup(tier, scope, body, cwd_origin, con=con)
         if dup:
@@ -1493,8 +1492,7 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
             if journal_action and not journal_insert_only:
                 _append_write_event(journal_action, dup, tier=tier, scope=scope,
                                      rtype=rtype, actor=journal_actor,
-                                     cwd=journal_cwd, snippet=_first_line(body),
-                                     labels=_journal_labels(con, dup))
+                                     cwd=journal_cwd, snippet=_first_line(body))
             return dup
         base = slugify(f"{rtype} {body}")
         # Include tier, scope, and cwd_origin in the hash seed to avoid namespace collisions.
@@ -1543,8 +1541,7 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
         if journal_action:
             _append_write_event(journal_action, sid, tier=tier, scope=scope,
                                  rtype=rtype, actor=journal_actor,
-                                 cwd=journal_cwd, snippet=_first_line(body),
-                                 labels=_journal_labels(con, sid))
+                                 cwd=journal_cwd, snippet=_first_line(body))
         return sid
     except ApidCapacityError:
         con.rollback()
@@ -2200,23 +2197,9 @@ def bootstrap_context(queries, *, cwd=None, limit=4, max_bytes=6144,
     return _utf8_prefix(output, max_bytes).rstrip()
 
 
-def _journal_labels(con, rid):
-    """The record's own work-style labels (its ``unit:``/``field:`` capsule topics, the kinds
-    ``bootstrap_context`` matches by label) for its journal row, four at most; none on any failure."""
-    try:
-        row = con.execute("SELECT topics FROM records WHERE id=?", (rid,)).fetchone()
-        topics = _normalize_capsule_list(row[0] if row else None)
-    except (sqlite3.Error, TypeError, ValueError):
-        return []
-    labels = [t.casefold() for t in topics]
-    return [t for t in labels if t.split(":", 1)[0] in _BOOTSTRAP_LABEL_RANK and t.split(":", 1)[1:] != [""]][:4]
-
-
 def _append_write_event(action, rid, tier=None, scope=None, rtype=None, actor=None,
-                         snippet=None, cwd=_WRITE_EVENT_CWD_UNSET, labels=None):
-    """Append bounded write telemetry without ever blocking a mutation. ``labels`` (the
-    record's own ``unit:``/``field:`` topics, ``_journal_labels``) is kept only when there are some:
-    the session panel's MEM colors a labelled preference by it."""
+                         snippet=None, cwd=_WRITE_EVENT_CWD_UNSET):
+    """Append bounded write telemetry without ever blocking a mutation."""
     try:
         snip = (snippet or "")
         snip = re.sub(r"[\x00-\x1f\x7f]", " ", snip).strip()[:80]
@@ -2231,8 +2214,6 @@ def _append_write_event(action, rid, tier=None, scope=None, rtype=None, actor=No
             "sid": os.environ.get("MEM_SID", ""),
             "snippet": snip,
         }
-        if labels:
-            event["labels"] = [str(label)[:64] for label in labels[:4]]
         # Existing callers retain MEM_CWD/process-cwd fallback. Source absorption
         # callers pass an explicit path or None so no ambient attribution leaks in.
         if cwd is _WRITE_EVENT_CWD_UNSET:

@@ -754,7 +754,8 @@ def memory_kind(kind):
 # kind word's color says what that kind of record can be for a worker. ``work``: a preference carrying a ``unit:`` or ``field:`` label
 # (the work-style records a worker's prompt is given by its labels); ``guide``: another type the worker bootstrap's own type fence
 # takes (``mem_base.BOOTSTRAP_TYPE_FENCE``: read from that file and evaluated as it is, never copied); ``""``: every other type, and
-# any type where the fence cannot be read. It is the kind's qualification, not whether a worker was given the record.
+# any type where the fence cannot be read. It is the kind's qualification, not whether a worker was given the record. The type and the
+# topics are the shown record's own, as stored now (the read that gives its headline, ``session_work.shown_records``), the type whole.
 MEMORY_LABEL_KINDS = ("unit:", "field:")
 _MEM_BASE = Path(__file__).resolve().parents[1] / "memory" / "mem_base.py"
 
@@ -794,14 +795,14 @@ def _bootstrap_type(kind):
         return None
 
 
-def memory_group(kind, labels=None):
-    """``work``, ``guide`` or ``""`` for a record of type ``kind`` whose write row carried ``labels`` (see above)."""
-    kind = str(kind or "")
-    if not kind or not _bootstrap_type(kind):
+def memory_group(kind, topics=None):
+    """``work``, ``guide`` or ``""`` for a record of type ``kind`` (as stored, uncut) whose capsule topics are ``topics``."""
+    if not isinstance(kind, str) or not kind or not _bootstrap_type(kind):
         return ""
-    labelled = isinstance(labels, (list, tuple)) and any(
-        isinstance(label, str) and label.startswith(MEMORY_LABEL_KINDS) and len(label.split(":", 1)[1]) > 0 for label in labels)
-    return "work" if labelled and "preference" in kind else "guide"
+    labelled = isinstance(topics, (list, tuple)) and any(
+        isinstance(topic, str) and topic.casefold().startswith(MEMORY_LABEL_KINDS) and topic.split(":", 1)[1].strip()
+        for topic in topics)
+    return "work" if labelled and "preference" in kind.casefold() else "guide"
 
 
 # 11-15 (panel polish 5): the memory system's own tier and scope names, as its records carry them.
@@ -822,10 +823,16 @@ def session_memory_items(values, now=None):
             continue
         text, age, kind = _memory_values(row, now)
         if text:
+            # 11-27: the shown record's stored type and topics where the read has them (else the journal row's type, no topics).
+            record = row.get("record") if isinstance(row.get("record"), dict) else {}
+            stored = record.get("type") if isinstance(record.get("type"), str) and record.get("type") else None
+            if stored is not None:
+                kind = sanitize_title(stored).strip()[:32]
             items.append({"kind": memory_kind(kind), "age": age, "text": text,
                           "tier": row.get("tier") if row.get("tier") in MEMORY_TIERS else "",
                           "scope": row.get("scope") if row.get("scope") in MEMORY_SCOPES else "",
-                          "body": _memory_body(row, text), "group": memory_group(kind, row.get("labels"))})
+                          "body": _memory_body(row, text),
+                          "group": memory_group(stored if stored is not None else row.get("type"), record.get("topics"))})
         if len(items) >= MEMORY_ITEMS:
             break
     return items

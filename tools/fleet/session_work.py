@@ -7,12 +7,22 @@ from .model import project_of
 
 class WorkRows(list):
     """The newest open rows (bounded) and ``total``, every open record of the repo, and the
-    stored headlines of the journal ids the caller asked about (``headlines``)."""
+    stored headlines of the journal ids the caller asked about (``headlines``) and, from the same
+    read, their stored type and capsule topics (``stored``)."""
 
-    def __init__(self, rows=(), total=None, headlines=None):
+    def __init__(self, rows=(), total=None, headlines=None, stored=None):
         super().__init__(rows)
         self.total = len(self) if total is None else max(len(self), int(total))
         self.headlines = dict(headlines or {})
+        self.stored = dict(stored or {})
+
+
+def shown_records(rows, work):
+    """The saved journal rows as the panel shows them: each with the stored headline and (11-27) the stored type and
+    topics (``record``, None where the read has none) of the record it shows (its ``headline_id``: the replacement of
+    a superseded one)."""
+    return [{**row, "headline": work.headlines.get(str(row.get("headline_id")), ""),
+             "record": work.stored.get(str(row.get("headline_id")))} for row in rows]
 
 
 def observe(cwd, journal_ids=()):
@@ -28,7 +38,7 @@ def observe(cwd, journal_ids=()):
     # The collector applies the repo page's classification before its display cut, so
     # finished records never count and never hide open work behind the cut.
     rows = [row for row in project.get("open") or () if memory.open_stage(row) is not None]
-    return WorkRows(rows, project.get("open_total"), data.get("headlines")), [str(path), str(path) + "-wal"]
+    return WorkRows(rows, project.get("open_total"), data.get("headlines"), data.get("stored")), [str(path), str(path) + "-wal"]
 
 
 _ROUTE_ID = re.compile(r"(?<![A-Za-z0-9])rt-[0-9a-f]{16}(?![A-Za-z0-9])")

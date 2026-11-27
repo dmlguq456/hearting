@@ -695,13 +695,18 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   color, `…` where it goes on (`◆ 10m decision headline`; short of cells the kind goes first, where the headline would be left under 14 cells; the
   mark and the age stay). 11-27 (the person: "그 앞의 종류가 중요한데 그거 에따라서 컬러를 부여해주고"; of the design's two, "세 무리"): the kind word
   alone takes the color of what that kind of record can be for a worker, here and in the MEM popup's head: the request zone's teal
-  (`zone_request`) for a preference whose journal row carries a `unit:` or `field:` label (the record's own capsule topics, which `mem.py`
-  `_journal_labels` writes into its `add` row; the labels a worker's prompt is given records by), the dispatch zone's violet (`zone_dispatch`)
-  for every other type the worker bootstrap's own type fence takes (`mem_base.BOOTSTRAP_TYPE_FENCE`, read from that file and evaluated as it
-  is, never copied; an unlabelled preference and an older row without labels are this), and dim as before for the rest (reference, fact,
-  project, artifact-pointer, lesson …) and wherever the fence cannot be read. The backend decides the group (`session_panel.memory_group`)
-  and the panel picks the color by it; a label is never guessed from the headline or body, and the color says what the kind can be, not
-  whether a worker was given the record. The cells, words and cuts are unchanged, and a colorless terminal draws the same cells as before.
+  (`zone_request`) for a preference carrying a `unit:` or `field:` label in its capsule topics (the labels a worker's prompt is given records
+  by), the dispatch zone's violet (`zone_dispatch`) for every other type the worker bootstrap's own type fence takes
+  (`mem_base.BOOTSTRAP_TYPE_FENCE`, read from that file and evaluated as it is, never copied; an unlabelled preference is this), and dim as
+  before for the rest (reference, fact, project, artifact-pointer, lesson …) and wherever the fence cannot be read. The type and the topics
+  are the shown record's own as stored now, old records and new alike: the read-only query that gives the record's headline (Fleet's
+  `collectors/memory.py`, `SELECT id, headline, type, topics … WHERE id IN (…)`) gives them too, for the record the row shows (its headline
+  id: the replacement where one was superseded); the type is judged whole and only the word drawn is cut. Where that read has no such
+  record (the store unreadable, the record gone) the journal row's type stands with no labels: a preference violet, an unknown type dim.
+  Nothing is written for it: the memory system's writes and its journal rows are unchanged. The backend decides the group
+  (`session_panel.memory_group`) and the panel picks the color by it; a label is never guessed from the headline or body, and the color
+  says what the kind can be, not whether a worker was given the record. The cells, words and cuts are unchanged, and a colorless terminal
+  draws the same cells as before.
   The head is `MEM                ›` (no rule since 11-22): a press on it, or on a record (`popup:MEM:<n>`), opens the MEM popup. Short of rows MEM shows two
   records, then one, after the messages took the one-row form; no section without a journal row.
   The MEM popup is the MESSAGES popup's frame, keys and press rules (the table popup: `←→` section, PgUp/PgDn, Esc), its rows drawn from the records the
