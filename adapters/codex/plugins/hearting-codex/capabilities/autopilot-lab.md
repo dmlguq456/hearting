@@ -190,11 +190,13 @@ attestation, config provenance, the governor, and its `supervised` continuation.
 The owner's Route steps, the receipt after `smoke`, `complete --check`, the
 stage-start refusal and `workflow-supervisor status` print `full-run`'s exact
 `resource-runner.py start` only when this route's own cycle is bound, its
-declared smoke attestation passes the runner's `verify`, no sealed config
-manifest (S3-2b) is bound to that attestation, and the cycle's run registry
-holds no run of this route node. Otherwise they print one line naming what is
-missing: the attestation path, the sealed manifest's run id and
-`--config-manifest`, or the existing run's id, state and registry.
+declared smoke attestation passes the runner's `verify` and records its
+execution environment, the cycle can be read and holds no sealed config
+manifest (S3-2b), and the cycle's run registry holds no run of this route node
+(matched as the runner matches it). Otherwise they print one line naming what
+is missing: the attestation path or a new smoke, a sealed manifest that may
+exist (its run id and `--config-manifest`), or the existing run's id, state and
+registry. A GPU-free `host-run` keeps its existing wording.
 
 For a failed resource run, use `<manifest_run_id>__a<N>` (N starts at 1) on the same route; reusing the previous run ID with a new owner conflicts with its existing watch binding (`resource-watch-binding-conflict`). When a completed `compute-hosts` run is offered instead, pass its id once to the existing `resource-runner start --compute-run <run-id>` surface. The runtime accepts only same-route (or its verified owner-pin-handoff successor) and sealed-contract evidence, a zero exit, declared outputs, and a fresh remote quiescence observation. The handoff creates the next `__aN` resource row and preserves the failed row; it does not start a payload or replace independent `run-verify` judgment. A run id alone is not evidence. A run this route's own owner launched directly with `compute-hosts run` (route provenance only, no resource row) is adopted by the same command as `<node>__aN` when it is this route's finished (exit 0, no process) run that no other row holds; command, inputs and outputs are recorded as matched or unverified, not required.
 For a retryable nonzero exit, the existing declared verifier may start from the

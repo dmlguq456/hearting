@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """A step the owner runs itself is printed with its exact command only in the simplest settled case; otherwise one
 line says what is missing. A resource start is printed only when the route's own cycle is bound, its declared smoke
-attestation passes the runner's `verify`, no sealed config manifest is bound to it and the registry holds no run of
-that route node. An owner-run stage's completion runs as printed in the owner's environment; the parent session
-still passes `--attempt-id` and a route file, as before.
+attestation passes the runner's `verify` and records its execution environment, the cycle is read to its end and
+holds no sealed config manifest, and the registry holds no run of that route node (the runner's route file and node
+match). A GPU-free host payload node keeps main's wording. An owner-run stage's completion runs as printed in the
+owner's environment; the parent session still passes `--attempt-id` and a route file, as before.
 
 Fabricated staged routes of the real recipes, no model: a measurement route (`smoke` then a `resource-runner`
 node), lab eval graphs, a ship route whose owner-run setup stage is followed by dispatched reviews, and the parent
@@ -14,6 +15,7 @@ import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -45,6 +47,7 @@ import artifact_producer  # noqa: E402
 import dispatch_completion_join as JOIN  # noqa: E402
 import dispatch_contract_gates as GATES  # noqa: E402
 import dispatch_stage_advance as ADVANCE  # noqa: E402
+from gpu_execution_sandbox import host_payload_nodes  # noqa: E402
 import workflow_state as WS  # noqa: E402
 import worker_bootstrap as W  # noqa: E402
 
@@ -183,10 +186,11 @@ class HumanRunStepCommandTest(unittest.TestCase):
         return subprocess.run([sys.executable, ROUTE_TOOL, "complete", *argv], text=True, capture_output=True,
                               env=env, cwd=self.repo)
 
-    def attest(self, output, manifest=None, payload=PAYLOAD):
+    def attest(self, output, manifest=None, payload=PAYLOAD, inputs=()):
         output.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run([sys.executable, str(ROOT / "tools/smoke-attestation.py"), "attest", "--input",
-                        str(self.repo / "README"), "--cwd", str(self.repo), "--output", str(output),
+                        str(self.repo / "README"), *(a for i in inputs for a in ("--input", str(i))),
+                        "--cwd", str(self.repo), "--output", str(output),
                         *(["--config-manifest", str(manifest)] if manifest else []), "--", *payload],
                        check=payload == PAYLOAD, capture_output=True, env=self.env)
 
@@ -285,12 +289,20 @@ class HumanRunStepCommandTest(unittest.TestCase):
                                  "full-run has no start command yet: this route node already has run "
                                  f"fixture-existing-run ({state or 'state unknown'}) in {registry} — read it with "
                                  f"`{status('fixture-existing-run')}`; start nothing new")
-        # Another route's run of the same node is not this route node's: the start is printed.
-        registry.write_text(json.dumps({"schema_version": 1, "runs": {
-            "fixture-other-route": {"route_id": "rt-" + "0" * 16, "node": "full-run", "status": "running"}}}))
+        # A row with no route id is matched as the runner matches it, by route file and node.
         run_id = f"{route['route_id']}-full-run"
-        self.assert_argv(self.command_in(W.human_run_step(route, path, node)),
-                         self.expected_argv(route, path, out, run_id, attestation))
+        legacy = {"node": "full-run", "route": str(path.resolve()), "status": "succeeded"}
+        for runs, held in (({"fixture-legacy-run": legacy}, "fixture-legacy-run (succeeded)"),
+                           ({run_id: {"node": "other", "route": "/elsewhere/route.json"}}, f"{run_id} (state unknown)")):
+            registry.write_text(json.dumps({"schema_version": 1, "runs": runs}))
+            self.assertTrue(W.human_run_step(route, path, node).startswith(
+                f"full-run has no start command yet: this route node already has run {held} in {registry}"), runs)
+        # Another route's run of the same node, by id or by route file, is not this route node's: the start is printed.
+        for other in ({"route_id": "rt-" + "0" * 16, "route": "/elsewhere/route.json"}, {"route": "/elsewhere/route.json"}):
+            registry.write_text(json.dumps({"schema_version": 1, "runs": {
+                "fixture-other-route": {**other, "node": "full-run", "status": "running"}}}))
+            self.assert_argv(self.command_in(W.human_run_step(route, path, node)),
+                             self.expected_argv(route, path, out, run_id, attestation))
         registry.write_text("{not json")
         self.assertEqual(W.human_run_step(route, path, node),
                          f"full-run has no start command yet: {registry} cannot be read — read its runs of this node "
@@ -353,9 +365,20 @@ class HumanRunStepCommandTest(unittest.TestCase):
                          f"eval-run has no start command yet: it needs a verified smoke attestation — "
                          f"{Path(argv[argv.index('--smoke-attestation') + 1])}")
 
-    def test_a_sealed_config_manifest_prints_one_line_and_no_run_id(self):
+    def test_a_sealed_config_manifest_in_the_cycle_or_an_unread_cycle_prints_one_line_and_no_run_id(self):
         route, path = self.compose("autopilot-lab", "setup")
-        out = self.cycle_output(route)
+        out, node = self.cycle_output(route), self.node(route, "full-run")
+        maybe = ("full-run has no start command yet: a sealed config manifest may exist — if so, pass its run id as "
+                 "`--run-id` and add `--config-manifest <that manifest>`")
+        self.attest(out / "reviews" / "smoke-attestation.json")
+        self.command_in(W.human_run_step(route, path, node))
+        if os.geteuid() != 0:  # a directory of the cycle that cannot be read leaves the manifest unknown
+            locked = out / "locked"
+            locked.mkdir()
+            locked.chmod(0)
+            self.addCleanup(locked.chmod, 0o755)
+            self.assertEqual(W.human_run_step(route, path, node), maybe)
+            locked.chmod(0o755)
         sealed = subprocess.run([sys.executable, str(ROOT / "tools/lab-config-provenance.py"), "seal", "--repo",
                                  str(self.repo), "--config", "configs/train.yaml", "--slug", "fixture-run", "--artifact-root",
                                  str(self.art)], text=True, capture_output=True, cwd=self.repo,
@@ -364,13 +387,37 @@ class HumanRunStepCommandTest(unittest.TestCase):
         self.assertEqual(sealed.returncode, 0, sealed.stderr)
         manifest = json.loads(sealed.stdout)
         manifest_path = Path(manifest["snapshot_path"]).parent / f"{manifest['run_id']}.manifest.json"
-        self.attest(out / "reviews" / "smoke-attestation.json", manifest_path)
-        line = W.human_run_step(route, path, self.node(route, "full-run"))
-        self.assertEqual(line, "full-run has no start command yet: a sealed config manifest is bound to its smoke "
-                               "attestation — pass that manifest's run id as `--run-id` and add "
-                               "`--config-manifest <that manifest>`")
+        # The source and snapshot passed as plain inputs: the attestation carries no `config_sha256`, yet the
+        # cycle holds the manifest.
+        attestation = out / "reviews" / "smoke-attestation.json"
+        self.attest(attestation, inputs=(self.repo / "configs" / "train.yaml", manifest["snapshot_path"]))
+        self.assertNotIn("config_sha256", json.loads(attestation.read_text()))
+        self.assertEqual(W.human_run_step(route, path, node), maybe)
+        self.attest(attestation, manifest_path)
+        line = W.human_run_step(route, path, node)
+        self.assertEqual(line, maybe)
         self.assertNotIn(manifest["run_id"], line)
         self.assertNotIn("payload", line)
+
+    def test_a_host_payload_node_keeps_main_wording(self):
+        route, path = self.compose_graph("host-run,metrics,report", "host-eval")
+        self.assertIn("host-run", host_payload_nodes(route))
+        self.assertEqual(W.human_run_step(route, path, self.node(route, "host-run")), "")
+        text = self.route_steps(path)
+        self.assertIsNone(self.step_line(text, "host-run"))
+        self.assertNotIn("smoke attestation", text)
+
+    def test_an_attestation_with_no_execution_environment_needs_a_new_smoke(self):
+        route, path = self.compose("autopilot-lab", "setup")
+        attestation = self.cycle_output(route) / "reviews" / "smoke-attestation.json"
+        self.attest(attestation)
+        data = json.loads(attestation.read_text())
+        del data["execution_environment"], data["attestation_hash"]
+        digest = hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode())
+        attestation.write_text(json.dumps({**data, "attestation_hash": "sha256:" + digest.hexdigest()}))
+        self.assertEqual(W.human_run_step(route, path, self.node(route, "full-run")),
+                         f"full-run has no start command yet: it needs a new smoke — {attestation} records no "
+                         "execution environment")
 
     def test_the_read_only_check_keeps_its_answer_when_the_step_text_cannot_be_imported(self):
         route, path = self.compose("autopilot-lab", "setup")

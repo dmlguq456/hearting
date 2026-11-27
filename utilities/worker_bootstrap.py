@@ -1422,8 +1422,10 @@ def route_cycle_output_dir(route, route_file) -> str | None:
 def resource_start_command(route, route_file, node, output_dir) -> tuple[str, str]:
     """`(command, note)`: the exact `resource-runner.py start` of a sealed resource node, only `<approved command>`
     left, when all four hold: this route's own cycle is bound; its declared smoke attestation input passes the
-    `verify` the runner applies; no sealed config manifest is bound to it; the cycle's run registry holds no run
-    of this route node. Otherwise `("", what is missing)`."""
+    `verify` the runner applies and records the execution environment it requires; the attestation binds no config
+    manifest and the cycle, read to its end, holds none (`config-seal` writes `_internal/configs/*.manifest.json`);
+    the cycle's run registry holds no run of this route node (the runner's route file and node match, or its id).
+    Otherwise `("", what is missing)`."""
     import importlib.util
     from resource_run_registry import route_registry_path
     if not output_dir or not route.get("cwd"):
@@ -1442,17 +1444,24 @@ def resource_start_command(route, route_file, node, output_dir) -> tuple[str, st
         smoke = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(smoke)
         smoke.verify(data)
+        if not smoke.RESOURCE_ENV.valid_execution_identity(data.get("execution_environment")):
+            return "", f"it needs a new smoke — {attestation} records no execution environment"
     except Exception:
         return "", f"it needs a verified smoke attestation — {attestation}"
-    if "config_sha256" in data:
-        return "", ("a sealed config manifest is bound to its smoke attestation — pass that manifest's run id as "
-                    "`--run-id` and add `--config-manifest <that manifest>`")
+    unread = []  # a directory that cannot be read leaves the manifest's presence unknown
+    if "config_sha256" in data or any(name.endswith(".manifest.json") and Path(top).match("_internal/configs")
+                                      for top, _d, names in os.walk(output_dir, onerror=unread.append)
+                                      for name in names) or unread:
+        return "", ("a sealed config manifest may exist — if so, pass its run id as `--run-id` and add "
+                    "`--config-manifest <that manifest>`")
     registry, run_id = route_registry_path(output_dir), f"{route['route_id']}-{node['id']}"
     runner = ["python3", entrypoint(_REPO_ROOT, "utilities/resource-runner.py"), "--registry", str(registry)]
     try:
         runs = json.loads(registry.read_text(encoding="utf-8"))["runs"] if registry.exists() else {}
+        mine = str(Path(route_file).resolve())
         held = {rid: row.get("status") or "state unknown" for rid, row in runs.items() if rid == run_id
-                or (row.get("node") == node["id"] and row.get("route_id") in (None, route["route_id"]))}
+                or (row.get("node") == node["id"] and (row.get("route_id") == route["route_id"]
+                                                       or row.get("route") == mine))}
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return "", f"{registry} cannot be read — read its runs of this node there before starting one"
     if held:
@@ -1467,10 +1476,12 @@ def resource_start_command(route, route_file, node, output_dir) -> tuple[str, st
 
 def human_run_step(route, route_file, node) -> str:
     """One line for a step the owner runs itself (a resource node it starts, a stage it closes): its exact command
-    when this route's own sealed context fixes every argument, else what is missing. "" for any other node."""
+    when this route's own sealed context fixes every argument, else what is missing. "" for any other node, a
+    GPU-free host payload node (`host-run`) included: the runner starts it without a smoke attestation."""
     try:
+        from gpu_execution_sandbox import host_payload_nodes
         node_id, resource = node["id"], node.get("kind") == "resource-runner"
-        if not resource and not owner_run_stage(node):
+        if not resource and not owner_run_stage(node) or resource and node_id in host_payload_nodes(route):
             return ""
         output_dir = route_cycle_output_dir(route, route_file)
         if resource:
