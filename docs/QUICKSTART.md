@@ -104,7 +104,7 @@ Tell the first session, using the second session's number:
 > Ask session [b2] to re-run the tests and report back.
 
 The request gets a number (`rq-…`) and shows in the route box of both panels:
-`→` in the session that asked, `◂` in the one asked. The second session opens the request
+`→` in the session that asked, `←` in the one asked. The second session opens the request
 body itself, works, and reports; a partial report keeps the request open, and
 a final report closes it and wakes the first session. Neither herdr nor tmux is
 needed. In a terminal without the panel, an idle Claude Code or OpenCode
