@@ -186,6 +186,9 @@ class TablePopupTest(unittest.TestCase):
                 for label, text, _tone in VISIBILITY['lines']:
                     self.assertIn((label + ':' + text).replace(' ', ''), whole, (window, columns, label))
                 self.assertNotRegex(whole, r'\+\d+more', (window, columns))
+        # The page is longer than a low window: the host's table reads it on and says where it stands.
+        low = self.popup(kind='routes', columns=82, open='rt-aaaaaaaaaaaaaaa2', page=True, rows=10)
+        self.assertGreater(len(low['rows']), 13)
 
     def test_a_long_route_page_is_whole_at_every_requested_height(self):
         from dataclasses import replace
@@ -293,9 +296,6 @@ class TablePopupTest(unittest.TestCase):
                     self.assertEqual(start + 5, len(rows) - 1)
                 else:
                     self.assertNotIn('owner raw', '\n'.join(rows))
-        # The page is longer than a low window: the host's table reads it on and says where it stands.
-        low = self.popup(kind='routes', columns=82, open='rt-aaaaaaaaaaaaaaa2', page=True, rows=10)
-        self.assertGreater(len(low['rows']), 13)
 
     def test_another_sessions_question_is_never_answered_from_this_window(self):
         # 11-15: the sessions popup and its way into another session's question are gone; an answer this
