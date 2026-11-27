@@ -632,7 +632,7 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   A request (11-16, the person: "양식을 맞추자. [6c] claude opus 5.5 xhigh 이런식으로") reads as a
   route's doer: beside the native area its first row is its mark (→ sent, ← received, `✓`/`✕`
   closed; 11-27, the person: "방향만 다르면 화살표 방향만 반대로 하면 되는걸 왜 삼각형을써? 메시지는 안그러잖아":
-  a received request wears the received message's `←`, no longer `◂`), the other session's Fleet number, then that session's harness, model and effort in
+  a received request wears the received message's `←`, no longer the small triangle), the other session's Fleet number, then that session's harness, model and effort in
   a route row's colors (`← [6c] claude Opus 5.5 xhigh`; the model and effort only as far as the
   session values Fleet's shared producer already read for the session displays know them, so
   `[6c] claude` where they are unknown, and a session that is gone keeps its name alone; 11-18, the person: "세션 id 외에도 repo
