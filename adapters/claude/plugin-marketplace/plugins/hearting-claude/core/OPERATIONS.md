@@ -2895,13 +2895,14 @@ acceptance and native receipt are not a completed check. A harness whose transpo
 unconfirmed stays unconfirmed. `steward check` shows only the caller's own
 `role_targets` (one winner per target) and uses only existing observations (herdr
 state, liveness, undelivered messages and notices): a live PID alone is not health and
-an unobserved session is not declared dead. It also matches waiting targets against
-remaining work from existing sources only — the holder repository's open records
-(`fleet.session_work.observe`, the repo page's work source, kept only when the shared
-`memory.open_stage` classification calls them open; a record awaiting a user decision is
-shown as one to raise with the user, not one to assign), peer requests still queued for
+an unobserved session is not declared dead. It reads remaining work from existing
+sources only — the holder repository's open records (`fleet.session_work.observe`,
+using the shared open-work classification) and peer requests still queued for
 delivery to the holder or a live target (an ended target's undeliverable rows are left
-out) — and prints each as a `next=` action (for example
+out). Explicit session ownership limits the list to the holder and confirmed
+role targets. A waiting target gets its name on the work it owns. Records without an owner link
+remain visible as project work without a target name. A record awaiting a user
+decision is shown as one to raise with the user. The check prints each as a `next=` action (for example
 `next=[e7] waiting 42 min · #1425 review → assign now`); the wait time comes from the
 duty's own earlier observations. `changes=none` does not mean nothing remains: while
 any next action exists the request names those actions (`assign-next`) and leaves release

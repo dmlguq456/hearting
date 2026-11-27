@@ -54,6 +54,12 @@ Adapters must preserve the portable invariants relevant to this capability:
 - state lives under `${XDG_STATE_HOME:-~/.local/state}/hearting/session-tidy/` (directories 0700, files 0600), never in the artifact root. The one exception is the memory worker's exchange folder `<artifact root>/.runtime/session-tidy/<batch>/` (0700; the input copy, the prompt and the one `actions.json` it writes): its sandbox allows the artifact root the checked wrapper launches it with and not the state folder. The runner reads that file back without following a link, checks it, copies the checked result into state and deletes the folder (a failed batch keeps only the worker's answer until it is pruned); sandboxes and permissions are never widened for it;
 - tidy `/compact` input goes only through `utilities/peer-steward.py clear`, at most once after the existing safety checks; exact-native seats may use their bounded attachment for one no-trailer continue write to the booked process after rechecking the empty input and form state, while other targets use one sealed pending ref through the native carrier and exact receipt; neither path targets an inherited pane;
 - the memory worker never calls a memory write command; only `mem tidy-apply` writes, and it never deletes.
+- Tidy can create open work only for the exact caller or a confirmed same-repository
+  steward target. The runner supplies those identities from the existing role
+  projection. The worker identifies who owes the action, and apply checks that
+  identity against the batch's scope using the same open-work classifier as Fleet.
+  A useful observation can be saved without opening work. Ownership uses the
+  existing record links and the check never infers it from quoted dialogue.
 - existing archived runtime-compact cards put a delivered last reply before the summary and prefer it over conflicting summary claims of non-delivery or non-completion; preserve post-summary turns separately. Some recent turns may remain verbatim depending on runtime: do not infer delivery from an omitted summary turn, name the last turn the summary covers when known, and say when the preserved transcript needs checking. Never assume the tail is visible or available.
 
 ## Portable Procedure

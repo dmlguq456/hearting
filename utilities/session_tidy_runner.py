@@ -75,6 +75,7 @@ if str(HERE) not in sys.path:
 
 import session_tidy as st  # noqa: E402
 import tidy_decisions as td  # noqa: E402
+from memory_open_work import scoped_owners  # noqa: E402
 try:  # ends a detached child with the test that started it; no-op outside tests
     from detached_lifetime import bind as end_with_test  # noqa: E402
 except ImportError:  # a partial tree without it (e.g. a fixture release): no record
@@ -537,6 +538,21 @@ def _unread_entry(target: dict, chunk) -> dict:
             "coverage": tt.describe_coverage(chunk), "blocked": chunk.blocked, "remaining": tt.unread_total(chunk)}
 
 
+def _obligation_owners(item: dict) -> list[dict]:
+    """Resolve role targets from metadata, independently of which conversations were read."""
+    tools = str(ROOT / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    harness, sid = item["harness"], item["sid"]
+    try:
+        from fleet.collectors import steward
+        targets = steward.role_targets(harness, sid, cwd=item["cwd"],
+                                       sessions=steward._registry_sessions(), include_native=True)
+    except Exception:  # The exact caller can still own work when the role data is unavailable.
+        targets = ()
+    return [{"harness": h, "session_id": s} for h, s in sorted(scoped_owners(harness, sid, targets))]
+
+
 def assemble(item: dict, batch: str, run_dir: Path) -> Bundle:
     import tidy_transcripts as tt
     seat = st.physical_seat(st.seat_from_dict(item["seat"]))
@@ -599,6 +615,8 @@ def assemble(item: dict, batch: str, run_dir: Path) -> Bundle:
            "automatic_records": automatic_records,
            "pending_decisions": pending, "existing_records": records, "duplicate_groups": groups,
            "limits": {"max_new_records": 10, "max_duplicate_groups": DUPLICATE_SIGNAL_MAX}}
+    if sessions:
+        doc["obligation_owners"] = _obligation_owners(item)
     if item.get("idle_card"):
         import session_tidy_idle_card
         try:

@@ -26,10 +26,13 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 _UTILITIES = Path(__file__).resolve().parent
 if str(_UTILITIES) not in sys.path:
     sys.path.insert(0, str(_UTILITIES))
+
+from memory_open_work import owner_identity, owner_link, record_owner, scoped_owners
 
 DUTY_KIND = "steward-check"
 NOTICE_KEY_PREFIX = "steward-check:"
@@ -427,13 +430,9 @@ def _holder_cwd(harness: str, session_id: str):
     return cwds.pop() if len(cwds) == 1 else None
 
 
-def _is_open_work(memory, row: dict) -> bool:
-    """The shared repo-page classification (``memory.open_stage``); until it ships, only the
-    collector's own open types count, so finished, pointer and feedback records never do."""
-    open_stage = getattr(memory, "open_stage", None)
-    if callable(open_stage):
-        return open_stage(row) is not None
-    return str(row.get("type") or "").casefold() in getattr(memory, "_OPEN_TYPES", ())
+class OpenWork(NamedTuple):
+    headline: str
+    owner: str | None = None
 
 
 def _is_user_decision(row: dict, headline: str) -> bool:
@@ -442,9 +441,8 @@ def _is_user_decision(row: dict, headline: str) -> bool:
     return bool(tags & _USER_DECISION_TAGS) or any(word in text for word in _USER_DECISION_WORDS)
 
 
-def _open_work(harness: str, session_id: str) -> tuple[list[str], list[str]]:
-    """``(open work, awaiting the user)`` headlines for the holder's repository from the
-    existing Fleet work source (``fleet.session_work.observe``); ([], []) when unknown."""
+def _open_work(harness: str, session_id: str, targets=()) -> tuple[list[OpenWork], list[str]]:
+    """Open work and pending decisions from the holder's repository and role."""
     cwd = _holder_cwd(harness, session_id)
     if not cwd:
         return [], []
@@ -452,23 +450,21 @@ def _open_work(harness: str, session_id: str) -> tuple[list[str], list[str]]:
         tools = _UTILITIES.parent / "tools"
         if str(tools) not in sys.path:
             sys.path.insert(0, str(tools))
-        from fleet.collectors import memory
         from fleet.session_work import observe
         rows, _watched = observe(cwd)
     except Exception:  # noqa: BLE001 - backlog is optional evidence
         return [], []
+    allowed = {owner_link(owner) for owner in scoped_owners(harness, session_id, targets)}
     open_rows = []
     for row in rows or ():
         row = row if isinstance(row, dict) else {}
         headline = " ".join(str(row.get("headline") or "").split())
         if not headline:
             continue
-        try:
-            if not _is_open_work(memory, row):
-                continue
-        except Exception:  # noqa: BLE001
+        owner = record_owner(row)
+        if owner is not None and owner not in allowed:
             continue
-        open_rows.append((row, headline))
+        open_rows.append((row, OpenWork(headline, owner)))
     # Work handed to a route whose worker runs now is the route's, not this session's to do:
     # it comes back as the route's own completion. A finished route's unreceived result and
     # a record with no running route, or one that also names another session's or a finished
@@ -480,11 +476,11 @@ def _open_work(harness: str, session_id: str) -> tuple[list[str], list[str]]:
     except Exception:  # noqa: BLE001
         handed = set()
     work, decisions = [], []
-    for row, headline in open_rows:
-        if _is_user_decision(row, headline):
-            decisions.append(headline)
+    for row, item in open_rows:
+        if _is_user_decision(row, item.headline):
+            decisions.append(item.headline)
         elif id(row) not in handed:
-            work.append(headline)
+            work.append(item)
     return work, decisions
 
 
@@ -614,7 +610,7 @@ def _lab_summary(observation: dict, notified) -> tuple[str, str, dict]:
 
 def _observe_role(harness: str, session_id: str) -> dict:
     """``{"targets": [{name, harness, session_id, state, liveness, owed}],
-    "pending_messages": n, "open_work": [headline, ...], "user_decisions": [headline, ...],
+    "pending_messages": n, "open_work": [OpenWork, ...], "user_decisions": [headline, ...],
     "lab": {root: counts_and_group_names}}``
     for this holder's own winner targets only; ``owed`` and ``pending_messages`` count peer
     requests queued but not yet delivered to that target or to the holder."""
@@ -663,7 +659,7 @@ def _observe_role(harness: str, session_id: str) -> dict:
                 "owed": _pending_count(module, t_harness, t_sid)})
     _lengthen_shared_prefixes(targets)
     pending = _pending_count(module, harness, session_id)
-    work, decisions = _open_work(harness, session_id)
+    work, decisions = _open_work(harness, session_id, targets)
     lab = _observe_lab(cwds)
     return {"targets": targets, "pending_messages": pending,
             "open_work": work, "user_decisions": decisions, "lab": lab}
@@ -723,13 +719,18 @@ def _label(name: str) -> str:
 
 
 def next_actions(observation: dict, waiting_since=None, now: float | None = None) -> list[str]:
-    """Concrete next steps: queued peer requests, waiting targets paired with open work,
-    unassigned open work, then decisions awaiting the user. Empty when nothing remains."""
+    """Queued peer requests, waiting targets' own work, other open work and user decisions."""
     now = _now() if now is None else now
     waiting_since = waiting_since or {}
     targets = observation["targets"]
-    work = [h if len(h) <= _MAX_HEADLINE else h[:_MAX_HEADLINE - 1] + "…"
-            for h in observation.get("open_work") or ()]
+    work = []
+    by_owner = {}
+    for item in observation.get("open_work") or ():
+        headline = item.headline
+        if len(headline) > _MAX_HEADLINE:
+            headline = headline[:_MAX_HEADLINE - 1] + "…"
+        work.append(OpenWork(headline, item.owner))
+        by_owner.setdefault(item.owner, []).append(headline)
     waiting = sorted((t for t in targets if _waiting(t) and not _queued_for(t)),
                      key=lambda t: waiting_since.get(str(t.get("session_id")), now))
     actions = []
@@ -739,13 +740,17 @@ def next_actions(observation: dict, waiting_since=None, now: float | None = None
             actions.append(f"{_label(target['name'])} {owed} peer request(s) queued, not yet "
                            "delivered → do not resend")
     for target in waiting:
+        owner = owner_link(owner_identity(target))
+        headlines = by_owner.pop(owner, ()) if owner is not None else ()
+        if not headlines:
+            continue
         minutes = int(max(0.0, now - float(waiting_since.get(str(target.get("session_id")), now))) // 60)
         since = f" {minutes} min" if minutes else ""
-        if not work:
-            break
-        actions.append(f"{_label(target['name'])} waiting{since} · {work.pop(0)} → assign now")
-    for headline in work:
-        actions.append(f"open: {headline} → assign or do now")
+        actions.extend(f"{_label(target['name'])} waiting{since} · {headline} → assign now"
+                       for headline in headlines)
+    for headline, owner in work:
+        if owner in by_owner:
+            actions.append(f"open: {headline} → assign or do now")
     for headline in observation.get("user_decisions") or ():
         short = headline if len(headline) <= _MAX_HEADLINE else headline[:_MAX_HEADLINE - 1] + "…"
         actions.append(f"awaiting user decision: {short} → raise it to the user")
@@ -755,12 +760,16 @@ def next_actions(observation: dict, waiting_since=None, now: float | None = None
     return actions
 
 
+def _work_signature(observation: dict) -> tuple:
+    return tuple(item if item.owner else item.headline for item in observation.get("open_work") or ())
+
+
 def _signature(action: str, observation: dict) -> str:
     rows = sorted((t["name"], t["harness"], str(t["session_id"]), t["state"], t["liveness"],
                    int(t.get("owed") or 0))
                   for t in observation["targets"])
     raw = repr((action, rows, observation["pending_messages"],
-                tuple(observation.get("open_work") or ()),
+                _work_signature(observation),
                 tuple(observation.get("user_decisions") or ())))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
@@ -1224,7 +1233,7 @@ def _check_digest(seen: dict) -> str:
              for t in seen["targets"]]
     parts.append("pending=" + str(seen["pending_messages"]))
     if seen.get("open_work"):
-        parts.append("open=" + hashlib.sha256(repr(tuple(seen["open_work"])).encode()).hexdigest()[:8])
+        parts.append("open=" + hashlib.sha256(repr(_work_signature(seen)).encode()).hexdigest()[:8])
     if seen.get("user_decisions"):
         parts.append("user=" + hashlib.sha256(repr(tuple(seen["user_decisions"])).encode()).hexdigest()[:8])
     return "|".join(sorted(parts))

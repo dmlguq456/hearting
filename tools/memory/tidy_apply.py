@@ -55,6 +55,7 @@ if str(UTILITIES) not in sys.path:
 
 import session_tidy as st  # noqa: E402
 import tidy_decisions as td  # noqa: E402
+from memory_open_work import open_stage, owner_identity, owner_link  # noqa: E402
 
 SCHEMA = 1
 ACTOR = td.DECISION_ACTOR
@@ -303,8 +304,10 @@ def _validate_static(index: int, action, seen_sources: set, groups: list) -> Opt
 class Batch:
     """One apply run: state, counters and the result document."""
 
-    def __init__(self, mem, batch_id: str, cwd: str, pkey: str, directory: Path):
+    def __init__(self, mem, batch_id: str, cwd: str, pkey: str, directory: Path,
+                 obligation_owners):
         self.mem, self.batch_id, self.cwd, self.pkey, self.dir = mem, batch_id, cwd, pkey, directory
+        self.obligation_owners = obligation_owners
         self.journal = Journal(directory, batch_id, pkey, cwd)
         self.result = {
             "schema_version": SCHEMA, "batch_id": batch_id, "cwd": cwd, "project_key": pkey,
@@ -345,20 +348,29 @@ class Batch:
 
     def _new_record(self, action: dict, tier: str, rtype: str, source: str, label: str):
         mem = self.mem
+        body = action["body"]
+        headline = action.get("headline") if isinstance(action.get("headline"), str) else None
+        stored_body = mem.sanitize(body)[0]
+        stored_headline = mem._normalize_headline(headline, stored_body)
+        links = []
+        if open_stage({"type": rtype, "headline": stored_headline}) is not None:
+            owner = owner_identity(action.get("owner"))
+            if owner not in self.obligation_owners:
+                return None, "obligation-owner-unconfirmed"
+            links.append(owner_link(owner))
         con = mem.get_con()
         try:
             if mem.find_by_source(tier, "project", rtype, source, self.pkey, con):
                 return None, "source-exists"
-            body = action["body"]
-            if mem.find_dup(tier, "project", mem.sanitize(body)[0], self.pkey, con=con):
+            if mem.find_dup(tier, "project", stored_body, self.pkey, con=con):
                 return None, "duplicate"
         finally:
             con.close()
         op = self.journal.intent(op="add", source=source, tier=tier, type=rtype, via=label)
         rid = mem.write_record(
-            tier, "project", rtype, body, cwd_origin=self.pkey, source=source, quiet=True,
+            tier, "project", rtype, body, cwd_origin=self.pkey, source=source, quiet=True, links=links,
             journal_action="tidy-" + label, journal_insert_only=True, journal_actor=ACTOR,
-            journal_cwd=self.cwd, headline=action.get("headline") if isinstance(action.get("headline"), str) else None)
+            journal_cwd=self.cwd, headline=headline)
         if not rid:
             self.journal.drop(op)
             return None, "quality"
@@ -546,7 +558,13 @@ def apply_batch(mem, doc: dict, input_doc: Optional[dict], cwd: str, input_diges
         return result
 
     pkey = td.project_origin(mem, cwd)
-    batch = Batch(mem, batch_id, cwd, pkey, directory)
+    scope = (input_doc or {}).get("obligation_owners")
+    input_cwd = (input_doc or {}).get("cwd")
+    owners = set()
+    if (isinstance(scope, list) and isinstance(input_cwd, str) and input_cwd
+            and os.path.realpath(input_cwd) == cwd):
+        owners = {owner for row in scope if (owner := owner_identity(row))}
+    batch = Batch(mem, batch_id, cwd, pkey, directory, owners)
     batch.result["before"] = _counts(mem)
     block_reason = None
     declared = doc.get("input_digest")

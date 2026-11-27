@@ -29,7 +29,8 @@ conversation still unread for each session (`sessions[].text`), the user's own
 question-tool answers (`user_choices`, already recorded by code — never re-add them),
 waiting answers (`pending_decisions`), related active records of this project
 (`existing_records`: id, tier, headline, excerpt), at most five duplicate-group signals
-(`duplicate_groups`), and the caller's card (`card`). An automatic idle batch
+(`duplicate_groups`), the caller's card (`card`), and `obligation_owners`, the exact
+caller and confirmed same-repository steward targets. An automatic idle batch
 also provides `idle_card`: the portable `card_format` policy, complete previous
 card, caller conversation and the existing card-writing guide. Use that context to preserve the original goal,
 dated user wording, requirements/PRD locations and unfinished obligations.
@@ -53,6 +54,8 @@ only — no Markdown fence, no prose:
  "actions": [
   {"kind": "add", "type": "decision", "tier": "durable", "body": "...", "new_ref": "r1",
    "duplicate_group": "g1"},
+  {"kind": "add", "type": "unresolved-obligation", "tier": "working", "body": "...",
+   "owner": {"harness": "<from obligation_owners>", "session_id": "<from obligation_owners>"}},
   {"kind": "supersede", "old_id": "<existing id>", "body": "..."},
   {"kind": "supersede", "old_id": "<duplicate id>", "new_ref": "r1"},
   {"kind": "reinforce", "target_id": "<existing id>"}],
@@ -75,6 +78,15 @@ only — no Markdown fence, no prose:
   `unresolved-obligation` (something promised or left open), or `artifact-pointer`
   (where the real content lives and why to look). Never copy a summary of a document,
   plan or report that already exists — point to it.
+- For an open obligation, use the conversation to identify the session that owes the
+  next action. Copy that session's `owner` from `obligation_owners` when adding or
+  replacing an open record. The session whose transcript contains a quote, the
+  sender who relays a request, and a session mentioned in passing do not establish
+  ownership. A request accepted or adopted by the caller or a confirmed target
+  belongs to that session. If the evidence names someone outside the list or is
+  unclear, leave the open record alone. Save a useful fact from it as an
+  `observation` if it meets the same memory criteria. With no ownership list,
+  open work cannot be attributed.
 - Skip chatter, status narration, progress, anything already in `existing_records`,
   anything the user did not decide or correct, and anything that will not matter after
   three weeks. Empty `actions` is a correct answer.

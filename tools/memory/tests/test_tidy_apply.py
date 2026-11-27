@@ -22,11 +22,14 @@ import re
 import sqlite3
 import sys
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT / "utilities"))
+sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tools" / "memory"))
 
 from tidy_isolation import isolated_env  # noqa: E402
@@ -203,6 +206,91 @@ class ClosedSetTest(TidyApplyCase):
         # exactly as the curator commands' own project gate does.
         self.assertEqual({rid for rid, ok in verdict.items() if ok}, (ids & set(verdict)) - {profile})
         self.assertEqual({rid for rid, ok in verdict.items() if ok}, {durable, working})
+
+
+class ObligationOwnershipTest(TidyApplyCase):
+    def test_tidy_uses_the_obligation_owner_and_steward_labels_only_its_target(self):
+        import session_tidy as st
+        import session_tidy_runner as runner
+        import steward_check as check
+        from fleet.collectors import steward
+        from memory_open_work import owner_link
+
+        own = {"harness": "claude", "session_id": "captain"}
+        target = {"harness": "opencode", "session_id": "helper"}
+        foreign = {"harness": "codex", "session_id": "helper"}
+        foreign_project = self.iso.root / "other"
+        foreign_project.mkdir()
+        for repo in (self.proj, foreign_project):
+            for command in (["git", "init", "-q"],
+                            ["git", "remote", "add", "origin", f"https://example.invalid/team/{repo.name}"]):
+                result = self.iso.run(command, cwd=repo)
+                self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [SimpleNamespace(**owner, cwd=str(repo)) for owner, repo in
+                ((own, self.proj), (target, self.proj), (foreign, foreign_project))]
+        marker = {"session_id": "captain", "targets": {
+            "local": dict(target, source="start", name="Sparrow", ts="1"),
+            "foreign": dict(foreign, source="watch", name="Wren", ts="2")}}
+        legacy = "Old project plan mentions Sparrow"
+        legacy_id = self.seed("working", "unresolved-obligation", legacy)
+        foreign_legacy = "Older promise made by Wren"
+        self.seed("working", "unresolved-obligation", foreign_legacy,
+                  "--links", owner_link(("codex", "helper")))
+        legacy_rows = self.rows()
+
+        transcript = self.work / "captain.jsonl"
+        transcript.write_text(json.dumps({"type": "user", "message": {"role": "user", "content":
+            "I will check the sample. Sparrow agreed to trace the fixture. "
+            "Quoted from Wren in the other project: I will package the release. "
+            "The note says there is another follow-up, but gives no owner."}}) + "\n", encoding="utf-8")
+        with self.iso.patched_environ(), \
+                mock.patch.object(steward, "_registry_sessions", return_value=rows), \
+                mock.patch.object(steward, "read_markers", return_value={("claude", "captain"): marker}), \
+                mock.patch.object(steward, "read_relations", return_value=[]):
+            seat = st.seat_for_project("claude", st.project_key_for(self.proj))
+            item = {"seat": seat.as_dict(), "harness": "claude", "sid": "captain",
+                    "cwd": str(self.proj), "transcript": str(transcript)}
+            run_dir = st.ensure_dir(self.state / "runs" / "obligation-input")
+            bundle = runner.assemble(item, "obligation-input", run_dir)
+            data = json.loads(bundle.path.read_text(encoding="utf-8"))
+            self.assertEqual(data["obligation_owners"], [own, target])
+            self.assertEqual([row["sid"] for row in data["sessions"]], ["captain"])
+            self.assertIn("Quoted from Wren", data["sessions"][0]["text"])
+            result, batch = self.apply([
+                self.add_action(1, type="unresolved-obligation", body="Check the new sample", owner=own),
+                self.add_action(2, type="unresolved-obligation", body="Trace the fixture", owner=target),
+                self.add_action(3, type="unresolved-obligation", body="Package the other release", owner=foreign),
+                self.add_action(4, type="unresolved-obligation", body="Follow up with an unknown owner"),
+                self.add_action(5, type="observation", body="[미해결] Reference to the packaging note"),
+                self.add_action(6, type="lesson", body="A follow-up described in an open headline",
+                                headline="[미해결] Unattributed repeat check"),
+                {"kind": "supersede", "old_id": legacy_id,
+                 "body": "Rewrite an older obligation without confirming its owner"},
+            ], input_doc=data)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = self.result_json(batch)
+            self.assertEqual(len(report["added"]), 3)
+            self.assertEqual([row["reason"] for row in report["skipped"]],
+                             ["obligation-owner-unconfirmed"] * 4)
+            with mock.patch.object(check, "_end_observation", return_value=None), \
+                    mock.patch.object(check, "_session_liveness", return_value="live"), \
+                    mock.patch.object(check, "_pending_count", return_value=0), \
+                    mock.patch.object(check, "_observe_lab", return_value={}), \
+                    mock.patch("peer_steward_native.native_agent",
+                               return_value={"result": {"agent": {"agent_status": "idle"}}}):
+                seen = check._observe_role("claude", "captain")
+
+        self.assertEqual([row["name"] for row in seen["targets"]], ["Sparrow"])
+        self.assertEqual(check._classify(seen), "assign-next")
+        self.assertCountEqual(check.next_actions(seen), [
+            "[Sparrow] waiting · Trace the fixture → assign now",
+            "open: Check the new sample → assign or do now",
+            f"open: {legacy} → assign or do now",
+        ])
+        final_rows = self.rows()
+        self.assertEqual({rid: final_rows[rid] for rid in legacy_rows}, legacy_rows)
+        self.assertIn(("observation", "[미해결] Reference to the packaging note"),
+                      {(row[6], row[5]) for row in final_rows.values()})
 
 
 class BudgetTest(TidyApplyCase):
