@@ -2050,6 +2050,11 @@ def job_holders(records, jobs, *, read_context=None) -> list:
         jobs_key = read_context.jobs_key(jobs) if read_context is not None else _jobs_key(jobs)
     except (OSError, ValueError, TypeError):
         return [direct(record) for record in records]
+    parked = getattr(graph, "parked", None)
+    if isinstance(parked, (dict, MappingProxyType)) and parked:
+        # A parked fork is followed while its live link holds: the same graph can answer
+        # differently a moment later, so nothing is remembered on it.
+        return [direct(record) for record in records]
     with _HOLDER_LOCK:
         if _HOLDER_MEMO["graph"] is not graph:
             _HOLDER_MEMO["graph"], _HOLDER_MEMO["answers"] = graph, {}

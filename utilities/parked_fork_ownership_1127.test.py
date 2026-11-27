@@ -320,6 +320,22 @@ class ParkedForkOwnership(unittest.TestCase):
         later = self.owned_route("route-after-the-link-ended")
         self.assertEqual(handover.effective_parent(later, self.jobs), OLD)
 
+    def test_a_remembered_holder_does_not_outlive_the_link(self):
+        import dispatch_registry_cache
+        self.scene()
+        self.assertIsNotNone(self.hook(NEW_SEAT, NEW))
+        self.owned_route("registered-by-the-old-id-after-the-split")    # nothing binds it
+        records = dispatch_registry_cache.registry_view(self.jobs).records
+        self.assertEqual([answer.session_id for answer in handover.job_holders(records, self.jobs)], [NEW])
+        graph = handover.lineage_graph()
+        # The window takes its conversation back; no ledger changes, so the graph is the same one.
+        (self.config / "sessions" / ("%d.json" % self.window.pid)).write_text(json.dumps(
+            {"pid": self.window.pid, "procStart": sr._proc_start(self.window.pid), "sessionId": OLD,
+             "kind": "interactive", "startedAt": 1}))
+        handover._PARKED_LINKS.clear()
+        self.assertIs(handover.lineage_graph(), graph)
+        self.assertEqual([answer.session_id for answer in handover.job_holders(records, self.jobs)], [OLD])
+
     def test_the_background_process_ending_ends_the_link(self):
         self.scene()
         self.assertIsNotNone(self.hook(NEW_SEAT, NEW))
