@@ -443,6 +443,153 @@ class RequestFolderTest(S.SourceRepoStartBase):
     def test_request_delete_resumes_after_physical_removal(self):
         self.interrupted_delete(after_removal=True)
 
+    # A sealed frame's refresh lists the frame's own files, never an execution's (CORE.md "Logical
+    # executions in one request folder": each execution keeps its own manifest).
+    def frame_paths(self, frame_dir):
+        document = json.loads((frame_dir / "manifest.json").read_bytes())
+        return {row["locator"]["path"] for row in document["artifact_revisions"]}
+
+    def sealed_frame_with_execution(self, legs=(S.CODE_STAGED,), *, extra_files=0):
+        leg, path, _ = self.selected(list(legs))
+        frame, execution = self.cycle(self.route), self.cycle(leg)
+        frame_dir = P.cycle_dir(self.root, frame["campaign_id"], frame["cycle_id"])
+        execution_dir = P.cycle_dir(self.root, execution["campaign_id"], execution["cycle_id"])
+        self.write_output({"cycle_dir": str(execution_dir)}, "plans/final_report.md", b"execution\n")
+        for index in range(extra_files):
+            (execution_dir / "artifacts" / "plans" / f"f{index:04d}.md").write_bytes(b"x\n")
+        self.close(leg, path)
+        P.finalize(self.root, cycle_id=execution["cycle_id"], state="completed")
+        self.assertEqual(P.read_cycle_record(self.root, frame["cycle_id"])["state"], "sealed")
+        self.assertEqual({p for p in self.frame_paths(frame_dir) if p.startswith("_internal/executions/")}, set())
+        return frame, execution, frame_dir, execution_dir
+
+    def assert_frame_note_in_and_no_execution_rows(self, frame_dir, result):
+        self.assertEqual(result["status"], "emitted", result)
+        paths = self.frame_paths(frame_dir)
+        self.assertIn("_internal/frame-note.md", paths)
+        self.assertEqual({p for p in paths if p.startswith("_internal/executions/")}, set(), result)
+
+    def test_a_frame_refresh_takes_in_its_own_late_file_and_none_of_its_executions_files(self):
+        frame, execution, frame_dir, execution_dir = self.sealed_frame_with_execution()
+        (frame_dir / "_internal" / "frame-note.md").write_bytes(b"the frame's own late file\n")
+        result = P.refresh_cycle(self.root, frame["cycle_id"], trigger="explicit")
+        self.assert_frame_note_in_and_no_execution_rows(frame_dir, result)
+        execution_manifest = json.loads((execution_dir / "manifest.json").read_bytes())
+        self.assertEqual(execution_manifest["cycle"]["cycle_id"], execution["cycle_id"])
+        self.assertIn("artifacts/plans/final_report.md",
+                      {row["locator"]["path"] for row in execution_manifest["artifact_revisions"]})
+
+    def test_an_execution_begun_after_the_member_list_was_read_waits_for_the_next_refresh(self):
+        import artifact_producer_refresh as REF
+        frame, execution, frame_dir, _ = self.sealed_frame_with_execution([S.CODE_STAGED, S.CODE_STAGED])
+        second_route, second_path = self.next_execution(1, execution, start=False)
+        (frame_dir / "_internal" / "frame-note.md").write_bytes(b"the frame's own late file\n")
+        real, begun = REF._request_member_dirs, []
+
+        def read_then_begin(directory):
+            members = real(directory)
+            if not begun:  # a normal begin finishes right after the member list was read
+                begun.append(self.begin_route(second_route, second_path))
+                self.write_output(begun[0], "plans/concurrent-member.md", b"second\n")
+            return members
+        with mock.patch.object(REF, "_request_member_dirs", side_effect=read_then_begin):
+            first = P.refresh_cycle(self.root, frame["cycle_id"])
+        self.assertEqual((first["status"], first.get("reason")), ("skipped", "superseded"), first)
+        self.assertEqual({p for p in self.frame_paths(frame_dir) if p.startswith("_internal/")}, set())
+        self.assert_frame_note_in_and_no_execution_rows(frame_dir, P.refresh_cycle(self.root, frame["cycle_id"]))
+
+    def test_support_files_of_an_ordinary_cycle_in_the_same_shape_are_listed_and_refreshed_as_before(self):
+        import time
+        import artifact_producer_refresh as REF
+        frame, execution, frame_dir, _ = self.sealed_frame_with_execution()
+        route = S.T.compile_for("direct", self.root, slug="ordinary", campaign_key="ordinary-campaign")
+        route_path = Path(S.L.admit_runtime_route(self.root, route).route_file)
+        ordinary = self.begin_route(route, route_path)
+        self.write_output(ordinary, "plans/final_report.md", b"ordinary\n")
+        self.close(route, route_path)
+        P.finalize(self.root, cycle_id=ordinary["cycle_id"], state="completed")
+        self.assertEqual(P.read_cycle_record(self.root, ordinary["cycle_id"])["state"], "sealed")
+        support = Path(ordinary["cycle_dir"]) / "_internal" / "executions" / execution["cycle_id"]
+        support.mkdir(parents=True)
+        (support / "support.md").write_bytes(b"ordinary support\n")
+        result = P.refresh_cycle(self.root, ordinary["cycle_id"])
+        self.assertEqual(result["status"], "emitted", result)
+        self.assertIn(f"_internal/executions/{execution['cycle_id']}/support.md", self.frame_paths(Path(ordinary["cycle_dir"])))
+        # Mid copy-move (the record names its new root, the source folder is still here) nothing changed,
+        # and the member check is made in the recorded folder, so nothing is looked up.
+        record = P.read_cycle_record(self.root, ordinary["cycle_id"])
+        P._write_cycle_record(self.root, dict(record, relocation={"artifact_root": "/elsewhere"}), exclusive=False)
+        later = time.time() + REF.checkpoint_interval_seconds() + 1
+        self.assertEqual(P.refresh_cycle(self.root, ordinary["cycle_id"])["status"], "unchanged")
+        self.assertEqual(P.refresh_cycle(self.root, ordinary["cycle_id"], trigger="turn-end", now=later)["status"],
+                         "unchanged")
+        refinalized = P.finalize(self.root, cycle_id=ordinary["cycle_id"])
+        self.assertEqual((refinalized["status"], refinalized["refreshed"]), ("already-sealed", False), refinalized)
+
+    def test_a_frame_moved_in_its_campaign_and_linked_from_its_old_name_refreshes_as_before(self):
+        # Left as it was: the shared member check refuses the linked recorded folder, so it finds no member
+        # and the refresh lists the execution's files as it did before this change.
+        frame, execution, frame_dir, _ = self.sealed_frame_with_execution()
+        moved = frame_dir.with_name(frame_dir.name + "-moved")
+        frame_dir.rename(moved)
+        frame_dir.symlink_to(moved.name, target_is_directory=True)  # the record still names the old one
+        (moved / "_internal" / "frame-note.md").write_bytes(b"the frame's own late file\n")
+        result = P.refresh_cycle(self.root, frame["cycle_id"])
+        self.assertEqual(result["status"], "emitted", result)
+        member = f"_internal/executions/{execution['cycle_id']}/"
+        self.assertEqual(sorted(result["changes"]["added"]), sorted(
+            ["_internal/frame-note.md", member + "artifacts/plans/final_report.md", member + "manifest.json"]))
+
+    def test_a_linked_artifact_root_and_a_relative_frame_path_leave_executions_out(self):
+        import contextlib
+        import tempfile
+        import artifact_producer_store as STORE
+        frame, _execution, frame_dir, _ = self.sealed_frame_with_execution()
+        relative = frame_dir.relative_to(self.root)
+        with contextlib.chdir(self.root):  # both walkers compare the same cycle-relative form
+            self.assertEqual(STORE._request_member_dirs(relative), STORE._request_member_dirs(frame_dir))
+            walked = {path.relative_to(relative).as_posix() for path in P._walk_cycle_files(relative)}
+            self.assertEqual({p for p in walked if p.startswith("_internal/executions/")}, set())
+        links = tempfile.TemporaryDirectory()
+        self.addCleanup(links.cleanup)
+        linked = Path(links.name) / "root"
+        linked.symlink_to(self.root, target_is_directory=True)
+        (frame_dir / "_internal" / "frame-note.md").write_bytes(b"the frame's own late file\n")
+        self.assert_frame_note_in_and_no_execution_rows(frame_dir, P.refresh_cycle(linked, frame["cycle_id"]))
+
+    def test_old_execution_rows_do_not_spend_the_absence_check_and_a_refinalize_defers_as_on_main(self):
+        import artifact_producer_refresh as REF
+        # More old member rows than the absence check's floor plus the 22 walk entries a turn-end run has left.
+        frame, _execution, frame_dir, execution_dir = self.sealed_frame_with_execution(
+            extra_files=P.REFRESH_ABSENCE_CHECK_FLOOR + 30)
+        frame_id, removed = frame["cycle_id"], frame_dir / "_internal" / "z-removed.txt"
+        removed.write_bytes(b"the frame's own file\n")
+        with mock.patch.object(REF, "_request_member_dirs", return_value=set()):  # the refresh before this change
+            self.assertEqual(P.refresh_cycle(self.root, frame_id)["status"], "emitted")
+        member = execution_dir.relative_to(frame_dir).as_posix() + "/"
+        old_rows = {p for p in self.frame_paths(frame_dir) if p.startswith(member)}
+        self.assertGreater(len(old_rows), P.REFRESH_ABSENCE_CHECK_FLOOR + 22)
+        for cursor in (None, member + "artifacts/plans/f0500.md"):  # from the top, and resumed inside the old member
+            if cursor is not None:
+                removed.write_bytes(b"the frame's own file again\n")
+                self.assertEqual(P.refresh_cycle(self.root, frame_id)["changes"]["added"], ["_internal/z-removed.txt"])
+            removed.unlink()
+            state = REF._read_refresh_state(self.root, frame_id)
+            REF._write_refresh_state(self.root, frame_id, cursor=cursor, files=state.get("files", {}), observed_at=None)
+            result = P.refresh_cycle(self.root, frame_id, trigger="turn-end", budget=P.RefreshBudget(max_walk_entries=22))
+            self.assertEqual(result["status"], "emitted", (cursor, result))
+            self.assertEqual(result["changes"]["removed"], ["_internal/z-removed.txt"], cursor)
+            self.assertEqual(result["changes"]["reclassified"], [], cursor)
+            self.assertEqual({p for p in self.frame_paths(frame_dir) if p.startswith(member)}, old_rows, cursor)
+        # A refinalize keeps main's path: the old rows the seal walk leaves out look removed, the files are there,
+        # so it defers and the frame's late file waits for a refresh. The old rows stay as they are.
+        (frame_dir / "_internal" / "frame-note.md").write_bytes(b"the frame's own late file\n")
+        refinalized = P.finalize(self.root, cycle_id=frame_id)
+        self.assertEqual((refinalized.get("refreshed"), refinalized.get("deferred")),
+                         (False, "files-changed-during-read"), refinalized)
+        self.assertNotIn("_internal/frame-note.md", self.frame_paths(frame_dir))
+        self.assertEqual({p for p in self.frame_paths(frame_dir) if p.startswith(member)}, old_rows)
+
 
 if __name__ == "__main__":
     unittest.main()
