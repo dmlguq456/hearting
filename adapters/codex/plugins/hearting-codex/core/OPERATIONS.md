@@ -155,13 +155,15 @@ checks continue to bound cycle output writes. The route's sealed `source_commit=
 is the runtime signal; a Git probe error is not equivalent to a non-Git folder.
 Its Codex profile keeps `/tmp` read-only, so a non-Git worker launch (all three
 harnesses) points `TMPDIR`, `TMP`, `TEMP` and `CLAUDE_CODE_TMPDIR` at one private
-`<TMPDIR or /tmp>/hearting-<uid>` folder, grants only that folder and records it in
-its launch input; a nested launch reuses the folder and an owner recovery reuses only
-the recorded value. A `TMPDIR` inside the source or artifact root moves it to
-`/tmp/hearting-<uid>`; the worker keeps its inherited temp, as Git workers do, when
-that place is inside them too or the folder is not a directory of the launching uid,
-mode 0700, that it can write (a link, a looser mode, a read-only mount, a share
-showing another uid), and an existing folder is left as it is.
+`<TMPDIR or /tmp>/hearting-<uid>` folder by its real path (links resolved), grants
+only that path and records it in its launch input; a nested launch reuses the folder,
+and an owner recovery reuses the recorded path only while the write record holds that
+exact string and no link lies on it. The boundary is judged first, on the real path:
+a `TMPDIR` whose real path is inside the source or artifact root (through a link too)
+moves it to `/tmp/hearting-<uid>`; the worker keeps its inherited temp, as Git
+workers do, when that place is inside them too or the folder is not a directory of
+the launching uid, mode 0700, that it can write (a link, a looser mode, a read-only
+mount, a share showing another uid), and an existing folder is left as it is.
 When the non-Git source is exactly the canonical `HOME`, the generated default
 runtime may use only its exact project-hash child under the existing managed
 state `project-runtimes` namespace. Artifact overlap, namespace-parent aliases,

@@ -1383,6 +1383,13 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         # its inherited temp, and that folder keeps its mode.
         self._public_correct_respawn_fixture(legacy_record=False, temp_case="git-same-name-output")
 
+    def test_respawned_non_git_owner_keeps_its_folder_after_the_temp_link_moves(self):
+        # The start ran with TMPDIR=current-tmp -> a-worker and recorded the real
+        # a-worker folder; before recovery current-tmp is pointed at z-output, which
+        # holds a same-named 0700 folder the grant also holds. The respawned owner
+        # still gets the recorded a-worker folder, never the z-output one.
+        self._public_correct_respawn_fixture(legacy_record=False, temp_case="non-git-relinked")
+
     def _public_correct_respawn_fixture(self, *, legacy_record, additional_grant=False,
                                         earlier_launch_home=False, temp_case=None):
         import contextlib
@@ -1399,7 +1406,8 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         from worker_runtime_home import prepare_worker_home
 
         base = self.base
-        if temp_case == "non-git":
+        non_git = temp_case in ("non-git", "non-git-relinked")
+        if non_git:
             # A real non-Git folder: the route below is sealed unversioned.
             shutil.rmtree(base / ".git")
         jobs = base / "dispatch" / "jobs.log"
@@ -1505,7 +1513,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
             # A made-up value of no window: the respawned owner still takes it over.
             "FIXTURE_CARRIED": "kept-by-the-respawned-owner",
         }
-        if temp_case == "non-git":
+        if non_git:
             # The respawned supervisor applies the non-Git profile only on a Codex CLI
             # with named permission profiles; CI has no Codex CLI. This stand-in answers
             # only that capability probe and fails any other use loudly.
@@ -1530,7 +1538,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
 
         route_compiler = load_local("respawn_route_compiler", ROOT / "utilities/capability-route.py")
         with mock.patch.dict(os.environ, env, clear=True):
-            if temp_case == "non-git":
+            if non_git:
                 # A non-Git folder admits only an artifact-only route: a plan stage.
                 route = route_compiler.compose_route(
                     capability="autopilot-code", capability_mode="dev", shape="staged", graph="plan",
@@ -1599,25 +1607,44 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
             default_writable_roots = (artifact_root, runtime_dir, jobs.parent)
             worker_temp = ""
             same_name_output = None
+            relink = None
             if temp_case is not None:
                 import dispatch_wrapper_common as wrapper_common
                 temp_name = f"hearting-{os.getuid()}"
-                # An output folder of the same name, sorted before the temp folder.
-                output_scratch = tempfile.TemporaryDirectory(prefix="a-output-")
-                self.addCleanup(output_scratch.cleanup)
-                same_name_output = Path(output_scratch.name) / temp_name
-                same_name_output.mkdir()
-                os.chmod(same_name_output, 0o700 if temp_case == "non-git" else 0o755)
+                if temp_case == "non-git-relinked":
+                    # The launcher's TMPDIR is the link current-tmp -> a-worker; z-output
+                    # holds a same-named folder, sorted after the temp folder.
+                    relink_scratch = tempfile.TemporaryDirectory(prefix="relink-")
+                    self.addCleanup(relink_scratch.cleanup)
+                    relink = Path(relink_scratch.name)
+                    (relink / "a-worker").mkdir()
+                    (relink / "current-tmp").symlink_to(relink / "a-worker")
+                    same_name_output = relink / "z-output" / temp_name
+                    same_name_output.mkdir(parents=True)
+                else:
+                    # An output folder of the same name, sorted before the temp folder.
+                    output_scratch = tempfile.TemporaryDirectory(prefix="a-output-")
+                    self.addCleanup(output_scratch.cleanup)
+                    same_name_output = Path(output_scratch.name) / temp_name
+                    same_name_output.mkdir()
+                os.chmod(same_name_output, 0o700 if non_git else 0o755)
                 default_writable_roots += (same_name_output,)
-            if temp_case == "non-git":
+            if non_git:
                 self.assertEqual(route.get("source_commit"), "unversioned")
                 # The launcher's TMPDIR (this fixture's base) is the source itself, so the
-                # start chose a folder outside it; the record keeps that one value.
-                launcher_scratch = tempfile.TemporaryDirectory(prefix="z-launcher-temp-")
-                self.addCleanup(launcher_scratch.cleanup)
+                # start chose a folder outside it; the record keeps that one value, the
+                # real path the start judged.
+                if relink is not None:
+                    launcher_tmp = relink / "current-tmp"
+                    expected_temp = Path(os.path.realpath(relink)) / "a-worker" / temp_name
+                else:
+                    launcher_scratch = tempfile.TemporaryDirectory(prefix="z-launcher-temp-")
+                    self.addCleanup(launcher_scratch.cleanup)
+                    launcher_tmp = Path(launcher_scratch.name)
+                    expected_temp = Path(os.path.realpath(launcher_tmp)) / temp_name
                 worker_temp = wrapper_common.prepare_worker_temp_dir(
-                    {"TMPDIR": launcher_scratch.name}, source_root=str(base), route_file=str(route_path))
-                self.assertEqual(worker_temp, str(Path(launcher_scratch.name) / temp_name))
+                    {"TMPDIR": str(launcher_tmp)}, source_root=str(base), route_file=str(route_path))
+                self.assertEqual(worker_temp, str(expected_temp))
                 default_writable_roots += (Path(worker_temp),)
             access_grant = None
             access_argv = []
@@ -1690,6 +1717,10 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                 network_allowed=False,
             )
             verified_effective = json.loads(effective_path.read_text(encoding="utf-8"))
+            if relink is not None:
+                # After the start, the launcher's temp link is pointed at z-output.
+                (relink / "current-tmp").unlink()
+                (relink / "current-tmp").symlink_to(relink / "z-output")
             if additional_grant:
                 self.assertEqual(verified_effective["request_sha256"], access_request.request_sha256)
                 self.assertEqual(verified_effective["request_path"], str(access_file))
@@ -2028,7 +2059,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
             self.assertNotIn("CLAUDE_CODE_TMPDIR", launch_environments[0])
         if same_name_output is not None:
             self.assertEqual(stat.S_IMODE(os.lstat(same_name_output).st_mode),
-                             0o700 if temp_case == "non-git" else 0o755)
+                             0o700 if non_git else 0o755)
         # The respawned owner never carries the correcting window's session shell; the caller keeps it.
         self.assertEqual(sorted(key for key in launch_environments[0] if key.startswith("HEARTING_SHELL_")), [])
         self.assertEqual(launch_environments[0].get("FIXTURE_CARRIED"), "kept-by-the-respawned-owner")

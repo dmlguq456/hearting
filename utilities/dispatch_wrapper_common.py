@@ -235,10 +235,15 @@ def prepare_worker_temp_dir(environ=None, *, source_root, route_file, create=Tru
     only when the route is sealed unversioned, the non-Git profile's source
     protection keeps it as a write root and it is not inside the artifact root,
     and it is a directory (not a link) of this uid, mode exactly 0700, that this
-    process can write. A candidate inside the source or artifact boundary yields
-    to `/tmp/hearting-<uid>`; any other refusal keeps the inherited temp. An
-    existing folder is never changed; ``create=False`` (recovery) makes none
-    either. Never raises.
+    process can write. The boundary is judged first, on the candidate's real
+    path: a candidate whose real path is inside the source or artifact boundary
+    (a link pointing there included) yields to `/tmp/hearting-<uid>`; any other
+    refusal keeps the inherited temp. An existing folder is never changed;
+    ``create=False`` (recovery) makes none either. Never raises.
+
+    The value returned is that real path (a link in a parent resolved), so the
+    temp variables, both Codex grants, the write roots and the launch record
+    carry the one folder this check judged.
     """
     from codex_permission_profile import recordish_write_root
     values = os.environ if environ is None else environ
@@ -270,6 +275,7 @@ def prepare_worker_temp_dir(environ=None, *, source_root, route_file, create=Tru
             except FileExistsError:
                 pass
         status = os.lstat(candidate)
+        real = os.path.realpath(candidate)
     except (OSError, RuntimeError, ValueError):
         return ""
     # A symlink, another user's folder in a shared /tmp, a looser mode, or a
@@ -277,7 +283,7 @@ def prepare_worker_temp_dir(environ=None, *, source_root, route_file, create=Tru
     if (not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid()
             or stat.S_IMODE(status.st_mode) != 0o700 or not os.access(candidate, os.W_OK)):
         return ""
-    return str(candidate)
+    return real
 
 
 def recorded_worker_temp_dir(record, writable_roots, *, source_root, route_file) -> str:
@@ -285,18 +291,15 @@ def recorded_worker_temp_dir(record, writable_roots, *, source_root, route_file)
 
     Only the value the start chose and sealed in its launch record counts; a
     write root is never picked by its name. Git launches and older records
-    without the value keep the inherited temp. The folder must still be in the
-    recorded write roots and pass the same acceptance rule, read only.
+    without the value keep the inherited temp. The value is never resolved
+    again: that exact string must be in the recorded write roots, and the same
+    acceptance rule (read only) must return it unchanged, which it does only
+    while no link sits on that path (its real path is the value itself).
     """
     value = record.get("worker_temp_dir") if isinstance(record, dict) else None
     if not isinstance(value, str) or not value:
         return ""
-    # The grant records resolved paths; the same folder is compared resolved.
-    try:
-        if Path(value).resolve(strict=False) not in {
-                Path(str(root)).resolve(strict=False) for root in writable_roots}:
-            return ""
-    except (OSError, RuntimeError, ValueError):
+    if value not in {str(root) for root in writable_roots}:
         return ""
     found = prepare_worker_temp_dir({"TMPDIR": value}, source_root=source_root,
                                     route_file=route_file, create=False)

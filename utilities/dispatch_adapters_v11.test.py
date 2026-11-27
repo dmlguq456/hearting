@@ -581,7 +581,12 @@ class AdapterV11Test(unittest.TestCase):
       "retry_on_isolated_worktree":0,
      } for child in ADAPTERS]
      # The launcher's own temp: a non-Git worker's private temp folder is made below it.
-     launcher_tmp=source/"tmp" if temp_inside else root/"tmp"; launcher_tmp.mkdir()
+     # With only the artifact inside, TMPDIR is reached through a link
+     # (current-tmp -> a-worker): every place names the real folder the start judged.
+     if temp_inside or not artifact_inside:
+      launcher_tmp=source/"tmp" if temp_inside else root/"tmp"; launcher_tmp.mkdir()
+     else:
+      (root/"a-worker").mkdir(); launcher_tmp=root/"current-tmp"; launcher_tmp.symlink_to(root/"a-worker")
      # The fallback base stands in for /tmp, so the real /tmp/hearting-<uid> is never made.
      fallback=root/"fallback"; fallback.mkdir()
      base_env={"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),"HOME":str(home),
@@ -693,7 +698,8 @@ class AdapterV11Test(unittest.TestCase):
                           if flag in ("--add-dir","--writable-root")),child["argv"])
      # Every harness gets the same private temp folder; Codex also gets it as its
      # only extra write root, since its non-Git profile keeps /tmp read-only.
-     worker_temp=str((fallback if temp_inside else launcher_tmp)/f"hearting-{os.getuid()}")
+     worker_temp=os.path.join(os.path.realpath(fallback if temp_inside else launcher_tmp),f"hearting-{os.getuid()}")
+     self.assertNotIn("current-tmp"," ".join(child["argv"]))
      self.assertFalse((source/"tmp"/f"hearting-{os.getuid()}").exists())
      for key in ("TMPDIR","TMP","TEMP","CLAUDE_CODE_TMPDIR"):
       self.assertEqual(child["env"].get(key),worker_temp,key)

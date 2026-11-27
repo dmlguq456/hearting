@@ -30,6 +30,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import codex_permission_profile as profiles  # noqa: E402
 import dispatch_contract  # noqa: E402
 import dispatch_headless_main as DISPATCH_MAIN  # noqa: E402
+import dispatch_replacement  # noqa: E402
 import dispatch_wrapper_common as WRAPPER_COMMON  # noqa: E402
 from execution_access import adapter_default_roots  # noqa: E402
 import fixture_processes  # noqa: E402
@@ -101,6 +102,31 @@ class PrepareWorkerTempDirTest(_Boundary, unittest.TestCase):
         self.assertEqual(profiles.recordish_write_root(
             self.fallback / NAME, self.source.resolve(), self.artifact.resolve()),
             str((self.fallback / NAME).resolve()))
+
+    def test_parent_link_gives_the_real_path(self):
+        # TMPDIR reached through a link: the value is the folder the boundary
+        # check judged, with the link resolved, so later link changes move nothing.
+        (self.base / "a-worker").mkdir()
+        (self.base / "current-tmp").symlink_to(self.base / "a-worker")
+        path = self.prepare(self.base / "current-tmp")
+        self.assertEqual(path, os.path.join(os.path.realpath(self.base / "a-worker"), NAME))
+        self.assertEqual(os.path.realpath(path), path)
+        self.assertEqual(self.prepare(path), path)
+
+    def test_link_into_the_boundary_is_judged_by_its_real_path_first(self):
+        # The boundary is judged before the link check: a first candidate that
+        # is (or sits below) a link into the artifact or source root yields to
+        # the next candidate, and the link stays as it is.
+        (self.artifact / "kept").mkdir(mode=0o700)
+        linked = self.base / "outside"
+        linked.mkdir()
+        (linked / NAME).symlink_to(self.artifact / "kept")
+        (self.base / "into-source").symlink_to(self.source)
+        for inherited in (linked, self.base / "into-source"):
+            with self.subTest(inherited=str(inherited)):
+                self.assertEqual(self.prepare(inherited), os.path.join(os.path.realpath(self.fallback), NAME))
+        self.assertTrue((linked / NAME).is_symlink())
+        self.assertEqual(sorted(path.name for path in self.source.rglob("*")), [".agent_reports", "kept"])
 
     def test_no_place_outside_the_boundary_keeps_the_inherited_temp(self):
         with mock.patch.object(WRAPPER_COMMON, "WORKER_TEMP_FALLBACK_BASE", self.source / "fallback"):
@@ -215,14 +241,101 @@ class RecordedWorkerTempTest(_Boundary, unittest.TestCase):
                                       [str(self.artifact), self.same_name]), "")
 
     def test_recovery_check_makes_and_changes_nothing(self):
-        missing = self.base / "gone" / NAME
+        # The recorded folder is gone but its parent is writable: a recovery
+        # that made folders would succeed here, so only check_only keeps it gone.
+        parent = self.base / "gone"
+        parent.mkdir(mode=0o700)
+        missing = parent / NAME
         self.assertEqual(self.recover({"worker_temp_dir": str(missing)},
                                       [str(self.artifact), str(missing)]), "")
-        self.assertFalse(missing.parent.exists())
+        self.assertFalse(os.path.lexists(missing))
         os.chmod(self.recorded, 0o755)
         self.assertEqual(self.recover({"worker_temp_dir": self.recorded},
                                       [str(self.artifact), self.recorded]), "")
         self.assertEqual(stat.S_IMODE(os.lstat(self.recorded).st_mode), 0o755)
+
+
+class RecordedLinkTest(_Boundary, unittest.TestCase):
+    """Recovery compares the recorded real path as written; it never resolves it again."""
+
+    def setUp(self):
+        self.make_boundary()
+        # The start ran with TMPDIR=current-tmp -> a-worker; z-output holds a
+        # same-named 0700 folder of this uid that the grant also holds.
+        for name in ("a-worker", "z-output"):
+            (self.base / name).mkdir()
+        self.link = self.base / "current-tmp"
+        self.link.symlink_to(self.base / "a-worker")
+        self.recorded = self.prepare(self.link)
+        self.other = self.prepare(self.base / "z-output")
+        self.worker = os.path.join(os.path.realpath(self.base / "a-worker"), NAME)
+        self.assertEqual(Path(self.other).name, NAME)
+        # The grant records resolved paths, resolved at the start.
+        granted = str(Path(self.recorded).resolve())
+        self.orders = ([str(self.artifact), granted, self.other],
+                       [str(self.artifact), self.other, granted])
+
+    def recover(self, record, roots):
+        found = WRAPPER_COMMON.recorded_worker_temp_dir(
+            record, roots, source_root=str(self.source), route_file=str(self.route))
+        # The z-output folder is never chosen, by its name or through a link.
+        if found:
+            self.assertNotEqual(os.path.realpath(found), os.path.realpath(self.other), found)
+        return found
+
+    def relink(self, link, target):
+        link.unlink()
+        link.symlink_to(target)
+
+    def test_start_records_the_real_path(self):
+        self.assertEqual(self.recorded, self.worker)
+
+    def test_parent_link_moved_after_the_start_keeps_the_recorded_folder(self):
+        self.relink(self.link, self.base / "z-output")
+        for roots in self.orders:
+            with self.subTest(roots=roots):
+                self.assertEqual(self.recover({"worker_temp_dir": self.recorded}, roots), self.worker)
+
+    def test_recorded_path_that_now_holds_a_link_is_not_used(self):
+        # a-worker itself becomes a link to z-output: the recorded string would
+        # now name the other folder, so recovery keeps the inherited temp.
+        (self.base / "a-worker").rename(self.base / "a-worker-moved")
+        (self.base / "a-worker").symlink_to(self.base / "z-output")
+        for roots in ([str(self.artifact), self.worker, self.other],
+                      [str(self.artifact), self.other, self.worker]):
+            with self.subTest(roots=roots):
+                self.assertEqual(self.recover({"worker_temp_dir": self.worker}, roots), "")
+
+    def test_record_naming_the_link_is_not_used(self):
+        # A record holding the link-bearing string (as the previous head sealed
+        # it) never follows the link to whichever folder it names now.
+        through_link = str(self.link / NAME)
+        self.relink(self.link, self.base / "z-output")
+        for roots in (*self.orders, [str(self.artifact), through_link, self.worker, self.other]):
+            with self.subTest(roots=roots):
+                self.assertEqual(self.recover({"worker_temp_dir": through_link}, roots), "")
+
+    def test_value_must_be_in_the_grant_as_written(self):
+        # The grant names the same folder only through a link: not the same string.
+        self.assertEqual(self.recover({"worker_temp_dir": self.worker},
+                                      [str(self.artifact), str(self.link / NAME), self.other]), "")
+
+
+def launch_environment(wrapper, harness, args, base, artifact_root):
+    """The worker environment the shared launch path builds for a bound launch."""
+    args.__dict__.update(
+        review_output_binding=None, parent_slug="", parent_session_id="", dispatch_depth=2,
+        execution_surface="registered-headless", registered_worker=True,
+        fallback_hop="same-harness-headless", intensity="quick", capability_mode="dev",
+        slug="fixture", attempt_id="att-fixture", parent_attempt_id="", worker_type="stage",
+        assigned_contract="fixture", capability_owner="", owner_harness="",
+        artifact_root=str(artifact_root), runtime_dir="", raw_data_dir="",
+        report_bundle_root=None, route_id="", owner_route_binding=None, route_node="refs",
+        agent_home=ROOT)
+    return DISPATCH_MAIN.worker_environment(
+        wrapper, args, harness=harness, jobs=base / "jobs.log",
+        governor_root=base / "governor", reservation_token="", permission_env={},
+        current_sandbox="fixture", supervised=False)
 
 
 class LaunchBindingTest(unittest.TestCase):
@@ -246,19 +359,7 @@ class LaunchBindingTest(unittest.TestCase):
         return args
 
     def worker_env(self, wrapper, harness, args):
-        args.__dict__.update(
-            review_output_binding=None, parent_slug="", parent_session_id="", dispatch_depth=2,
-            execution_surface="registered-headless", registered_worker=True,
-            fallback_hop="same-harness-headless", intensity="quick", capability_mode="dev",
-            slug="fixture", attempt_id="att-fixture", parent_attempt_id="", worker_type="stage",
-            assigned_contract="fixture", capability_owner="", owner_harness="",
-            artifact_root=str(self.worktree / ".agent_reports"), runtime_dir="", raw_data_dir="",
-            report_bundle_root=None, route_id="", owner_route_binding=None, route_node="refs",
-            agent_home=ROOT)
-        return DISPATCH_MAIN.worker_environment(
-            wrapper, args, harness=harness, jobs=self.base / "jobs.log",
-            governor_root=self.base / "governor", reservation_token="", permission_env={},
-            current_sandbox="fixture", supervised=False)
+        return launch_environment(wrapper, harness, args, self.base, self.worktree / ".agent_reports")
 
     def test_non_git_launch_gives_every_harness_one_private_temp(self):
         for harness in HARNESSES:
@@ -392,6 +493,58 @@ class CodexGrantTest(_CodexFixture, unittest.TestCase):
             with self.subTest(**extra):
                 command = self.command(self.args("git", **extra))
                 self.assertNotIn(NAME, command)
+
+
+class LinkedTempOneValueTest(_CodexFixture, unittest.TestCase):
+    """A TMPDIR reached through a link: every place gets the one real path the start judged."""
+
+    def setUp(self):
+        self.make_fixture(Path(self.enterContext(tempfile.TemporaryDirectory())))
+        (self.base / "a-worker").mkdir()
+        (self.base / "current-tmp").symlink_to(self.base / "a-worker")
+        self.enterContext(mock.patch.dict(os.environ, {"TMPDIR": str(self.base / "current-tmp")}))
+        self.real = os.path.join(os.path.realpath(self.base / "a-worker"), NAME)
+
+    def test_start_passes_one_real_path_to_all_five_places(self):
+        for harness in HARNESSES:
+            with self.subTest(harness=harness):
+                wrapper = self.wrapper if harness == "codex" else load_wrapper(harness)
+                args = SimpleNamespace(worktree=str(self.cwd), route_file=str(self.route))
+                with mock.patch.object(dispatch_contract, "launch_repository_identity",
+                                       return_value=(str(self.cwd), "non-git")):
+                    self.assertIsNone(DISPATCH_MAIN.bind_repository(wrapper, args))
+                temp = args.worker_temp_dir
+                self.assertEqual(temp, self.real)
+                # 1. The four temp variables.
+                env = launch_environment(wrapper, harness, args, self.base, self.cwd / ".agent_reports")
+                self.assertEqual({key: env[key] for key in TEMP_KEYS}, {key: temp for key in TEMP_KEYS})
+                # 2. The write roots the grant records.
+                self.assertIn(temp, [str(root) for root in adapter_default_roots(args)])
+                # 3. The sealed launch record.
+                jobs = self.base / f"state-{harness}" / "jobs.log"
+                jobs.parent.mkdir()
+                jobs.touch()
+                seal = SimpleNamespace(**{**args.__dict__, **dict(
+                    replacement_input_argv=["--approval", "never"], jobs_path=jobs,
+                    capability="autopilot-code", unit="", worker_mode="", qa="quick",
+                    sandbox="workspace-write", permission_mode="sandboxed", launch_lifecycle="detached",
+                    nested_headless_network=False, approval="never")})
+                fragment = dispatch_replacement.seal_launch_input(seal, harness, "task")
+                sealed = dispatch_replacement.launch_input(jobs, "att-fixture", {
+                    "replacement_input_digest": fragment.split("replacement_input_digest=", 1)[1]})
+                self.assertEqual(sealed["worker_temp_dir"], temp)
+                if harness != "codex":
+                    continue
+                # 4. exec --add-dir and its profile; 5. App Server --writable-root.
+                exec_command = self.command(self.args("non-git", worker_temp_dir=temp))
+                self.assertIn(f"--add-dir {temp}", exec_command)
+                self.assertEqual(self.profile_filesystem(exec_command)[1][temp], "write")
+                app_server = self.command(self.args("non-git", worker_temp_dir=temp,
+                                                    resolved_completion_delivery="app-server-supervised"))
+                self.assertIn(f"--writable-root {temp}", app_server)
+                for command in (exec_command, app_server):
+                    self.assertNotIn("current-tmp", command)
+        self.assertEqual(os.listdir(self.base / "a-worker"), [NAME])
 
 
 def require_native_codex(testcase):
