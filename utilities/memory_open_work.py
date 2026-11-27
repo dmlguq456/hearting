@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from typing import NamedTuple
 
 from harness_capabilities import HARNESSES
 
@@ -72,18 +73,117 @@ def owner_identity(row):
     """The exact (harness, session ID) from a resolved target or an owner declaration."""
     if not isinstance(row, dict) or row.get("unresolved"):
         return None
-    harness, sid = row.get("harness"), row.get("session_id")
+    return _owner_key(row.get("harness"), row.get("session_id"))
+
+
+def _owner_key(harness, sid):
     if harness in HARNESSES and isinstance(sid, str) and _SESSION_ID.fullmatch(sid):
         return harness, sid
     return None
 
 
-def scoped_owners(harness, sid, targets):
-    """The caller and the targets of its existing same-repository steward role."""
-    caller = owner_identity({"harness": harness, "session_id": sid})
+class OwnerScope(NamedTuple):
+    confirmed: frozenset
+    unresolved: frozenset = frozenset()
+    targets: tuple = ()
+    sessions: tuple = ()
+    complete: bool = True
+    foreign: frozenset = frozenset()
+
+
+def target_owners(target):
+    """Resolved target keys share one label. Unresolved references have none."""
+    owner = owner_identity(target)
+    return target.get("owner_keys", (owner,)) if owner is not None else ()
+
+
+def _known_foreign_owners(harness, sid, collector, cwd, rows):
+    """A failed role read still leaves unambiguous native repository evidence usable."""
+    if not rows:
+        return frozenset()
+    try:
+        repository = (collector._repository_key(cwd) if cwd else
+                      collector.repository_for_session(harness, sid, sessions=rows))
+        if repository is None:
+            return frozenset()
+        by_cwd = {cwd: collector._repository_key(cwd) for cwd in {row.cwd for row in rows}}
+        origins = {}
+        for row in rows:
+            for key in collector._session_keys(row):
+                origins.setdefault(key, set()).add(by_cwd[row.cwd])
+        return frozenset(key for key, repositories in origins.items()
+                         if None not in repositories and repository not in repositories)
+    except Exception:
+        return frozenset()
+
+
+def scoped_owners(harness, sid, collector, *, cwd=None, predecessors=()):
+    """Project the existing role and session lineage onto obligation owners.
+
+    Confirmed keys can write. An active unresolved relation can retain an
+    existing obligation under its exact id, without proving a new same-repo
+    write or a target label. An unavailable read leaves the scope incomplete.
+    """
+    caller = _owner_key(harness, sid)
     if caller is None:
-        return set()
-    return {caller, *(owner for target in targets if (owner := owner_identity(target)))}
+        return OwnerScope(frozenset())
+    own = {caller, *(key for prior in predecessors if (key := _owner_key(harness, prior)))}
+    rows = ()
+    try:
+        rows = tuple(collector._registry_sessions(strict=True, include_aliases=True))
+        markers = collector.read_markers(strict=True)
+        relations = collector.read_relations(strict=True, markers=markers)
+
+        joined = {}
+        by_owner = {}
+        for row in rows:
+            owner = _owner_key(row.harness, getattr(row, "session_id", None))
+            if owner is None:
+                continue
+            for key in collector._session_keys(row):
+                joined.setdefault(key, set()).add(owner)
+                by_owner.setdefault(owner, set()).add(key)
+        def keys(owner):
+            return (owner, *sorted(key for key in by_owner.get(owner, ())
+                                   if key != owner and joined[key] == {owner}))
+
+        caller_keys = keys(caller)
+        own.update(caller_keys)
+        # The role reader already selected the current seat holder. Consume its
+        # chain, including the origin even if the old native row has ended.
+        prior = set()
+        for relation in relations:
+            holder = relation.get("holder") or {}
+            if _owner_key(holder.get("harness"), holder.get("sid")) not in own:
+                continue
+            origin = relation.get("origin") or {}
+            if origin.get("harness") == harness:
+                prior.add(origin.get("sid"))
+            prior.update(edge["from"] for edge in relation.get("lineage") or () if edge.get("from"))
+        if prior:
+            same_repo = (collector._repository_key(cwd) if cwd else
+                         collector.repository_for_session(harness, sid, sessions=rows))
+            for former_sid in prior:
+                key = _owner_key(harness, former_sid)
+                # A native row that can still be joined may now be in another repo.
+                known = {collector._repository_key(row.cwd) for row in rows
+                         if key in collector._session_keys(row)} - {None}
+                if key is not None and same_repo and not known.difference({same_repo}):
+                    own.add(key)
+
+        resolved = collector.role_targets(
+            harness, sid, aliases=tuple(key[1] for key in caller_keys[1:]),
+            cwd=cwd, sessions=rows, include_native=True, markers=markers, _relations=relations)
+        unresolved = collector.unresolved_role_targets(harness, sid, sessions=rows, _relations=relations)
+        labelled = [dict(target, owner_keys=keys(owner)) for target in resolved
+                    if (owner := owner_identity(target)) is not None]
+        retained = frozenset(key for target in unresolved
+                             if (key := _owner_key(target.get("harness"), target.get("session_id"))))
+        confirmed = frozenset(own.union(*(target["owner_keys"] for target in labelled)))
+        return OwnerScope(confirmed, retained, (*labelled, *unresolved), rows)
+    except Exception:
+        foreign = _known_foreign_owners(harness, sid, collector, cwd, rows)
+        return OwnerScope(frozenset(own) - foreign, sessions=rows, complete=False, foreign=foreign)
 
 
 def owner_link(owner):

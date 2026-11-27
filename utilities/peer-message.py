@@ -5952,23 +5952,37 @@ def is_steward_marker(marker):
     return bool(steward_evidence_targets(marker))
 
 
-def _iter_marker_files(base):
+def _iter_marker_files(base, *, strict=False):
     """Yield ``(harness, path, data)`` for every ``peer-steward/<harness>/*.json`` under
     the dispatch state root ``base``; ``data`` is None when the file is unreadable."""
     root = Path(base) / "peer-steward"
     try:
         harness_dirs = sorted(root.iterdir())
+    except FileNotFoundError:
+        return
     except OSError:
+        if strict:
+            raise
         return
     for hdir in harness_dirs:
         # `obligations/` is the duty store that shares this directory, not a harness.
         if not hdir.is_dir() or hdir.name == "obligations":
             continue
-        for f in sorted(hdir.glob("*.json")):
+        try:
+            files = sorted(p for p in hdir.iterdir() if p.suffix == ".json") if strict else sorted(hdir.glob("*.json"))
+        except FileNotFoundError:
+            continue
+        for f in files:
             try:
                 with open(f, encoding="utf-8") as fh:
                     data = json.load(fh)
+                if strict and not isinstance(data, dict):
+                    raise ValueError("invalid-steward-marker")
+            except FileNotFoundError:
+                data = None
             except Exception:
+                if strict:
+                    raise
                 data = None
             yield hdir.name, f, data if isinstance(data, dict) else None
 
@@ -6002,7 +6016,7 @@ def steward_marker_roots():
     return [peer_state_root()], "own-root"
 
 
-def read_steward_markers(roots=None):
+def read_steward_markers(roots=None, *, strict=False):
     """``{(harness, session_id): marker_dict}`` over every marker under the ledger
     root(s). ``roots`` = iterable of dispatch state roots (F-100c: Fleet passes every
     installed runtime's own root as well); default = this process's own root.
@@ -6013,7 +6027,7 @@ def read_steward_markers(roots=None):
     out = {}
     root_list = [Path(r) for r in roots] if roots else [peer_state_root()]
     for base in root_list:
-        for harness, _path, data in _iter_marker_files(base):
+        for harness, _path, data in _iter_marker_files(base, strict=strict):
             if data is None or not data.get("session_id"):
                 continue
             if not is_steward_marker(data):

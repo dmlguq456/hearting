@@ -953,34 +953,39 @@ def _ledger_generation(path: str):
                                         info.st_mtime_ns, info.st_ctime_ns)
 
 
-def _seat_transition_rows(st, path: str, key: str):
+def _seat_transition_rows(st, path: str, key: str, *, strict=False):
     """This seat ledger's steward rows, or ``None`` for a symlinked ledger."""
     def read():
         with st.seat_ledger_readonly_scope():
-            return tuple(row for row in st._read_ledger_lines(st.Seat("pane", key))
-                         if row.get("event") in {ROW_EVENT, "steward-release"})
+            entries = st._read_ledger_lines(st.Seat("pane", key))
+            rows = tuple(row for row in entries if row.get("event") in {ROW_EVENT, "steward-release"})
+            return rows, entries.usable
     link, before = _ledger_generation(path)
     if link:
+        if strict:
+            raise OSError("steward-ledger-unsafe")
         return None
-    if st._LEDGER_READ_SCOPE.get() is not None or not _TRUST_LEDGER_GENERATIONS.get():
-        return read()  # an open read pass keeps its own pinned rows
+    if before is None:
+        return ()
+    use_cache = st._LEDGER_READ_SCOPE.get() is None and _TRUST_LEDGER_GENERATIONS.get()
     with _TRANSITION_ROWS_LOCK:
-        held = _TRANSITION_ROWS.get(path)
-    if held is not None and before is not None and held[0] == before:
-        return held[1]
-    rows = read()
-    with _TRANSITION_ROWS_LOCK:
-        if before is not None and before == _ledger_generation(path)[1]:
-            _TRANSITION_ROWS[path] = (before, rows)
-        else:
-            _TRANSITION_ROWS.pop(path, None)
+        held = _TRANSITION_ROWS.get(path) if use_cache else None
+    if held is not None and held[0] == before:
+        rows, usable = held[1]
+    else:
+        rows, usable = read()
+        if use_cache and before == _ledger_generation(path)[1]:
+            with _TRANSITION_ROWS_LOCK:
+                _TRANSITION_ROWS[path] = (before, (rows, usable))
+    if strict and not usable:
+        raise OSError("steward-ledger-unreadable")
     return rows
 
 
-def _transition_rows(seat_key: Optional[str] = None) -> list[tuple[str, dict]]:
+def _transition_rows(seat_key: Optional[str] = None, *, strict=False) -> list[tuple[str, dict]]:
     """Read only confirmed steward transitions and releases from the existing seat ledgers."""
     if seat_key:
-        return _seat_keys_transition_rows((seat_key,))
+        return _seat_keys_transition_rows((seat_key,), strict=strict)
     st = _st()
     directory = st.state_root() / "sessions"
     paths = sorted(path for path in directory.glob("*.jsonl")
@@ -1000,13 +1005,13 @@ def _transition_rows(seat_key: Optional[str] = None) -> list[tuple[str, dict]]:
     return out
 
 
-def _seat_keys_transition_rows(keys) -> list[tuple[str, dict]]:
+def _seat_keys_transition_rows(keys, *, strict=False) -> list[tuple[str, dict]]:
     """`_transition_rows` of each seat key in order, resolving the ledger directory once."""
     st = _st()
     prefix = os.path.join(str(st.state_root() / "sessions"), "")
     out = []
     for key in keys:
-        rows = _seat_transition_rows(st, prefix + f"{key}.jsonl", key)
+        rows = _seat_transition_rows(st, prefix + f"{key}.jsonl", key, strict=strict)
         if rows is not None:
             out.extend((key, row) for row in rows)
     return out
@@ -1140,7 +1145,8 @@ def _marker_relation(harness: str, sid: str, marker: dict, evidence: list[dict],
 
 
 def resolved_steward_relations(harness: Optional[str] = None, sid: Optional[str] = None, *,
-                                seat_key: Optional[str] = None, include_released: bool = False) -> list[dict]:
+                                seat_key: Optional[str] = None, include_released: bool = False,
+                                strict: bool = False, markers=None) -> list[dict]:
     """Resolve valid original role evidence to its confirmed current same-seat holder.
 
     This is a read-only projection. It never creates or copies a marker. Ordinary
@@ -1148,10 +1154,11 @@ def resolved_steward_relations(harness: Optional[str] = None, sid: Optional[str]
     """
     try:
         pm = _peer_message()
-        roots, _source = pm.steward_marker_roots()
-        markers = pm.read_steward_markers(roots)
+        if markers is None:
+            roots, _source = pm.steward_marker_roots()
+            markers = pm.read_steward_markers(roots, strict=True) if strict else pm.read_steward_markers(roots)
         if seat_key is not None:
-            rows = _transition_rows(seat_key)
+            rows = _transition_rows(seat_key, strict=True) if strict else _transition_rows(seat_key)
         else:
             keys = _snapshot_seat_keys()
             legacy_marker = False
@@ -1163,9 +1170,16 @@ def resolved_steward_relations(harness: Optional[str] = None, sid: Optional[str]
                     legacy_marker = True
             if legacy_marker:
                 directory = _st().state_root() / "sessions"
-                keys.update(path.stem for path in directory.glob("*.jsonl")
-                            if path.is_file() and not path.is_symlink())
-            rows = [entry for key in sorted(keys) for entry in _transition_rows(key)]
+                if strict:
+                    try:
+                        keys.update(path.stem for path in directory.iterdir() if path.suffix == ".jsonl")
+                    except FileNotFoundError:
+                        pass
+                else:
+                    keys.update(path.stem for path in directory.glob("*.jsonl")
+                                if path.is_file() and not path.is_symlink())
+            rows = (_seat_keys_transition_rows(sorted(keys), strict=True) if strict else
+                    [entry for key in sorted(keys) for entry in _transition_rows(key)])
         marker_relations = []
         marker_reader = getattr(pm, "steward_evidence_targets", None)
         for (marker_harness, marker_sid), marker in markers.items():
@@ -1187,6 +1201,8 @@ def resolved_steward_relations(harness: Optional[str] = None, sid: Optional[str]
             marker_relations.append(relation)
         states, releases = _role_states(rows=rows, marker_relations=marker_relations)
     except Exception:  # noqa: BLE001 - unknown authority is never a new role
+        if strict:
+            raise
         return []
     out = []
     for identity, saved in sorted(states.items()):

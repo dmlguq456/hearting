@@ -14,9 +14,13 @@ import json
 import os
 import re
 import sqlite3
+import sys
 from pathlib import Path
 
-from memory_open_work import OPEN_STAGES, OPEN_TYPES as _OPEN_TYPES, open_stage
+_UTILITIES = str(Path(__file__).resolve().parents[3] / "utilities")
+if _UTILITIES not in sys.path:
+    sys.path.insert(0, _UTILITIES)
+from memory_open_work import OPEN_STAGES, OPEN_TYPES as _OPEN_TYPES, open_stage  # noqa: E402
 
 # mirrors tools/memory/mem.py DOCTOR_DURABLE_SOFT_CEILING (D-39) — duplicated constant is
 # intentional (collector must not import mem.py; different module, same number by contract).

@@ -2899,9 +2899,11 @@ an unobserved session is not declared dead. It reads remaining work from existin
 sources only — the holder repository's open records (`fleet.session_work.observe`,
 using the shared open-work classification) and peer requests still queued for
 delivery to the holder or a live target (an ended target's undeliverable rows are left
-out). Explicit session ownership limits the list to the holder and confirmed
-role targets. A waiting target gets its name on the work it owns. Records without an owner link
-remain visible as project work without a target name. A record awaiting a user
+out). The holder and confirmed role targets keep their work across confirmed
+prior identities. An active unresolved target keeps existing work visible by
+exact ID. A waiting target gets its name on the work it owns. Unreadable role
+evidence and records without an owner link leave project work visible without
+an inferred target name. A record awaiting a user
 decision is shown as one to raise with the user. The check prints each as a `next=` action (for example
 `next=[e7] waiting 42 min · #1425 review → assign now`); the wait time comes from the
 duty's own earlier observations. `changes=none` does not mean nothing remains: while

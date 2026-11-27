@@ -293,6 +293,182 @@ class ObligationOwnershipTest(TidyApplyCase):
                       {(row[6], row[5]) for row in final_rows.values()})
 
 
+class StewardObligationContinuityTest(TidyApplyCase):
+    def setUp(self):
+        super().setUp()
+        import steward_check as check
+        import session_tidy_runner as runner
+        import session_tidy as tidy
+        from fleet.collectors import steward
+
+        self.check, self.runner, self.tidy, self.steward = check, runner, tidy, steward
+        self.own = {"harness": "claude", "session_id": "captain"}
+        self.prior = {"harness": "claude", "session_id": "earlier-captain"}
+        self.sparrow = {"harness": "opencode", "session_id": "sparrow"}
+        self.old_sparrow = dict(self.sparrow, session_id="old-sparrow")
+        self.kite = {"harness": "codex", "session_id": "kite"}
+        self.finch = {"harness": "claude", "session_id": "finch"}
+        self.wren = {"harness": "codex", "session_id": "sparrow"}
+        self.raven = {"harness": "claude", "session_id": "raven"}
+        self.foreign = self.iso.root / "other"
+        self.foreign.mkdir()
+        for repo in (self.proj, self.foreign):
+            for command in (["git", "init", "-q"],
+                            ["git", "remote", "add", "origin", f"https://example.invalid/team/{repo.name}"]):
+                result = self.iso.run(command, cwd=repo)
+                self.assertEqual(result.returncode, 0, result.stderr)
+        self.census = [SimpleNamespace(**identity, cwd=str(repo)) for identity, repo in
+                       ((self.own, self.proj), (self.sparrow, self.proj), (self.kite, self.proj),
+                        (self.wren, self.foreign), (self.raven, self.foreign))]
+        self.census[1].session_aliases = ["old-sparrow"]
+        self.relation = {
+            "origin": {"harness": "claude", "sid": "earlier-captain"},
+            "holder": {"harness": "claude", "sid": "captain"},
+            "lineage": [{"from": "earlier-captain", "to": "captain", "snapshot_id": "mock-clear"}],
+            "targets": [dict(owner, name=name, source="watch") for owner, name in
+                        ((self.old_sparrow, "Sparrow"), (self.kite, "Kite"), (self.finch, "Finch"),
+                         (self.raven, "Raven"))],
+        }
+        self.relations = [self.relation]
+        self.relation_failure = None
+        self.states = {}
+
+    @contextlib.contextmanager
+    def project(self):
+        with self.iso.patched_environ(), contextlib.ExitStack() as stack:
+            for patch in (
+                mock.patch.object(self.steward, "_registry_sessions", return_value=self.census),
+                mock.patch.object(self.steward, "read_markers", return_value={}),
+                mock.patch.object(self.steward, "read_relations", return_value=self.relations,
+                                  side_effect=self.relation_failure),
+                mock.patch.object(self.check, "_end_observation", return_value=None),
+                mock.patch.object(self.check, "_pending_count", return_value=0),
+                mock.patch.object(self.check, "_observe_lab", return_value={}),
+                mock.patch.object(self.check, "_session_liveness",
+                                  side_effect=lambda h, s, *a: "ended" if s == "finch" else "live"),
+                mock.patch("peer_steward_native.native_agent", side_effect=lambda h, s: {
+                    "result": {"agent": {"agent_status": self.states.get(s, "idle")}}}),
+            ):
+                stack.enter_context(patch)
+            yield
+
+    def promise(self, body, *owners):
+        from memory_open_work import owner_link
+        return self.seed("working", "unresolved-obligation", body, "--links", ",".join(
+            owner_link((owner["harness"], owner["session_id"])) for owner in owners))
+
+    def report_actions(self):
+        with self.project():
+            seen = self.check._observe_role("claude", "captain")
+            return self.check.next_actions(seen)
+
+    def bundle(self, seat, transcript):
+        run = self.tidy.ensure_dir(self.state / "runs" / "ownership-scene")
+        item = {"seat": seat.as_dict(), "harness": "claude", "sid": "captain",
+                "cwd": str(self.proj), "transcript": str(transcript)}
+        bundle = self.runner.assemble(item, "ownership-scene", run)
+        return json.loads(bundle.path.read_text(encoding="utf-8"))
+
+    def transcript(self, sid, text):
+        path = self.work / f"{sid}.jsonl"
+        path.write_text(json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n")
+        return path
+
+    def test_handover_keeps_the_holders_prior_own_work(self):
+        self.promise("Read the earlier sample", self.prior)
+        self.promise("Read the new sample", self.own)
+        self.promise("Foreign update still pending", self.wren)
+        own_work = ["open: Read the earlier sample → assign or do now",
+                    "open: Read the new sample → assign or do now"]
+        self.assertCountEqual(self.report_actions(), own_work)
+        self.relation["released"] = True
+        self.assertCountEqual(self.report_actions(), own_work)
+
+    def test_unresolved_keeps_existing_work_until_the_relation_is_released(self):
+        self.promise("Finch still owes the field notes", self.finch)
+        self.promise("Finish the other repository task", self.raven)
+        self.assertEqual(self.report_actions(), ["open: Finch still owes the field notes → assign or do now"])
+        self.relation["released"] = True
+        self.assertEqual(self.report_actions(), [])
+
+    def test_same_pane_predecessor_tail_can_write_its_own_obligation_without_a_role(self):
+        import time
+
+        self.relations = []
+        tidy = self.tidy
+        seat = tidy._pane_seat_of("fixture:pane")
+        current = self.transcript("captain", "The samples already came in.")
+        old = self.transcript("earlier-captain", "I owe the measurements for the samples.")
+        with self.project():
+            for sid, path, source, at in ((self.prior["session_id"], old, "startup", time.time() - 5),
+                                          (self.own["session_id"], current, "clear", time.time())):
+                tidy._append_ledger_entry(seat, {"event": "start", "harness": "claude", "sid": sid,
+                    "source": source, "cwd": str(self.proj), "transcript": str(path), "ts": at})
+            tidy._append_ledger_entry(seat, {"event": "handover", "harness": "claude",
+                "sid": "captain", "from": "earlier-captain", "source": "clear",
+                "cwd": str(self.proj), "ts": time.time(), "bindings": []})
+            data = self.bundle(seat, current)
+            self.assertIn("I owe the measurements", " ".join(row["text"] for row in data["sessions"]))
+            result, batch = self.apply([
+                self.add_action(1, type="unresolved-obligation", body="Check the legacy measurements",
+                                owner=self.prior),
+                self.add_action(2, type="unresolved-obligation", body="Separate project packaging",
+                                owner=self.wren),
+            ], input_doc=data)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        doc = self.result_json(batch)
+        self.assertEqual(len(doc["added"]), 1)
+        self.assertEqual(len(doc["skipped"]), 1)
+        # The same preserved origin is visible to a check after role handover.
+        self.relations = [self.relation]
+        self.assertEqual(self.report_actions(), ["open: Check the legacy measurements → assign or do now"])
+
+    def test_unreadable_roles_keep_existing_work_as_unsigned_project_work(self):
+        self.promise("Trace the unfinished fixture", self.old_sparrow)
+        self.promise("Foreign release already entered", self.wren)
+        self.relation_failure = OSError("fixture ledger unreadable")
+        self.assertEqual(self.report_actions(), ["open: Trace the unfinished fixture → assign or do now"])
+
+    def test_owner_scope_scene_table(self):
+        legacy = self.seed("working", "unresolved-obligation", "Old project work remains")
+        conflicting = self.promise("Two different owners are named", self.sparrow, self.kite)
+        before = self.rows()
+        with self.project():
+            current = self.transcript("captain", "I will prepare the sample. Sparrow and Kite have next steps.")
+            data = self.bundle(self.tidy.seat_for_project("claude", self.tidy.project_key_for(self.proj)), current)
+            proposals = [
+                ("Prepare the new sample", self.own),
+                ("Sparrow will trace the fixture", self.old_sparrow),
+                ("Kite will check the table", self.kite),
+                ("Wren will bundle the other release", self.wren),
+                ("Raven will check the other project", self.raven),
+                ("Someone will follow up", None),
+                ("Either session might follow up", [self.sparrow, self.kite]),
+            ]
+            actions = [self.add_action(i, type="unresolved-obligation", body=body, owner=owner)
+                       for i, (body, owner) in enumerate(proposals)]
+            actions.append(self.add_action(20, type="observation", body="Useful reference from Wren"))
+            result, batch = self.apply(actions, input_doc=data)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        doc = self.result_json(batch)
+        self.assertEqual(len(doc["added"]), 4)
+        self.assertEqual([row["reason"] for row in doc["skipped"]], ["obligation-owner-unconfirmed"] * 4)
+        after = self.rows()
+        self.assertEqual({key: after[key] for key in (legacy, conflicting)}, before)
+        self.assertIn(("observation", "Useful reference from Wren"), {(row[6], row[5]) for row in after.values()})
+        generic = ["open: Prepare the new sample → assign or do now",
+                   "open: Old project work remains → assign or do now",
+                   "open: Two different owners are named → assign or do now"]
+        sparrow = "[Sparrow] waiting · Sparrow will trace the fixture → assign now"
+        self.assertCountEqual(self.report_actions(), [*generic, sparrow,
+            "[Kite] waiting · Kite will check the table → assign now"])
+        self.states["kite"] = "working"
+        self.assertCountEqual(self.report_actions(), [*generic, sparrow,
+            "open: Kite will check the table → assign or do now"])
+        self.relation["released"] = True
+        self.assertCountEqual(self.report_actions(), generic)
+
+
 class BudgetTest(TidyApplyCase):
 
     def count(self, rtype):

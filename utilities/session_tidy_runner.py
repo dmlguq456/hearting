@@ -508,6 +508,7 @@ class Bundle:
         self.unreadable: list = []      # sessions whose record could not be read (never "nothing new")
         self.idle_card_requested = False
         self.idle_card_body: Optional[str] = None
+        self.owner_scope_complete = True
 
 
 def _target_sessions(item: dict, seat) -> list:
@@ -538,19 +539,18 @@ def _unread_entry(target: dict, chunk) -> dict:
             "coverage": tt.describe_coverage(chunk), "blocked": chunk.blocked, "remaining": tt.unread_total(chunk)}
 
 
-def _obligation_owners(item: dict) -> list[dict]:
-    """Resolve role targets from metadata, independently of which conversations were read."""
+def _obligation_scope(item: dict, seat):
+    """Resolve identities from metadata, independently of which conversations were read."""
     tools = str(ROOT / "tools")
     if tools not in sys.path:
         sys.path.insert(0, tools)
-    harness, sid = item["harness"], item["sid"]
     try:
         from fleet.collectors import steward
-        targets = steward.role_targets(harness, sid, cwd=item["cwd"],
-                                       sessions=steward._registry_sessions(), include_native=True)
-    except Exception:  # The exact caller can still own work when the role data is unavailable.
-        targets = ()
-    return [{"harness": h, "session_id": s} for h, s in sorted(scoped_owners(harness, sid, targets))]
+    except ImportError:
+        steward = None
+    harness, sid, cwd = item["harness"], item["sid"], item["cwd"]
+    predecessors = st.confirmed_pane_predecessors(harness, sid, seat.pane, cwd, endpoint=seat.endpoint)
+    return scoped_owners(harness, sid, steward, cwd=cwd, predecessors=predecessors)
 
 
 def assemble(item: dict, batch: str, run_dir: Path) -> Bundle:
@@ -615,8 +615,9 @@ def assemble(item: dict, batch: str, run_dir: Path) -> Bundle:
            "automatic_records": automatic_records,
            "pending_decisions": pending, "existing_records": records, "duplicate_groups": groups,
            "limits": {"max_new_records": 10, "max_duplicate_groups": DUPLICATE_SIGNAL_MAX}}
-    if sessions:
-        doc["obligation_owners"] = _obligation_owners(item)
+    scope = _obligation_scope(item, seat) if sessions else None
+    if scope is not None:
+        doc["obligation_owners"] = [{"harness": h, "session_id": s} for h, s in sorted(scope.confirmed)]
     if item.get("idle_card"):
         import session_tidy_idle_card
         try:
@@ -632,6 +633,7 @@ def assemble(item: dict, batch: str, run_dir: Path) -> Bundle:
     empty = not (sessions or choices or pending or doc.get("idle_card"))
     bundle = Bundle(path, digest, cursors, empty, unread, {r["id"] for r in records})
     bundle.idle_card_requested = "idle_card" in doc
+    bundle.owner_scope_complete = scope is None or scope.complete
     bundle.unreadable = [s for s in skipped if str(s.get("reason", "")).startswith("unreadable")]
     return bundle
 
@@ -1216,20 +1218,28 @@ def process_item(item: dict) -> None:
         line = apply_actions(item, run_dir, bundle)
         result = st.read_json(run_dir / "result.json")
         over = int(result.get("discarded_over_budget") or 0) if isinstance(result, dict) else 0
-        if over:
+        reason = ""
+        scope_unavailable = not getattr(bundle, "owner_scope_complete", True)
+        if scope_unavailable:
+            # Keep these ranges eligible for the next normal tidy. Only confirmed
+            # writes landed, and replay already deduplicates the applied records.
+            reason = "obligation-owner-scope-unavailable"
+            line = failure_line(reason, batch, applied_writes(run_dir))
+        elif over:
             # Proposals beyond the batch's ten were dropped: that conversation is read again next time.
+            reason = "상한 초과 제안 폐기"
             line = _with_coverage(line, st._ui_translator()("tidy.runner.over_limit"))
         else:
             advance_watermarks(bundle)
             line = _with_coverage(line, coverage_note(bundle))
-        publish_memory(item, batch, run_dir, bundle, "applied" if not over else "partial",
-                       "상한 초과 제안 폐기" if over else "")
+        publish_memory(item, batch, run_dir, bundle, "partial" if reason else "applied", reason)
         # A partly applied batch or a failed deletion check is no quiet result.
         applied_status = result.get("status") if isinstance(result, dict) else ""
-        notify(item, line, level="" if applied_status in ("partial", "integrity-violation") else "done")
+        notify(item, line, level="" if scope_unavailable or applied_status in (
+            "partial", "integrity-violation") else "done")
         # A terminal status is written last: whoever reads it sees the folder as it stays.
         end_batch_files(item, run_dir, True)
-        set_status(item, "notified", result="applied")
+        set_status(item, "notified", result="partial" if scope_unavailable else "applied")
         finished = True
     except RunnerFailure as exc:
         _log(run_dir, f"failed: {exc}")

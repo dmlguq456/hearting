@@ -32,7 +32,7 @@ _UTILITIES = Path(__file__).resolve().parent
 if str(_UTILITIES) not in sys.path:
     sys.path.insert(0, str(_UTILITIES))
 
-from memory_open_work import owner_identity, owner_link, record_owner, scoped_owners
+from memory_open_work import owner_link, record_owner, scoped_owners, target_owners
 
 DUTY_KIND = "steward-check"
 NOTICE_KEY_PREFIX = "steward-check:"
@@ -164,7 +164,7 @@ def policy_warnings() -> list[str]:
 
 def _relations() -> list[dict]:
     import dispatch_seat_handover
-    return dispatch_seat_handover.resolved_steward_relations(include_released=False)
+    return dispatch_seat_handover.resolved_steward_relations(include_released=False, strict=True)
 
 
 def _role_held(harness: str, session_id: str) -> dict:
@@ -198,9 +198,13 @@ def _role_flagged(harness: str, session_id: str) -> bool:
         return True  # no collector: keep the existing check rather than go silent
     try:
         # Native registry rows, as in `_observe_role`: the flag never asks Herdr.
-        rows = collector._registry_sessions()
+        rows = collector._registry_sessions(strict=True, include_aliases=True)
         targets = collector.role_targets(harness, session_id, sessions=rows, include_native=True)
-        return bool(function(harness, session_id, sessions=rows, _targets=targets))
+        if function(harness, session_id, sessions=rows, _targets=targets):
+            return True
+        # An unreadable relation must not turn a due check into a missing flag.
+        collector.read_relations(strict=True)
+        return False
     except Exception:  # noqa: BLE001
         return True
 
@@ -414,7 +418,7 @@ def _human_wait_open(harness: str, session_id: str, now: float) -> bool:
         return False
 
 
-def _holder_cwd(harness: str, session_id: str):
+def _holder_cwd(harness: str, session_id: str, *, sessions=None):
     """The holder's own single cwd from the collector's session rows, or None."""
     collector = _collector()
     # Native registry rows: the holder's cwd never needs a Herdr agent list.
@@ -423,8 +427,9 @@ def _holder_cwd(harness: str, session_id: str):
     if rows_of is None or keys_of is None:
         return None
     try:
-        cwds = {row.cwd for row in rows_of() or ()
-                if getattr(row, "cwd", None) and (harness, session_id) in keys_of(row)}
+        rows = (rows_of() or ()) if sessions is None else sessions
+        cwds = {row.cwd for row in rows if getattr(row, "cwd", None)
+                and (harness, session_id) in keys_of(row)}
     except Exception:  # noqa: BLE001
         return None
     return cwds.pop() if len(cwds) == 1 else None
@@ -441,9 +446,10 @@ def _is_user_decision(row: dict, headline: str) -> bool:
     return bool(tags & _USER_DECISION_TAGS) or any(word in text for word in _USER_DECISION_WORDS)
 
 
-def _open_work(harness: str, session_id: str, targets=()) -> tuple[list[OpenWork], list[str]]:
+def _open_work(harness: str, session_id: str, scope=None) -> tuple[list[OpenWork], list[str]]:
     """Open work and pending decisions from the holder's repository and role."""
-    cwd = _holder_cwd(harness, session_id)
+    sessions = scope.sessions if scope is not None and scope.sessions else None
+    cwd = _holder_cwd(harness, session_id, sessions=sessions)
     if not cwd:
         return [], []
     try:
@@ -454,7 +460,10 @@ def _open_work(harness: str, session_id: str, targets=()) -> tuple[list[OpenWork
         rows, _watched = observe(cwd)
     except Exception:  # noqa: BLE001 - backlog is optional evidence
         return [], []
-    allowed = {owner_link(owner) for owner in scoped_owners(harness, session_id, targets)}
+    if scope is None:
+        scope = scoped_owners(harness, session_id, _collector(), cwd=cwd)
+    allowed = {owner_link(owner) for owner in scope.confirmed | scope.unresolved}
+    foreign = {owner_link(owner) for owner in scope.foreign}
     open_rows = []
     for row in rows or ():
         row = row if isinstance(row, dict) else {}
@@ -462,7 +471,7 @@ def _open_work(harness: str, session_id: str, targets=()) -> tuple[list[OpenWork
         if not headline:
             continue
         owner = record_owner(row)
-        if owner is not None and owner not in allowed:
+        if owner in foreign or (scope.complete and owner is not None and owner not in allowed):
             continue
         open_rows.append((row, OpenWork(headline, owner)))
     # Work handed to a route whose worker runs now is the route's, not this session's to do:
@@ -623,43 +632,40 @@ def _observe_role(harness: str, session_id: str) -> dict:
     cwds = set()
     agents = ()
     observation = _end_observation()
-    if collector is not None:
-        # Native registry rows only (as `_holder_cwd` and `grant_steward`): no Herdr agent list.
-        rows = collector._registry_sessions()
-        resolved = collector.role_targets(harness, session_id, sessions=rows, include_native=True) or []
-        unresolved_reader = getattr(collector, "unresolved_role_targets", None)
-        unresolved = unresolved_reader(harness, session_id, sessions=rows) if callable(unresolved_reader) else []
-        for target in [*resolved, *unresolved]:
-            t_harness = str(target.get("harness") or "").lower()
-            t_sid = target.get("session_id")
-            try:
-                from peer_steward_native import native_agent
-                payload = native_agent(t_harness, t_sid)
-                agent = (payload or {}).get("result", {}).get("agent")
-            except Exception:
-                agent = None
-            if target.get("unresolved"):
-                agent = None
-            if not target.get("unresolved"):
-                directories = {row.cwd for row in rows if getattr(row, "cwd", None)
-                               and getattr(row, "harness", None) == t_harness
-                               and t_sid in (getattr(row, "session_id", None),
-                                             *(getattr(row, "session_aliases", None) or ()))}
-                if not directories and (agent or {}).get("cwd"):
-                    directories.add(agent["cwd"])
-                cwds.update(directories)
-            state = (agent or {}).get("agent_status") or "unknown"
-            targets.append({
-                "name": str(target.get("name") or (t_sid or "-")[:8]),
-                "harness": t_harness or "-", "session_id": t_sid,
-                "state": state,
-                "liveness": (_session_liveness(t_harness, t_sid, agents, observation)
-                             if t_sid else "unknown"),
-                **({"unresolved": True} if target.get("unresolved") else {}),
-                "owed": _pending_count(module, t_harness, t_sid)})
+    scope = scoped_owners(harness, session_id, collector)
+    rows = scope.sessions
+    for target in scope.targets:
+        t_harness = str(target.get("harness") or "").lower()
+        t_sid = target.get("session_id")
+        try:
+            from peer_steward_native import native_agent
+            payload = native_agent(t_harness, t_sid)
+            agent = (payload or {}).get("result", {}).get("agent")
+        except Exception:
+            agent = None
+        if target.get("unresolved"):
+            agent = None
+        if not target.get("unresolved"):
+            directories = {row.cwd for row in rows if getattr(row, "cwd", None)
+                           and getattr(row, "harness", None) == t_harness
+                           and t_sid in (getattr(row, "session_id", None),
+                                         *(getattr(row, "session_aliases", None) or ()))}
+            if not directories and (agent or {}).get("cwd"):
+                directories.add(agent["cwd"])
+            cwds.update(directories)
+        state = (agent or {}).get("agent_status") or "unknown"
+        targets.append({
+            "name": str(target.get("name") or (t_sid or "-")[:8]),
+            "harness": t_harness or "-", "session_id": t_sid,
+            "state": state,
+            **({"owner_keys": target["owner_keys"]} if "owner_keys" in target else {}),
+            "liveness": (_session_liveness(t_harness, t_sid, agents, observation)
+                         if t_sid else "unknown"),
+            **({"unresolved": True} if target.get("unresolved") else {}),
+            "owed": _pending_count(module, t_harness, t_sid)})
     _lengthen_shared_prefixes(targets)
     pending = _pending_count(module, harness, session_id)
-    work, decisions = _open_work(harness, session_id, targets)
+    work, decisions = _open_work(harness, session_id, scope)
     lab = _observe_lab(cwds)
     return {"targets": targets, "pending_messages": pending,
             "open_work": work, "user_decisions": decisions, "lab": lab}
@@ -740,8 +746,8 @@ def next_actions(observation: dict, waiting_since=None, now: float | None = None
             actions.append(f"{_label(target['name'])} {owed} peer request(s) queued, not yet "
                            "delivered → do not resend")
     for target in waiting:
-        owner = owner_link(owner_identity(target))
-        headlines = by_owner.pop(owner, ()) if owner is not None else ()
+        headlines = [headline for owner in target_owners(target)
+                     for headline in by_owner.pop(owner_link(owner), ())]
         if not headlines:
             continue
         minutes = int(max(0.0, now - float(waiting_since.get(str(target.get("session_id")), now))) // 60)

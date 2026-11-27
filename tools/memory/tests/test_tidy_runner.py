@@ -679,6 +679,46 @@ class EnqueueTest(RunnerCase):
         self.assertEqual(self.notices(), ["[정리] 새로 정리할 대화가 없습니다."])
 
 
+class ObligationRoleReadTest(RunnerCase):
+    def test_unreadable_role_retains_the_range_and_normal_tidy_retries_it(self):
+        sid = "sid-A"
+        result = self.iso.run(["git", "init", "-q"], cwd=self.cwd)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.transcript(sid, [claude_row("user", "I will take the sample. Sparrow will review it.")])
+        ledger = self.fake / "role-ledger"
+        marker = ledger / "peer-steward" / "claude" / f"{sid}.json"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("{", encoding="utf-8")
+        registry = self.iso.xdg_state / "agent-fleet" / "sessions" / "opencode" / "123.json"
+        registry.parent.mkdir(parents=True)
+        registry.write_text(json.dumps({"sessionId": "helper", "cwd": str(self.cwd)}), encoding="utf-8")
+        target = {"harness": "opencode", "session_id": "helper"}
+        self.scenario([], default={"mode": "ok", "actions": [
+            {"kind": "add", "type": "unresolved-obligation", "body": "Collect the first sample",
+             "owner": {"harness": "claude", "session_id": sid}},
+            {"kind": "add", "type": "unresolved-obligation", "body": "Review the sample notes", "owner": target},
+            {"kind": "add", "type": "unresolved-obligation", "body": "Package a separate project release",
+             "owner": {"harness": "codex", "session_id": "unrelated"}},
+        ]})
+
+        first = self.enqueue(sid, AGENT_PEER_LEDGER_ROOT=str(ledger))
+        self.assertEqual(self.wait_status(first, "notified")["result"], "partial")
+        self.assertIsNone(self.watermark(sid))
+        self.assertEqual({row[3] for row in self.records().values()}, {"Collect the first sample"})
+        self.assertIn("obligation-owner-scope-unavailable", " ".join(self.notices()))
+
+        marker.write_text(json.dumps({"session_id": sid, "targets": {
+            "helper": dict(target, source="start", name="Sparrow", ts="1")}}), encoding="utf-8")
+        second = self.enqueue(sid, AGENT_PEER_LEDGER_ROOT=str(ledger))
+        self.assertEqual(self.wait_status(second, "notified")["result"], "applied")
+        self.assertGreater(self.watermark(sid)["cursor"], 0)
+        self.assertEqual({row[3] for row in self.records().values()},
+                         {"Collect the first sample", "Review the sample notes"})
+        self.assertEqual(len(self.records()), 2)
+        self.assertEqual(self.saved_input(1)["sessions"][0]["cursor_from"],
+                         self.saved_input(2)["sessions"][0]["cursor_from"])
+
+
 class ProjectCardSlotRunTest(RunnerCase):
 
     def test_project_queue_round_trip_uses_the_callers_card_slot(self):

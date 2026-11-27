@@ -50,8 +50,8 @@ class NativeStewardProjectionTest(unittest.TestCase):
                      SimpleNamespace(harness='codex',session_id='foreign',cwd=self.repos[1]),
                      SimpleNamespace(harness='codex',session_id='unknown',cwd='')]
         p=mock.patch.object(steward,'_projection_sessions',side_effect=lambda:list(self.rows));p.start();self.addCleanup(p.stop)
-        p=mock.patch.object(steward,'read_markers',side_effect=lambda:self.markers);p.start();self.addCleanup(p.stop)
-        p=mock.patch.object(steward,'read_relations',side_effect=lambda:self.relations);p.start();self.addCleanup(p.stop)
+        p=mock.patch.object(steward,'read_markers',side_effect=lambda **kw:self.markers);p.start();self.addCleanup(p.stop)
+        p=mock.patch.object(steward,'read_relations',side_effect=lambda **kw:self.relations);p.start();self.addCleanup(p.stop)
 
     def relation(self, actor, ts):
         return {'holder':{'harness':'codex','sid':actor},'released':False,'targets':[
@@ -60,6 +60,29 @@ class NativeStewardProjectionTest(unittest.TestCase):
 
     def targets(self, actor='actor'):
         return [r['session_id'] for r in steward.role_targets('codex',actor)]
+
+    def test_registry_alias_needs_the_exact_current_argv_identity(self):
+        from fleet import session_registry
+        from fleet.collectors import liveness
+
+        current = "11111111-1111-4111-8111-111111111111"
+        previous = "22222222-2222-4222-8222-222222222222"
+        other = "33333333-3333-4333-8333-333333333333"
+        info = {"pid": 123, "sessionId": current, "cwd": self.repos[0]}
+        with mock.patch.object(steward, "_registry_records",
+                               side_effect=lambda h, **kw: [info] if h == "claude" else []), \
+                mock.patch.object(liveness, "_proc_evidence", return_value=(True, None)) as birth, \
+                mock.patch.object(session_registry, "_proc_argv",
+                                  return_value=["claude", "--session-id", current, "--resume", previous]) as argv:
+            def keys():
+                return steward._session_keys(steward._registry_sessions(include_aliases=True)[0])
+
+            self.assertEqual(keys(), [("claude", current), ("claude", previous)])
+            argv.return_value[2] = other
+            self.assertEqual(keys(), [("claude", current)])
+            argv.return_value[2] = current
+            birth.return_value = (True, False)
+            self.assertEqual(keys(), [("claude", current)])
 
     def test_actor_absent_from_snapshot_uses_its_own_native_repository(self):
         self.assertEqual(self.targets(),['target'])
@@ -95,7 +118,7 @@ class NativeStewardProjectionTest(unittest.TestCase):
     def test_existing_check_sees_targets_and_uses_the_existing_hourly_duty(self):
         store=peer_obligations.ObligationStore(self.root / 'duties')
         with mock.patch.object(check,'_collector',return_value=steward), \
-             mock.patch.object(check,'_relations',side_effect=lambda:self.relations), \
+             mock.patch.object(check,'_relations',side_effect=lambda **kw:self.relations), \
              mock.patch.object(check,'_agents',return_value=[]), \
              mock.patch.object(check,'_end_observation',return_value=None), \
              mock.patch.object(check,'_session_liveness',return_value='live'), \

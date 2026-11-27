@@ -53,6 +53,14 @@ def work_item(headline, owner=None):
     return SC.OpenWork(headline, owner_link(owner))
 
 
+def role_collector(*, _registry_sessions, **methods):
+    from fleet.session_registry import session_join_keys
+    defaults = dict(read_markers=lambda **kw: {}, read_relations=lambda **kw: [],
+                    _session_keys=session_join_keys, unresolved_role_targets=lambda *a, **kw: [])
+    return SimpleNamespace(**{**defaults, **methods},
+                           _registry_sessions=lambda **kw: _registry_sessions())
+
+
 class CheckBase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -162,7 +170,7 @@ class StewardCheckLabTest(CheckBase):
         self.targets = [target("a", state="done"), target("b", state="done")]
         self.rows = [SimpleNamespace(harness=t["harness"], session_id=t["session_id"],
                                      cwd=str(self.root.parent)) for t in self.targets]
-        self.collector = SimpleNamespace(
+        self.collector = role_collector(
             _registry_sessions=lambda: self.rows, role_targets=lambda *a, **kw: self.targets,
             _peer_message_module=lambda: None)
         for patch in (
@@ -673,7 +681,7 @@ class StewardCheckUnresolvedTest(CheckBase):
     """RV-PR1593: retain unresolved targets without paying for unchanged dead work."""
 
     def observe(self, liveness, sid="target-unresolved"):
-        collector = SimpleNamespace(
+        collector = role_collector(
             _peer_message_module=lambda: None, _registry_sessions=lambda: [],
             role_targets=lambda *a, **k: [],
             unresolved_role_targets=lambda *a, **k: [{
@@ -868,7 +876,7 @@ class StewardCheckOpenWorkSourceTest(unittest.TestCase):
     def test_observe_role_counts_peer_requests_owed_by_each_target(self):
         module = SimpleNamespace(pending_messages=lambda who: (
             [{"state": "pending"}, {"state": "acked"}] if who["session_id"] == "sid-e7" else []))
-        collector = SimpleNamespace(
+        collector = role_collector(
             role_targets=lambda h, s, **kw: [{"name": "e7", "harness": "codex", "session_id": "sid-e7"}],
             _registry_sessions=lambda: [], _peer_message_module=lambda: module)
         with mock.patch.object(SC, "_collector", return_value=collector), \
@@ -900,7 +908,7 @@ class StewardCheckPeerRequestCountTest(CheckBase):
         module = SimpleNamespace(pending_messages=lambda who: [
             row for row in self.rows
             if (row["to"]["harness"], row["to"]["session_id"]) == (who["harness"], who["session_id"])])
-        self.collector = SimpleNamespace(role_targets=lambda h, s, **kw: [],
+        self.collector = role_collector(role_targets=lambda h, s, **kw: [],
                                          _registry_sessions=lambda: [],
                                          _peer_message_module=lambda: module)
         for name, patch in (
@@ -1406,6 +1414,8 @@ class StewardCheckProcessProofTest(CheckBase):
         targets = [{"name": "cx", "harness": "codex", "session_id": self.CODEX_SID},
                    {"name": "oc", "harness": "opencode", "session_id": self.OPENCODE_SID}]
         with mock.patch.object(self.steward, "role_targets", return_value=targets), \
+                mock.patch.object(self.steward, "read_markers", return_value={}), \
+                mock.patch.object(self.steward, "read_relations", return_value=[]), \
                 mock.patch.object(self.steward, "_peer_message_module", return_value=None):
             seen = REAL_OBSERVE(HARNESS, SID)
         self.assertEqual({t["name"]: t["liveness"] for t in seen["targets"]},
@@ -1896,9 +1906,9 @@ class StewardCheckRoleFlagTest(CheckBase):
 
     def test_real_flag_seam_reads_the_fleet_role_flag(self):
         rows = [SimpleNamespace(harness=HARNESS, session_id=SID, cwd="/repo", runtime_name=None)]
-        collector = SimpleNamespace(role_flag=mock.Mock(return_value=False),
-                                    _registry_sessions=mock.Mock(return_value=rows),
-                                    role_targets=mock.Mock(return_value=[]))
+        collector = role_collector(role_flag=mock.Mock(return_value=False),
+                                   _registry_sessions=mock.Mock(return_value=rows),
+                                   role_targets=mock.Mock(return_value=[]))
         with mock.patch.object(SC, "_collector", return_value=collector):
             self.assertFalse(REAL_ROLE_FLAGGED(HARNESS, SID))
         collector.role_targets.assert_called_once_with(HARNESS, SID, sessions=rows,
