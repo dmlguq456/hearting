@@ -38,6 +38,7 @@ from fleet import gitinfo, session_line, session_registry as sr, titles  # noqa:
 
 OLD = "3f1c0a7e-5b2d-4c6e-9a8f-1d2e3f4a5b6c"
 NEW = "7a9b8c6d-2e4f-4a1b-8c3d-5e6f7a8b9c0d"
+PARKED_JOB_ID = "fixture-parked-job"
 ROUTE = {"id": "rt-new", "title": "route of the held session", "state": "running", "worker_stage": "plan",
          "shape": "one-shot", "owner": "autopilot-code", "stages": [{"name": "plan", "st": "active"}]}
 OLD_ROUTE = dict(ROUTE, id="rt-old", title="finished route of the original")
@@ -95,9 +96,9 @@ class ParkedPanel(unittest.TestCase):
         """A viewer of OLD (holding the job) and the held background session NEW, with its tap."""
         self.viewer = self.spawn()
         self.vstart = self.record(self.viewer, sessionId=OLD, kind="interactive", status="idle",
-                                  **({"parkedJobId": "e675a253"} if parked else {}))
+                                  **({"parkedJobId": PARKED_JOB_ID} if parked else {}))
         self.bg = self.spawn("--session-id", NEW, "--fork-session", "--resume", "/p/%s.jsonl" % OLD)
-        self.bstart = self.record(self.bg, sessionId=NEW, kind="bg", jobId="e675a253", status="busy")
+        self.bstart = self.record(self.bg, sessionId=NEW, kind="bg", jobId=PARKED_JOB_ID, status="busy")
         tap = {"session_id": NEW, "pid": tap_pid if tap_pid is not None else self.bg.pid, "proc_start": self.bstart, "cwd": str(self.root),
                "model": {"display_name": "Held Model", "id": "held-model"}, "effort": {"level": "max"},
                "context_window": {"used_percentage": 23, "context_window_size": 1000000}}
