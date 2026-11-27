@@ -2807,7 +2807,8 @@ def main():
             outcome=route_parent_close.close(route, a.route, stop_resources=a.stop_resources,
                                             summary=a.summary, commit=a.commit)
             if outcome is None:
-                outcome,created=close_route(route,a.route,a.commit,a.summary,allow_unproven=True)
+                outcome,created=close_route(route,a.route,a.commit,a.summary,allow_unproven=True,
+                                            registry_current=route["_registry_current"])
                 if outcome.get("terminal_gate_proven") is not True:
                     # No running owner to stop: the owner had ended without a PASS. The unproven closure
                     # ends the ledger and the cycle as stopping a running owner does; the same close run
