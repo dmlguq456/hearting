@@ -357,24 +357,44 @@ class RouteReleaseFlipTest(unittest.TestCase):
                 process.kill()
             process.wait(timeout=10)
         self.addCleanup(stop_launch)
+        # One deadline covers the start, the wrapper and the completion together;
+        # a late run names what was pending, the wrapper's own exit and the row.
+        budget = 240
+        deadline = time.monotonic() + budget
+        stdout = stderr = ""
+
+        def late(pending):
+            try:
+                last = JOIN.exact_attempt_row(jobs, attempt).raw
+            except JOIN.JoinContractError as exc:
+                last = f"not registered ({exc})"
+            return (f"{pending} at the {budget}s deadline; wrapper returncode={process.poll()!r}; "
+                    f"last completion row: {last}\nwrapper output: {stdout}{stderr}")
+
         if flip == "during":
-            deadline = time.monotonic() + 120
             while not sentinel.is_file():
                 self.assertIsNone(process.poll(), "the worker ended before it started")
-                self.assertLess(time.monotonic(), deadline, "the worker never started")
+                if time.monotonic() > deadline:
+                    self.fail(late("the worker had not started"))
                 time.sleep(0.02)
             install.point(install.b)
             sentinel.unlink()
-        stdout, stderr = process.communicate(timeout=240)
+        try:
+            stdout, stderr = process.communicate(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired as exc:
+            stdout, stderr = (value.decode(errors="replace") if isinstance(value, bytes) else value or ""
+                              for value in (exc.stdout, exc.stderr))
+            self.fail(late("the wrapper had not returned"))
         self.assertEqual(process.returncode, 0, stdout + stderr)
-        deadline = time.monotonic() + 240
         while True:
             try:
                 row = JOIN.exact_attempt_row(jobs, attempt)
             except JOIN.JoinContractError as exc:
                 self.fail(f"the worker was never registered ({exc}): {stdout}")
-            if row.status != "open" or time.monotonic() > deadline:
+            if row.status != "open":
                 break
+            if time.monotonic() > deadline:
+                self.fail(late("the PASS attempt was still open"))
             time.sleep(0.05)
         self.assertEqual(row.status, "done", f"the PASS attempt was never closed: {row.raw}\n{stdout}")
         # The close a person or parent runs next reads the route on the installed release.

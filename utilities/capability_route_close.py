@@ -627,11 +627,31 @@ def _moved_root_canonical_location(route, route_file):
     except (OSError,ValueError):
         return False
 
+def _reader_registry_current(route):
+    """This reader's catalog verdict for a route it closes without one in hand.
+
+    A route this reader cannot verify is recorded as not current: the closure is
+    still a real closure, it only does not claim the catalog read here.
+    """
+    from capability_route_verify import verify_route
+    try:
+        return verify_route(dict(route), allow_stale_registry=True)["_registry_current"] is True
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return False
+
 def close_route(route, route_file, commit=None, summary=None, publication=None,
                 allow_unproven=True, jobs=None, expected_terminal_marker_digest=None,
                 terminal_commit_id=None, expected_owner_attempt_id=None,
                 expected_producer_binding_digest=None, inline_finish_id=None,
-                expected_summary_digest=None, inline_commit=None, autoclose=None):
+                expected_summary_digest=None, inline_commit=None, autoclose=None,
+                registry_current=None):
+    """Write the route's closure sidecar (or replay the one already written).
+
+    `registry_current` is the closing reader's own catalog verdict: a caller that
+    already ran `verify_route` passes its `_registry_current`; otherwise the verdict
+    is computed here. A `_registry_current` carried in `route` is never read, since a
+    route file can hold that key without changing its hash.
+    """
     import route_parent_close
     if route_parent_close.intent(route, jobs):
         raise ValueError("cancelled-by-parent")
@@ -731,7 +751,8 @@ def close_route(route, route_file, commit=None, summary=None, publication=None,
              "head_commit":(None if inline_finish_id is not None and
                             not _COMMIT_SHA.fullmatch(str(route.get("source_commit") or ""))
                             else commit or _head_commit(route["cwd"])),"summary":summary,
-             "registry_current":route.get("_registry_current",True),
+             "registry_current":(_reader_registry_current(route) if registry_current is None
+                                 else bool(registry_current)),
              "route_location":classify_route_location(route_file,route["artifact_root"]),
              "terminal_gate_proven":terminal_gate_proven(gates),"terminal_gates":gates}
     if expected_terminal_marker_digest is not None:

@@ -1593,7 +1593,7 @@ class TestRoute(unittest.TestCase):
     registry=json.loads(json.dumps(R.TOPO.load_registry())); mutate(registry)
     with mock.patch.object(R.TOPO,"load_registry",return_value=registry):
      if current:
-      self.assertNotIn("_registry_current",R.verify_route(route,R.ROOT))
+      self.assertIs(R.verify_route(route,R.ROOT)["_registry_current"],True)
      else:
       self.assertIs(R.verify_route(route,R.ROOT)["_registry_current"],False)
  def test_composed_requires_standard_plus(self):
@@ -5138,7 +5138,7 @@ class TestValidationBasis(unittest.TestCase):
    with contextlib.redirect_stderr(io.StringIO()) as err:
     verified=R.verify_route(route,R.ROOT)
    self.assertNotIn("gate-off",err.getvalue())
-   self.assertNotIn("_registry_current",verified)
+   self.assertIs(verified["_registry_current"],True)
    R.verify_route(route,R.ROOT)
  def test_edit_to_the_same_capability_or_a_shared_section_makes_the_route_stale(self):
   route=R.compile_route(**self.args())
@@ -5330,6 +5330,46 @@ class TestValidationBasis(unittest.TestCase):
    path=artifact_root/"demo-route.json"; path.write_text(json.dumps(verified),encoding="utf-8")
    outcome,created=R.close_route(verified,path,commit="d"*40,allow_unproven=True)
    self.assertTrue(created)
+
+ def test_close_records_the_readers_catalog_verdict_not_the_route_files(self):
+  # `_registry_current` is outside the route hash, so a route file may carry one
+  # without any hash warning. Both closers -- the `close` CLI, which verifies first,
+  # and the raw route JSON the terminal commit passes -- record the reader's verdict.
+  import subprocess,sys
+  env=os.environ.copy(); env["AGENT_HOME"]=self._tmp_home.name
+  env.pop("AGENT_DISPATCH_JOBS",None)
+  def same_catalog(route):
+   return route
+  def other_catalog(route):
+   route["validation_basis"]["registry_root"]="/tmp/b2-fixture-other-registry-root"
+   route["registry_digest"]="sha256:"+"1"*64
+   route["capability_registry_digest"]="sha256:"+"1"*64
+   return route
+  def newer_basis(route):
+   route["validation_basis"]["basis_version"]=R.VALIDATION_BASIS_VERSION+1
+   return route
+  cases=((same_catalog,False,True),(other_catalog,True,False),(newer_basis,True,False))
+  for vary,carried,expected in cases:
+   for closer in ("cli","raw-json"):
+    with self.subTest(case=vary.__name__,closer=closer), tempfile.TemporaryDirectory() as tmp:
+     artifact_root=Path(tmp)/"artifacts"
+     sealed=self._reseal(vary(R.compile_route(**self.args(artifact_root=artifact_root))))
+     on_disk=dict(sealed,_registry_current=carried)
+     self.assertEqual(R.route_hash(on_disk),sealed["route_hash"])
+     route_path=R.canonical_route_path(artifact_root,sealed["route_id"])
+     R.write_once(route_path,on_disk)
+     if closer=="cli":
+      result=subprocess.run(
+       [sys.executable,str(P),"close","--route",str(route_path),"--commit","d"*40],
+       capture_output=True,text=True,cwd=str(R.ROOT),env=env)
+      self.assertEqual(result.returncode,0,result.stderr)
+     else:
+      R.close_route(json.loads(route_path.read_text(encoding="utf-8")),route_path,
+                    commit="d"*40,allow_unproven=True)
+     outcome=json.loads(R.outcome_path(route_path).read_text(encoding="utf-8"))
+     self.assertIs(outcome["registry_current"],expected)
+     row=next(row for row in R.route_status(artifact_root) if row["route_id"]==sealed["route_id"])
+     self.assertIs(row["registry_current"],expected)
 
 class GroundingCwdLineageTest(unittest.TestCase):
  """SD-107 × SD-67/69: the mutation worktree's HEAD may move along its first-parent line."""
