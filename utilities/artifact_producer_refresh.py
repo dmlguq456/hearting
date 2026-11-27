@@ -139,7 +139,7 @@ def _refreshed_document(root: Path, record: Mapping[str, Any], document: Mapping
                         facts: Sequence[Tuple[str, str, int]], *, allocator: artifact_identity.IdAllocator,
                         now: Optional[float],
                         removable: Optional[Iterable[str]] = None,
-                        excluded_roots: Sequence[str] = (),
+                        excluded_roots: Sequence[str] = (), kept_roots: Sequence[str] = (),
                         ) -> Tuple[Optional[Dict[str, Any]], Dict[str, List[str]]]:
     """The cycle's next document, or `None` when no file differs from `document`.
 
@@ -149,10 +149,11 @@ def _refreshed_document(root: Path, record: Mapping[str, Any], document: Mapping
     would not list today is neither changed nor removed.  `cycle`, `routes[]` and
     the terminal fields are never touched.  `removable`, when given, names the only
     declared paths a missing fact may remove: a scan that stopped early has not seen
-    the rest of the tree, so a file it did not visit is never read as deleted."""
+    the rest of the tree, so a file it did not visit is never read as deleted.  Rows under
+    `kept_roots` (a frame's execution folders) stay exactly as they are."""
     declared = {row.get("locator", {}).get("path"): row
                 for row in document.get("artifact_revisions", []) or [] if isinstance(row, dict)}
-    present = {rel: (digest, size) for rel, digest, size in facts}
+    present = {rel: (digest, size) for rel, digest, size in facts if not _excluded_by_roots(rel, kept_roots)}
     changes: Dict[str, List[str]] = {"added": [], "modified": [], "removed": [], "reclassified": []}
     for rel in sorted(declared):
         if _excluded_by_roots(rel, excluded_roots):
@@ -166,7 +167,7 @@ def _refreshed_document(root: Path, record: Mapping[str, Any], document: Mapping
     removable_set = None if removable is None else set(removable)
     for rel in sorted(declared):
         if (rel not in present and not _outside_inclusion_rule(rel)
-                and not _excluded_by_roots(rel, excluded_roots)
+                and not _excluded_by_roots(rel, excluded_roots) and not _excluded_by_roots(rel, kept_roots)
                 and (removable_set is None or rel in removable_set)):
             changes["removed"].append(rel)
     if not any(changes.values()):
@@ -1198,7 +1199,7 @@ def _refresh_cycle_locked(root: Path, record: Mapping[str, Any], *, now: Optiona
         facts = prescan.facts
         refreshed, changes = _refreshed_document(
             root, record, document, facts, allocator=alloc, now=now,
-            excluded_roots=prescan.excluded_roots)
+            excluded_roots=prescan.excluded_roots, kept_roots=_frame_member_roots(root, record, directory))
         deferred = refreshed is not None and not _prescan_holds(directory, prescan, changes)
     else:
         deferred = True
@@ -1437,6 +1438,14 @@ class _RefreshScan:
     complete: bool = True
     cursor: Optional[str] = None
     from_top: bool = True
+    kept_roots: List[str] = field(default_factory=list)  # a frame's execution folders, never looked into
+
+
+def _frame_member_roots(root: Path, record: Mapping[str, Any], directory: Path) -> Set[str]:
+    """A frame's execution folders, judged where its first seal judges them (`cycle_dir`)."""
+    if not (directory / "_internal" / "executions").is_dir():
+        return set()
+    return _request_member_dirs(cycle_dir(root, record["campaign_id"], record["cycle_id"], record))
 
 
 def _pruned_directory(parts: Sequence[str]) -> bool:
@@ -1488,7 +1497,7 @@ def _walk_sorted(top: str, prefix: Tuple[str, ...], after: Optional[Tuple[str, .
 
 
 def _bounded_scan(directory: Path, *, cursor: Optional[str], known: Mapping[str, Sequence[Any]],
-                  budget: RefreshBudget) -> _RefreshScan:
+                  budget: RefreshBudget, kept_roots: Iterable[str] = ()) -> _RefreshScan:
     """Walk both exact cycle payload roots without a lock, within one shared budget.
 
     Resume positions and file facts use full cycle-relative locators. Older
@@ -1514,7 +1523,7 @@ def _bounded_scan(directory: Path, *, cursor: Optional[str], known: Mapping[str,
             if parts[0] in {"artifacts", "_internal"}:
                 after = parts
     normalized_cursor = "/".join(after) if after else None
-    scan = _RefreshScan(from_top=after is None)
+    scan = _RefreshScan(from_top=after is None, kept_roots=sorted(kept_roots))
     roots_to_walk = []
     for root_name, top in roots:
         observation = artifact_payload.observe_directory(top, payload_root=top)
@@ -1531,7 +1540,7 @@ def _bounded_scan(directory: Path, *, cursor: Optional[str], known: Mapping[str,
     bundle_directories = _manifest_bundle_directories(document) if isinstance(document, Mapping) else set()
     bundle_parts = {tuple(path.split("/")) for path in bundle_directories}
     # A frame's execution folders are left out exactly as its first seal left them out.
-    skipped_parts = bundle_parts | {path.relative_to(directory).parts for path in _request_member_dirs(directory)}
+    skipped_parts = bundle_parts | {tuple(rel.split("/")) for rel in scan.kept_roots}
     cursor_root = after[0] if after else None
     root_order = {name: index for index, (name, _top) in enumerate(
         (("artifacts", artifacts), ("_internal", internal)))}
@@ -1624,7 +1633,8 @@ def _confirmed_absent(directory: Path, document: Mapping[str, Any], scan: _Refre
     for row in document.get("artifact_revisions", []) or []:
         rel = row.get("locator", {}).get("path") if isinstance(row, dict) else None
         if (not isinstance(rel, str) or rel in scan.visited or _outside_inclusion_rule(rel)
-                or any(rel.startswith(path + "/") for path in bundle_directories)):
+                or any(rel.startswith(path + "/") for path in bundle_directories)
+                or _excluded_by_roots(rel, scan.kept_roots)):
             continue
         parts = rel.split("/")
         marker_excluded = False
@@ -1776,7 +1786,8 @@ def _refresh_cycle_observed(root: Path, cycle_id: str, *, trigger: str, clock: f
         return skipped("min-interval", next_eligible_at=_rfc3339(observed_at + checkpoint_interval_seconds()))
     directory = manifest_path.parent
     scan = _bounded_scan(directory, cursor=None if trigger == "explicit" else state.get("cursor"),
-                         known=state.get("files", {}), budget=budget)
+                         known=state.get("files", {}), budget=budget,
+                         kept_roots=_frame_member_roots(root, record, directory))
     gone = _confirmed_absent(directory, document, scan, budget)
     alloc = allocator or artifact_identity.IdAllocator()
     facts = [(rel, digest_, size) for rel, (digest_, size, _fp) in sorted(scan.facts.items())]
@@ -1850,6 +1861,12 @@ def _publish_refresh(root: Path, cycle_id: str, manifest_path: Path, raw: bytes,
                 or _record_cycle_manifest_path(root, record) != manifest_path):
             return "superseded"
         if not _recheck_candidate(directory, manifest_path, raw, scan, changes):
+            return "superseded"
+        # An execution begun after the scan read the frame's members owns these files now.
+        later = [rel for rel in (*changes.get("added", []), *changes.get("modified", []))
+                 if rel.startswith("_internal/executions/")]
+        owned = _frame_member_roots(root, record, directory) if later else set()
+        if any(_excluded_by_roots(rel, owned) for rel in later):
             return "superseded"
         # An active -> completed candidate was decided from observations taken before this
         # lock; a lease, route or outcome that moved since keeps the document as it is.
