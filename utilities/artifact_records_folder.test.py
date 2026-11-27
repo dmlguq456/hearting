@@ -81,7 +81,9 @@ class RecordsFolderTest(F.ProducerTestBase):
         status = C.status(self.root, self.campaign_json)
         out["campaign-status"] = {"closable": status.get("closable"), "refusal": status.get("close_refusal"),
                                   "cycles": status.get("cycles")}
-        out["relayout-plan"] = RL.build_plan(self.root)
+        plan = RL.build_plan(self.root)
+        del plan["generated_at"]  # Compare the layout across observations at different times.
+        out["relayout-plan"] = plan
         out["relayout-status"] = RL.status(self.root)
         out["residue-plan"] = RES.build_plan(self.root)
         out["residue-status"] = RES.status(self.root)
