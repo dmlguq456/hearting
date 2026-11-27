@@ -490,6 +490,46 @@ kept.update([written('A','submitted')],'',{});take(kept,'\x1b[201~');assert.equa
 })().catch(e=>{console.error(e);process.exit(1);});
 """)
 
+    def test_what_the_third_review_of_1889_found_ends_as_on_main(self):
+        # Review 3 of #1889, each scene pinned to main's result: (1) a stalled paste ended by Enter, then the
+        # question answered elsewhere, then a one-key tail: no byte reaches the session; (2) A sent, Tab to B,
+        # a paste begun, B gone: the end of A's send lets go as on main (the paste's tail then goes to the
+        # session, as on main) and never lands in a new question C's answer; (3) a paste with no end mark keeps
+        # the keys, as on main, until a key ends it.
+        self.node(r"""
+const assert=require('node:assert/strict'),path=require('node:path'),create=require(path.join(process.argv[1],'block-input.cjs'));
+const written=(id,state)=>({id,revision:id,answerable:state?false:true,...(state?{request_state:state}:{}),
+                            questions:[{id:'q'+id,question:'Question '+id+'?'}]});
+const chosen=(id,state)=>({...written(id,state),questions:[{id:'q'+id,question:'Question '+id+'?',choices:['one','two']}]});
+const take=(b,bytes,why)=>assert.equal(b.input(Buffer.from(bytes)).length,0,why);
+const until=async(ready,why)=>{for(let i=0;i<400&&!ready();i++)await new Promise(r=>setTimeout(r,5));assert(ready(),why);};
+(async()=>{
+ {const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){},pasteIdle:200,keyWait:20});
+  b.update([written('A')],'',{});b.enter();take(b,'\x1b[200~');
+  await until(()=>b.stalled,'the paste stalls');
+  take(b,'\r');await until(()=>!b.pasting,'Enter ends the stalled paste');
+  b.update([written('A','submitted')],'',{});                   // answered elsewhere
+  const tail=b.discarding?b.swallow(Buffer.from('x')):Buffer.from('x');   // the host asks swallow first
+  assert.equal((b.focused?b.input(tail):tail).length,0,'the one-key tail reaches no session (main: 0 bytes)');
+  await until(()=>!b.focused,'then it lets go');}
+ {let release,watch=()=>{};const sent=new Promise(r=>{release=r;});const asked=[];
+  const b=create({changed(){watch();},answer:r=>{asked.push(JSON.stringify(r));return asked.length===1?sent:Promise.resolve({state:'submitted'});},action(){}});
+  b.update([chosen('A'),written('B')],'',{});b.enter();take(b,'1');take(b,'\r');take(b,'\t');take(b,'\x1b[200~');
+  b.update([chosen('A','submitted')],'',{});                    // B closes elsewhere while A is sent
+  const left=new Promise(r=>{watch=()=>{if(!b.focused)r();};});
+  release({state:'submitted'});await left;                     // the end of A's send lets go, as on main
+  assert.equal(b.input(Buffer.from('TailForB\x1b[201~')).toString(),'TailForB\x1b[201~','as on main the tail is the session’s');
+  b.update([chosen('A','submitted'),written('C')],'',{});b.enter();take(b,'\r');
+  assert(!asked.some(r=>r.includes('TailForB')),'it never answers C');}
+ {const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){},pasteIdle:200,keyWait:20});
+  b.update([written('A')],'',{});b.enter();take(b,'\x1b[200~');
+  b.update([written('A','submitted')],'',{});
+  assert.equal(b.focused,true,'a paste with no end mark keeps the keys, as on main');
+  await until(()=>b.stalled,'it stalls');assert.equal(b.focused,true);
+  take(b,'\x1b');await until(()=>!b.focused,'a lone Esc after the stall closes it, as on main');}
+})().catch(e=>{console.error(e);process.exit(1);});
+""")
+
     def test_no_guidance_the_question_popup_draws_names_the_arrows_as_sections(self):
         # 11-22: in the question popup ←→ only move the place in the typed text, so none of its guidance
         # (the keys rows `navigate`, `navigate_write`, the writing hints, and `editor_help`, which a popup with no
