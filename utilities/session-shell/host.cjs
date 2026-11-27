@@ -1506,7 +1506,9 @@ function queueLayout(){
 }
 const block=require('./block-input.cjs')({changed:queueDisplay,cellWidth,
   answer:async fields=>{const result=await source('answer',fields);queueProjection();return result;},
-  action:key=>blockAction(key)});
+  action:key=>blockAction(key),
+  // Review 1871: a read that waited with a key held in a paste goes on from the start of the input path, as it came.
+  again:data=>userInput(data)});
 let actionLines=[];
 function rebuildDisplay() {
   // The popup layer first: Fleet's screen or the plain relay closes it with the rest.
@@ -2071,11 +2073,11 @@ function nativePointer(code,release,raw){
 }
 // The next input of any kind takes the selection's flipped cells back (a press that starts another
 // makes its own); a key typed while one is being dragged ends it.
-// 11-26 (review 1861): while a key pressed in a paste waits in the question popup, or the bulk of a paste such a key
-// ended is dropped (the popup may be closed by now), each read is asked first, as it came: a read holding one key lets
-// the waiting key act first; the paste's bulk is dropped, never the native's (a read of the person's holding several
-// keys is the bulk too); a read holding one key (a mouse or focus report too) and a new paste go on their own way.
-function userInput(data){if(block.holding||block.discarding){data=block.swallow(data);if(!data.length){queueDisplay();return;}}if(data.length){epoch+=data.length;empty=false;if(pick&&(!pick.live||data[0]!==27||data[1]!==91||data[2]!==60))clearPick();mouseInput.feed(data);}}
+// 11-26 (review 1861): while the bulk of a paste a pressed key ended in the question popup is dropped (the popup may be
+// closed by now), each read is asked first, as it came: the paste's bulk is dropped, never the native's (a read of the
+// person's holding several keys is the bulk too); a read holding one key (a mouse or focus report too) and a new paste
+// go on their own way.
+function userInput(data){if(block.discarding){data=block.swallow(data);if(!data.length){queueDisplay();return;}}if(data.length){epoch+=data.length;empty=false;if(pick&&(!pick.live||data[0]!==27||data[1]!==91||data[2]!==60))clearPick();mouseInput.feed(data);}}
 function inputBytes(data) {
   if(!data.length)return;
   while(data.length){

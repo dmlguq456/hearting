@@ -960,12 +960,14 @@ its text, a line break, a tab or an Esc of it no key. The popup's key row then r
 paste is open one rule tells the person's key from its bytes: a read holding one key (one byte,
 one character, or one whole escape sequence such as an arrow or a mouse or focus report) is the
 person's, a read of more than one key (the bulk) the paste's. An Enter or Esc alone in a read
-once the paste stalled, or such a `Ctrl+]` at any time in a paste, waits 0.15 s (Fleet: for what
-it reads within them). Only the paste's bulk within them (or its end mark) makes it the paste's
-own (a CR its line break, an Esc an escape sequence's start). Nothing within them, or a read
-holding one key (the person's next key, a second Enter, a focus, mouse, size or cursor report of
-the terminal), and it ends the paste and is that key, acting first, that read then going its own
-way: Enter sends what came, Esc closes the popup (in Fleet pauses the writing), `Ctrl+]` closes
+once the paste stalled, or such a `Ctrl+]` at any time in a paste, waits 0.15 s and is told by
+all that comes within them (review 1871). What goes on with the paste then (its bulk, its end
+mark whole or cut, a byte at a time too, a character's or an escape sequence's rest, the LF of a
+CR LF; after a report too) makes it the paste's own (a CR its line break, an Esc an escape sequence's start), with the
+reads that waited. Nothing like it within them (nothing at all, or reads holding one key: the
+person's next key, a second Enter, a focus, mouse, size or cursor report of the terminal), and at
+their end it ends the paste and is that key, acting first, the reads that waited then going their
+own way: Enter sends what came, Esc closes the popup (in Fleet pauses the writing), `Ctrl+]` closes
 it; what is not whole of the paste then (an escape sequence not ended, a character's first
 bytes) is left out. Once the paste stalled a read holding one key (a key typed, a mouse report)
 is its text but leaves it stalled, its key row too, so Enter still sends; only the bulk makes it
@@ -979,7 +981,8 @@ it is dropped and counts the second again. A paste that never ends holds nothing
 remain: a paste that stalls and brings its next CR alone with more than 0.15 s before the rest
 sends what came (the rest is then dropped), and a rest that comes one key per read goes on as
 keys (its CR an Enter there: the native's, or a second sending of an answer not confirmed); so
-the CR held then is Enter too when the rest's next read holds one key (what came is sent). One
+the CR held then is Enter too when within its 0.15 s the rest brings only reads holding one key
+(what came is sent). One
 past the limit goes in as far as it fits, with the limit's notice.
 The answer grows a row per line (and per wrap) within the popup or the page while the
 question's first words (and their `more` line), its choices and the key line keep their
@@ -1316,7 +1319,7 @@ reads the mouse included; whatever follows an Esc, in the same read or within it
 25 ms, other than `[` or `O` (an arrow or function key) is the popup's, neither closing
 it nor reaching the native: Alt/Option+Enter puts a line break in a written answer and
 Alt+B/F/D/Backspace are its word keys (11-26); any other Alt+letter and Esc then a control
-byte are dropped, and a second Esc closes it and is dropped; a paste enters a free-text answer row, its end mark `ESC[201~` read whole wherever it is split, and a paste that stalls (a second with no byte) goes on: its rest is its text, and a press then is no press (the panel's reader keeps reading the paste); only a key pressed then (a read holding one key the paste's bulk does not follow within 0.15 s: Enter, Esc) ends it and is that key, acting before a read holding one key that comes within them, and a read holding one key leaves it stalled, and a `Ctrl+]` so pressed (one inside the pasted bytes is left out with them) closes the popup even mid paste; after such a key only the paste's bulk is dropped (up to its end mark, at a new paste, or a second after the last read dropped), never the native's, while a read holding one key (a press too) goes its way; the popup's input state, a paste under way, a key's front and the Esc waited on, ends with the popup, closed or opened again); a lone Escape,
+byte are dropped, and a second Esc closes it and is dropped; a paste enters a free-text answer row, its end mark `ESC[201~` read whole wherever it is split, and a paste that stalls (a second with no byte) goes on: its rest is its text, and a press then is no press (the panel's reader keeps reading the paste); only a key pressed then (a read holding one key that nothing going on with the paste follows within 0.15 s: Enter, Esc) ends it and is that key, acting at their end before the reads holding one key that came within them, and a read holding one key leaves it stalled, and a `Ctrl+]` so pressed (one inside the pasted bytes is left out with them) closes the popup even mid paste; after such a key only the paste's bulk is dropped (up to its end mark, at a new paste, or a second after the last read dropped), never the native's, while a read holding one key (a press too) goes its way; the popup's input state, a paste under way, a key's front and the Esc waited on, ends with the popup, closed or opened again); a lone Escape,
 `Ctrl+]`, its `✕` or a press outside it closes it
 and returns to the native input and cursor (the drag and release that follow that
 press are the popup's too; one lone Esc within a second of the Esc that closed it is

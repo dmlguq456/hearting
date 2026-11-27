@@ -33,8 +33,8 @@ _PASTE_START, _PASTE_END = b"\x1b[200~", b"\x1b[201~"
 _PASTE_LIMIT = 65536
 # A paste whose bytes stop this long has stalled; review 1861: it is not over then (``_CursesInput._expire``).
 _PASTE_IDLE = 1.0
-# Review 1861: while a paste is open the person's key is a read holding one key the paste's bulk does not follow within this
-# long (the shell popup's `PASTE_KEY_WAIT`); a paste resumed after a stall can bring its next byte, a CR, alone, its rest after a gap not measured on a real link.
+# Review 1861: while a paste is open the person's key is a read holding one key that nothing going on with the paste follows
+# within this long (the shell popup's `PASTE_KEY_WAIT`); a paste resumed after a stall can bring its next byte, a CR, alone, its rest after a gap not measured on a real link.
 _PASTE_KEY_WAIT = 0.15
 # A read holding one key as a person types it: one byte, one character, or one whole escape sequence (an arrow, a modified
 # key, a mouse or focus report, a terminal's reply). A paste's bulk holds more (or is its end mark, never a key). The
@@ -51,6 +51,21 @@ def _one_key(raw):
     if text.startswith("\x1b"):
         text = text[1:]
     return len(text) == 1 and text != "\ufffd" and text >= " "
+
+
+_UNFINISHED = re.compile(rb"\x1b(?:\[[0-?]*[ -/]*|O|\][^\x07\x1b]*)\Z")
+
+
+def _paste_rest(raw, key, sofar):
+    """Review 1871: whether a read goes on with a paste while a key pressed in it waits: a read of more than one key (its
+    bulk), a character's lone byte, the LF of a CR LF after a held CR, or the bytes so far (the key, the reads that
+    waited, this one) holding the paste's end mark or ending in an escape sequence not finished (``ESC [`` and what may
+    follow it, ``ESC O``, ``ESC ]``: an end mark coming a byte at a time too). Any other read (a key, a terminal's
+    report) does not. The shell's question popup tells it by the same rule (`pasteRest`)."""
+    raw = bytes(raw)
+    if not _one_key(raw) or (len(raw) == 1 and (raw[0] >= 0x80 or (key == 13 and raw[0] == 10))):
+        return True
+    return _PASTE_END in sofar or bool(_UNFINISHED.search(sofar))
 # 11-26: an escape sequence inside a paste (a coloured log): `ESC [`, then anything up to its final byte, as
 # the shell's question popup reads one (it gives up after 62 bytes without a final one, those bytes dropped).
 _PASTED_CSI = re.compile(rb"\x1b\[(?:[^\x40-\x7e]{0,62}[\x40-\x7e]|[^\x40-\x7e]{63})")
@@ -308,12 +323,13 @@ class _CursesInput:
         self.paste = None
         self.paste_since = None
         # Review 1861: a paste whose bytes stopped for ``_PASTE_IDLE`` has stalled (what came went in); a byte that
-        # may be a key pressed then (Esc, Enter; Ctrl+] at any time), alone in its read, waits to see whether the
-        # paste's bulk comes right after it; after a pressed key the rest of that paste is dropped (``paste_discard``)
-        # up to its end mark or a second.
+        # may be a key pressed then (Esc, Enter; Ctrl+] at any time), alone in its read, waits to see whether what goes
+        # on with the paste comes within its wait (the reads meanwhile wait with it, ``paste_key_reads``); after a
+        # pressed key the rest of that paste is dropped (``paste_discard``) up to its end mark or a second.
         self.paste_stalled = False
         self.paste_key = None
         self.paste_key_since = None
+        self.paste_key_reads = []
         self.paste_discard = False
         self.timeout_ms = 100
         self.skip_utf8 = 0
@@ -512,9 +528,18 @@ class _CursesInput:
             return KEY_PASTE, text
         return self.curses.ERR, None
 
+    def _paste_key_settle(self, now):
+        """A key's wait is over and nothing that goes on with the paste came within it: the key pressed, then the reads
+        that waited with it, each its own way, in order (``_discard_batch``: a read holding one key goes on)."""
+        waited, self.paste_key_reads = self.paste_key_reads, []
+        result = self._paste_key_pressed(now)
+        for raw, after in waited:
+            self.ready.extend(self._discard_batch(raw, now) + after)
+        return result
+
     def _paste_key_pressed(self, now):
-        """A key pressed in a paste (Enter or Esc after it stalled, Ctrl+] at any time; nothing within its wait, or a read
-        holding one key): the paste ends as what came (an escape sequence not ended or a character's first bytes left
+        """A key pressed in a paste (Enter or Esc after it stalled, Ctrl+] at any time; nothing that goes on with the
+        paste within its wait): the paste ends as what came (an escape sequence not ended or a character's first bytes left
         out), then that key; the bulk of the paste that may still come is dropped (``_discard_batch``)."""
         code, self.paste_key = self.paste_key, None
         raw = bytes(self.paste)
@@ -586,22 +611,28 @@ class _CursesInput:
     def _paste_read(self, stdscr, code, now):
         """A read in a paste that may be the person's, as it came (review 1861): one rule tells it, a read holding one key
         is the person's, a read of more than one key (the bulk, or its end mark) the paste's. A key held in the paste
-        (``paste_key``): nothing within its wait, or a read holding one key (the person's next key, a second Enter, a
-        focus or mouse report), and it is the key pressed, acting first, that read after it; the paste's bulk within the
-        wait makes it the paste's own byte. Ctrl+] (at any time), Enter or Esc (once the paste stalled) alone in a read is
-        held. After a stall a read holding one key is the paste's text as before but leaves it stalled (what came goes in
-        at once); only the bulk makes it go on."""
+        (``paste_key``) is told by the whole of its wait (review 1871): a read that goes on with the paste
+        (``_paste_rest``) makes it the paste's own byte at once, with the reads that waited; any other read (the person's
+        next key, a second Enter, a focus or mouse report) waits with it, and when the wait is over the key is the one
+        pressed, acting first, those reads after it (``_paste_key_settle``). Ctrl+] (at any time), Enter or Esc (once the
+        paste stalled) alone in a read is held. After a stall a read holding one key is the paste's text as before but
+        leaves it stalled (what came goes in at once); only the bulk makes it go on."""
         raw, after = self._gather(stdscr, code)
         one = _one_key(raw) and raw != _PASTE_END
         if self.paste_key is not None:
-            if one or now - self.paste_key_since >= _PASTE_KEY_WAIT:
-                result = self._paste_key_pressed(now)
+            if now - self.paste_key_since >= _PASTE_KEY_WAIT:
+                result = self._paste_key_settle(now)
                 self.ready.extend(self._discard_batch(raw, now) + after)
                 return result
-            held, self.paste_key = self.paste_key, None
-            raw = bytes((held,)) + raw
+            sofar = bytes((self.paste_key,)) + b"".join(read for read, _after in self.paste_key_reads) + raw
+            if not _paste_rest(raw, self.paste_key, sofar):
+                self.paste_key_reads.append((raw, after))
+                return self.curses.ERR, None
+            waited, self.paste_key, self.paste_key_reads = self.paste_key_reads, None, []
+            raw = sofar
+            after = [event for _read, events in waited for event in events] + after
         elif len(raw) == 1 and (code == 29 or self.paste_stalled and code in (13, 27)):
-            self.paste_key, self.paste_key_since = code, now
+            self.paste_key, self.paste_key_since, self.paste_key_reads = code, now, []
             return self._events(after)
         elif self.paste_stalled and one:
             events = self._replay(raw, now)
@@ -632,7 +663,7 @@ class _CursesInput:
             if self.paste_key is not None:
                 # Nothing came within its wait: a key pressed.
                 if now - self.paste_key_since >= _PASTE_KEY_WAIT:
-                    return self._paste_key_pressed(now)
+                    return self._paste_key_settle(now)
                 return self.curses.ERR, None
             if self.paste_stalled or now - self.paste_since < _PASTE_IDLE:
                 return self.curses.ERR, None
