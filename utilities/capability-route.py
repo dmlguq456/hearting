@@ -2797,8 +2797,8 @@ def main():
             # An unproven terminal gate is recorded and warned about below, never refused:
             # the refusal was bypassed almost every time it fired.
             import route_parent_close
-            # Running frame legs are this route's work too: they stop before the record closes.
-            legs=route_parent_close.stop_route_legs(route)
+            # A full stop includes frame legs in the route cancellation itself.
+            legs=None if a.stop_resources else route_parent_close.stop_route_legs(route)
             if legs and legs["state"]!="cancelled":
                 print(json.dumps(legs,sort_keys=True))
                 return
@@ -2822,6 +2822,9 @@ def main():
                 from work_start import pin_handoff_continuation
                 outcome=pin_handoff_continuation(route, a.route, route_parent_close.jobs_path(),
                                                 {**outcome,"summary":a.summary or outcome.get("summary")})
+                if a.stop_resources:
+                    # Only a full stop's wait names the way on: without the flag, resume_command relaunches stopped legs.
+                    outcome=route_parent_close.explain_pending(outcome,UI_TEXT.translator())
                 print(json.dumps(outcome,sort_keys=True))
                 return
             print(json.dumps(outcome,sort_keys=True))

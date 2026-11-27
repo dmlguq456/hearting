@@ -27,9 +27,12 @@ _SENT_STATES = frozenset({"submitted", "received", "applied"})
 
 # What an answer still on its way waits for, in the person's words (``session_shell.answer_delivery_wait``):
 # an older shell takes it once its window is reopened or typed in (the window's own `새 판 대기`), a Claude
-# window outside the shell at the next prompt typed there.
+# window outside the shell at the next prompt typed there, a window whose screen is too large once it is smaller.
 _ANSWER_WAIT_WORDS = {"old-shell": ("session_shell.upgrade_pending", "fleet.session_block.wait_old_shell"),
-                      "no-shell": ("fleet.session_block.wait_no_shell",)}
+                      "no-shell": ("fleet.session_block.wait_no_shell",),
+                      # The window's screen is too large to read: the words its waiting messages carry.
+                      "screen-large": ("peer.delivery.hold_screen_large",),
+                      "old-shell-large": ("peer.delivery.hold_old_shell_large",)}
 
 
 # What a drawn value may not carry, whatever draws it (Fleet's grid drops these; the panel may not):

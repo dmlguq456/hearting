@@ -35,7 +35,7 @@ function oneKey(data){
   const chars=[...text];return chars.length===1&&chars[0]!=='\ufffd'&&chars[0]>=' ';
 }
 const wordChar=c=>/[\p{L}\p{N}\p{M}_]/u.test(c||'');
-module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,keyWait=PASTE_KEY_WAIT}) {
+module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=PASTE_IDLE,keyWait=PASTE_KEY_WAIT}) {
   let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null,answeredAt=0,escapedAt=0;
   let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer,skipTail=false,changeArmed=false,pasteCR=false;
   // 11-26 (review 1861): a paste whose bytes stop for a second has stalled. It is not over: what comes after is still
@@ -468,7 +468,10 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
         }
       }
       const said=shown.join(', ').replace(/\s+/g,' ').trim();
-      return [span(text('sent','✓ answer sent'),'lvl_g'),...(said?[span(' · '),span(said,'loc_repo')]:[])];
+      // This window's own reading keeps it from taking the answer: say so, in the words its messages carry.
+      const why=hold()==='screen-large'?text('hold_screen_large',''):'';
+      return [span(text('sent','✓ answer sent'),'lvl_g'),...(said?[span(' · '),span(said,'loc_repo')]:[]),
+        ...(why?[span(' · '),span(why,'dim')]:[])];
     });
   }
   async function submit(){
