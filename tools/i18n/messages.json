@@ -1518,6 +1518,10 @@
    "en": "paste stalled",
    "ko": "붙여넣기 멈춤"
   },
+  "fleet.session_block.pasting": {
+   "en": "pasting · Enter sends once it stops",
+   "ko": "붙여넣는 중 · 멈추면 Enter 보내기"
+  },
   "fleet.session_block.questions": {
    "en": "QUESTIONS",
    "ko": "QUESTIONS"
