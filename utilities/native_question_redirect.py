@@ -200,16 +200,18 @@ def same_question(signal: dict, rows: list) -> bool:
     """Whether the open question asks what this native call asks (DESIGN-QUESTIONS-MULTI-1127 §3).
 
     All of them must match: the text, the choice values in their order, the answer form and secrecy.
-    The text is compared with the forms this very call is registered in (`build`, with and without the
-    options' descriptions), so `questions ask` and the same question asked natively with descriptions
-    are one question; a recommendation and a description are no answer value and do not count. The
-    form is the one the board holds: one choice, or written. Several questions, a multi-select one or
-    a preview are held as one written listing, so they are the same only as that whole listing; a
-    written question with the same first line is another question. Nothing else is stripped or
+    The text is compared with the form this very call is registered in (`build`); a one-choice question
+    also without the options' descriptions, so `questions ask` and the same question asked natively with
+    descriptions are one question (a recommendation and a description are no answer value). The form is
+    the one the board holds: one choice, or written. Several questions, a multi-select one or a preview
+    are held as one written listing and are the same only as that whole listing (previews included); a
+    written question that lists the same lines is another question. Nothing else is stripped or
     compared by likeness."""
     try:
         asked = ((signal.get("detail") or {}).get("questions") or [{}])[0]
-        forms = [build(rows, detail=detail) for detail in (True, False)]
+        forms = [build(rows, detail=True)]
+        if forms[0]["choices"]:
+            forms.append(build(rows, detail=False))
         return (_body(signal.get("question")) in {_body(form["text"]) for form in forms}
                 and list(asked.get("choices") or []) == forms[0]["choices"]
                 and bool(asked.get("is_secret")) == any(row["secret"] for row in rows))

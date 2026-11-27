@@ -258,6 +258,8 @@ class PassThroughTest(Base):
         cases = [  # (what is open, the native call, held back?)
             (dict(text="Pick a size?"), multi, False),                               # written vs several may be chosen
             (dict(text="Pick a size?"), single(preview="a layout"), False),          # written vs a preview
+            (dict(text=redirect.build(redirect._normalized("claude", single(preview="a layout"))[1],
+                                      detail=False)["text"]), single(preview="a layout"), False),  # a written list
             (dict(text="Pick a size?", choices=["Large", "Small"]), single(), False),  # the order of the choices
             (dict(text="Pick a size?", choices=["small", "Large"]), single(), False),  # a choice's case
             (dict(text="Pick a size?", choices=["Small", "Large"], secret=True), single(), False),
