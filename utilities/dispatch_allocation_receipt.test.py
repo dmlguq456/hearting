@@ -75,6 +75,7 @@ class AllocationReceiptTest(unittest.TestCase):
         self.assertEqual(row["depth_affinity"], {"owner": "claude", "worker": "codex"})
         self.assertEqual(row["rank"], ["claude", "codex"])
         self.assertEqual(row["capacity"]["codex"], 74.0)
+        self.assertNotIn("capacity_raw_headroom", row)
         self.assertEqual(row["counts"], {"claude": 3, "codex": 4, "opencode": 0})
         # The receipt names the keys the sealed strategy never read: this is
         # the evidence that was missing when depth-affinity looked "applied".
@@ -200,6 +201,24 @@ class AllocationReceiptTest(unittest.TestCase):
         self.assertEqual(summary["preferred_honored"], {"yes": 2, "no": 2, "n/a": 0})
         self.assertEqual(summary["rows_with_inert_keys"], 1)
         self.assertEqual(summary["by_unit"]["u/execute"], {"claude": 1})
+
+    def test_receipt_preserves_the_adjusted_score_and_adds_only_different_raw_quota(self):
+        spec = importlib.util.spec_from_file_location("capacity", MODULE.with_name("harness-capacity.py"))
+        capacity = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(capacity)
+        codex = capacity._headroom([(90, 1600.0, 18000)], now=1000.0)
+        self.receipt.record_allocation_receipt(
+            route_id="rt-timed", route_node="execute", writer="stage-dispatch-fallback.py",
+            child_harness="claude", capacity={"claude": 79.0, "codex": codex, "opencode": None},
+            jobs=self.jobs,
+        )
+        row, = self.receipt.read_rows(route_id="rt-timed", jobs=self.jobs)
+        self.assertEqual(row["capacity"], {"claude": 79.0, "codex": float(codex), "opencode": None})
+        self.assertEqual(row.pop("capacity_raw_headroom"), {"codex": 10.0})
+        raw_row = {**row, "capacity_raw_headroom": {"codex": 10.0}}
+        self.assertEqual(self.receipt.format_row(raw_row).splitlines(), [
+            self.receipt.format_row(row), "capacity_raw_headroom.codex=10.0",
+        ])
 
     def test_cli_list_and_summary_are_one_line_per_answer(self):
         self.receipt.record_allocation_receipt(

@@ -2575,7 +2575,7 @@ function popupWidth(cols,kind='text'){
 // frame first (under 8 rows), then its bottom line (3 rows or fewer), so the content keeps rows.
 function popupHeight(space){return space>=8?space-2:space;}
 function popupRoom(rows,band=0){const H=popupHeight(Math.max(1,rows-band));return Math.max(0,H>3?H-2:H-1);}
-function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],current=0,model={},configuration,cellWidth,background=''}){
+function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],current=0,model={},configuration,cellWidth,background='',fixedTop=false}){
   const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
   const styles=model.styles||{},text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
   const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
@@ -2588,7 +2588,7 @@ function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],curren
   const cut=(parts,limit)=>size(parts)<=limit?parts:limit<1?[]:[...clip(parts,limit-1).parts,{...text('…','dim')}];
   const space=Math.max(1,rows-band),W=Math.min(cols,popupWidth(cols,kind)),inner=Math.max(0,W-4);
   const maxH=popupHeight(space),shut=maxH>3,list=body.slice(0,Math.max(0,shut?maxH-2:maxH-1)),H=Math.min(maxH,list.length+(shut?2:1));
-  const x=Math.floor((cols-W)/2),y=Math.max(0,Math.round((space-H)/2));
+  const x=Math.floor((cols-W)/2),y=Math.max(0,Math.round((space-(fixedTop?maxH:H))/2));
   // 11-15 (panel polish 3): where nothing behind it is veiled (mono, eight colors, NO_COLOR) the
   // frame's line is bright instead of the messages' gray.
   const bright=veil(configuration,{colors:model.colors??256,noColor:model.no_color===true,background})===null;

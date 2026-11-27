@@ -98,7 +98,9 @@ middle of the window (the native area and the panel together), never by
 itself: the question editor for QUESTIONS (up to 132 cells wide; the window less 4 where that is narrower), Fleet's own table at the popup's
 width for ROUTE (up to 196 cells; the other table popups up to 116, text 76) (a route unfolded with its failure reason whole, Enter for its
 page with its paths), the status document for STATUS, this session's story for NOW, and the requests and
-messages whole for MESSAGES. While it stands every key and press is its own,
+messages whole for MESSAGES. A route's page starts at the upper edge of the popup area while it reads.
+It grows down to fit its content and scrolls when the page is taller than that area.
+While a popup stands every key and press is its own,
 everything behind it reads in one dark gray (the native's output keeps
 arriving, still gray, and the native is never told) while the popup stands on
 its own lighter ground with bright words; in the question popup a thin line under the question's words (with an empty row above it) parts them from the choices, whose numbers are bold in the question's rose, and the chosen
