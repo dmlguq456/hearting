@@ -729,18 +729,32 @@ def select_model_settings(h, args, *, harness: str, label: str, knob: str,
     }
 
 
+# What a worker never takes over from the process that launches it: the retired
+# broker bindings, and the person's session-shell window. `HEARTING_SHELL_*`
+# (the window host's socket and token, its display state and descriptors)
+# belongs to that one window; a worker sends it no events and paints no status
+# line as if it were that window.
+NOT_INHERITED_PREFIXES = ("AGENT_DISPATCH_BROKER_", "HEARTING_SHELL_")
+
+
+def inherited_environment(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The launching process's environment a worker starts from, without `NOT_INHERITED_PREFIXES`."""
+    environ = os.environ if environ is None else environ
+    return {key: value for key, value in environ.items() if not key.startswith(NOT_INHERITED_PREFIXES)}
+
+
 def worker_environment(h, args, *, harness: str, jobs: Path, governor_root: Path,
                        reservation_token: str, permission_env: Mapping[str, str],
                        current_sandbox: str, supervised: bool,
                        extra: Mapping[str, str] | None = None) -> dict[str, str]:
     """The child environment every wrapper gives its claimed worker.
 
-    The inherited environment minus broker variables, then the dispatch identity,
+    The inherited environment (`inherited_environment`), then the dispatch identity,
     route, artifact, governor and registry values. `permission_env` is the
     harness's runtime permission context, `extra` its own additional variables.
     """
     review = args.review_output_binding
-    env = {key: value for key, value in os.environ.items() if not key.startswith("AGENT_DISPATCH_BROKER_")}
+    env = inherited_environment()
     env.update({
         "AGENT_SESSION_ROLE": "worker",
         "AGENT_DISPATCH_CHILD": "1",

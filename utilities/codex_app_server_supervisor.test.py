@@ -1460,6 +1460,9 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
             "FAKE_SECOND_TURN_READY": str(second_turn_ready),
             "FAKE_SECOND_TURN_RELEASE": str(second_turn_release),
             "TMPDIR": str(base),
+            # The correcting parent may be a person's session-shell window (made-up values).
+            "HEARTING_SHELL_SOCKET": str(base / "fixture-shell" / "control.sock"),
+            "HEARTING_SHELL_TOKEN": "e" * 64,
         }
         def load_local(name, path):
             spec = importlib.util.spec_from_file_location(name, path)
@@ -1854,6 +1857,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                      "correct", "--attempt-id", attempt, "--jobs", str(jobs),
                      "--message-file", str(correction_path)]):
                 public_status = cap.main()
+            caller_shell = sorted(key for key in os.environ if key.startswith("HEARTING_SHELL_"))
             receipt = json.loads(output.getvalue())
             if additional_grant and receipt.get("consumer_recovery") != "respawned":
                 pending = owner_input.inspect(jobs, attempt)["requests"]
@@ -1917,6 +1921,9 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         self.assertEqual(len(launch_environments), 1)
         self.assertEqual(launch_environments[0]["AGENT_RUNTIME_DIR"], str(runtime_dir))
         self.assertEqual(launch_environments[0]["AGENT_HOME"], str(ROOT.resolve()))
+        # The respawned owner never carries the correcting window's session shell; the caller keeps it.
+        self.assertEqual(sorted(key for key in launch_environments[0] if key.startswith("HEARTING_SHELL_")), [])
+        self.assertEqual(caller_shell, ["HEARTING_SHELL_SOCKET", "HEARTING_SHELL_TOKEN"])
         self.assertEqual(respawn_outcomes[0]["respawn_release"], str(ROOT.resolve()))
         self.assertEqual(respawn_outcomes[0]["launch_home"],
                          str(recorded_release if earlier_launch_home else ROOT.resolve()))
