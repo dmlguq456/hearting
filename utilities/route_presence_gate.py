@@ -22,10 +22,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+from artifact_root_selection import ARTIFACT_ROOT_NAMES, select_artifact_root
+
 ROOT = Path(__file__).resolve().parents[1]
 SWITCH = "HEARTING_ROUTE_GATE"
 _OFF = {"off", "0", "false", "no"}
-_ARTIFACT_DIRS = (".agent_reports", ".claude_reports")
+_ARTIFACT_DIRS = ARTIFACT_ROOT_NAMES
 _EDIT_TOOLS = {"Write", "write", "Edit", "edit", "MultiEdit", "multi_edit", "multiedit",
                "NotebookEdit"}
 _PATCH_TOOLS = {"apply_patch", "functions.apply_patch", "ApplyPatch", "patch"}
@@ -145,10 +147,8 @@ def artifact_root(top: Path, env) -> str:
     if not env.get("AGENT_ARTIFACT_ROOT"):
         primary = _primary(top)
         if primary is not None:
-            for name in _ARTIFACT_DIRS:
-                if (primary / name).is_dir():
-                    return os.path.realpath(primary / name)
-            return str(primary / ".agent_reports")
+            root = select_artifact_root(primary)
+            return os.path.realpath(root) if root.is_dir() else str(root)
     result = subprocess.run(["sh", str(ROOT / "utilities" / "artifact-root.sh"), str(top)],
                             capture_output=True, text=True, timeout=20, check=False,
                             env=dict(env))

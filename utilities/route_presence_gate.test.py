@@ -319,6 +319,61 @@ class ArtifactRootParityTest(Fixture):
         self.assertEqual(G.artifact_root(self.repo, {**self.env, "AGENT_ARTIFACT_ROOT": str(override)}),
                          self.resolver(self.repo, AGENT_ARTIFACT_ROOT=str(override)))
 
+    def test_activation_choices_agree_from_primary_and_linked_worktrees(self):
+        from artifact_producer import activate, classify_root, cutover_path
+        from tools.fleet.collectors import project_status
+
+        choices = [
+            ("absent", "absent", ".agent_reports"),
+            ("inactive", "absent", ".agent_reports"),
+            ("active", "absent", ".agent_reports"),
+            ("absent", "inactive", ".claude_reports"),
+            ("absent", "active", ".claude_reports"),
+            ("inactive", "inactive", ".agent_reports"),
+            ("active", "inactive", ".agent_reports"),
+            ("active", "active", ".agent_reports"),
+            ("inactive", "active", ".claude_reports"),
+            ("mismatched", "active", ".claude_reports"),
+        ]
+        for agent_state, claude_state, name in choices:
+            with self.subTest(agent=agent_state, claude=claude_state):
+                project = self.tmp / f"project-{agent_state}-{claude_state}"
+                project.mkdir()
+                git(project, "init", "-q")
+                git(project, "commit", "--allow-empty", "-qm", "init")
+                linked = project.with_name(project.name + "-linked")
+                git(project, "worktree", "add", "-q", "-b", "topic", str(linked))
+                # A local snapshot must not influence the primary checkout's choice.
+                (linked / ".agent_reports").mkdir()
+
+                states = {project / ".agent_reports": agent_state,
+                          project / ".claude_reports": claude_state}
+                for root, state in states.items():
+                    if state != "absent":
+                        root.mkdir()
+                    if state == "inactive":
+                        (root / "document.md").write_text("draft\n", encoding="utf-8")
+                for index, (root, state) in enumerate(states.items(), 1):
+                    if state in {"active", "mismatched"}:
+                        activate(root, repository_id="repo_" + "a" * 32,
+                                 artifact_root_id="root_" + str(index) * 32)
+                    if state == "mismatched":
+                        marker = cutover_path(root)
+                        value = json.loads(marker.read_text(encoding="utf-8"))
+                        value["identity"]["artifact_root_id"] = "root_" + "f" * 32
+                        marker.write_text(json.dumps(value), encoding="utf-8")
+                        self.assertEqual(classify_root(root)["state"], "malformed")
+                modern = project / ".agent_reports"
+                if agent_state == "absent" and modern.is_symlink():
+                    modern.unlink()  # Model a legacy root activated before alias creation.
+
+                expected = str(project / name)
+                for checkout in (project, linked):
+                    self.assertEqual(self.resolver(checkout), expected)
+                    self.assertEqual(G.artifact_root(checkout, self.env), expected)
+                    self.assertEqual(project_status.artifact_root(checkout),
+                                     expected if Path(expected).is_dir() else None)
+
     def test_linked_worktree_shares_the_primary_folder(self):
         linked = self.tmp / "work" / "proj-wt"
         git(self.repo, "worktree", "add", "-q", "-b", "feat", str(linked))
