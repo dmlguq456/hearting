@@ -567,6 +567,8 @@ def _resource_run_label(run):
     """``host:gpu · launcher`` of a resource run: where it runs and what it was launched with."""
     placement = _get(run, "local_placement")
     host = _text(_get(placement, "hostname")) if placement is not None else None
+    # A compute-hosts run is placed on its remote host, which its recorded receipt names (11-27).
+    host = host or _text(_get(run, "compute_host"))
     host = host.split(".", 1)[0] if host else None
     devices = [d for d in (_get(placement, "requested_devices", default=()) or ()) if isinstance(d, str)]
     gpu = next((d for d in devices if d.isdigit()), None)
@@ -656,6 +658,28 @@ def _runs_node(owner, node):
 def _owner_job(jobs):
     owners = _owner_jobs(jobs)
     return owners[0] if len(owners) == 1 else None
+
+
+_LIVE_OWNER = ("working", "idle", "blocked")
+
+
+def _running_owner(owner, attempts):
+    """The owner attempt whose liveness says whether the route runs: the owner, else the one
+    live attempt among several. A continued, resumed or relaunched route carries several owner
+    attempts and its sealed record names none; which is its owner is not guessed for display
+    (``_owner_job``), but while exactly one of them is alive the route runs by it (11-27)."""
+    if owner is not None:
+        return owner
+    live = [job for job in attempts if _get(job, "liveness") in _LIVE_OWNER]
+    return live[0] if len(live) == 1 else None
+
+
+def _owner_session_tag(job, tag_by_sid):
+    for key in ("parent_sid", "caller_sid"):
+        tag = tag_by_sid.get(_text(_get(job, key)))
+        if tag:
+            return tag
+    return None
 
 
 def _route_stem(path):
@@ -1127,12 +1151,15 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
                 break
         if owner_tag is None:
             owner_tag = next((tag for tag, info in session_index.items() if rid in info["chain"]), None)
+        owner_attempts = _owner_jobs(owner_jobs)
         if owner_tag is None and owner is not None:
-            for key in ("parent_sid", "caller_sid"):
-                tag = tag_by_sid.get(_text(_get(owner, key)))
-                if tag:
-                    owner_tag = tag
-                    break
+            owner_tag = _owner_session_tag(owner, tag_by_sid)
+        elif owner_tag is None and owner_attempts:
+            # Several owner attempts: the session they all name (a continued route stays its session's).
+            tags = {_owner_session_tag(job, tag_by_sid) for job in owner_attempts} - {None}
+            if len(tags) == 1:
+                owner_tag = tags.pop()
+        runner = _running_owner(owner, owner_attempts)
         session_row = by_tag.get(owner_tag) if owner_tag else None
         view_nodes = [n for n in (view.get("nodes") or ()) if isinstance(n, Mapping)]
         frame_displays = _frame_leg_displays(jobs)
@@ -1161,7 +1188,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         cwd = _text(view.get("cwd")) or _text(record.get("cwd")) or _text(_get(owner, "cwd"))
         repo = (session_row or {}).get("repo") or _repo_of(resolver, cwd)
         owner_state = (session_row or {}).get("state")
-        owner_live = _text(_get(owner, "liveness")) if owner is not None else None
+        owner_live = _text(_get(runner, "liveness")) if runner is not None else None
         if owner_live in ("working", "idle", "blocked", "dead", "done"):
             state = owner_live                    # the route is as alive as the attempt that owns it
         elif active is not None:
@@ -1294,9 +1321,14 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             # KIND reads `frame`: a frame route's default capability mode and inherited
             # intensity are not display axes. The source record keeps both values.
             mode = intensity = None
+        # The route runs while its owner or a worker of it does. An owner whose registry row is
+        # still open and whose attempt is alive is running the route however quiet it is, between
+        # stages, after a stage ended FAIL or BLOCKED, or after the last stage (11-27). A row
+        # already closed keeps the stage rule, so a finished route does not stay.
+        owner_open = _text(_get(runner, "status")) in ("open", "running") if runner is not None else False
         current = bool(run_children or worker_contexts
-                       or owner_live in ("working", "idle", "blocked")
-                       and total and done != total and (active is not None or not failed))
+                       or owner_live in _LIVE_OWNER
+                       and (owner_open or total and done != total and (active is not None or not failed)))
         running = current and (active is not None or state == "working" or run_children or worker_contexts)
         route = {
             "id": rid, "repo": repo, "session_tag": owner_tag, "title": title, "state": state,
