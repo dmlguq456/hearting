@@ -33,6 +33,7 @@ from dispatch_completion_join import (  # noqa: E402
     current_children,
     current_delivery_state,
     completion_harvest_command,
+    unit_leg_report_line,
     delivery_classification,
     delivery_required_action,
 )
@@ -61,6 +62,9 @@ DEFAULT_ARM_WINDOW_SECONDS = 600
 MAXIMUM_CLOCK_SKEW_SECONDS = 60
 # Depth-1 workers that may wake the interactive parent through this hook.
 DEPTH1_WORKER_TYPES = frozenset({"owner", "frame", "review"})
+# A `support` worker wakes it only as the one leg of a unit route (a lookup, `general/explore`): its row names
+# the route and node. A route-free support row (a tidy worker) never does.
+ROUTE_BOUND_DEPTH1_WORKER_TYPES = frozenset({"support"})
 REGISTRY_DEPTH1_START = {
     "dispatch_depth": "1",
     "parent_completion_delivery": "claude-parent-runtime",
@@ -77,6 +81,14 @@ HOLD_MAX_SECONDS = 60.0  # longest wait between checks while a sibling batch is 
 # drains (dispatch-reap-watch). Exiting at the first missing record made that
 # ordinary lag a permanently lost wake for an idle session (2026-09-17).
 DEFAULT_RECORD_GRACE_SECONDS = 900
+
+
+def _row_is_depth1_waited(metadata: dict) -> bool:
+    """A registry row's worker type may wake the parent: a depth-1 type, or a support leg of a route."""
+    worker_type = metadata.get("worker_type")
+    return _worker_type_is_depth1(worker_type) or (
+        worker_type in ROUTE_BOUND_DEPTH1_WORKER_TYPES
+        and bool(metadata.get("route_id")) and bool(metadata.get("route_node")))
 
 
 def _worker_type_is_depth1(candidate: object) -> bool:
@@ -234,6 +246,8 @@ def parse_launch(payload: object) -> Launch | None:
     }
     if any(expected not in fields.get(key, []) for key, expected in required_memberships.items()):
         return None
+    # Deliberately not `_row_is_depth1_waited`: a support leg counts only with its route and node, which the start
+    # output does not name, so the registry sweep (`_session_owner_rows`) arms it; this shortcut only saves latency.
     if not _worker_type_is_depth1(fields.get("worker_type", [])):
         return None
     attempt_id = _single(fields, "attempt_id")
@@ -421,7 +435,7 @@ def _session_owner_states(
                 continue
             if any(metadata.get(key) != value for key, value in REGISTRY_DEPTH1_START.items()):
                 continue
-            if not _worker_type_is_depth1(metadata.get("worker_type")):
+            if not _row_is_depth1_waited(metadata):
                 continue
             # Unknown (an unreadable lineage) is not this session's row yet: the next call looks again.
             if seat_handover.owns(metadata, session, jobs, read_context=read_context) is not True:
@@ -480,9 +494,14 @@ def registry_launch(payload: object) -> tuple[Launch, ArmClaim] | ArmRefusal | N
     # may have finished between the release and this call (top review M1).
     for attempt_id, age, _status in rows:
         fresh = attempt_id in open_rows and age <= window
-        if attempt_id not in open_rows and not arm_path(jobs, attempt_id).exists():
+        path = arm_path(jobs, attempt_id)
+        if attempt_id not in open_rows and not path.exists():
             continue
-        claim = claim_arm(jobs, attempt_id, session, fresh=fresh)
+        # A settled record refuses without the ledger lock or any lineage read: under the
+        # lock every one of a long session's ended arms re-read the registry row and
+        # re-observed the lineage, ~40ms each, so one Bash call held the shared lock
+        # ~700 times for ~23s of CPU and the session's hooks queued behind it (2026-11-17).
+        claim = _settled_arm(path) or claim_arm(jobs, attempt_id, session, fresh=fresh)
         if isinstance(claim, ArmRefusal):
             # Keep the receipt-named attempt's reason above any other's
             # (review R2 M2): the notice must say why *that* start did not arm.
@@ -529,9 +548,10 @@ def boundary_launch(payload: object) -> tuple[Launch, ArmClaim] | ArmRefusal | N
     refusal: ArmRefusal | None = None
     for attempt_id, age, status in _session_owner_states(jobs, session, RECEIPT_ROW_STATUSES):
         fresh = status in ARM_ROW_STATUSES and age <= window
-        if not fresh and not arm_path(jobs, attempt_id).exists():
+        path = arm_path(jobs, attempt_id)
+        if not fresh and not path.exists():
             continue
-        claim = claim_arm(jobs, attempt_id, session, fresh=fresh)
+        claim = _settled_arm(path) or claim_arm(jobs, attempt_id, session, fresh=fresh)  # see `registry_launch`
         if isinstance(claim, ArmRefusal):
             refusal = refusal or claim
             continue
@@ -818,13 +838,50 @@ def _holds_arm(claim: "ArmClaim") -> bool:
     return bool(held) and held.get("holder") == list(claim.holder) and held.get("session_id") == claim.session_id
 
 
-def _reclaim_refusal(existing: dict[str, Any], jobs: Path, session: str) -> str | None:
-    """None when the existing record may be re-taken, else the typed reason."""
+# Reasons a record settles by itself: no later read can make it claimable
+# (`ended` is permanent, `arms` only grows), so the claim loops refuse it
+# without the ledger lock (2026-11-17).
+SETTLED_ARM_REASONS = frozenset({"ended", "exhausted"})
 
-    if existing.get("state") == "unreadable":
+
+def _record_refusal(existing: dict[str, Any]) -> str | None:
+    """The refusal the record alone decides, before any registry or lineage read."""
+
+    if existing.get("state") == "unreadable" or existing.get("schema") != ARM_SCHEMA:
         return "unreadable"
-    if existing.get("schema") != ARM_SCHEMA:
+    arms = existing.get("arms")
+    if not isinstance(arms, int):
         return "unreadable"
+    if arms >= ARM_LIMIT:
+        return "exhausted"
+    state = existing.get("state")
+    if state == "ended":
+        return "ended"
+    if state not in ARM_STATES:
+        return "unreadable"
+    return None
+
+
+def _settled_arm(path: Path) -> ArmRefusal | None:
+    """The claim refusal for a record that settled for good, read without the lock.
+
+    Only `SETTLED_ARM_REASONS` count: a missing, unreadable, or unknown record
+    goes through `claim_arm`, so a transient read failure never costs an arm."""
+
+    existing = _read_arm(path)
+    reason = None if existing is None else _record_refusal(existing)
+    return ArmRefusal(reason) if reason in SETTLED_ARM_REASONS else None
+
+
+def _reclaim_refusal(existing: dict[str, Any], jobs: Path, session: str) -> str | None:
+    """None when the existing record may be re-taken, else the typed reason.
+
+    The record's own refusals come first; the registry and lineage are read
+    only for a record that may still be claimable."""
+
+    refusal = _record_refusal(existing)
+    if refusal is not None:
+        return refusal
     # The session that armed it may have been cleared; its same-seat successor takes the wait over.
     handed = existing.get("session_id") != session and _handed_to(jobs, existing.get("attempt_id"), session)
     if handed is None:
@@ -837,16 +894,7 @@ def _reclaim_refusal(existing: dict[str, Any], jobs: Path, session: str) -> str 
         return "foreign-session"       # the arming session handed the owner on and no longer answers for it
     if metadata is not None and owned is None:
         return "handover-unreadable"   # unknown, not another session: the next call looks again
-    arms = existing.get("arms")
-    if not isinstance(arms, int):
-        return "unreadable"
-    if arms >= ARM_LIMIT:
-        return "exhausted"
     state = existing.get("state")
-    if state == "ended":
-        return "ended"
-    if state not in ARM_STATES:
-        return "unreadable"
     # A `lapsed` arm is one its holder stopped waiting on (a timeout, or a row a
     # boundary wait holding several did not wake for); that holder may still
     # live while it carries another row's wake (`_first_due`).
@@ -1171,7 +1219,7 @@ def replacement_authority(launch: Launch, claim: ArmClaim, jobs: Path, aid: str,
         and held.get("session_id") == launch.session_id
         and _process_identity(os.getpid()) == claim.holder
         and all(metadata.get(key) == value for key, value in REGISTRY_DEPTH1_START.items())
-        and _worker_type_is_depth1(metadata.get("worker_type"))
+        and _row_is_depth1_waited(metadata)
         and _incarnation_binding_matches(metadata)
     )
 
@@ -1283,7 +1331,6 @@ def classified_receipt(
     if not (home / "core" / "CORE.md").is_file():
         home = root
     status = delivery.status if delivery is not None else ""
-    row_revision = delivery.row_revision if delivery is not None else "unavailable"
     marker_current = bool(delivery and _completion_evidence_current(delivery))
     if delivery is not None:
         owned_children = delivery.owned_children
@@ -1300,8 +1347,6 @@ def classified_receipt(
     else:
         owned_children = 0
     quiescent = bool(delivery and delivery.quiescent)
-    advanced = bool(delivery and delivery.advanced)
-    row_digest = delivery.row_digest if delivery is not None else "unavailable"
     if (
         state in {"ready", "attention"}
         and delivery is not None
@@ -1326,16 +1371,20 @@ def classified_receipt(
             except (ImportError, OSError, ValueError):  # the optional explanation never blocks a wake
                 parked = None
         if state == "success":
-            instruction = "No harvest command is required; the registered owner completed."
+            # The shared runtime-v1 follow-up line (Codex and OpenCode carry the same one);
+            # the close contract itself is the adapter bootstrap's (§0.5).
+            from dispatch_completion_join import RUNTIME_V1_FOLLOWUP_PREFIXES
             summary = _sealed_summary(row, launch.attempt_id)
-            if summary:
-                instruction += ("\nFirst close: give the result in one or two sentences, preserve any "
-                                "important remaining failure, unfinished work, or user-impacting limit, "
-                                "ask only what only the person can decide, state a recommended in-scope, "
-                                "reversible next step (such as fixing and re-testing) as proceeding, and "
-                                "point to the "
-                                "detailed record. Keep the runtime summary below as agent context and "
-                                "record; do not reproduce it for the person.\n" + summary)
+            head = kept = ""
+            if row is not None and row.metadata.get("capability") == "unit":
+                try:   # a continued unit turn names its turn; a request kept for the route names its start
+                    import unit_continue
+                    head, kept = unit_continue.notice_lines(str(launch.jobs), row.metadata, agent_home=home)
+                except Exception:  # noqa: BLE001 -- the extra lines never block a wake
+                    head = kept = ""
+            instruction = (RUNTIME_V1_FOLLOWUP_PREFIXES[bool(summary)]
+                           + ("\n" + (head + "\n" if head else "") + summary if summary else "")
+                           + ("\n" + kept if kept else ""))
         elif parked and parked["status"] == "blocked":
             gate = parked["gate"]
             required_action = HUMAN_GATE_PREFIX + gate
@@ -1362,6 +1411,10 @@ def classified_receipt(
                 + completion_harvest_command(launch.attempt_id, required_action,
                     jobs=str(launch.jobs))
             )
+            if required_action == "inspect-done-failure":
+                # A unit route's review that failed and was not read as finished work: name its report.
+                report = unit_leg_report_line(row.metadata if row is not None else {})
+                instruction += ("\n" + report) if report else ""
         elif required_action == "advance-completed":
             instruction = "No harvest command is required; advance or finish the route."
         elif required_action.startswith(HUMAN_GATE_PREFIX):
@@ -1395,16 +1448,17 @@ def classified_receipt(
         if state == "success"
         else "Hearting dispatch requires attention"
     )
+    # Only what the model acts on: the row revision and digest are the runtime's own
+    # record (the delivery record keeps them), and waiting, polling and recaps are the
+    # adapter bootstrap's rules already.
     message = (
         f"{title}. Runtime owner completion receipt "
         f"schema=2 state={state} attempt_id={launch.attempt_id} armed={launch.armed} "
-        f"status={status or '-'} row_revision={row_revision} "
-        f"row_digest={row_digest} marker_current={int(marker_current)} "
+        f"status={status or '-'} marker_current={int(marker_current)} "
         f"quiescent={int(quiescent)} owned_children={owned_children} "
-        f"advanced={int(advanced)} "
+        f"advanced={int(bool(delivery and delivery.advanced))} "
         f"reason={reason} required_action={required_action}. "
-        "Do not start or re-arm Background Bash, Monitor, liveness, or dispatch-wait. "
-        f"{instruction}\nDo not emit a periodic progress recap."
+        f"{instruction}"
     )
     return state, message
 
@@ -1850,11 +1904,13 @@ def gate_wake_message(launch: Launch, notices: list[str], *, human_gate: bool,
         f"schema=2 state=attention attempt_id={launch.attempt_id} armed={launch.armed} "
         "owner=waiting-or-parked required_action=human-gate. "
         "The owner is waiting on `workflow-supervisor.py await-release` or has paused at the "
-        "gate; either way it is answered, not harvested, and a release continues the work. Read the artifact named below (an interview file or frame summary), put "
-        "the [방향 확인] card -- and every interview question, one topic at a time, in plain "
-        "words -- to the user through AskUserQuestion, then record the answer with "
+        "gate; either way it is answered, not harvested, and a release continues the work. Read the artifact named below (an interview file or frame summary) and show "
+        "the [방향 확인] card in your reply. The gate's questions are already on the Hearting "
+        "question board (the panel, Fleet and `hearting run questions`), where the person "
+        "answers them; do not ask them again through another tool. An answer the person gives in "
+        "conversation is recorded with "
         "`workflow-supervisor.py release --route <route file> --gate <name> --decision "
-        "proceed|revise|stop [--answers <answers.json>]`. That release command re-arms this "
+        "proceed|revise|stop [--answers <answers.json>]`. A release re-arms this "
         "hook for the owner's completion. Do not start or re-arm Background Bash, Monitor, "
         "liveness, or dispatch-wait, and do not emit a periodic progress recap. "
         + " ".join(notices)

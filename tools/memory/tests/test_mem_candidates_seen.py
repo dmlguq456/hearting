@@ -22,11 +22,11 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 
 from helpers import MEMORY_DIR, git
+from tools import fixture_processes
 
 
 MEM = MEMORY_DIR / "mem.py"
@@ -48,7 +48,8 @@ class SeenTestCase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.tempdir = tempfile.TemporaryDirectory(prefix="seen-", dir="/var/tmp")
+        cls.tempdir = fixture_processes.TemporaryDirectory(prefix="seen-")
+        cls.addClassCleanup(cls.tempdir.cleanup)
         cls.root = Path(cls.tempdir.name)
         cls.fake_bin = cls.root / "bin"
         cls.fake_bin.mkdir()
@@ -75,10 +76,6 @@ class SeenTestCase(unittest.TestCase):
                              f"gadget note {index} explains the widget cache layout",
                              "--headline", f"gadget headline {index} widget cache")
             assert result.returncode == 0, result.stderr
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.tempdir.cleanup()
 
     @classmethod
     def environment(cls, **extra):
@@ -135,11 +132,11 @@ class DisplayHistoryTest(SeenTestCase):
         session = self.sid("s")
         first = self.candidates(session)
         shown = ids_in(first)
-        self.assertEqual(len(shown), 6)
+        self.assertEqual(len(shown), 3)
         stamp = self.receipt(session)["created_at_ns"]
         time.sleep(0.01)
         second = self.candidates(session)
-        # The top six were all shown; the seventh and eighth are NOT pulled in.
+        # The top three were all shown; the fourth and later are NOT pulled in.
         self.assertEqual(second, "")
         self.assertEqual(len(second.encode()), 0)
         receipt = self.receipt(session)
@@ -155,15 +152,15 @@ class DisplayHistoryTest(SeenTestCase):
         self.assertEqual(second.stdout, "")
 
     def test_another_session_sees_the_records_again(self):
-        self.assertEqual(len(ids_in(self.candidates(self.sid("one")))), 6)
-        self.assertEqual(len(ids_in(self.candidates(self.sid("two")))), 6)
+        self.assertEqual(len(ids_in(self.candidates(self.sid("one")))), 3)
+        self.assertEqual(len(ids_in(self.candidates(self.sid("two")))), 3)
 
     def test_no_session_means_no_deduplication(self):
         for placeholder in ("memory-prompt-hook", "opencode-plugin", "codex-hook", ""):
             with self.subTest(placeholder=placeholder):
                 first = self.candidates(placeholder)
                 second = self.candidates(placeholder)
-                self.assertEqual(len(ids_in(first)), 6)
+                self.assertEqual(len(ids_in(first)), 3)
                 self.assertEqual(first, second)
         for placeholder in ("memory-prompt-hook", "opencode-plugin", "codex-hook", ""):
             self.assertEqual(
@@ -172,12 +169,12 @@ class DisplayHistoryTest(SeenTestCase):
 
     def test_part_of_the_top_results_seen_only_the_rest_is_shown_and_nothing_pads(self):
         session = self.sid("s")
-        head = ids_in(self.candidates(session, QUERY, "--limit", "3"))
-        self.assertEqual(len(head), 3)
-        rest = ids_in(self.candidates(session, QUERY, "--limit", "6"))
-        self.assertEqual(len(rest), 3, "at most 6 - seen ids, never padded from rank 7+")
+        head = ids_in(self.candidates(session, QUERY, "--limit", "2"))
+        self.assertEqual(len(head), 2)
+        rest = ids_in(self.candidates(session, QUERY))
+        self.assertEqual(len(rest), 1, "at most 3 - seen ids, never padded from rank 4+")
         self.assertFalse(set(head) & set(rest))
-        self.assertEqual(self.candidates(session, QUERY, "--limit", "6"), "")
+        self.assertEqual(self.candidates(session, QUERY), "")
 
     def test_the_event_records_what_was_output_and_how_many_were_dropped(self):
         session = self.sid("s")
@@ -192,14 +189,14 @@ class DisplayHistoryTest(SeenTestCase):
         self.assertEqual(mine[1]["result_ids"], [])
         self.assertEqual(mine[1]["result_count"], 0)
         self.assertEqual(mine[1]["output_utf8_bytes"], len(second.encode()))
-        self.assertEqual(mine[1]["suppressed_count"], 6)
+        self.assertEqual(mine[1]["suppressed_count"], 3)
         self.assertNotIn("zzuniqueprompt", json.dumps(mine), "no raw prompt in the event")
 
     def test_receipts_readers_only_need_a_bounded_id_list(self):
         session = self.sid("s")
         self.candidates(session)
         receipt = self.receipt(session)
-        self.assertLessEqual(len(receipt["result_ids"]), 6)
+        self.assertLessEqual(len(receipt["result_ids"]), 3)
         self.assertEqual(receipt["result_count"], len(receipt["result_ids"]))
         self.assertEqual(receipt["source"], "candidate-probe")
 
@@ -213,7 +210,7 @@ class DisplayHistoryTest(SeenTestCase):
         value = json.loads(result.stdout)
         pending = value["deferredCandidateReceipt"]
         shown = ids_in(value["hookSpecificOutput"]["additionalContext"])
-        self.assertEqual(len(shown), 6)
+        self.assertEqual(len(shown), 3)
         self.assertIsNone(self.receipt(session), "the probe wrote its receipt before delivery")
         self.assertEqual(len(self.events()), before, "the probe wrote its event before delivery")
         again = self.mem("candidates", QUERY, "--session-id", session, "--runtime", "test")
@@ -255,7 +252,7 @@ class DisplayHistoryTest(SeenTestCase):
         stale = {key: time.time() - 25 * 3600 for key in state["ids"]}
         state["ids"] = stale
         mem._seen_save(name, digest, "p", state, time.time())
-        self.assertEqual(len(ids_in(self.candidates(session))), 6, "past the 24h TTL")
+        self.assertEqual(len(ids_in(self.candidates(session))), 3, "past the 24h TTL")
         # More than 512 ids: the oldest are dropped, the newest kept.
         now = time.time()
         big = {"ids": {f"id-{i}": now - 1000 + i for i in range(700)},
@@ -272,13 +269,13 @@ class DisplayHistoryTest(SeenTestCase):
         for path in self.seen_dir.glob(f"*.json"):
             if session_digest(session) in path.name:
                 path.write_text("{not json")
-        self.assertEqual(len(ids_in(self.candidates(session))), 6)
+        self.assertEqual(len(ids_in(self.candidates(session))), 3)
         blocker = self.root / "not-a-directory"
         blocker.write_text("x")
         env = {"MEM_CANDIDATE_SEEN": str(blocker / "seen")}
         one = self.candidates(self.sid("blocked"), env=env)
         two = self.candidates(self.sid("blocked"), env=env)
-        self.assertEqual(len(ids_in(one)), 6)
+        self.assertEqual(len(ids_in(one)), 3)
         self.assertEqual(one, two, "no history available: candidates still show")
 
 
@@ -325,10 +322,10 @@ class ResetSignalTest(SeenTestCase):
                                 ("resume", False), ("startup", False)):
             with self.subTest(source=source):
                 session = self.sid(source)
-                self.assertEqual(len(ids_in(self.candidates(session))), 6)
+                self.assertEqual(len(ids_in(self.candidates(session))), 3)
                 self.start(source, session)
                 again = ids_in(self.candidates(session))
-                self.assertEqual(len(again), 6 if forgets else 0)
+                self.assertEqual(len(again), 3 if forgets else 0)
 
     def test_a_signal_for_another_session_leaves_this_history_alone(self):
         session = self.sid("mine")
@@ -376,14 +373,14 @@ class ResetSignalTest(SeenTestCase):
                                 cwd=self.project, env=self.environment(), timeout=60,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(ids_in(self.candidates(session))), 6)
+        self.assertEqual(len(ids_in(self.candidates(session))), 3)
 
     def test_the_hidden_reset_command_is_the_shared_helper(self):
         session = self.sid("s")
         self.candidates(session)
         result = self.mem("_seen-reset", "--session-id", session)
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(len(ids_in(self.candidates(session))), 6)
+        self.assertEqual(len(ids_in(self.candidates(session))), 3)
         for placeholder in ("memory-prompt-hook", "codex-hook", ""):
             self.assertEqual(self.mem("_seen-reset", "--session-id", placeholder).returncode, 0)
 
@@ -400,7 +397,7 @@ class ResetSignalTest(SeenTestCase):
                     env=self.environment(), cwd=self.project, timeout=60,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(len(ids_in(self.candidates(session))), 6 if forgets else 0)
+                self.assertEqual(len(ids_in(self.candidates(session))), 3 if forgets else 0)
         worker = self.sid("worker")
         self.candidates(worker)
         payload = json.dumps({"source": "compact", "session_id": worker,
@@ -432,7 +429,7 @@ await plugin.event({{ event: {{ type: "session.compacted", properties: {{ sessio
             env=self.environment(), text=True, timeout=60,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(ids_in(self.candidates(session))), 6)
+        self.assertEqual(len(ids_in(self.candidates(session))), 3)
         self.assertEqual(self.candidates(other), "", "only the compacted session resets")
 
 
@@ -493,14 +490,14 @@ class ShortBodyTest(SeenTestCase):
     def test_enabled_shows_one_bounded_body_once_and_within_half_the_savings(self):
         mem = self.loaded()
         session = self.sid("s")
-        self.run_probe(mem, session, QUERY)            # show six
-        first_again = self.run_probe(mem, session, QUERY)  # drop six: savings accrue
+        self.run_probe(mem, session, QUERY)            # show three
+        first_again = self.run_probe(mem, session, QUERY)  # drop three: savings accrue
         self.assertEqual(first_again, "")
         lead = self.run_probe(mem, session, "zebrafish")
         self.assertEqual(lead.count("  > "), 1)
         body_line = next(l for l in lead.splitlines() if l.startswith("  > "))
         self.assertLessEqual(len(body_line) - 4, 600)
-        self.assertLessEqual(len(lead.encode()), 1200)
+        self.assertLessEqual(len(lead.encode()), 600)
         digest, name = mem._seen_names(session, mem.project_key(self.project))
         state = mem._seen_load(name, time.time())
         self.assertGreater(state["saved_bytes"], 0)
@@ -526,13 +523,13 @@ class ShortBodyTest(SeenTestCase):
         unclear = self.run_probe(mem, session, "zebrafish", gap=1e9)
         self.assertNotIn("  > ", unclear)
 
-    def test_the_whole_block_stays_within_1200_bytes_with_a_body(self):
+    def test_the_whole_block_stays_within_600_bytes_with_a_body(self):
         mem = self.loaded()
-        rows = [(f"id-{i}", "durable", "lesson", "h" * 80) for i in range(6)]
+        rows = [(f"id-{i}", "durable", "lesson", "h" * 80) for i in range(3)]
         text, shown = mem._render_candidate_block(
-            rows, 1200, body=("id-0", "가" * 600))
-        self.assertLessEqual(len(text.encode()), 1200)
-        self.assertEqual(shown, 6)
+            rows, 600, body=("id-0", "가" * 600))
+        self.assertLessEqual(len(text.encode()), 600)
+        self.assertEqual(shown, 3)
 
 
 if __name__ == "__main__":

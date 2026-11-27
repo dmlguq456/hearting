@@ -1710,18 +1710,18 @@ class ExperimentObservationTest(unittest.TestCase):
         run = {"run_id": "r1", "status": "succeeded", "exit_code": 0}
         bare = {"summary": {}, "elapsed_seconds": 3720, "planned_seconds": None}
         final = "; ".join(progress._notice_texts(run, "final", {**bare, "undeclared": "not-declared"}, None, []))
-        self.assertIn("status=succeeded; exit=0; 실제=1h02m; 진행 파일 선언 없음", final)
+        self.assertIn("상태=succeeded; 종료 코드=0; 실제=1h02m; 진행 파일 선언 없음", final)
         checkpoint = "; ".join(progress._notice_texts(run, "checkpoint", {**bare, "undeclared": "not-declared"},
                                                       None, []))
         self.assertIn("경과 1h02m; 진행 파일 선언 없음", checkpoint)
         unmapped = "; ".join(progress._notice_texts(run, "checkpoint", {**bare, "undeclared": "remote-unmapped"},
                                                     None, []))
-        self.assertIn("선언한 진행 폴더가 여기서 안 보임", unmapped)
+        self.assertIn("선언한 진행 폴더 — 여기서 안 보임", unmapped)
         for text in (final, checkpoint, unmapped):
             self.assertNotIn("지표 없음", text)
             self.assertNotIn("판정 불가", text)
             self.assertNotIn("ETA", text)
-            self.assertNotIn("source metrics unavailable", text)
+            self.assertNotIn("지표 출처 없음", text)
         # A declared folder that has not produced anything yet keeps the full form.
         declared = "; ".join(progress._notice_texts(run, "final", {**bare, "undeclared": None}, None, []))
         self.assertIn("마지막=지표 없음", declared)
@@ -1739,7 +1739,7 @@ class ExperimentObservationTest(unittest.TestCase):
         self.assertIn("최근=loss=0.42@12", text)
         self.assertIn("진행 12/60 epoch", text)
         self.assertIn("마지막 갱신 25m 전", text)
-        self.assertIn("source jsonl=/o/log.jsonl", text)
+        self.assertIn("출처 jsonl=/o/log.jsonl", text)
 
     def test_the_last_update_is_the_newest_source_change_this_observer_saw(self):
         samples = [{"source_updated_at": 100.0}, {"source_updated_at": 400.0}, {"epoch": 3}]
@@ -1803,7 +1803,7 @@ class ExperimentObservationTest(unittest.TestCase):
         # RV-PR1619-R2-1114 required fix 2: the launch note counted a named progress file as a
         # declaration, the run's notices only after a first successful read. One judgment now.
         # The place the runner gives every run (log + ".progress.json") stays no declaration.
-        not_visible = "선언한 진행 폴더가 여기서 안 보임"
+        not_visible = "선언한 진행 파일 — 여기서 안 보임"   # a file was declared: say file
         with tempfile.TemporaryDirectory() as tmp:
             base, now = Path(tmp), 1_800_000_000.0
 
@@ -1867,6 +1867,62 @@ class ExperimentObservationTest(unittest.TestCase):
                 self.assertEqual(observation["undeclared"], "not-declared")
                 self.assertIn("진행 파일 선언 없음", text)
                 self.assertNotIn(not_visible, text)
+
+    def test_a_declared_file_and_a_declared_folder_are_named_by_their_own_word(self):
+        # RV-PR1619-R3-1114: a declared progress FILE not there yet was told "folder not visible".
+        bare = {"summary": {}, "elapsed_seconds": 60, "planned_seconds": None, "undeclared": "declared-unresolved"}
+        for lang, file_text, folder_text in (
+                ("Korean", "선언한 진행 파일 — 여기서 안 보임", "선언한 진행 폴더 — 여기서 안 보임"),
+                ("English", "declared progress file not visible here", "declared progress folder not visible here")):
+            with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}):
+                for name, run, wanted, other in (
+                        ("file", {"run_id": "r", "progress_file": "/data/mine/counter.json"}, file_text, folder_text),
+                        ("folder", {"run_id": "r", "output_dir": "/data/out"}, folder_text, file_text),
+                        ("both", {"run_id": "r", "output_dir": "/data/out",
+                                  "progress_file": "/data/mine/counter.json"}, folder_text, file_text),
+                        ("runner place", {"run_id": "r", "log": "/data/run.log",
+                                          "progress_file": "/data/run.log.progress.json"}, folder_text, file_text)):
+                    with self.subTest(lang=lang, run=name):
+                        text = "; ".join(progress._notice_texts(run, "checkpoint", bare, None, []))
+                        self.assertIn(wanted, text)
+                        self.assertNotIn(other, text)
+
+    def test_the_runners_own_progress_place_is_told_from_a_declaration_by_the_file_not_its_spelling(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            base = Path(tmp).resolve()
+            (base / "real").mkdir()
+            (base / "link").symlink_to(base / "real")
+            log = base / "real" / "run.log"
+            place = str(log) + ".progress.json"
+            (base / "link-file.json").symlink_to(place)        # a link to the file itself
+            Path(place).write_text("{}")
+            os.link(place, base / "hard.json")
+            other = base / "real" / "other.json"
+            other.write_text("{}")
+            relative = os.path.relpath(place, base / "work")
+            (base / "work").mkdir()
+            cases = (
+                ("same string", {"log": str(log), "progress_file": place}, False),
+                ("a dotted spelling", {"log": str(log), "progress_file": str(base / "real" / "." / "run.log.progress.json")}, False),
+                ("through a linked folder", {"log": str(log), "progress_file": str(base / "link" / "run.log.progress.json")}, False),
+                ("log through the link", {"log": str(base / "link" / "run.log"), "progress_file": place}, False),
+                ("a link to the file", {"log": str(log), "progress_file": str(base / "link-file.json")}, False),
+                ("a hard link", {"log": str(log), "progress_file": str(base / "hard.json")}, False),
+                ("relative to the run's folder", {"log": str(log), "progress_file": relative,
+                                                  "cwd": str(base / "work")}, False),
+                ("relative log", {"log": os.path.relpath(log, base / "work"), "progress_file": place,
+                                  "cwd": str(base / "work")}, False),
+                ("another file", {"log": str(log), "progress_file": str(other)}, True),
+                ("relative to nowhere", {"log": str(log), "progress_file": relative}, True),
+            )
+            for name, run, declared in cases:
+                with self.subTest(case=name):
+                    self.assertEqual(bool(progress._declared_progress_file(dict(run))), declared)
+            # A run on another host: its paths are not this machine's disk, so only spelling counts.
+            remote = {"log": str(log), "progress_file": str(base / "link" / "run.log.progress.json")}
+            self.assertTrue(progress._declared_progress_file({**remote, "host_is_local": False}))
+            self.assertTrue(progress._declared_progress_file({**remote, "path_namespace": {"/r": "/l"}}))
+            self.assertIsNone(progress._declared_progress_file({**remote, "host_is_local": True}))
 
     @mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"})
     def test_the_launch_note_and_the_notice_come_from_the_same_undeclared_result(self):
@@ -1939,12 +1995,12 @@ class ExperimentObservationTest(unittest.TestCase):
         self.assertIn("estimated total time unknown; planned unknown; elapsed 1h02m", checkpoint)
         self.assertIn("source jsonl=no path", checkpoint)
         final, checkpoint = texts["Korean"]
-        self.assertIn("public run record=기록 경로 없음", final)
+        self.assertIn("실행 기록=기록 경로 없음", final)
         self.assertIn("마지막=loss=0.5@3; 최고=loss=0.4@2; 추세=악화", final)
         self.assertIn("실제=1h02m; 계획=미상", final)
         self.assertIn("최근=loss=0.5@3; 최고=loss=0.4@2; 기준 delta=기준 없음; 추세=악화", checkpoint)
         self.assertIn("ETA 총 미상; 계획 미상; 경과 1h02m", checkpoint)
-        self.assertIn("source jsonl=경로 없음", checkpoint)
+        self.assertIn("출처 jsonl=경로 없음", checkpoint)
 
     def test_a_short_or_metric_less_normal_end_and_a_bare_checkpoint_are_quiet(self):
         metric = {"summary": {"latest": {"value": 0.5, "epoch": 3}}}
@@ -2687,7 +2743,9 @@ class CatalogNoticeTest(unittest.TestCase):
         self.register()
         texts = self.observe(3600)
         (text,) = texts.values()
-        self.assertTrue(text.startswith("잔향 줄임 — SI-SNRi가 8 dB보다 높은가; 최근 11.00 dB@1; fix 8.00 dB 대비 +3.00 dB; run=name-run"), text)
+        self.assertTrue(text.startswith("잔향 줄임 — SI-SNRi가 8 dB보다 높은가; 최근 11.00 dB@1; fix 8.00 dB 대비 +3.00 dB; "
+                                        "지표: SISNRi (dB) ↑ · validation · s · 기준: fix 8.00 dB; 실행=name-run"), text)
+        self.assertTrue(text.endswith("; 표: hearting run experiment_catalog leaderboard --group '소리 분리 개선'"), text)
         self.assertNotIn("정본 이름 없음", text)
 
     def test_a_new_name_reaches_the_next_event_and_the_old_text_is_not_rewritten(self):
@@ -2707,7 +2765,8 @@ class CatalogNoticeTest(unittest.TestCase):
         other = self.run_spec("stray-run")
         first = self.observe(3600, other)
         (text,) = first.values()
-        self.assertIn("정본 이름 없음: run을 정본에 등록", text)
+        self.assertIn("정본 이름 없음: run을 정본에 등록; `hearting run experiment_catalog register --group-name <묶음> "
+                      "--condition-name <조건> --run stray-run`로 등록하면", text)   # the command, while the notice stays one part
         self.assertTrue(text.startswith("정본 이름 없음"))
         self.epochs(2)
         second = self.observe(7200, other)
@@ -2724,7 +2783,7 @@ class CatalogNoticeTest(unittest.TestCase):
         path.write_text("{not json", encoding="utf-8")
         texts = self.observe(3600)
         (text,) = texts.values()
-        self.assertTrue(text.startswith("run=name-run"), text)
+        self.assertTrue(text.startswith("실행=name-run"), text)
 
     def test_a_checkpoint_with_no_new_evaluation_point_is_quiet_but_still_published(self):
         self.register()

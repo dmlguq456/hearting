@@ -93,6 +93,7 @@ from dispatch_contract import (
 )
 from parent_next_directive import receipt_lines as parent_next_receipt_lines  # noqa: E402
 import launch_receipt  # noqa: E402
+from dispatch_contract_rows import is_unit_leg_launch  # noqa: E402
 import dispatch_wrapper_common as WRAPPER_COMMON  # noqa: E402
 import dispatch_headless_main as DISPATCH_MAIN  # noqa: E402
 import frame_repository
@@ -518,6 +519,9 @@ def dispatch_prompt(
 ) -> tuple[str, str]:
     task, source = task_input or task_prompt(args)
     bootstrap = DISPATCH_MAIN.bind_worker_contract(_ADAPTER, args, profile_type=profile_worker_type(ROOT, args.profile))
+    unit_prompt = DISPATCH_MAIN.unit_leg_prompt(_ADAPTER, args, task, commit_clause=commit_policy.prompt_clause(args))
+    if unit_prompt is not None:
+        return unit_prompt, source
     route_state = (
         "consume the assigned route only (wrapper-validated immutable record)"
         if args.route_file
@@ -865,9 +869,20 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
                 "--parent-attempt-id", args.attempt_id or "unassigned",
                 "--state-file", str(completion_state_path(args)),
                 "--lease-file", str(completion_lease_path(args)),
+                # An owner keeps its thread, so an owner taking over from it can wake it.
+                "--keep-session",
             ]
+            plan = getattr(args, "session_plan", None)
+            if plan is not None and plan.kind == "resumed":
+                command += ["--resume-thread", plan.session_id]
         else:
             command += ["--one-turn"]
+            if is_unit_leg_launch(args):
+                # A unit leg keeps its thread in the worker home, so its next turn can wake it.
+                command += ["--keep-session"]
+                plan = getattr(args, "session_plan", None)
+                if plan is not None and plan.kind == "resumed":
+                    command += ["--resume-thread", plan.session_id]
         command += [
             "--sandbox", effective_runtime_sandbox(args),
             "--approval", args.approval,
@@ -875,6 +890,8 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         ]
         if getattr(args, "runtime_dir", ""):
             command += ["--writable-root", str(args.runtime_dir)]
+        if WRAPPER_COMMON.raw_data_grant(args):
+            command += ["--writable-root", WRAPPER_COMMON.raw_data_grant(args)]
         if getattr(args, "report_bundle_root", None) is not None:
             command += ["--writable-root", str(args.report_bundle_root)]
         if owner_supervised:
@@ -945,6 +962,8 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
     ]
     if getattr(args, "runtime_dir", ""):
         cmd += ["--add-dir", str(args.runtime_dir)]
+    if WRAPPER_COMMON.raw_data_grant(args):
+        cmd += ["--add-dir", WRAPPER_COMMON.raw_data_grant(args)]
     cmd += codex_worker_arguments(getattr(args, "worker_runtime_env", None))
     if getattr(args, "report_bundle_root", None) is not None:
         cmd += ["--add-dir", str(args.report_bundle_root)]
@@ -1451,6 +1470,11 @@ def _respawn_supervised_owner(jobs, attempt_id, *, expected_identity, check_only
     # environment to the one path resolved above before any recovery prompt or
     # child environment is constructed.
     artifact_env["AGENT_RUNTIME_DIR"] = runtime_dir
+    # The raw data folder is named only when the recorded grant already holds it.
+    raw_data_dir = artifact_env.get("AGENT_RAW_DATA_DIR") or runtime_dir
+    if raw_data_dir not in {str(Path(root)) for root in effective["writable_roots"]}:
+        raw_data_dir = runtime_dir
+    artifact_env["AGENT_RAW_DATA_DIR"] = raw_data_dir
 
     parent_session = resolved.get("parent_session_id") or metadata.get("parent_sid", "")
     if metadata.get("parent_sid") and parent_session != metadata.get("parent_sid"):
@@ -1460,7 +1484,7 @@ def _respawn_supervised_owner(jobs, attempt_id, *, expected_identity, check_only
     args = SimpleNamespace(
         attempt_id=attempt_id, command_attempt_id=attempt_id, jobs_path=jobs,
         worktree=row_fields[3], slug=row_fields[4], artifact_root=artifact_root,
-        runtime_dir=runtime_dir, route_file=route_file, route_id=route_id,
+        runtime_dir=runtime_dir, raw_data_dir=raw_data_dir, route_file=route_file, route_id=route_id,
         route_hash=route_hash, route_node=launch.get("route_node") or metadata.get("route_node", ""),
         owner_route_binding=owner_binding, worker_type="owner", dispatch_depth=1,
         capability=resolved.get("capability", ""), capability_mode=resolved.get("capability_mode", ""),
@@ -1504,6 +1528,7 @@ def _respawn_supervised_owner(jobs, attempt_id, *, expected_identity, check_only
         "AGENT_ARTIFACT_ROOT": artifact_root,
         "AGENT_DISPATCH_WORKTREE": row_fields[3],
         "AGENT_RUNTIME_DIR": runtime_dir,
+        "AGENT_RAW_DATA_DIR": raw_data_dir,
         "REPORT_BUNDLE_ROOT": str(args.report_bundle_root or ""),
         "AGENT_ROUTE_FILE": route_file,
         "AGENT_ROUTE_ID": route_id,
@@ -1558,6 +1583,7 @@ def _respawn_supervised_owner(jobs, attempt_id, *, expected_identity, check_only
         dispatch_env.pop("AGENT_DISPATCH_EXECUTION_ACCESS_FILE", None)
     dispatch_env.update(worker_env)
     dispatch_env["AGENT_RUNTIME_DIR"] = runtime_dir
+    dispatch_env["AGENT_RAW_DATA_DIR"] = raw_data_dir
     dispatch_env.update(parent_completion.worker_runtime_identity("codex"))
     dispatch_env.update(git_optional_locks_env())
     permission_args = SimpleNamespace(
@@ -1980,6 +2006,8 @@ def main(argv: list[str]) -> int:
         args.artifact_root = resolve_artifact_root(args.worktree)
         args.runtime_dir = WRAPPER_COMMON.prepare_runtime_root(
             args.artifact_root, repository_kind=args.repository_kind, source_root=args.worktree)
+        args.raw_data_dir = WRAPPER_COMMON.prepare_raw_data_root(
+            args.artifact_root, args.runtime_dir, source_root=args.worktree)
         args.report_bundle_root = resolve_report_bundle_root(args.route_file, args.route_node)
     except ValueError as e:
         return fail("writable-root-resolution-failed", 64, detail=str(e), worktree=args.worktree)
@@ -2105,6 +2133,16 @@ def main(argv: list[str]) -> int:
             completion_lease_path(args)
     except DispatchContractError as e:
         return fail(e.reason, 69, detail=e.detail, child_spawned="0")
+    import unit_continue
+    # An owner taking over from an earlier owner of its route wakes that thread when the App Server supervises it.
+    unit_continue.owner_plan_for_args(
+        args, jobs, "codex", keeps_session=args.resolved_completion_delivery == "app-server-supervised")
+    if is_unit_leg_launch(args):
+        plan = unit_continue.plan_for_args(args, jobs, "codex")
+        if (plan is not None and plan.kind == "resumed"
+                and getattr(args, "resolved_stage_telemetry_transport", "raw-exec") != "app-server-one-turn"):
+            # Only the App Server one-turn keeps a session; `codex exec --ephemeral` cannot wake one.
+            args.session_plan = plan._replace(kind="fresh", reason="resume-refused", source="")
     log_dir = (
         Path(args.log_dir)
         if args.log_dir
@@ -2112,11 +2150,15 @@ def main(argv: list[str]) -> int:
     )
     task_input = task_prompt(args)
     args.replacement_raw_task = task_input[0]
-    prompt_text, prompt_source = dispatch_prompt(args, task_input)
     from review_input import prompt_block as review_input_prompt
-    prompt_text += review_input_prompt(args)
     from dispatch_replacement import recovery_instructions
-    prompt_text += recovery_instructions(args)
+    recovery = recovery_instructions(args)
+
+    def render_prompt():
+        text, source = dispatch_prompt(args, task_input)
+        text += review_input_prompt(args)
+        return DISPATCH_MAIN.owner_continuation_prompt(_ADAPTER, args, text, recovery), source
+    prompt_text, prompt_source = render_prompt()
     assignment_sha256 = "sha256:" + hashlib.sha256(
         task_input[0].encode("utf-8")
     ).hexdigest()
@@ -2257,6 +2299,9 @@ def main(argv: list[str]) -> int:
             args.agent_home, 'codex', args.worker_type, args.attempt_id,
             env=dispatch_env, destination=args.nested_codex_home, profile=args.profile)
         dispatch_env.update(args.worker_runtime_env)
+        if is_unit_leg_launch(args) or unit_continue.owner_predecessor(args):
+            DISPATCH_MAIN.carry_session(_ADAPTER, args, dispatch_env["CODEX_HOME"], jobs=jobs, prompt_path=prompt_path,
+                                        fresh_prompt=lambda: render_prompt()[0])
         command = shell_command(args, prompt_path, log_path)
         launch_spec = DISPATCH_MAIN.LaunchSpec(
             harness="codex",

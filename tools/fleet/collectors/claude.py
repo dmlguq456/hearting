@@ -634,7 +634,16 @@ def session_id_of_process(pid, home=None):
     return _current_identity(sess, home, record, claims.get(pid))[0]
 
 
-def enrich(sess, tick=None):
+def fill_subagents(sess):
+    """Read the sub-agent tail that `enrich(defer_subagents=True)` left for after a scoped filter."""
+    path = getattr(sess, "_transcript_path", None)
+    if path:
+        subs = _tail_subagents(path)
+        if subs is not None:
+            sess.subagents = subs
+
+
+def enrich(sess, tick=None, *, defer_subagents=False):
     home = _home()
     sj = read_registry(sess.pid, home)
     # Identity is settled before any identity-dependent name, state or telemetry.
@@ -717,7 +726,7 @@ def enrich(sess, tick=None):
     # been prompted has no transcript at all. Ephemeral (leading underscore) — evidence for
     # the classifier, not a --json field.
     sess._has_transcript = bool(path)
-    if path:
+    if path and not defer_subagents:
         subs = _tail_subagents(path)
         if subs is not None:
             sess.subagents = subs

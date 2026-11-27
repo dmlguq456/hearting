@@ -1119,6 +1119,27 @@ class TestGateRelease(WorkflowFixture):
         self.assertFalse((self.base / "raise-root" / route["route_id"]).exists())
         self.assertFalse((self.base / "release-root" / route["route_id"]).exists())
 
+    def test_the_status_line_of_a_unit_route_tells_no_intensity_and_the_record_keeps_it(self):
+        # 11-20: a unit route has no intensity (one unit does one job and nothing checks it). Its status line names the
+        # kind only; `effective_intensity` stays in the record and in `--json`. Every other route reads as it did.
+        for capability, mode, intensity, line in (("unit", "default", "quick", "(unit)"),
+                                                  ("autopilot-code", "dev", "quick", "(autopilot-code/dev quick)"),
+                                                  ("autopilot-lab", "setup", "standard", "(autopilot-lab/setup standard)")):
+            with self.subTest(capability=capability):
+                route, path = self.two_stage_route()
+                route.update(capability=capability, capability_mode=mode, effective_intensity=intensity)
+                path.write_text(json.dumps(route, indent=2), encoding="utf-8")
+                jobs, _session, _attempt = self.owner_registry(route_id=route["route_id"])
+                text, machine = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(text):
+                    SUP.main(["status", "--route", str(path), "--jobs", str(jobs)])
+                with contextlib.redirect_stdout(machine):
+                    SUP.main(["status", "--route", str(path), "--jobs", str(jobs), "--json"])
+                first = text.getvalue().splitlines()[0]
+                self.assertEqual(first, f"route      {route['route_id']} {line}")
+                payload = json.loads(machine.getvalue())
+                self.assertEqual((payload["capability"], payload["effective_intensity"]), (capability, intensity))
+
     def test_explicit_jobs_authority_rejects_missing_directory_and_symlink(self):
         missing = self.base / "missing-state" / "jobs.log"
         with self.assertRaisesRegex(
@@ -1625,6 +1646,106 @@ class TestStatusProjection(WorkflowFixture):
         self.assertEqual(payload["next_stage"], ["verify"])
         self.assertEqual([child["run_id"] for child in payload["resource_children"]],
                          ["fixture-run"])
+
+    def test_status_shows_owner_completion_delivery_state_and_reason(self):
+        # #1410: a completion left with no recipient after a plain `/clear` is visible in status,
+        # and so is the reason its record was later settled.
+        import dispatch_pending_delivery as pending
+
+        route, path = self.two_stage_route(route_id="rt-0123456789abcdef")
+        canonical = ROUTE.canonical_route_path(self.artifact_root, route["route_id"])
+        canonical.parent.mkdir(parents=True)
+        path = path.rename(canonical)
+        self.base.chmod(0o700)
+        jobs = self.base / "jobs.log"
+        attempt, delivery_id = "att-" + "1" * 32, "delivery-" + "2" * 32
+        jobs.write_text(
+            f"now\tdone\t1\tp\towner\tattempt_id={attempt},dispatch_depth=1,worker_type=owner,"
+            f"owner_route_id={route['route_id']},parent_sid=sess-before-clear,delivery_intent=1,"
+            f"delivery_id={delivery_id}\n", encoding="utf-8")
+        receipt = {"schema_version": 2, "state": "ready", "children": [{"attempt_id": attempt}]}
+        pending.create(
+            self.base, recipient_kind="claude-parent-runtime", recipient_key="sess-before-clear",
+            delivery_id=delivery_id, session_generation="", session_generation_supported="0",
+            attempt_ids=[attempt], parent_attempt_id="att-" + "3" * 32, route_id=route["route_id"],
+            route_node="execute", receipt=receipt,
+            receipt_digest=pending._canonical_receipt_digest(receipt),
+            row_revisions={attempt: "revision-1"})
+
+        def status(as_json=True):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(SUP.cmd_status(SimpleNamespace(
+                    route=str(path), jobs=str(jobs), json=as_json)), 0)
+            return json.loads(out.getvalue()) if as_json else out.getvalue()
+
+        # The route is still open: the record is pending and no reason is given.
+        entry, = status()["owner_completion_delivery"]
+        self.assertEqual((entry["attempt_id"], entry["state"], entry["reason"], entry["recipient"]),
+                         (attempt, "pending", "-", "sess-bef"))
+        # Closed with the record still open: undelivered, in both outputs.
+        ROUTE.outcome_path(path).write_text(json.dumps({
+            "route_id": route["route_id"], "route_hash": route["route_hash"]}), encoding="utf-8")
+        entry, = status()["owner_completion_delivery"]
+        self.assertEqual((entry["state"], entry["reason"]), ("pending", "undelivered"))
+        self.assertIn(f"delivery   {attempt} pending undelivered", status(as_json=False))
+        # Settled by the next session's notice: the reason says so.
+        pending.expire_if_due(self.base, "sess-before-clear", delivery_id,
+                              actor="dispatch-reconcile", reason="recipient-session-replaced")
+        entry, = status()["owner_completion_delivery"]
+        self.assertEqual((entry["state"], entry["reason"]), ("expired", "recipient-session-replaced"))
+        self.assertIn(f"delivery   {attempt} expired recipient-session-replaced", status(as_json=False))
+        # A route without a registered owner completion has nothing to show.
+        jobs.write_text("", encoding="utf-8")
+        self.assertEqual(status()["owner_completion_delivery"], [])
+        text = status(as_json=False)
+        self.assertNotIn("delivery   ", text)
+        # An unreadable registry is a missing field, never a failed status.
+        self.assertIsNone(SUP.owner_completion_delivery(route, path, self.base / "no-such.log"))
+
+    def test_status_without_jobs_shows_owner_completion_delivery_from_one_registry_read(self):
+        # A plain `workflow-supervisor status <route>` reads the default registry, the one the owner
+        # projection uses, and reads it once for both.
+        import dispatch_pending_delivery as pending
+
+        route, path = self.two_stage_route(route_id="rt-0123456789abcdef")
+        canonical = ROUTE.canonical_route_path(self.artifact_root, route["route_id"])
+        canonical.parent.mkdir(parents=True)
+        path = path.rename(canonical)
+        self.base.chmod(0o700)
+        jobs = self.base / "jobs.log"
+        attempt, delivery_id = "att-" + "4" * 32, "delivery-" + "5" * 32
+        jobs.write_text(
+            f"now\tdone\t1\tp\towner\tattempt_id={attempt},dispatch_depth=1,worker_type=owner,"
+            f"owner_route_id={route['route_id']},parent_sid=sess-before-clear,delivery_intent=1,"
+            f"delivery_id={delivery_id}\n", encoding="utf-8")
+        receipt = {"schema_version": 2, "state": "ready", "children": [{"attempt_id": attempt}]}
+        pending.create(
+            self.base, recipient_kind="claude-parent-runtime", recipient_key="sess-before-clear",
+            delivery_id=delivery_id, session_generation="", session_generation_supported="0",
+            attempt_ids=[attempt], parent_attempt_id="att-" + "6" * 32, route_id=route["route_id"],
+            route_node="execute", receipt=receipt,
+            receipt_digest=pending._canonical_receipt_digest(receipt),
+            row_revisions={attempt: "revision-1"})
+        reads = []
+        real_rows = SUP._registry_rows
+
+        def counted(jobs_path):
+            reads.append(str(jobs_path))
+            return real_rows(jobs_path)
+
+        out = io.StringIO()
+        with mock.patch.object(SUP, "default_jobs_path", return_value=jobs), \
+             mock.patch.object(SUP, "_registry_rows", side_effect=counted), \
+             contextlib.redirect_stdout(out):
+            self.assertEqual(SUP.cmd_status(SimpleNamespace(route=str(path), jobs=None, json=True)), 0)
+        payload = json.loads(out.getvalue())
+        self.assertIsNone(payload["jobs_path"])
+        self.assertEqual(payload["owner"]["attempt_id"], attempt)
+        entry, = payload["owner_completion_delivery"]
+        self.assertEqual((entry["attempt_id"], entry["state"], entry["recipient"]),
+                         (attempt, "pending", "sess-bef"))
+        self.assertEqual(reads, [str(jobs)])
 
     def test_resource_child_is_listed_even_when_the_global_index_misses_it(self):
         route, path = self.two_stage_route()
@@ -4937,7 +5058,7 @@ class TestComputePollObservationBoundary(WorkflowFixture):
             "artifacts": {"checked": True, "missing": []},
         }
         if ledger.state()["nodes"]["run"]["state"] != "RUNNING":
-            ledger.record("run", "RUNNING", evidence={"fixture": "owner-terminal-settlement"},
+            ledger.record("run", "RUNNING", evidence={"fixture": "owner-terminal-owner-pass"},
                           actor="fixture")
         ledger.record("run", "STAGE_SUCCEEDED", evidence=evidence, actor="completion-controller")
         node = WS.route_node(route, "run")

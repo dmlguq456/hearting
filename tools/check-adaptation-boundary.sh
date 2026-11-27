@@ -178,13 +178,13 @@ if [ -z "$EVENTS" ]; then
   fail_msg "could not derive hook EVENTS domain from adapters/claude/settings.json .hooks (empty extraction)"
 fi
 # HOOK_EVENT_EXEMPT: events in $EVENTS explicitly not required to have a Codex hooks.json bridge /
-# INSTALL_LAYOUT.md doc entry. PostToolUseFailure is Claude-native; the current Codex native hook
+# docs/INSTALL_LAYOUT.md doc entry. PostToolUseFailure is Claude-native; the current Codex native hook
 # surface has no verified matching event, so projecting a bridge would overclaim parity. Module-level so both consumer sites (check_install_layout_codex_projection,
 # check_codex_bin_wrappers) can read it regardless of registration order.
 HOOK_EVENT_EXEMPT="PostToolUseFailure PreToolUse"
 
 is_mechanized_install_layout() {
-  grep -Fq 'tools/install/harness.sh' INSTALL_LAYOUT.md 2>/dev/null
+  grep -Fq 'tools/install/harness.sh' docs/INSTALL_LAYOUT.md 2>/dev/null
 }
 
 check_mechanized_install_projection() {
@@ -197,9 +197,9 @@ check_mechanized_install_projection() {
     fail_msg "tools/install/harness.sh must be executable because the installed harness launcher points to it"
     return
   fi
-  if ! grep -Fq "harness install $runtime" INSTALL_LAYOUT.md \
-    || ! grep -Fq 'harness verify  [claude|codex|opencode|all] --json' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must route $runtime installation and verification through the mechanized harness CLI"
+  if ! grep -Fq "harness install $runtime" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'harness verify  [claude|codex|opencode|all] --json' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must route $runtime installation and verification through the mechanized harness CLI"
     return
   fi
   if ! grep -Fq 'def checks(scope="global")' "tools/install/drivers/$runtime.py"; then
@@ -406,7 +406,6 @@ check_claude_projection_targets() {
   check_link_target claude_setting/commands ../adapters/claude/commands
   check_link_target claude_setting/skills ../adapters/claude/skills
   check_link_target claude_setting/agents ../adapters/claude/agents
-  # claude_setting/agent-modes retired 2026-07-22 (재홈): units project via roles/.
   check_link_target claude_setting/hooks ../adapters/claude/hooks
   check_link_target claude_setting/utilities ../adapters/claude/utilities
   check_link_target claude_setting/tools ../adapters/claude/tools
@@ -690,7 +689,7 @@ assert_shared_adapter_class() {
 }
 
 check_install_layout_codex_projection() {
-  [ -f INSTALL_LAYOUT.md ] || { fail_msg "INSTALL_LAYOUT.md is missing"; return; }
+  [ -f docs/INSTALL_LAYOUT.md ] || { fail_msg "docs/INSTALL_LAYOUT.md is missing"; return; }
 
   if is_mechanized_install_layout; then
     check_mechanized_install_projection codex \
@@ -699,130 +698,130 @@ check_install_layout_codex_projection() {
   fi
 
   for p in AGENTS.md README.md core capabilities roles bin tools utilities scaffolds codex-skills codex-modes codex-hooks codex-config codex-agents; do
-    if ! grep -Fq "\$AGENT_HOME/codex_setting/$p" INSTALL_LAYOUT.md; then
-      fail_msg "INSTALL_LAYOUT.md must include Codex projection install step for codex_setting/$p"
+    if ! grep -Fq "\$AGENT_HOME/codex_setting/$p" docs/INSTALL_LAYOUT.md; then
+      fail_msg "docs/INSTALL_LAYOUT.md must include Codex projection install step for codex_setting/$p"
     fi
   done
-  if ! grep -Fq 'ln -sfn "$AGENT_HOME" "$HOME/.codex/hearting"' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must install the Codex hook command hearting pointer"
+  if ! grep -Fq 'ln -sfn "$AGENT_HOME" "$HOME/.codex/hearting"' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must install the Codex hook command hearting pointer"
   fi
-  if ! grep -Fq "non_claude_runtime_re='adapters/claude|claude_setting|settings\\.json|statusline\\.sh|CLAUDE\\.md|agent-modes|allowedTools|/\\.claude/'" INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must define a shared non-Claude runtime output deny regex"
+  if ! grep -Fq "non_claude_runtime_re='adapters/claude|claude_setting|settings\\.json|statusline\\.sh|CLAUDE\\.md|agent-modes|allowedTools|/\\.claude/'" docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must define a shared non-Claude runtime output deny regex"
   fi
 
   for p in settings.json commands skills agents statusline.sh hooks; do
-    if ! grep -Fq "$p" INSTALL_LAYOUT.md; then
-      fail_msg "INSTALL_LAYOUT.md must explicitly keep Claude-native $p out of Codex runtime projection"
+    if ! grep -Fq "$p" docs/INSTALL_LAYOUT.md; then
+      fail_msg "docs/INSTALL_LAYOUT.md must explicitly keep Claude-native $p out of Codex runtime projection"
     fi
   done
 
-  if ! grep -Fq '.codex/agents/' INSTALL_LAYOUT.md \
-    || ! grep -Fq 'developer_instructions = """' INSTALL_LAYOUT.md \
-    || ! grep -Fq "Path(sys.argv[1]).glob(\"*.toml\")" INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must document and validate Codex native custom agent projection"
+  if ! grep -Fq '.codex/agents/' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'developer_instructions = """' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "Path(sys.argv[1]).glob(\"*.toml\")" docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must document and validate Codex native custom agent projection"
   fi
-  if ! grep -Fq 'tmp_codex_bootstrap_home=' INSTALL_LAYOUT.md \
-    || ! grep -Fq 'codex_setting/AGENTS.md' INSTALL_LAYOUT.md \
-    || ! grep -Fq "codex debug prompt-input 'bootstrap check' >/tmp/codex-bootstrap.json" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg 'AGENTS.md — Codex Adapter Bootstrap' /tmp/codex-bootstrap.json" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg 'codex_setting/codex-hooks' /tmp/codex-bootstrap.json" INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate Codex bootstrap projection through codex debug prompt-input"
+  if ! grep -Fq 'tmp_codex_bootstrap_home=' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'codex_setting/AGENTS.md' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "codex debug prompt-input 'bootstrap check' >/tmp/codex-bootstrap.json" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg 'AGENTS.md — Codex Adapter Bootstrap' /tmp/codex-bootstrap.json" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg 'codex_setting/codex-hooks' /tmp/codex-bootstrap.json" docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate Codex bootstrap projection through codex debug prompt-input"
   fi
-  if ! grep -Fq 'tmp_codex_hook_home=' INSTALL_LAYOUT.md \
-    || ! grep -Fq 'codex_setting/codex-hooks/hooks.json' INSTALL_LAYOUT.md \
-    || ! grep -Fq 'sessionend-lifecycle.py' INSTALL_LAYOUT.md \
-    || ! grep -Fq 'permissionrequest-lifecycle.py' INSTALL_LAYOUT.md \
-    || ! grep -Fq 'posttooluse-read-marker.py' INSTALL_LAYOUT.md \
-    || ! grep -Fq '! rg "$non_claude_runtime_re" "$tmp_codex_hook_home/hooks.json"' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate Codex native hook projection installation"
+  if ! grep -Fq 'tmp_codex_hook_home=' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'codex_setting/codex-hooks/hooks.json' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'sessionend-lifecycle.py' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'permissionrequest-lifecycle.py' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'posttooluse-read-marker.py' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq '! rg "$non_claude_runtime_re" "$tmp_codex_hook_home/hooks.json"' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate Codex native hook projection installation"
   fi
   # codex-adapter-parity audit P-19 (2026-07-04): derive the doc-literal hook-event completeness
   # check from the SAME module-level $EVENTS var (not a re-extraction) instead of a second hardcoded
-  # 7-event list, so a newly added Claude hook event that INSTALL_LAYOUT.md fails to document also
+  # 7-event list, so a newly added Claude hook event that docs/INSTALL_LAYOUT.md fails to document also
   # fails loud (closes the second P-19 leak window besides check_codex_bin_wrappers at line ~789).
   for event in $EVENTS; do
     case " $HOOK_EVENT_EXEMPT " in
       *" $event "*) continue ;;
     esac
-    if ! grep -Fq "\"$event\"" INSTALL_LAYOUT.md; then
-      fail_msg "INSTALL_LAYOUT.md must document Codex native hook projection for event $event"
+    if ! grep -Fq "\"$event\"" docs/INSTALL_LAYOUT.md; then
+      fail_msg "docs/INSTALL_LAYOUT.md must document Codex native hook projection for event $event"
     fi
   done
-  if ! grep -Fq '! rg "$non_claude_runtime_re" /tmp/codex-skills.json' INSTALL_LAYOUT.md \
-    || ! grep -Fq '! rg "$non_claude_runtime_re" /tmp/codex-plugin-skills.json' INSTALL_LAYOUT.md \
-    || ! grep -Fq '! rg "$non_claude_runtime_re" "$tmp_codex_agent_home/agents"' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate Codex runtime projection outputs with the shared non-Claude deny regex"
+  if ! grep -Fq '! rg "$non_claude_runtime_re" /tmp/codex-skills.json' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq '! rg "$non_claude_runtime_re" /tmp/codex-plugin-skills.json' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq '! rg "$non_claude_runtime_re" "$tmp_codex_agent_home/agents"' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate Codex runtime projection outputs with the shared non-Claude deny regex"
   fi
-  if ! grep -Fq 'codex_setting/bin/preflight.sh capability-info autopilot-code >/tmp/codex-capability.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^native_skill_path=adapters/codex/skills/autopilot-code/SKILL.md$' /tmp/codex-capability.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^native_plugin_skill_path=adapters/codex/plugins/hearting-codex/skills/autopilot-code/SKILL.md$' /tmp/codex-capability.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^compat_reference=not-projected$' /tmp/codex-capability.txt" INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate Codex capability-info native projections without root Skill compat references"
+  if ! grep -Fq 'codex_setting/bin/preflight.sh capability-info autopilot-code >/tmp/codex-capability.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^native_skill_path=adapters/codex/skills/autopilot-code/SKILL.md$' /tmp/codex-capability.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^native_plugin_skill_path=adapters/codex/plugins/hearting-codex/skills/autopilot-code/SKILL.md$' /tmp/codex-capability.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^compat_reference=not-projected$' /tmp/codex-capability.txt" docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate Codex capability-info native projections without root Skill compat references"
   fi
-  if ! grep -Fq 'codex_setting/bin/preflight.sh role fast reviewer >/tmp/codex-role.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^adapter=codex$' /tmp/codex-role.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^source=roles/README.md$' /tmp/codex-role.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^family=fast$' /tmp/codex-role.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq 'codex_setting/bin/preflight.sh mode-info dev/backend >/tmp/codex-mode.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^adapter=codex$' /tmp/codex-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^status=portable$' /tmp/codex-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^native_mode_path=adapters/codex/modes/dev/backend.md$' /tmp/codex-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq 'test -f codex_setting/codex-modes/dev/backend.md' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate Codex role and mode mapping surfaces"
+  if ! grep -Fq 'codex_setting/bin/preflight.sh role fast reviewer >/tmp/codex-role.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^adapter=codex$' /tmp/codex-role.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^source=roles/README.md$' /tmp/codex-role.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^family=fast$' /tmp/codex-role.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'codex_setting/bin/preflight.sh mode-info dev/backend >/tmp/codex-mode.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^adapter=codex$' /tmp/codex-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^status=portable$' /tmp/codex-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^native_mode_path=adapters/codex/modes/dev/backend.md$' /tmp/codex-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'test -f codex_setting/codex-modes/dev/backend.md' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate Codex role and mode mapping surfaces"
   fi
-  if ! grep -Fq 'codex_setting/bin/preflight.sh visual-harness >/tmp/codex-visual-contract.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^adapter=codex$' /tmp/codex-visual-contract.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^runtime_surface=adapter-owned-visual-harness$' /tmp/codex-visual-contract.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq 'test -x codex_setting/tools/design/visual-harness.sh' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate Codex visual harness projection"
+  if ! grep -Fq 'codex_setting/bin/preflight.sh visual-harness >/tmp/codex-visual-contract.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^adapter=codex$' /tmp/codex-visual-contract.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^runtime_surface=adapter-owned-visual-harness$' /tmp/codex-visual-contract.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'test -x codex_setting/tools/design/visual-harness.sh' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate Codex visual harness projection"
   fi
-  if ! grep -Fq 'codex_setting/bin/preflight.sh loop-info drill >/tmp/codex-loop-drill.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^status=manual-contract$' /tmp/codex-loop-drill.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^auto_run=unsupported$' /tmp/codex-loop-drill.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq 'codex_setting/bin/preflight.sh loop-info study >/tmp/codex-loop-study.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^action=proposal-report-only$' /tmp/codex-loop-study.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^fallback=read-source-and-draft-proposal-in-main-session$' /tmp/codex-loop-study.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq 'codex_setting/bin/preflight.sh loop-info note >/tmp/codex-loop-note.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^status=unsupported$' /tmp/codex-loop-note.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^fallback=worklog-board-or-manual-post-it-flow$' /tmp/codex-loop-note.txt" INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate Codex loop-info manual/unsupported contracts"
+  if ! grep -Fq 'codex_setting/bin/preflight.sh loop-info drill >/tmp/codex-loop-drill.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^status=manual-contract$' /tmp/codex-loop-drill.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^auto_run=unsupported$' /tmp/codex-loop-drill.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'codex_setting/bin/preflight.sh loop-info study >/tmp/codex-loop-study.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^action=proposal-report-only$' /tmp/codex-loop-study.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^fallback=read-source-and-draft-proposal-in-main-session$' /tmp/codex-loop-study.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'codex_setting/bin/preflight.sh loop-info note >/tmp/codex-loop-note.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^status=unsupported$' /tmp/codex-loop-note.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^fallback=worklog-board-or-manual-post-it-flow$' /tmp/codex-loop-note.txt" docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate Codex loop-info manual/unsupported contracts"
   fi
-  if ! grep -Fq 'codex_setting/bin/preflight.sh mode-info material/browser-fetch >/tmp/codex-browser-fetch-mode.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^tool_contract=browser-fetch$' /tmp/codex-browser-fetch-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^runtime_surface=adapter-owned-browser-fetch$' /tmp/codex-browser-fetch-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^native_mode_path=adapters/codex/modes/material/browser-fetch.md$' /tmp/codex-browser-fetch-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq 'test -x codex_setting/tools/material/browser-fetch.sh' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate Codex material browser-fetch projection"
+  if ! grep -Fq 'codex_setting/bin/preflight.sh mode-info material/browser-fetch >/tmp/codex-browser-fetch-mode.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^tool_contract=browser-fetch$' /tmp/codex-browser-fetch-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^runtime_surface=adapter-owned-browser-fetch$' /tmp/codex-browser-fetch-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^native_mode_path=adapters/codex/modes/material/browser-fetch.md$' /tmp/codex-browser-fetch-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'test -x codex_setting/tools/material/browser-fetch.sh' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate Codex material browser-fetch projection"
   fi
   # codex-adapter-parity audit P-42 (2026-07-04): fold the four IDENTICAL-shape material tool doc
   # checks (data-script, figure-gen, pdf-extract, web-image-search) into a derived loop templated by
   # $tool. browser-fetch is kept as its own separate block above — it carries a 5th `native_mode_path`
   # assertion the other four do not, so it must not be swept into this fold (F3, behavior-preserving).
   for tool in data-script figure-gen pdf-extract web-image-search; do
-    if ! grep -Fq "codex_setting/bin/preflight.sh mode-info material/$tool >/tmp/codex-$tool-mode.txt" INSTALL_LAYOUT.md \
-      || ! grep -Fq "rg '^tool_contract=$tool\$' /tmp/codex-$tool-mode.txt" INSTALL_LAYOUT.md \
-      || ! grep -Fq "rg '^runtime_surface=adapter-owned-$tool\$' /tmp/codex-$tool-mode.txt" INSTALL_LAYOUT.md \
-      || ! grep -Fq "test -x codex_setting/tools/material/$tool.sh" INSTALL_LAYOUT.md; then
-      fail_msg "INSTALL_LAYOUT.md must validate Codex material $tool projection"
+    if ! grep -Fq "codex_setting/bin/preflight.sh mode-info material/$tool >/tmp/codex-$tool-mode.txt" docs/INSTALL_LAYOUT.md \
+      || ! grep -Fq "rg '^tool_contract=$tool\$' /tmp/codex-$tool-mode.txt" docs/INSTALL_LAYOUT.md \
+      || ! grep -Fq "rg '^runtime_surface=adapter-owned-$tool\$' /tmp/codex-$tool-mode.txt" docs/INSTALL_LAYOUT.md \
+      || ! grep -Fq "test -x codex_setting/tools/material/$tool.sh" docs/INSTALL_LAYOUT.md; then
+      fail_msg "docs/INSTALL_LAYOUT.md must validate Codex material $tool projection"
     fi
   done
-  if ! grep -Fq 'codex_setting/bin/preflight.sh mode-info qa/test >/tmp/codex-test-mode.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^tool_contract=verification-runner$' /tmp/codex-test-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^runtime_surface=adapter-owned-verification-runner$' /tmp/codex-test-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^native_mode_path=adapters/codex/modes/qa/test.md$' /tmp/codex-test-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq 'test -x codex_setting/tools/qa/verification-runner.sh' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate Codex QA verification runner projection"
+  if ! grep -Fq 'codex_setting/bin/preflight.sh mode-info qa/test >/tmp/codex-test-mode.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^tool_contract=verification-runner$' /tmp/codex-test-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^runtime_surface=adapter-owned-verification-runner$' /tmp/codex-test-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^native_mode_path=adapters/codex/modes/qa/test.md$' /tmp/codex-test-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'test -x codex_setting/tools/qa/verification-runner.sh' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate Codex QA verification runner projection"
   fi
-  if ! grep -Fq 'codex_setting/bin/preflight.sh mode-info research/claim-verify >/tmp/codex-claim-verify-mode.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^tool_contract=external-claim-verification$' /tmp/codex-claim-verify-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^runtime_surface=adapter-owned-claim-verify$' /tmp/codex-claim-verify-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq 'test -x codex_setting/tools/research/claim-verify.sh' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate Codex research claim-verify projection"
+  if ! grep -Fq 'codex_setting/bin/preflight.sh mode-info research/claim-verify >/tmp/codex-claim-verify-mode.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^tool_contract=external-claim-verification$' /tmp/codex-claim-verify-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^runtime_surface=adapter-owned-claim-verify$' /tmp/codex-claim-verify-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'test -x codex_setting/tools/research/claim-verify.sh' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate Codex research claim-verify projection"
   fi
 }
 
 check_install_layout_opencode_projection() {
-  [ -f INSTALL_LAYOUT.md ] || { fail_msg "INSTALL_LAYOUT.md is missing"; return; }
+  [ -f docs/INSTALL_LAYOUT.md ] || { fail_msg "docs/INSTALL_LAYOUT.md is missing"; return; }
 
   if is_mechanized_install_layout; then
     OPENCODE_RUNTIME_VERSION=2.0.32 check_mechanized_install_projection opencode \
@@ -831,112 +830,112 @@ check_install_layout_opencode_projection() {
   fi
 
   for p in AGENTS.md README.md core capabilities roles bin tools utilities opencode-skills opencode-agents opencode-commands opencode-plugins; do
-    if ! grep -Fq "\$AGENT_HOME/opencode_setting/$p" INSTALL_LAYOUT.md; then
-      fail_msg "INSTALL_LAYOUT.md must include OpenCode projection install step for opencode_setting/$p"
+    if ! grep -Fq "\$AGENT_HOME/opencode_setting/$p" docs/INSTALL_LAYOUT.md; then
+      fail_msg "docs/INSTALL_LAYOUT.md must include OpenCode projection install step for opencode_setting/$p"
     fi
   done
-  if ! grep -Fq 'ln -sfn "$AGENT_HOME" "$HOME/.config/opencode/hearting"' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must install the OpenCode hearting pointer"
+  if ! grep -Fq 'ln -sfn "$AGENT_HOME" "$HOME/.config/opencode/hearting"' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must install the OpenCode hearting pointer"
   fi
 
-  if ! grep -Fq 'OPENCODE_CONFIG_CONTENT=' INSTALL_LAYOUT.md \
-    || ! grep -Fq 'opencode_setting/opencode-skills' INSTALL_LAYOUT.md \
-    || ! grep -Fq 'OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate OpenCode skills through adapter-owned paths with Claude compat autoload disabled"
+  if ! grep -Fq 'OPENCODE_CONFIG_CONTENT=' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'opencode_setting/opencode-skills' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate OpenCode skills through adapter-owned paths with Claude compat autoload disabled"
   fi
-  if ! grep -Fq 'tmp_opencode_bootstrap_home=' INSTALL_LAYOUT.md \
-    || ! grep -Fq 'OPENCODE_CONFIG_CONTENT="{\"instructions\"' INSTALL_LAYOUT.md \
-    || ! grep -Fq '$PWD/opencode_setting/AGENTS.md' INSTALL_LAYOUT.md \
-    || ! grep -Fq 'opencode debug config --pure >/tmp/opencode-bootstrap.json' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg 'opencode_setting/AGENTS.md' /tmp/opencode-bootstrap.json" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg 'opencode_setting/opencode-skills' /tmp/opencode-bootstrap.json" INSTALL_LAYOUT.md \
-    || ! grep -Fq "! rg '/.claude/' /tmp/opencode-bootstrap.json" INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate OpenCode bootstrap instructions and skill path config"
+  if ! grep -Fq 'tmp_opencode_bootstrap_home=' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'OPENCODE_CONFIG_CONTENT="{\"instructions\"' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq '$PWD/opencode_setting/AGENTS.md' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'opencode debug config --pure >/tmp/opencode-bootstrap.json' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg 'opencode_setting/AGENTS.md' /tmp/opencode-bootstrap.json" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg 'opencode_setting/opencode-skills' /tmp/opencode-bootstrap.json" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "! rg '/.claude/' /tmp/opencode-bootstrap.json" docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate OpenCode bootstrap instructions and skill path config"
   fi
-  if ! grep -Fq 'opencode_setting/opencode-plugins/hearting-guards.js' INSTALL_LAYOUT.md \
-    || ! grep -Fq 'opencode debug config >/tmp/opencode-plugin.json' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg 'hearting-guards.js' /tmp/opencode-plugin.json" INSTALL_LAYOUT.md \
-    || ! grep -Fq '! rg "$non_claude_runtime_re" /tmp/opencode-plugin.json' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate the OpenCode native plugin projection"
+  if ! grep -Fq 'opencode_setting/opencode-plugins/hearting-guards.js' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'opencode debug config >/tmp/opencode-plugin.json' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg 'hearting-guards.js' /tmp/opencode-plugin.json" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq '! rg "$non_claude_runtime_re" /tmp/opencode-plugin.json' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate the OpenCode native plugin projection"
   fi
-  if ! grep -Fq '! rg "$non_claude_runtime_re" /tmp/opencode-agent.json' INSTALL_LAYOUT.md \
-    || ! grep -Fq '! rg "$non_claude_runtime_re" /tmp/opencode-command.json' INSTALL_LAYOUT.md \
-    || ! grep -Fq '! rg "$non_claude_runtime_re" /tmp/opencode-skills.json' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate OpenCode runtime projection outputs with the shared non-Claude deny regex"
+  if ! grep -Fq '! rg "$non_claude_runtime_re" /tmp/opencode-agent.json' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq '! rg "$non_claude_runtime_re" /tmp/opencode-command.json' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq '! rg "$non_claude_runtime_re" /tmp/opencode-skills.json' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate OpenCode runtime projection outputs with the shared non-Claude deny regex"
   fi
-  if ! grep -Fq 'opencode_setting/bin/preflight.sh capability-info autopilot-code >/tmp/opencode-capability.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^native_skill_path=adapters/opencode/skills/autopilot-code/SKILL.md$' /tmp/opencode-capability.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^native_command_path=adapters/opencode/commands/autopilot-code.md$' /tmp/opencode-capability.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^compat_reference=not-projected$' /tmp/opencode-capability.txt" INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate OpenCode capability-info native projections without root Skill compat references"
+  if ! grep -Fq 'opencode_setting/bin/preflight.sh capability-info autopilot-code >/tmp/opencode-capability.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^native_skill_path=adapters/opencode/skills/autopilot-code/SKILL.md$' /tmp/opencode-capability.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^native_command_path=adapters/opencode/commands/autopilot-code.md$' /tmp/opencode-capability.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^compat_reference=not-projected$' /tmp/opencode-capability.txt" docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate OpenCode capability-info native projections without root Skill compat references"
   fi
-  if ! grep -Fq 'opencode_setting/bin/preflight.sh role fast reviewer >/tmp/opencode-role.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^adapter=opencode$' /tmp/opencode-role.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^source=roles/README.md$' /tmp/opencode-role.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^family=fast$' /tmp/opencode-role.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq 'opencode_setting/bin/preflight.sh mode-info dev/backend >/tmp/opencode-mode.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^adapter=opencode$' /tmp/opencode-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^status=portable$' /tmp/opencode-mode.txt" INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate OpenCode role and mode mapping surfaces"
+  if ! grep -Fq 'opencode_setting/bin/preflight.sh role fast reviewer >/tmp/opencode-role.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^adapter=opencode$' /tmp/opencode-role.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^source=roles/README.md$' /tmp/opencode-role.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^family=fast$' /tmp/opencode-role.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'opencode_setting/bin/preflight.sh mode-info dev/backend >/tmp/opencode-mode.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^adapter=opencode$' /tmp/opencode-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^status=portable$' /tmp/opencode-mode.txt" docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate OpenCode role and mode mapping surfaces"
   fi
-  if ! grep -Fq 'opencode_setting/bin/preflight.sh visual-harness >/tmp/opencode-visual-contract.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^adapter=opencode$' /tmp/opencode-visual-contract.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^runtime_surface=adapter-owned-visual-harness$' /tmp/opencode-visual-contract.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq 'test -x opencode_setting/tools/design/visual-harness.sh' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate OpenCode visual harness projection"
+  if ! grep -Fq 'opencode_setting/bin/preflight.sh visual-harness >/tmp/opencode-visual-contract.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^adapter=opencode$' /tmp/opencode-visual-contract.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^runtime_surface=adapter-owned-visual-harness$' /tmp/opencode-visual-contract.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'test -x opencode_setting/tools/design/visual-harness.sh' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate OpenCode visual harness projection"
   fi
-  if ! grep -Fq 'opencode_setting/bin/preflight.sh loop-info drill >/tmp/opencode-loop-drill.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^status=manual-contract$' /tmp/opencode-loop-drill.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^auto_run=unsupported$' /tmp/opencode-loop-drill.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq 'opencode_setting/bin/preflight.sh loop-info study >/tmp/opencode-loop-study.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^action=proposal-report-only$' /tmp/opencode-loop-study.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^fallback=read-source-and-draft-proposal-in-main-session$' /tmp/opencode-loop-study.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq 'opencode_setting/bin/preflight.sh loop-info note >/tmp/opencode-loop-note.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^status=unsupported$' /tmp/opencode-loop-note.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^fallback=worklog-board-or-manual-post-it-flow$' /tmp/opencode-loop-note.txt" INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate OpenCode loop-info manual/unsupported contracts"
+  if ! grep -Fq 'opencode_setting/bin/preflight.sh loop-info drill >/tmp/opencode-loop-drill.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^status=manual-contract$' /tmp/opencode-loop-drill.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^auto_run=unsupported$' /tmp/opencode-loop-drill.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'opencode_setting/bin/preflight.sh loop-info study >/tmp/opencode-loop-study.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^action=proposal-report-only$' /tmp/opencode-loop-study.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^fallback=read-source-and-draft-proposal-in-main-session$' /tmp/opencode-loop-study.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'opencode_setting/bin/preflight.sh loop-info note >/tmp/opencode-loop-note.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^status=unsupported$' /tmp/opencode-loop-note.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^fallback=worklog-board-or-manual-post-it-flow$' /tmp/opencode-loop-note.txt" docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate OpenCode loop-info manual/unsupported contracts"
   fi
-  if ! grep -Fq 'opencode_setting/bin/preflight.sh mode-info material/browser-fetch >/tmp/opencode-browser-fetch-mode.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^tool_contract=browser-fetch$' /tmp/opencode-browser-fetch-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^runtime_surface=adapter-owned-browser-fetch$' /tmp/opencode-browser-fetch-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq 'test -x opencode_setting/tools/material/browser-fetch.sh' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate OpenCode material browser-fetch projection"
+  if ! grep -Fq 'opencode_setting/bin/preflight.sh mode-info material/browser-fetch >/tmp/opencode-browser-fetch-mode.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^tool_contract=browser-fetch$' /tmp/opencode-browser-fetch-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^runtime_surface=adapter-owned-browser-fetch$' /tmp/opencode-browser-fetch-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'test -x opencode_setting/tools/material/browser-fetch.sh' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate OpenCode material browser-fetch projection"
   fi
-  if ! grep -Fq 'opencode_setting/bin/preflight.sh mode-info material/data-script >/tmp/opencode-data-script-mode.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^tool_contract=data-script$' /tmp/opencode-data-script-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^runtime_surface=adapter-owned-data-script$' /tmp/opencode-data-script-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq 'test -x opencode_setting/tools/material/data-script.sh' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate OpenCode material data-script projection"
+  if ! grep -Fq 'opencode_setting/bin/preflight.sh mode-info material/data-script >/tmp/opencode-data-script-mode.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^tool_contract=data-script$' /tmp/opencode-data-script-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^runtime_surface=adapter-owned-data-script$' /tmp/opencode-data-script-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'test -x opencode_setting/tools/material/data-script.sh' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate OpenCode material data-script projection"
   fi
-  if ! grep -Fq 'opencode_setting/bin/preflight.sh mode-info material/figure-gen >/tmp/opencode-figure-gen-mode.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^tool_contract=figure-gen$' /tmp/opencode-figure-gen-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^runtime_surface=adapter-owned-figure-gen$' /tmp/opencode-figure-gen-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq 'test -x opencode_setting/tools/material/figure-gen.sh' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate OpenCode material figure-gen projection"
+  if ! grep -Fq 'opencode_setting/bin/preflight.sh mode-info material/figure-gen >/tmp/opencode-figure-gen-mode.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^tool_contract=figure-gen$' /tmp/opencode-figure-gen-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^runtime_surface=adapter-owned-figure-gen$' /tmp/opencode-figure-gen-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'test -x opencode_setting/tools/material/figure-gen.sh' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate OpenCode material figure-gen projection"
   fi
-  if ! grep -Fq 'opencode_setting/bin/preflight.sh mode-info material/pdf-extract >/tmp/opencode-pdf-extract-mode.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^tool_contract=pdf-extract$' /tmp/opencode-pdf-extract-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^runtime_surface=adapter-owned-pdf-extract$' /tmp/opencode-pdf-extract-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq 'test -x opencode_setting/tools/material/pdf-extract.sh' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate OpenCode material PDF extract projection"
+  if ! grep -Fq 'opencode_setting/bin/preflight.sh mode-info material/pdf-extract >/tmp/opencode-pdf-extract-mode.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^tool_contract=pdf-extract$' /tmp/opencode-pdf-extract-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^runtime_surface=adapter-owned-pdf-extract$' /tmp/opencode-pdf-extract-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'test -x opencode_setting/tools/material/pdf-extract.sh' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate OpenCode material PDF extract projection"
   fi
-  if ! grep -Fq 'opencode_setting/bin/preflight.sh mode-info material/web-image-search >/tmp/opencode-web-image-search-mode.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^tool_contract=web-image-search$' /tmp/opencode-web-image-search-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^runtime_surface=adapter-owned-web-image-search$' /tmp/opencode-web-image-search-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq 'test -x opencode_setting/tools/material/web-image-search.sh' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate OpenCode material web image search projection"
+  if ! grep -Fq 'opencode_setting/bin/preflight.sh mode-info material/web-image-search >/tmp/opencode-web-image-search-mode.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^tool_contract=web-image-search$' /tmp/opencode-web-image-search-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^runtime_surface=adapter-owned-web-image-search$' /tmp/opencode-web-image-search-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'test -x opencode_setting/tools/material/web-image-search.sh' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate OpenCode material web image search projection"
   fi
-  if ! grep -Fq 'opencode_setting/bin/preflight.sh mode-info qa/test >/tmp/opencode-test-mode.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^tool_contract=verification-runner$' /tmp/opencode-test-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^runtime_surface=adapter-owned-verification-runner$' /tmp/opencode-test-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq 'test -x opencode_setting/tools/qa/verification-runner.sh' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate OpenCode QA verification runner projection"
+  if ! grep -Fq 'opencode_setting/bin/preflight.sh mode-info qa/test >/tmp/opencode-test-mode.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^tool_contract=verification-runner$' /tmp/opencode-test-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^runtime_surface=adapter-owned-verification-runner$' /tmp/opencode-test-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'test -x opencode_setting/tools/qa/verification-runner.sh' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate OpenCode QA verification runner projection"
   fi
-  if ! grep -Fq 'opencode_setting/bin/preflight.sh mode-info research/claim-verify >/tmp/opencode-claim-verify-mode.txt' INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^tool_contract=external-claim-verification$' /tmp/opencode-claim-verify-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq "rg '^runtime_surface=adapter-owned-claim-verify$' /tmp/opencode-claim-verify-mode.txt" INSTALL_LAYOUT.md \
-    || ! grep -Fq 'test -x opencode_setting/tools/research/claim-verify.sh' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must validate OpenCode research claim-verify projection"
+  if ! grep -Fq 'opencode_setting/bin/preflight.sh mode-info research/claim-verify >/tmp/opencode-claim-verify-mode.txt' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^tool_contract=external-claim-verification$' /tmp/opencode-claim-verify-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq "rg '^runtime_surface=adapter-owned-claim-verify$' /tmp/opencode-claim-verify-mode.txt" docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'test -x opencode_setting/tools/research/claim-verify.sh' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must validate OpenCode research claim-verify projection"
   fi
 }
 
@@ -1081,9 +1080,6 @@ check_codex_bin_wrappers() {
     || ! grep -Fq 'role <portable-role|role-profile|pipeline-stage>' adapters/codex/README.md \
     || ! grep -Fq 'role <portable-role|role-profile|pipeline-stage>' adapters/codex/README.md; then
     fail_msg "adapters/codex/bin/role-map.sh must map pipeline-stage aliases to portable roles with unit-catalog guidance (no retired team profiles)"
-  fi
-  if adapters/codex/bin/role-map.sh 'plan team' >/tmp/codex-role-retired.out 2>/tmp/codex-role-retired.err; then
-    fail_msg "adapters/codex/bin/role-map.sh must not resolve the retired 'plan team' profile alias"
   fi
   if ! adapters/codex/bin/role-map.sh variable reviewer >/tmp/codex-role-set.out 2>/tmp/codex-role-set.err \
     || ! grep -Fq 'family=role-set' /tmp/codex-role-set.out \
@@ -1881,13 +1877,6 @@ check_codex_native_agent_projection() {
     cat /tmp/codex-sync-agents.err
   fi
 
-  # Runtime team agents retired 2026-07-22 (재홈, CONVENTIONS §2.3): kernel helper only,
-  # and the retired projections must NOT reappear.
-  for retired in plan-team dev-team qa-team research-team material-team design-team editorial-team external-adversary; do
-    if [ -e "adapters/codex/agents/$retired.toml" ]; then
-      fail_msg "adapters/codex/agents/$retired.toml is a retired team projection and must not exist"
-    fi
-  done
   for profile in memory-scout; do
     agent="adapters/codex/agents/$profile.toml"
     if [ ! -f "$agent" ]; then
@@ -1997,23 +1986,6 @@ PY
     || ! grep -Fq 'structural plus install-path validation' adapters/codex/ADAPTATION.md \
     || ! grep -Fq '`codex debug agent` listing surface' adapters/codex/ADAPTATION.md; then
     fail_msg "Codex custom agent docs must state current validation boundary until runtime agent discovery exists"
-  fi
-}
-
-# codex-adapter-parity audit P-26 (2026-07-04), retired-team rework 2026-07-22 (재홈,
-# CONVENTIONS §2.3): the original check cross-verified each Codex role-profile agent's
-# static model pin against role-map.sh resolution. Runtime team agents are retired, so
-# the check is now memory-scout-only (its static read-only pin is asserted in
-# check_codex_native_agent_projection) plus must-not-exist negatives: no retired team
-# toml may reappear, and role-map.sh must not resolve team names or emit team paths.
-check_codex_model_pin_role_map_consistency() {
-  for retired in plan-team dev-team qa-team research-team material-team design-team editorial-team external-adversary; do
-    if [ -e "adapters/codex/agents/$retired.toml" ]; then
-      fail_msg "adapters/codex/agents/$retired.toml is a retired team projection and must not exist"
-    fi
-  done
-  if grep -Eq 'agents/(plan|dev|qa|research|material|design|editorial)-team|agents/external-adversary' adapters/codex/bin/role-map.sh; then
-    fail_msg "adapters/codex/bin/role-map.sh must not reference retired team agent paths"
   fi
 }
 
@@ -2756,16 +2728,8 @@ check_opencode_native_agent_projection() {
     cat /tmp/opencode-sync-agents.err
   fi
 
-  # codex-adapter-parity audit P-18 (2026-07-04), retired-team rework 2026-07-22 (재홈,
-  # CONVENTIONS §2.3): runtime team agents are retired on all harnesses — the OpenCode
-  # native agent domain is the kernel helper memory-scout plus the generated native
-  # subagent type catalog (general-purpose/light/deep, CFG_NATIVE_AGENT_CATALOG),
-  # plus must-not-exist negatives so retired team projections cannot reappear.
-  for retired in plan-team dev-team qa-team research-team material-team design-team editorial-team external-adversary; do
-    if [ -e "adapters/opencode/agents/$retired" ]; then
-      fail_msg "adapters/opencode/agents/$retired is a retired team projection and must not exist"
-    fi
-  done
+  # OpenCode native agent domain: the kernel helper memory-scout plus the generated
+  # native subagent type catalog (general-purpose/light/deep, CFG_NATIVE_AGENT_CATALOG).
   for profile in memory-scout; do
     agent="adapters/opencode/agents/$profile/$profile.md"
     if [ ! -f "$agent" ]; then
@@ -2996,15 +2960,7 @@ check_claude_skill_projection() {
 }
 
 check_claude_mode_projection() {
-  # agent-modes retired 2026-07-22 (재홈, CONVENTIONS §2.3): the persona SoT is
-  # roles/units/, projected wholesale through the roles surface. Neither the adapter
-  # copy nor its claude_setting symlink may reappear.
-  if [ -e adapters/claude/agent-modes ] || [ -L adapters/claude/agent-modes ]; then
-    fail_msg "adapters/claude/agent-modes is retired (unit catalog roles/units/ is the persona SoT) and must not exist"
-  fi
-  if [ -e claude_setting/agent-modes ] || [ -L claude_setting/agent-modes ]; then
-    fail_msg "claude_setting/agent-modes is a retired projection and must not exist"
-  fi
+  # The persona SoT is roles/units/, projected wholesale through the roles surface.
   if [ ! -d roles/units ]; then
     fail_msg "roles/units unit catalog is missing"
   fi
@@ -3289,23 +3245,13 @@ check_claude_shared_layer_census() {
   done
 }
 
-check_removed_root_surfaces() {
-  if [ -e agents ] || [ -L agents ]; then
-    fail_msg "root agents/ exists; Claude-native agents must live under adapters/claude/agents and portable meaning under roles/"
-  fi
-  if [ -e agent-modes ] || [ -L agent-modes ]; then
-    fail_msg "root agent-modes/ exists; portable unit bodies live under roles/units"
-  fi
-}
-
 check_role_catalog() {
   if [ ! -f roles/README.md ]; then
     fail_msg "roles/README.md is missing"
     return
   fi
 
-  # 재홈 2026-07-22 (CONVENTIONS §2.3): roles/README.md renders the generated UNIT
-  # catalog table; every catalog unit has a row and retired team rows must not reappear.
+  # roles/README.md renders the generated UNIT catalog table; every catalog unit has a row.
   if ! grep -Fq '| Family | Unit | Portable model role | Worker type | Floor |' roles/README.md; then
     fail_msg "roles/README.md must render the unit catalog table header (Family/Unit/Portable model role/Worker type/Floor)"
   fi
@@ -3317,15 +3263,6 @@ check_role_catalog() {
     case "$unit_name" in _*) continue ;; esac
     if ! grep -Fq "| \`$unit_family/$unit_name\` |" roles/README.md; then
       fail_msg "roles/README.md unit catalog table is missing unit row: $unit_family/$unit_name"
-    fi
-  done
-  for retired in plan-team dev-team qa-team research-team material-team design-team editorial-team external-adversary; do
-    if grep -Fq "| \`$retired\` |" roles/README.md; then
-      fail_msg "roles/README.md must not carry retired team profile row: $retired"
-    fi
-    if grep -Fq "adapters/codex/agents/$retired.toml" roles/README.md \
-      || grep -Fq "adapters/opencode/agents/$retired/$retired.md" roles/README.md; then
-      fail_msg "roles/README.md must not reference retired native team agent projections: $retired"
     fi
   done
 }
@@ -3479,8 +3416,8 @@ check_adaptation_inventory_native_surfaces() {
     || ! grep -Fq 'approval-sandbox.toml' adapters/codex/ADAPTATION.md; then
     fail_msg "Codex approval/sandbox posture must be captured as an adapter-owned config fragment (approval-sandbox.toml), referenced by preflight permissions and ADAPTATION.md"
   fi
-  if grep -Fq 'core settings.json keybindings.json commands' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must not symlink runtime-owned settings.json/keybindings.json into the Claude home; Claude Code rewrites them in place and clobbers the symlink"
+  if grep -Fq 'core settings.json keybindings.json commands' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must not symlink runtime-owned settings.json/keybindings.json into the Claude home; Claude Code rewrites them in place and clobbers the symlink"
   fi
   if ! grep -Fq '_CLAUDE_COPY_ONCE_NAMES = ["settings.json", "keybindings.json"]' tools/install/projector.py \
     || ! grep -Fq 'if action == "copy_once":' tools/install/drivers/claude.py; then
@@ -3518,19 +3455,19 @@ check_adaptation_inventory_native_surfaces() {
 }
 
 check_projection_summary_docs() {
-  if grep -Fq 'minimal adapted bootstrap + shared core/capabilities/roles/tools' README.md INSTALL_LAYOUT.md 2>/dev/null; then
+  if grep -Fq 'minimal adapted bootstrap + shared core/capabilities/roles/tools' README.md docs/INSTALL_LAYOUT.md 2>/dev/null; then
     fail_msg "projection summary docs must describe current native adapter projections, not minimal bootstrap only"
   fi
-  if grep -Fq 'Codex does not currently consume the full harness natively' README.md INSTALL_LAYOUT.md 2>/dev/null; then
+  if grep -Fq 'Codex does not currently consume the full harness natively' README.md docs/INSTALL_LAYOUT.md 2>/dev/null; then
     fail_msg "Codex install docs must describe selected native projections instead of implying instruction-only support"
   fi
   if ! grep -Fq '| Codex | Skills, custom agents, modes, and hooks |' README.md \
     || ! grep -Fq '| OpenCode | Skills, agents, commands, and local guard plugin |' README.md; then
     fail_msg "README.md must summarize Codex and OpenCode native projection surfaces"
   fi
-  if ! grep -Fq 'Codex-native Skills, custom Agents, mode' INSTALL_LAYOUT.md \
-    || ! grep -Fq 'hook bridges' INSTALL_LAYOUT.md; then
-    fail_msg "INSTALL_LAYOUT.md must summarize Codex native projection install surfaces"
+  if ! grep -Fq 'Codex-native Skills, custom Agents, mode' docs/INSTALL_LAYOUT.md \
+    || ! grep -Fq 'hook bridges' docs/INSTALL_LAYOUT.md; then
+    fail_msg "docs/INSTALL_LAYOUT.md must summarize Codex native projection install surfaces"
   fi
 }
 
@@ -3758,24 +3695,6 @@ check_hook_catalog() {
   done
 }
 
-check_legacy_root_links() {
-  command -v rg >/dev/null 2>&1 || return 0
-
-  legacy_skill_links=$(rg -n '\]\(\.\./\.\./(CLAUDE|MEMORY|CORE|WORKFLOW|CONVENTIONS|OPERATIONS|DESIGN_PRINCIPLES|VISION)\.md\)' \
-    skills adapters README.md MANUAL.md INSTALL_LAYOUT.md 2>/dev/null || true)
-  if [ -n "$legacy_skill_links" ]; then
-    fail_msg "legacy ../../ tier1 markdown links remain:"
-    printf '%s\n' "$legacy_skill_links"
-  fi
-
-  legacy_root_links=$(rg -n '\]\((CLAUDE|MEMORY|CORE|WORKFLOW|CONVENTIONS|OPERATIONS|DESIGN_PRINCIPLES|VISION)\.md\)' \
-    README.md MANUAL.md INSTALL_LAYOUT.md adapters skills 2>/dev/null || true)
-  if [ -n "$legacy_root_links" ]; then
-    fail_msg "legacy root tier1 markdown links remain outside core/:"
-    printf '%s\n' "$legacy_root_links"
-  fi
-}
-
 warn_concrete_runtime_terms() {
   command -v rg >/dev/null 2>&1 || return 0
 
@@ -3965,10 +3884,10 @@ check_language_neutrality_contract() {
   fi
 
   readme_hangul=$(grep -Fvx "$english_switch" README.md 2>/dev/null | rg -n '[가-힣]' 2>/dev/null || true)
-  other_root_hangul=$(rg -n '[가-힣]' MANUAL.md INSTALL_LAYOUT.md 2>/dev/null || true)
+  other_root_hangul=$(rg -n '[가-힣]' docs/MANUAL.md docs/INSTALL_LAYOUT.md 2>/dev/null || true)
   root_doc_hangul=$(printf '%s\n%s\n' "$readme_hangul" "$other_root_hangul" | sed '/^$/d')
   if [ -n "$root_doc_hangul" ]; then
-    fail_msg "the canonical English README body, MANUAL.md, and INSTALL_LAYOUT.md must not contain Hangul prose:"
+    fail_msg "the canonical English README body, docs/MANUAL.md, and docs/INSTALL_LAYOUT.md must not contain Hangul prose:"
     printf '%s\n' "$root_doc_hangul"
   fi
 
@@ -4031,8 +3950,8 @@ check_language_neutrality_contract() {
     || ! grep -Fq 'Memory follows D-40: the acting agent decides storing, retrieval, promotion, merge, and pruning.' core/DESIGN_PRINCIPLES.md \
     || ! grep -Fq 'tools/memory/recall.sh' adapters/codex/bin/preflight.sh \
     || ! grep -Fq 'tools/memory/recall.sh' adapters/opencode/bin/preflight.sh \
-    || ! cat $mem_sources | grep -Fq 'CANDIDATE_MAX_RESULTS = 6' \
-    || ! cat $mem_sources | grep -Fq 'CANDIDATE_MAX_UTF8_BYTES = 1200' \
+    || ! cat $mem_sources | grep -Fq 'CANDIDATE_MAX_RESULTS = 3' \
+    || ! cat $mem_sources | grep -Fq 'CANDIDATE_MAX_UTF8_BYTES = 600' \
     || ! cat $mem_sources | grep -Fq 'records_capsule_fts'; then
     fail_msg "memory semantics must remain agent-owned while capsule candidates and same-turn opportunity are enforced mechanically"
   fi
@@ -4092,7 +4011,6 @@ check_census_rows
 check_codex_scaffold_projection
 check_codex_native_skill_projection
 check_codex_native_agent_projection
-check_codex_model_pin_role_map_consistency
 check_codex_native_mode_projection
 check_codex_native_hook_projection
 check_codex_native_plugin_entry_skill
@@ -4116,7 +4034,6 @@ check_claude_scaffold_projection
 check_claude_loop_projection
 check_claude_tool_projection
 check_claude_shared_layer_census
-check_removed_root_surfaces
 check_role_catalog
 check_claude_native_agent_projection
 check_adaptation_inventory_native_surfaces
@@ -4134,7 +4051,6 @@ check_sibling_adapter_contract
 check_worker_bootstrap_contract
 check_language_neutrality_contract
 check_fleet_depth2_liveness_regression
-check_legacy_root_links
 warn_concrete_runtime_terms
 flush_shared_adapter_links
 

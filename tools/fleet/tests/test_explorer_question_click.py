@@ -125,7 +125,7 @@ class PressLandsOnThePaintedLine(unittest.TestCase):
         for lang, word in (("English", "◑ to answer 2"), ("Korean", "◑답 대기 2")):
             with self.subTest(lang=lang), mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}):
                 rows = draw(_vm(2), NavState(view="QUESTIONS"), 140, 45).text_rows()
-                self.assertTrue(any(f"── {word} ─" in row for row in rows), rows)
+                self.assertTrue(any(f"│ {word} ─" in row for row in rows), rows)
         vm = ExplorerViewModel(questions=(_row(0, h="claude", m=("Fable 5.2", "fam_fable"),
                                                 e="medium"),))
         rows = draw(vm, NavState(view="QUESTIONS"), 140, 45).text_rows()
@@ -136,7 +136,7 @@ class PressLandsOnThePaintedLine(unittest.TestCase):
             with self.subTest(count=count):
                 frame = draw(_vm(count), NavState(view="QUESTIONS"), 80, 45)
                 rows = frame.text_rows()
-                self.assertTrue(any(f"── ◑ to answer {count} ─" in row for row in rows))
+                self.assertTrue(any(f"│ ◑ to answer {count} ─" in row for row in rows))
                 opens = [h for h in frame.hits if h.action[:1] == ("question.open",)]
                 self.assertEqual(len(opens), count)
                 for index in range(count):

@@ -79,15 +79,22 @@ function observe(harness, lines, sid) {
 }
 // Rows whose text equals the statusline output Claude's callback recorded for
 // this exact session. Only Claude's statusline area counts: the rows directly
-// under the lowest input box (a rule, a `❯` prompt row, a rule). A screen
+// under the lowest input box (a rule that may carry the session's name, a `❯` prompt row, a rule). A screen
 // without that box, such as the Ctrl+O transcript, conceals nothing, and only a
 // complete contiguous match counts; the previous record covers the paint in flight.
 function claudeStatusRows(lines,sid,record) {
   if(!sid||!record||record.session_id!==sid)return new Set();
   const rule=s=>/^─{8,}$/.test(String(s).trim());
+  // A named session carries its name in the box's upper border: rule glyphs, one
+  // blank-set-off piece of text, rule glyphs (the name at either end or between).
+  const named=s=>{
+    const m=String(s).trim().match(/^(─+) [^─]*\S[^─]* (─+)$/);
+    return !!m&&m[1].length+m[2].length>=8;
+  };
+  const upper=s=>rule(s)||named(s);
   let bottom=-1;
   for(let y=lines.length-2;y>=1&&bottom<0;y--)if(rule(lines[y])){
-    let top=y-1;while(top>=0&&!rule(lines[top]))top--;
+    let top=y-1;while(top>=0&&!upper(lines[top]))top--;
     if(top>=0&&top<y-1&&/^❯/.test(String(lines[top+1])))bottom=y;
     else return new Set();
   }
@@ -157,45 +164,77 @@ function footerConcealment(harness,lines,sid,plan,painted=[],details=[]) {
   return row.cells?{rows:new Set(),cells:new Map([[row.y,row.cells]])}:{rows:new Set([row.y]),cells:new Map()};
 }
 function hiddenFooterRows(...args){return footerConcealment(...args).rows;}
+// 11-16 (spec E9 rule 60): the native rows that are a harness's own last line, which the shell writes over (the last of
+// them takes its one line, the others are blanked). Found only when the screen has the harness's own footer layout; a
+// row that is merely like it is left alone (review of #1662: what is not found is not covered).
+// Codex: the footer rows are the ones after the composer's last `›` row (a multi-line draft's rows end at the blank row
+// that closes the composer), and they are exactly two, the status row and the help row, or exactly one, the thread-id
+// status row Codex draws without a help row (the layout `pane_ownership._codex_current_footer` reads). The status row
+// opens with a word, a number or a path, never a sign (`↳ queued`, `⏎ to send`, `■ stream error`); a row that opens
+// with a thread's id counts only as the id status row (`<id> · …`), not as a draft's line that begins with an id.
+// OpenCode: its bottom bar is the row with `ctrl+p commands` among the last three, and the row right above it that
+// opens with the working folder; without that row nothing is covered.
+// Claude's rows are the ones its recorded status text fills (`claudeStatusRows`).
+function footerRows(harness,lines){
+  const n=lines.length,from=Math.max(0,n-4);
+  const help=s=>/(?:^|\s)\? for shortcuts(?:\s|$)/.test(s||'')||/(?:\^c|ctrl\+c) copy · enter copy & follow · esc clear/i.test(s||'');
+  if(harness==='codex'){
+    const rows=Array.from({length:n},(_,y)=>lines[y]||''),filled=s=>/\S/.test(s);
+    const uuid='[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}',idStatus=new RegExp('^ +'+uuid+'(?: [\\u2800-\\u28ff])? · ','i'),idFirst=new RegExp('^ +'+uuid,'i');
+    let top=-1;for(let y=n-1;y>=0&&top<0;y--)if(/^›/.test(rows[y].trim()))top=y;
+    if(top<0)return [];
+    const tail=[];for(let y=top+1;y<n;y++)if(filled(rows[y]))tail.push(y);
+    // The footer block: the rows after the composer's closing blank row, when there is one.
+    let first=tail.length;while(first>0&&(first===tail.length||tail[first]-tail[first-1]===1))first--;
+    const block=tail.slice(first);
+    if(block.length===2&&block[0]>=from&&help(rows[block[1]])&&!help(rows[block[0]])
+       &&/^ {2}[\p{L}\p{N}~.\/]/u.test(rows[block[0]])&&(!idFirst.test(rows[block[0]])||idStatus.test(rows[block[0]])))return [block[0]];
+    if(block.length===1&&block[0]>=from&&idStatus.test(rows[block[0]]))return [block[0]];
+    return [];
+  }
+  if(harness==='opencode'){
+    const out=[],bar=y=>/ctrl\+p commands\b/.test(lines[y]||''),path=/^\s*(?:~|\/)[\w.\-\/~]*(?::\S+)?(?:\s{2,}|$)/;
+    for(let y=Math.max(0,n-3);y<n;y++){
+      const row=lines[y]||'';
+      if(bar(y)||y+1<n&&bar(y+1)&&path.test(row)&&/\S/.test(row))out.push(y);
+    }
+    return out;
+  }
+  return [];
+}
 // Spec rule 49 (d): the one narrow-width judgment. Beside the native area an open panel
 // folds by itself when the native area would be left under NATIVE_MIN columns, and opens
-// again when there is room. The person's last choice wins at its width: a panel folded by
-// hand stays folded however wide the window grows; one opened by hand stays open until the
-// width changes. The bottom layout never narrows the native area, so only a hand folds it.
-// `pinned` (the settings editor or a question being answered) keeps an open panel open.
-// A panel folded by itself opens again only REOPEN_MARGIN columns past the threshold, so a
-// window dragged across it does not jump back and forth (#1586 review follow-up 2).
-const NATIVE_MIN=80,REOPEN_MARGIN=3;
-// Spec rule 49 (c): the folded strip is eight cells (two borders, a blank cell inside each,
-// four content cells), one blank cell from the native area. Its width is this one constant.
-const STRIP=8,STRIP_GAP=1;
-// The strip stands only where the native beside it keeps this many columns; a narrower window
-// folds the panel to the one row under the native instead (the native never gets zero columns).
-const STRIP_NATIVE_MIN=20;
+// again when there is room. The judgment stands only while the person has not chosen: a
+// panel folded by hand stays folded however wide the window grows, and one opened by hand
+// stays open however the width changes (where it cannot stand beside, `layout` puts it
+// under the native area and back beside once the width returns). The bottom layout never
+// narrows the native area, so only a hand folds it. `pinned` (the settings editor or a
+// question being answered) keeps an open panel open. A panel folded by itself opens again
+// only REOPEN_MARGIN columns past the threshold, so a window dragged across it does not
+// jump back and forth (#1586 review follow-up 2).
+const NATIVE_MIN=60,REOPEN_MARGIN=3;
 const sideWidth=configuration=>{const width=configuration?.side_width;return Number.isInteger(width)&&width>=32&&width<=80?width:0;};
 function fold({cols,choice=null,configuration={},pinned=false,expanded=true}) {
   configuration=configuration&&typeof configuration==='object'?configuration:{};
-  // An open-by-hand choice lapses once the width it was made at changes.
-  if(choice&&choice.folded!==true&&choice.cols!==cols)choice=null;
+  // A choice made by hand holds at every width.
   if(choice)return {folded:choice.folded===true,choice};
   const width=sideWidth(configuration);
   const roomy=!(configuration.layout==='side'&&width)||cols-width-2>=NATIVE_MIN+(expanded?0:REOPEN_MARGIN);
   return {folded:!roomy&&!pinned,choice:null};
 }
+// Spec rule 49 (c), as the person changed it (11-15: "전체를 한줄로만 만들자"): folded, the panel is one
+// row under the native area in every placement and however it folded (by itself or by hand), whatever
+// the window's height and whatever it shows, so a question coming or going never moves the native
+// area. The native always keeps its whole width.
+function foldRows(rows){return 1;}
 // `panelRows` is the panel's row count under the native area; the native keeps at least one row.
 function layout({cols,rows,expanded=true,configuration={},panelRows=1}) {
   configuration=configuration&&typeof configuration==='object'?configuration:{};
   const width=sideWidth(configuration),wanted=configuration.layout==='side'&&width>0;
-  // Folded beside the native area: the eight-cell strip at the panel's edge; the native
-  // area takes the rest (spec rule 49 (c)).
-  if(wanted&&!expanded&&cols-STRIP-STRIP_GAP>=STRIP_NATIVE_MIN){
-    const left=configuration.position==='left';
-    return {side:true,folded:true,left,gap:STRIP_GAP,panelCols:STRIP,nativeCols:cols-STRIP-STRIP_GAP,nativeRows:rows,
-      panelColumn:left?0:cols-STRIP,nativeColumn:left?STRIP+STRIP_GAP:0,panelRow:0};
-  }
   // An open panel stands beside the native area when it physically fits (the native area
   // keeps 48 columns, the window 8 rows). Short of that (only a panel opened by hand in a
-  // window narrower than the fold judgment above) it opens under the native area.
+  // window narrower than the fold judgment above) it opens under the native area, and it
+  // stands beside again once the window is wide enough. Folded, it is the strip under it.
   const side=expanded&&wanted&&cols-width-2>=48&&rows>=8;
   // The one placement rule for every harness: a side panel sits right (the
   // default) or left of the native area, two blank cells apart. Only the
@@ -249,4 +288,4 @@ function titleSequence(title) {
   const text=[...String(title).replace(/[\x00-\x1f\x7f-\x9f]/g,'')].slice(0,1024).join('');
   return '\x1b]2;'+text+'\x07';
 }
-module.exports={layout,fold,NATIVE_MIN,REOPEN_MARGIN,STRIP,STRIP_NATIVE_MIN,observe,firstLine,hiddenFooterRows,footerConcealment,claudeStatusRows,blockHeight,titleSequence,publisher};
+module.exports={layout,fold,foldRows,NATIVE_MIN,REOPEN_MARGIN,observe,firstLine,hiddenFooterRows,footerConcealment,footerRows,claudeStatusRows,blockHeight,titleSequence,publisher};

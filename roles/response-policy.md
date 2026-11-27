@@ -108,7 +108,11 @@ Each clause is one contract line plus the signal that it was violated.
   read it and follow it rather than improvising a substitute; if it must change,
   expose the change before committing. When reporting a condition, make the
   existing label state the applied target, operation, and value; do not rely on
-  an ambiguous nickname or add a repeated definition line. *Violation signal:*
+  an ambiguous nickname or add a repeated definition line. To compare
+  experiment results, paste the table `hearting run experiment_catalog
+  leaderboard` prints as printed, in a worker report too; a table made by hand
+  uses the catalog's names, units and ↑/↓. Without a catalog, the `register`
+  advice in its notices and start context is how one begins. *Violation signal:*
   an ad-hoc replacement for a rule that is already written down somewhere, or a
   report label that hides which operation ran.
 
@@ -148,8 +152,7 @@ Each clause is one contract line plus the signal that it was violated.
   asking about a recommended reversible option, stopping for usage, or omitting a
   decision's difference, recommendation, or no-answer outcome.
 - **No answer is not a decision** — an empty answer, no response, or elapsed
-  time or an async acknowledgement (`accepted`) from a structured question (`AskUserQuestion`, Codex
-  `request_user_input[_async]`, OpenCode `question`, or equivalent) never counts
+  time or an async acknowledgement (`accepted`) from a question tool or a registered question never counts
   as the user's decision. A question that
   needs a user decision — goals, architecture, destructive actions, external
   effects, a large scope, or any question a Hearting receipt asks — stays open:

@@ -458,6 +458,31 @@ def current_segment(lines):
     return segment
 
 
+def outcome_state(outcome):
+    """``(state, ambiguity reason or None)`` of one route from its outcome sidecar
+    (``route.load_outcome``): ``open`` without one, ``done`` once its terminal gate is proven,
+    ``finish-pending`` while its inline finish waits, else ``unknown``. A false terminal gate is
+    unproven, not failed."""
+    if not isinstance(outcome, dict) or not outcome.get("present"):
+        return "open", None
+    if outcome.get("match") is False:
+        return "unknown", "outcome-mismatch"
+    tgp = outcome.get("terminal_gate_proven")
+    if outcome.get("finish_pending"):
+        return "finish-pending", None
+    if tgp is True:
+        return "done", None
+    if tgp is False:
+        return "unknown", "terminal-result-unproven"
+    return "unknown", None
+
+
+def _sealed_plan(record):
+    """The ``{decision, digest, index}`` a route sealed from an approved plan, or None."""
+    plan = record.get("route_plan") if isinstance(record, dict) else None
+    return {key: plan.get(key) for key in ("decision", "digest", "index")} if isinstance(plan, dict) else None
+
+
 def assemble(lines, *, load_record, load_outcome, jobs=(), node_evidence=None):
     """PURE (loaders injected) — one displayed chain from a session's ledger lines."""
     from . import route as _route
@@ -509,22 +534,9 @@ def assemble(lines, *, load_record, load_outcome, jobs=(), node_evidence=None):
             except Exception:
                 outcome = None
             result = _route.result_projection(record, outcome)
-            if not isinstance(outcome, dict) or not outcome.get("present"):
-                state = "open"
-            elif outcome.get("match") is False:
-                state = "unknown"
-                ambiguity.append("outcome-mismatch")
-            else:
-                tgp = outcome.get("terminal_gate_proven")
-                if outcome.get("finish_pending"):
-                    state = "finish-pending"
-                elif tgp is True:
-                    state = "done"
-                elif tgp is False:
-                    state = "unknown"
-                    ambiguity.append("terminal-result-unproven")
-                else:
-                    state = "unknown"
+            state, reason = outcome_state(outcome)
+            if reason:
+                ambiguity.append(reason)
         nodes.append({
             "label": "fix record" if line.get("automatic") else short_capability(capability), "capability": capability,
             "capability_mode": capability_mode, "automatic": bool(line.get("automatic")),
@@ -533,6 +545,9 @@ def assemble(lines, *, load_record, load_outcome, jobs=(), node_evidence=None):
             "ambiguity": ambiguity, "source_route_id": line.get("source_route_id"),
             "ts": line.get("ts"), "_record": record,
             "result": result,
+            # What the route itself recorded about its relation to the others (``route_plan``: the approved
+            # plan it is a leg of); the display chains only routes such records tie together.
+            "route_plan": _sealed_plan(record),
         })
 
     # Step 4 — continuation folding (rule 3-i): verified hops collapse onto the earliest slot.
@@ -585,6 +600,7 @@ def assemble(lines, *, load_record, load_outcome, jobs=(), node_evidence=None):
                 break
         if pos is not None:
             pi = pos + 1
+        node["planned"] = pos is not None      # it consumed a step of the declared ``--plan``
         result_nodes.append(node)
     for label in plan[pi:]:
         result_nodes.append({

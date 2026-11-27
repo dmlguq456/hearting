@@ -118,7 +118,8 @@ from mem_base import (  # noqa: F401
     CAPSULE_LIST_FIELDS, DELIVERY_STATES, DOCTOR_DURABLE_SOFT_CEILING,
     DOCTOR_WORKING_BLOAT_CEILING, enc_cwd, EXCHANGE_MAX_RUNS, EXCHANGE_NOTICE_REPEAT_SECONDS,
     EXCHANGE_READ_INTERVAL_SECONDS, EXCHANGE_RECEIVE_RETRY_SECONDS, EXCHANGE_RUN_LOCK,
-    EXCHANGE_SCHEDULE_LOCK, EXCHANGE_SPAWN_GRACE_SECONDS, EXCHANGE_STATE_FILE,
+    EXCHANGE_SCHEDULE_LOCK, EXCHANGE_SPAWN_GRACE_SECONDS, EXCHANGE_STALE_DAYS,
+    EXCHANGE_STATE_FILE,
     EXCHANGE_WINDOW_SECONDS, find_by_source, FM_ORDER, INJECT_DEFAULT_CLEANUP_LINES,
     INJECT_DEFAULT_MAX_BULLETS, INJECT_DEFAULT_MAX_CHARS, INJECT_DEFAULT_MAX_DURABLE,
     INJECT_DEFAULT_MAX_WORKING, INJECT_DEFAULT_SNIPPET_CHARS, INJECTION_PAT, iter_md_files,
@@ -261,6 +262,44 @@ def _session_id_from_env():
         except Exception:
             return ""
     return ""
+
+def _work_labels(tier, rtype):
+    """The field/unit labels of the session's one current route, for a work-style record (D-82).
+
+    Only a durable ``preference`` record (the work-style shape) gets them. No route, several
+    routes, direct work, a worker session, or any failure gives ``[]``: the write itself never
+    depends on this. The labels are only ever *added* (see ``_merge_auto_topics``).
+    """
+    if tier != "durable" or rtype != "preference":
+        return []
+    for base in (MEM_MODULE_DIR.parents[1] / "utilities", AGENT_HOME / "utilities"):
+        if not (base / "memory_work_labels.py").is_file():
+            continue
+        if str(base) not in sys.path:
+            sys.path.append(str(base))
+        try:
+            from memory_work_labels import labels_for_session
+            return [label for label in labels_for_session() if isinstance(label, str)]
+        except Exception:
+            return []
+    return []
+
+
+def _merge_auto_topics(base, auto):
+    """``base`` plus the automatic labels whose kind (``field``/``unit``) ``base`` lacks.
+
+    Never replaces or reorders what ``base`` holds: a label a person wrote, or one the record
+    already carries, stays, and a kind already present is left alone.
+    """
+    merged = list(base or [])
+    kinds = {str(item).strip().casefold().partition(":")[0] for item in merged if isinstance(item, str)}
+    for label in auto or []:
+        kind = label.strip().casefold().partition(":")[0]
+        if kind not in kinds:
+            kinds.add(kind)
+            merged.append(label)
+    return merged
+
 
 # Module-level FTS and CJK-shadow availability caches, initialized by get_con().
 _FTS_OK = None     # FTS5 unicode61 availability.
@@ -1300,8 +1339,12 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
                  source=None, quiet=False, requires_consume=False, journal_action=None,
                  journal_insert_only=False, journal_actor=None,
                  journal_cwd=_WRITE_EVENT_CWD_UNSET, headline=None, aliases=None,
-                 entities=None, topics=None, artifact_refs=None):
-    """DB write primitive: one write, one connection, one transaction."""
+                 entities=None, topics=None, artifact_refs=None, auto_topics=None):
+    """DB write primitive: one write, one connection, one transaction.
+
+    ``auto_topics`` are labels the runtime offers (not the caller's ``topics``): they are
+    merged into a record's topics, never replacing its existing or given ones.
+    """
     assert tier in TIERS and scope in SCOPES
     ok, why = quality_ok(body)
     if not ok:
@@ -1336,6 +1379,10 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
             supplied = (aliases, entities, topics, artifact_refs)
             for idx, (raw, old) in enumerate(zip(supplied, current[1:])):
                 normalized = _normalize_capsule_list(raw if raw is not None else old)
+                if idx == 2 and auto_topics:  # topics slot: merge in, never replace
+                    had = _normalize_capsule_list(old)  # a kind the record had, or the caller gave, is not filled in
+                    lacking = _merge_auto_topics(had, auto_topics)[len(had):]
+                    normalized = _normalize_capsule_list(_merge_auto_topics(normalized, lacking))
                 if idx == 1:  # entities slot: merge in deterministic extraction
                     normalized = _merge_entities(normalized, _extracted)
                 values.append(json.dumps(normalized, ensure_ascii=False))
@@ -1433,7 +1480,8 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
                     " delivery_state=CASE WHEN delivery_state='pending' OR ?='pending' "
                     "THEN 'pending' ELSE delivery_state END WHERE id=?",
                     (today(), requested_delivery, dup))
-            if any(value is not None for value in (headline, aliases, entities, topics, artifact_refs)) or _extracted:
+            if (any(value is not None for value in (headline, aliases, entities, topics, artifact_refs))
+                    or _extracted or auto_topics):
                 refresh_capsule(dup)
             _capture_v2_operation(
                 con, "put", post_ids=[dup], reason="dedup-reinforce"
@@ -1460,7 +1508,7 @@ def write_record(tier, scope, rtype, body, cwd_origin=None, tags=None, links=Non
             "injection_flag": 1 if "injection-pattern" in flags else 0,
             "delivery_state": requested_delivery,
             "headline": _normalize_headline(headline, body),
-            "aliases": aliases or [], "entities": _merge_entities(entities, _extracted), "topics": topics or [],
+            "aliases": aliases or [], "entities": _merge_entities(entities, _extracted), "topics": _merge_auto_topics(topics, auto_topics),
             "artifact_refs": artifact_refs or [], "status": "active",
             "canonical_id": sid, "superseded_by": None, "capsule_version": 1,
         }
@@ -2040,17 +2088,33 @@ def candidates(query, *, limit=CANDIDATE_MAX_RESULTS,
     return shown_rows
 
 
+_BOOTSTRAP_LABEL_RANK = {"unit": 0, "field": 1}
+_BOOTSTRAP_LOOKUP_SECONDS = 3.0
+# The fence both bootstrap queries share; bind (project, today) in this order.
+_BOOTSTRAP_FENCE_SQL = (
+    "AND r.status='active' "
+    "AND (r.injection_flag=0 OR r.injection_flag IS NULL) "
+    "AND (r.scope='global' OR r.cwd_origin=?) "
+    "AND (r.expires IS NULL OR r.expires='' OR r.expires>=?) "
+    f"AND {BOOTSTRAP_TYPE_FENCE} "
+)
+
+
 def bootstrap_context(queries, *, cwd=None, limit=4, max_bytes=6144,
-                      per_record_bytes=1600):
+                      per_record_bytes=1600, topics=None):
     """Return bounded preference bodies for a unit-declared worker bootstrap.
 
     Runtime-only and read-only: it opens the database with ``mode=ro`` and never
     calls ``get_con``, ``_touch_records``, ``_append_recall_event`` or
     ``_write_recall_receipt``. Query groups rank in the given order; the type
     fence selects instruction-bearing records by purpose, not by content
-    relevance. Any failure returns an empty string.
+    relevance. ``topics`` are exact capsule labels (``unit:<family/name>``,
+    ``field:<name>``): records carrying one come first, unit labels before
+    field labels, then strength and update order; query groups fill what is
+    left. Any failure, or a lookup past three seconds, returns an empty string.
     """
     limit = max(1, min(int(limit), BOOTSTRAP_MAX_RESULTS))
+    labels = [t.casefold() for t in _normalize_capsule_list(list(topics or []))]
     max_bytes = max(1, min(int(max_bytes), BOOTSTRAP_MAX_UTF8_BYTES))
     groups = []
     for q in queries or []:
@@ -2059,31 +2123,47 @@ def bootstrap_context(queries, *, cwd=None, limit=4, max_bytes=6144,
         ]
         if terms:
             groups.append(" OR ".join(terms))
-    if not groups or not DB.is_file():
+    if not (groups or labels) or not DB.is_file():
         return ""
     con = None
     rows = []
     try:
         project = project_key(Path(cwd) if cwd else Path.cwd())
         con = sqlite3.connect(DB.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
-        if not con.execute(
+        if labels:
+            stop_at = time.monotonic() + _BOOTSTRAP_LOOKUP_SECONDS
+            con.set_progress_handler(lambda: int(time.monotonic() > stop_at), 10000)
+        if groups and not con.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' "
             "AND name='records_capsule_fts'"
         ).fetchone():
             return ""
         today_s = datetime.date.today().isoformat()
         seen = set()
+        if labels:
+            marks = ",".join("?" * len(labels))
+            labelled = {}
+            for row in con.execute(
+                "SELECT r.id,r.tier,r.type,r.scope,r.body,t.topic "
+                "FROM record_topics t JOIN records r ON r.id=t.record_id "
+                f"WHERE t.topic IN ({marks}) {_BOOTSTRAP_FENCE_SQL}"
+                "ORDER BY r.strength DESC,r.updated DESC,r.id",
+                (*labels, project, today_s),
+            ).fetchall():
+                rank = _BOOTSTRAP_LABEL_RANK.get(row[5].split(":", 1)[0], 2)
+                if row[0] not in labelled or rank < labelled[row[0]][0]:
+                    labelled[row[0]] = (rank, row[:5])
+            # dict order keeps the strength/updated order; the sort is stable.
+            for _rank, row in sorted(labelled.values(), key=lambda item: item[0])[:limit]:
+                seen.add(row[0])
+                rows.append(row)
         for expression in groups:
             if len(rows) >= limit:
                 break
             found = con.execute(
                 "SELECT r.id,r.tier,r.type,r.scope,r.body "
                 "FROM records_capsule_fts c JOIN records r ON r.id=c.id "
-                "WHERE records_capsule_fts MATCH ? AND r.status='active' "
-                "AND (r.injection_flag=0 OR r.injection_flag IS NULL) "
-                "AND (r.scope='global' OR r.cwd_origin=?) "
-                "AND (r.expires IS NULL OR r.expires='' OR r.expires>=?) "
-                f"AND {BOOTSTRAP_TYPE_FENCE} "
+                f"WHERE records_capsule_fts MATCH ? {_BOOTSTRAP_FENCE_SQL}"
                 "ORDER BY bm25(records_capsule_fts),r.strength DESC,r.updated DESC "
                 "LIMIT ?",
                 (expression, project, today_s, limit + len(seen)),
@@ -5111,6 +5191,7 @@ def doctor(json_output=False):
             return 2
         policy = sync_v2.remote_policy(_sync_environment(), connection=con)
         sync_snapshot = sync_v2.sync_status(con, policy=policy)
+        stale_line = _exchange_stale_line(con)
         # ① PRAGMA integrity_check
         rows = con.execute("PRAGMA integrity_check").fetchall()
         verdict = rows[0][0] if rows else "unknown"
@@ -5279,11 +5360,14 @@ def doctor(json_output=False):
             _doctor_check(results, "dump-freshness", "OK", f"dump max(updated)={dump_max}")
 
     sync_level = int(sync_snapshot.get("exit_code", 2))
+    sync_message = f"{sync_snapshot.get('status')}: {sync_snapshot.get('reason') or 'ok'}"
+    if stale_line:
+        sync_message += f" | {stale_line}"
     _doctor_check(
         results,
         "sync-v2",
         "OK" if sync_level == 0 else "WARN" if sync_level == 1 else "FAIL",
-        f"{sync_snapshot.get('status')}: {sync_snapshot.get('reason') or 'ok'}",
+        sync_message,
     )
     max_level = 0
     for name, status, message in results:
@@ -5387,10 +5471,72 @@ def inject_cleanup_candidates(con, encc, max_groups=5, soft_ceiling=80):
     return lines
 
 
-def inject(max_working=None, max_durable=None, hook=False):
+SESSION_START_REPEAT_SECONDS = 120
+
+
+def _session_start_repeat(payload, block):
+    """True when this session was just shown this very summary for this very start source.
+
+    One SessionStart can reach the hook twice (a compaction right after a resume was seen
+    to put the same summary into the context twice in a row). The marker lives in the
+    candidate-seen directory (swept by the same TTL), is keyed by session, start source,
+    the session's compaction mark and text, and only a repeat inside
+    SESSION_START_REPEAT_SECONDS counts. A later start, a changed summary, another source
+    (resume, then compact) and a compaction that happened since (the compaction path records
+    it whichever of SessionStart(compact) and PostCompact comes first) still deliver. Any
+    failure delivers."""
+    try:
+        sid = _seen_session(next((payload.get(k) for k in ("session_id", "sessionID", "thread_id")
+                                  if isinstance(payload.get(k), str) and payload.get(k)), ""))
+        if not sid:
+            return False
+        try:
+            import context_repeat
+            compaction = context_repeat.compaction_mark(sid)
+        except Exception:
+            compaction = ""
+        source = str(payload.get("source") or "")
+        digest, _ = _seen_names(sid, "")
+        name = f"summary-{digest}"
+        key = hashlib.sha256(
+            (source + "\0" + compaction + "\0" + block).encode("utf-8", "replace")).hexdigest()[:16]
+        now = time.time()
+        with _seen_lock(name) as held:
+            if not held:
+                return False
+            path = CANDIDATE_SEEN / f"{name}.json"
+            try:
+                last = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                last = {}
+            if (isinstance(last, dict) and last.get("key") == key
+                    and 0 <= now - float(last.get("at") or 0) < SESSION_START_REPEAT_SECONDS):
+                return True
+            fd, raw = tempfile.mkstemp(prefix=f".{name}.", dir=CANDIDATE_SEEN)
+            try:
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(json.dumps({"key": key, "at": now}))
+                os.replace(raw, path)
+            finally:
+                try:
+                    os.unlink(raw)
+                except FileNotFoundError:
+                    pass
+            _seen_sweep(now, keep=path)
+    except Exception:
+        return False
+    return False
+
+
+def inject(max_working=None, max_durable=None, hook=False, payload=None):
     """Build the SessionStart memory block and optional hook JSON wrapper."""
+    payload = payload if isinstance(payload, dict) else {}
+
     def emit(block):
         if hook:
+            if _session_start_repeat(payload, block):
+                return
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
                                                      "additionalContext": block}},
                               ensure_ascii=False))
@@ -5421,6 +5567,9 @@ def inject(max_working=None, max_durable=None, hook=False):
             (encc, today())))
         # Collect cleanup candidates while the connection remains open.
         cleanup_lines = inject_cleanup_candidates(con, encc)
+        stale = _exchange_stale_line(con)
+        if stale:
+            cleanup_lines.insert(0, "⚠️ " + stale)
         # Count cwd-scoped injection-flagged working and durable records.
         flagged_cnt = con.execute(
             "SELECT COUNT(*) FROM records "
@@ -6232,7 +6381,11 @@ def _sync_locked(json_output=False, routine=False, apply_expiry=False,
             reason = "remote-rewind"
         else:
             exchange_status = "hard-failure"
-            reason = "exchange-validation-failed"
+            # Name the environment check and (shortened) path that failed, never
+            # the exception text, which can carry host paths or project names.
+            label = git_exchange_v2.failure_label(exc)
+            reason = f"exchange-validation-failed:{label}" if label else (
+                "exchange-validation-failed")
         status.update(common, status=exchange_status, reason=reason,
                       exit_code=exc.exit_code)
         return _emit_sync(status, json_output)
@@ -6489,6 +6642,46 @@ def _exchange_read_trigger():
         _schedule_exchange("read")
     except Exception:
         pass
+
+
+def _exchange_stale_line(con):
+    """One line when a remote exchange is configured, work is waiting, and nothing
+    has gone up for ``EXCHANGE_STALE_DAYS``; ``None`` when healthy or not applicable.
+
+    Read-only and local: DB outbox/peer rows plus the last recorded failure reason.
+    """
+    try:
+        if not sync_v2.remote_policy(_sync_environment()).get("enabled"):
+            return None
+        pending, oldest = con.execute(
+            "SELECT COUNT(*), MIN(queued_at) FROM sync_outbox WHERE state<>'confirmed'"
+        ).fetchone()
+        if not pending:
+            return None
+        peer = con.execute(
+            "SELECT confirmed_at FROM sync_peer_state WHERE peer_id='origin'"
+        ).fetchone()
+
+        def _age_days(raw):
+            when = datetime.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=datetime.timezone.utc)
+            return (datetime.datetime.now(datetime.timezone.utc) - when).total_seconds() / 86400
+
+        waiting = _age_days(oldest)   # a write queued just now is not a stall
+        since = _age_days(peer[0]) if peer and peer[0] else waiting
+        if waiting < 1 or since < EXCHANGE_STALE_DAYS:
+            return None
+        state = _exchange_state_load()
+        notice = state.get("failure_notice") or state.get("last_notified")
+        cause = _exchange_clean_reason(
+            notice.get("reason") if isinstance(notice, dict) else notice)
+        days = int(since)
+        line = (f"memory not pushed to the remote for {days} day{'' if days == 1 else 's'}; "
+                f"{pending} pending; cause: ")
+        return (line + cause)[:140]
+    except Exception:
+        return None
 
 
 def _exchange_consume_notice():
@@ -8529,6 +8722,8 @@ def _cli_main():
     bc = sub.add_parser("bootstrap-context",
                         help="Runtime-only read-only preference bodies for declared unit bootstrap")
     bc.add_argument("--query", action="append", default=[])
+    bc.add_argument("--topic", action="append", default=[],
+                    help="Exact capsule label such as unit:<family/name> or field:<name>")
     bc.add_argument("--cwd")
     bc.add_argument("--limit", type=int, default=4)
     bc.add_argument("--max-bytes", type=int, default=6144)
@@ -8728,10 +8923,11 @@ def _cli_main():
     args = ap.parse_args()
 
     # A failed background exchange is reported once, by the next command a
-    # person or agent runs. Hook-driven reads (candidates, inject) stay silent:
+    # person or agent runs. Hook-driven reads (candidates, inject, recall-gate)
+    # and the runtime's worker-start read (bootstrap-context) stay silent:
     # nobody sees their stderr, so they must not use the notice up.
     no_touch_read = args.cmd in ("show", "recall") and getattr(args, "no_touch", False)
-    if not no_touch_read and args.cmd not in ("candidates", "inject", "recall-gate"):
+    if not no_touch_read and args.cmd not in ("candidates", "inject", "recall-gate", "bootstrap-context"):
         _exchange_consume_notice()
     probe_deadline = None
     if args.cmd == "candidates":
@@ -8751,7 +8947,8 @@ def _cli_main():
             requires_consume=args.requires_consume,
             journal_action="add",
             headline=args.headline, aliases=args.alias, entities=args.entity,
-            topics=args.topic, artifact_refs=args.artifact_ref,
+            topics=args.topic, auto_topics=_work_labels(args.tier, args.type),
+            artifact_refs=args.artifact_ref,
         )
     elif args.cmd == "note":
         write_record("working", "project", args.type, args.body,
@@ -8777,7 +8974,7 @@ def _cli_main():
     elif args.cmd == "bootstrap-context":
         try:
             out = bootstrap_context(args.query, cwd=args.cwd, limit=args.limit,
-                                    max_bytes=args.max_bytes)
+                                    max_bytes=args.max_bytes, topics=args.topic)
         except Exception:
             out = ""
         if out:
@@ -8881,11 +9078,13 @@ def _cli_main():
         _EXCHANGE_SUPPRESS = True  # the explicit sync is the exchange
         sys.exit(sync(json_output=args.json_output))
     elif args.cmd == "inject":
+        hook_payload = {}
         if args.hook:
             # SessionStart hands its JSON to stdin; compact/clear mean the
             # model's context lost what the display history says it saw.
-            _seen_reset_from_hook_payload(_hook_stdin_payload())
-        inject(hook=args.hook)
+            hook_payload = _hook_stdin_payload()
+            _seen_reset_from_hook_payload(hook_payload)
+        inject(hook=args.hook, payload=hook_payload)
     elif args.cmd == "register-postit":
         register_postit(args.path)
     elif args.cmd == "export":

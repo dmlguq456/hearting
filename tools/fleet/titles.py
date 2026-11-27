@@ -11,6 +11,10 @@ title also returns a live one-sentence status, written alongside it. Absent on
 older sidecars and omitted from the written dict when there is nothing to say —
 old readers ignore the unknown key either way.
 
+Beside it, ``<sid>.timeline.jsonl`` is an append-only record of the earlier NOW values
+and the person's one-line prompts (``append_timeline`` / ``read_timeline``). It follows
+the sidecar's seven-day sweep and is the only place earlier NOW values are kept.
+
 ``FLEET_TITLE_STATE_DIR`` overrides the state root. Otherwise the XDG state
 location is used: ``${XDG_STATE_HOME:-~/.local/state}/agent-fleet/titles``.
 The pre-F-21 Claude path (``~/.claude/.fleet-titles/<sid>.json``) remains a
@@ -20,6 +24,7 @@ import json
 import math
 import os
 import re
+import stat
 import tempfile
 import time
 
@@ -32,6 +37,9 @@ _FRESH_SUMMARY_SEC = _FRESH_SEC
 _STALE_SWEEP_SEC = 7 * 24 * 3600
 _SAFE_KEY_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _TITLE_TIME_UNSET = object()
+TIMELINE_LINE_MAX = 64 * 1024
+TIMELINE_KINDS = ("now", "prompt")
+_TIMELINE_READ_MAX = 8 * 1024 * 1024
 
 
 def previous_title(entity, timestamp, now=None):
@@ -77,7 +85,7 @@ def annotate(entities):
 
 def _safe_key(value, label):
     value = str(value or "")
-    if not value or not _SAFE_KEY_RE.match(value):
+    if not value or not _SAFE_KEY_RE.fullmatch(value):     # `$` alone takes a final newline
         raise ValueError("invalid %s" % label)
     return value
 
@@ -98,6 +106,10 @@ def sidecar_path(sid, harness="claude"):
     return os.path.join(titles_dir(harness), _safe_key(sid, "session id") + ".json")
 
 
+def timeline_path(sid, harness="claude"):
+    return os.path.join(titles_dir(harness), _safe_key(sid, "session id") + ".timeline.jsonl")
+
+
 def lock_path(sid, harness="claude"):
     return os.path.join(titles_dir(harness), ".lock-" + _safe_key(sid, "session id"))
 
@@ -109,7 +121,7 @@ def attempt_sid(attempt_id):
     A registered worker session runs no statusline producer, so its own runtime
     sid never gains a sidecar; the attempt-owned record is the only producer.
     """
-    if not isinstance(attempt_id, str) or not _SAFE_KEY_RE.match(attempt_id):
+    if not isinstance(attempt_id, str) or not _SAFE_KEY_RE.fullmatch(attempt_id):
         return None
     return "dispatch-" + attempt_id
 
@@ -251,6 +263,92 @@ def write(sid, title, source="refresher", offset=0, now=None, harness="claude", 
     return True
 
 
+def append_timeline(sid, row, harness="claude", now=None):
+    """Append one record to the session's timeline with a single ``O_APPEND`` write.
+
+    ``row`` is a dict with a ``kind`` of ``now`` or ``prompt``; ``at`` defaults to now.
+    Returns False — quietly — for a bad key or row, a line over ``TIMELINE_LINE_MAX``,
+    or any I/O error: the record is a convenience and never fails its caller. The file
+    is created ``0600`` like the sidecar.
+    """
+    try:
+        if not isinstance(row, dict) or row.get("kind") not in TIMELINE_KINDS:
+            return False
+        record = dict(row)
+        at = record.get("at")
+        if type(at) not in (int, float) or not math.isfinite(at):
+            record["at"] = time.time() if now is None else now
+        line = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+        if len(line) > TIMELINE_LINE_MAX:
+            return False
+        path = timeline_path(sid, harness=harness)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # A link or a FIFO in its place is not followed or waited on: only a regular file is written.
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return False
+            return os.write(fd, line) == len(line)
+        finally:
+            os.close(fd)
+    except Exception:
+        return False
+
+
+def _timeline_record(raw):
+    """One line's record; a line a half-finished write ran into keeps the whole record after it."""
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        pass
+    start = raw.rfind(b'{"kind":"')
+    if start <= 0:
+        return None
+    try:
+        return json.loads(raw[start:].decode("utf-8"))
+    except Exception:
+        return None
+
+
+def read_timeline(sid, harness="claude"):
+    """The session's timeline records in file order, oldest first.
+
+    Each item is a dict with a finite ``at``, a ``kind`` of ``now``/``prompt``, a string
+    ``text`` and, when the writer knew them, the cursor fields (``from``/``to`` for a
+    NOW, ``from`` for a prompt). A broken line, an unknown ``kind`` and a last line
+    that never got its newline (a half-finished write) are skipped; a whole record written
+    after a half-finished one on the same line is still read. A missing file or bad key
+    reads as ``[]``. Only the last ``_TIMELINE_READ_MAX`` bytes are read.
+    """
+    try:
+        path = timeline_path(sid, harness=harness)
+        with open(path, "rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
+            if size > _TIMELINE_READ_MAX:
+                # One byte more: when it is a newline the window starts on a whole line.
+                handle.seek(size - _TIMELINE_READ_MAX - 1)
+                data = handle.read(_TIMELINE_READ_MAX + 1).partition(b"\n")[2]
+            else:
+                data = handle.read(_TIMELINE_READ_MAX)
+    except Exception:
+        return []
+    lines = data.split(b"\n")
+    lines.pop()  # the segment after the last newline is empty or half written
+    rows = []
+    for raw in lines:
+        item = _timeline_record(raw)
+        if item is None:
+            continue
+        if (not isinstance(item, dict) or item.get("kind") not in TIMELINE_KINDS
+                or not isinstance(item.get("text"), str)):
+            continue
+        at = item.get("at")
+        if type(at) not in (int, float) or not math.isfinite(at):
+            continue
+        rows.append(item)
+    return rows
+
+
 _TAG_SWEEP_SEC = 30 * 24 * 3600
 
 
@@ -355,7 +453,8 @@ def sweep(now=None, max_age=_STALE_SWEEP_SEC):
         except OSError:
             continue
         for name in names:
-            if not (name.endswith(".json") or name.endswith(".tmp")):
+            if not (name.endswith(".json") or name.endswith(".tmp")
+                    or name.endswith(".timeline.jsonl")):
                 continue
             path = os.path.join(directory, name)
             try:

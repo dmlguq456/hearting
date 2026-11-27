@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -430,6 +431,37 @@ class NativeAnswerNormalizationTest(unittest.TestCase):
         answers = FI.answers_from_native(interview, asked)
         self.assertEqual(answers["answers"][question["id"]]["choice"], 0)
 
+    def test_board_mixed_values_reach_the_frame_answer_file(self):
+        import human_wait_state as waits
+        interview = good_interview()
+        rows = [{"id": FI.UNDERSTANDING_SLOT, "question": interview["understanding"], "choices": [{"value": "yes", "label": "yes"}]}]
+        long_note = "가" * (FI.MAX_CORRECTION_CHARS + 1)
+        answers = {FI.UNDERSTANDING_SLOT: ["yes", long_note]}
+        for question in interview["questions"]:
+            labels = [option["label"] for option in question["options"]]
+            rows.append({"id": question["id"], "question": question["question"], "choices": [{"value": label, "label": label} for label in labels]})
+            answers[question["id"]] = [labels[0], "A separate note"]
+        detail = {"questions": [{**row, "is_other": True} for row in rows], "response_mode": "frame-interview"}
+        envelope = {"source": "S2", "kind": "question", "gate_epoch": 1, "detail": detail,
+                    "native_ref": {"transport": "hearting-human-gate", "gate_epoch": 1}}
+        self.assertIsNone(waits._native_response_error(envelope, {"answers": answers}))
+        result = waits._frame_interview_answers(detail, interview, answers)
+        self.assertEqual(FI.validate_answers(interview, result), [])
+        mark = FI._truncated_mark()
+        self.assertTrue(result["understanding_confirmed"])
+        self.assertEqual(result["correction"], long_note[:FI.MAX_CORRECTION_CHARS - len(mark)] + mark)
+        for question in interview["questions"]:
+            self.assertEqual(result["answers"][question["id"]], {"choice": 0, "note": "A separate note"})
+
+    def test_restatement_choice_keeps_the_added_correction(self):
+        row = {"options": ["yes", "no"], "answer": "yes", "note": "Correct the target"}
+        self.assertEqual(FI._restatement_outcome(row), (True, "Correct the target"))
+        interview = good_interview()
+        answers = {"schema": FI.ANSWERS_SCHEMA, "route_id": interview["route_id"], "round": 1,
+                   "actor_kind": "user", "understanding_confirmed": True, "correction": row["note"],
+                   "answers": {q["id"]: {"choice": 0, "note": ""} for q in interview["questions"]}}
+        self.assertIn("Correct the target", FI.render_intent(interview, answers))
+
     def test_a_note_beside_a_picked_option_is_kept_with_the_choice(self):
         # GA-A5-007: the words added beside a picked option are the person's, kept as the note.
         interview = good_interview()
@@ -827,6 +859,88 @@ class EntryExecutionScopeTest(unittest.TestCase):
         for choice, state in ((None, "unanswered"), (FI.NONE_SENTINEL, "off-menu"), (99, "unanswered")):
             answers["answers"]["q-scope"]["choice"] = choice
             self.assertEqual(FI.route_choice(interview, answers)["state"], state)
+
+
+class RouteScopeNoteTest(unittest.TestCase):
+    """What the runtime reads from a proposal's structure and writes beside the route question."""
+    ROUTE = "Both (recommended)"
+
+    def scoped(self, legs, scope):
+        interview = routed_interview()
+        proposal = interview["route_proposals"]["by_option"][self.ROUTE]
+        proposal["legs"] = [dict(LEG) for _ in range(legs)]
+        if scope is None:
+            proposal.pop("execution_scope", None)
+        else:
+            proposal["execution_scope"] = scope
+        self.assertEqual(FI.validate(interview, intensity="standard"), [])
+        return interview
+
+    def note(self, interview, label=None, lang="en", question="q-scope"):
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}):
+            return FI.route_scope_note(interview, question, label or self.ROUTE)
+
+    TEXT = {("en", "complete"): "Runs all {n} legs through to the end, without asking again in between.",
+            ("en", "report"): "Stops each time a leg ends; the next leg starts when you say so.",
+            ("ko", "complete"): "leg {n}개를 끝까지 이어서 진행합니다. 중간에 다시 묻지 않습니다.",
+            ("ko", "report"): "leg가 하나 끝날 때마다 멈춥니다. 다음 leg는 말씀하시면 시작합니다."}
+
+    def test_only_an_option_mapped_to_a_proposal_of_several_legs_gets_the_line(self):
+        for lang in ("en", "ko"):
+            for scope in (None, "complete", "report"):
+                for legs in (1, 2, 3):
+                    with self.subTest(lang=lang, scope=scope, legs=legs):
+                        interview = self.scoped(legs, scope)
+                        expected = "" if legs == 1 else self.TEXT[(lang, scope or "complete")].format(n=legs)
+                        self.assertEqual(self.note(interview, lang=lang), expected)
+        interview = self.scoped(2, "complete")
+        self.assertEqual(self.note(interview, "Approval step only"), "")           # an option with no proposal
+        self.assertEqual(self.note(interview, question="q-cap"), "")               # not the route question
+        self.assertEqual(self.note({}), "")
+
+    def test_the_conversation_card_puts_the_line_right_under_that_option_and_nowhere_else(self):
+        for legs, scope in ((1, "complete"), (2, "complete"), (2, "report"), (3, "report")):
+            with self.subTest(legs=legs, scope=scope):
+                interview = self.scoped(legs, scope)
+                with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "en"}):
+                    block = FI.pending_question_block(interview).split("\n")
+                at = block.index("- Both (recommended): " + interview["questions"][0]["options"][0]["means"])
+                note = self.TEXT[("en", scope)].format(n=legs)
+                self.assertEqual(block[at + 1] == "  " + note, legs > 1)
+                self.assertEqual(sum(line.strip() == note for line in block), int(legs > 1))
+                without = copy.deepcopy(interview)
+                del without["route_proposals"]
+                with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "en"}):
+                    plain = FI.pending_question_block(without).split("\n")
+                self.assertEqual([line for line in block if line != "  " + note], plain)
+
+    def test_the_line_changes_neither_the_interview_nor_what_an_answer_means(self):
+        interview = self.scoped(3, "report")
+        before = copy.deepcopy(interview)
+        answers = good_answers(interview)
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "ko"}):
+            FI.pending_question_block(interview)
+            FI.route_scope_note(interview, "q-scope", self.ROUTE)
+        self.assertEqual(interview, before)
+        self.assertEqual(FI.validate_answers(interview, answers), [])
+        chosen = FI.route_choice(interview, answers)
+        self.assertEqual((chosen["state"], chosen["label"], chosen["execution_scope"]), ("selected", self.ROUTE, "report"))
+        self.assertEqual(chosen["proposal"], before["route_proposals"]["by_option"][self.ROUTE])
+
+    def test_the_intent_says_how_each_later_leg_starts(self):
+        for legs in (2, 3):
+            for scope, tag in (("complete", "(starts when the leg before it ends, without asking again)"),
+                               ("report", "(waits for the person's word)")):
+                with self.subTest(legs=legs, scope=scope):
+                    interview = self.scoped(legs, scope)
+                    text = FI.render_intent(interview, good_answers(interview), now="2026-10-01",
+                                            approval_scope={("full-run", 0): ["autopilot-lab:full-run"]})
+                    rows = [line for line in text.split("\n") if line.startswith("- Leg ")]
+                    self.assertEqual(len(rows), legs)
+                    self.assertTrue(rows[0].endswith("  (starts now)"), rows[0])
+                    for row in rows[1:]:
+                        self.assertTrue(row.endswith("  " + tag), row)
+                    self.assertNotIn("decided separately", text)
 
 
 class RouteProposalsTest(unittest.TestCase):

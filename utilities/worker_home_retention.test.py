@@ -1444,6 +1444,74 @@ class Deliveries(Fixture):
         self.assertEqual(self.unknown(self.sweep((24) / 7), "delivery-unknown"), 1)
         self.assertTrue(home.is_dir())
 
+    def test_legacy_empty_tombstone_settles_only_for_callers_that_opt_in(self):
+        # Only log retention reads the legacy pruner's empty tombstone (record gone) as
+        # resolved; worker-home retention and the registry archive keep refusing it.
+        import dispatch_log_retention as LR
+        import dispatch_registry_archive as A
+        home, record = self.intent("att-legacy")
+        record.parent.mkdir(parents=True)
+        tomb = Path(str(record) + ".pruned")
+        tomb.write_text("")
+        meta = R._Snapshot(self.jobs).rows["att-legacy"].meta
+        self.assertEqual(R._delivery_state(self.root, meta)[0], "unknown")
+        self.assertEqual(R._delivery_state(self.root, meta, legacy_empty_tombstone=True)[0], "resolved")
+        self.assertFalse(A._delivery_settled(self.root)(meta), "the archive does not opt in")
+        # The log-retention caller asks the shared decision for the opt-in read.
+        with mock.patch.object(R, "_protections",
+                               return_value=R._Verdict("keep", "stub")) as protections:
+            LR._log_protection(mock.Mock(snapshot=R._Snapshot(self.jobs)), "att-legacy",
+                               probe_processes=False)
+        self.assertTrue(protections.called)
+        self.assertIs(protections.call_args.kwargs.get("legacy_empty_tombstone"), True)
+        # Worker-home retention keeps the 10-15 protection on the same input.
+        self.assertEqual(self.unknown(self.expire(), "delivery-unknown"), 1)
+        self.assertTrue(home.is_dir())
+
+    def test_an_archived_legacy_row_never_lets_the_orphan_home_path_retire_its_home(self):
+        # RV-PR1717 B1: log retention may retire the row's log, but the registry archive
+        # does not opt in, so the row stays and the home stays protected. Had the row
+        # moved to the archive, the orphan-home path (which reads no tombstone) would
+        # retire the home at the +24 day sweep.
+        import dispatch_registry_archive as A
+        home, record = self.intent("att-legacy3",
+                                   log_file=str(self.outside / "gone" / "att-legacy3.log"))
+        self.add("att-stay")
+        record.parent.mkdir(parents=True)
+        Path(str(record) + ".pruned").write_text("")
+        self.assertEqual(self.unknown(self.expire(), "delivery-unknown"), 1)
+        moved = A.sweep(self.jobs, now_ns=self.now + 15 * 86400 * 1_000_000_000, force=True)
+        self.assertNotIn("att-legacy3", "\n".join(A.archived_rows(self.jobs, "att-legacy3")))
+        self.assertIn("attempt_id=att-legacy3", self.jobs.read_text(), moved)
+        for windows in (16 / 7, 24 / 7, 40 / 7):
+            self.sweep(windows)
+            self.assertTrue(home.is_dir(), windows)
+
+    def test_legacy_empty_tombstone_does_not_override_a_record_or_a_bad_tombstone(self):
+        import dispatch_registry_archive as A
+        _home, record = self.intent("att-legacy2")
+        record.parent.mkdir(parents=True)
+        tomb = Path(str(record) + ".pruned")
+        tomb.write_text("")
+        record.write_text("{not json")  # interrupted prune: the record still decides
+        meta = R._Snapshot(self.jobs).rows["att-legacy2"].meta
+        self.assertEqual(R._delivery_state(self.root, meta, legacy_empty_tombstone=True)[0], "unknown")
+        self.assertFalse(A._delivery_settled(self.root)(meta))
+        record.unlink()
+        tomb.write_text(json.dumps({"schema": P.PRUNE_TOMBSTONE_SCHEMA,
+                                    "delivery_id": record.name[:-5],
+                                    "recipient_digest": record.parent.name,
+                                    "attempt_ids": ["att-other"],
+                                    "parent_attempt_id": "att-parent",
+                                    "terminal_state": "acked"}))
+        self.assertEqual(R._delivery_state(self.root, meta, legacy_empty_tombstone=True)[0], "unknown")
+        fake = self.outside / "empty-fake"
+        fake.write_text("")
+        tomb.unlink()
+        tomb.symlink_to(fake)
+        self.assertEqual(R._delivery_state(self.root, meta, legacy_empty_tombstone=True)[0], "unknown")
+        self.assertFalse(A._delivery_settled(self.root)(meta))
+
     def test_unreadable_own_record_is_unknown(self):
         home, record = self.intent("att-d4")
         record.parent.mkdir(parents=True)
@@ -6428,6 +6496,66 @@ class SharedCodexHomes(Fixture):
         result = self.sweep(24 / 7)
         self.assertEqual(result["codex"]["removed"], 1, result)
         self.assertFalse((self.root / "homes/worker-retention/views" / home.name).exists())
+
+    def rollout(self, home, thread, *, age_windows):
+        path = home / "sessions" / "2026" / "11" / "26" / f"rollout-2026-11-26T00-00-00-{thread}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"type":"session_meta"}\n')
+        stamp = (self.now - int(age_windows * RETENTION_NS)) / 1e9
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def owner_log(self, attempt, thread):
+        log = self.root / "logs" / f"{attempt}.codex.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(json.dumps({"type": "dispatch.supervisor.turn.started", "thread_id": thread,
+                                   "turn_id": "t1"}) + "\n")
+        return log
+
+    def test_a_kept_home_drops_the_session_files_no_owner_holds_after_the_wake_window(self):
+        # The home stays for its running owner. A thread the running owner names stays however old (it may be
+        # idle while it waits for a resource); a recent write stays; an ended owner's old thread goes.
+        home = self.codex_home()
+        running, ended = "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
+        recent = "33333333-3333-4333-8333-333333333333"
+        self.claim("att-codex-owner", home)
+        self.row("att-codex-running", "running", harness="codex", worker_type="owner", runtime_home=str(home),
+                 log_file=str(self.owner_log("att-codex-running", running)))
+        held = self.rollout(home, running, age_windows=30)
+        gone = self.rollout(home, ended, age_windows=2)
+        fresh = self.rollout(home, recent, age_windows=0.5)
+        other = home / "sessions" / "2026" / "11" / "26" / "notes.jsonl"
+        other.write_text("x")
+        os.utime(other, (0, 0))
+        result = self.sweep(0)
+        self.assertEqual((result["codex"]["removed"], result["codex"]["rollouts_removed"]), (0, 1), result)
+        self.assertTrue(home.is_dir())
+        self.assertFalse(gone.exists())
+        self.assertTrue(held.is_file() and fresh.is_file() and other.is_file())
+
+    def test_a_session_file_a_process_holds_open_stays(self):
+        home = self.codex_home()
+        self.claim("att-codex-owner", home)
+        old = self.rollout(home, "22222222-2222-4222-8222-222222222222", age_windows=2)
+        holder = subprocess.Popen([sys.executable, "-c", "import sys, time; handle = open(sys.argv[1]); "
+                                   "print('ready', flush=True); time.sleep(120)", str(old)],
+                                  stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (holder.kill(), holder.wait(timeout=10), holder.stdout.close()))
+        self.assertEqual(holder.stdout.readline().strip(), "ready")
+        self.row("att-codex-running", "running", harness="codex", worker_type="owner", runtime_home=str(home),
+                 log_file=str(self.owner_log("att-codex-running", "11111111-1111-4111-8111-111111111111")))
+        result = self.sweep(0)
+        self.assertEqual(result["codex"]["rollouts_removed"], 0, result)
+        self.assertTrue(old.is_file())
+
+    def test_a_running_owner_whose_thread_cannot_be_read_yet_keeps_every_session_file(self):
+        home = self.codex_home()
+        self.claim("att-codex-owner", home)
+        self.claim("att-codex-running", home, status="running")      # no log yet: its thread is unknown
+        old = self.rollout(home, "22222222-2222-4222-8222-222222222222", age_windows=2)
+        result = self.sweep(0)
+        self.assertEqual(result["codex"]["rollouts_removed"], 0, result)
+        self.assertTrue(old.is_file())
 
     def test_replacement_reserved_after_observation_keeps_the_home(self):
         # A normal recovery reservation can land between the examine pass and

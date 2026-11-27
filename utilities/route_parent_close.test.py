@@ -5,6 +5,7 @@ import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 from types import SimpleNamespace
+import base64
 import contextlib
 import io
 import hashlib
@@ -833,7 +834,9 @@ class ParentCloseTest(unittest.TestCase):
             # release tree at test time.
             old_registry_digest = "sha256:67471577db7a8f65d3c1ae24df920d33031882ae214c938db8d1a628b26bfc2a"
             old_capability_digest = "sha256:bd146b5b0abf97788e9695cf9c70d5f956677d837712688c9fad811035495643"
-            old_unit_digest = "sha256:bbdaa2cef3e5759be7d71772c7baebe08d69e575d967973280a0ba9ad6760b5a"
+            # The unit heads now carry a default `field:`, so today's unit digest is no longer the one
+            # v3.47.0 sealed; this fixture needs only the unit axis to read current beside a stale registry.
+            old_unit_digest = ROUTE.unit_catalog_digest()
             historical_release_root = fixture.base / "sealed-release-v3.47.0"
             historical_release_root.mkdir()
             (historical_release_root / "release-provenance.json").write_text(json.dumps({
@@ -2819,6 +2822,257 @@ class ParentCloseTest(unittest.TestCase):
         self.assertEqual(result["state"], "cancelled")
         self.assertNotEqual(RR.classify_identity(run)[0], "working")
         self.assertIsNone(foreign.poll())
+
+    def ended_owner_close_fixture(self, **row):
+        import artifact_producer as AP
+        self.row("att-owner", status="done", **row)
+        begun = AP.begin(self.artifacts, route_file=self.path, capability="autopilot-code", intensity="standard")
+        output = Path(begun["cycle_dir"]) / "artifacts/plans/fixture/REPORT.md"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("fixture output")
+        command = [sys.executable, str(HERE / "capability-route.py"), "close", "--route", str(self.path)]
+        return AP, begun, output, command
+
+    def cycle_reading(self, AP, begun):
+        record = AP.read_cycle_record(self.artifacts, begun["cycle_id"])
+        return record["state"], (AP._published_cycle_state(self.artifacts, record)
+                                 if record["state"] == "sealed" else None)
+
+    def test_closing_a_failed_owners_route_seals_its_cycle_abandoned_and_records_the_ledger_cancelled(self):
+        # (가) The owner had already ended FAIL: the close found no running owner, so only the record closed and
+        # the cycle stayed open. Now the new unproven closure ends both as stopping a running owner does.
+        AP, begun, output, command = self.ended_owner_close_fixture(note="dead-worker-fail", failure_class="fail")
+        first = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        outcome = json.loads(first.stdout)
+        self.assertIs(outcome["terminal_gate_proven"], False)
+        self.assertIn("terminal-gate-unproven", first.stderr)
+        self.assertEqual(self.cycle_reading(AP, begun), ("sealed", "abandoned"))
+        self.assertEqual(output.read_text(), "fixture output")          # the files stay in the cycle folder
+        ledger = WS.WorkflowLedger(self.route["route_id"], self.route["route_hash"], jobs=self.jobs)
+        state = ledger.state()
+        self.assertEqual(state["workflow_state"], "CANCELLED")
+        self.assertEqual({row["state"] for row in state["nodes"].values()}, {"CANCELLED"})
+        self.assertIsNone(CLOSE.intent(self.route, self.jobs))           # no running owner's stop was requested
+        # What `start --route` reads before it says `route-closed-unproven` (the scenario runs that start).
+        from dispatch_notice_state import closed_outcome
+        self.assertIs(closed_outcome(self.path, self.route).get("terminal_gate_proven"), False)
+        # (3) The same close again changes nothing: same closure, same cycle, no new ledger entry.
+        entries = len(ledger.journal())
+        again = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(json.loads(again.stdout), outcome)
+        self.assertIn("route already closed", again.stderr)
+        self.assertEqual(self.cycle_reading(AP, begun), ("sealed", "abandoned"))
+        self.assertEqual(len(ledger.journal()), entries)
+
+    def test_closing_a_route_whose_owner_ended_pass_leaves_its_cycle_to_the_completion(self):
+        # (가-2) A PASS whose completion has not proven the gate yet (or a proven close) never seals the cycle
+        # abandoned: the completion that follows still consumes the unproven close and seals it completed.
+        AP, begun, _output, command = self.ended_owner_close_fixture(note="completed-supervisor",
+                                                                     failure_class="pass")
+        done = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.cycle_reading(AP, begun), ("open", None))
+        ledger = WS.WorkflowLedger(self.route["route_id"], self.route["route_hash"], jobs=self.jobs)
+        self.assertNotEqual(ledger.state()["workflow_state"], "CANCELLED")
+        self.assertFalse(CLOSE.finish_ended_owner_close(self.route, {"terminal_gate_proven": True}, jobs=self.jobs))
+
+    def test_a_route_with_no_registered_owner_keeps_its_cycle_for_a_later_completion(self):
+        # Inline or legacy work closed before its `complete`: its later exact completion may still consume the
+        # unproven close and finalize the cycle, so the close does not seal it abandoned.
+        import artifact_producer as AP
+        begun = AP.begin(self.artifacts, route_file=self.path, capability="autopilot-code", intensity="standard")
+        command = [sys.executable, str(HERE / "capability-route.py"), "close", "--route", str(self.path)]
+        done = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIs(json.loads(done.stdout)["terminal_gate_proven"], False)
+        self.assertEqual(self.cycle_reading(AP, begun), ("open", None))
+
+    def test_a_later_turns_failed_close_keeps_the_earlier_turns_complete_ledger(self):
+        # A route closed PASS took a later request whose turn ended FAIL: COMPLETE is the earlier turn's record and
+        # cannot move to CANCELLED, so it stays; the close still stands and the open cycle is sealed abandoned.
+        ledger = WS.WorkflowLedger(self.route["route_id"], self.route["route_hash"], jobs=self.jobs)
+        for state in WS.completion_transition_path("CREATED", "COMPLETE"):
+            ledger.set_workflow_state(state)
+        AP, begun, _output, command = self.ended_owner_close_fixture(note="dead-worker-fail", failure_class="fail")
+        done = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIs(json.loads(done.stdout)["terminal_gate_proven"], False)
+        self.assertEqual(ledger.state()["workflow_state"], "COMPLETE")
+        self.assertEqual(self.cycle_reading(AP, begun), ("sealed", "abandoned"))
+
+    def test_a_busy_lock_leaves_the_closure_standing_and_the_same_close_finishes_it(self):
+        # 🔴2: the artifact admission lock held elsewhere made `close` end in a traceback (rc 1, no JSON) with the
+        # cycle left open, and a repeated close did nothing. Now the closure stands (rc 0, its JSON), the cycle stays
+        # open, the same close run again seals it, and a third close changes nothing.
+        AP, begun, _output, command = self.ended_owner_close_fixture(note="dead-worker-fail", failure_class="fail")
+        release = self.base / "release-lock"
+        holder = subprocess.Popen([sys.executable, "-c",
+            "import sys,time; sys.path.insert(0,%r); import artifact_admission as A; from pathlib import Path; "
+            "fd=A._acquire_lock(Path(%r), 5); print('held',flush=True)\n"
+            "while not Path(%r).exists(): time.sleep(0.05)" % (str(HERE), str(self.artifacts), str(release))],
+            stdout=subprocess.PIPE, text=True, start_new_session=True)
+        self.processes.append(holder)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
+        busy = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        self.assertEqual(busy.returncode, 0, busy.stderr)
+        self.assertNotIn("Traceback", busy.stderr)
+        outcome = json.loads(busy.stdout)
+        self.assertIs(outcome["terminal_gate_proven"], False)
+        self.assertEqual(self.cycle_reading(AP, begun), ("open", None))
+        release.write_text("")
+        holder.wait(timeout=30)
+        again = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(json.loads(again.stdout), outcome)
+        self.assertIn("route already closed", again.stderr)
+        self.assertEqual(self.cycle_reading(AP, begun), ("sealed", "abandoned"))
+        ledger = WS.WorkflowLedger(self.route["route_id"], self.route["route_hash"], jobs=self.jobs)
+        entries = len(ledger.journal())
+        third = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        self.assertEqual((third.returncode, json.loads(third.stdout)), (0, outcome))
+        self.assertEqual(self.cycle_reading(AP, begun), ("sealed", "abandoned"))
+        self.assertEqual(len(ledger.journal()), entries)
+
+    def test_a_cycle_sealed_before_the_close_is_left_and_the_ledger_untouched(self):
+        # Once the cycle is sealed (by another close, or anything that finished it), a close adds nothing: no
+        # ledger entry and no second seal.
+        import artifact_producer as AP
+        self.row("att-owner", status="done", note="dead-worker-fail", failure_class="fail")
+        begun = AP.begin(self.artifacts, route_file=self.path, capability="autopilot-code", intensity="standard")
+        AP.finalize(self.artifacts, cycle_id=begun["cycle_id"], state="abandoned", abandon_reason="operator-decision")
+        self.assertEqual(AP.read_cycle_record(self.artifacts, begun["cycle_id"])["state"], "abandoned")
+        command = [sys.executable, str(HERE / "capability-route.py"), "close", "--route", str(self.path)]
+        ledger = WS.WorkflowLedger(self.route["route_id"], self.route["route_hash"], jobs=self.jobs)
+        before = ledger.state()["workflow_state"]
+        done = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(ledger.state()["workflow_state"], before)
+        self.assertNotEqual(before, "CANCELLED")
+
+    def test_concurrent_closes_seal_once_and_write_the_ledger_once(self):
+        AP, begun, _output, command = self.ended_owner_close_fixture(note="dead-worker-fail", failure_class="fail")
+        procs = [subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(3)]
+        outs = [proc.communicate(timeout=120) for proc in procs]
+        self.assertEqual([proc.returncode for proc in procs], [0, 0, 0], [err[-400:] for _out, err in outs])
+        self.assertEqual(len({out for out, _err in outs}), 1)                 # one closure, printed three times
+        self.assertEqual(sum("route already closed" in err for _out, err in outs), 2)
+        self.assertEqual(self.cycle_reading(AP, begun), ("sealed", "abandoned"))
+        ledger = WS.WorkflowLedger(self.route["route_id"], self.route["route_hash"], jobs=self.jobs)
+        self.assertEqual(sum(1 for e in ledger.journal() if e.get("workflow_state") == "CANCELLED"), 1)
+
+    def settled_case(self, status, **row):
+        AP, begun, _output, command = self.ended_owner_close_fixture(**row) if status == "done" else (None,) * 4
+        if status != "done":
+            import artifact_producer as AP
+            self.row("att-owner", status=status, **row)
+            begun = AP.begin(self.artifacts, route_file=self.path, capability="autopilot-code", intensity="standard")
+            output = Path(begun["cycle_dir"]) / "artifacts/plans/fixture/REPORT.md"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text("fixture output")
+            command = [sys.executable, str(HERE / "capability-route.py"), "close", "--route", str(self.path)]
+        done = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return self.cycle_reading(AP, begun)
+
+    def test_a_row_no_outcome_reads_from_is_not_sealed(self):
+        # Check 1: a row closes with its note and verdict in one write; an empty note is no committed end, and
+        # whatever it may still become (a PASS among them) is left to its settlement.
+        self.assertEqual(self.settled_case("done", note="", failure_class=""), ("open", None))
+
+    def test_a_terminal_conflict_under_review_is_not_sealed(self):
+        # A FAIL a later PASS contradicts waits for its review; the review may settle it as the route's PASS.
+        conflicts = base64.b64encode(json.dumps(
+            {"c1": {"note": "completed-supervisor", "failure_class": "pass"}}).encode()).decode()
+        self.assertEqual(self.settled_case("done", note="dead-worker-fail", failure_class="fail",
+                                           terminal_conflict="1", terminal_conflicts_b64=conflicts), ("open", None))
+
+    def test_a_stopped_owner_is_sealed_abandoned(self):
+        self.assertEqual(self.settled_case("killed", note="fleet-kill", failure_class="cancelled"),
+                         ("sealed", "abandoned"))
+
+    def continuation_sharing_the_cycle(self, b_owner):
+        """A continuation B of this route A writes into A's open cycle; B's owner ended as `b_owner` says and B's
+        closure landed unproven (B's own close)."""
+        first = self.route["nodes"][0]["id"]
+        cont = ROUTE.build_continuation_route(self.route, resume_from_node=first, requested_boundary=first,
+                                              reason="fixture", artifact_root=self.artifacts)
+        cpath = ROUTE.canonical_route_path(self.artifacts, cont["route_id"])
+        ROUTE.publish_continuation_route(cont, self.route, cpath)
+        self.row("att-owner-b", status="done", owner_route_file=str(cpath), owner_route_id=cont["route_id"],
+                 owner_route_hash=cont["route_hash"], **b_owner)
+        b_close = subprocess.run([sys.executable, str(HERE / "capability-route.py"), "close", "--route", str(cpath)],
+                                 capture_output=True, text=True, timeout=120)
+        self.assertEqual(b_close.returncode, 0, b_close.stderr)
+        self.assertIs(json.loads(b_close.stdout)["terminal_gate_proven"], False)
+        return cont
+
+    def test_a_cycle_a_passing_continuation_shares_is_left_to_that_continuation(self):
+        # 🟡1 (review round 2): B's owner ended PASS and its completion has not proven B's closure yet. A is not the
+        # leaf of the cycle, so neither A's first close nor A's close run again seals it.
+        AP, begun, output, command = self.ended_owner_close_fixture(note="dead-worker-fail", failure_class="fail")
+        cont = self.continuation_sharing_the_cycle(dict(note="completed-supervisor", failure_class="pass"))
+        self.assertEqual(AP.route_cycle_for(self.artifacts, cont)["cycle_id"], begun["cycle_id"])
+        self.assertEqual(self.cycle_reading(AP, begun), ("open", None))     # B's own close left it, as before
+        for _ in range(2):
+            done = subprocess.run(command, capture_output=True, text=True, timeout=120)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual(self.cycle_reading(AP, begun), ("open", None))
+        self.assertEqual(output.read_text(), "fixture output")
+
+    def test_a_close_run_again_after_a_busy_lock_leaves_a_cycle_a_passing_continuation_shares(self):
+        AP, begun, _output, command = self.ended_owner_close_fixture(note="dead-worker-fail", failure_class="fail")
+        release = self.base / "release-lock"
+        holder = subprocess.Popen([sys.executable, "-c",
+            "import sys,time; sys.path.insert(0,%r); import artifact_admission as A; from pathlib import Path; "
+            "fd=A._acquire_lock(Path(%r), 5); print('held',flush=True)\n"
+            "while not Path(%r).exists(): time.sleep(0.05)" % (str(HERE), str(self.artifacts), str(release))],
+            stdout=subprocess.PIPE, text=True, start_new_session=True)
+        self.processes.append(holder)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
+        busy = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        self.assertEqual(busy.returncode, 0, busy.stderr)
+        release.write_text("")
+        holder.wait(timeout=30)
+        self.assertEqual(self.cycle_reading(AP, begun), ("open", None))
+        self.continuation_sharing_the_cycle(dict(note="completed-supervisor", failure_class="pass"))
+        again = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(self.cycle_reading(AP, begun), ("open", None))
+
+    def test_a_failed_continuation_seals_the_cycle_it_shares_with_its_own_close(self):
+        # B is the leaf and its owner ended FAIL: B's close seals the shared cycle as before; A's close adds nothing.
+        AP, begun, _output, command = self.ended_owner_close_fixture(note="dead-worker-fail", failure_class="fail")
+        self.continuation_sharing_the_cycle(dict(note="dead-worker-fail", failure_class="fail"))
+        self.assertEqual(self.cycle_reading(AP, begun), ("sealed", "abandoned"))
+        done = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.cycle_reading(AP, begun), ("sealed", "abandoned"))
+
+    def owners_in_order(self, first, last):
+        import artifact_producer as AP
+        self.row("att-owner-a", status="done", **first)
+        self.row("att-owner-b", status="done", **last)
+        begun = AP.begin(self.artifacts, route_file=self.path, capability="autopilot-code", intensity="standard")
+        output = Path(begun["cycle_dir"]) / "artifacts/plans/fixture/REPORT.md"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("fixture output")
+        done = subprocess.run([sys.executable, str(HERE / "capability-route.py"), "close", "--route", str(self.path)],
+                              capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return self.cycle_reading(AP, begun)
+
+    def test_the_latest_owner_decides_an_earlier_fail_then_a_pass_keeps_the_cycle(self):
+        # 🟡4: a FAIL answered by a replacement owner that ended PASS (its completion still settling).
+        self.assertEqual(self.owners_in_order(dict(note="dead-worker-fail", failure_class="fail"),
+                                              dict(note="completed-supervisor", failure_class="pass")), ("open", None))
+
+    def test_the_latest_owner_decides_an_earlier_pass_then_a_fail_is_sealed(self):
+        # A later turn (or replacement) ended FAIL after an earlier PASS: the latest end is the route's.
+        self.assertEqual(self.owners_in_order(dict(note="completed-supervisor", failure_class="pass"),
+                                              dict(note="dead-worker-fail", failure_class="fail")),
+                         ("sealed", "abandoned"))
 
     def test_close_finalizes_existing_cycle_and_deleted_output_is_replayable(self):
         import artifact_producer as AP

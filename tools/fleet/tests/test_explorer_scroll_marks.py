@@ -62,6 +62,12 @@ class SidebarRules(unittest.TestCase):
         self.assertGreater(dict(inside.scroll).get("tree", 0), 0)
 
 
+def _routes_head(line):
+    """The OVERVIEW ROUTES section head: ``6 ROUTES ───`` (or ``ROUTES · details wait``)."""
+    import re
+    return re.match(r"(?:[\d?]+ ROUTES|ROUTES ·)", line) is not None
+
+
 class PinnedOverviewTail(unittest.TestCase):
     def setUp(self):
         self.vm = load_fixture(FIXTURE)
@@ -74,9 +80,9 @@ class PinnedOverviewTail(unittest.TestCase):
         top = frame.pane_scroll[3]
         text = self._rows(frame)
         self.assertLess(top, body_end, "the tail is pinned")
-        self.assertTrue(text[top + 1].startswith("── ROUTES"), text[top + 1])
-        self.assertTrue(any(line.startswith("── RECENT") for line in text[top:body_end]))
-        recent = next(y for y in range(top, body_end) if text[y].startswith("── RECENT"))
+        self.assertTrue(_routes_head(text[top + 1]), text[top + 1])
+        self.assertTrue(any(line.startswith("RECENT ") for line in text[top:body_end]))
+        recent = next(y for y in range(top, body_end) if text[y].startswith("RECENT "))
         self.assertLess(recent + 1, body_end, "a RECENT row stays visible")
         self.assertIn("✓", text[recent + 1])
         route_hits = [hit for hit in frame.hits if hit.action[:2] == ("root", "ROUTES") and hit.x0 >= PANE_X]
@@ -126,7 +132,7 @@ class PinnedOverviewTail(unittest.TestCase):
         text = self._rows(frame)
         self.assertEqual(frame.pane_scroll[3], 60 - 4, "nothing is pinned when everything fits")
         summary = next(y for y, line in enumerate(text) if "10 sessions" in line)
-        self.assertTrue(text[summary + 2].startswith("── ROUTES"))
+        self.assertTrue(_routes_head(text[summary + 2]))
         self.assertNotIn("↓ more", "\n".join(text))
 
     def test_scoped_pages_keep_their_own_flow(self):

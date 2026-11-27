@@ -4665,11 +4665,21 @@ def _closed_terminal_projection(route, route_file, gates, node_states, claims):
     )
 
 
-def _status_owner(route, jobs):
+def _status_registry(jobs):
+    """The registry status reads once: `(path, rows)`, or `(None, None)` when it cannot be read."""
+    try:
+        path = jobs or default_jobs_path()
+        return path, _registry_rows(path)
+    except (OSError, ValueError, SupervisorError):
+        return None, None
+
+
+def _status_owner(route, jobs, rows=None):
     """Read-only owner projection from the actual registry, including initial execution."""
     try:
         # A status caller can itself be an older owner; newest registered owner wins.
-        rows = _registry_rows(jobs or default_jobs_path())
+        if rows is None:
+            rows = _registry_rows(jobs or default_jobs_path())
         owners = [row for row in rows if row["meta"].get("dispatch_depth") == "1"
                   and row["meta"].get("worker_type") != "frame"
                   and route["route_id"] in (row["meta"].get("owner_route_id"),
@@ -4694,6 +4704,44 @@ def _status_owner(route, jobs):
                 "last_activity": row.get("time")}
     except (OSError, ValueError, SupervisorError) as exc:
         return {"attempt_id": None, "liveness": "unknown", "reason": type(exc).__name__}
+
+
+def owner_completion_delivery(route, route_file, jobs_path, rows=None):
+    """Where each owner completion record of this route stands, read only.
+
+    One entry per latest depth-1 owner row that asked for delivery: its record's state, why it is
+    not delivered (`undelivered` while the record is open and the route is closed; the expiry
+    reason once expired) and the recipient session's first eight characters. None when the
+    registry or a record cannot be read; status never fails for it. ``rows`` are the registry rows
+    the caller already read from ``jobs_path``."""
+    try:
+        latest = {}
+        for row in (_registry_rows(jobs_path) if rows is None else rows):
+            meta = row["meta"]
+            if (meta.get("attempt_id") and meta.get("dispatch_depth") == "1"
+                    and meta.get("worker_type") == "owner" and meta.get("delivery_intent") == "1"
+                    and route["route_id"] in (meta.get("owner_route_id"), meta.get("route_id"))):
+                latest[meta["attempt_id"]] = meta
+        if not latest:
+            return []
+        closed = route_module().outcome_path(route_file).is_file()
+        result = []
+        for attempt_id, meta in latest.items():
+            record = PENDING.read(Path(jobs_path).resolve().parent, meta.get("parent_sid", ""),
+                                  meta.get("delivery_id", ""))
+            if not isinstance(record, dict):
+                continue
+            state = record.get("state")
+            if state in PENDING.OPEN_STATES:
+                reason = "undelivered" if closed else "-"
+            else:
+                reason = record.get("expiry_reason") or "-"
+            result.append({"attempt_id": attempt_id, "delivery_id": record.get("delivery_id"),
+                           "state": state, "reason": reason,
+                           "recipient": str(meta.get("parent_sid", ""))[:8]})
+        return result
+    except (OSError, ValueError, KeyError, TypeError, SupervisorError, PENDING.PendingDeliveryError):
+        return None
 
 
 def cmd_status(args):
@@ -4722,7 +4770,8 @@ def cmd_status(args):
     if closed_complete:
         derived = "COMPLETE"
         running, next_stage = [], []
-    owner = _status_owner(route, jobs)
+    registry_path, registry_rows = _status_registry(jobs)
+    owner = _status_owner(route, jobs, rows=registry_rows)
     displayed_state = "COMPLETE" if closed_complete else state["workflow_state"]
     if (not closed_complete and not failed and owner.get("liveness") == "live"
             and owner.get("registry_status") in {"open", "running"}
@@ -4768,11 +4817,33 @@ def cmd_status(args):
         "resource_children": resource_children(route, ledger),
         **ledger_metadata(jobs, ledger),
     }
+    # The registry `owner` was read from (`--jobs`, else the default one), read once for both.
+    payload["owner_completion_delivery"] = (
+        owner_completion_delivery(route, route_file, registry_path, rows=registry_rows)
+        if registry_rows is not None else None)
+    from dispatch_attempt_policy import provider_failure_kind
+    provider_failures = []
+    identity = (route["route_id"], route.get("route_hash"))
+    for row in registry_rows or ():
+        if row["status"] != "done":
+            continue
+        meta = row["meta"]
+        if identity not in ((meta.get("route_id"), meta.get("route_hash")),
+                            (meta.get("owner_route_id"), meta.get("owner_route_hash"))):
+            continue
+        kind = provider_failure_kind(meta.get("provider_failure_kind"))
+        if kind:
+            provider_failures.append({"attempt_id": meta.get("attempt_id"), "node": meta.get("route_node"),
+                                      "harness": meta.get("harness"), "provider_failure_kind": kind})
+    if provider_failures:
+        payload["provider_failures"] = provider_failures
     if args.json:
         print(json.dumps(payload, sort_keys=True, indent=2))
     else:
-        print(f"route      {payload['route_id']} ({payload['capability']}/"
-              f"{payload['capability_mode']} {payload['effective_intensity']})")
+        # 11-20: a unit route has no intensity; `effective_intensity` stays in the record and in `--json`.
+        label = (payload['capability'] if payload['capability'] == "unit"
+                 else f"{payload['capability']}/{payload['capability_mode']} {payload['effective_intensity']}")
+        print(f"route      {payload['route_id']} ({label})")
         print(f"workflow   {payload['workflow_state']} (derived {derived})")
         print(f"owner      {owner.get('attempt_id') or '-'} {owner.get('liveness')} reason={owner.get('reason')}")
         print(f"stage      current={payload['current_stage'] or '-'} "
@@ -4784,6 +4855,9 @@ def cmd_status(args):
                   f"class={child.get('resource_class')} log={child.get('log_path')}")
         if payload["failure_reason"]:
             print(f"failure    {payload['failure_reason']}")
+        for item in payload["owner_completion_delivery"] or []:
+            if item["state"] in PENDING.OPEN_STATES or item["state"] == "expired":
+                print(f"delivery   {item['attempt_id']} {item['state']} {item['reason']}")
     return 0
 
 

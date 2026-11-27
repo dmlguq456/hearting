@@ -97,6 +97,7 @@ from dispatch_contract import (  # noqa: E402
     detached_review_outcome_from_pipe,
     attempt_raw_row_sha256,
     attempt_process_quiescence,
+    finishes_route,
     foreground_review_eligible,
     validate_review_output_binding,
     close_attempt_row,
@@ -119,13 +120,15 @@ from dispatch_contract import (  # noqa: E402
 import dispatch_pending_delivery as pending_delivery  # noqa: E402
 import dispatch_subsession_advance as subsession_advance  # noqa: E402
 from codex_dispatch_terminal import (  # noqa: E402
-    ARTIFACT_HINT_KEYS,
     REVIEW_BLOCKING_NOTE,
     review_blocking_handoff,
     inspect_terminal_attempt,
     terminal_envelope_observed,
 )
 from dispatch_degradation import record_degradation  # noqa: E402
+from dispatch_attempt_policy import (  # noqa: E402
+    SAME_PROVIDER_REFUSAL, content_refusal, provider_failure_kind,
+)
 from dispatch_supervisor_terminal import (  # noqa: E402
     classify_supervisor_log, missing_result_terminal,
 )
@@ -299,7 +302,8 @@ def pending_record_identity(
     # terminal was refused as identity-incomplete, no record existed, and
     # the asyncRewake carrier exited 0 without waking the session -- the
     # 2026-08-29 owner defect reproduced on the frame layer added 2026-09-10.
-    if (metadata.get("worker_type") == "frame"
+    # The one leg of a unit route is launched the same way (any worker type but the owner's).
+    if (metadata.get("worker_type") in {"frame", "review", "stage", "support"}
             and metadata.get("dispatch_depth") == "1"
             and route_id and route_node):
         return route_id, route_node, parent_attempt_id or NO_PARENT_ATTEMPT
@@ -600,6 +604,24 @@ _DEAD_RECIPIENT_ROW_FIELDS = (
 )
 
 
+def recorded_parent_runtime(owner_metadata: dict[str, str]) -> tuple[str, str, str]:
+    """The parent runtime an owner row recorded at launch: `(pid, start, pid namespace)`."""
+    return tuple(str(owner_metadata.get(key, "") or "") for key in (
+        "parent_runtime_pid", "parent_runtime_pid_start", "parent_runtime_ns"))
+
+
+def is_recorded_parent_runtime(owner_metadata: dict[str, str], binding) -> bool:
+    """Whether `binding` (a live process's `(pid, start, pid namespace)`) is exactly the recorded one.
+
+    All three recorded values must be present and equal; a partial record never matches."""
+    recorded = recorded_parent_runtime(owner_metadata)
+    try:
+        observed = tuple(str(part) for part in binding)
+    except TypeError:
+        return False
+    return all(recorded) and observed == recorded
+
+
 def expire_pending_for_dead_recipient(
     jobs: Path, owner_metadata: dict[str, str], record: dict, *, attempt_id: str,
 ) -> str:
@@ -614,6 +636,38 @@ def expire_pending_for_dead_recipient(
     Returns expired, pending (not positively dead), protected (successor or
     identity changed), or skipped (incomplete/unreadable).
     """
+    return _expire_exact_pending(
+        jobs, owner_metadata, record, attempt_id=attempt_id,
+        reason="recipient-session-gone", disposition_wanted="dead")
+
+
+def expire_pending_for_replaced_recipient(
+    jobs: Path, owner_metadata: dict[str, str], record: dict, *, attempt_id: str,
+    runtime_binding: tuple[str, str, str],
+) -> str:
+    """Expire one exact pending delivery whose session was replaced inside a live runtime.
+
+    A plain `/clear` leaves the registered parent runtime running while its
+    session id changes. The caller is the next session of that same runtime
+    (``runtime_binding`` is its `(pid, start, pid_namespace)`), and it has just
+    shown the owner's completion as a notice. The record expires only when the
+    owner row names exactly that live runtime and the original parent is still
+    the effective recipient (no handover). The same exact row and record checks
+    as the dead-recipient rule apply.
+
+    Returns expired, pending (the runtime differs or is not live), protected
+    (successor or identity changed), or skipped (incomplete/unreadable).
+    """
+    return _expire_exact_pending(
+        jobs, owner_metadata, record, attempt_id=attempt_id,
+        reason="recipient-session-replaced", disposition_wanted="live",
+        runtime_binding=tuple(runtime_binding))
+
+
+def _expire_exact_pending(
+    jobs: Path, owner_metadata: dict[str, str], record: dict, *, attempt_id: str,
+    reason: str, disposition_wanted: str, runtime_binding: tuple[str, str, str] | None = None,
+) -> str:
     if not isinstance(owner_metadata, dict) or not isinstance(record, dict):
         return "skipped"
     recipient_key = owner_metadata.get("parent_sid", "")
@@ -640,6 +694,8 @@ def expire_pending_for_dead_recipient(
             return "skipped"
     except (TypeError, ValueError):
         return "skipped"
+    if runtime_binding is not None and not is_recorded_parent_runtime(owner_metadata, runtime_binding):
+        return "pending"
 
     from dispatch_seat_handover import effective_parent, lineage_effect_lock
 
@@ -665,7 +721,7 @@ def expire_pending_for_dead_recipient(
         disposition = process_identity_disposition(pid, pid_start)
     except (ValueError, OSError):
         return "pending"
-    if disposition != "dead":
+    if disposition != disposition_wanted:
         return "pending"
 
     root = jobs.resolve(strict=False).parent
@@ -699,14 +755,14 @@ def expire_pending_for_dead_recipient(
             expired = pending_delivery.expire_if_due(
                 root, recipient_key, delivery_id,
                 actor="dispatch-reconcile",
-                reason="recipient-session-gone",
+                reason=reason,
                 liveness="known",
             )
     except (JoinContractError, pending_delivery.PendingDeliveryError, OSError, ValueError,
             TypeError, RuntimeError, BlockingIOError):
         return "skipped"
     return ("expired" if expired.get("state") == "expired"
-            and expired.get("expiry_reason") == "recipient-session-gone" else "protected")
+            and expired.get("expiry_reason") == reason else "protected")
 
 
 NOTICE_LINEAGE_PREFIX = "session-notice-lineage-v1:"
@@ -720,31 +776,41 @@ class NoticeOwnerObservation:
     attempt id); anything else -- an unreadable, missing, broken-link or
     directory path, a torn last line or invalid UTF-8, a row that did not
     parse -- leaves it ``None``: nothing was observed, so no owner is absent.
-    The archive is read lazily, after the live file, with the same rule: the
-    archive writes and syncs a row before the live file drops it, so a row is
-    always in one of the two reads.
+    ``owner_rows`` keeps each observed attempt's latest status beside its id,
+    so the eligibility rule can tell a row the notice can still be delivered
+    through from one it cannot. The archive is
+    read lazily, after the live file, with the same rule: the archive writes
+    and syncs a row before the live file drops it, so a row is always in one
+    of the two reads.
     """
 
     def __init__(self, root: Path, lines) -> None:
         self.root = root
-        self.attempts = self._attempts(lines)
+        self.attempts, self.owner_rows = self._rows(lines)
         self._archived: frozenset | None = None
         self._archive_read = False
 
     @staticmethod
-    def _attempts(lines):
+    def _rows(lines):
         if lines is None:
-            return None
-        attempts = set()
+            return None, None
+        attempts, rows = set(), {}
         for line in lines:
             fields = line.split("\t") if isinstance(line, str) else ()
             if len(fields) != 6:
-                return None
-            attempt_id = parse_registry_metadata(fields[5]).get("attempt_id", "")
+                return None, None
+            metadata = parse_registry_metadata(fields[5])
+            attempt_id = metadata.get("attempt_id", "")
             if not attempt_id:
-                return None
+                return None, None
             attempts.add(attempt_id)
-        return frozenset(attempts)
+            rows[attempt_id] = fields[1]  # the last row wins, as the resolver reads it
+        return frozenset(attempts), rows
+
+    @staticmethod
+    def _attempts(lines):
+        attempts, _rows = NoticeOwnerObservation._rows(lines)
+        return attempts
 
     def archived_attempts(self):
         if not self._archive_read:
@@ -787,11 +853,20 @@ def notice_ttl_eligible(record, observation: NoticeOwnerObservation) -> bool:
 
     True only when a successful, valid registry observation confirms that no
     owner the record names (its attempt ids, parent attempt, or session-notice
-    lineage binding) has a row, live or archived. Every other case -- an
-    unobserved registry or archive, a record or lineage that does not parse, a
-    lineage naming another registry, a named owner whose row exists (the
-    dead-recipient rule alone decides it), a person's question answer, a
-    claimed or ambiguous delivery -- keeps the record.
+    lineage binding) has a row the notice could still be delivered through.
+    Every other case -- an unobserved registry or archive, a record or lineage
+    that does not parse, a lineage naming another registry, a named owner
+    whose row can still receive, a person's question answer, a claimed or
+    ambiguous delivery -- keeps the record.
+
+    A row the notice can no longer be delivered through does not block: for an
+    ``owner-session`` lineage the resolver refuses a terminally ended row and
+    a done row whose waiting supervisor is gone for good, so such a row counts
+    as absent; a row only the archive still holds left the live view the
+    notice resolution reads, so an ``owner-session`` or ``attempt-parent``
+    lineage naming it has no recipient left to find. A provenance lineage and
+    a live ``attempt-parent`` row keep the older rule: the dead-recipient rule
+    alone decides them.
     """
     try:
         if observation.attempts is None or not isinstance(record, dict):
@@ -808,6 +883,7 @@ def notice_ttl_eligible(record, observation: NoticeOwnerObservation) -> bool:
                 or not all(isinstance(name, str) and name for name in names)):
             return False
         names = set(names) | ({parent} if parent else set())
+        lineage_kind, lineage_attempt = "", ""
         for entry in lineage:
             if not isinstance(entry, str) or not entry.startswith(NOTICE_LINEAGE_PREFIX):
                 return False
@@ -826,16 +902,59 @@ def notice_ttl_eligible(record, observation: NoticeOwnerObservation) -> bool:
                 if not isinstance(attempt_id, str) or not attempt_id:
                     return False
                 names.add(attempt_id)
+                lineage_kind, lineage_attempt = kind, attempt_id
             elif kind != "provenance":
                 return False
         if not names:
             return True
-        if names & observation.attempts:
+        present = names & observation.attempts
+        if present:
+            # Only a row the owner-session resolution can still pass blocks:
+            # a live or running owner, or a done one whose waiting supervisor
+            # state still names the session. A row it refuses for good -- a
+            # terminally ended one, or a done one whose waiting supervisor is
+            # gone -- no longer keeps the notice; the live row is the latest
+            # read, so no archive confirmation is needed for it.
+            if lineage_kind == "owner-session" and all(
+                    _notice_owner_row_unreceivable(attempt, observation)
+                    for attempt in present):
+                return True
             return False
         archived = observation.archived_attempts()
-        return archived is not None and not names & archived
+        if archived is None:
+            return False
+        left = names & archived
+        if not left:
+            return True
+        # A row only the archive holds is settled history: the live view the
+        # notice resolution reads has no row for it, so an owner-session or
+        # attempt-parent lineage can never name a recipient again. A lineage
+        # without an attempt keeps the older rule and stays.
+        return lineage_kind in {"owner-session", "attempt-parent"}
     except Exception:  # noqa: BLE001 -- an unjudged record is kept
         return False
+
+
+def _notice_owner_row_unreceivable(attempt_id: str, observation: NoticeOwnerObservation) -> bool:
+    """Whether the owner-session delivery of one observed attempt is refused for good.
+
+    Mirrors the resolver's own ``owner-session`` gate from the registry row
+    alone: a row outside the live set is a recorded end; a done row is refused
+    once its waiting supervisor state is gone (it is never written again), and
+    an open or running row, or a done row the state still names, can still
+    receive.
+    """
+    row = (observation.owner_rows or {}).get(attempt_id)
+    if row is None:
+        return False
+    status = row
+    if status in {"open", "running"}:
+        return False
+    if status != "done":
+        return True
+    state = read_supervisor_phase_state(
+        observation.root / "supervisor-state" / (attempt_id + ".json"), attempt_id)
+    return state is None
 
 
 def reconcile_pending_delivery(jobs: Path, *, max_rows: int | None = None,
@@ -1197,6 +1316,14 @@ def previous_harvest_wording(text: str) -> str:
     return text.replace(current, previous)
 
 
+def _child_note(jobs: str, child, key: str = "note") -> str | None:
+    """One registry value of a receipt child, its note by default (None when the row cannot be read)."""
+    try:
+        return exact_attempt_row(Path(jobs), child["attempt_id"]).metadata.get(key)
+    except (OSError, ValueError, KeyError, JoinContractError):
+        return None
+
+
 def _next_ready_start_lines(receipt: dict, jobs: str) -> list[str]:
     """`Next ready:` lines for an owner's depth-2 stage/review row that just finished; [] when unsure.
 
@@ -1224,7 +1351,22 @@ def _next_ready_start_lines(receipt: dict, jobs: str) -> list[str]:
                 completed = dispatch_stage_advance.completed_nodes(Path(jobs), route["route_id"])
                 started = dispatch_stage_advance.started_nodes(Path(jobs), route["route_id"], route["route_hash"])
                 for node in dispatch_stage_advance.runnable_successors(route, completed, started):
-                    if worker_bootstrap._dispatchable_stage(node):
+                    from route_form import one_shot_review_route
+                    if one_shot_review_route(route) and node.get("id") == "one-shot":
+                        # The middle cell: the review is done; the owner's end is its own final handoff, unless
+                        # a verdict blocks (then the verdict text above is the instruction). A review group is
+                        # one batch: any blocking leg blocks it.
+                        import review_round_cap
+                        if any(_child_note(jobs, other) == review_round_cap.REVIEW_BLOCKING_NOTE
+                               for other in receipt.get("children") or []) or (
+                                meta.get("note") == review_round_cap.REVIEW_BLOCKING_NOTE):
+                            lines.append("Next ready: nothing to start; the independent review has finished and "
+                                         "blocks. Follow the Review FAIL instruction above; do not return a final "
+                                         "handoff before you have.")
+                        else:
+                            lines.append("Next ready: nothing to start; the independent review has finished. "
+                                         "Act on its verdict as your task describes, then return your final handoff.")
+                    elif worker_bootstrap._dispatchable_stage(node):
                         lines.append("Next ready: " + worker_bootstrap.route_start_command(route_file, node["id"]))
                     else:
                         lines.append(f"Next ready: run {node['id']} yourself (per your Route steps).")
@@ -1258,8 +1400,17 @@ def _owner_handed_over_lines(route: dict, route_file: Path, node_id) -> list[str
 
 # The fixed first line of a completed runtime-v1 owner follow-up, keyed by
 # whether runtime summaries follow it. Delivery recovery maps exactly these
-# bytes back to earlier shipped wording (dispatch_session_sweep).
+# bytes back to earlier shipped wording (dispatch_session_sweep). One short line:
+# the close contract itself is the adapter bootstrap's (§0.5), so the receipt only
+# points at it and keeps what the bootstrap cannot know (no harvest is owed, and
+# the summary below is context, not text for the person).
 RUNTIME_V1_FOLLOWUP_PREFIXES = {
+    True: ("Owner finished; no harvest. Close per §0.5; the summary below is agent context: "
+           "do not reproduce it for the person."),
+    False: "Owner finished; no harvest. Close per §0.5.",
+}
+# The first line v4.32.4 shipped (frozen; receipt recovery only).
+SHIPPED_RUNTIME_V1_FOLLOWUP_PREFIXES = {
     True: ("Original request/format apply. Review the result and continue approved work or its existing "
            "continuation. First close: "
            "give the result in one or two sentences; preserve any important remaining failure, "
@@ -1282,7 +1433,49 @@ RUNTIME_V1_FOLLOWUP_PREFIXES = {
 }
 
 
-def completion_followup_text(receipt: dict, *, jobs: str) -> str:
+def unit_leg_report_line(metadata, *, jobs=None) -> str:
+    """`Report: <path>` for a unit route's one leg whose end was not read as finished work (a failed
+    review the caller must inspect), so the caller finds the report without reading the leg's log.
+    "" for any other row, a leg that named no readable report, or an unreadable route."""
+    if not finishes_route(metadata) or metadata.get("worker_type") in {"owner", "frame"}:
+        return ""
+    try:
+        import worker_bootstrap
+        route = json.loads(Path(metadata.get("owner_route_file") or metadata["route_file"]).read_text())
+        artifact = worker_bootstrap.attempt_outcome(route, metadata).get("artifact")
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
+    return f"Report: {artifact}" if artifact else ""
+
+
+def unit_leg_reason_line(metadata) -> str:
+    """`Reason: <why>` for a continued unit turn (one that wakes an earlier session) that ended as an error,
+    from the reason the row already records (`app-server-request-failed:thread/resume` when Codex refused to
+    wake the thread). "" for a first turn, any other row, or an end that recorded none."""
+    reason = str(metadata.get("reconcile_reason") or "").strip()
+    if not metadata.get("continues_attempt_id") or not reason:
+        return ""
+    return f"Reason: {reason}"
+
+
+def completion_followup_text(receipt: dict, *, jobs: str, include_provider_failure: bool = True) -> str:
+    if not include_provider_failure:
+        return _completion_work_followup(receipt, jobs=jobs)
+    lines = []
+    refused = False
+    for child in receipt.get("children") or ():
+        # The receipt keeps its delivery identity; the closed row holds the kind.
+        if child.get("required_action") == "inspect-done-failure" and jobs:
+            if kind := provider_failure_kind(_child_note(jobs, child, "provider_failure_kind")):
+                lines.append(f"Provider failure for {child['attempt_id']} was {kind}.")
+                refused = refused or content_refusal(kind)
+    if refused:
+        lines.append(SAME_PROVIDER_REFUSAL)
+    lines.append(_completion_work_followup(receipt, jobs=jobs))
+    return "\n".join(lines)
+
+
+def _completion_work_followup(receipt: dict, *, jobs: str) -> str:
     if receipt.get("children") and all(child.get("reason") == "cancelled-by-parent"
             and child.get("required_action") == "advance-completed" for child in receipt["children"]):
         return ("Parent-requested close has settled. No harvest, next-stage launch, "
@@ -1293,7 +1486,9 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
     work_commands = {}
     completed_work = set()
     summaries = []
+    kept_notes = []
     parked_notes = []
+    unit_reports, other_work = [], False
     if jobs:
         from route_identity import route_hash
         for child in receipt["children"]:
@@ -1303,15 +1498,25 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
                 import route_parent_close
                 if route_parent_close.row_requested(meta, Path(jobs)):
                     continue
-                if meta.get("dispatch_depth") != "1" or meta.get("worker_type") not in {"frame", "owner"}:
+                if meta.get("dispatch_depth") != "1" or not (
+                        meta.get("worker_type") in {"frame", "owner"} or finishes_route(meta)):
                     continue
-                if meta["worker_type"] == "owner" and child["required_action"] == "advance-completed":
+                if finishes_route(meta) and child["required_action"] == "advance-completed":
                     if meta.get("workflow_completion") == "runtime-v1":
                         completed_work.add(child["attempt_id"])
                         import work_intent
                         summary = work_intent.sealed_summary(meta, child["attempt_id"])
+                        import unit_continue
+                        try:
+                            head, kept = unit_continue.notice_lines(jobs, meta)
+                        except (OSError, ValueError):
+                            head, kept = "", ""     # a turn's own line is a courtesy: never lose its summary
+                        if summary and head:
+                            summary = head + "\n" + summary
                         if summary and summary not in summaries:
                             summaries.append(summary)
+                        if kept:
+                            kept_notes.append(kept)
                     continue  # Already sealed; successful work has no extra command obligation.
                 path = Path(meta.get("owner_route_file") or meta.get("route_file") or "")
                 route = json.loads(path.read_text())
@@ -1322,6 +1527,11 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
                 from parent_next_directive import resume_command
                 work_commands[child["attempt_id"]] = resume_command(
                     path, jobs, agent_home=Path(__file__).resolve().parents[1])
+                report = unit_leg_report_line(meta)
+                if meta["worker_type"] not in {"owner", "frame"}:
+                    unit_reports.append("\n".join(filter(None, (report, unit_leg_reason_line(meta)))))
+                else:
+                    other_work = True
                 if meta["worker_type"] == "owner" and child["required_action"] == "inspect-done-failure":
                     import dispatch_replacement
                     parked = dispatch_replacement.owner_parked_gate(Path(jobs), child["attempt_id"])
@@ -1340,9 +1550,19 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
                  f"{child['next_leg']['compose_command']}" for child in receipt["children"] if child.get("next_leg")]
         return (RUNTIME_V1_FOLLOWUP_PREFIXES[bool(summaries)]
                 + "".join("\n" + summary for summary in summaries)
+                + "".join("\n" + note for note in kept_notes)
                 + ("".join("\n" + note for note in notes)
                    + ("\nIf this next leg is already approved, execute it in this turn or its existing registered continuation. "
                       "Nothing starts it from receipt alone; obtain approval only for work outside the existing scope." if notes else "")))
+    if work_commands and not other_work and unit_reports and len(unit_reports) == len(work_commands):
+        # A unit route's review that ended failed and was not read as finished work: no frame is
+        # involved, so say what the handle returns and where the report is.
+        return ("\n".join(dict.fromkeys(report for report in unit_reports if report))
+                + ("\n" if any(unit_reports) else "")
+                + "Continue the existing work with its exact handle:\n"
+                + "\n".join(dict.fromkeys(command for command in commands if command))
+                + "\nThis reuses registered attempts and the shared outcome/cleanup controller. "
+                  "No replacement launch or manual workflow/cycle finalization is implied.")
     if work_commands:
         text = "\n".join(dict.fromkeys(command for command in commands if command))
         return ("\n".join(parked_notes) + ("\n" if parked_notes else "")
@@ -4694,7 +4914,6 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--attempt-id", action="append", default=[])
     value.add_argument("--interval", type=float, default=2.0)
     value.add_argument("--timeout", type=float, default=3600.0)
-    value.add_argument("--liveness-command", help="Compatibility input; only shared exact process evidence decides readiness")
     value.add_argument("--recover-receiptless", action="store_true",
                        help="run bounded exact-proof recovery while joining owned children")
     return value
@@ -4718,7 +4937,6 @@ def main(argv: list[str] | None = None) -> int:
         }
         print(json.dumps(receipt, separators=(",", ":"), sort_keys=True))
         return 69
-    liveness = [args.liveness_command] if args.liveness_command else None
     try:
         if bool(args.parent_attempt_id) == bool(args.parent_session_id):
             raise JoinContractError("parent-identity-ambiguous")
@@ -4733,7 +4951,6 @@ def main(argv: list[str] | None = None) -> int:
                 recover_receiptless=args.recover_receiptless,
                 interval=args.interval,
                 timeout=args.timeout,
-                liveness_command=liveness,
                 registry_append_only=True,
             )
         else:
@@ -4746,7 +4963,6 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 interval=args.interval,
                 timeout=args.timeout,
-                liveness_command=liveness,
                 registry_append_only=True,
             )
     except JoinContractError as exc:
@@ -4959,7 +5175,7 @@ def classify_exact_route_free_support_outcome(
     if terminal.reconcile_reason in {
         "terminal-log-missing", "terminal-log-unreadable", "terminal-event-missing",
     }:
-        terminal = missing_result_terminal(row.metadata)
+        terminal = missing_result_terminal(row.metadata, provider_kind=terminal.provider_failure_kind)
     if terminal.note == "completed-supervisor" and terminal.failure_class == "pass":
         return ExactReviewClassification("done", "support-supervisor-pass", terminal.note,
                                          "typed-close", terminal.evidence())
@@ -5140,10 +5356,14 @@ def classify_exact_route_free_review_outcome(
         note, evidence = choice.detail, choice.census
         reason = choice.reason
         if choice.state == "absent":
-            result = missing_result_terminal({**metadata, "worktree": _row_worktree(row), "started_at": raw_fields[0]})
+            result = missing_result_terminal(
+                {**metadata, "worktree": _row_worktree(row), "started_at": raw_fields[0]},
+                provider_kind=str(terminal.get("provider_failure_kind") or ""))
             note, evidence = result.note, result.evidence()
         if choice.state in {"absent", "invalid"} and terminal.get("state") != "valid":
             reason = str(terminal.get("reason") or "terminal-" + str(terminal.get("state") or "absent"))
+        if choice.state != "absent" and (kind := terminal.get("provider_failure_kind")):
+            evidence = {**(evidence or review_terminal_evidence(note, reason)), "provider_failure_kind": kind}
         return ExactReviewClassification("terminal-handoff", reason, note, "typed-close", evidence)
     artifact, evidence_reason = route_completion_evidence(
         metadata, worktree=_row_worktree(row), terminal=terminal, decision=choice
@@ -5349,8 +5569,15 @@ def close_finished_child(
         if choice.next_action != "typed-close":
             return choice.reason
         note, evidence, reason = choice.detail, choice.census, choice.reason
-        if choice.state == "typed":
-            from foreground_terminal import terminal_evidence
+        from foreground_terminal import capacity_evidence, terminal_evidence, terminal_log_evidence
+        classifier_source = INVALID_ENVELOPE_CLASSIFIER_SOURCE
+        if choice.state == "typed" and note == "dead-capacity":
+            reason = f"terminal-invalid:{terminal.get('reason') or 'claude-result-capacity'}"
+            classifier_source = "completion-join-native-capacity-v1"
+            evidence = capacity_evidence(terminal, metadata.get("log_file"))
+            evidence.update(terminal_log_evidence(terminal))
+        elif choice.state == "typed":
+            classifier_source = "completion-join-terminal-verdict-v1"
             evidence = {**terminal_evidence(terminal, note, metadata.get("log_file")),
                         **(evidence or {})}
             # SD-124 preserves the foreground wrapper's fail axis, but the
@@ -5358,36 +5585,17 @@ def close_finished_child(
             # note and exact artifact, without a failure_class annotation.
             if note == REVIEW_BLOCKING_NOTE:
                 evidence.pop("failure_class", None)
-        if choice.state == "absent":
-            missing = missing_result_terminal({**metadata, "worktree": _row_worktree(row),
-                                              "started_at": row.raw.split("\t")[0]})
+        elif choice.state == "absent":
+            classifier_source = "completion-join-missing-result-v1"
+            missing = missing_result_terminal(
+                {**metadata, "worktree": _row_worktree(row), "started_at": row.raw.split("\t")[0]},
+                provider_kind=str(terminal.get("provider_failure_kind") or ""))
             note, evidence, reason = missing.note, missing.evidence(), "terminal-envelope-absent"
         elif choice.state in {"invalid", "evidence"}:
-            evidence = {key: str(terminal.get(key) or "") for key in ARTIFACT_HINT_KEYS}
-        if choice.state == "typed" and note == "dead-capacity":
-            # The shared native reader already classified this exact raw
-            # Claude result. Preserve its typed reason and any quota reset
-            # fields so a later normal start can consume the existing pause.
-            capacity_evidence = {"failure_class": "capacity"}
-            if metadata.get("log_file"):
-                capacity_evidence["capacity_log"] = str(metadata["log_file"])
-            if terminal.get("quota_reset_epoch") is not None:
-                capacity_evidence["reset"] = str(terminal["quota_reset_epoch"])
-            for key in ("quota_window", "quota_model_scope"):
-                if terminal.get(key) is not None:
-                    capacity_evidence[key] = str(terminal[key])
-            reason = f"terminal-invalid:{terminal.get('reason') or 'claude-result-capacity'}"
-            if _close_invalid_envelope_child(
-                    row, jobs=jobs, reason=reason, note="dead-capacity",
-                    classifier_source="completion-join-native-capacity-v1",
-                    terminal_envelope=True, extra_evidence=capacity_evidence):
-                return ""
-            return choice.reason
+            evidence = terminal_log_evidence(terminal)
         if _close_invalid_envelope_child(row, jobs=jobs, reason=reason, note=note,
-            classifier_source="completion-join-terminal-verdict-v1" if choice.state == "typed"
-                              else "completion-join-missing-result-v1" if choice.state == "absent"
-                              else "completion-join-invalid-envelope-v1",
-            terminal_envelope=choice.state != "absent", extra_evidence=evidence):
+            classifier_source=classifier_source, terminal_envelope=choice.state != "absent",
+            extra_evidence=evidence):
             return ""
         return choice.reason
     artifact, evidence_reason = route_completion_evidence(

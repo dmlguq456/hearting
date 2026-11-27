@@ -45,9 +45,12 @@ class Fixture(unittest.TestCase):
         git(self.repo, "add", "-A")
         git(self.repo, "commit", "-q", "-m", "init")
         self.root = self.repo / ".agent_reports"
-        (self.root / "campaigns" / "2026-09-01_old-stream").mkdir(parents=True)
-        (self.root / "campaigns" / "2026-10-01_new-stream").mkdir(parents=True)
-        os.utime(self.root / "campaigns" / "2026-09-01_old-stream", (1, 1))
+        closed = self.root / "campaigns" / "2026-10-01_demo-closed"
+        closed.mkdir(parents=True)
+        (closed / "campaign.json").write_text(json.dumps({
+            "campaign_id": "camp_" + "1" * 32, "key": "demo-closed", "title": "Demo closed",
+            "state": "abandoned", "cycles": [],
+        }))
         self.ledgers = self.tmp / "ledgers"
         self.env = {
             "HOME": str(self.home), "PATH": os.environ.get("PATH", ""),
@@ -114,15 +117,28 @@ class EditTriggerTest(Fixture):
         line = reason.splitlines()[1]
         self.assertTrue(line.startswith("python3 "), line)
         self.assertIn("capability-route.py compose --start --shape direct --prompt-file '<task>'", line)
-        self.assertIn("--campaign-key new-stream", line)
+        self.assertNotIn("--campaign-key", line)
+        self.assertNotIn("demo-closed", line)
         self.assertIn("--slug engine --cwd", line)  # the cycle folder carries the date
         self.assertIn(f"--cwd {self.repo}", line)
         self.assertIn("For one atomic, reversible inline change", reason)
         self.assertIn("make the edit in the worktree it prints", reason)
-        self.assertIn("For other new work, omit --shape", reason)
+        self.assertIn("open --shape solo|staged --capability <kind> when the direction is clear", reason)
+        self.assertIn("otherwise omit --shape", reason)
         self.assertIn("the frame decides the route", reason)
         self.assertIn("person-specified route", reason)
         self.assertIn("capability-route.py start --route", reason)
+
+    def test_compose_line_can_start_unassigned_with_an_active_stream_elsewhere(self):
+        other = self.root / "campaigns" / "2026-10-02_demo-other"
+        other.mkdir()
+        (other / "campaign.json").write_text(json.dumps({
+            "campaign_id": "camp_" + "2" * 32, "key": "demo-other", "title": "Demo other",
+            "state": "active", "cycles": [],
+        }))
+        line = self.judge(self.edit(self.repo / "src" / "engine.py")).splitlines()[1]
+        self.assertIn("--unassigned", line)
+        self.assertNotIn("--campaign-key", line)
 
     def test_a_managed_release_is_printed_as_its_current_pointer(self):
         hearting = self.home / ".local" / "share" / "hearting"

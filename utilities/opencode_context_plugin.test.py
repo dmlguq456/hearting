@@ -33,7 +33,7 @@ def fixture_tempdir(stack, *, prefix):
 
 
 class OpenCodeContextPluginTest(unittest.TestCase):
-    def test_first_prompt_owns_card_and_evidence_and_auxiliary_calls_only_replay(self):
+    def test_first_prompt_owns_card_and_auxiliary_calls_only_replay(self):
         with tempfile.TemporaryDirectory(prefix="opencode-first-prompt-") as raw:
             script = '''import assert from "node:assert/strict";
 import childProcess from "node:child_process";
@@ -42,7 +42,6 @@ import { pathToFileURL } from "node:url";
 const calls = [];
 childProcess.spawnSync = (command, args) => {
   calls.push(args);
-  if (args.includes("local-evidence")) return { status: 0, stdout: "same local evidence" };
   if (args.includes("--event") && args.includes("prompt"))
     return { status: 0, stdout: JSON.stringify({additionalContext: "same card", deferredConsumed: []}) };
   return { status: 0, stdout: "", stderr: "" };
@@ -53,7 +52,7 @@ const { AgentHarnessGuards } = await import(pathToFileURL(process.env.PLUGIN_PAT
 const hooks = await AgentHarnessGuards({directory: process.env.HOME, worktree: process.env.HOME,
   client: {}}, {initialize: false});
 const sid = "first-prompt-only";
-const probes = () => calls.filter(a => a.includes("local-evidence")).length;
+const probes = () => calls.filter(a => a.includes("local-evidence")).length;  // the retired presence probe
 const cards = () => calls.filter(a => a.includes("--event") && !a.includes("--human-only"));
 await hooks.event({event: {type: "session.created", properties: {info: {id: sid}}}});
 const title = {system: []};
@@ -63,16 +62,15 @@ assert.equal(cards().length, 0);
 const turn = id => hooks["chat.message"]({sessionID: sid, messageID: id},
   {parts: [{type: "text", text: "hi"}]});
 await turn("m1");
-assert.equal(probes(), 1);
+assert.equal(probes(), 0);
 assert.equal(cards().length, 1);
 for (let i = 0; i < 2; i++) {
   const output = {system: []};
   await hooks["experimental.chat.system.transform"]({sessionID: sid, model: {}}, output);
-  assert.ok(output.system.includes("same local evidence"));
   assert.ok(output.system.includes("same card"));
 }
 await turn("m2");
-assert.equal(probes(), 1);
+assert.equal(probes(), 0);
 assert.ok(cards().every(a => a[a.indexOf("--event") + 1] === "prompt"));
 hooks.dispose?.({silent: true});
 '''
@@ -222,6 +220,7 @@ console.log(JSON.stringify({{ elapsed_ms: performance.now() - started }}));
                         time.sleep(0.01)
 
     def test_real_plugin_config_hook_caps_only_loaded_provider_and_hides_auth_values(self):
+        attempt = fixture_processes.unique_attempt_id("att-context")
         with ExitStack() as stack:
             raw = fixture_tempdir(stack, prefix="opencode-context-hook-")
             home = Path(raw)
@@ -272,7 +271,7 @@ const after = await hooks.config(before);
 await hooks["chat.params"]({{ sessionID: "ses_context123", model: {{ providerID: "openai", id: "gpt",
   limit: {{ context: 600000, input: 600000, output: 8192 }} }}, provider: {{ info: {{ id: "openai" }} }} }},
   {{ maxOutputTokens: 4096 }});
-const policy = JSON.parse(readFileSync(process.env.XDG_STATE_HOME + "/agent-fleet/context-policy/opencode/attempt-att-context.json", "utf8"));
+const policy = JSON.parse(readFileSync(process.env.XDG_STATE_HOME + "/agent-fleet/context-policy/opencode/attempt-{attempt}.json", "utf8"));
 delete process.env.AGENT_DISPATCH_ATTEMPT_ID;
 await hooks["chat.params"]({{ sessionID: "ses_interactive", model: {{ providerID: "openai", id: "gpt",
   limit: {{ context: 600000, input: 600000, output: 8192 }} }}, provider: {{ info: {{ id: "openai" }} }} }},
@@ -291,7 +290,7 @@ console.log(JSON.stringify({{ after, again, disabled, restricted, policy, intera
                    "PYTHONPYCACHEPREFIX": str(xcache / "pycache"),
                    "FLEET_SESSION_REGISTRY_DIR": str(xstate / "agent-fleet" / "sessions"),
                    "AGENT_HOME": str(ROOT), "AGENT_SESSION_ROLE": "worker",
-                   "AGENT_DISPATCH_ATTEMPT_ID": "att-context", "OPENCODE_VERSION": "1.19.0"}
+                   "AGENT_DISPATCH_ATTEMPT_ID": attempt, "OPENCODE_VERSION": "1.19.0"}
             run = subprocess.run([NODE, "--input-type=module", "-e", script], cwd=ROOT,
                                  env=env, text=True, capture_output=True, timeout=10)
             self.assertEqual(run.returncode, 0, run.stderr)
@@ -299,7 +298,7 @@ console.log(JSON.stringify({{ after, again, disabled, restricted, policy, intera
             result = json.loads(run.stdout.strip().splitlines()[-1])
             policy = result["policy"]
             self.assertEqual((policy["session_id"], policy["attempt_id"], policy["model"]),
-                             ("ses_context123", "att-context", "openai/gpt"))
+                             ("ses_context123", attempt, "openai/gpt"))
             self.assertEqual(policy["policy"]["state"], "applied")
             self.assertEqual(policy["policy"]["effective_window_tokens"], 600000)
             self.assertEqual(policy["policy"]["applied_trigger_tokens"], 595000)
@@ -311,14 +310,14 @@ console.log(JSON.stringify({{ after, again, disabled, restricted, policy, intera
             # The same producer record passes through the registered collector and
             # normalizer under its exact attempt/session, with the PRD's dispatch
             # surface remaining JSON-only.
-            attempt_log = home / "attempt.att-context.opencode.jsonl"
+            attempt_log = home / f"attempt.{attempt}.opencode.jsonl"
             attempt_log.write_text(json.dumps({"type": "step_finish",
                 "sessionID": "ses_context123", "part": {"tokens": {
                     "total": 300000, "input": 280000, "output": 1000,
                     "cache": {"read": 19000, "write": 0}}}}) + "\n", encoding="utf-8")
             os.utime(attempt_log, (time.time() + 2, time.time() + 2))
             job = DispatchJob(key="code", slug="worker", harness="opencode",
-                              attempt_id="att-context", liveness="working")
+                              attempt_id=attempt, liveness="working")
             job.model = "openai/gpt"
             job.cwd = str(home)
             with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(xstate),
@@ -331,7 +330,7 @@ console.log(JSON.stringify({{ after, again, disabled, restricted, policy, intera
             self.assertEqual(job.context_display_window_tokens, 595000)
             self.assertEqual(job.context.used_pct, 50)
             payload = job.to_dict()
-            self.assertEqual(payload["context_policy"]["attempt_id"], "att-context")
+            self.assertEqual(payload["context_policy"]["attempt_id"], attempt)
             self.assertIn("50%", "".join(part for row in
                 render._dispatch_summary_detail_row(job, term_width=168) for part, _key in row))
             after = result["after"]

@@ -171,6 +171,271 @@ def session_aliases(harness, pid, *, argv=None):
     return [sid for sid in dict.fromkeys(aliases) if sid != current][:_MAX_ALIASES]
 
 
+# --- Claude's "send to background" link (M1) ------------------------------------------
+#
+# `/bg` (or an empty prompt + the left arrow) does not move a conversation: Claude Code
+# clones it under a new session id into a daemon-run process (argv `--session-id NEW
+# --fork-session --resume <OLD>.jsonl`) and leaves the original process as a viewer.
+# Nothing public says which viewer shows which background session, but two internal
+# facts of the running processes agree when it is so:
+#   (a) the live viewer's record ``sessions/<pid>.json`` carries ``parkedJobId`` and a live
+#       ``kind=bg`` record carries the same ``jobId``;
+#   (b) that background process's argv ``--resume`` names the viewer's ``sessionId``.
+# Both are Claude's own files and argv, not a documented contract: this is the ONE place
+# that reads them, and any change of shape falls to "not linked" (``None``). Replace it with
+# an official signal when Claude Code offers one. The link is never stored: every call
+# decides it again from the live processes, so it ends the moment either one does.
+# Every reader asks here: the shell panel and peer delivery (:func:`parked_successor`), Fleet's
+# row, number and pane header (one decision per pass, :func:`steady_parked_links`), and a pane
+# proof (:func:`holds_parked_job`).
+_MAX_RECORDS = 512
+
+
+def _proc_start(pid):
+    """Live ``/proc/<pid>/stat`` field 22 as a string (the PID-reuse guard), else None."""
+    try:
+        with open("/proc/%d/stat" % int(pid), "rb") as handle:
+            tail = handle.read(4096).rsplit(b")", 1)[1].split()
+    except (OSError, ValueError, IndexError):
+        return None
+    if len(tail) < 20 or tail[0] in (b"Z", b"X"):
+        return None
+    return tail[19].decode("ascii", "replace")
+
+
+def _live_claude_records(home, undecided=None):
+    """Every live Claude process record, or raise ``OSError`` when the folder was not read.
+
+    A record whose process is gone or reused (``procStart`` differs) is not live. ``undecided``
+    (a set) collects the pids of live processes whose record exists but did not parse (half
+    written, or not a record): such a read says nothing about that process either way."""
+    directory = _dir_for("claude", home=home)
+    try:
+        names = os.listdir(directory)
+    except FileNotFoundError:
+        return []
+    if len(names) > _MAX_RECORDS:
+        raise OSError("session record folder too large")
+    found = []
+    for name in names:
+        match = re.fullmatch(r"([0-9]{1,10})\.json", name)
+        if not match:
+            continue
+        pid = int(match.group(1))
+        record = read("claude", pid, home=home, raise_unread=True, extra=("jobId",))
+        if (record and str(record.get("procStart") or "") and _proc_start(pid) == str(record["procStart"])
+                and record.get("pid") in (None, pid, str(pid))):
+            record["pid"] = pid
+            found.append(record)
+        elif record is None and undecided is not None and _proc_start(pid) is not None:
+            undecided.add(pid)
+    return found
+
+
+def _usable_sid(value):
+    return value.lower() if isinstance(value, str) and _SID_RE.fullmatch(value) else None
+
+
+def holds_parked_job(record):
+    """True when a process record says its window holds a backgrounded job (one fact only).
+
+    Enough to stop treating that window's ``sessionId`` as the conversation it shows (a pane
+    proof withdraws on doubt); never enough to link it to another session — that needs both facts
+    (:func:`parked_successor`). Any value counts here: this side only ever withdraws."""
+    return isinstance(record, dict) and bool(record.get("parkedJobId"))
+
+
+def _parked_from_viewer(records, viewer_sid, viewer_pid, viewer_start):
+    same = [item for item in records if _usable_sid(item.get("sessionId")) == viewer_sid]
+    # One live process answers to this session id, and it is a viewer holding a job.
+    if len(same) != 1:
+        return None
+    viewer = same[0]
+    job = viewer.get("parkedJobId")
+    if (viewer.get("kind") == "bg" or not isinstance(job, str) or not job
+            or viewer_pid is not None and viewer["pid"] != int(viewer_pid)
+            or viewer_start is not None and str(viewer["procStart"]) != str(viewer_start)):
+        return None
+    # No other live process points at the same job, and exactly one background process is it.
+    if any(item is not viewer and item.get("parkedJobId") == job for item in records):
+        return None
+    background = [item for item in records if item.get("kind") == "bg" and item.get("jobId") == job]
+    if len(background) != 1:
+        return None
+    other = background[0]
+    sid = _usable_sid(other.get("sessionId"))
+    if sid is None or sid == viewer_sid or session_aliases("claude", other["pid"]) != [viewer_sid]:
+        return None
+    started = _ms_to_sec(other.get("startedAt"))
+    return {"harness": "claude", "session_id": sid, "pid": other["pid"],
+            "proc_start": str(other["procStart"]), "started_at": started,
+            "viewer_sid": viewer_sid, "viewer_pid": viewer["pid"],
+            "viewer_start": str(viewer["procStart"]), "job_id": job}
+
+
+def parked_successor(harness, sid, *, viewer_pid=None, viewer_start=None, home=None):
+    """The background session a live viewer of ``sid`` holds, or ``None``.
+
+    ``{"session_id", "pid", "proc_start", "started_at", "viewer_sid", "viewer_pid", "job_id"}``
+    only when both facts above agree for exactly one live viewer and one live background
+    process. One fact alone (a deliberate ``--fork-session``, a background session started
+    elsewhere), a dead or reused process, an unreadable or broken record, a second process
+    for either side, or a viewer that holds no job anymore all give ``None``. Read-only."""
+    try:
+        sid = _usable_sid(sid)
+        if harness != "claude" or sid is None:
+            return None
+        return _parked_from_viewer(_live_claude_records(home), sid, viewer_pid, viewer_start)
+    except Exception:
+        return None
+
+
+def _a_record_holds_a_job(home):
+    """False only when the record folder was read and no process record names ``parkedJobId``.
+
+    A cheap look at the raw bytes first: no viewer holds a job in the ordinary case, and then
+    nothing needs a process check. Any doubt answers True and the full read decides."""
+    directory = _dir_for("claude", home=home)
+    try:
+        names = os.listdir(directory)
+        if len(names) > _MAX_RECORDS:
+            return True
+        for name in names:
+            if re.fullmatch(r"[0-9]{1,10}\.json", name):
+                with open(os.path.join(directory, name), "rb") as handle:
+                    if b"parkedJobId" in handle.read(65537):
+                        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return False
+
+
+def parked_links(harness="claude", *, home=None):
+    """Every link :func:`parked_successor` and :func:`parked_origin` would find, from ONE read of
+    the live process records: ``{"successor": {viewer_sid: link}, "origin": {held_sid: link}}``.
+
+    A caller that asks about many sessions in one pass (a scan of the pending rows) reads the
+    record folder once and looks each session up. Nothing is held and nothing is stored: the
+    table is as live as the read, and it is empty (so a lookup costs nothing more) unless some
+    live viewer holds a job. Any doubt or read failure gives an empty table."""
+    try:
+        if harness != "claude" or not _a_record_holds_a_job(home):
+            return {"successor": {}, "origin": {}}
+        return _links_table(_live_claude_records(home))
+    except Exception:
+        return {"successor": {}, "origin": {}}
+
+
+def _links_table(records):
+    table = {"successor": {}, "origin": {}}
+    for item in records:
+        job = item.get("parkedJobId")
+        viewer_sid = _usable_sid(item.get("sessionId"))
+        if viewer_sid is None or item.get("kind") == "bg" or not isinstance(job, str) or not job:
+            continue
+        found = _parked_from_viewer(records, viewer_sid, None, None)
+        if found is None:
+            continue
+        held = found["session_id"]
+        if sum(1 for other in records if other.get("kind") == "bg"
+               and _usable_sid(other.get("sessionId")) == held) != 1:
+            continue
+        table["successor"][viewer_sid] = found
+        table["origin"][held] = found
+    return table
+
+
+# The links Fleet's last pass decided, in this process only (never stored), and for each link
+# kept without a confirming read, how many passes in a row it has been kept so.
+_STEADY = {}
+_STEADY_UNCONFIRMED = {}
+_STEADY_LOCK = threading.Lock()
+# A link is kept through at most this many passes in a row that could not confirm it: Fleet asks
+# every 2 s by default, so about 10 s. A half-written record lasts a moment and a failed read a
+# pass or two; anything longer is not passing, and doubt draws two rows.
+STEADY_KEEP_PASSES = 5
+
+
+def _record_allows(pid, sid, start, *, home, bg, job):
+    """Whether a process's own record, read by its pid (no folder listing), leaves the link
+    standing: an unreadable or half-written record says nothing (True); a record that reads and
+    names another session, another process start, another job or the other kind says no."""
+    record = read("claude", pid, home=home, extra=("jobId",))
+    if record is None:
+        return True
+    return (_usable_sid(record.get("sessionId")) == sid and str(record.get("procStart") or "") == start
+            and (record.get("kind") == "bg") == bg
+            and record.get("jobId" if bg else "parkedJobId") == job)
+
+
+def steady_parked_links(harness="claude", *, home=None):
+    """:func:`parked_links` for a caller that asks again on every pass (Fleet's rows and numbers).
+
+    A read that could not decide is not "no link": when the record folder was not read, or one
+    of a link's two records exists but did not parse (half written), a link the previous pass
+    decided is kept, if both of its processes are still the same live processes and each one's
+    own record, read again by its pid, either still says so or cannot be read. A read that does
+    decide — the folder read, or that pid read (the window's record holds no job or another job,
+    a record names another session, a process ended or is another process) — ends it at once.
+    The keeping lasts at most ``STEADY_KEEP_PASSES`` passes in a row; a link nobody decided before
+    is never made from a failed read. Process-local; a new process starts with no link kept."""
+    empty = {"successor": {}, "origin": {}}
+    if harness != "claude":
+        return empty
+    with _STEADY_LOCK:
+        kept = dict(_STEADY)
+        undecided, failed = set(), False
+        try:
+            table = (_links_table(_live_claude_records(home, undecided))
+                     if kept or _a_record_holds_a_job(home) else empty)
+        except Exception:
+            table, failed = {"successor": {}, "origin": {}}, True
+        unconfirmed = {}
+        for viewer_sid, link in kept.items():
+            if (viewer_sid in table["successor"] or link["session_id"] in table["origin"]
+                    or not (failed or {link["viewer_pid"], link["pid"]} & undecided)):
+                continue
+            passes = _STEADY_UNCONFIRMED.get(viewer_sid, 0) + 1
+            if passes > STEADY_KEEP_PASSES:
+                continue
+            start = link.get("viewer_start")
+            if (_proc_start(link["viewer_pid"]) == start and _proc_start(link["pid"]) == link["proc_start"]
+                    and _record_allows(link["viewer_pid"], viewer_sid, start, home=home, bg=False,
+                                       job=link["job_id"])
+                    and _record_allows(link["pid"], link["session_id"], link["proc_start"], home=home,
+                                       bg=True, job=link["job_id"])):
+                table["successor"][viewer_sid] = link
+                table["origin"][link["session_id"]] = link
+                unconfirmed[viewer_sid] = passes
+        _STEADY.clear()
+        _STEADY.update(table["successor"])
+        _STEADY_UNCONFIRMED.clear()
+        _STEADY_UNCONFIRMED.update(unconfirmed)
+        return table
+
+
+def parked_origin(harness, sid, *, home=None):
+    """The same link read from the background side: the viewer a background session ``sid`` is
+    held by, as :func:`parked_successor` of that viewer (its ``viewer_sid`` is the original id)."""
+    try:
+        sid = _usable_sid(sid)
+        if harness != "claude" or sid is None:
+            return None
+        records = _live_claude_records(home)
+        mine = [item for item in records if item.get("kind") == "bg" and _usable_sid(item.get("sessionId")) == sid]
+        if len(mine) != 1:
+            return None
+        origins = session_aliases("claude", mine[0]["pid"])
+        if len(origins) != 1:
+            return None
+        found = _parked_from_viewer(records, origins[0], None, None)
+        return found if found and found["session_id"] == sid else None
+    except Exception:
+        return None
+
+
 def session_join_keys(sess):
     """Every ``(harness, session_id)`` a rendered row answers to — its own id first, then
     its resume aliases. The one definition: the peer ledger join, the steward marker join,

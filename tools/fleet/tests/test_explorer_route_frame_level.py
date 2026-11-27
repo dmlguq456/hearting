@@ -11,8 +11,9 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
 import unittest
 from unittest.mock import patch
 
-from tools.fleet.explorer import live
+from tools.fleet.explorer import live, pages
 from tools.fleet.explorer.frame import draw
+from tools.fleet.explorer.grid import CellGrid
 from tools.fleet.explorer.state import NavState
 from tools.fleet.explorer.tables import _harness_mix
 from tools.fleet.explorer.view_model import ExplorerViewModel
@@ -120,7 +121,9 @@ def _staged_after_frame_vm():
              "effort": "xhigh", "route_id": STAGED_ID, "attempt_id": "att-owner",
              "elapsed_min": 11}]
     chain = [{"route_id": "rt-prev", "capability": "route-frame", "state": "done"},
-             {"route_id": STAGED_ID, "capability": "autopilot-code", "state": "active"}]
+             # The staged route is a leg of the plan its frame opened: that recorded relation is what chains them.
+             {"route_id": STAGED_ID, "capability": "autopilot-code", "state": "active",
+              "route_plan": {"decision": "frame/route-decision.json", "digest": "sha256:" + "0" * 64, "index": 0}}]
     session = {"harness": "claude", "session_id": "sid-owner", "session_tag": "z9",
                "cwd": REPO, "liveness": "idle", "is_child": False, "title": "owner",
                "route_chain": {"nodes": chain}}
@@ -135,6 +138,12 @@ def _staged_after_frame_vm():
 
 
 class FrameOwnerLevelTests(unittest.TestCase):
+    def test_the_fixed_frame_keeps_its_joints_where_the_panel_meets_its_bottom(self):
+        _view_value, _record_value, route, vm = _vm()
+        grid = CellGrid(100, 24)
+        pages.draw_route_detail(grid, vm, route, 0, 98, 10, bottom=16)
+        self.assertEqual((grid.cells[16][2][0], grid.cells[16][96][0]), ("╧", "╧"))
+
     def test_a_sealed_route_frame_record_displays_as_frame_without_a_default_suffix(self):
         view, record, route, vm = _vm()
         self.assertEqual(route["capability"], "frame")
@@ -355,6 +364,13 @@ class FrameOwnerLevelTests(unittest.TestCase):
                     if view == "ROUTES":
                         self.assertIn("⠏ [z9]", row)
 
+    def _two_way(self, row, cols):
+        # 11-17: the `∥ frame 2-way` detail stands whole or not at all (never `∥ frame 2-w`).
+        if cols >= 180:
+            self.assertIn("∥ frame 2-way", row)
+        else:
+            self.assertNotRegex(row, r"∥ frame 2-w(?!ay)")
+
     def test_framed_progress_mark_follows_the_frame_legs(self):
         _view_value, _record_value, _route, running = _vm(running=True)
         _view_value, _record_value, _route, finished = _vm()
@@ -364,33 +380,36 @@ class FrameOwnerLevelTests(unittest.TestCase):
                 text = "\n".join(draw(running, NavState(view="ROUTES", title="ROUTES"),
                                       cols, 60).text_rows())
                 row = next(line for line in text.splitlines() if "[z9]" in line and "frame" in line)
-                self.assertIn("frame ●", row)
-                self.assertIn("∥ frame 2-way", row)
+                self.assertIn("frame → ??", row)   # 11-17 (route row 5): running, no mark; the row's spinner moves
+                self._two_way(row, cols)
                 text = "\n".join(draw(finished, NavState(view="ROUTES", title="ROUTES"),
                                       cols, 60).text_rows())
                 row = next(line for line in text.splitlines() if "[z9]" in line and "frame" in line)
                 self.assertIn("frame ✓", row)
-                self.assertIn("∥ frame 2-way", row)
+                self._two_way(row, cols)
                 text = "\n".join(draw(failed, NavState(view="ROUTES", title="ROUTES"),
                                       cols, 60).text_rows())
                 row = next(line for line in text.splitlines() if "[z9]" in line and "frame" in line)
                 self.assertIn("frame ✕", row)
 
     def test_framed_progress_marks_the_routes_own_frame_leg_after_a_predecessor(self):
-        chain = [{"route_id": "rt-prev", "capability": "route-frame", "state": "done"},
-                 {"route_id": ROUTE_ID, "capability": "route-frame", "state": "active"}]
-        for kwargs, expected in (({"running": True}, "frame ●"),
-                                 ({"node_state": "failed"}, "frame ✕")):
-            with self.subTest(expected=expected):
-                _view_value, _record_value, route, vm = _vm(chain=chain, **kwargs)
-                self.assertEqual([leg[0] for leg in route["legs"]], ["frame", "frame"])
-                for cols in (120, 180):
-                    text = "\n".join(draw(vm, NavState(view="ROUTES", title="ROUTES"),
-                                          cols, 60).text_rows())
-                    row = next(line for line in text.splitlines()
-                               if "[z9]" in line and "frame" in line)
-                    self.assertIn(expected, row)
-                    self.assertNotIn("frame ✓", row)
+        # A frame route after another frame is tied to it only by a record (`source_route_id`); a record that names none is what
+        # happens in practice, and the route then stands alone (no `frame → frame`).
+        for source, legs in (({"source_route_id": "rt-prev"}, ["frame", "frame"]), ({}, ["frame"])):
+            chain = [{"route_id": "rt-prev", "capability": "route-frame", "state": "done"},
+                     {"route_id": ROUTE_ID, "capability": "route-frame", "state": "active", **source}]
+            for kwargs, expected in (({"running": True}, "frame → ??"),
+                                     ({"node_state": "failed"}, "frame ✕")):
+                with self.subTest(expected=expected, source=bool(source)):
+                    _view_value, _record_value, route, vm = _vm(chain=chain, **kwargs)
+                    self.assertEqual([leg[0] for leg in route["legs"]], legs)
+                    for cols in (120, 180):
+                        text = "\n".join(draw(vm, NavState(view="ROUTES", title="ROUTES"),
+                                              cols, 60).text_rows())
+                        row = next(line for line in text.splitlines()
+                                   if "[z9]" in line and "frame" in line)
+                        self.assertIn(expected, row)
+                        self.assertNotIn("frame ✓", row)
 
     def test_the_legacy_synthetic_frame_shape_draws_the_same_progress_suffix(self):
         # Render-only unit case: the pre-collector synthetic shape is not a record the
@@ -404,14 +423,14 @@ class FrameOwnerLevelTests(unittest.TestCase):
         grid = CellGrid(120, 1)
         tables._draw_route_progress(grid, 0, 120, 0, route)
         text = grid.rows_text()[0]
-        self.assertIn("frame ●", text)
+        self.assertIn("frame → ??", text)
         self.assertIn("(frame-alternative ✓)", text)
 
         route["stages"] = [{"name": "frame-alternative", "st": "failed"}]
         grid = CellGrid(120, 1)
         tables._draw_route_progress(grid, 0, 120, 0, route)
         text = grid.rows_text()[0]
-        self.assertIn("frame ●", text)
+        self.assertIn("frame → ??", text)
         self.assertIn("(frame-alternative ✕)", text)
 
     def test_a_resumed_route_with_two_owner_jobs_does_not_borrow_a_frame_leg(self):

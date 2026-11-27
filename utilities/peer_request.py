@@ -318,7 +318,7 @@ def _index():
 
 # --- identity following (N3) ------------------------------------------------
 
-def follow(endpoint):
+def follow(endpoint, *, read_context=None):
     """The session now answerable for ``endpoint``: a confirmed successor or itself.
 
     Only the lineage Hearting already confirms moves a request. A read that fails
@@ -328,7 +328,8 @@ def follow(endpoint):
     harness, sid = endpoint["harness"], endpoint["session_id"]
     try:
         import dispatch_seat_handover as handover
-        new_sid, new_harness = handover.session_successor(sid, harness=harness)
+        new_sid, new_harness = handover.session_successor(
+            sid, harness=harness, read_context=read_context)
     except Exception:  # noqa: BLE001 - an unconfirmed observation never moves the request
         return {"harness": harness, "session_id": sid}
     if new_sid and new_harness in _HARNESSES and _SAFE.fullmatch(new_sid):
@@ -352,7 +353,11 @@ def _predecessors(harness, sid):
     """Sessions whose confirmed successor is ``sid`` (reverse lineage, verified forward)."""
     try:
         import dispatch_seat_handover as handover
-        graph = handover.lineage_graph()
+        from peer_read_context import PeerReadContext
+        # The runner-published compact rows stand in for unchanged ledgers; a
+        # missing or unusable file falls back to the full read.
+        context = PeerReadContext(compact_lineage=True)
+        graph = handover.lineage_graph(read_context=context)
         reverse = {}
         for edge_harness, origin, target in graph.edges:
             if edge_harness == harness:
@@ -364,7 +369,8 @@ def _predecessors(harness, sid):
             if origin in seen or not _SAFE.fullmatch(origin or ""):
                 continue
             seen.add(origin)
-            if follow({"harness": harness, "session_id": origin}).get("session_id") == sid:
+            if follow({"harness": harness, "session_id": origin},
+                      read_context=context).get("session_id") == sid:
                 found.append(origin)
             pending.extend(reverse.get(origin, ()))
         return found
@@ -1005,10 +1011,43 @@ def render_line(record, role, *, revision=None, label="", report=None, body_line
     raise ValueError("request-role-invalid")
 
 
+# What a held row waits for, in the person's words: the receiving host's `hold` (session_shell._hold)
+# and a window outside the shell. The last two are the words a sent answer uses (session_block).
+_HOLD_WORDS = {"busy": ("peer.delivery.hold_busy",), "form": ("peer.delivery.hold_form",),
+               "draft": ("peer.delivery.hold_draft",), "paste": ("peer.delivery.hold_paste",),
+               "unsettled": ("peer.delivery.hold_unsettled",), "unobserved": ("peer.delivery.hold_unobserved",),
+               "old-shell": ("session_shell.upgrade_pending", "fleet.session_block.wait_old_shell"),
+               "no-shell": ("fleet.session_block.wait_no_shell",)}
+
+
+def _ui_text(key):
+    tools = str(Path(__file__).resolve().parents[1] / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    from fleet.config import ui_text
+    return ui_text(key)
+
+
+def hold_words(row, text=None):
+    """Why a still-pending row waits (its ``held``), in words; "" when nothing is known.
+
+    ``text`` is the caller's own ``ui_text`` (the panel and Fleet pass theirs, so the words and the language are one
+    reading); without it the catalog is read here, as `peer-steward show` does."""
+    row = row or {}
+    if row.get("state") != "pending":
+        return ""
+    keys = _HOLD_WORDS.get(str((row.get("held") or {}).get("reason") or ""), ())
+    return " · ".join((text or _ui_text)(key) for key in keys)
+
+
 def delivery_word(row):
-    """The delivery column from the pending row: 보냄 / 전달됨 / 보임."""
+    """The delivery column from the pending row: awaiting delivery (and why) / sent / delivered / seen."""
     state = (row or {}).get("state")
-    return {"pending": "보냄", "unverified": "보냄", "queued": "전달됨", "received": "보임"}.get(state, "")
+    key = {"pending": "peer.delivery.waiting", "unverified": "peer.delivery.sent",
+           "queued": "peer.delivery.queued", "received": "peer.delivery.seen"}.get(state)
+    if key is None:
+        return ""
+    return " · ".join(part for part in (_ui_text(key), hold_words(row)) if part)
 
 
 def describe(record, *, rows=None, now=None):

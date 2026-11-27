@@ -25,7 +25,7 @@ _PERSISTED_ROW_FIELDS = {
                           "repo_id", "branch", "generation", "last_clear"}),
     "route": frozenset({"id", "repo", "session_tag", "title", "state", "worker",
                         "age", "legs", "stages", "harness", "model", "effort",
-                        "mode", "intensity", "profile", "capability", "shape",
+                        "mode", "intensity", "profile", "capability", "field", "shape",
                         "worker_stage"}),
     "stage": frozenset({"name", "st", "el", "h", "m", "e", "gate", "r"}),
 }

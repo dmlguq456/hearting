@@ -23,6 +23,8 @@ from contextlib import ExitStack, contextmanager
 import artifact_lifecycle
 import route_identity
 import route_lineage
+from route_plan import is_depth0_leg
+from route_form import one_shot_review_nodes, serial_attempt_route
 import dispatch_contract
 import dispatch_lock_order
 from dispatch_attempt_policy import verdict_pass
@@ -556,17 +558,46 @@ def _seal_completion_summary(request, route, primary, slot, *, publication=None)
         if (slot / work_intent.SUMMARY_NAME).exists():
             return
         from dispatch_owner_input import completion_corrections
-        assessment = None
-        if route.get("capability") == "audit":
-            from dispatch_completion_join import exact_attempt_row
-            row = exact_attempt_row(Path(request.jobs), request.owner_attempt_id)
-            if row.metadata.get("reconcile_reason") == "completed-audit-with-findings":
+        assessment = owner = None
+        if work_intent.requested_owner(route):
+            # Only work that asked for an owner harness can differ from it; the owner row names
+            # the harness and model that ran, and without it the summary omits that line.
+            try:
+                from dispatch_completion_join import exact_attempt_row
+                owner = exact_attempt_row(Path(request.jobs), request.owner_attempt_id).metadata
+            except Exception:  # noqa: BLE001
+                owner = None
+        # A finished review whose subject did not pass: an audit, or any owner that
+        # closed on a review disposition (`수정 후 병합`, route_authority.handoff_search).
+        try:
+            row = owner
+            if row is None:
+                from dispatch_completion_join import exact_attempt_row
+                row = exact_attempt_row(Path(request.jobs), request.owner_attempt_id).metadata
+            if row.get("reconcile_reason") == "completed-audit-with-findings":
                 assessment = "FAIL"
-        text = work_intent.completion_summary(route, primary, route_file=request.route_file,
-                                              cost=_completion_cost(request, route),
-                                              corrections=completion_corrections(request.jobs, request.owner_attempt_id),
-                                              assessment=assessment, publication=publication)
-        _write_exclusive(slot / work_intent.SUMMARY_NAME, text.encode())
+            elif row.get("worker_type") != "owner":
+                # A unit route's leg: its FAIL handoff with a readable report reads as PASS plus this
+                # assessment (the same reading as an audit's), left in the exact log and the row.
+                from codex_dispatch_terminal import inspect_terminal_attempt
+                view = inspect_terminal_attempt(row.get("log_file"), worktree=route["cwd"],
+                    artifact_root_metadata=route.get("artifact_root"), worker_type=row.get("worker_type"),
+                    artifact_binding=row)
+                if view.get("assessment_verdict") == "FAIL":
+                    assessment = "FAIL"
+        except Exception:  # noqa: BLE001 -- an unreadable row only leaves the assessment unnamed
+            assessment = None
+        import unit_ephemeral
+        if unit_ephemeral.is_scratch_root(route.get("artifact_root")):
+            # An ephemeral unit route: the answer itself is what the caller is given.
+            text = unit_ephemeral.answer_summary(route, primary, head=work_intent.ui_translator()("completion.head"))
+        else:
+            text = work_intent.completion_summary(route, primary, route_file=request.route_file,
+                                                  cost=_completion_cost(request, route),
+                                                  corrections=completion_corrections(request.jobs, request.owner_attempt_id),
+                                                  assessment=assessment, publication=publication, owner=owner)
+        if text:
+            _write_exclusive(slot / work_intent.SUMMARY_NAME, text.encode())
     except Exception:  # noqa: BLE001 -- an existing or unrenderable summary keeps the delivery as it was
         return
 
@@ -581,7 +612,7 @@ def _row_epoch(stamp) -> Optional[float]:
 
 def _completion_cost(request, route, *, now=None) -> dict[str, Any]:
     """Elapsed time and session tokens of this route's registered attempts (the owner, its
-    workers and their retries), for the summary's cost line.
+    workers and their retries), for the summary's cost line. A continued unit turn counts its own attempt only.
 
     Elapsed runs from the first registry row of those attempts to this seal. Tokens are
     the counts each session wrote into its exact attempt log -- the rows Fleet reads,
@@ -596,6 +627,12 @@ def _completion_cost(request, route, *, now=None) -> dict[str, Any]:
             request.owner_attempt_id, str(route.get("route_id") or ""), str(route.get("route_hash") or ""))
         latest: dict[str, Mapping[str, Any]] = {}
         started = []
+        records = list(records)
+        if any(record.completion_metadata().get("attempt_id") == request.owner_attempt_id
+               and record.completion_metadata().get("continues_attempt_id") for record in records):
+            # A unit route's continued turn is its own attempt: count that turn, not every turn before it.
+            records = [record for record in records
+                       if record.completion_metadata().get("attempt_id") == request.owner_attempt_id]
         for record in records:
             metadata = record.completion_metadata()
             attempt = metadata.get("attempt_id")
@@ -711,12 +748,15 @@ def validate_owner_route(*, jobs: Path, route_file: Path, owner_attempt_id: str,
                 Path(jobs), owner_attempt_id, rows=registry_rows)
             route = json.loads(Path(route_file).read_text())
             # Quick is a three-node route: `one-shot` plus two depth-1 frame
-            # legs. Both worker types terminate through here, and the derived
-            # tuple must come from the node the row actually names -- assuming
-            # `one-shot` made every frame leg's termination fail as
+            # legs. The owner and a depth-0 leg both terminate through here, and
+            # the derived tuple must come from the node the row actually names --
+            # assuming `one-shot` made every frame leg's termination fail as
             # `route-identity-unverified: quick-owner-tuple`.
-            if (route.get("effective_intensity") != "quick"
-                    or meta.get("worker_type") not in {"owner", "frame"}
+            named = next((n for n in route.get("nodes") or [] if isinstance(n, dict)
+                          and n.get("id") == meta.get("route_node")), None)
+            if (not serial_attempt_route(route)
+                    or not (meta.get("worker_type") == "owner" or (
+                        is_depth0_leg(named) and meta.get("worker_type") == named.get("worker_type")))
                     or meta.get("dispatch_depth") != "1" or meta.get("registered_worker") != "1"
                     or fields[1] not in {"open", "running", "done"}
                     or (fields[1] == "done" and not verdict_pass(meta))):
@@ -769,7 +809,7 @@ def verify_request_identity(request, route, *, registry_rows=None):
     binding = validate_owner_route(jobs=request.jobs, route_file=request.route_file,
                                    owner_attempt_id=request.owner_attempt_id,
                                    registry_rows=registry_rows)
-    owners = [(fields, meta) for fields, meta in rows if meta.get("worker_type") == "owner"
+    owners = [(fields, meta) for fields, meta in rows if dispatch_contract.finishes_route(meta)
               and (meta.get("owner_route_id") == route["route_id"]
                    or meta.get("route_id") == route["route_id"]
                    or meta.get("attempt_id") == request.owner_attempt_id)]
@@ -913,7 +953,7 @@ def _exact_owner_handoff(jobs: Path, attempt: str, route: Mapping[str, Any], *,
             if len(matches) != 1:
                 return None
             fields, meta = matches[0]
-        if meta.get("worker_type") != "owner":
+        if not dispatch_contract.finishes_route(meta):
             return None
         log_file = meta.get("log_file")
         if not isinstance(log_file, str) or not log_file:
@@ -921,7 +961,7 @@ def _exact_owner_handoff(jobs: Path, attempt: str, route: Mapping[str, Any], *,
         from codex_dispatch_terminal import inspect_terminal_attempt
         inspected = inspect_terminal_attempt(
             log_file, worktree=fields[3], artifact_root_metadata=route.get("artifact_root"),
-            worker_type="owner", artifact_binding=meta)
+            worker_type=meta.get("worker_type"), artifact_binding=meta)
         if (inspected.get("state") != "valid" or inspected.get("verdict") != "PASS"
                 or inspected.get("artifact_state") != "readable"):
             return None
@@ -2163,10 +2203,12 @@ def owner_workflow_gaps(jobs, metadata, route):
 def _completion_owner_choice(jobs, status, metadata, *, executing=False,
                              selected_registry_rows=None):
     import route_parent_close
+    import unit_continue
     from route_authority import decide_continuation
     return decide_continuation(action="completion-owner", status=status, metadata=metadata,
         facts={"closing": route_parent_close.row_requested(
-            metadata, jobs, registry_rows=selected_registry_rows), "executing": executing})
+            metadata, jobs, registry_rows=selected_registry_rows), "executing": executing,
+            "continued": unit_continue.continued_by_later_turn(jobs, metadata)})
 
 
 def owner_workflow_continuation(jobs, owner_attempt_id, route_file):
@@ -2187,7 +2229,7 @@ def owner_workflow_continuation(jobs, owner_attempt_id, route_file):
         "gates": {node: {"passed": False, "reason": reason} for node, reason in missing.items()}})
     if choice.allowed:
         return None
-    return (
+    text = (
         "[workflow-completion-pending]\n"
         "Your report is preserved, but the selected route still lacks completion evidence: "
         + json.dumps(missing, ensure_ascii=False, sort_keys=True)
@@ -2197,6 +2239,55 @@ def owner_workflow_continuation(jobs, owner_attempt_id, route_file):
         "Return the final handoff after the declared stages finish. If execution cannot proceed, "
         "report the actual blocker and retained report instead of PASS. Runtime settlement owns close/finalize."
     )
+    reviews = [node for node in one_shot_review_nodes(route) if node["id"] in missing]
+    if reviews:
+        text += "\n" + _middle_cell_review_sentence(route, route_file, reviews, missing, jobs)
+    return text
+
+
+def _middle_cell_review_sentence(route, route_file, reviews, missing, jobs):
+    """What is true of the middle cell's review when its owner ends without it standing: it has not run, it
+    passed work the owner has since changed, it blocked (the verdict text's own instruction), or its rounds are
+    spent. The owner cannot close the review itself, so each sentence leads to the one start command or to the end."""
+    import review_round_cap as ROUND
+    import worker_bootstrap
+    # One command starts the whole review group (any member names it; the anchor is the first).
+    anchor = reviews[0].get("parallel_anchor") or reviews[0]["id"]
+    start = (f"`{worker_bootstrap.route_start_command(route_file, anchor, jobs=jobs)}` and yield "
+             "runtime_wait: registered-children")
+    no_inline = "You cannot review your own work or close this review inline; do not report PASS without it."
+    lineage = worker_bootstrap._lineage_rows(route, jobs)
+    blocking, ran_without_verdict = [], False
+    for review in reviews:
+        rows = [(status, meta) for status, meta in lineage.get(review["id"], ())]
+        verdicts = [(status, meta) for status, meta in rows
+                    if ROUND.classify_round_row(status, meta, worker_type="review") == "verdict"]
+        if verdicts and ROUND.last_verdict_blocking(rows, "review"):
+            blocking.append((review, verdicts[-1][1]))
+        elif rows and not verdicts:
+            ran_without_verdict = True
+    if blocking:
+        # Every blocking leg of a review group is named; the owner fixes them in one pass.
+        fixes = [fields for fields in (worker_bootstrap.continuation_followup_fields(route, review, meta, jobs, route_file)
+                                       for review, meta in blocking) if fields.get("owner_fixes")]
+        if fixes:
+            return worker_bootstrap.continuation_followup_text(fixes if len(fixes) > 1 else fixes[0])
+        return ("Your route's independent review blocks your current work. Fix the blocking findings in its report, "
+                f"commit, then start it again with exactly: {start}. {no_inline}")
+    stale = [str(missing[review["id"]]).startswith("completion-review-source-stale") for review in reviews]
+    if any(stale) and not all(stale):
+        # Some legs of a group passed before the work changed and the rest gave no verdict or have not run.
+        return ("Part of your route's independent review passed but the work changed after it, and the rest ended "
+                "without a verdict or has not run. Commit your work, then start the review again with exactly: "
+                f"{start}. {no_inline}")
+    if any(stale):
+        return ("Your route's independent review passed, but the work changed after it. Commit your work, then start "
+                f"the review again with exactly: {start}. {no_inline}")
+    if ran_without_verdict:
+        return ("Your route's independent review ended without a verdict. Commit your work, then start it again with "
+                f"exactly: {start}. {no_inline}")
+    return ("Your route's independent review has not run. Commit your work, then start it with exactly: "
+            f"{start}. {no_inline}")
 
 
 def _historical_request(jobs, status, metadata, *, selected_registry_rows=None, observer=None):
@@ -2219,11 +2310,11 @@ def _historical_request(jobs, status, metadata, *, selected_registry_rows=None, 
     digest = route_identity.route_hash(route)
     if (route.get("route_hash") != digest or route.get("route_id") != route_identity.route_id_from_hash(digest)
             or (owner and (owner.route_id != route["route_id"] or owner.route_hash != digest))
-            or (not owner and (route.get("effective_intensity") != "quick"
+            or (not owner and (not serial_attempt_route(route)
                 or meta.get("route_id") != route["route_id"] or meta.get("route_hash") != digest))
             or fields[1] not in {"open", "running", "done"} or meta.get("attempt_id") != metadata["attempt_id"]
             or meta.get("registered_worker") != "1" or meta.get("dispatch_depth") != "1"
-            or meta.get("worker_type") != "owner" or meta.get("harness") not in dispatch_contract.WRAPPER_PARENT_HARNESSES
+            or not dispatch_contract.finishes_route(meta) or meta.get("harness") not in dispatch_contract.WRAPPER_PARENT_HARNESSES
             or (fields[1] == "done" and not verdict_pass(meta))):
         raise TerminalCommitError("route-identity-unverified", "historical-owner-identity")
     root = Path(route["artifact_root"]).resolve()

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -25,11 +26,16 @@ OPENCODE_MARKER_LINE_RE = re.compile(
 )
 MAX_CLAUDE_TRANSCRIPT_BYTES = 4 * 1024 * 1024
 CLAUDE_STOP_FEEDBACK_PREFIX = "Stop hook feedback:"
-CLAUDE_TASK_NOTIFICATION_SUMMARY_RE = re.compile(
-    r"<task-notification>(?:(?!</task-notification>).)*?"
-    r"<summary>Stop hook feedback</summary>(?:(?!</task-notification>).)*?"
-    r"</task-notification>", re.DOTALL,
-)
+# A Stop-hook notification block where a text begins (``match`` at a position), and the
+# reminder Claude Code puts the hook's output in, right after it. Claude Code's block holds
+# only its summary; one holding a ``<result>`` or another notification tag is a different
+# notification (a background agent's) whatever it quotes.
+_BLOCK_BODY = r"(?:(?!</?task-notification>|<result>).)*?"
+_LEADING_STOP_FEEDBACK_RE = re.compile(
+    r"\s*<task-notification>" + _BLOCK_BODY + r"<summary>Stop hook feedback</summary>" + _BLOCK_BODY
+    + r"</task-notification>", re.DOTALL)
+_LEADING_REMINDER_RE = re.compile(r"\s*<system-reminder>(?:(?!</system-reminder>).)*?</system-reminder>",
+                                  re.DOTALL)
 LEGACY_COMPLETION_RE = re.compile(
     r"Runtime owner completion receipt schema=2 state=(success|attention) "
     r"attempt_id=([^\s]+) armed=([^\s]+) status=([^\s]+) "
@@ -91,7 +97,9 @@ def _delivery_heads() -> tuple[str, ...]:
     import human_gate_receipt
     headers = (sweep.GATE_DELIVERY_HEADER, sweep.NOTICE_DELIVERY_HEADER,
                sweep.COMPLETION_DELIVERY_HEADER, sweep._PREVIOUS_GATE_DELIVERY_HEADER,
+               sweep._SHIPPED_V440_GATE_DELIVERY_HEADER,
                sweep._PREVIOUS_NOTICE_DELIVERY_HEADER, sweep._PREVIOUS_COMPLETION_DELIVERY_HEADER,
+               sweep._SHIPPED_COMPLETION_DELIVERY_HEADER, sweep._SHIPPED_NOTICE_DELIVERY_HEADER,
                sweep._LEGACY_COMPLETION_DELIVERY_HEADER, sweep.OVERFLOW_HEADER,
                "AGENT_HARNESS_COMPLETION_V1", human_gate_receipt.NATIVE_HEAD)
     return tuple(header + "\n" for header in headers) + (dispatch_supervision.NEEDS_ATTENTION_HEAD,)
@@ -125,8 +133,8 @@ def bound_delivery_ids(text: str, storage_recipient: str, roots) -> list[str]:
 
     The marker is the identity a receipt ACK proves (``settle_native_receipt``), but a
     person can paste it with words of their own, so the prompt as a whole must be what
-    Hearting sent: every marker line is complete (the Codex queue recovery's fullmatch),
-    one ends the prompt, each binds to a record stored for this recipient, and the text
+    Hearting sent: every marker line outside the answers its records carry (a person's words,
+    ``without_answer_text``) is complete (the Codex queue recovery's fullmatch), one ends the prompt, each binds to a record stored for this recipient, and the text
     above the last one opens with a fixed Hearting delivery heading or is exactly a session
     notice's native text (rendered from its stored receipt alone; other notices re-render
     from live registry state, so their fixed opening is the comparison). Anything else
@@ -136,10 +144,24 @@ def bound_delivery_ids(text: str, storage_recipient: str, roots) -> list[str]:
         return []
     body = text.strip()
     above, _newline, last = body.rpartition("\n")
-    matches = [MARKER_LINE_RE.fullmatch(line) for line in body.split("\n")
-               if "HEARTING_RECEIPT_V1" in line]
-    if (not above or MARKER_LINE_RE.fullmatch(last) is None
-            or any(match is None for match in matches)):
+    if not above or MARKER_LINE_RE.fullmatch(last) is None:
+        return []
+    lines = [line for line in body.split("\n") if "HEARTING_RECEIPT_V1" in line]
+    if len(lines) > 1:
+        # 11-26: an answer the delivery's own records carry is the person's words; a marker line copied into it
+        # (a piece of a session record) is neither one of the delivery's markers nor a break in it. One marker line
+        # (an ordinary delivery: the one ending it) holds no answer's, and no answer is read (review 1861).
+        named = {}
+        for line in lines:
+            found = MARKER_LINE_RE.fullmatch(line)
+            if found and found.group(1) not in named:
+                bound = _bound_record(found.group(1), found.group(2), storage_recipient, roots)
+                if bound is not None:
+                    named[found.group(1)] = bound
+        lines = [line for line in without_answer_text(body, named.values()).split("\n")
+                 if "HEARTING_RECEIPT_V1" in line]
+    matches = [MARKER_LINE_RE.fullmatch(line) for line in lines]
+    if not matches or any(match is None for match in matches):
         return []
     ids = [match.group(1) for match in matches]
     if len(set(ids)) != len(ids):
@@ -156,6 +178,28 @@ def bound_delivery_ids(text: str, storage_recipient: str, roots) -> list[str]:
     except Exception:  # noqa: BLE001 - no heading to compare is no proof
         pass
     return ids if len(records) == 1 and above == _sent_notice_text(records[0]) else []
+
+
+def without_answer_text(text: str, records) -> str:
+    """``text`` less the answer each answer notice among ``records`` carries, as its delivery shows it.
+
+    A written answer may hold anything the person put in it, a line with a receipt marker copied from a
+    session record too (11-26). Only the exact answer a record is bound to is taken out, so the markers
+    the delivery itself carries, and anything outside its answers, are read as before. The delivered
+    text is never changed: this is what its readers look for markers in.
+    """
+    for record in records:
+        receipt = record.get("receipt") if isinstance(record, dict) else None
+        if not isinstance(receipt, dict) or "answer_binding" not in receipt:
+            continue
+        try:
+            import session_notice
+            answer = session_notice.consumer_text(receipt)
+        except Exception:  # noqa: BLE001 - an answer that cannot be read is not taken out
+            continue
+        if answer:
+            text = text.replace(answer, "")
+    return text
 
 
 def _text_content(value: Any) -> str:
@@ -176,12 +220,57 @@ def _evidence(harness: str, session_id: str, source: str,
             "bindings": bindings, "legacy_texts": list(texts)}
 
 
+def _native_notification(value: Any) -> bool:
+    return (isinstance(value, dict) and value.get("kind") == "task-notification")
+
+
+def _stop_feedback_head(text: str) -> str:
+    """The Stop-hook-feedback notifications a text begins with, each with its reminder.
+
+    Claude Code puts the hook's output after the notification block (in the system
+    reminder that follows it), the same text a user event holds. Only blocks at the
+    top count: the text starts with one and the next directly follows it. A block or
+    marker inside another notification (a background agent's ``<result>`` quoting a
+    transcript) is that notification's content, never a receipt."""
+    if not isinstance(text, str):
+        return ""
+    end = 0
+    while True:
+        block = _LEADING_STOP_FEEDBACK_RE.match(text, end)
+        if block is None:
+            return text[:end]
+        end = block.end()
+        reminder = _LEADING_REMINDER_RE.match(text, end)
+        if reminder is not None:
+            end = reminder.end()
+
+
+def _stop_feedback_bindings(text: str) -> list[tuple[str, str]]:
+    """Markers of the Stop-hook-feedback notifications a text begins with (``_stop_feedback_head``)."""
+    return [(match.group(1), match.group(2)) for match in MARKER_RE.finditer(_stop_feedback_head(text))]
+
+
 def claude_feedback_evidence(events: Any, session_id: str) -> dict[str, Any] | None:
-    """Accept only this session's native user feedback transcript events."""
+    """Accept only this session's native user feedback transcript events.
+
+    A Stop-hook notification that arrived while the model was working is attached
+    to the running turn as a ``queued_command`` record instead of a user event;
+    that record is the same native receipt.
+    """
     if not isinstance(session_id, str) or not session_id or not isinstance(events, list):
         return None
     texts = []
     for event in events:
+        if (isinstance(event, dict) and event.get("type") == "attachment"
+                and event.get("sessionId", event.get("session_id")) == session_id):
+            attachment = event.get("attachment")
+            if (isinstance(attachment, dict) and attachment.get("type") == "queued_command"
+                    and attachment.get("commandMode") == "task-notification"
+                    and _native_notification(attachment.get("origin"))):
+                head = _stop_feedback_head(attachment.get("prompt"))
+                if head:
+                    texts.append(head)
+            continue
         if not isinstance(event, dict) or event.get("type") != "user":
             continue
         if event.get("sessionId", event.get("session_id")) != session_id:
@@ -198,30 +287,52 @@ def claude_feedback_evidence(events: Any, session_id: str) -> dict[str, Any] | N
             and event["origin"].get("kind") == "task-notification"
             and event.get("promptSource") == "system"
             and event.get("turnOrigin") == "task_notification"
-            and CLAUDE_TASK_NOTIFICATION_SUMMARY_RE.search(text) is not None
         )
-        if not (legacy_feedback or stop_feedback or native_notification):
+        if native_notification and not (legacy_feedback or stop_feedback):
+            # Only the Stop-hook notifications the turn's text begins with (not one quoted
+            # in another notification's result).
+            text = _stop_feedback_head(text)
+        elif not (legacy_feedback or stop_feedback):
             continue
         if text:
             texts.append(text)
     return _evidence("claude", session_id, "claude-transcript", texts)
 
 
+def claude_prompt_bindings(prompt: Any) -> list[tuple[str, str]]:
+    """Receipts in the prompt Claude Code is submitting for a Stop-hook notification turn.
+
+    When a notification wakes a resting session, its text is the turn's prompt: the
+    prompt hooks run with it before the transcript holds the user event, and the model
+    reads it in the same request as their context.
+    """
+    if not isinstance(prompt, str) or not prompt.lstrip().startswith("<task-notification>"):
+        return []
+    return _stop_feedback_bindings(prompt)
+
+
 def claude_transcript_evidence(*, transcript_path: str | Path, session_id: str,
-                               cwd: str, expected_cwd: str,
                                runtime_home: str) -> dict[str, Any] | None:
     """Read only the verified Claude session transcript's bounded tail.
 
+    The path is the one Claude Code gave the hook; the session's current working
+    folder is not consulted (the transcript stays where the session started, even
+    after a ``cd``). The file itself proves it is this session's: a real file named
+    ``<session_id>.jsonl`` under ``<runtime_home>/projects`` once symlinks resolve.
     Only actual user feedback events are eligible. A missing, foreign, partial,
     or unreadable transcript returns unknown (``None``), which leaves normal
     delivery fallback intact.
     """
     try:
-        from claude_project_dir import resolve_session_transcript
-        resolved, _reason = resolve_session_transcript(
-            session_id, cwd, expected_cwd=expected_cwd, runtime_home=runtime_home)
+        if (not isinstance(session_id, str) or not session_id
+                or session_id in {".", ".."} or any(ch in session_id for ch in "/\\")
+                or any(ord(ch) < 32 for ch in session_id)
+                or not isinstance(runtime_home, str) or not os.path.isabs(runtime_home)):
+            return None
+        projects = (Path(runtime_home) / "projects").resolve(strict=True)
         supplied = Path(transcript_path).resolve(strict=True)
-        if resolved is None or supplied != resolved.resolve(strict=True):
+        if (supplied.name != session_id + ".jsonl" or not supplied.is_file()
+                or projects not in supplied.parents):
             return None
         size = supplied.stat().st_size
         with supplied.open("rb") as handle:

@@ -109,7 +109,7 @@ make_fixture() {
   chmod +x "$root/adapters/claude/statusline.sh"
   # Owner-name-set union members installed by `harness install claude` but
   # historically outside runtime_activation.py's own native discovery names
-  # (INSTALL_LAYOUT.md "owner-name-set reconciliation").
+  # (docs/INSTALL_LAYOUT.md "owner-name-set reconciliation").
   printf '%s\n' '# fixture root readme' > "$root/README.md"
   printf '%s\n' '{"capabilities":[]}' > "$root/manifest.json"
   mkdir -p "$root/adapters/claude/loops"
@@ -248,14 +248,14 @@ with open(path, "w", encoding="utf-8") as handle:
 PY
 ok "fresh Claude activation reports conflicts and uninstall preserves custom values"
 
-# INSTALL_LAYOUT.md "owner-name-set reconciliation": README.md/manifest.json
+# docs/INSTALL_LAYOUT.md "owner-name-set reconciliation": README.md/manifest.json
 # are installer-owned names outside activation's own historical discovery
 # set. A real `harness install claude` symlink resolves into the checkout
 # ($SRC), which is also `source_roots` for a fresh activation -- so it is
 # never a "foreign" collision, just a name activation has not managed yet.
 # In `packaged` mode `active_root` is a separate bundle copy, so adopting
 # the union here produces a *different* final target than the installer's,
-# exactly the real mixed-layout case INSTALL_LAYOUT.md describes. Simulate
+# exactly the real mixed-layout case docs/INSTALL_LAYOUT.md describes. Simulate
 # the installer's prior projection by pre-creating that exact symlink shape.
 mkdir -p "$HOME/.claude"
 ln -sfn "$SRC/README.md" "$HOME/.claude/README.md"
@@ -1384,11 +1384,11 @@ commands = [hook["command"] for groups in settings["hooks"].values()
             for group in groups for hook in group.get("hooks", [])
             if isinstance(hook, dict) and isinstance(hook.get("command"), str)]
 managed = [command for command in commands if prefix in command]
-assert sum(command.count(prefix) for command in managed) == 44, len(managed)
+assert sum(command.count(prefix) for command in managed) == 43, len(managed)
 paths = [match.replace(prefix, str(expected_root), 1)
          for command in managed
          for match in re.findall(re.escape(prefix) + r'/[^\s"\']+', command)]
-assert len(paths) == 44, paths
+assert len(paths) == 43, paths
 for raw in paths:
     path = Path(raw)
     assert path.is_file() and path.is_relative_to(expected_root), path
@@ -1396,7 +1396,7 @@ PY
   harness uninstall claude > "$TMP/claude-template-default-uninstall.log" 2>&1 \
     || { cat "$TMP/claude-template-default-uninstall.log" >&2; fail "default template uninstall failed"; }
 )
-ok "default Claude activation keeps the 44 shipped hook paths healthy under HOME/.claude"
+ok "default Claude activation keeps the 43 shipped hook paths healthy under HOME/.claude"
 
 # Custom config roots have no fallback hook files under HOME/.claude. The
 # capture wrappers record resolved argv without running any hook workload.
@@ -1435,8 +1435,8 @@ commands = [hook["command"] for groups in settings["hooks"].values()
             for group in groups for hook in group.get("hooks", [])
             if isinstance(hook, dict) and isinstance(hook.get("command"), str)]
 managed = [command for command in commands if prefix in command]
-assert sum(command.count(prefix) for command in managed) == 44, len(managed)
-assert sum("/hooks/" in command for command in managed) == 43
+assert sum(command.count(prefix) for command in managed) == 43, len(managed)
+assert sum("/hooks/" in command for command in managed) == 42
 assert sum("/tools/memory/mem.py" in command for command in managed) == 1
 assert not (Path(os.environ["HOME"]) / ".claude/hooks/run-hook.sh").exists()
 
@@ -1469,16 +1469,16 @@ for command in managed:
                                 capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, (command, result.returncode, result.stderr)
 records = [json.loads(line) for line in capture_log.read_text().splitlines()]
-assert len(records) == 44, records
+assert len(records) == 43, records
 paths = [record["argv"][0] for record in records]
 for raw in paths:
     path = Path(raw)
     assert str(path).startswith(str(expected_root) + os.sep), path
     assert path.is_file(), path
     assert ".claude}" not in str(path), path
-assert sum("/hooks/" in raw for raw in paths) == 43, paths
+assert sum("/hooks/" in raw for raw in paths) == 42, paths
 assert sum("/tools/memory/mem.py" in raw for raw in paths) == 1, paths
-assert sum(raw.endswith("/hooks/run-hook.sh") for raw in paths) == 42, paths
+assert sum(raw.endswith("/hooks/run-hook.sh") for raw in paths) == 41, paths
 assert sum(raw.endswith("/hooks/herdr-agent-state.sh") for raw in paths) == 1, paths
 session_start = [hook["command"] for group in settings["hooks"].get("SessionStart", [])
                  for hook in group.get("hooks", [])]
@@ -1495,7 +1495,7 @@ settings = json.load(open(sys.argv[1], encoding="utf-8"))
 commands = [hook.get("command") for groups in settings["hooks"].values()
             for group in groups for hook in group.get("hooks", [])]
 prefix = "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-assert sum(command.count(prefix) for command in commands if isinstance(command, str)) == 44
+assert sum(command.count(prefix) for command in commands if isinstance(command, str)) == 43
 canonical = 'bash "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr-agent-state.sh" session'
 assert sum(command == canonical for command in commands) == 1
 assert any(hook.get("command") == "echo custom-user-hook"

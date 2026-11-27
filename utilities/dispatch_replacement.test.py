@@ -10,6 +10,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import shutil
 import os
 from pathlib import Path
 import subprocess
@@ -3021,6 +3022,107 @@ class ReplacementTest(unittest.TestCase):
         self.assertEqual(result['record']['proof']['death_kind'], 'runtime')
         self.assertEqual(result['record']['proof']['note'], 'dead-runtime-exit')
 
+    def test_policy_refusal_can_release_a_bound_parent_notice_when_no_alternative_exists(self):
+        self._runtime_end(provider_failure_kind="cyberPolicy", model="fixture-model")
+        result = R.advance(
+            self.jobs, "att-source", authority_check=lambda *_: True,
+            run=lambda *_args, **_kw: SimpleNamespace(returncode=65,
+                stdout="reason=provider-refusal-no-alternative\n", stderr=""))
+        self.assertEqual(result["reason"], "provider-refusal-no-alternative")
+        self.assertEqual(result["failure"], "cyberPolicy")
+        self.assertEqual(R.recovery_delivery_state(self.jobs, "att-source"), "settled")
+        self.assertIn("same harness and model", result["detail"])
+        # A later explicit start may choose a new pin/model in the same claim.
+        runs = []
+        R.advance(self.jobs, "att-source", authority_check=lambda *_: True, resume_capacity=True,
+                  run=lambda command, **_kw: runs.append(command)
+                  or SimpleNamespace(returncode=65, stdout="", stderr=""))
+        self.assertEqual(len(runs), 1)
+
+    def test_a_refused_owner_waits_for_the_other_harness_to_leave_capacity(self):
+        spec = importlib.util.spec_from_file_location(
+            'replacement_owner_capacity_fixture', Path(__file__).with_name('dispatch_owner.test.py'))
+        suite = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(suite)
+        selector = suite.RouteOwnerPinTest()
+        self.addCleanup(selector.doCleanups)
+        path = selector._route(sealed=('claude', 'codex'))
+        self.addCleanup(shutil.rmtree, path.parent)
+        self._runtime_end(note='dead-runtime-error', provider_failure_kind='cyberPolicy', model='fixture-model')
+        usage = {'claude': 'limited(2100-01-01T00:10:00Z)',
+                 'codex': 'limited(2100-01-01T00:00:00Z)', 'opencode': 'ok'}
+        launches = []
+        replacement_source = R.replacement_source
+
+        def run(command, **_kwargs):
+            attempt = command[command.index('--attempt-id') + 1]
+            selection = selector._launch(path, None, usage=usage,
+                extra=('--automatic-retry-of', 'att-source', '--attempt-id', attempt))
+            launches.extend(selection.calls)
+            return SimpleNamespace(returncode=selection.rc, stdout=selection.out, stderr='')
+
+        def hold(_jobs, harness, **_kwargs):
+            if usage[harness] == 'ok':
+                return None
+            return {'label': usage[harness], 'until_epoch': 4102445400 if harness == 'claude' else 4102444800}
+
+        with mock.patch.object(R, 'replacement_source',
+                               side_effect=lambda _jobs, prior, next_: replacement_source(self.jobs, prior, next_)), \
+             mock.patch('model_profile.resolve_runtime_profile', return_value=({'model': 'fixture-model'}, {})), \
+             mock.patch('dispatch_capacity_evidence.harness_hold', side_effect=hold):
+            waited = R.advance(self.jobs, 'att-source', authority_check=lambda *_: True, run=run)
+            self.assertEqual((waited['reason'], waited.get('harness'), waited.get('retry_at'), launches),
+                             ('replacement-capacity-wait', 'claude', '2100-01-01T00:10:00Z', []))
+            usage.update(claude='ok', codex='ok')
+            R.advance(self.jobs, 'att-source', authority_check=lambda *_: True, resume_capacity=True, run=run)
+        self.assertEqual([Path(command[0]).parts[-3] for command in launches], ['claude'])
+
+    def test_a_second_content_refusal_in_a_row_returns_to_the_parent(self):
+        """The selector leaves a refused pair out, so A -> B -> C would alternate forever."""
+        refused = {'note': 'dead-runtime-error', 'failure_class': 'runtime',
+                   'provider_failure_kind': 'cyberPolicy', 'model': 'fixture-codex'}
+        second_ends = (({'harness': 'claude', 'model': 'fixture-claude', 'provider_failure_kind': 'refusal'},
+                        ('automatic-replacement-exhausted', 0)),
+                       ({'harness': 'claude', 'model': 'fixture-claude'},
+                        ('replacement-launch-pending', 1)))
+        for second, expected in second_ends:
+            with self.subTest(second=second):
+                self.tearDown_case()
+                parent = self._runtime_end(**refused)
+                first, commands = self._bound_launch()
+                self.assertEqual((first['reason'], len(commands)), ('replacement-launch-pending', 1))
+                self.assertIn('--automatic-retry-of', commands[0])
+                successor = self._successor(first['record'], parent, status='open')
+                successor.pop('provider_failure_kind')   # only B's own end writes its kind
+                ended = self._die(successor, note='dead-runtime-error', failure_class='runtime',
+                                  terminal_event='dispatch.supervisor.error', launch_started='1',
+                                  supervisor_lease='flock-v1', supervisor_lease_file=str(
+                                      D.supervisor_lease_path(self.jobs, successor['attempt_id'])), **second)
+                result, commands = self._bound_launch(ended['attempt_id'])
+                self.assertEqual((result['reason'], len(commands)), expected)
+
+    def test_a_fixed_replay_stops_on_a_content_refusal(self):
+        """A frame or batch replay keeps its harness and model, so it cannot avoid the refused pair."""
+        self._runtime_end(worker_type='frame', note='dead-runtime-error',
+                          provider_failure_kind='cyberPolicy', model='fixture-codex')
+        result, commands = self._bound_launch()
+        self.assertEqual((result['reason'], result['failure'], commands),
+                         ('provider-refusal-no-alternative', 'cyberPolicy', []))
+        self.assertIn('same harness and model', result['detail'])
+        self.assertIsNone(R.accept_terminal_delivery_duty(self.jobs, 'att-source'))
+
+    def test_a_pin_names_the_model_that_was_or_was_not_refused(self):
+        source = {'harness': 'codex', 'model': 'fixture-refused', 'provider_failure_kind': 'cyberPolicy',
+                  'note': 'dead-runtime-error', 'failure_class': 'runtime'}
+        with mock.patch('model_profile.resolve_runtime_profile', return_value=({'model': 'fixture-refused'}, {})):
+            self.assertEqual(R.refused_profile_harness(source, 'deep'), 'codex')
+            self.assertEqual(R.refused_profile_harness(
+                source, 'deep', pin={'harness': 'codex', 'model': 'fixture-refused'}), 'codex')
+            self.assertIsNone(R.refused_profile_harness(
+                source, 'deep', pin={'harness': 'codex', 'model': 'fixture-pinned'}))
+            self.assertIsNone(R.refused_profile_harness({**source, 'provider_failure_kind': 'usageLimitExceeded'},
+                                                        'deep'))
+
     def test_a_supervisor_tick_does_not_launch_a_runtime_end(self):
         self._runtime_end()
         result = R.advance(self.jobs, 'att-source',
@@ -4646,6 +4748,106 @@ class ReplacementTest(unittest.TestCase):
             self.assertIn('predecessor=', caught.exception.detail)
             self.assertIn('candidate=', caught.exception.detail)
             self.assertIn('child_spawned=0', caught.exception.detail)
+
+    def test_carried_allowed_tools_follow_the_sealed_lineage_across_a_release_move(self):
+        # #1510: a Claude owner sealed on an older release is replaced on a newer one. The
+        # launcher would compute its allow list again, with rules the newer release adds, so
+        # the unchanged strict comparison refuses it. The replacement keeps the sealed list.
+        import route_authority
+        share=self.root/'share'
+        va,vb=share/'releases'/'vA',share/'releases'/'vB'
+        for tree in (va,vb,self.root/'dev'):(tree/'core').mkdir(parents=True)
+        (share/'current').symlink_to(vb)
+        public=['Bash(git push -u origin HEAD:refs/heads/task)','Bash(gh pr view)']
+        def rules(home,*extra):
+            return [f'Bash(python3 {home}/utilities/peer-steward.py *)',f'Bash({home}/utilities/peer-steward.py)',
+                    'Bash(git status *)',f'Bash(python3 {self.root}/dev/utilities/tool.py *)',
+                    f'Edit(//{self.root}/**)',*extra]
+        def seal(attempt,home,tools,*,harness='claude',worker_type='owner',retry=None,digest=None):
+            args=SimpleNamespace(attempt_id=attempt,jobs_path=self.jobs,worktree=str(self.root),route_id='rt-test',
+                route_node='frame',launch_lifecycle='detached',
+                replacement_input_argv=['--start','--attempt-id',attempt,'--prompt-text','the raw task'],
+                resolved_permission_posture={'mode':'bypass','mode_flag':'bypassPermissions',
+                    'allowed_tools':tools,'inherited_default_mode':'default'})
+            with mock.patch.object(R,'ROOT',Path(home)):
+                fragment=R.seal_launch_input(args,harness,'the raw task')
+            meta={**self.meta,'attempt_id':attempt,'worker_type':worker_type,'harness':harness,
+                  **D.parse_registry_metadata(fragment)}
+            if retry:meta['automatic_retry_of']=retry
+            if digest:meta['replacement_input_digest']=digest
+            self.write(meta,append=True)
+        def carried(attempt,*,home=vb,agent_home=None,**options):
+            return R.carried_allowed_tools(self.jobs,attempt,**{'harness':'claude','worker_type':'owner',
+                'agent_home':agent_home or home,'current_home':home,**options})
+        sealed=rules(va)
+        seal('att-p',va,sealed)
+        # (a) The release moved: the sealed list comes back with only its release root moved.
+        moved=carried('att-p')
+        self.assertEqual(moved,rules(vb))
+        self.assertEqual(len(moved),len(sealed))
+        # (g) Another harness tree (a development checkout) and the Edit rule keep their place.
+        self.assertIn(f'Bash(python3 {self.root}/dev/utilities/tool.py *)',moved)
+        self.assertIn(f'Edit(//{self.root}/**)',moved)
+        # (h) The moved list is the same permission as the sealed one for the strict comparison.
+        sealed_input=R.launch_input(self.jobs,'att-p',R._rows(self.jobs.read_text().splitlines())['att-p'][1])
+        candidate=json.loads(json.dumps(sealed_input))
+        candidate['launch_home']=str(vb);candidate['applied_permissions']['claude']['allowed_tools']=moved
+        self.assertEqual(route_authority.granted_permissions(sealed_input['applied_permissions'],va)['claude'],
+                         route_authority.granted_permissions(candidate['applied_permissions'],vb)['claude'])
+        # The pointer spelling is kept when the launch was started through it.
+        self.assertEqual(carried('att-p',agent_home=share/'current'),rules(share/'current'))
+        # Without a rule or a predecessor to carry, and on the other axes, nothing is carried.
+        for name,value in (('retry_of',None),('harness','codex'),('worker_type','stage')):
+            with self.subTest(refused=name):
+                options={name:value} if name!='retry_of' else {}
+                self.assertIsNone(R.carried_allowed_tools(self.jobs,value if name=='retry_of' else 'att-p',
+                    **{'harness':'claude','worker_type':'owner','agent_home':vb,'current_home':vb,**options}))
+        self.assertIsNone(carried('att-unknown'))
+        # (b) A lineage that stayed on one release keeps computing afresh, so a change there is
+        # still refused by the comparator.
+        seal('att-same',vb,rules(vb))
+        self.assertIsNone(carried('att-same'))
+        # (c) A replacement already carried to vB, replaced again on vB: the move is still in
+        # its lineage, so the predecessor's carried list is used rather than a fresh one.
+        seal('att-r1',vb,moved,retry='att-p')
+        self.assertEqual(carried('att-r1'),rules(vb))
+        seal('att-r2',vb,moved,retry='att-r1')
+        self.assertEqual(carried('att-r2'),rules(vb))
+        # Once the install moves again, the chain's own sealed list is re-addressed again.
+        vc=share/'releases'/'vC';(vc/'core').mkdir(parents=True)
+        self.assertEqual(carried('att-r2',home=vc),rules(vc))
+        # An unrelated chain on the release does not borrow another chain's move.
+        seal('att-r1-other',vb,rules(vb),retry='att-same')
+        self.assertIsNone(carried('att-r1-other'))
+        # (d) A predecessor of another harness, (e) a predecessor stage, (f) an input that does
+        # not prove itself: the ordinary computation stays.
+        seal('att-codex',va,sealed,harness='codex')
+        self.assertIsNone(carried('att-codex'))
+        seal('att-stage',va,sealed,worker_type='stage')
+        self.assertIsNone(carried('att-stage'))
+        seal('att-digest',va,sealed,digest='0'*64)
+        self.assertIsNone(carried('att-digest'))
+        # A lineage whose earlier link was sealed by another harness does not count that link.
+        seal('att-x1',va,sealed,harness='codex')
+        seal('att-x2',vb,rules(vb),retry='att-x1')
+        self.assertIsNone(carried('att-x2'))
+        # (i) A list sealed while a Git operation was in progress names no release path: there
+        # is nothing to move, so the ordinary computation stays as it is today.
+        observation=['Bash(git status *)','Bash(git diff *)',f'Edit(//{self.root}/**)']
+        seal('att-observation',va,observation)
+        self.assertIsNone(carried('att-observation'))
+        # (j) A carried list never gains a rule: rules the newer release would add stay out.
+        grown=rules(va,*public)
+        seal('att-grown',va,grown)
+        self.assertEqual(carried('att-grown'),rules(vb,*public))
+        self.assertNotIn('Bash(git push -u origin HEAD:refs/heads/other)',carried('att-p'))
+        # The default current home is read when called, so a patched ROOT is honoured.
+        with mock.patch.object(R,'ROOT',vb):
+            self.assertEqual(R.carried_allowed_tools(self.jobs,'att-p',harness='claude',worker_type='owner',
+                                                     agent_home=vb),rules(vb))
+        with mock.patch.object(R,'ROOT',va):
+            self.assertIsNone(R.carried_allowed_tools(self.jobs,'att-p',harness='claude',worker_type='owner',
+                                                      agent_home=va))
 
     def test_historical_read_axis_mismatch_is_detailed_on_normal_and_never_started_reentry(self):
         import route_authority
@@ -6961,6 +7163,70 @@ class SuccessorSetsTests(unittest.TestCase):
         longer['att-g'] = (['t', 'open'], {'attempt_id': 'att-g', 'automatic_retry_of': 'att-nobody'})
         self.assertTrue(mod._plain_retry_successor(longer, 'att-nobody'))
         self.assertFalse(mod._plain_retry_successor(rows, 'att-nobody'))
+
+
+class LaterTurnReplacementTest(unittest.TestCase):
+    """(다) A one-shot owner's route closed PASS took a later request (`correct --route`), and that turn ended
+    without a PASS. Its replacement (the parent's answer to a FAIL, the runtime's observation of a format error)
+    continues the turn's own cycle as a unit route's later turn does: the earlier turn's COMPLETE ledger and
+    completion marker are that turn's history, not a closed workflow."""
+
+    def setUp(self):
+        import workflow_state as WS
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.jobs = self.root / "jobs.log"
+        self.jobs.write_text("", encoding="utf-8")
+        self.completion = self.root / "completion" / "rt-later"
+        self.completion.mkdir(parents=True)
+        self.route = {"route_id": "rt-later", "route_hash": "sha256:later", "capability": "autopilot-code",
+                      "artifact_root": str(self.root), "cwd": str(self.root), "human_gate_bindings": [],
+                      "nodes": [{"id": "one-shot", "depends_on": []}]}
+        # Turn 1 ended PASS: its marker and the ledger it completed stay as they were.
+        (self.completion / "one-shot.json").write_text(json.dumps(
+            {"route_id": "rt-later", "route_hash": "sha256:later", "node_id": "one-shot",
+             "attempt_id": "att-turn-1", "sequence": 1, "verdict": "PASS"}), encoding="utf-8")
+        ledger = WS.WorkflowLedger("rt-later", "sha256:later", jobs=self.jobs)
+        for state in WS.completion_transition_path("CREATED", "COMPLETE"):
+            ledger.set_workflow_state(state)
+
+    def snapshot(self, cycle):
+        import artifact_producer
+        module = SimpleNamespace(completion_dir=lambda route_id, jobs=None: self.completion)
+        with patch_split(D, "_route_module", return_value=module), \
+                patch_split(D, "gate_currency", side_effect=AssertionError("an earlier turn's marker is not read")), \
+                patch_split(artifact_producer, "route_cycle_for", return_value=cycle), \
+                patch_split(artifact_producer, "cycle_route_admission", return_value=SimpleNamespace(allow=True)):
+            return R._reuse_snapshot(self.jobs, self.route, [])
+
+    def test_a_later_turns_replacement_continues_that_turns_cycle(self):
+        later = {"cycle_id": "cyc-turn-2", "producer_id": "prod-turn-2", "state": "open",
+                 "continuation_attempt_id": "att-turn-2", "continues_cycle_id": "cyc-turn-1"}
+        snapshot = self.snapshot(later)
+        self.assertEqual((snapshot["cycle_id"], snapshot["completed"], snapshot["pending"], snapshot["gates"]),
+                         ("cyc-turn-2", [], ["one-shot"], []))
+
+    def test_a_sealed_later_turn_takes_no_replacement(self):
+        sealed = {"cycle_id": "cyc-turn-2", "producer_id": "prod-turn-2", "state": "sealed",
+                  "continuation_attempt_id": "att-turn-2", "continues_cycle_id": "cyc-turn-1"}
+        with self.assertRaises(D.DispatchContractError) as caught:
+            self.snapshot(sealed)
+        self.assertEqual(caught.exception.reason, "replacement-producer-not-open")
+
+    def test_a_finished_workflow_is_refused_once_with_what_to_do_instead(self):
+        # The route's own (first) cycle: COMPLETE still takes no replacement, and the refusal says why and what to
+        # do next rather than "retry after the launch settles" (the same start refuses the same way every time).
+        (self.completion / "one-shot.json").unlink()
+        with self.assertRaises(D.DispatchContractError) as caught:
+            self.snapshot({"cycle_id": "cyc-turn-1", "producer_id": "prod-turn-1", "state": "open"})
+        self.assertEqual(caught.exception.reason, "replacement-workflow-not-open")
+        self.assertIn("already ended (COMPLETE)", caught.exception.next_step)
+        self.assertIn("running the same start again is refused the same way", caught.exception.next_step)
+        self.assertIn("run close_command", caught.exception.next_step)
+        # The `next:` line appends a command for each name its step says: resume_command would invite the repeat.
+        self.assertNotIn("resume_command", caught.exception.next_step)
+        self.assertFalse(getattr(caught.exception, "retry_when", ""))
 
 
 if __name__=='__main__':unittest.main()

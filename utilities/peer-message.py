@@ -120,30 +120,470 @@ def _derived_name_of(harness, session_id, name):
         return False
 
 
-def peer_trailer(harness, session_id, name=None, *, transfer_ref=None, pane_id=None):
-    """Human display; the bracket token keeps display identity off the legacy path."""
-    def clean(value):
-        return " ".join("".join(ch if ch.isprintable() and ch not in ");" else " "
-                                for ch in str(value or "")).split())
+def _clean_display(value):
+    return " ".join("".join(ch if ch.isprintable() and ch not in ");" else " "
+                            for ch in str(value or "")).split())
 
-    parts = [clean(harness) or "unknown", peer_alias(harness, session_id)]
-    display_name = clean(name)
+
+def _sender_display_parts(harness, session_id, name):
+    """``[harness-text, alias, name-or-empty]`` as the trailer and the visible tail show them."""
+    parts = [_clean_display(harness) or "unknown", peer_alias(harness, session_id)]
+    display_name = _clean_display(name)
     if session_id:
         display_name = display_name.replace(str(session_id), parts[1])
     # A harness-derived `<folder>-<xx>` label only repeats the tag (and a dated folder
-    # reads as a date: `[57] 2026-11-57`); the display keeps Fleet's `[xx]` and the pane.
+    # reads as a date: `[57] 2026-11-57`); the display keeps Fleet's `[xx]`.
     # The shape alone is not provenance: a user-set `release-57` stays (Fleet's
     # `nameSource == "derived"` reader decides, as `derived_tag` requires).
     if (parts[1] != "[?]" and display_name.endswith("-" + parts[1][1:-1])
             and _derived_name_of(harness, session_id, display_name)):
         display_name = ""
+    return parts + [display_name]
+
+
+def peer_trailer(harness, session_id, name=None, *, transfer_ref=None, pane_id=None):
+    """Human display; the bracket token keeps display identity off the legacy path.
+
+    ``pane_id`` is accepted for callers that still pass it and is not shown."""
+    harness_text, alias, display_name = _sender_display_parts(harness, session_id, name)
+    parts = [harness_text, alias]
     if display_name:
         parts.append(display_name)
-    suffix = " ; pane=%s ; sid=%s" % (clean(pane_id) or "-", usable_session_id(session_id) or "-")
-    if transfer_ref:
-        suffix += f" ; ref={transfer_ref}"
+    # `pane=` and `sid=` were decoration only: no receiver reads them (see
+    # `parse_peer_trailer`), the sealed transfer named by `ref=` owns the attribution.
+    suffix = f" ; ref={transfer_ref}" if transfer_ref else ""
     tag = "runtime-from" if harness == "runtime" else "peer-from"
     return "(%s: %s%s)" % (tag, " ".join(parts), suffix)
+
+
+# ---------------------------------------------------------------------------
+# Display forms. What the person reads in the receiving window is a short text;
+# everything the agent needs (the sealed sender and reply address, ref, receipts,
+# question numbers, required actions) reaches it through the hook/plugin context
+# that already carries guidance. The sender seals both texts in one transfer
+# record (`display`); the receiver finds that record from the fingerprint of the
+# text it was given and then judges the sealed (old-form) text exactly as before:
+# same body digest, same recipient tuple, same sender checks.
+#
+#   peer      body + blank line + `— [d4]` (or `— [d4] <user-set name>`)
+#   runtime   one `↳ …` line built by the producer
+#
+# A sender uses a display form only when the receiving session has already shown
+# that its code reads it (`note_display_ready`); otherwise the old form is sent
+# (the trailer without the decoration), so a window whose code predates this form
+# keeps working. The sign is believed for two days, and for an OpenCode window only when
+# the plugin said its own gate reads the forms (`declares_display_gate`).
+#
+# The visible text is the receiver's only key, and it is not unique to a message (two
+# untagged senders of one harness, the same short answer to two questions). So a recipient
+# holds at most one unreceived message per visible text: a message sealed while another
+# is waiting goes in the old form (`_prepare_peer_message`), and the arrival that finds
+# one waiting is that message's arrival.
+#
+# The old form shows the whole text. A runtime body holding a secret question's answer
+# (`private_body`) that is not sealed in a display form shows a pointer instead: its body
+# is the transfer's private payload (`body_ref` with `presentation_mode: private-answer`, the
+# one the receive checks already read), the window gets one header line, the payload's path
+# and the receipt lines, and the agent gets the body through the same hook/plugin context
+# (`_private_answer_guidance`). Every carrier that takes the row puts that text in an agent-only
+# place before the row settles (`_secret_answer_agent_text`): Claude's hook context beside the
+# pointer, OpenCode's system context while its tool result (which its TUI may draw) keeps the
+# pointer alone; a secret answer to OpenCode always takes the pointer form.
+# ---------------------------------------------------------------------------
+_DISPLAY_FORM = 2
+_DISPLAY_AGENT_MAX_CHARS = 12000
+# A secret answer's one-line form is sealed only when its agent text fits one Claude hook context
+# whole (`_fit_claude_context` never makes an overflow copy of a secret answer).
+_PRIVATE_DISPLAY_AGENT_MAX = 8000
+_DISPLAY_NAME_MAX = 60
+_DISPLAY_LINE_MAX = 400
+_DISPLAY_LINES_MAX = 12
+_DISPLAY_TEXT_MAX = 2400
+# A readiness mark is written at most once a day (`note_display_ready`) and is believed for two,
+# so a session whose code went back to a release that predates the forms stops being sent them.
+_DISPLAY_READY_MAX_AGE = 2 * 86400
+# A pending row is dropped 7 days after it was received (`peer_steward_duties`, history window).
+_DISPLAY_ROW_WINDOW = 7 * 86400
+_DISPLAY_HARNESSES = ("claude", "codex", "opencode")
+_DISPLAY_TAIL_RE = re.compile(
+    r"(?m)^— (?:\[(?:[0-9a-f]{2}|\?)\]|claude|codex|opencode)(?: [^\n]{1,%d})?[ \t]*$" % (_DISPLAY_NAME_MAX + 20))
+_DISPLAY_LINE_RE = re.compile(r"\A\s*(?:<pasted_content[^>]*>\s*)?↳ ")
+_DISPLAY_DELAY_PREFIX_RE = re.compile(
+    r"\A\[지연 전달 — 원래 보낸 시각 \d{4}-\d{2}-\d{2} \d{2}:\d{2}, 약 [1-9]\d*시간 지연\] "
+    r"\(ref (?P<ref8>[0-9a-f]{8})\)\n")
+_TRANSFER_REF_RE = re.compile(r"[0-9a-f]{32}")
+
+
+def looks_like_display_text(text):
+    """Cheap gate for a receiver: could this prompt be a form-2 text? (Not an authority.)"""
+    if not isinstance(text, str) or not text:
+        return False
+    return bool(_DISPLAY_LINE_RE.match(text[:300]) or _DISPLAY_TAIL_RE.search(text[-400:]))
+
+
+def looks_like_peer_text(text):
+    """A trailer-form or display-form peer/runtime text: the one gate every receiver uses."""
+    if not isinstance(text, str) or not text:
+        return False
+    return "peer-from:" in text or "runtime-from:" in text or looks_like_display_text(text)
+
+
+def display_tail(harness, session_id, name=None):
+    """`— [d4]` / `— [d4] <name>`; `— <harness>` when Fleet has no tag. None for a sender
+    that is not one of the three harnesses (the runtime's `↳` line is built by its producer)."""
+    if harness not in _DISPLAY_HARNESSES:
+        return None
+    _harness_text, alias, display_name = _sender_display_parts(harness, session_id, name)
+    shown = alias if alias != "[?]" else harness
+    if display_name:
+        shown += " " + display_name[:_DISPLAY_NAME_MAX].strip()
+    return "— " + shown
+
+
+def _display_root(state_root=None):
+    # Dot-named: the ledger scanners that read every `peer-messages/*` as a month folder skip it.
+    return Path(state_root or peer_state_root()) / "peer-messages" / ".display"
+
+
+def _display_ready_path(recipient):
+    sid = usable_session_id((recipient or {}).get("session_id"))
+    harness = (recipient or {}).get("harness")
+    if sid is None or harness not in _DISPLAY_HARNESSES:
+        return None
+    return peer_state_root() / "peer-messages" / ".display-ready" / harness / sid
+
+
+def note_display_ready(recipient):
+    """Record, once per day, that this session's receiving code reads the display forms.
+
+    Called by the code that receives for the session (each hook/plugin boundary that already
+    asks for its peer context). A session whose code predates the display forms never writes
+    it, so a sender sees no sign and keeps the old form. Best effort: never raises."""
+    try:
+        path = _display_ready_path(recipient)
+        if path is None:
+            return
+        try:
+            if time.time() - path.stat().st_mtime < 86400:
+                return
+        except FileNotFoundError:
+            pass
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}")
+        tmp.write_text(f"{_DISPLAY_FORM}\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except (OSError, ValueError):
+        pass
+
+
+def declares_display_gate(recipient):
+    """May the code receiving for ``recipient`` leave the sign (`note_display_ready`)?
+
+    A hook script (Claude, Codex) is the release's own file, run fresh each time, so it always
+    pairs with this module. The OpenCode plugin keeps its gate in a long-lived process while
+    `AGENT_HOME` may name a `current` link that now points at a newer release: its calls here
+    leave the sign only when it says its own gate reads the forms (`HEARTING_PEER_DISPLAY_GATE`),
+    which a plugin loaded before them cannot."""
+    return ((recipient or {}).get("harness") != "opencode"
+            or os.environ.get("HEARTING_PEER_DISPLAY_GATE") == str(_DISPLAY_FORM))
+
+
+def receiver_reads_display(recipient):
+    """True when the exact recipient session has shown, within two days, that its code reads the
+    display forms (a mark older than that is not believed: the session may have gone back)."""
+    try:
+        path = _display_ready_path(recipient)
+        return (path is not None
+                and 0 <= time.time() - path.stat().st_mtime < _DISPLAY_READY_MAX_AGE
+                and path.read_text(encoding="utf-8").strip() == str(_DISPLAY_FORM))
+    except (OSError, ValueError):
+        return False
+
+
+def _display_entry(kind, old_text, trailer, sender, line=None):
+    """The `display` entry sealed with a transfer, or None when no display form applies."""
+    if kind == "peer":
+        tail = display_tail(sender.get("harness"), sender.get("session_id"), sender.get("name"))
+        if tail is None or not old_text.endswith("\n\n" + trailer):
+            return None
+        visible = old_text[:len(old_text) - len(trailer)] + tail
+        if visible != visible.strip():
+            # A receiver also looks a text up by its stripped variants (`_display_variants`), so
+            # every sealed fingerprint must be a stripped text: then an arrival matches one
+            # fingerprint at most, and a text that differs only in edge whitespace stays in the
+            # old form (ref shown) instead of sharing a record with its trimmed twin.
+            return None
+        return {"form": _DISPLAY_FORM, "kind": "peer",
+                "sha256": hashlib.sha256(visible.encode("utf-8")).hexdigest(),
+                "tail": tail, "agent": trailer}
+    if (kind == "runtime" and isinstance(line, str) and 0 < len(line) <= _DISPLAY_TEXT_MAX
+            and line == line.strip() and 1 <= len(line.split("\n")) <= _DISPLAY_LINES_MAX
+            and all(one.startswith("↳ ") and len(one) <= _DISPLAY_LINE_MAX
+                    and all(ch.isprintable() for ch in one) for one in line.split("\n"))
+            and len(old_text) <= _DISPLAY_AGENT_MAX_CHARS):
+        return {"form": _DISPLAY_FORM, "kind": "runtime",
+                "sha256": hashlib.sha256(line.encode("utf-8")).hexdigest(),
+                "line": line, "agent": old_text}
+    return None
+
+
+def _publish_display_pointer(entry, ref):
+    """`<peer-messages>/display/<fingerprint>/<ref>`: a derived hint a receiver re-validates
+    against the sealed transfer, so a stray or forged one proves nothing."""
+    root = _display_root()
+    if root.parent.is_symlink() or root.is_symlink():
+        raise ValueError("peer-display-directory-symlink")
+    directory = root / entry["sha256"]
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(directory / ref, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    os.close(fd)
+
+
+def remove_display_hint(ref, digest):
+    """Remove the fingerprint hint ``.display/<digest>/<ref>`` and its folder once empty.
+
+    Called by the history prune when it drops the received row that names this fingerprint, so
+    the hints a common visible text collects do not grow without end. Best effort; a hint that
+    is already gone, or a folder another seal is still filling, is left as it is."""
+    if (not isinstance(ref, str) or not _TRANSFER_REF_RE.fullmatch(ref)
+            or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+        return False
+    directory = _display_root() / digest
+    removed = False
+    try:
+        (directory / ref).unlink()
+        removed = True
+    except OSError:
+        pass
+    try:
+        directory.rmdir()
+    except OSError:
+        pass
+    return removed
+
+
+def _display_seal_key(digest, recipient):
+    """The ``pending_lock`` key serializing the check-and-publish of one visible text to one
+    recipient session (a ``prepare-`` key: its lock directory is removed on release)."""
+    raw = "\0".join(("display-seal", digest, str(recipient.get("harness")), str(recipient.get("session_id"))))
+    return "prepare-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _display_variants(text):
+    """``(variant, ref8)`` pairs: the arrived text with its allowed whitespace/wrapper changes.
+    ``ref8`` is the 8 characters a delayed-delivery prefix named (stripped), else None; a
+    record is a candidate for a prefixed variant only when its ref starts with them."""
+    variants = [(value, None) for value in _arrived_body_variants(text)]
+    for value, _none in list(variants):
+        match = _DISPLAY_DELAY_PREFIX_RE.match(value)
+        if match:
+            rest = value[match.end():]
+            variants.extend(((item, match.group("ref8")) for item in (rest, rest.rstrip(), rest.strip())))
+    return list(dict.fromkeys(variants))
+
+
+def _display_old_text(variant, entry, transfer):
+    """The sealed text the visible ``variant`` stands for, or None when it does not match."""
+    if (not isinstance(entry, dict) or entry.get("form") != _DISPLAY_FORM
+            or entry.get("kind") not in ("peer", "runtime")
+            or entry.get("sha256") != hashlib.sha256(variant.encode("utf-8")).hexdigest()
+            or not isinstance(entry.get("agent"), str)):
+        return None
+    if entry["kind"] == "peer":
+        tail = entry.get("tail")
+        if not isinstance(tail, str) or not tail or not variant.endswith(tail):
+            return None
+        old_text = variant[:len(variant) - len(tail)] + entry["agent"]
+    else:
+        if entry.get("line") != variant:
+            return None
+        old_text = entry["agent"]
+    if (not isinstance(transfer, dict)
+            or hashlib.sha256(old_text.encode("utf-8")).hexdigest() != transfer.get("body_sha256")):
+        return None
+    return old_text
+
+
+def _display_unreceived(ref, pending):
+    """Is the sealed message ``ref`` still waiting to be received by its recipient?
+
+    A pending row that is not ``received`` is. A message with no row is one sent straight to the
+    window and not yet received, unless it is older than the history window: a row is dropped
+    that long after it was received, so an old row-less record is a received one."""
+    if isinstance(pending, dict):
+        return pending.get("state") != "received"
+    try:
+        return time.time() - _transfer_path(ref).stat().st_mtime < _DISPLAY_ROW_WINDOW
+    except (OSError, ValueError):
+        return False
+
+
+def _display_candidates(variants, recipient):
+    """The sealed messages whose visible text is one of ``variants`` and that were sent to
+    ``recipient``: ``[{order, ref, old_text, transfer, unreceived}]``.
+
+    The fingerprint finds candidate transfers; each is re-read, its sealed old-form text is
+    rebuilt and must hash to the sealed ``body_sha256``, and that text must be attributed to
+    this recipient by the very check an old-form message goes through. ``order`` is the pick
+    order: unreceived ones first (oldest first), then received ones (most recently received
+    first)."""
+    root = _display_root()
+    found = []
+    for variant, ref8 in variants:
+        digest = hashlib.sha256(variant.encode("utf-8")).hexdigest()
+        try:
+            names = os.listdir(root / digest)
+        except OSError:
+            continue
+        for ref in names:
+            if not _TRANSFER_REF_RE.fullmatch(ref) or (ref8 is not None and ref[:8] != ref8):
+                continue
+            try:
+                transfer = _read_transfer_record(ref)
+                old_text = _display_old_text(
+                    variant, transfer.get("display") if isinstance(transfer, dict) else None, transfer)
+                if old_text is None:
+                    continue
+                parsed = _parse_peer_trailer_core(old_text, recipient, include_ref=True)
+                if not parsed or parsed.get("transfer_ref") != ref:
+                    continue
+                pending = _read_pending(ref)
+            except UnsupportedPendingSchema:
+                continue
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                continue
+            unreceived = _display_unreceived(ref, pending)
+            if unreceived:
+                order = (0, _display_time((pending or {}).get("created")))
+            else:
+                when = (pending or {}).get("received_at")
+                order = (1, -_display_time(when if when is not None else (pending or {}).get("created")))
+            found.append({"order": order, "ref": ref, "old_text": old_text,
+                          "transfer": transfer, "unreceived": unreceived})
+    return found
+
+
+def _display_time(value):
+    return float(value) if type(value) in (int, float) and math.isfinite(value) else 0.0
+
+
+def _display_resolve(text, recipient):
+    """``{ref, old_text, entry, transfer}`` for a form-2 ``text`` that this recipient was sent.
+
+    A sender seals a form-2 text only when no other message to this recipient with the same
+    visible text is still unreceived (`_prepare_peer_message`), so at most one candidate is
+    unreceived and it is the one the arrival stands for. Once it is received, the most recently
+    received one is taken: the arrival that just consumed it, or a re-read of that prompt,
+    finds the same record again (the receive and the agent's guidance each resolve, in one
+    process or two)."""
+    if (not isinstance(text, str) or not looks_like_display_text(text)
+            or not _valid_transfer_endpoint(recipient)):
+        return None
+    found = _display_candidates(_display_variants(text), recipient)
+    if not found:
+        return None
+    pick = min(found, key=lambda item: item["order"])
+    return {"ref": pick["ref"], "old_text": pick["old_text"],
+            "entry": pick["transfer"]["display"], "transfer": pick["transfer"]}
+
+
+def _display_unreceived_holder(entry, old_text, trailer, recipient):
+    """True when a message to ``recipient`` with the same visible text as the one about to be
+    sealed (``entry`` from ``_display_entry``) is still unreceived."""
+    visible = entry["line"] if entry["kind"] == "runtime" else (
+        old_text[:len(old_text) - len(trailer)] + entry["tail"])
+    return any(item["unreceived"] for item in _display_candidates([(visible, None)], recipient))
+
+
+def expand_display_text(text, recipient):
+    """The sealed old-form text for a form-2 ``text`` sent to ``recipient``, else ``text`` itself."""
+    try:
+        resolved = _display_resolve(text, recipient)
+    except UnsupportedPendingSchema:
+        return text
+    return resolved["old_text"] if resolved else text
+
+
+def _display_agent_block(resolved):
+    """What only the agent receives next to a form-2 text: the sealed sender, reply
+    address, ref and receipt lines the person's window no longer shows."""
+    entry, transfer = resolved["entry"], resolved["transfer"]
+    if entry["kind"] == "runtime":
+        return ("Hearting delivery (the person sees only the one `↳` line above); the full text:\n"
+                + entry["agent"] + ("\n\n" + _SECRET_ANSWER_NOTE if entry.get("private") is True else ""))
+    return _sender_sentence(" (the person sees only `%s`)" % entry["tail"], entry["agent"],
+                            transfer.get("from"), always=True)
+
+
+def _sender_sentence(lead, trailer, sender, *, always=False):
+    """``Sender of the message above<lead>: <trailer>. Reply with `…`.`` for a sealed sender.
+
+    Without a reply address (a sender that is not one of the three harnesses or has no usable
+    session id) the sentence still names the sender when ``always``, else it is ``""``."""
+    sender = sender if isinstance(sender, dict) else {}
+    reply = ""
+    if sender.get("harness") in _DISPLAY_HARNESSES and usable_session_id(sender.get("session_id")):
+        reply = (" Reply with `hearting run peer-steward prompt %s:%s --body-file <file>`."
+                 % (sender["harness"], sender["session_id"]))
+    elif not always:
+        return ""
+    return "Sender of the message above%s: %s.%s" % (lead, trailer, reply)
+
+
+def _trailer_form_sender_sentence(text, recipient):
+    """The reply address for a trailer-form (`sid=` omitted) peer text bound to its sealed transfer.
+
+    The tag shows only `[xx]` or `[?]`, so the agent has no address to answer; the sealed
+    sender has. Same sentence as the display form's. ``""`` when the text is not bound."""
+    if not isinstance(text, str) or not _valid_transfer_endpoint(recipient):
+        return ""
+    matches = list(_PEER_TRAILER_RE.finditer(text))
+    if (not matches or matches[-1].group("tag") != "peer" or not matches[-1].group("sid").startswith("[")
+            or "; sid=" in matches[-1].group(0)):   # a decorated trailer already shows its sender's sid
+        return ""
+    parsed = parse_peer_trailer(text, recipient, include_ref=True)
+    ref = parsed.get("transfer_ref") if isinstance(parsed, dict) else None
+    if not ref or parsed.get("source") == "runtime-completion":
+        return ""
+    transfer = _read_transfer_record(ref)
+    return _sender_sentence("", matches[-1].group(0), transfer.get("from") if isinstance(transfer, dict) else None)
+
+
+def pasted_text(row, *, strict=False):
+    """The text a carrier that types into the recipient's input should send for ``row``.
+
+    The visible form when the row was sealed with one and it still matches its seal, else the
+    sealed text itself (so a carrier that does not call this, or a row it cannot rebuild,
+    behaves exactly as before). A carrier that sends the same row again and compares what it
+    sent (the Codex queue) passes ``strict``: a sealed record that cannot be read this time
+    raises ``ValueError`` instead of giving the sealed text, which would not match the visible
+    text it sent before."""
+    text = row.get("text") if isinstance(row, dict) else None
+    shown = row.get("display") if isinstance(row, dict) else None
+    if (not isinstance(text, str) or not isinstance(shown, dict) or shown.get("form") != _DISPLAY_FORM
+            or row.get("no_trailer")):
+        return text
+    try:
+        record = _read_transfer_record(row["ref"]) or {}
+    except (OSError, ValueError, KeyError, TypeError):
+        if strict:
+            raise ValueError("peer-display-unreadable")
+        return text
+    try:
+        entry = record.get("display")
+        if not isinstance(entry, dict) or entry.get("sha256") != shown.get("sha256"):
+            return text
+        if entry["kind"] == "runtime":
+            visible = entry["line"]
+        else:
+            if not text.endswith(entry["agent"]):
+                return text
+            visible = text[:len(text) - len(entry["agent"])] + entry["tail"]
+        if hashlib.sha256(visible.encode("utf-8")).hexdigest() != entry["sha256"]:
+            return text
+        return visible
+    except (KeyError, TypeError, AttributeError):
+        return text
 
 
 def _transfer_path(ref):
@@ -433,8 +873,12 @@ def _reference_access_evidence_valid(evidence, recipient):
 
 def _prepare_peer_message(body, sender, recipient, *, include_trailer=True,
                           reference_evidence=None, refs=(), producer_binding=None, handoff=None,
-                          request=None):
+                          request=None, display=None, private_body=False):
     """Seal a transmission intent before delivery (the receiver may run immediately).
+
+    ``private_body``: a runtime body the person's window must not show (it holds the answer to a
+    secret question). When no one-line display form is sealed for it, the body is published as
+    the transfer's private payload and the window gets only `_private_body_envelope`.
 
     This immutable record shares the ledger's local write trust boundary; it is
     not an authorization token. The final ledger row refers to this message_id.
@@ -504,37 +948,78 @@ def _prepare_peer_message(body, sender, recipient, *, include_trailer=True,
     record = {"schema_version": 1, "message_id": ref, "from": dict(sender),
               "to": dict(recipient), "body_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
               "refs": list(refs)}
-    if handoff is not None:
-        record["handoff"] = handoff
-    if producer_binding is not None:
-        record["producer_binding"] = dict(producer_binding)
-    if body_ref is not None:
-        record["body_ref"] = body_ref
-    if request is not None:
-        record["request"] = dict(request["seal"])
-    path = _transfer_path(ref)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        # Publish the immutable transfer only after its payload is complete.
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-            json.dump(record, fh, ensure_ascii=False)
-            fh.flush()
-            os.fsync(fh.fileno())
-        directory_fd = os.open(path.parent, os.O_RDONLY)
+    # The display seal lock is held until the transfer is written, and released on any exit.
+    with contextlib.ExitStack() as sealing:
+        display_entry = None
+        if display is not None and include_trailer and trailer is not None:
+            # The visible text is sealed beside the old-form text. The pointer is published first:
+            # one without a transfer proves nothing, a transfer without it would strand the text.
+            display_entry = _display_entry(
+                display.get("kind"), text, trailer, sender, line=display.get("line"))
+            if display_entry is not None and private_body and len(text) > _PRIVATE_DISPLAY_AGENT_MAX:
+                display_entry = None   # too long for one hook context whole: the pointer form
+            if display_entry is not None:
+                # A receiver finds the record a visible text stands for by that text alone, so a
+                # recipient holds at most one unreceived message per visible text: when one is
+                # already waiting, this one is sealed in the old-form text (a peer message shows its
+                # ref, a runtime message its full text) and the receiver finds it by that. The check
+                # and the pointer sit under one lock per visible text and recipient; a busy lock means
+                # another seal of the same text is in flight, so this one takes the old form too.
+                try:
+                    sealing.enter_context(pending_lock(_display_seal_key(display_entry["sha256"], recipient)))
+                    if _display_unreceived_holder(display_entry, text, trailer, recipient):
+                        display_entry = None
+                    else:
+                        _publish_display_pointer(display_entry, ref)
+                except (OSError, ValueError):
+                    display_entry = None
+        if (display_entry is None and private_body and producer_binding is not None
+                and include_trailer and body_ref is None and request is None and handoff is None):
+            # No one-line form carries it (Codex, an unsigned window, the same line still waiting,
+            # a delivery with no short form): the body goes to the private payload the existing
+            # checks read, and the window shows the pointer and receipt lines. Each receiver's own
+            # callback gives the agent the body from that payload (`_private_answer_guidance`), so
+            # no file read is needed. A payload that cannot be published fails the seal, as a
+            # request's does; nothing is sent in full.
+            body_ref, payload_path = _write_body_payload(ref, raw_body, source_sha256,
+                                                         presentation_mode="private-answer")
+            text = _private_body_envelope(body, payload_path) + "\n\n" + trailer
+            record["body_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if display_entry is not None:
+            if private_body and display_entry["kind"] == "runtime":
+                display_entry["private"] = True   # its agent text holds a secret answer
+            record["display"] = display_entry
+        if handoff is not None:
+            record["handoff"] = handoff
+        if producer_binding is not None:
+            record["producer_binding"] = dict(producer_binding)
+        if body_ref is not None:
+            record["body_ref"] = body_ref
+        if request is not None:
+            record["request"] = dict(request["seal"])
+        path = _transfer_path(ref)
+        path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    except Exception:
-        if payload_path is not None:
+            # Publish the immutable transfer only after its payload is complete.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                json.dump(record, fh, ensure_ascii=False)
+                fh.flush()
+                os.fsync(fh.fileno())
+            directory_fd = os.open(path.parent, os.O_RDONLY)
             try:
-                payload_path.unlink()
-            except OSError:
-                pass
-        raise
-    return text, ref
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except Exception:
+            if payload_path is not None:
+                try:
+                    payload_path.unlink()
+                except OSError:
+                    pass
+            raise
+        return text, ref
 
 
 _BODY_REFERENCE_THRESHOLD = 2048
@@ -635,6 +1120,21 @@ def _body_reference_envelope(body, payload_path, raw_size, sender, ref, *, comma
     return None
 
 
+_PRIVATE_BODY_HEADER = ("Hearting delivery holding a private answer: the person's window shows only "
+                        "this pointer. Its full text comes to you as context with this message; the same "
+                        "text is in the file below.")
+# Said with a secret question's answer, in either agent-only text (the one-line form's, the pointer's).
+_SECRET_ANSWER_NOTE = ("It answers a question asked as secret: use it, but do not repeat it in your "
+                       "replies or reports.")
+
+
+def _private_body_envelope(body, payload_path):
+    """The window text for a ``private_body`` delivery: the header, the private payload's path and
+    the body's receipt lines (``HEARTING_RECEIPT_V1``, read by its carriers and Codex's recovery)."""
+    markers = [line for line in body.splitlines() if line.startswith("HEARTING_RECEIPT_V1 ")]
+    return "\n".join([_PRIVATE_BODY_HEADER, f"`{payload_path}`", *markers])
+
+
 def _body_reference_descriptor_valid(descriptor, ref):
     return (
         isinstance(descriptor, dict) and set(descriptor) == _BODY_REFERENCE_FIELDS
@@ -644,7 +1144,7 @@ def _body_reference_descriptor_valid(descriptor, ref):
         and all(isinstance(descriptor.get(key), str)
                 and re.fullmatch(r"[0-9a-f]{64}", descriptor[key])
                 for key in ("payload_sha256", "source_sha256"))
-        and descriptor.get("presentation_mode") in ("file-reference", "request-body")
+        and descriptor.get("presentation_mode") in ("file-reference", "request-body", "private-answer")
     )
 
 
@@ -970,6 +1470,52 @@ def _pending_endpoint(endpoint, state, *, sender=False, producer_binding=None, r
             and (endpoint.get("name") is None or isinstance(endpoint.get("name"), str)))
 
 
+_PARKED_MEMO = {}
+_PARKED_MEMO_SECONDS = 1.0
+
+
+def _parked_link(key, sid):
+    """``parked_successor`` (``key="successor"``) or ``parked_origin`` (``"origin"``) of a Claude
+    session, or None.
+
+    The link between a window's viewer and the background session that holds its conversation
+    is read live from the running processes and never stored. A scan asks about every row it
+    looks at, so the live records are read ONCE into a table (``session_registry.parked_links``)
+    that this process reuses for a second; each row then costs one lookup, and an empty table
+    (no window has a held conversation) costs nothing more."""
+    now = time.monotonic()
+    held = _PARKED_MEMO.get("table")
+    if held is None or now - held[0] >= _PARKED_MEMO_SECONDS:
+        try:
+            tools = str(Path(__file__).resolve().parents[1] / "tools")
+            if tools not in sys.path:
+                sys.path.insert(0, tools)
+            from fleet import session_registry
+            table = session_registry.parked_links("claude")
+        except Exception:
+            table = {}
+        held = _PARKED_MEMO["table"] = (now, table)
+    return (held[1].get(key) or {}).get(sid.lower()) if isinstance(sid, str) else None
+
+
+def _parked_recipient(original, created):
+    """The background session that took over this plain row's recipient, or ``original``.
+
+    A sender that still addressed the window's old session id after its conversation went to
+    the background reaches the new one, but only a row made after that process started: what
+    came earlier was written to the old conversation, and one that is never delivered must
+    stay where it is. The row is delivered once, by whichever session it is now bound to."""
+    if (not isinstance(original, dict) or original.get("harness") != "claude"
+            or type(created) not in (int, float) or not math.isfinite(created)
+            or not _valid_transfer_endpoint(original)):
+        return original
+    found = _parked_link("successor", original["session_id"])
+    if (not found or type(found.get("started_at")) not in (int, float)
+            or created < found["started_at"]):
+        return original
+    return {**original, "session_id": found["session_id"], "name": None}
+
+
 def pending_delivery_binding(row, *, include_acked=False):
     """The current delivery binding without changing the immutable transfer target."""
     if not isinstance(row, dict):
@@ -1006,8 +1552,15 @@ def pending_delivery_binding(row, *, include_acked=False):
             return {"recipient": dict(bound), "watches": []}
         return None
     original = row.get("to")
-    return ({"recipient": dict(original), "watches": []}
-            if _valid_transfer_endpoint(original) else None)
+    if not _valid_transfer_endpoint(original):
+        return None
+    held = _parked_recipient(original, row.get("created"))
+    if held is original:
+        return {"recipient": dict(original), "watches": []}
+    # `parked_from` names the id the row still carries, so a receipt for this binding can be
+    # told from a row that was addressed to its receiver (see `acknowledge_message_receipt`).
+    return {"recipient": dict(held), "watches": [],
+            "parked_from": {"harness": original["harness"], "session_id": original["session_id"]}}
 
 
 def pending_delivery_recipient(row):
@@ -1806,6 +2359,7 @@ def rebuild_recipient_index(dispatch_root, time_budget_s=1.0):
     except (OSError, ValueError):
         roots = None
     groups = {}
+    withheld = set()
     scanned = 0
     verified_all = True
     for name in names:
@@ -1831,7 +2385,12 @@ def rebuild_recipient_index(dispatch_root, time_budget_s=1.0):
             continue
         if not row or row.get("state") == "received":
             continue
-        recipient_key = _index_key(pending_delivery_recipient(row))
+        binding = pending_delivery_binding(row)
+        recipient_key = _index_key((binding or {}).get("recipient"))
+        if (binding or {}).get("parked_from"):
+            # The row names the window's old id but a background session took it: the old id's
+            # index would omit it and look current once the link ends, so it is not published.
+            withheld.add(_index_key(binding["parked_from"]))
         sender_key = _index_key(row.get("from"))
         if recipient_key is None and sender_key is None:
             continue
@@ -1848,6 +2407,8 @@ def rebuild_recipient_index(dispatch_root, time_budget_s=1.0):
         return result
     recipients = senders = 0
     for (harness, session_id), lists in groups.items():
+        if (harness, session_id) in withheld:
+            continue
         if _publish_recipient_index(
                 pending, {"harness": harness, "session_id": session_id}, lists["rows"], names,
                 sent=lists["sent"], dispatch_root=dispatch_root,
@@ -2053,6 +2614,22 @@ def _pending_rows(*, recipient=None, sender=None, read_context=None, strict=Fals
     # falls back to that same full scan below.
     use_index = (recipient is not None and not strict and ref is None
                  and (sender is None or _same_transfer_session(sender, recipient)))
+    # A background session that holds a window's conversation also takes the rows still
+    # addressed to that window's old session id which were made after it started
+    # (`_parked_recipient`). Those rows name the old id, not this one: they are neither in
+    # this session's index nor among its scan markers, so this scan looks for them itself.
+    origin = (_parked_link("origin", recipient["session_id"])
+              if recipient is not None and not strict and ref is None
+              and isinstance(recipient, dict) and recipient.get("harness") == "claude"
+              and isinstance(recipient.get("session_id"), str) else None)
+    if origin:
+        use_index = False
+    if (use_index and recipient.get("harness") == "claude" and isinstance(recipient.get("session_id"), str)
+            and _parked_link("successor", recipient["session_id"])):
+        # While this window's conversation is held elsewhere, the rows it still names but its
+        # background session took are not in this scan; an index published now would look
+        # current after the link ends and keep hiding them. Neither read nor publish one.
+        use_index = False
     if use_index:
         indexed = _indexed_pending_rows(pending, recipient, roots=roots,
                                         read_context=read_context,
@@ -2076,6 +2653,8 @@ def _pending_rows(*, recipient=None, sender=None, read_context=None, strict=Fals
     # that cost most of a prompt once hundreds of live rows had accumulated.
     # Malformed rows still take the full read below, which quarantines them.
     markers = None if strict else _scan_markers(recipient, sender)
+    if markers is not None and origin:
+        markers += (origin["viewer_sid"].encode("ascii"),)
     wanted_ref = ref  # `ref` is reused below for a quarantine diagnostic
     if wanted_ref is not None:
         if recipient is not None or sender is not None:
@@ -2218,8 +2797,14 @@ def pending_messages(recipient, *, deadline=None):
 def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), receipt="target-form-open",
                          with_trailer=True, reference_evidence=None, first_input_process=None,
                          producer_binding=None, handoff=None, original_target=None, server=None,
-                         prepared=None, namespace=None, request=None):
+                         prepared=None, namespace=None, request=None, display_line=None,
+                         private_body=False):
     """A retry reuses a pending intent; ordinary sends need no preparation lock.
+
+    A display form (see the block above ``_transfer_path``) is sealed only for a recipient
+    session that has shown its code reads it: a peer message always, a runtime message when
+    its producer supplies ``display_line`` (not to Codex, see below). A runtime body marked
+    ``private_body`` that gets no display form is sealed as a pointer to its private payload.
 
     ``prepared`` (a list) receives the authoritative sealed row, stored or reused, so a
     caller can keep its courier even when a later read of that row fails.
@@ -2230,6 +2815,19 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
     endpoints_verified = (_valid_transfer_sender(sender, producer_binding, recipient, list(refs))
                           and (_valid_transfer_endpoint(recipient)
                                or _valid_pane_bound_endpoint(recipient)))
+    display = None
+    if (with_trailer and handoff is None and _valid_transfer_endpoint(recipient)
+            and receiver_reads_display(recipient)):
+        if producer_binding is None and sender.get("harness") in _DISPLAY_HARNESSES:
+            display = {"kind": "peer"}
+        elif (producer_binding is not None and display_line and recipient.get("harness") != "codex"
+              and not (private_body and recipient.get("harness") == "opencode")):
+            # Codex keeps the full runtime text in its own queue: its delivery recovery reads the
+            # receipt marker lines from the thread's input history (`codex_queue_delivery`), and
+            # the one-line form has none. A person's window there still reads the full text.
+            # OpenCode's idle plugin delivery pastes a row's sealed text, which for the one-line
+            # form is the whole old text: a secret answer to OpenCode takes the pointer form.
+            display = {"kind": "runtime", "line": display_line}
     body_hash = hashlib.sha256(body.rstrip("\n").encode("utf-8")).hexdigest()
     request_seal = dict(request["seal"]) if request is not None else None
     address_namespace = None
@@ -2368,7 +2966,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
         return found or _prepare_peer_message(body, sender, recipient, include_trailer=with_trailer,
                                               reference_evidence=reference_evidence, refs=refs,
                                               producer_binding=producer_binding, handoff=handoff,
-                                              request=request)
+                                              request=request, display=display,
+                                              private_body=private_body)
     key_parts = [[e.get("harness"), e.get("session_id"),
                   e.get("name") if e.get("session_id") is None else None, e.get("pane_id")]
                  for e in (sender, recipient)]
@@ -2401,7 +3000,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
         text, ref = _prepare_peer_message(body, sender, recipient, include_trailer=with_trailer,
                                           reference_evidence=reference_evidence, refs=refs,
                                           producer_binding=producer_binding, handoff=handoff,
-                                          request=request)
+                                          request=request, display=display,
+                                          private_body=private_body)
         if len(text.encode("utf-8")) > _PENDING_BYTES:
             raise ValueError("peer-pending-body-oversized")
         pending = {"schema_version": 2 if _unresolved_target(recipient) else 1,
@@ -2429,6 +3029,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
         transfer = _read_transfer_record(ref)
         if transfer and transfer.get("body_ref") is not None:
             pending["body_ref"] = transfer["body_ref"]
+        if transfer and isinstance(transfer.get("display"), dict):
+            pending["display"] = {key: transfer["display"][key] for key in ("form", "kind", "sha256")}
         _save_pending(pending)
         if prepared is not None:
             prepared.append(pending)
@@ -2684,6 +3286,28 @@ def release_unstarted_pending_write(row, *, receipt="herdr-not-started"):
         return True
 
 
+def note_pending_hold(ref, hold):
+    """Keep on a still-pending row why its receiving window holds it (``held``), for the sender.
+
+    ``hold`` is the receiving host's word (``session_shell._hold``) or ``no-shell``; ``""``
+    clears it. Written only when it changes, so an unchanged pass rewrites nothing."""
+    if not isinstance(hold, str) or len(hold) > 32:
+        return False
+    with pending_lock(ref):
+        current = _read_pending(ref)
+        if not current or current.get("state") != "pending":
+            return False
+        if ((current.get("held") or {}).get("reason") or "") == hold:
+            return True
+        row = dict(current)
+        if hold:
+            row["held"] = {"reason": hold, "at": time.time()}
+        else:
+            row.pop("held", None)
+        _save_pending(row)
+        return True
+
+
 def release_unsent_herdr_claim(row, *, receipt="target-form-open"):
     """Release this exact pending claim only before the external write.
 
@@ -2912,7 +3536,7 @@ def _deliver_pending_codex_row(ref, *, timeout, start_interrupted, before_submit
     try:
         result = send_at_least_once(resolve_queue_socket(),
             thread_id=recipient["session_id"], client_message_id="delivery-peer-" + ref,
-            message=row["text"], timeout=timeout, allow_restart=start_interrupted is True,
+            message=pasted_text(row, strict=True), timeout=timeout, allow_restart=start_interrupted is True,
             retry_ambiguous=False, allow_add=row["state"] == "pending", require_message_match=True,
             before_add=before_add, steer=steer, owned_queue_only_restart=True,
             observe_turn=True, steer_turn_id=steer_turn, before_steer=before_steer)
@@ -2951,6 +3575,7 @@ def _deliver_pending_codex_row(ref, *, timeout, start_interrupted, before_submit
             if rc:
                 _save_pending(dict(current, rpc_claim=None))
                 return {"status": "unverified", "reason": "peer-receive-ledger-unavailable"}
+            _note_received_peer(current.get("text") or row.get("text"), recipient)
             received = dict(current, state="received", text=_received_delivery_text(current), rpc_claim=None,
                             receipt="exact-native-history",
                             actual_message_id=native_message_id,
@@ -3003,7 +3628,13 @@ def usable_session_id(value):
 
 
 def _arrived_body_digests(text, transfer_ref=None):
-    """Digests the sealed body may have once it arrives: a runtime's input surface can add or
+    """Digests the sealed body may have once it arrives (see ``_arrived_body_variants``)."""
+    return {hashlib.sha256(v.encode("utf-8")).hexdigest()
+            for v in _arrived_body_variants(text, transfer_ref)}
+
+
+def _arrived_body_variants(text, transfer_ref=None):
+    """Texts the sealed body may have once it arrives: a runtime's input surface can add or
     trim whitespace or wrap a Claude paste; the inner message must remain exact."""
     variants = [text, text.rstrip(), text.strip()]
     wrapped = re.fullmatch(
@@ -3023,10 +3654,17 @@ def _arrived_body_digests(text, transfer_ref=None):
             if match:
                 body = value[match.end():]
                 variants.extend((body, body.rstrip(), body.strip()))
-    return {hashlib.sha256(v.encode("utf-8")).hexdigest() for v in variants}
+    return variants
 
 
 def parse_peer_trailer(text, recipient=None, *, include_ref=False):
+    """``_parse_peer_trailer_core`` of the text the sender sealed: a visible form-2 text
+    (``expand_display_text``) is read through its sealed record, any other text as it is."""
+    return _parse_peer_trailer_core(expand_display_text(text, recipient), recipient,
+                                    include_ref=include_ref)
+
+
+def _parse_peer_trailer_core(text, recipient=None, *, include_ref=False):
     """→ {harness, session_id, name} for the LAST trailer in ``text``, else ``None``.
 
     New aliases require a sealed transfer and the actual recipient tuple. A
@@ -3073,7 +3711,8 @@ def parse_peer_trailer(text, recipient=None, *, include_ref=False):
                             and (pending is None or not isinstance(transfer_refs, list)
                                  or transfer_refs == pending_refs)):
                         current = pending_delivery_binding(
-                            {"to": target, "refs": refs}, include_acked=True)
+                            {"to": target, "refs": refs, "created": (pending or {}).get("created")},
+                            include_acked=True)
                         target_matches = bool(current and _same_transfer_session(
                             current.get("recipient"), recipient))
             elif _valid_pane_bound_endpoint(target) or _unresolved_target(target):
@@ -3807,7 +4446,9 @@ def _exact_receiver_evidence(ref, transfer, pending, recipient, *, roots=None):
     target = transfer.get("to") or {}
     binding = (pending_delivery_binding(pending, include_acked=True)
                if (_valid_pane_bound_endpoint(target) or _unresolved_target(target)) and pending is not None
-               else pending_delivery_binding({"to": target, "refs": refs}, include_acked=True))
+               else pending_delivery_binding(
+                   {"to": target, "refs": refs, "created": (pending or {}).get("created")},
+                   include_acked=True))
     if not isinstance(binding, dict):
         return None
     effective = binding.get("recipient") or {}
@@ -3901,8 +4542,10 @@ def _body_reference_guidance(text, recipient):
                     "Do not act on this preview; leave the request unprocessed for its existing continuation.")
         return ""
     ref, transfer = found
-    if (transfer.get("body_ref") or {}).get("presentation_mode") == "request-body":
-        return ""  # a request's body is opened through `show`, never pasted
+    if (transfer.get("body_ref") or {}).get("presentation_mode") in ("request-body", "private-answer"):
+        # A request's body is opened through `show`, never pasted; a private answer reaches only
+        # its recipient (`_private_answer_guidance`), and its recovery is the courier's.
+        return ""
     identity_matches = _reference_target_matches(transfer, recipient, ref)
     fallback_required = False
     if identity_matches:
@@ -3959,16 +4602,93 @@ def receiver_guidance(text="", recipient=None, *, cwd=None):
 
     This is a read-only hint. ``accept_handoff`` repeats the same receiver check
     while holding its existing pending lock before it records any acceptance.
+
+    For a form-2 text the sealed sender, reply address and ref (a runtime text: its whole
+    sealed text) lead the guidance: this is the agent-only path for what the window omits.
     """
+    try:
+        resolved = _display_resolve(text, recipient)
+    except UnsupportedPendingSchema:
+        resolved = None
+    if resolved is not None:
+        inner = _plain_receiver_guidance(resolved["old_text"], recipient, cwd=cwd)
+        return "\n\n".join(part for part in (_display_agent_block(resolved), inner) if part)
+    return _plain_receiver_guidance(text, recipient, cwd=cwd, name_sender=True)
+
+
+_PRIVATE_ANSWER_TOO_LONG = ("Its full text is too long for this context: read it from the file named in the "
+                            "pointer above. It answers a question asked as secret: use it, but do not "
+                            "repeat it in your replies or reports.")
+
+
+def _secret_answer_form(ref):
+    """``"pointer"`` or ``"sealed"`` for a transfer carrying a secret question's answer
+    (``private_body``: its private payload, or its one-line form marked private), else None."""
+    try:
+        transfer = _read_transfer_record(ref) or {}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if ((transfer.get("body_ref") or {}).get("presentation_mode")) == "private-answer":
+        return "pointer"
+    display = transfer.get("display")
+    return "sealed" if isinstance(display, dict) and display.get("private") is True else None
+
+
+def _secret_answer_agent_text(form, ref):
+    """What only the recipient's agent may read for a secret answer's row, at every carrier that
+    takes the row (prompt hooks, Claude's hook context, OpenCode's system context): a pointer's
+    full text (``_private_answer_guidance``), or for a one-line form row, whose own text is the
+    whole old text, the sentence that comes with every secret answer."""
+    if form == "pointer":
+        return _private_answer_guidance(ref)
+    return _SECRET_ANSWER_NOTE if form == "sealed" else ""
+
+
+def _private_answer_guidance(ref):
+    """The agent-only full text of a runtime delivery sealed as a private answer's pointer
+    (``private_body``), read from its verified payload; ``""`` for any other runtime text.
+
+    ``ref`` comes from ``parse_peer_trailer``, which has already bound the arrived text to its
+    sealed transfer and to this recipient. Claude's and Codex's prompt hooks and the OpenCode
+    plugin all add this guidance to the agent's context, so the answer needs no file read."""
+    try:
+        transfer = _read_transfer_record(ref) if isinstance(ref, str) else None
+        if ((transfer or {}).get("body_ref") or {}).get("presentation_mode") != "private-answer":
+            return ""   # any other runtime text keeps its empty guidance
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return ""
+    try:
+        payload = read_peer_payload(ref)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        payload = None
+    if not payload:
+        return ("The private answer this pointer stands for could not be verified or read by the "
+                "trusted receiver. Do not act on a guess; leave it for its existing continuation.")
+    return ("Hearting delivery (the person sees only the pointer above); the full text:\n"
+            + payload["body"] + "\n\n" + _SECRET_ANSWER_NOTE)
+
+
+def _plain_receiver_guidance(text, recipient, *, cwd=None, name_sender=False):
+    """The guidance for a text that is not a display form; ``name_sender`` leads the ordinary
+    guidance with the sealed sender's reply address when the text shows only a trailer tag."""
     current_origin = parse_peer_trailer(text, recipient, include_ref=True)
     if isinstance(current_origin, dict) and current_origin.get("source") == "runtime-completion":
-        return ""
+        return _private_answer_guidance(current_origin.get("transfer_ref"))
     requested = _request_receiver_guidance(text, recipient)
     if requested:
         return requested
     ordinary = _ordinary_receiver_guidance()
     body_reference_guidance = _body_reference_guidance(text, recipient)
     guidance = ordinary + ("\n\n" + body_reference_guidance if body_reference_guidance else "")
+    if name_sender:
+        try:
+            sender_line = _trailer_form_sender_sentence(text, recipient)
+        except UnsupportedPendingSchema:
+            sender_line = ""
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            sender_line = ""
+        if sender_line:
+            guidance = sender_line + "\n\n" + guidance
     if not isinstance(recipient, dict) or not _valid_transfer_endpoint(recipient):
         return guidance
     try:
@@ -4047,6 +4767,69 @@ def receiver_guidance(text="", recipient=None, *, cwd=None):
         return guidance
 
 
+def receiver_guidance_once(text="", recipient=None, *, cwd=None, deferred=None):
+    """``receiver_guidance`` without repeating the fixed text the session already holds.
+
+    Only the fixed ordinary guidance is withheld when it equals the one delivered just
+    before. Anything else it carries is about this very message and goes in every time: the
+    verified body of a long message, the notice that the body could not be verified, a
+    request command, a handoff accept command. The first turn after a compaction or clear
+    (``context_repeat``) delivers the fixed text again. OpenCode's system-prompt context lasts
+    for one request only, so its per-turn repeat stays the carrier there.
+
+    The fixed text counts as delivered only once it went out. With ``deferred`` (a list) the
+    record is appended there and the caller applies it with ``commit_receiver_guidance``
+    after its output was flushed; without it the record is written at once."""
+    guidance = receiver_guidance(text, recipient, cwd=cwd)
+    if (not guidance or not isinstance(recipient, dict) or recipient.get("harness") == "opencode"
+            or guidance != _ordinary_receiver_guidance()):
+        return guidance
+    try:
+        import context_repeat
+        blocks, entry = context_repeat.filter_fresh(
+            str(recipient.get("harness") or ""), str(recipient.get("session_id") or ""),
+            "peer-guidance", [guidance])
+        if entry is not None:
+            if deferred is None:
+                context_repeat.commit(entry)
+            else:
+                deferred.append(entry)
+        return blocks[0] if blocks else ""
+    except Exception:
+        return guidance
+
+
+def receiver_guidance_parts(text="", recipient=None, *, cwd=None):
+    """``receiver_guidance_once`` split for a carrier that keeps a secret answer apart (the OpenCode
+    plugin): ``{"guidance": ..., "secret": ...}``. ``secret`` is the guidance when it is the agent-only
+    text of a secret answer's row (``_secret_answer_agent_text``: a pointer's full text, or a one-line
+    form's whole old text), which that carrier holds until a model call has read it; ``guidance`` is
+    any other guidance, kept as before. One of the two is always empty."""
+    guidance = receiver_guidance_once(text, recipient, cwd=cwd)
+    try:
+        resolved = _display_resolve(text, recipient)
+        if resolved is not None:
+            ref = resolved["ref"]
+        else:
+            trailer = parse_peer_trailer(text, recipient, include_ref=True)
+            ref = trailer.get("transfer_ref") if isinstance(trailer, dict) else None
+        secret = (bool(guidance) and isinstance(ref, str) and _secret_answer_form(ref) is not None
+                  and _SECRET_ANSWER_NOTE in guidance)
+    except Exception:  # noqa: BLE001 - unreadable: the guidance keeps its ordinary life
+        secret = False
+    return {"guidance": "" if secret else guidance, "secret": guidance if secret else ""}
+
+
+def commit_receiver_guidance(entries):
+    """Record the fixed guidance as delivered, after the context carrying it was flushed."""
+    try:
+        import context_repeat
+        for entry in entries or ():
+            context_repeat.commit(entry)
+    except Exception:
+        pass
+
+
 def _ack_watch_refs(pending, recipient, carrier):
     for watch_ref in (pending or {}).get("refs") or ():
         if not isinstance(watch_ref, str) or not watch_ref.startswith("peer-watch:"):
@@ -4106,6 +4889,24 @@ def settle_watch_transfers(watch_id, harness, sid):
         return False
 
 
+def _note_received_peer(text, recipient):
+    """Keep the display line of a peer message this session has just received.
+
+    Every way a message reaches a session ends in one of the receipts below, whatever carried it:
+    the session's own prompt, a hook comment added to another prompt, a tool boundary, a native
+    queue. The line is read from the delivered text with the same ``prompt_origin`` the prompt
+    hook classifies by, so only a message from another session counts. Display only: it never
+    costs a receipt."""
+    try:
+        import session_tidy
+        harness, sid = recipient.get("harness"), recipient.get("session_id")
+        origin = prompt_origin(text, harness, sid) if isinstance(text, str) else None
+        if origin:
+            session_tidy.record_received_peer(harness, sid, text, origin, read_payload=read_peer_payload)
+    except Exception:  # noqa: BLE001 - a display line never costs a receipt
+        pass
+
+
 def receive_peer_message(text, recipient, project="", *, summary_text=""):
     try:
         return _receive_peer_message(text, recipient, project, summary_text=summary_text)
@@ -4120,6 +4921,8 @@ def receive_peer_message(text, recipient, project="", *, summary_text=""):
 
 def _receive_peer_message(text, recipient, project="", *, summary_text=""):
     """Actual receiver observation; rendering a callback is never this boundary."""
+    # A form-2 text is judged as the sealed old-form text it stands for.
+    text = expand_display_text(text, recipient)
     # A SID-less first-turn message is bound only after the native callback can
     # prove that the same foreground process admitted it. Pane reuse alone is
     # never enough, including when an old row has no readable process proof.
@@ -4206,6 +5009,7 @@ def _receive_peer_message(text, recipient, project="", *, summary_text=""):
                 trailer, recipient, project, summary_text, refs, proof)
             if rc:
                 return rc
+        _note_received_peer(text, recipient)
         received_at = proof["received_at"]
         if pending:
             received = dict(pending, state="received", text=_received_delivery_text(pending, text), rpc_claim=None,
@@ -4339,19 +5143,35 @@ def _fit_claude_context(claims, context):
         return
     from dispatch_session_sweep import CLAUDE_CONTEXT_CHARS, overflow_pointer
     while len(claims) > 1 and len("\n\n".join(context)) > CLAUDE_CONTEXT_CHARS:
-        row = claims.pop()
+        ordinary = [claim for claim in claims if not claim.get("secret_answer")]
+        row = ordinary[-1] if ordinary else claims[-1]   # a secret answer is the last to wait
+        claims.remove(row)
         release_pending_herdr_claim(row)
         try:
-            context.remove(row["text"])
+            context.remove(row.get("shown_text", row["text"]))
         except ValueError:
             pass
     if len(claims) == 1 and len("\n\n".join(context)) > CLAUDE_CONTEXT_CHARS:
         row = claims[0]
         try:
-            index = context.index(row["text"])
+            index = context.index(row.get("shown_text", row["text"]))
         except ValueError:
             return
         others = sum(len(part) + 2 for i, part in enumerate(context) if i != index)
+        if row.get("secret_answer"):
+            # A secret answer gets no overflow copy. One that fits a context alone waits for a
+            # boundary with room, where it goes whole; only a pointer too long even alone names
+            # its own private payload instead.
+            shown = row["text"] + "\n\n" + _PRIVATE_ANSWER_TOO_LONG
+            alone = len(row.get("shown_text", row["text"])) <= CLAUDE_CONTEXT_CHARS
+            if (not alone and _secret_answer_form(row["ref"]) == "pointer"
+                    and others + len(shown) <= CLAUDE_CONTEXT_CHARS):
+                context[index] = row["shown_text"] = shown
+                return
+            claims.pop()
+            release_pending_herdr_claim(row)
+            del context[index]
+            return
         shown = overflow_pointer(row["text"], _pending_dir().parent,
                                  max(1_000, CLAUDE_CONTEXT_CHARS - others), keep_last_lines=1)
         if shown == row["text"] or others + len(shown) > CLAUDE_CONTEXT_CHARS:
@@ -4364,11 +5184,38 @@ def _fit_claude_context(claims, context):
         row["shown_text"] = shown
 
 
+def _runtime_completion_copy(row):
+    """Whether this stored row is the runner's peer-body copy of a registered completion.
+
+    Such a copy reaches a Claude session only through the pane courier (a resting
+    session, an empty input); a hook boundary never carries it, because the
+    asyncRewake sends the completion and the turn's Stop and the next prompt carry
+    what it did not deliver. A copy that also holds a gate or supervision notice is
+    carried as before. Unreadable means not a copy (fail-soft: carried).
+    """
+    bindings = row.get("dispatch_notices") or [row.get("dispatch_notice")]
+    if not bindings or not all(isinstance(item, dict) for item in bindings):
+        return False
+    try:
+        import dispatch_pending_delivery as pending
+        from dispatch_session_sweep import is_completion_record
+        for item in bindings:
+            record = pending.read(Path(item["jobs"]).parent, item["storage_recipient"],
+                                  item["delivery_id"])
+            if not record or not is_completion_record(record):
+                return False
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
 def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
                       native_delivery=False, deadline=None):
     """Use an existing native context boundary, settling only exact native delivery.
 
-    Claude delivers bodies here at every boundary. OpenCode delivers them only at
+    Claude delivers bodies here at every boundary, except the runner's copy of a
+    registered completion (``_runtime_completion_copy``): that one waits for the pane
+    courier, since the hook carriers send the completion record itself. OpenCode delivers them only at
     its native post-tool boundary (the plugin appends the text to the finished
     tool result, as Claude's PostToolUse additionalContext does), so a report that
     arrives while the session is working reaches the model during that work; its
@@ -4390,8 +5237,11 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
     """
     if not _valid_transfer_endpoint(recipient):
         return
+    if declares_display_gate(recipient):
+        note_display_ready(recipient)  # this code reads the display forms (once a day per session)
     stream = sys.stdout if stream is None else stream
     claims, warnings, context = [], [], []
+    system = []   # the agent-only part a carrier puts outside what it shows (OpenCode: system context)
 
     def expired():
         return deadline is not None and time.monotonic() >= deadline
@@ -4416,6 +5266,8 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
                 break
             if not _same_transfer_session(pending_delivery_recipient(row), recipient):
                 continue
+            if recipient["harness"] == "claude" and _runtime_completion_copy(row):
+                continue
             # The sole no-trailer context is the booked session-tidy continue;
             # ordinary peer bodies still require their exact sealed trailer.
             if row.get("no_trailer"):
@@ -4425,6 +5277,11 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
                 parsed = parse_peer_trailer(row.get("text"), recipient, include_ref=True)
                 if not parsed or parsed.get("transfer_ref") != row["ref"]:
                     continue
+            secret = None if row.get("no_trailer") else _secret_answer_form(row["ref"])
+            if secret == "sealed" and recipient["harness"] != "claude":
+                # OpenCode appends this context to the finished tool result, which its TUI may draw
+                # for the person, and a one-line form row's text is the whole old text.
+                continue
             native_boundary = bool(native_delivery and event in _NATIVE_BOUNDARY_EVENTS)
             try:
                 claimed = reserve_pending_herdr(
@@ -4433,8 +5290,20 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
             except BlockingIOError:
                 continue
             if claimed:
+                shown = claimed["text"]
+                agent = _secret_answer_agent_text(secret, claimed["ref"]) if secret else ""
+                if agent and recipient["harness"] == "claude":
+                    # Claude's hook context is the agent's alone: the pointer and its full text.
+                    shown += "\n\n" + agent
+                elif agent:
+                    # OpenCode: the tool result (which its TUI may draw) keeps the pointer; the full
+                    # text goes to the plugin's system context for the tool loop's next model call.
+                    claimed["system_text"] = agent
+                    system.append(agent)
+                if secret:
+                    claimed["shown_text"], claimed["secret_answer"] = shown, True
                 claims.append(claimed)
-                context.append(claimed["text"])
+                context.append(shown)
     now = time.time()
     for row in rows:
         try:
@@ -4487,6 +5356,8 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
             release_pending_herdr_claim(row)
             try:
                 context.remove(row.get("shown_text", row["text"]))
+                if row.get("system_text"):
+                    system.remove(row["system_text"])
             except ValueError:
                 pass
     claims = begun
@@ -4495,6 +5366,8 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
     text = "\n\n".join(context)
     output = ({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}
               if event else {"context": text})
+    if system:
+        output["system"] = "\n\n".join(system)
     print(json.dumps(output, ensure_ascii=False), file=stream)
     stream.flush()
     for row in claims:
@@ -4566,6 +5439,9 @@ def cmd_context(args):
 
 def cmd_pending(args):
     recipient = {"harness": args.to_harness, "session_id": args.to_session_id}
+    if _valid_transfer_endpoint(recipient):
+        if declares_display_gate(recipient):
+            note_display_ready(recipient)  # the receiving plugin's code reads the display forms
     received_ref = getattr(args, "received", None)
     claim_ref = getattr(args, "claim", None)
     queued_ref = getattr(args, "queued", None)
@@ -4673,6 +5549,7 @@ def cmd_pending(args):
                     producer_binding=row.get("producer_binding")))
                 if rc:
                     return rc
+            _note_received_peer(row.get("text"), recipient)
             received = dict(row, state="received", text=_received_delivery_text(row), rpc_claim=None,
                             receipt="exact-native-history", received_at=time.time(),
                             actual_message_id=message_id,
@@ -5743,8 +6620,8 @@ def _iter_records(since_hours=None):
         if not root.is_dir():
             continue
         for month_dir in sorted(root.glob("*")):
-            if not month_dir.is_dir():
-                continue
+            if month_dir.name.startswith(".") or not month_dir.is_dir():
+                continue  # a dot-named folder (the display hints and marks) holds no ledger
             for f in sorted(month_dir.glob("*.jsonl")):
                 try:
                     with open(f, "r", encoding="utf-8", errors="replace") as fh:

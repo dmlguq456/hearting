@@ -21,7 +21,9 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
 
+import fixture_processes  # noqa: E402
 import artifact_producer_spec as spec  # noqa: E402
 import artifact_producer_store as producer_store  # noqa: E402
 import dispatch_seat_handover as handover  # noqa: E402
@@ -45,7 +47,7 @@ def write_revision(root: Path, files: dict[str, bytes]) -> Path:
 
 class SharedRevisionReads(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = fixture_processes.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         spec._VERIFIED_REVISIONS.clear()
         self.files = {"a/prd.md": b"# A\n", "b/prd.md": b"# B\n", "b/notes.md": b"n\n"}
@@ -158,7 +160,7 @@ class SharedRevisionReads(unittest.TestCase):
 
 class SeatLedgerReads(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = fixture_processes.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         patcher = mock.patch.dict(os.environ, {"XDG_STATE_HOME": self.tmp.name})
         patcher.start()
@@ -231,7 +233,7 @@ class UntrustedReadersStayFresh(unittest.TestCase):
 
 class ActiveIndexReads(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = fixture_processes.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = peer_obligations.ObligationStore(Path(self.tmp.name) / "state")
 

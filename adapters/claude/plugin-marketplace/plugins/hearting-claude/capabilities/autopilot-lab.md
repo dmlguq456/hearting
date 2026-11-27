@@ -2,11 +2,16 @@
 
 This is the portable capability contract for `autopilot-lab`. It defines runtime-neutral meaning and adapter obligations. It is not a Claude Skill file.
 
-Write new training checkpoints under `$AGENT_RUNTIME_DIR/experiments/<slug>/runs/<run>/ckpt/`.
+Write raw experiment data under `$AGENT_RAW_DATA_DIR`, outside artifacts (it is the
+runtime dir when no data folder is set, so paths stay unchanged): new training
+checkpoints in `experiments/<slug>/runs/<run>/ckpt/`; per-sample outputs, raw results
+and array or audio dumps in `campaigns/<campaign>/<cycle>/<path below artifacts>`.
 Keep `run.json.ckpt_path` as the compatible pointer; once a checkpoint exists,
 record optional `ckpt_sha256` and `ckpt_byte_size` and verify the digest at
 handoff and parent evaluation. While training is running, the expected path is
-valid without a hash or size. Keep configs, logs and reports in artifacts.
+valid without a hash or size. Keep configs, logs, reports, tables, figures and
+summary numbers in artifacts; `run.json` records the raw paths.
+A route's declared output (e.g. `eval-run`'s `raw-results/**`) stays at its declared path.
 
 ## Contract
 <!-- GENERATED: harness-manifest.json -->
@@ -134,7 +139,7 @@ hearting run capability-route compose --prompt-file <task> \
   --intensity strong --graph metrics,diagnose,report,independent-verify --explain
 ```
 
-Reuse the existing `raw-results/**` and `run.json`; omit already completed
+Reuse the existing raw results (`raw-results/**` or the paths `run.json` records) and `run.json`; omit already completed
 aggregation when its metrics are sufficient. At standard or lower, the default
 graph is `metrics,diagnose,report`. Selected inputs, report provenance and
 completion contracts still apply.
@@ -149,7 +154,8 @@ Both strong graphs retain the two-way verification and automatic owner close.
 
 Bound a single CPU inference by its sample, checkpoint, count and output paths
 in the eval spec and approved task. Run it through `eval-run`, whose write scope
-already covers `run.json`, `raw-results/**` and `logs/**`; it retains the registry
+already covers `run.json`, its declared `raw-results/**` and `logs/**` (other raw
+output goes under `raw_data_dir`); it retains the registry
 resource class, hash-bound smoke/config requirements and supervised continuation.
 The `metrics` stage, including `metrics:qa/ml-debug`, writes only `metrics.jsonl`
 and `summary-stats.json`. It cannot create the new raw results.
@@ -221,7 +227,10 @@ Call an experiment condition by the name in the project catalog
 (`python3 utilities/experiment_catalog.py status` or `show`), not by a run id, a config name,
 or a private label. A condition the catalog does not list is registered first
 (`experiment_catalog.py register`); a missing goal or baseline there is a warning and does not
-stop the run. Run ids stay as references next to the name.
+stop the run. Run ids stay as references next to the name. Report results with the table
+`hearting run experiment_catalog leaderboard` prints, pasted as printed (in a stage report
+too, so the parent pastes it instead of drawing another); it is Fleet's LAB table with the
+catalog's metric line and words.
 
 Admission is another optional observation axis, independent of metric progress.
 The shared observer can use bounded records tied to exact run provenance when
@@ -276,7 +285,7 @@ check: missing evidence can fail that check without changing resource success.
 ### Parts (SD-165)
 
 For an already verified run's same-code/config resume, epoch extension or repeat,
-select `--shape direct|solo --graph resume-run,run-verify`. This starts no frame,
+select `--capability autopilot-lab --shape direct|solo --graph resume-run,run-verify`. This starts no frame,
 scaffold, smoke, pre-run owner or new approval. Use the route's `resource-runner
 start` instruction once with the approved command; the runtime connects its
 sentinel and supervisor to the independent verification after exit. The small
@@ -456,11 +465,12 @@ invalidates it. `_RUNLOG` and existing provenance manifests are append-only.
 
 Smoke and resource launch also bind the same normalized execution choices:
 cwd, interpreter, the selected local environment, and any compute-host and
-explicit remote environment selectors. The launcher checks again before the
-payload is reserved and when a queued controller releases it. Changed or
-unbound smoke input cannot authorize a launch. Legacy attestations remain
-inspectable, but cannot authorize a new payload; secrets and the full ambient
-environment are not copied into the attestation.
+explicit remote environment selectors. Local payloads inherit the selected
+values captured by smoke, and an explicit assignment is still compared. The
+launcher checks before reservation and before a queued controller releases the
+payload. Changed or unbound smoke input cannot authorize a launch. Legacy
+attestations remain inspectable, but cannot authorize a new payload; secrets and
+the full ambient environment are not copied into the attestation.
 
 **Limits (by design):** attestation requires the source file to exist *at
 attest time* — a manifest whose source was later deleted stays

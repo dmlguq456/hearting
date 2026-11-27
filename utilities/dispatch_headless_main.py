@@ -109,6 +109,10 @@ def add_launch_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--capacity-retry", type=int, choices=(0, 1), default=0)
     p.add_argument("--prior-attempt-id")
     p.add_argument("--automatic-retry-of", help="Exact failed predecessor; revalidated atomically at claim")
+    # A unit route's next turn (`correct --route`): the previous turn's attempt, this turn's number and text.
+    p.add_argument("--continues-attempt-id", help=argparse.SUPPRESS)
+    p.add_argument("--turn", type=int, default=0, help=argparse.SUPPRESS)
+    p.add_argument("--continuation-text", default="", help=argparse.SUPPRESS)
     p.add_argument("--cooled-model")
     p.add_argument("--selection-source")
     p.add_argument("--launch-authority", choices=("conductor", "ancestor-broker"), default="conductor")
@@ -136,7 +140,9 @@ def bind_worker_contract(h, args, *, profile_type) -> str:
         route_node=args.route_node,
         profile_type=profile_type,
     )
-    bootstrap = h.render_worker_bootstrap(h.ROOT, args.worker_type, unit=(args.unit or None))
+    import worker_bootstrap as wb
+    bootstrap = h.render_worker_bootstrap(h.ROOT, args.worker_type, unit=(args.unit or None),
+                                          field=wb.unit_route_field(args))
     args.assigned_contract = h.assigned_contract(
         capability=args.capability,
         worker_type=args.worker_type,
@@ -152,13 +158,16 @@ def bind_worker_contract(h, args, *, profile_type) -> str:
 def dispatch_metadata_prompt(h, args, *, guard_session_id: bool = True) -> str:
     """The prompt's `Dispatch metadata` block, through the artifact context."""
     guard = f"- guard_session_id: {args.attempt_id}\n" if guard_session_id else ""
+    # 11-20: a unit route has no intensity (one unit does one job, nothing checks it), so its worker is
+    # told neither a `qa:` nor an `intensity:` value. The row and the environment keep the recorded `quick`.
+    qa, intensity = ("-", "-") if getattr(args, "capability", None) == "unit" else (args.qa, args.intensity)
     return (
         "Dispatch metadata:\n"
         f"- capability: {args.capability}\n"
         f"- capability_mode: {args.capability_mode}\n"
         f"- worker_mode: {args.worker_mode or '-'}\n"
-        f"- qa: {args.qa}\n"
-        f"- intensity: {args.intensity}\n"
+        f"- qa: {qa}\n"
+        f"- intensity: {intensity}\n"
         f"- dispatch_depth: {args.dispatch_depth}\n"
         f"- worker_type: {args.worker_type}\n"
         f"{guard}"
@@ -176,8 +185,55 @@ def dispatch_metadata_prompt(h, args, *, guard_session_id: bool = True) -> str:
         f"- owner_harness: {args.owner_harness or '-'}\n"
         f"- worktree: {args.worktree}\n"
         f"- artifact_root: {args.artifact_root}\n"
-        f"{h.artifact_context_prompt({**os.environ, 'AGENT_RUNTIME_DIR': getattr(args, 'runtime_dir', '')})}"
+        f"{h.artifact_context_prompt({**os.environ, 'AGENT_RUNTIME_DIR': getattr(args, 'runtime_dir', ''), 'AGENT_RAW_DATA_DIR': getattr(args, 'raw_data_dir', '')})}"
     )
+
+
+def owner_continuation_prompt(h, args, prompt: str, recovery: str) -> str:
+    """The owner prompt and its recovery context (`dispatch_replacement.recovery_instructions`). An owner that
+    takes over from an earlier owner of its route is told `unit_continue.owner_turn_prompt` instead: a woken
+    session gets only this attempt's facts and what is new."""
+    import unit_continue
+    plan = getattr(args, "session_plan", None)
+    if not unit_continue.owner_predecessor(args) or plan is None:
+        return prompt + recovery
+    facts = dispatch_metadata_prompt(h, args) + (launch_policy_prompt(args) if plan.kind == "resumed" else "")
+    return unit_continue.owner_turn_prompt(args, plan, facts, prompt, recovery, args.jobs_path)
+
+
+def launch_policy_prompt(args) -> str:
+    """This launch's commit policy and this node's declared scope, which a woken owner session is told again:
+    the launch decides them, not the earlier attempt whose instructions the session holds."""
+    import commit_policy
+    import worker_bootstrap as wb
+    commit = commit_policy.prompt_clause(args) or "This launch's commit policy: commit as the owner contract says.\n"
+    return commit + wb.declared_scope_prompt(args, os.environ)
+
+
+def owner_session_arguments(args) -> list:
+    """The supervisor flag that wakes the earlier owner's session (Claude and OpenCode supervisors)."""
+    import unit_continue
+    plan = getattr(args, "session_plan", None)
+    if unit_continue.owner_predecessor(args) and plan is not None and plan.kind == "resumed":
+        return ["--resume-session", plan.session_id]
+    return []
+
+
+def carry_session(h, args, home, *, jobs: Path, prompt_path: Path, fresh_prompt: Callable[[], str]) -> None:
+    """Carry the earlier session's file into this launch's worker home (`unit_continue.transplant`).
+
+    The session was found before the claim. When it can no longer be carried (its home was removed since), this
+    launch starts fresh instead of failing: the plan becomes `fresh:session-missing`, the row says so, and the
+    prompt file holds what a fresh session is told (`fresh_prompt`, read after the plan changed)."""
+    import unit_continue
+    try:
+        unit_continue.transplant(getattr(args, "session_plan", None), home)
+        return
+    except (OSError, unit_continue.ContinueError):
+        pass
+    args.session_plan = unit_continue.SessionPlan("fresh", "session-missing", "", "")
+    h.annotate_attempt_row(jobs, args.attempt_id, {"session": args.session_plan.row_value})
+    Path(h.frame_repository.execution_path(prompt_path)).write_text(fresh_prompt(), encoding="utf-8")
 
 
 def assignment_prompt_tail(h, args, task: str, *, heartbeat: str, commit_clause: str) -> str:
@@ -190,6 +246,50 @@ def assignment_prompt_tail(h, args, task: str, *, heartbeat: str, commit_clause:
         f"{h.unit_bootstrap_prompt(args, task, os.environ)}"
         f"{h.assignment_prompt(args, task, os.environ)}"
     )
+
+
+def unit_leg_prompt(h, args, task: str, *, commit_clause: str = "") -> str | None:
+    """The whole first instruction of a unit route's worker, or None when this launch is not one.
+
+    The unit's text (its stance and body), the dispatch facts, a few of the kernel's safety lines, the brief,
+    the node's declared scope and how to end: nothing the owner reads. A unit route has no owner above its
+    worker and no stage after it, so the kernel's owner and stage rules, the capability contract and the
+    route steps stay out."""
+    if (getattr(args, "capability", None) != "unit" or int(getattr(args, "dispatch_depth", 0)) != 1
+            or not getattr(args, "route_file", None)):
+        return None
+    import json
+    import worker_bootstrap as wb
+    route = json.loads(Path(args.route_file).read_text(encoding="utf-8"))
+    scope = wb.resolve_node_scope(route, args.route_node, wb._child_scope_environment(args, route, os.environ),
+                                  parent_attempt_id=getattr(args, "parent_attempt_id", None),
+                                  route_file=args.route_file)
+    if getattr(args, "continues_attempt_id", None):
+        import unit_continue
+        plan = unit_continue.plan_for_args(args, args.jobs_path, Path(h.__file__).resolve().parents[1].name)
+        if plan is not None and plan.kind == "resumed":
+            # The woken session holds the brief and the kernel's rules already: only this turn's facts and text.
+            return unit_continue.turn_prompt(args, plan, dispatch_metadata_prompt(h, args), task, args.jobs_path)
+        task = unit_continue.turn_prompt(args, plan, "", task, args.jobs_path)
+    persona = wb.unit_persona_body(h.ROOT, args.unit, wb.unit_route_field(args)) or ""
+    stance = wb.unit_stance_text(h.ROOT, args.unit)
+    unit_text = "\n\n".join(part for part in (stance if stance and stance not in persona else "", persona) if part)
+    # The kernel's closing contract, without the paragraph that only a supervised owner reads.
+    contract = "\n\n".join(paragraph for paragraph in wb.worker_terminal_contract(h.ROOT).split("\n\n")
+                            if "supervised owner" not in paragraph)
+    # A support leg (a lookup) starts no other worker, as `roles/worker-types/support.md` says: it is not told how.
+    call = "" if args.worker_type == "support" else f"{wb.unit_call_prompt(h.ROOT)}\n"
+    return (f"{unit_text}\n\n"
+            f"{dispatch_metadata_prompt(h, args)}\n"
+            f"{commit_clause}"
+            f"{wb.unit_safety_prompt(args.worker_type)}"
+            f"{call}"
+            f"{wb.unit_bootstrap_prompt(args, task, os.environ)}"
+            f"Assignment:\n{task.rstrip()}\n\n"
+            f"{wb.node_scope_prompt(scope)}\n"
+            f"{contract}\n\n"
+            f"{wb.unit_verdict_prompt(args.worker_type)}"
+            f"{wb.worker_ending_prompt()}")
 
 
 def registry_gates(h, args, action: str, *, agent_home: Path, jobs: Path) -> int | None:
@@ -498,6 +598,7 @@ def select_model_settings(h, args, *, harness: str, label: str, knob: str,
             # ITS OWN sealed profile, not the owner's. Without this the route
             # compiles `top` onto the anchor and this wrapper refuses it.
             node=getattr(args, "route_node", None),
+            worker_type=args.worker_type,
         )
     except h.ModelProfileError as exc:
         raise h.ModelSelectionError(exc.reason, str(exc)) from exc
@@ -679,6 +780,7 @@ def worker_environment(h, args, *, harness: str, jobs: Path, governor_root: Path
         # second lineage.
         **h.artifact_cycle_environment(os.environ),
         "AGENT_RUNTIME_DIR": getattr(args, "runtime_dir", ""),
+        "AGENT_RAW_DATA_DIR": getattr(args, "raw_data_dir", "") or getattr(args, "runtime_dir", ""),
         "REPORT_BUNDLE_ROOT": str(args.report_bundle_root or ""),
         "AGENT_ROUTE_FILE": (
             args.route_file

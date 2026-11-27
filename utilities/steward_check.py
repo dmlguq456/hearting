@@ -262,9 +262,14 @@ def _holder_seat_keys(harness: str, session_id: str):
     return keys
 
 
-def _window_closed(harness: str, session_id: str) -> bool:
-    """Release a holder only on positive native proof of exact session end."""
-    return _session_liveness(harness, session_id, (), _end_observation()) == "ended"
+def _window_closed(harness: str, session_id: str, observation=None) -> bool:
+    """Release a holder only on positive native proof of exact session end.
+
+    ``observation`` is the runner pass's one shared reading of the live session holders;
+    without it the call takes its own."""
+    if observation is None:
+        observation = _end_observation()
+    return _session_liveness(harness, session_id, (), observation) == "ended"
 
 
 _ACTIVITY_EVENTS = frozenset({"start", "prompt", "real-prompt", "summary"})
@@ -289,7 +294,7 @@ def _evidence_ts(relation: dict) -> float:
     return latest
 
 
-def _seat_cleared(harness: str, session_id: str) -> bool:
+def _seat_cleared(harness: str, session_id: str, observation=None) -> bool:
     """True only when every seat this holder's role sits in recorded the holder's own
     confirmed same-harness ``/clear``, nothing shows the holder after that clear, and the
     session is not ``live``.
@@ -352,21 +357,34 @@ def _seat_cleared(harness: str, session_id: str) -> bool:
                 return False
     except Exception:  # noqa: BLE001 - unreadable lineage concludes nothing
         return False
-    return _session_liveness(harness, session_id, _agents(), _end_observation()) != "live"
+    if observation is None:
+        observation = _end_observation()
+    return _session_liveness(harness, session_id, _agents(), observation) != "live"
 
 
-def _release_if_window_closed(duty, store, harness: str, session_id: str, now: float) -> bool:
+def _release_reason(harness: str, session_id: str, observation):
+    """``session-ended``, ``cleared`` or None from one reading of the session holders."""
+    if _window_closed(harness, session_id, observation):
+        return "session-ended"
+    if _seat_cleared(harness, session_id, observation):
+        return "cleared"
+    return None
+
+
+def _release_if_window_closed(duty, store, harness: str, session_id: str, now: float,
+                              observation=None) -> bool:
     """Release a role only on exact native end or confirmed clear evidence.
 
     The release itself is the one ``release_closed_session``; if role resolution is
-    uncertain, keep the duty for the next pass.
+    uncertain, keep the duty for the next pass. The round's shared ``observation`` can
+    predate a resume of this same session, so a release it points to is decided again
+    on a fresh reading, as the message cancel re-checks lifetime before it acts.
     """
     try:
-        if _window_closed(harness, session_id):
-            reason = "session-ended"
-        elif _seat_cleared(harness, session_id):
-            reason = "cleared"
-        else:
+        reason = _release_reason(harness, session_id, observation)
+        if reason is not None and observation is not None:
+            reason = _release_reason(harness, session_id, _end_observation())
+        if reason is None:
             return False
         module = getattr(_collector(), "_peer_message_module", None)
         peer_message = module() if module else None
@@ -439,7 +457,7 @@ def _open_work(harness: str, session_id: str) -> tuple[list[str], list[str]]:
         rows, _watched = observe(cwd)
     except Exception:  # noqa: BLE001 - backlog is optional evidence
         return [], []
-    work, decisions = [], []
+    open_rows = []
     for row in rows or ():
         row = row if isinstance(row, dict) else {}
         headline = " ".join(str(row.get("headline") or "").split())
@@ -450,8 +468,33 @@ def _open_work(harness: str, session_id: str) -> tuple[list[str], list[str]]:
                 continue
         except Exception:  # noqa: BLE001
             continue
-        (decisions if _is_user_decision(row, headline) else work).append(headline)
+        open_rows.append((row, headline))
+    # Work handed to a route whose worker runs now is the route's, not this session's to do:
+    # it comes back as the route's own completion. A finished route's unreceived result and
+    # a record with no running route, or one that also names another session's or a finished
+    # route, stay open work.
+    try:
+        from fleet.session_work import delegated
+        handed = {id(row) for row in delegated(
+            [row for row, _ in open_rows], lambda ids: _running_routes(ids, session_id))}
+    except Exception:  # noqa: BLE001
+        handed = set()
+    work, decisions = [], []
+    for row, headline in open_rows:
+        if _is_user_decision(row, headline):
+            decisions.append(headline)
+        elif id(row) not in handed:
+            work.append(headline)
     return work, decisions
+
+
+def _running_routes(route_ids, session_id) -> set:
+    """Which of these route ids this session launched and still have a live worker, from the
+    existing dispatch observer."""
+    import dispatch_supervision
+    import session_notice
+    return dispatch_supervision.running_route_ids(
+        session_notice._registry(None), route_ids, session_id or "")
 
 
 def _pending_count(module, harness: str, session_id) -> int:
@@ -549,8 +592,15 @@ def _lab_summary(observation: dict, notified) -> tuple[str, str, dict]:
     # Only the id-less tail needs a count watermark; named runs use identities.
     overflow = {_lab_id(root, "unlinked-overflow"): lab["unlinked"] for root, lab in labs.items()
                 if lab["unlinked"] > len(lab.get("unlinked_run_ids", []))}
-    line = "LAB: " + "·".join(t("fleet.lab.n_" + key, n=sum(lab[key] for lab in labs.values()))
-                              for key in ("unknown", "unlinked", "failed", "stagnant"))
+    if len(ids) > _MAX_LAB_MEMORY:
+        # More nameplates are visible than the memory holds: remember their number, so the
+        # count is announced once and then stays quiet until it grows.
+        ids, overflow = [], {**overflow, _lab_id("visible-overflow"): len(ids)}
+    # The head, the Fleet line and this line name a run without a catalog name with one word.
+    line = "LAB: " + "·".join(
+        t("fleet.lab.n_" + word, n=sum(lab[key] for lab in labs.values()))
+        for key, word in (("unknown", "unknown"), ("unlinked", "unnamed"),
+                          ("failed", "failed"), ("stagnant", "stagnant")))
     if len(groups) > 1:
         line += " (" + t("fleet.lab.n_groups", n=len(groups)) + ")"
     selected = next((group for root, group in groups
@@ -713,6 +763,23 @@ def _signature(action: str, observation: dict) -> str:
                 tuple(observation.get("open_work") or ()),
                 tuple(observation.get("user_decisions") or ())))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _none_live(observation: dict) -> bool:
+    """Every target has ended (or never proved live): nobody is left to watch or assign to."""
+    return not any(t["liveness"] != "ended" for t in observation["targets"]
+                   if not t.get("unresolved") or t["liveness"] == "live")
+
+
+def _quiet_signature(observation: dict) -> str:
+    """What a role with no live target is quiet about: its targets alone.
+
+    The holder's own open records, decisions and queued requests reach it on their own
+    (its memory, its prompts, the courier); with nobody left to watch or to take work
+    they open no turn. A live idle target keeps the full signature: new work is for it."""
+    rows = sorted((t["name"], t["harness"], str(t["session_id"]), t["state"], t["liveness"])
+                  for t in observation["targets"])
+    return hashlib.sha256(repr(("quiet", rows)).encode("utf-8")).hexdigest()[:16]
 
 
 def _quiet(observation: dict) -> bool:
@@ -950,8 +1017,11 @@ def _throttled(duty_id_: str, kind: str, now: float) -> bool:
     return False
 
 
-def advance(duty: dict, store, *, now: float | None = None) -> None:
-    """One runner pass for one duty. Before the due time this is a memory comparison."""
+def advance(duty: dict, store, *, now: float | None = None, end_observation=None) -> None:
+    """One runner pass for one duty. Before the due time this is a memory comparison.
+
+    ``end_observation`` is the runner pass's shared ``end_observation()``: every duty of
+    one pass asks the same live-session question of one process-table reading."""
     if not _active(duty):
         return
     now = _now() if now is None else now
@@ -966,7 +1036,7 @@ def advance(duty: dict, store, *, now: float | None = None) -> None:
         return
     if not _throttled(duty["id"], "window", now):
         # A cadence for the native window-closed read, not a time condition on the verdict.
-        if _release_if_window_closed(duty, store, harness, session_id, now):
+        if _release_if_window_closed(duty, store, harness, session_id, now, end_observation):
             return
     if phase == "notified":
         _advance_notified(duty, store, observation, harness, session_id, now)
@@ -1029,8 +1099,8 @@ def _due(duty, store, observation, harness, session_id, now) -> None:
     retained = dict(observation.get("lab_notified") or [])
     line, names, current = _lab_summary(seen, retained)
     new_lab = any(count > retained.get(rid, 0) for rid, count in current.items())
-    signature = _signature(action, seen)
     quiet = _quiet(seen)
+    signature = _quiet_signature(seen) if quiet and _none_live(seen) else _signature(action, seen)
     if action == "release-if-idle":
         text = TEXT_RELEASE_IF_IDLE
     elif action == "tidy-and-release":
@@ -1047,8 +1117,9 @@ def _due(duty, store, observation, harness, session_id, now) -> None:
             **observation, "anchor": now, "skipped": int(observation.get("skipped") or 0) + 1,
             "reason": "quiet-no-change"})
         return
-    # List order survives the store's sorted JSON keys. Evict oldest announcements only.
-    retained.update({rid: max(count, retained.get(rid, 0)) for rid, count in current.items()})
+    # List order survives the store's sorted JSON keys. Evict the oldest announcements first.
+    # The nameplates seen now go last, so the cut below never drops one that is still visible.
+    retained.update({rid: max(count, retained.pop(rid, 0)) for rid, count in current.items()})
     lab_notified = list(retained.items())[-_MAX_LAB_MEMORY:]
     delivery_id = _delivery_id(key)
     # Record the intent first so a carrier claiming right away already finds the
@@ -1114,7 +1185,8 @@ def reconcile_all(store) -> None:
 
     It reads only the role relations and one record per holder, never a store
     listing, so the runner's cold pass keeps its I/O shape; a duty whose holder
-    lost the role retires at its own next due point (`_due`)."""
+    lost the role retires at its own next due point (`_due`). One reading of the
+    session holders serves every holder; each ended one is read again before release."""
     try:
         relations = _relations()
     except Exception:  # noqa: BLE001
@@ -1130,7 +1202,11 @@ def reconcile_all(store) -> None:
     observation = _end_observation()
     for (harness, session_id) in holders:
         try:
-            if _session_liveness(harness, session_id, agents, observation) != "ended":
+            # The shared reading only nominates an ended holder; the release acts on a
+            # fresh reading, as in ``_release_if_window_closed``.
+            if (_session_liveness(harness, session_id, agents, observation) != "ended"
+                    or _session_liveness(harness, session_id, agents,
+                                         _end_observation()) != "ended"):
                 register(harness, session_id, store=store, ensure_runner=False)
             else:
                 module = getattr(_collector(), "_peer_message_module", None)
@@ -1198,6 +1274,12 @@ def cmd_check(harness: str, session_id: str, *, now: float | None = None, out=No
           f"targets={count} changes={changes} checked_at={stamp}", file=out)
     for warning in policy_warnings():
         print(f"warning={warning}", file=out)
+    try:  # the same LAB line the periodic notice carries; a lab read that breaks hides only this line
+        line, names, _ = _lab_summary(seen, dict(observation.get("lab_notified") or []))
+    except Exception:  # noqa: BLE001
+        line = names = ""
+    if line:
+        print(line + names, file=out)
     actions = next_actions(seen, waiting_since, now)
     if not targets and not actions:
         print("hint=nothing to supervise; tidy finished sessions and release with "

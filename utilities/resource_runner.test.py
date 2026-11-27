@@ -11,6 +11,7 @@ import json
 import os
 import select
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -24,6 +25,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 CLEAN_ENV = {k: v for k, v in os.environ.items() if not (
     k in {"AGENT_HOME", "AGENT_DISPATCH_JOBS"}
     or k.startswith("AGENT_DISPATCH_") or k.startswith("AGENT_ROUTE_")
@@ -1382,6 +1385,348 @@ class TestRunner(unittest.TestCase):
         self.assertIn("smoke-execution-environment-unbound", legacy_outcome.stderr)
         self.assertFalse(self.launch.exists())
 
+    def test_direct_payload_restores_inherited_smoke_path(self):
+        smoke_path = f"{self.base}/smoke-session:/usr/bin:/bin"
+        smoke = self.base / "direct-environment-smoke.json"
+        subprocess.run([sys.executable, str(SMOKE), "attest", "--input",
+            str(self.repo / "config"), "--cwd", str(self.repo), "--output", str(smoke),
+            "--", sys.executable, "-c", "pass"], check=True, capture_output=True,
+            env={**CLEAN_ENV, "PATH": smoke_path})
+        args = self.start_args(smoke=smoke, run_id="direct-environment")
+        prefix = args[:args.index("--") + 1]
+        command = (sys.executable, "-c",
+                   "import os, sys; from pathlib import Path; "
+                   "Path(sys.argv[1]).write_bytes(os.environb[b'PATH'])", str(self.launch))
+
+        # A full-run assignment does not match an inherited smoke value.
+        outcome = self.cli(*prefix, "/usr/bin/env", f"PATH={smoke_path}", *command)
+        self.assertIn("smoke-execution-environment-mismatch", outcome.stderr)
+        self.assertNotEqual(outcome.returncode, 0)
+        self.assertFalse(self.launch.exists())
+
+        outcome = self.cli(*prefix, *command, extra_env={"PATH": "/usr/bin:/bin"})
+        self.assertEqual(outcome.returncode, 0, outcome.stderr)
+        self.assert_payload_exit_zero("direct-environment")
+        self.assertEqual(self.launch.read_bytes(), os.fsencode(smoke_path))
+
+    def assert_payload_exit_zero(self, run_id):
+        row = json.loads(self.registry.read_text())["runs"][run_id]
+        sentinel = Path(row["sentinel"])
+        deadline = time.monotonic() + 5
+        while not sentinel.exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        self.assertEqual(R.read_sentinel(sentinel), 0, Path(row["log"]).read_text())
+
+    def test_direct_payload_with_equals_in_executable_runs(self):
+        smoke_dir = self.base / "smoke-session"
+        smoke_dir.mkdir()
+        smoke_env = {**CLEAN_ENV, "PATH": f"{smoke_dir}:/usr/bin:/bin"}
+        smoke_env.pop("PYTHONPATH", None)
+        executable = smoke_dir / "payload=check"
+        executable.write_text(
+            "#!/bin/sh\n"
+            'test -z "${PYTHONPATH+x}" || exit 2\n'
+            f'printf "%s" "${{1-ran}}" > {shlex.quote(str(self.launch))}\n')
+        executable.chmod(0o755)
+        for label, command in (("absolute", [str(executable)]),
+                               ("path", [executable.name, "argument with spaces=1"])):
+            with self.subTest(executable=label):
+                proof = self.base / f"{label}-equals-smoke.json"
+                subprocess.run([sys.executable, str(SMOKE), "attest", "--input",
+                    str(self.repo / "config"), "--cwd", str(self.repo), "--output",
+                    str(proof), "--", *command], check=True, capture_output=True, env=smoke_env)
+                self.launch.unlink()
+                run_id = f"equals-{label}"
+                args = self.start_args(smoke=proof, run_id=run_id)
+                result = self.cli(*args[:args.index("--") + 1], *command,
+                    extra_env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(self.base)})
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assert_payload_exit_zero(run_id)
+                self.assertEqual(self.launch.read_text(), command[1] if len(command) > 1 else "ran")
+
+    def test_explicit_unset_and_inherited_absence_both_run_without_the_variable(self):
+        # A name the smoke removed with `env -u` (or never had) and the full run
+        # inherits or removes the other way round: either way the payload runs
+        # without it, as the smoke did, and is not refused.
+        names = ("PATH", "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "CONDA_PREFIX",
+                 "LD_LIBRARY_PATH")
+        present = {"PATH": CLEAN_ENV.get("PATH", "/usr/bin:/bin"),
+                   "PYTHONHOME": sys.base_prefix}
+        probe = ("import json, os, sys; from pathlib import Path; "
+                 "Path(sys.argv[1]).write_text(json.dumps(sorted(set(sys.argv[2:]) & set(os.environ))))")
+        env_u = lambda name: ["/usr/bin/env", "-u", name]
+        cases = (("smoke-unsets", "has", "has"), ("smoke-unsets", "lacks", "lacks"),
+                 ("full-unsets", "lacks", "lacks"))
+        for name in names:
+            value = present.get(name, str(self.base / "ambient"))
+            for direction, smoke_state, runner_state in cases:
+                label = f"{name.lower()}-{direction}-{smoke_state}-{runner_state}"
+                with self.subTest(case=label):
+                    smoke_env = {**CLEAN_ENV, name: value if smoke_state == "has" else None}
+                    smoke_env = {k: v for k, v in smoke_env.items() if v is not None}
+                    smoke_prefix = env_u(name) if direction == "smoke-unsets" else []
+                    proof = self.base / f"{label}-smoke.json"
+                    subprocess.run([sys.executable, str(SMOKE), "attest", "--input",
+                        str(self.repo / "config"), "--cwd", str(self.repo), "--output",
+                        str(proof), "--", *smoke_prefix, sys.executable, "-c", "pass"],
+                        check=True, capture_output=True, env=smoke_env)
+                    args = self.start_args(smoke=proof, run_id=label)
+                    full_prefix = env_u(name) if direction == "full-unsets" else []
+                    effect = self.base / f"{label}.seen"
+                    result = self.cli(*args[:args.index("--") + 1], *full_prefix,
+                        sys.executable, "-c", probe, str(effect), name,
+                        extra_env={name: value if runner_state == "has" else None})
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assert_payload_exit_zero(label)
+                    self.assertEqual(json.loads(effect.read_text()), [])
+        # `env -i` in the smoke removes every selected name at once.
+        proof = self.base / "clear-smoke.json"
+        subprocess.run([sys.executable, str(SMOKE), "attest", "--input",
+            str(self.repo / "config"), "--cwd", str(self.repo), "--output",
+            str(proof), "--", "/usr/bin/env", "-i", sys.executable, "-c", "pass"],
+            check=True, capture_output=True, env=CLEAN_ENV)
+        args = self.start_args(smoke=proof, run_id="clear")
+        effect = self.base / "clear.seen"
+        result = self.cli(*args[:args.index("--") + 1], sys.executable, "-c", probe, str(effect), *names,
+            extra_env={name: present.get(name, str(self.base / "ambient")) for name in names})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_payload_exit_zero("clear")
+        self.assertEqual(json.loads(effect.read_text()), [])
+
+    def unset_path_command(self):
+        """`env -u PATH sh ...`, with a shim named `sh` that only a smoke session's PATH has."""
+        shim_dir = self.base / "smoke-bin"
+        shim_dir.mkdir()
+        shim = shim_dir / "sh"
+        shim.write_text("#!/bin/sh\nexit 87\n")
+        shim.chmod(0o755)
+        # dash defines an unexported default PATH, so look at what it exports.
+        command = ["/usr/bin/env", "-u", "PATH", "sh", "-c",
+                   'if /usr/bin/env | /bin/grep -q "^PATH="; then exit 3; fi; printf ran > "$1"',
+                   "sh", str(self.launch)]
+        return shim, f"{shim_dir}:/usr/bin:/bin", command
+
+    def attest_command(self, command, path, name):
+        proof = self.base / name
+        subprocess.run([sys.executable, str(SMOKE), "attest", "--input",
+            str(self.repo / "config"), "--cwd", str(self.repo), "--output",
+            str(proof), "--", *command], check=True, capture_output=True,
+            env={**CLEAN_ENV, "PATH": path})
+        self.launch.unlink()
+        return proof
+
+    def test_explicit_unset_path_proof_ignores_the_smoke_session_path(self):
+        shim, smoke_path, command = self.unset_path_command()
+        proof = self.attest_command(command, smoke_path, "unset-path-smoke.json")
+        args = self.start_args(smoke=proof, run_id="unset-path")
+        result = self.cli(*args[:args.index("--") + 1], *command,
+                          extra_env={"PATH": "/usr/bin:/bin"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_payload_exit_zero("unset-path")
+        self.assertEqual(self.launch.read_text(), "ran")
+        # With PATH unset, exec searches its default path, never the shim ahead of it.
+        identity = json.loads(proof.read_text())["execution_environment"]
+        self.assertEqual(identity["interpreter"],
+                         str(Path(shutil.which("sh", path=os.defpath)).resolve()))
+        self.assertNotEqual(identity["interpreter"], str(shim))
+
+    def test_proof_made_with_the_launcher_path_lookup_still_matches_that_lookup(self):
+        shim, smoke_path, command = self.unset_path_command()
+        proof = self.attest_command(command, smoke_path, "legacy-lookup-smoke.json")
+        # Earlier releases recorded the launcher PATH's `sh` for this command.
+        data = json.loads(proof.read_text())
+        data["execution_environment"]["interpreter"] = str(shim)
+        data.pop("attestation_hash")
+        data["attestation_hash"] = "sha256:" + hashlib.sha256(json.dumps(
+            data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        proof.write_text(json.dumps(data, sort_keys=True))
+        args = self.start_args(smoke=proof, run_id="legacy-lookup")
+        prefix = args[:args.index("--") + 1]
+
+        result = self.cli(*prefix, *command, extra_env={"PATH": "/usr/bin:/bin"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("smoke-execution-environment-mismatch", result.stderr)
+        self.assertFalse(self.launch.exists())
+
+        result = self.cli(*prefix, *command, extra_env={"PATH": smoke_path})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_payload_exit_zero("legacy-lookup")
+        self.assertEqual(self.launch.read_text(), "ran")
+
+    def test_operation_for_launch_keeps_a_stored_one_made_with_the_launcher_path_lookup(self):
+        def binding(*args, legacy_lookup=False, **kwargs):
+            return {"payload": {"execution_environment": {"kind": "local"}},
+                    "lookup": "launcher" if legacy_lookup else "exec"}
+
+        def stored(lookup, kind="local"):
+            return {"payload": {"execution_environment": {"kind": kind}}, "lookup": lookup}
+
+        with mock.patch.object(R, "resource_operation_binding", side_effect=binding) as bound:
+            for held, kept, lookups in (
+                    (None, "exec", [False]),
+                    (stored("exec"), "exec", [False]),
+                    (stored("launcher"), "launcher", [False, True]),
+                    (stored("other"), "exec", [False, True]),
+                    # A remote payload has no local lookup to reproduce.
+                    (stored("launcher", "compute-hosts"), "exec", [False])):
+                bound.reset_mock()
+                self.assertEqual(R.resource_operation_for_launch(held, "route")["lookup"], kept)
+                self.assertEqual([call.kwargs.get("legacy_lookup", False)
+                                  for call in bound.call_args_list], lookups)
+
+    def test_controller_keeps_a_queued_operation_made_with_the_launcher_path_lookup(self):
+        import artifact_producer
+        import dispatch_resource_wait
+        smoke_spec = importlib.util.spec_from_file_location("stored_operation_smoke", SMOKE)
+        smoke_module = importlib.util.module_from_spec(smoke_spec)
+        smoke_spec.loader.exec_module(smoke_module)
+        command = [sys.executable, "-c", "import sys; from pathlib import Path; Path(sys.argv[1]).write_text('ran')",
+                   str(self.launch)]
+        proof = self.base / "stored-operation-smoke.json"
+        with mock.patch.dict(os.environ, CLEAN_ENV, clear=True):
+            attestation = smoke_module.payload([self.repo / "config"], command, self.repo)
+            identity = attestation["execution_environment"]
+        attestation.update(status="passed", exit_code=0)
+        attestation["attestation_hash"] = "sha256:" + hashlib.sha256(json.dumps(
+            attestation, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        proof.write_text(json.dumps(attestation, sort_keys=True))
+        route = json.loads(self.route.read_text())
+        next(node for node in route["nodes"] if node["id"] == "full-run")["continuation"] = {
+            "kind": "supervised"}
+        self.route.write_text(json.dumps(route))
+        owner_wait = {"session_id": "same-native", "launch_scope": "codex-owner-controller"}
+
+        def operation(lookup):
+            return {"schema_version": 1, "operation_id": lookup,
+                    "payload": {"execution_environment": identity}}
+
+        def binding(*args, legacy_lookup=False, **kwargs):
+            return operation("launcher" if legacy_lookup else "exec")
+
+        watch = mock.Mock(pid=os.getpid(), **{"poll.return_value": None})
+        real_popen = subprocess.Popen
+        for stored, started in (("launcher", True), ("unrelated", False)):
+            with self.subTest(stored=stored):
+                directory = self.base / stored
+                directory.mkdir()
+                jobs = directory / "jobs.log"
+                jobs.write_text("")
+                registry = directory / "resource-runs.json"
+                argv = ["--registry", str(registry), "start", "--run-id", stored, "--cwd", str(self.repo),
+                        "--log", str(directory / "payload.log"), "--route", str(self.route),
+                        "--node", "full-run", "--jobs", str(jobs), "--parent-attempt-id", "att-parent",
+                        "--smoke-attestation", str(proof), "--", *command]
+                with mock.patch.object(dispatch_resource_wait, "start_binding", return_value=owner_wait), \
+                     mock.patch.object(artifact_producer, "prepare_route_artifact_env",
+                        return_value={"AGENT_ARTIFACT_OUTPUT_DIR": str(self.base)}), \
+                     mock.patch.object(R, "register_registry"), \
+                     mock.patch.object(R, "verify_launch_input"), \
+                     mock.patch.object(R.subprocess, "run"), \
+                     mock.patch.object(R, "resource_operation_binding", side_effect=binding), \
+                     mock.patch.object(R.gpu_leases, "resource_admission",
+                        return_value=(None, None, {"CUDA_VISIBLE_DEVICES": ""})), \
+                     mock.patch.object(R, "start_watch", return_value=(watch, R.proc_identity(os.getpid()))), \
+                     mock.patch.object(R.subprocess, "Popen", wraps=real_popen), \
+                     contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    with mock.patch.dict(os.environ, CLEAN_ENV, clear=True):
+                        R.main(argv)
+                    data = json.loads(registry.read_text())
+                    # The row was queued by a release that used the launcher-PATH lookup.
+                    data["runs"][stored]["resource_operation"] = operation(stored)
+                    registry.write_text(json.dumps(data))
+                    queued = json.loads(registry.read_text())["runs"][stored]
+                    controller = SimpleNamespace(
+                        expected=queued, identity={**R.proc_identity(os.getpid()),
+                        "pid_namespace": os.readlink("/proc/self/ns/pid")}, command=command,
+                        sandbox={"mode": "workspace-write", "enforcement": "os-sandbox"},
+                        guard=contextlib.nullcontext, registry=str(registry))
+                    with mock.patch.dict(os.environ, CLEAN_ENV, clear=True):
+                        if started:
+                            R.main(R.controller_argv(registry, queued), controller=controller)
+                        else:
+                            with self.assertRaises((SystemExit, ValueError)):
+                                R.main(R.controller_argv(registry, queued), controller=controller)
+                if started:
+                    payload, _ = controller.children
+                    self.addCleanup(payload.wait, timeout=5)
+                    self.assertEqual(payload.wait(timeout=5), 0)
+                    running = json.loads(registry.read_text())["runs"][stored]
+                    self.assertEqual(running["launch_state"], "started")
+                    self.assertEqual(running["resource_operation"], operation(stored))
+                    self.assertEqual(self.launch.read_text(), "ran")
+                else:
+                    self.assertEqual(json.loads(registry.read_text())["runs"][stored]["launch_state"], "queued")
+
+    def test_inherited_absent_path_does_not_accept_the_launcher_path_lookup(self):
+        smoke_env = {key: value for key, value in CLEAN_ENV.items() if key != "PATH"}
+        controller_bin = self.base / "controller-bin"
+        controller_bin.mkdir()
+        shim = controller_bin / "python3"
+        shim.write_text("#!/bin/sh\nexit 87\n")
+        shim.chmod(0o755)
+        command = ["python3", "-c", "import os; assert 'PATH' not in os.environ"]
+        proof = self.base / "absent-path-forged.json"
+        subprocess.run([sys.executable, str(SMOKE), "attest", "--input",
+            str(self.repo / "config"), "--cwd", str(self.repo), "--output",
+            str(proof), "--", *command], check=True, capture_output=True, env=smoke_env)
+        data = json.loads(proof.read_text())
+        # No release records a launcher shim for a command that inherits an absent PATH.
+        data["execution_environment"]["interpreter"] = str(shim)
+        data.pop("attestation_hash")
+        data["attestation_hash"] = "sha256:" + hashlib.sha256(json.dumps(
+            data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        proof.write_text(json.dumps(data, sort_keys=True))
+        args = self.start_args(smoke=proof, run_id="absent-path-forged")
+        result = self.cli(*args[:args.index("--") + 1], *command,
+                          extra_env={"PATH": f"{controller_bin}:/usr/bin:/bin"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("smoke-execution-environment-mismatch", result.stderr)
+
+    def test_equals_in_executable_resolved_on_the_default_path_keeps_its_bytes(self):
+        import resource_execution_environment as environment
+        launch = {"PATH": "/bin:/usr/bin", "PYTHONPATH": str(self.base / "overlay")}
+        for name in ("payload=check", "payload=check\n"):
+            with self.subTest(executable=name):
+                found = self.base / "default-path" / name
+                found.parent.mkdir(exist_ok=True)
+                found.write_text(f"#!{sys.executable}\nimport os\n"
+                                 "assert 'PATH' not in os.environ and 'PYTHONPATH' not in os.environ\n"
+                                 "print('ran', end='')\n")
+                found.chmod(0o755)
+                # Only this name may exist, so a truncated lookup cannot find a sibling.
+                self.addCleanup(found.unlink, missing_ok=True)
+                with mock.patch.object(os, "defpath", str(found.parent)):
+                    command = [name]
+                    recorded = environment.execution_identity(command, self.base, environ={})
+                    self.assertEqual(recorded["interpreter"], str(found))
+                    effective, prefix = environment.smoke_payload_environment(
+                        command, {"execution_environment": recorded, "command": command},
+                        launch, pin_inherited=True)
+                    self.assertEqual(environment.execution_identity(
+                        command, self.base, environ=effective), recorded)
+                    result = subprocess.run([*prefix, *command], cwd=self.base, env=launch,
+                                            capture_output=True, text=True, timeout=5)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "ran", ""))
+                found.unlink()
+
+    def test_inherited_absent_path_uses_smoke_lookup(self):
+        smoke_env = {key: value for key, value in CLEAN_ENV.items() if key != "PATH"}
+        fake_bin = self.base / "controller-bin"
+        fake_bin.mkdir()
+        shim = fake_bin / "python3"
+        shim.write_text('#!/bin/sh\nexit 87\n')
+        shim.chmod(0o755)
+        command = ["python3", "-c", "import os; assert 'PATH' not in os.environ"]
+        proof = self.base / "absent-path-smoke.json"
+        subprocess.run([sys.executable, str(SMOKE), "attest", "--input",
+            str(self.repo / "config"), "--cwd", str(self.repo), "--output",
+            str(proof), "--", *command], check=True, capture_output=True, env=smoke_env)
+        args = self.start_args(smoke=proof, run_id="absent-path")
+        result = self.cli(*args[:args.index("--") + 1], *command,
+                          extra_env={"PATH": f"{fake_bin}:/usr/bin:/bin"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_payload_exit_zero("absent-path")
+
     def test_cleanup_stops_only_its_exact_supervisor(self):
         watch = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(30)"], env=CLEAN_ENV)
@@ -1596,7 +1941,7 @@ class TestRunner(unittest.TestCase):
                 route_state = base / "route-chains"
                 dispatch.mkdir(parents=True)
                 jobs = dispatch / "jobs.log"
-                metadata = ",".join(("attempt_id=att-route-owner", "worker_type=owner",
+                metadata = ",".join((f"attempt_id={unique_attempt_id('att-route-owner')}", "worker_type=owner",
                     "dispatch_depth=1", "owner_route_id=rt-resource-probe",
                     "owner_route_hash=sha256:resource-probe", "parent_sid=route-parent"))
                 jobs.write_text("\t".join(("2099-01-01T00:00:00Z", "done", "/work", "/work",
@@ -1614,7 +1959,7 @@ class TestRunner(unittest.TestCase):
                     "outputs": ["run.json"], "write_scope": ["run.json"],
                     "resource_transport": "detached-process"}]}), encoding="utf-8")
                 env = {**base_env, "AGENT_HOME": str(ROOT),
-                    "AGENT_DISPATCH_ATTEMPT_ID": "att-route-owner",
+                    "AGENT_DISPATCH_ATTEMPT_ID": unique_attempt_id("att-route-owner"),
                     "AGENT_DISPATCH_JOBS": str(jobs), "AGENT_DISPATCH_CALLER_HARNESS": "claude",
                     "CLAUDE_CODE_SESSION_ID": "worker-self-session",
                     "XDG_STATE_HOME": str(base / "state-home"),
@@ -1640,7 +1985,7 @@ class TestRunner(unittest.TestCase):
                     self.assertEqual(session_owner["evidence_pid"], result["row"]["pid"])
                     self.assertNotEqual(session_owner["id"], result["outer_claim"]["owner"]["id"])
                 self.assertEqual(result["process"]["owner"]["kind"], "job")
-                self.assertEqual(result["process"]["owner"]["id"], "att-route-owner")
+                self.assertEqual(result["process"]["owner"]["id"], unique_attempt_id("att-route-owner"))
 
     def test_verified_publication_cas_preserves_changed_or_missing_reservation(self):
         expected = {"run_id":"resume", "status":"launching", "command":["approved"], "token":"one"}
@@ -1786,21 +2131,119 @@ class TestRunner(unittest.TestCase):
             self.assertEqual(R.classify_identity(foreign)[0],"stale")
             self.assertEqual(R.classify_identity(foreign)[2],"process-namespace-mismatch")
 
-    def test_queued_controller_rechecks_smoke_environment_before_release(self):
+    def test_queued_controller_restores_smoke_environment_before_release(self):
         import artifact_producer
-        import importlib.util
-        jobs = self.base / "queued-environment-jobs.log"
-        jobs.write_text("")
-        route = json.loads(self.route.read_text())
-        run_id = "queued-environment"
-        effect = self.base / "queued-environment-payload"
-        command = [sys.executable, "-c",
-                   f"from pathlib import Path; Path({str(effect)!r}).write_text('released')"]
-        smoke_path = self.base / "queued-environment-smoke.json"
+        import dispatch_resource_wait
         smoke_spec = importlib.util.spec_from_file_location("queued_environment_smoke", SMOKE)
         smoke_module = importlib.util.module_from_spec(smoke_spec)
         smoke_spec.loader.exec_module(smoke_module)
-        attestation = smoke_module.payload([self.repo / "config"], [sys.executable, "-c", "pass"], self.repo)
+        base_path = "/usr/bin:/bin"
+        smoke_bin = self.base / "codex-arg0-smoke "
+        smoke_bin.mkdir()
+        equals_executable = smoke_bin / "payload=python"
+        equals_executable.symlink_to(sys.executable)
+        smoke_environment = {**CLEAN_ENV, "PATH": f"{smoke_bin}:{base_path}"}
+        smoke_environment.pop("PYTHONPATH", None)
+        attestation_out = self.base / "queued-environment-smoke.json"
+        with mock.patch.dict(os.environ, smoke_environment, clear=True):
+            attestation = smoke_module.payload(
+                [self.repo / "config"], [sys.executable, "-c", "pass"], self.repo)
+        attestation.update(status="passed", exit_code=0)
+        attestation["attestation_hash"] = "sha256:" + hashlib.sha256(json.dumps(
+            attestation, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        attestation_out.write_text(json.dumps(attestation, sort_keys=True))
+        route = json.loads(self.route.read_text())
+        next(node for node in route["nodes"] if node["id"] == "full-run")["continuation"] = {
+            "kind": "supervised"}
+        self.route.write_text(json.dumps(route))
+        owner_wait = {"session_id": "same-native", "launch_scope": "codex-owner-controller"}
+        watch = mock.Mock(pid=os.getpid(), **{"poll.return_value": None})
+        identity = {**R.proc_identity(os.getpid()), "pid_namespace": os.readlink("/proc/self/ns/pid")}
+        real_popen = subprocess.Popen
+        controller_path = f"{self.base}/codex-arg0-controller:{base_path}"
+        overlay = str(self.base / "controller-overlay")
+
+        for label, owner_path, launcher_path, executable in (
+                ("controller-differs", smoke_environment["PATH"], controller_path, sys.executable),
+                ("owner-differs", base_path, controller_path, str(equals_executable)),
+                ("sandbox-only-differs", smoke_environment["PATH"], smoke_environment["PATH"],
+                 equals_executable.name)):
+            with self.subTest(launch=label):
+                case_directory = self.base / label
+                case_directory.mkdir()
+                jobs = case_directory / "jobs.log"
+                jobs.write_text("")
+                registry = case_directory / "resource-runs.json"
+                effect = self.base / f"{label}.payload"
+                outer_effect = self.base / f"{label}.wrapper"
+                log = self.base / f"{label}.log"
+                command = [executable, "-c",
+                    "import os, sys; from pathlib import Path; "
+                    "Path(sys.argv[1]).write_bytes(os.environb[b'PATH']); "
+                    "assert b'PYTHONPATH' not in os.environb", str(effect)]
+                argv = ["--registry", str(registry), "start", "--run-id", label,
+                    "--cwd", str(self.repo), "--log", str(log), "--route", str(self.route),
+                    "--node", "full-run", "--jobs", str(jobs), "--parent-attempt-id", "att-parent",
+                    "--smoke-attestation", str(attestation_out), "--", *command]
+                with mock.patch.object(dispatch_resource_wait, "start_binding", return_value=owner_wait), \
+                     mock.patch.object(artifact_producer, "prepare_route_artifact_env",
+                        return_value={"AGENT_ARTIFACT_OUTPUT_DIR": str(self.base)}), \
+                     mock.patch.object(R, "register_registry"), \
+                     mock.patch.object(R, "verify_launch_input"), \
+                     mock.patch.object(R.subprocess, "run"), \
+                     mock.patch.object(R.gpu_leases, "resource_admission",
+                        return_value=(None, None, {"CUDA_VISIBLE_DEVICES": ""})), \
+                     mock.patch.object(R, "start_watch", return_value=(watch, R.proc_identity(os.getpid()))), \
+                     mock.patch.object(R.subprocess, "Popen", wraps=real_popen) as spawn, \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    with mock.patch.dict(os.environ, {**smoke_environment, "PATH": owner_path}, clear=True):
+                        R.main(argv)
+                    queued = json.loads(registry.read_text())["runs"][label]
+                    self.assertEqual(queued["launch_state"], "queued")
+                    spawn.assert_not_called()
+                    self.assertFalse(effect.exists())
+                    wrapper = ["/bin/sh", "-c",
+                        'printf "%s\n%s" "$PATH" "$PYTHONPATH" > "$1"; shift; '
+                        'export PATH="/sandbox-helpers:$PATH"; exec "$@"',
+                        "sandbox", str(outer_effect), *command]
+                    controller = SimpleNamespace(expected=queued, identity=identity, command=wrapper,
+                        sandbox={"mode": "workspace-write", "enforcement": "os-sandbox"},
+                        guard=contextlib.nullcontext, registry=str(registry))
+                    launcher_environment = {**smoke_environment, "PATH": launcher_path}
+                    if label != "sandbox-only-differs":
+                        launcher_environment["PYTHONPATH"] = overlay
+                    with mock.patch.dict(os.environ, launcher_environment, clear=True):
+                        R.main(R.controller_argv(registry, queued), controller=controller)
+                    spawn.assert_called_once()
+                    payload, _ = controller.children
+                    self.addCleanup(payload.wait, timeout=5)
+                    self.assertEqual(payload.wait(timeout=5), 0)
+                    recorded_path = attestation["execution_environment"]["environment"]["PATH"]["value"]
+                    self.assertEqual(effect.read_bytes(), os.fsencode(recorded_path))
+                    self.assertEqual(outer_effect.read_text(),
+                                     f"{launcher_path}\n{launcher_environment.get('PYTHONPATH', '')}")
+                    running = json.loads(registry.read_text())["runs"][label]
+                    self.assertEqual(running["launch_state"], "started")
+                    self.assertEqual(R.read_sentinel(running["sentinel"]), 0)
+
+    def test_queued_controller_refuses_an_interpreter_changed_after_the_wait(self):
+        import artifact_producer
+        jobs = self.base / "queued-interpreter-jobs.log"
+        jobs.write_text("")
+        route = json.loads(self.route.read_text())
+        run_id = "queued-interpreter"
+        effect = self.base / "queued-interpreter-payload"
+        link_directory = self.base / "interpreter-link"
+        link_directory.mkdir()
+        link = link_directory / "python"
+        link.symlink_to(sys.executable)
+        command = [str(link), "-c",
+                   f"from pathlib import Path; Path({str(effect)!r}).write_text('released')"]
+        smoke_path = self.base / "queued-interpreter-smoke.json"
+        smoke_spec = importlib.util.spec_from_file_location("queued_interpreter_smoke", SMOKE)
+        smoke_module = importlib.util.module_from_spec(smoke_spec)
+        smoke_spec.loader.exec_module(smoke_module)
+        attestation = smoke_module.payload([self.repo / "config"], [str(link), "-c", "pass"], self.repo)
         attestation.update(status="passed", exit_code=0)
         attestation["attestation_hash"] = "sha256:" + hashlib.sha256(json.dumps(
             attestation, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -1814,61 +2257,64 @@ class TestRunner(unittest.TestCase):
             "owner_wait": {"session_id": "same-native", "launch_scope": "codex-owner-controller"}}
         route_watch = mock.Mock(pid=os.getpid())
         route_watch.poll.return_value = None
-        runner = R
-        payloads=[]
-        real_popen=subprocess.Popen
-        def capture_popen(*args,**kwargs):
-            process=real_popen(*args,**kwargs)
+        payloads = []
+        real_popen = subprocess.Popen
+        def capture_popen(*popen_args, **kwargs):
+            process = real_popen(*popen_args, **kwargs)
             payloads.append(process)
             return process
         with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}), \
              mock.patch.object(artifact_producer, "prepare_route_artifact_env",
                 return_value={"AGENT_ARTIFACT_OUTPUT_DIR": str(self.base)}), \
-             mock.patch.object(runner, "register_registry"), \
-             mock.patch.object(runner.subprocess, "run"), \
-             mock.patch.object(runner.gpu_leases, "resource_admission",
+             mock.patch.object(R, "register_registry"), \
+             mock.patch.object(R.subprocess, "run"), \
+             mock.patch.object(R.gpu_leases, "resource_admission",
                                return_value=(None, None, {"CUDA_VISIBLE_DEVICES": ""})), \
-             mock.patch.object(runner, "start_watch", return_value=(route_watch, runner.proc_identity(os.getpid()))), \
-             mock.patch.object(runner.subprocess, "Popen", side_effect=capture_popen), \
+             mock.patch.object(R, "start_watch", return_value=(route_watch, R.proc_identity(os.getpid()))), \
+             mock.patch.object(R.subprocess, "Popen", side_effect=capture_popen), \
              mock.patch("sys.stdout"):
-            runner.start_verified(self.registry, args, route, self.route, dict(body))
-            current_registry = json.loads(self.registry.read_text())
-            self.assertIn(run_id, current_registry.get("runs", {}), current_registry)
-            queued = current_registry["runs"][run_id]
+            R.start_verified(self.registry, args, route, self.route, dict(body))
+            queued = json.loads(self.registry.read_text())["runs"][run_id]
             self.assertEqual(queued["launch_state"], "queued")
             before = self.registry.read_bytes()
             controller = SimpleNamespace(expected=queued,
-                identity={**runner.proc_identity(os.getpid()),
+                identity={**R.proc_identity(os.getpid()),
                           "pid_namespace": os.readlink("/proc/self/ns/pid")},
                 command=command, sandbox={"mode": "workspace-write", "enforcement": "os-sandbox"},
                 guard=contextlib.nullcontext, registry=str(self.registry))
-            refused=None
-            with mock.patch.dict(os.environ, {"PYTHONPATH": str(self.base / "different-overlay")}):
-                try:
-                    runner.start_verified(self.registry, args, route, self.route,
-                                          dict(queued), controller=controller)
-                except ValueError as error:
-                    refused=error
-            for process in payloads:
-                process.wait(timeout=5)
-            self.assertIsNotNone(refused,
-                "the controller released payload under an environment different from smoke")
-            self.assertIn("smoke-execution-environment-mismatch", str(refused))
+            # While the row waited, the interpreter behind the smoke's command moved.
+            link.unlink()
+            link.symlink_to("/bin/sh")
+            with self.assertRaisesRegex(ValueError, "smoke-execution-environment-mismatch"):
+                R.start_verified(self.registry, args, route, self.route,
+                                 dict(queued), controller=controller)
             self.assertEqual(payloads, [])
             self.assertEqual(self.registry.read_bytes(), before)
             self.assertFalse(effect.exists())
-            runner.start_verified(self.registry, args, route, self.route,
-                                  dict(queued), controller=controller)
-            final_registry=json.loads(self.registry.read_text())
-            self.assertIn(run_id, final_registry.get("runs", {}), json.dumps(final_registry, sort_keys=True))
-            self.assertEqual(len(payloads), 1, json.dumps(final_registry["runs"][run_id], sort_keys=True))
+            # The same row is released once the smoke's interpreter is back.
+            link.unlink()
+            link.symlink_to(sys.executable)
+            R.start_verified(self.registry, args, route, self.route,
+                             dict(queued), controller=controller)
+            self.assertEqual(len(payloads), 1)
             self.assertEqual(payloads[0].wait(timeout=5), 0)
             self.assertEqual(effect.read_text(), "released")
-            final_registry=json.loads(self.registry.read_text())
-            self.assertIn(run_id, final_registry.get("runs", {}), json.dumps(final_registry, sort_keys=True))
-            running = final_registry["runs"][run_id]
-            self.assertEqual(running["launch_state"], "started")
-            self.assertEqual(runner.read_sentinel(running["sentinel"]), 0)
+
+    def test_smoke_attestation_changed_after_the_launch_request_is_refused(self):
+        smoke_path = self.base / "request-bound-smoke.json"
+        smoke_spec = importlib.util.spec_from_file_location("request_bound_smoke", SMOKE)
+        smoke_module = importlib.util.module_from_spec(smoke_spec)
+        smoke_spec.loader.exec_module(smoke_module)
+        attestation = smoke_module.payload([self.repo / "config"], [sys.executable, "-c", "pass"], self.repo)
+        attestation.update(status="passed", exit_code=0)
+        smoke_path.write_text(json.dumps(attestation, sort_keys=True))
+        request = R.launch_request(SimpleNamespace(
+            smoke_attestation=str(smoke_path), config_manifest=None))
+        self.assertEqual(R.read_smoke_attestation(request), attestation)
+        # Still valid JSON with the same identity, but not the bytes the request bound.
+        smoke_path.write_text(json.dumps(attestation, sort_keys=True) + "\n")
+        with self.assertRaisesRegex(ValueError, "resource-launch-request-changed"):
+            R.read_smoke_attestation(request)
 
     def _host_route(self):
         """A real lab eval route that borrowed the GPU-free host part (the catalog is the only source)."""
@@ -2525,8 +2971,9 @@ class TestRunner(unittest.TestCase):
         return subprocess.run([
             sys.executable, str(RUNNER), "--registry", str(self.registry), *args,
         ], cwd=cwd, text=True, capture_output=True, pass_fds=pass_fds, input=input,
-           env={**CLEAN_ENV, "AGENT_HOME": str(ROOT),
-                "AGENT_RESOURCE_RUN_INDEX": str(self.index), **(extra_env or {})})
+           env={key: value for key, value in {**CLEAN_ENV, "AGENT_HOME": str(ROOT),
+                "AGENT_RESOURCE_RUN_INDEX": str(self.index), **(extra_env or {})}.items()
+                if value is not None})
 
     def start_args(self, route=None, node="full-run", smoke=None, run_id="case", config_manifest=None):
         return ("start", "--run-id", run_id, "--cwd", str(self.repo), "--log", str(self.log),

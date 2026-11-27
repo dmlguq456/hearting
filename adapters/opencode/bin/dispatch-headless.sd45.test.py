@@ -346,6 +346,29 @@ class OpenCodeSupervisedOwner(unittest.TestCase):
                 self.assertFalse(WH._supervised_owner(self.args(**overrides)))
                 self.assertRegex(self.command(**overrides), r"^(cd -- \S+ && )?opencode run")
 
+    def test_the_middle_cells_owner_is_supervised_through_its_own_route_node(self):
+        """The cell's owner is standard and gets its route as arguments, never as a binding (the route is passed
+        so the owner's own node is one-shot): it is supervised like the quick owner and the team conductor, so
+        the park, the same-session wake and the `correct` channel stand on this harness too."""
+        route = dict(route_file="/tmp/r.json", route_id="rt-c", route_hash="sha256:c", route_node="one-shot")
+        for intensity in ("standard", "quick"):
+            with self.subTest(intensity):
+                args = self.args(intensity=intensity, **route)
+                self.assertTrue(WH._supervised_owner(args))
+                self.assertIn("claude-session-supervisor.py --runtime-harness opencode",
+                              WH.shell_command(args, Path("/tmp/p.txt"), Path("/tmp/l.log")))
+                with mock.patch("dispatch_owner_input.initialize_owner_input") as init:
+                    WH.initialize_supervised_owner_input(args, Path("/tmp/jobs.log"))
+                    init.assert_called_once_with(Path("/tmp/jobs.log"), "att-quick", "opencode-next-turn")
+        # nothing else changes: a standard+ owner with no route, a partial tuple or another node is one-shot as before
+        for overrides in (dict(intensity="standard"), dict(intensity="strong"),
+                          dict(intensity="standard", **{**route, "route_node": "execute"}),
+                          dict(intensity="standard", **{**route, "route_hash": None}),
+                          dict(intensity="standard", dispatch_depth=2, **route),
+                          dict(intensity="standard", worker_type="review", **route)):
+            with self.subTest(**overrides):
+                self.assertFalse(WH._supervised_owner(self.args(**overrides)))
+
     def test_quick_owner_command_is_the_session_supervisor_on_the_same_model(self):
         command = self.command()
         self.assertIn("claude-session-supervisor.py --runtime-harness opencode", command)

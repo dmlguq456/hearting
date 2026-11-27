@@ -206,6 +206,9 @@ ATTEMPT_MUTABLE_METADATA = {
     "launch_mismatch_fields",
     "launch_mismatch_expected",
     "launch_mismatch_observed",
+    # A continued turn's session (`resumed` | `fresh:<reason>`): a launch whose earlier session file is gone by
+    # the time it is carried into the new home starts fresh after its claim (`carry_session`).
+    "session",
 }
 ATTEMPT_TERMINAL_EVIDENCE_KEYS = {
     "api_status",
@@ -217,6 +220,7 @@ ATTEMPT_TERMINAL_EVIDENCE_KEYS = {
     "detected_by",
     "failure_class",
     "process_exit",
+    "provider_failure_kind",
     "quota_model_scope",
     "quota_window",
     "reconcile_reason",
@@ -499,9 +503,14 @@ def resolve_model_governor_root(
     artifact_root: str | Path,
     environ: dict[str, str] | os._Environ[str] | None = None,
 ) -> Path:
-    """Resolve one canonical governor root and reject ambient split-brain roots."""
+    """Resolve one canonical governor root and reject ambient split-brain roots.
+
+    The scratch root of record-free unit routes counts under its project's governor: one set of limits."""
+
+    import unit_ephemeral
 
     env = os.environ if environ is None else environ
+    artifact_root = unit_ephemeral.counted_root(artifact_root)
     expected = (
         Path(artifact_root).expanduser().resolve(strict=False)
         / ".runtime"

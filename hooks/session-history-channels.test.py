@@ -18,6 +18,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from tools import fixture_processes
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 sys.path.insert(0, str(ROOT / "tools/install"))
@@ -32,7 +34,7 @@ spec.loader.exec_module(codex)
 
 class HistoryChannelTests(unittest.TestCase):
     def test_independent_probes_overlap_but_context_and_receipt_keep_their_order(self):
-        together = threading.Barrier(4, timeout=3)
+        together = threading.Barrier(3, timeout=3)
         receipt = {"candidate": "pending until output"}
         def preflight(kind, _cwd):
             together.wait()
@@ -46,8 +48,8 @@ class HistoryChannelTests(unittest.TestCase):
         with patch.object(codex, "run_preflight", side_effect=preflight), \
              patch.object(codex, "candidate_context", side_effect=candidate), \
              patch.object(codex, "token_budget_context", side_effect=budget):
-            parts, deferred = codex.prompt_probe_context({}, "/fixture", "sid", startup_due=True)
-        self.assertEqual(parts, ["local-evidence", "candidate", "briefing", "budget"])
+            parts, deferred = codex.prompt_probe_context({}, "/fixture", "sid")
+        self.assertEqual(parts, ["candidate", "briefing", "budget"])
         self.assertIs(deferred, receipt)
 
     def test_notice_without_a_confirmed_incoming_edge_skips_full_history(self):
@@ -111,7 +113,7 @@ class HistoryChannelTests(unittest.TestCase):
         self.assertEqual((card, human, deferred), ("MODEL-CARD", ["PERSON-NOTICE"], [receipt]))
         self.assertTrue(startup["due"])
 
-    def test_slow_claude_evidence_probe_does_not_lose_the_prepared_card(self):
+    def test_claude_card_hook_runs_no_evidence_probe_and_keeps_the_prepared_card(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             hooks = root / "hooks"
@@ -125,7 +127,7 @@ class HistoryChannelTests(unittest.TestCase):
                 '    kw["startup_context"]["due"] = True\n'
                 'def apply_deferred(entries): pass\n')
             probe = hooks / "local-evidence-inject.sh"
-            probe.write_text('#!/bin/sh\nexec python3 -c "import time; time.sleep(6)"\n')
+            probe.write_text(f'#!/bin/sh\ntouch "{root}/probe-ran"\n')
             probe.chmod(0o755)
             env = {**os.environ, "AGENT_HOME": str(root)}
             for key in ("AGENT_SESSION_ROLE", "AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH",
@@ -138,6 +140,7 @@ class HistoryChannelTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"],
                              "PREPARED-CARD")
+            self.assertFalse((root / "probe-ran").exists())
 
     def test_human_only_lookup_leaves_ledger_and_receipts_untouched(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -161,7 +164,7 @@ class HistoryChannelTests(unittest.TestCase):
         # HOOK-LATENCY: the notice reads the whole shared lineage (about half of
         # a 1 s start). Past the hook's deadline it is left out; the start is
         # still recorded and the card path runs as before.
-        with tempfile.TemporaryDirectory() as directory:
+        with fixture_processes.TemporaryDirectory() as directory:
             state = Path(directory) / "state"
             seat = session_tidy.Seat("pane", "late-start-seat", "pane", "claude")
             for deadline, expected in ((0.0, []), (None, ["PERSON-NOTICE"]),

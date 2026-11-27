@@ -971,7 +971,7 @@ def _linked_entries(
             (source_root / "adapters/claude/utilities", home / "utilities", "hook_config"),
             (source_root / "adapters/claude/scaffolds", home / "scaffolds", "hook_config"),
             (source_root / "adapters/claude/statusline.sh", home / "statusline.sh", "hook_config"),
-            # Owner-name-set union (INSTALL_LAYOUT.md "owner-name-set
+            # Owner-name-set union (docs/INSTALL_LAYOUT.md "owner-name-set
             # reconciliation"): `harness install claude` also projects these
             # three names (projector._CLAUDE_SYMLINK_NAMES). Once activation
             # exists it takes over the union so the same active_root/bundle
@@ -1617,6 +1617,13 @@ def _read_json_object(path: Path, label: str) -> dict:
     return data
 
 
+def _claude_global_config_path() -> Path:
+    """Claude's global config file: `$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude.json`."""
+    if os.environ.get("CLAUDE_CONFIG_DIR"):
+        return paths.runtime_home("claude") / ".claude.json"
+    return Path.home() / ".claude.json"
+
+
 def _claude_managed_values(source: dict) -> dict:
     statusline = source.get("statusLine")
     if (
@@ -2011,6 +2018,17 @@ def _merge_claude_settings(
     if changed:
         _atomic_json(config, data)
     context_previous = context_before if context_present else None
+    report_lines = []
+    if config_path is None:
+        # Claude reads this key only from its global config file, not settings.json.
+        import claude_settings_config
+        owned, notice = claude_settings_config.apply_left_arrow_default(
+            _claude_global_config_path(),
+            owned=previous_values.get(claude_settings_config.LEFT_ARROW_KEY) is False)
+        if owned:
+            managed_values[claude_settings_config.LEFT_ARROW_KEY] = False
+        if notice:
+            report_lines.append(notice)
     native_context = {"claude": {"keys": {"idleCompaction": idle_record}}}
     if context_window is not None:
         from native_context import _native_key_record
@@ -2027,7 +2045,7 @@ def _merge_claude_settings(
         "previous_context_window": context_previous,
         "context_changed": context_window is not None and context_previous != str(context_window),
         "native_context": native_context,
-        "report_lines": ([f"context window: claude {context_previous or 'unset'} -> {context_window} tokens",
+        "report_lines": report_lines + ([f"context window: claude {context_previous or 'unset'} -> {context_window} tokens",
                           f"settings: {config}"] if context_window is not None and context_previous != str(context_window) else []),
     }
 
@@ -3373,7 +3391,7 @@ def _journal_dest_allowed(runtime: str, dest: Path, scope: str) -> bool:
         # owner-name-set `_linked_entries()` unions in). A journal recording a
         # union-only name such as README.md/manifest.json/loops must stay
         # recoverable after a crash, or a partial reprojection can never be
-        # repaired (INSTALL_LAYOUT.md "owner-name-set reconciliation").
+        # repaired (docs/INSTALL_LAYOUT.md "owner-name-set reconciliation").
         "claude": (
             {
                 "hearting", "CLAUDE.md", "core", "capabilities", "roles",
@@ -4280,7 +4298,7 @@ def _capture_replaced_installer_targets(
     previous: Optional[dict], desired: List[dict]
 ) -> dict:
     """Durable, write-once-per-dest record of what a dest pointed at before
-    activation first took it over (INSTALL_LAYOUT.md "owner-name-set
+    activation first took it over (docs/INSTALL_LAYOUT.md "owner-name-set
     reconciliation"). Must run before `_apply_transaction` mutates any dest.
 
     Carries every prior entry forward byte-for-byte -- a refresh or
@@ -4343,6 +4361,9 @@ def activate(
         )
     except user_model_config.UserModelConfigError as exc:
         raise ActivationError(str(exc)) from exc
+    # The table is settled before the default agent definitions are drawn from it, so one
+    # refresh leaves the table and the definitions agreeing. Never fails the activation.
+    model_follow_lines = _follow_models(runtime, active_root, scope)
 
     desired = _desired_entries(runtime, mode, source_root, active_root, revision, scope)
     agent_report_lines = _native_agent_entries(
@@ -4521,8 +4542,33 @@ def activate(
     report["preserved"] = list(report.get("user_changed", []))
     report["report_lines"] = (list(context_report_lines) + list(agent_report_lines) + notices
                               + list(report.get("report_lines", [])))
-    report["notices"] = notices
+    # What was done to the model table is also a notice: a release that reads an activation
+    # report from a newer one carries over only `preserved` and `notices`, and would say
+    # nothing of the first edit to the person's table. This release takes the same line once.
+    report["notices"] = [*notices, *model_follow_lines]
+    report["model_follow_lines"] = model_follow_lines
     return report
+
+
+# What this process's activations did to a model table so far. The report of an activation that
+# fails after its table was edited is not built, so the caller reads the lines here.
+MODEL_FOLLOW_LINES: List[str] = []
+
+
+def _follow_models(runtime: str, active_root: Path, scope: str) -> List[str]:
+    """Let the cells of this runtime's models.conf follow the newer models its list shows.
+
+    Result lines for the person; any failure is one line and changes nothing here. The
+    table's lock is waited for a short time only (the activation holds locks of its own).
+    """
+    try:
+        import model_follow
+        found = model_follow.apply_lines(
+            [runtime], source_root=active_root, runtime=paths.runtime_home(runtime, scope))
+    except Exception as exc:  # noqa: BLE001 - activation never fails on this
+        found = [f"model follow: {runtime} table not updated ({type(exc).__name__})"]
+    MODEL_FOLLOW_LINES.extend(line for line in found if line not in MODEL_FOLLOW_LINES)
+    return found
 
 
 def _edited_render_lines(runtime: str, previous: Optional[dict], desired: List[dict]) -> List[str]:
@@ -4798,6 +4844,22 @@ def refresh(
 def _unmerge_claude_settings(
     state: dict, scope: str, dry_run: bool = False, *, config_path: Path | None = None
 ) -> List[str]:
+    """Remove the settings.json entries and the global-config default Hearting still owns."""
+    restored = _unmerge_claude_settings_file(state, scope, dry_run, config_path=config_path)
+    managed_config = state.get("managed_config", {})
+    values = managed_config.get("claude_values", {}) if isinstance(managed_config, dict) else {}
+    import claude_settings_config
+    if (config_path is None and isinstance(values, dict)
+            and values.get(claude_settings_config.LEFT_ARROW_KEY) is False):
+        target = _claude_global_config_path()
+        if claude_settings_config.release_left_arrow_default(target, dry_run=dry_run):
+            restored = [*restored, str(target)]
+    return restored
+
+
+def _unmerge_claude_settings_file(
+    state: dict, scope: str, dry_run: bool = False, *, config_path: Path | None = None
+) -> List[str]:
     """Remove what the activation record still proves it owns.
 
     Hooks match by matcher and command, so a copy the user tuned leaves with
@@ -4929,7 +4991,7 @@ def deactivate(runtime: str, scope: str = "global", dry_run: bool = False) -> di
             # Restore the installer's exact prior target only when the link
             # activation put there is still exactly what activation put
             # there -- a user who repointed it after activation keeps their
-            # change untouched (INSTALL_LAYOUT.md owner-name-set
+            # change untouched (docs/INSTALL_LAYOUT.md owner-name-set
             # reconciliation, deactivate/uninstall restore condition).
             desired_entry = desired_by_dest.get(value)
             try:

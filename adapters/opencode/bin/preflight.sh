@@ -100,14 +100,12 @@ sys.exit(0 if _has_opencode_skills(data) else 1)' ; then
 
 usage() {
   cat <<'EOF'
-usage: preflight.sh write <file> [session-id] [turn-id]
-       preflight.sh read <file> [session-id]
+usage: preflight.sh read <file> [session-id]
        preflight.sh stages [--capability <name>] [--json]
        preflight.sh capability <name> [cwd] [session-id]
        preflight.sh skill <name> [cwd] [session-id]
        preflight.sh memory [cwd]
        preflight.sh candidates <prompt> <cwd> <session-id> [turn-id]
-       preflight.sh local-evidence [cwd]
        preflight.sh recall <query> [cwd] [session-id]
        preflight.sh recall-gate <cwd> (--decision recall|skip --reason <reason> [--query <query>] | --outcome applied|miss --gate-id <id>) [options]
        preflight.sh briefing [cwd]
@@ -294,18 +292,6 @@ case "$cmd" in
   doctor)
     doctor
     ;;
-  write)
-    if [ "${2:-}" = "-h" ] || [ "${2:-}" = "--help" ]; then
-      [ "$#" -eq 2 ] || { echo "opencode preflight: write help accepts no extra arguments" >&2; exit 64; }
-      printf '%s\n' 'usage: preflight.sh write <file> [session-id] [turn-id]'
-      exit 0
-    fi
-    [ "$#" -ge 2 ] && [ "$#" -le 4 ] || { echo "opencode preflight: write expects <file> [session-id] [turn-id]" >&2; exit 64; }
-    file=$2
-    case "$file" in -*) echo "opencode preflight: write file must be absolute or ./-prefixed" >&2; exit 64;; esac
-    # Compatibility command: write gates have been retired.
-
-    ;;
   material-route|worktree-path)
     # Retired with the write gates. `check` used to report route participation;
     # answering exit 0 now would claim a check that never ran, so it fails and
@@ -379,10 +365,6 @@ EOF
     set -- --prompt "$prompt" --cwd "$cwd" --session-id "$sid" --runtime opencode --format text
     [ -z "$turn" ] || set -- "$@" --turn-id "$turn"
     AGENT_HOME="$AGENT_ROOT" bash "$ROOT/hooks/mem-recall-inject.sh" "$@"
-    ;;
-  local-evidence)
-    cwd=${2:-$PWD}
-    AGENT_HOME="$AGENT_ROOT" bash "$ROOT/hooks/local-evidence-inject.sh" --cwd "$cwd" --format text
     ;;
   recall)
     [ "$#" -ge 2 ] || { echo "opencode preflight: recall requires a query" >&2; exit 64; }

@@ -256,7 +256,10 @@ class PromptDisplayTests(unittest.TestCase):
                     self.assertEqual(st.runtime_turn_source(framed), "")
                     display = self.prompt(framed, harness, "framed-" + harness)
                     self.assertEqual(display["human"]["source"], "real")
-                    self.assertEqual(display["human"]["text"], framed.splitlines()[0])
+                    # The person's own line: a runtime block in front of it is not its first line
+                    # (follow-up 3 of the PR #1661 review); one quoted after it stays in it.
+                    self.assertEqual(display["human"]["text"],
+                                     "My actual instruction" if framed.startswith(text) else framed.splitlines()[0])
                     self.assertEqual(display["received"], [])
         unknown = "<unknown-tag>\nDo not guess this wrapper\n</unknown-tag>"
         self.assertEqual(st.prompt_first_line(unknown), "<unknown-tag>")

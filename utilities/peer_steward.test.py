@@ -91,7 +91,13 @@ def _register_completion_fixture(jobs, attempt, metadata):
 
 class _TmpRootMixin:
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
+        # Whether the calling session descends from a service (Claude's background daemon, a
+        # Codex app-server) is a value the test sets, not what this machine's process tree says:
+        # the same test gives the same result run from a plain shell or under such a service.
+        pin = mock.patch.object(peer_address, "_service_hosted", return_value=False)
+        pin.start()
+        self.addCleanup(pin.stop)
+        self._tmp = fixture_processes.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.tmp_root = Path(self._tmp.name)
         self.jobs_path = self.tmp_root / "jobs.log"
@@ -226,6 +232,28 @@ def _herdr_json(payload):
     return subprocess.CompletedProcess(["herdr"], 0, stdout=json.dumps(payload), stderr="")
 
 
+def _stop_fixture_claude(proc):
+    proc.kill()
+    proc.wait(timeout=5)
+
+
+def _spawn_fixture_claude(test, seconds, env):
+    argv = ["/usr/bin/claude", str(seconds)]
+    proc = subprocess.Popen(argv, executable="/bin/sleep", env=env, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    test.addCleanup(_stop_fixture_claude, proc)
+    # Keep the fake runtime's executable. Wait for its exact argv and environment
+    # to be visible, since sleep has no startup output of its own.
+    expected = b"\0".join(os.fsencode(word) for word in argv) + b"\0"
+    directory = Path("/proc") / str(proc.pid)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and proc.poll() is None:
+        if (directory / "cmdline").read_bytes() == expected and (directory / "environ").read_bytes():
+            return proc
+        time.sleep(0.01)
+    test.fail("fixture Claude did not publish its argv and environment")
+
+
 class _NativeSeat:
     """A real native session the production readers can see, with no Herdr.
 
@@ -243,17 +271,8 @@ class _NativeSeat:
         env = {key: value for key, value in os.environ.items()
                if not key.startswith(("AGENT_", "HERDR_", "TMUX"))}
         env["HERDR_PANE_ID"] = pane
-        self.proc = subprocess.Popen(
-            ["bash", "-c", "exec -a /usr/bin/claude sleep 3600"], env=env,
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        test.addCleanup(self.stop)
+        self.proc = _spawn_fixture_claude(test, 3600, env)
         self.pid = self.proc.pid
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            live = pane_ownership._process(self.pid)
-            if live and "claude" in Path(f"/proc/{self.pid}/cmdline").read_text(errors="replace"):
-                break
-            time.sleep(0.01)
         self.birth = str(pane_ownership._process(self.pid)[5])
         self.path = Path(os.environ["HOME"]) / ".claude" / "sessions" / f"{self.pid}.json"
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -272,12 +291,7 @@ class _NativeSeat:
         self.set("idle")
 
     def end(self):
-        self.stop()
-
-    def stop(self):
-        if self.proc.poll() is None:
-            self.proc.kill()
-        self.proc.wait(timeout=5)
+        _stop_fixture_claude(self.proc)
 
 
 def _idle_shell_run(argv, **kwargs):
@@ -1636,11 +1650,7 @@ class _WatchMixin(_TmpRootMixin):
         census_home = self.tmp_root / "home" / ".claude"
         (census_home / "sessions").mkdir(parents=True, exist_ok=True)
         (census_home / ".statusline").mkdir(parents=True, exist_ok=True)
-        self.census_process = subprocess.Popen(
-            ["bash", "-c", "exec -a /usr/bin/claude sleep 600"],
-            env=dict(os.environ), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        self.addCleanup(self._stop_census_process)
+        _spawn_fixture_claude(self, 600, dict(os.environ))
         fake = self.bin / "herdr"
         fake.write_text(_FAKE_HERDR)
         fake.chmod(0o755)
@@ -1680,15 +1690,6 @@ class _WatchMixin(_TmpRootMixin):
             except subprocess.TimeoutExpired:
                 self.shell.kill()
                 self.shell.wait(timeout=3)
-
-    def _stop_census_process(self):
-        if self.census_process.poll() is None:
-            self.census_process.terminate()
-            try:
-                self.census_process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.census_process.kill()
-                self.census_process.wait(timeout=2)
 
     def _env(self, mode="idle", session_id="steward-1", with_herdr=True):
         env = dict(os.environ)
@@ -1810,14 +1811,48 @@ class _WatchMixin(_TmpRootMixin):
         }
         self.fail(f"receipt never appeared for {watch_id}; diagnostics={diagnostic}")
 
-    def _wait_for_observation(self, watch_id, seconds=10):
+    def _wait_for_observation(self, watch_id, seconds=10, *, predicate=None):
+        path = self.watch_root / f"{watch_id}.observation.json"
+        deadline = time.monotonic() + seconds
+        observation = None
+        while time.monotonic() < deadline:
+            observation = peer_steward._read_json(path)
+            if observation is not None and (predicate is None or predicate(observation)):
+                return observation
+            time.sleep(0.02)
+        self.fail(f"observation checkpoint never appeared for {watch_id}: {observation}")
+
+    def _observation_file(self, watch_id):
+        """The observation's file identity; each observer write puts a new file in place."""
+        status = (self.watch_root / f"{watch_id}.observation.json").stat()
+        return status.st_dev, status.st_ino
+
+    def _wait_for_observation_replaced(self, watch_id, before, seconds=10, *, watcher_pid=None):
+        """Wait for the observer's next write itself, not for a changed timestamp.
+
+        An atomic write creates its file while the old one is still in place, so
+        one write always changes the identity; an mtime can repeat on a coarse
+        clock. On failure the observer's scheduler state tells a missed wake-up
+        (asleep in select with nothing pending) from a slow write (disk wait).
+        """
         path = self.watch_root / f"{watch_id}.observation.json"
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
-            if path.exists():
-                return json.loads(path.read_text())
+            if self._observation_file(watch_id) != before:
+                return peer_steward._read_json(path)
             time.sleep(0.02)
-        self.fail(f"observation checkpoint never appeared for {watch_id}")
+        process = {}
+        if watcher_pid is not None:
+            for name in ("status", "wchan"):
+                try:
+                    text = Path(f"/proc/{watcher_pid}/{name}").read_text(errors="replace")
+                except OSError as exc:
+                    text = repr(exc)
+                process[name] = ([line for line in text.splitlines()
+                                  if line.startswith(("State:", "SigPnd:", "ShdPnd:"))]
+                                 if name == "status" else text)
+        self.fail(f"the observer did not handle its wake-up for {watch_id}: "
+                  f"observation={peer_steward._read_json(path)} watcher={process}")
 
 
 class WatchDeadlineTest(unittest.TestCase):
@@ -2199,6 +2234,61 @@ print(json.dumps({"queued": bool(queued), "kind": ((duty or {}).get("intent") or
         result = json.loads(done.stdout.strip().splitlines()[-1])
         self.assertEqual((result["queued"], result["kind"]), (True, "message"), result)
         self.assertEqual(result["to"]["harness"], "codex")
+
+    def _opencode_env(self, with_carrier, *, wake_marker=None):
+        """``with_carrier``: the completion carrier value every plugin since v3.2.10 puts on its
+        commands. ``wake_marker`` (default: with it): what only a plugin that can wake an idle
+        session with its watch receipts adds."""
+        env = self._env("idle")
+        env.pop("CLAUDE_CODE_SESSION_ID", None)
+        env["OPENCODE_SESSION_ID"] = "ses-oc-steward"
+        env.pop("AGENT_PARENT_COMPLETION_CARRIER", None)
+        env.pop("AGENT_STEWARD_WATCH_WAKE", None)
+        if with_carrier:
+            env["AGENT_PARENT_COMPLETION_CARRIER"] = "opencode-turn:ses-oc-steward"
+        if wake_marker if wake_marker is not None else with_carrier:
+            env["AGENT_STEWARD_WATCH_WAKE"] = "opencode"
+        return env
+
+    _OPENCODE_SEAT = {"kind": "pane", "key": "opencode-seat-k", "pane": "%7@/tmp/hbt-x/s",
+                      "harness": "opencode", "project_key": ""}
+
+    def test_an_opencode_watch_with_its_plugin_carrier_ends_the_turn(self):
+        """2026-11-14: OpenCode got `wake=none`, so a watch it left to rest never woke it."""
+        proc = self._codex_watch_with_seat(self._opencode_env(True), self._OPENCODE_SEAT)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("wake=opencode", proc.stdout)
+        directive = self._directive(proc.stdout)
+        self.assertEqual(directive.get("parent_next"), "end-turn", proc.stdout)
+        self.assertEqual(directive.get("parent_next_reason"), "carrier-steward-watch-opencode-turn")
+
+    def _assert_opencode_watch_waits(self, env, seat):
+        # One watch per test: a second `watch` of the same target reports the first one's arm.
+        proc = self._codex_watch_with_seat(env, seat)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("state=armed", proc.stdout)
+        self.assertIn("wake=none", proc.stdout)
+        self.assertEqual(self._directive(proc.stdout).get("parent_next"), "bounded-wait")
+
+    def test_an_opencode_watch_without_the_plugin_carrier_still_waits(self):
+        self._assert_opencode_watch_waits(self._opencode_env(False), self._OPENCODE_SEAT)
+
+    def test_an_opencode_watch_of_an_older_plugin_keeps_the_bounded_wait(self):
+        """RV-PR1645-1115: a plugin installed before the wake existed puts the completion carrier
+        value on its commands too, and cannot wake a session: the watch must not promise one."""
+        self._assert_opencode_watch_waits(self._opencode_env(True, wake_marker=False), self._OPENCODE_SEAT)
+
+    def test_an_opencode_watch_with_an_unproven_seat_still_waits(self):
+        self._assert_opencode_watch_waits(self._opencode_env(True), None)
+
+    def test_an_opencode_watch_receipt_leaves_no_queued_notice_to_hide_it_from_the_sweep(self):
+        import peer_steward_watch
+        arm = {"wake": "opencode", "steward": {"harness": "opencode", "session_id": "ses-oc-steward"},
+               "steward_seat": self._OPENCODE_SEAT, "agent": {"name": "w"}}
+        with mock.patch.object(peer_steward_watch.peer_message, "prepare_peer_message") as prepare:
+            self.assertIsNone(peer_steward_watch._prepare_watch_notice(
+                "0123456789abcdef", arm, {"state": "idle"}))
+        prepare.assert_not_called()
 
     def test_a_codex_watch_without_a_queue_socket_still_waits(self):
         proc = self._run("watch", self.target, env=self._codex_env(False))
@@ -3535,7 +3625,10 @@ class JoinTest(_WatchMixin, unittest.TestCase):
         armed = self._run("watch", self.target, env=self._env("held"))
         fields = self._fields(armed.stdout)
         started = time.monotonic()
-        proc = self._run("join", fields["watch_id"], "--timeout", "700")
+        # `_env()` with no mode sets the target idle. The join must see the same working target the watch
+        # armed on, or a watcher that is quick to notice the idle finishes the watch inside the 700 ms and
+        # the join returns the receipt (exit 0, `state=idle`) instead of timing out (CI 43664319284).
+        proc = self._run("join", fields["watch_id"], "--timeout", "700", env=self._env("held"))
         elapsed = time.monotonic() - started
         self.assertEqual(proc.returncode, 6, proc.stdout + proc.stderr)
         self.assertIn("state=join-timeout", proc.stdout)
@@ -4056,13 +4149,25 @@ class ReviewRoundOneTest(_WatchMixin, unittest.TestCase):
 
 class NativeResultRunnerWakeTest(_WatchMixin, unittest.TestCase):
     def test_native_result_over_a_pending_cached_projection_wakes_the_runner(self):
-        """A projection cached before the native result cannot reflect it.
+        self._check_pending_result_wake(reattach=False, cache="pending")
 
-        The watcher requests a refresh only when the cache reads ready or
-        unavailable. For any other cached result it must still wake the runner,
-        or the runner reads the new result only at its next backoff pass
-        (CI 41449820688: the request came 30 s after the native result).
-        """
+    def test_recovered_native_result_wakes_the_runner_only_once(self):
+        self._check_pending_result_wake(reattach=True, cache="pending")
+
+    def test_native_result_over_a_ready_cached_projection_wakes_once(self):
+        self._check_pending_result_wake(reattach=False, cache="ready")
+
+    def test_recovered_native_result_over_a_ready_cached_projection_wakes_once(self):
+        self._check_pending_result_wake(reattach=True, cache="ready")
+
+    def test_native_result_without_a_cached_projection_wakes_once(self):
+        self._check_pending_result_wake(reattach=False, cache="unavailable")
+
+    def test_recovered_native_result_without_a_cached_projection_wakes_once(self):
+        self._check_pending_result_wake(reattach=True, cache="unavailable")
+
+    def _check_pending_result_wake(self, *, reattach, cache):
+        """Both the pending and refresh paths owe one initial FIFO wake."""
         store = peer_steward.peer_obligations.ObligationStore()
         # Hold the runner lock and the wake input ourselves: no runner starts,
         # and every wake the watcher sends lands here. This test is the runner pass.
@@ -4074,9 +4179,21 @@ class NativeResultRunnerWakeTest(_WatchMixin, unittest.TestCase):
         self.addCleanup(os.close, wake_fd)
 
         env = self._env("held")
-        fields = self._fields(self._run("watch", self.target, env=env).stdout)
-        self._wait_for_lock(fields["watch_id"])
-        arm = json.loads((self.watch_root / f"{fields['watch_id']}.json").read_text())
+        proc = self._run("watch", self.target, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        watch_id = self._fields(proc.stdout)["watch_id"]
+        paths = peer_steward._watch_paths(watch_id, self.watch_root)
+        # The spawner's flock reaches the observer before its event loop does.
+        # Wait for its armed checkpoint so the new result takes the signal path.
+        # Each wait below is an event; its bound only has to outlast a slow disk.
+        armed = self._wait_for_observation(watch_id, seconds=30)
+        self.assertEqual(armed["native_wait"]["state"], "armed", armed)
+        arm = json.loads(paths.arm.read_text())
+        if reattach:
+            watcher = arm["watcher"]
+            self.assertTrue(peer_steward._pid_identity_ok(watcher["pid"], watcher["pid_start"]))
+            os.kill(watcher["pid"], signal.SIGKILL)
+            self._wait_for_watcher_exit(watch_id)
         start = str(peer_steward.process_start_ticks(os.getpid()))
         peer_steward.shared_readiness.publish_runner_incarnation(
             store.root, os.getpid(), start, "fixture-runner")
@@ -4084,41 +4201,103 @@ class NativeResultRunnerWakeTest(_WatchMixin, unittest.TestCase):
             while os.read(wake_fd, 4096):
                 pass
 
-        # The runner pass reads the changed native state and caches a pending projection.
+        # Supply the native result with the selected cache state.
         self.seat.set("idle")
-        snapshot = {"watch_root": self.watch_root, "watches": [(fields["watch_id"], arm)]}
-        with mock.patch.object(peer_steward, "_pane_readiness", return_value=SimpleNamespace(
-                state="pending", reason="fixture-cached-pending")):
+        snapshot = {"watch_root": self.watch_root, "watches": [(watch_id, arm)]}
+        with contextlib.ExitStack() as patches:
+            patches.enter_context(mock.patch.object(
+                peer_steward, "_pane_readiness", return_value=SimpleNamespace(
+                    state=cache, reason=f"fixture-cached-{cache}")))
+            if cache == "unavailable":
+                patches.enter_context(mock.patch.object(
+                    peer_steward.shared_readiness, "publish_target_projection", return_value=None))
             self.assertTrue(peer_steward._publish_watch_readiness(
                 store, snapshot, read_context=None, incarnation="fixture-runner"))
-        observation_path = self.watch_root / f"{fields['watch_id']}.observation.json"
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and (peer_steward._read_json(
-                observation_path) or {}).get("reason") != "fixture-cached-pending":
-            time.sleep(0.02)
-        self.assertEqual(peer_steward._read_json(observation_path).get("reason"),
-                         "fixture-cached-pending")
-        ready, _, _ = select.select([wake_fd], [], [], 10)
+        if reattach:
+            self.assertTrue(peer_steward._spawn_watch_observer(watch_id, arm))
+            arm = json.loads(paths.arm.read_text())
+            self.assertEqual(arm["observer_generation"], 2)
+        reason = ("fixture-cached-pending" if cache == "pending"
+                  else "shared-readiness-revalidating")
+        self._wait_for_observation(watch_id, seconds=30,
+                                   predicate=lambda obs: obs.get("reason") == reason)
+        ready, _, _ = select.select([wake_fd], [], [], 30)
         self.assertEqual(ready, [wake_fd], "the runner was not woken for the native result")
+        self.assertEqual(os.read(wake_fd, 4096), b"\0", "the runner was woken more than once")
 
         # At most once per observer: later wake-ups re-read the same cached
         # projection without waking the runner again.
-        with contextlib.suppress(BlockingIOError):
-            while os.read(wake_fd, 4096):
-                pass
         watcher = arm["watcher"]
         for _attempt in range(3):
-            before = observation_path.stat().st_mtime_ns
+            before = self._observation_file(watch_id)
             os.kill(watcher["pid"], signal.SIGUSR1)
-            deadline = time.monotonic() + 10
-            while (observation_path.stat().st_mtime_ns == before
-                   and time.monotonic() < deadline):
-                time.sleep(0.02)
-            self.assertNotEqual(observation_path.stat().st_mtime_ns, before,
-                                "the observer did not handle its wake-up")
+            self._wait_for_observation_replaced(watch_id, before, watcher_pid=watcher["pid"])
         self.assertTrue(peer_steward._pid_identity_ok(watcher["pid"], watcher["pid_start"]))
-        ready, _, _ = select.select([wake_fd], [], [], 0.5)
-        self.assertEqual(ready, [], "a later wake-up woke the runner again")
+        self.assertEqual(select.select([wake_fd], [], [], 0)[0], [],
+                         "a later wake-up woke the runner again")
+
+
+class DefaultWatchBoundWorkTest(_WatchMixin, unittest.TestCase):
+    def test_idle_receipt_waits_for_bound_registered_work_to_finish(self):
+        from dispatch_contract import ATTEMPT_SCHEMA_VERSION, claim_attempt_row
+
+        attempt_id = "att-watch"
+        metadata = (f"attempt_schema_version={ATTEMPT_SCHEMA_VERSION},dispatch_depth=1,"
+                    "transport=headless,execution_surface=registered-headless,registered_worker=1,"
+                    f"fallback_hop=same-harness-headless,attempt_id={attempt_id},"
+                    "parent_sid=sid-peer,parent_harness=claude,harness=claude")
+        self.assertTrue(claim_attempt_row(
+            self.jobs_path, attempt_id, f"now\topen\trepo\t-\tslug\t{metadata}", launch=True))
+        armed = self._run("watch", self.target, env=self._env("held"))
+        self.assertEqual(armed.returncode, 0, armed.stdout + armed.stderr)
+        watch_id = self._fields(armed.stdout)["watch_id"]
+        observation = self._wait_for_observation(watch_id, seconds=30)
+        self.assertEqual(observation["native_wait"]["state"], "armed", observation)
+
+        self._release()
+        pending = self._wait_for_observation(
+            watch_id, seconds=30,
+            predicate=lambda obs: obs.get("reason") == "bound-registered-work-unknown")
+        self.assertEqual(pending["state"], "pending", pending)
+        self.assertEqual(pending["native_wait"]["agent_state"], "idle", pending)
+        self.assertNotIn("readiness_transition", pending)
+        paths = peer_steward._watch_paths(watch_id, self.watch_root)
+        self.assertFalse(paths.receipt.exists(), "open work must keep the watch pending")
+
+        # The runner now rechecks this pending watch on its passes and wakes the
+        # watcher to judge again. Both must stay silent while the work is open,
+        # across two such rechecks. Each runner pass rewrites the target
+        # projection, and its `observed_at` names that one write.
+        identity = peer_steward._watch_readiness_identity(json.loads(paths.arm.read_text()), "idle")
+        projection = peer_steward.shared_readiness._target_path(
+            peer_steward.peer_obligations.ObligationStore().root, identity)
+
+        def runner_write():
+            return (peer_steward._read_json(projection) or {}).get("observed_at")
+
+        judged = runner_write()
+        self.assertIsNotNone(judged, "the pending judgment came without a runner projection")
+        rechecks = set()
+        deadline = time.monotonic() + 30
+        while len(rechecks) < 2 and not paths.receipt.exists() and time.monotonic() < deadline:
+            rechecks.add(runner_write())
+            rechecks -= {None, judged}
+            time.sleep(0.02)
+        self.assertFalse(paths.receipt.exists(),
+                         "open work must keep the watch pending across runner rechecks")
+        self.assertGreaterEqual(len(rechecks), 2, "the runner did not recheck the pending watch")
+        still = peer_steward._read_json(paths.observation)
+        self.assertEqual((still["state"], still["reason"]),
+                         ("pending", "bound-registered-work-unknown"), still)
+
+        # The finished fixture work is no longer bound. Replace the registry
+        # atomically and wake the same shared runner.
+        completed = self.jobs_path.with_suffix(".completed")
+        completed.touch()
+        completed.replace(self.jobs_path)
+        self._wake_runner()
+        receipt = self._wait_for_receipt(watch_id, seconds=15)
+        self.assertEqual((receipt["state"], receipt["agent"]["session_id"]), ("idle", "sid-peer"))
 
 
 def _agent_json(harness, sid, name, status="idle"):

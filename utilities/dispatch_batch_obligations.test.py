@@ -69,6 +69,21 @@ class BatchObligationTest(unittest.TestCase):
             obligations._resume_owner_settlements(self.jobs)
         settle.assert_called_once_with(self.jobs, "att-owner")
 
+    def test_a_pass_runs_unscoped_when_the_route_modules_cannot_be_imported(self):
+        # A release without its tools cannot import owner_route_binding. The path-read
+        # scope is only a memo: the pass still settles and never reports the whole
+        # registry as unavailable (a runner would then never idle or reach its exec).
+        self.jobs.write_text(self._runtime_owner_row() + "\n", encoding="utf-8")
+        context = obligations.OwnerSettlementReadContext()
+        self.addCleanup(context.close)
+        with split_patch("dispatch_contract.supervisor_lease_is_held", return_value=False), \
+             mock.patch("dispatch_terminal_commit.owner_completion_state", return_value=PENDING), \
+             mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle, \
+             mock.patch.dict(sys.modules, {"owner_route_binding": None}):
+            signatures = obligations._resume_owner_settlements(self.jobs, context=context)
+        settle.assert_called_once_with(self.jobs, "att-owner")
+        self.assertNotIn((str(self.jobs), "owner-settlement-unavailable"), signatures)
+
     def test_owner_settlement_keeps_partial_registry_retryable_until_complete(self):
         self.jobs.write_text(self._runtime_owner_row(), encoding="utf-8")
         before = self.jobs.read_bytes()
@@ -97,9 +112,14 @@ class BatchObligationTest(unittest.TestCase):
         context._clock = lambda: clock[0]
 
         service_script = self.base / "release" / "utilities" / "codex-managed-completion.py"
+        # A pending owner is held by its input list; one with no list is proved every pass.
+        evidence = self.base / "evidence.json"
+        evidence.write_text("sealed", encoding="utf-8")
         with mock.patch("peer_obligations.service_script",
                         return_value=(service_script, {}, None)), \
              split_patch("dispatch_contract.supervisor_lease_is_held", return_value=True) as lease, \
+             mock.patch.object(obligations, "_owner_settlement_dependency_paths",
+                               return_value=(evidence,)), \
              mock.patch("dispatch_terminal_commit.owner_completion_state", return_value=PENDING), \
              mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle:
             first = {"signature": ()}
@@ -1613,6 +1633,44 @@ class BatchObligationTest(unittest.TestCase):
         self.assertIn(slot, paths, "missing goal must observe its nearest existing parent")
         self.assertNotIn(terminal.campaign_goal_path(request), paths)
 
+        # The lifecycle files the resolution reads, as it reports them, and the bound
+        # route's own journal: an unfinished owner watches them too (never the registry).
+        attachment = self.base / "owner-route-bindings" / "attachment.json"
+        advances = self.base / "owner-route-advances" / "predecessor"
+        (self.base / "owner-route-bindings").mkdir()
+        attachment.write_text("{}", encoding="utf-8")
+        bound = "rt-bound-fixture"
+        bound_journal = ledger_root / bound / "journal.jsonl"
+        bound_journal.parent.mkdir(parents=True)
+        bound_journal.write_text('{"seq":1}\n', encoding="utf-8")
+        routed = json.loads(route_file.read_text(encoding="utf-8"))
+        routed["route_id"] = bound
+        route_file.write_text(json.dumps(routed), encoding="utf-8")
+
+        def resolving(jobs, status, meta, **kwargs):
+            watch = kwargs["observer"]
+            watch("file", self.jobs)
+            watch("file", attachment)
+            watch("members", advances)
+            return request
+
+        with mock.patch.object(terminal, "_historical_request", side_effect=resolving):
+            settlement = obligations._owner_settlement_dependency_paths(
+                self.jobs, "done", metadata)
+            watched = obligations._owner_unsettled_dependency_paths(
+                self.jobs, "done", metadata, settlement_paths=settlement)
+        self.assertEqual(settlement.route_id, bound)
+        self.assertIn(terminal.terminal_slot(request.artifact_root, bound, attempt_id) / "attempts",
+                      settlement.lifecycle,
+                      "the refusal records a route-closed verdict reads")
+        self.assertNotIn(attachment, settlement, "the settled cache does not watch lifecycle files")
+        self.assertIn(attachment, watched)
+        self.assertIn(self.base, watched,
+                      "the absent advance directory is watched through its nearest existing parent")
+        self.assertIn(bound_journal, watched)
+        self.assertIn(journal, watched)
+        self.assertNotIn(self.jobs, watched)
+
     def test_parent_ended_duty_waits_dormant_until_recipient_returns(self):
         args = Namespace(**vars(self.args))
         args.parent_session_id = "parent-thread"
@@ -2697,12 +2755,19 @@ class OwnerScanResumeOrderProofTest(unittest.TestCase):
         """
         dependency = self.base / "terminal-evidence.json"
         dependency.write_text("sealed", encoding="utf-8")
-        run = Namespace(now=[0.0], proofs=[], settled=[], resumes=[], classifying=[False])
+        run = Namespace(now=[0.0], proofs=[], settled=[], resumes=[], classifying=[False],
+                        alive=[False])
 
         def state(_jobs, _status, metadata):
             if run.classifying[0]:
                 run.proofs.append(metadata["attempt_id"])
                 run.now[0] += cost  # the default costs more than the pass budget
+            if metadata.get("note") == "alive":
+                # An owner whose process the proof reads through the real, recording observation.
+                import dispatch_contract
+                stopped = dispatch_contract.attempt_process_quiescence(
+                    metadata, terminal_receipt=True).state == "quiescent"
+                return COMPLETE if stopped else PENDING
             owes = (metadata.get("note") == "needs-settlement"
                     and metadata["attempt_id"] not in run.settled)
             return PENDING if owes else COMPLETE
@@ -2723,15 +2788,26 @@ class OwnerScanResumeOrderProofTest(unittest.TestCase):
         self.addCleanup(context.close)
         patches = contextlib.ExitStack()
         self.addCleanup(patches.close)
+        def owes(metadata):
+            return (metadata.get("note") == "needs-settlement"
+                    and metadata["attempt_id"] not in run.settled)
+
+        # `cacheable=False` keeps no settled proof (no list once the owner is complete). An
+        # owner that still owes keeps its list: an unfinished verdict without one is proved
+        # again every pass, which is not what the resume-order proofs here are about.
         patches.enter_context(mock.patch.object(
             obligations, "_owner_settlement_dependency_paths",
             side_effect=lambda _jobs, _status, metadata: (
-                (dependency,) if cacheable and metadata.get("attempt_id") not in uncached
-                else None)))
+                (dependency,) if (cacheable and metadata.get("attempt_id") not in uncached)
+                or owes(metadata) else None)))
         patches.enter_context(mock.patch.object(
             obligations, "_classify_owner_candidates", side_effect=observed_classify))
         patches.enter_context(mock.patch(
             "dispatch_terminal_commit.owner_completion_state", side_effect=state))
+        patches.enter_context(mock.patch(
+            "dispatch_contract_process._attempt_process_quiescence",
+            side_effect=lambda *a, **k: __import__("dispatch_contract_process").ProcessQuiescence(
+                "live" if run.alive[0] else "quiescent", "fixture")))
         patches.enter_context(mock.patch(
             "dispatch_completion_join.materialize_after_terminal_close",
             side_effect=lambda _jobs, attempt, *a, **k: run.settled.append(attempt)))
@@ -2898,6 +2974,33 @@ class OwnerScanResumeOrderProofTest(unittest.TestCase):
                                  "no owner is proved again without a prefix proof")
                 self.assertEqual(run.settled.count("att-18"), 1)
 
+    def test_an_owner_still_running_is_not_skipped_as_proved_by_an_unfinished_cold_scan(self):
+        # The resume order spares an owner "already proved this scan". A proof that read a
+        # process not yet stopped is held by nothing, so that owner comes back on the
+        # reselection path every pass and completes the pass after its process ends, instead
+        # of waiting for the scan to finish. (Nine proofs a pass: 40 owners are five passes.)
+        self._case("alive-in-scan")
+        lines = [self._owner(f"att-{number}") for number in range(40)]
+        lines[2] = self._owner("att-2", note="alive")
+        self._replace(lines)
+        run = self._runner(cost=0.6)
+        run.alive[0] = True
+        run.context.limit_owner_scan(5.0)
+        for _ in range(3):
+            self.assertTrue(run.one_pass(), "the scan is still unfinished")
+        self.assertEqual(run.proofs.count("att-2"), 3, "proved again on every pass of one scan")
+        self.assertEqual(run.proofs.count("att-0"), 1, "the others are proved once per scan")
+        self.assertFalse(run.context.has_settled_owner(self.jobs, "att-2"))
+        run.alive[0] = False  # the process ends; no row or file changed
+        run.one_pass()
+        self.assertEqual(run.proofs.count("att-2"), 4)
+        self.assertTrue(run.context.has_settled_owner(self.jobs, "att-2"),
+                        "the first pass after the process ended completes it")
+        for _ in range(6):
+            run.one_pass()
+        self.assertFalse(run.context.owner_scan_unfinished(self.jobs), "the scan finished")
+        self.assertEqual(run.proofs.count("att-2"), 4)
+
     def test_an_owner_due_again_after_the_resume_order_holds_no_gap(self):
         # Review follow-up 1 (base too): with one proof a pass, owners due again
         # (their rows changed) waited at the resume gap, so the pass's one proof
@@ -2917,6 +3020,1007 @@ class OwnerScanResumeOrderProofTest(unittest.TestCase):
         self.assertEqual(passes, 3)
         self.assertEqual(sorted(run.proofs[proofs:]), ["att-0", "att-2", "att-4"])
         self.assertEqual(run.settled.count("att-0"), 1)
+
+class ObserverBackoffTest(unittest.TestCase):
+    """A relaunched batch observer that ended without progress waits 60 s, doubling to 600 s."""
+
+    def setUp(self):
+        obligations._OBSERVER_RETRY.clear()
+        self.addCleanup(obligations._OBSERVER_RETRY.clear)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.jobs = self.base / "jobs.log"
+        self.jobs.write_text("fixture\n", encoding="utf-8")
+        self.args = Namespace(
+            jobs=self.jobs, sealed_batch_id="batch-fixture",
+            parent_attempt_id="att-parent", parent_session_id=None,
+            attempt_id=["att-child"], delivery_parent_id="att-parent",
+            control_socket=self.base / "control.sock", queue_socket=None,
+            thread_id=None, interval=0.1, timeout=1.0,
+        )
+        self.clock = [1000.0]
+        self._real_view = registry_cache.registry_view
+        self.rows = {}
+        self.popen_calls = []
+        patches = (
+            mock.patch.object(obligations, "_OBSERVER_CLOCK", lambda: self.clock[0]),
+            mock.patch.object(obligations.subprocess, "Popen", side_effect=self._popen),
+            mock.patch("dispatch_registry_cache.registry_view",
+                       side_effect=self._view),
+        )
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.duty_id, _record = obligations.create(self.args)
+
+    def _view(self, *args, **kwargs):
+        real = self._real_view(*args, **kwargs)
+        rows = self.rows
+
+        class Proxy:
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+            def handover_attempt(self, attempt):
+                return rows.get(attempt)
+
+        return Proxy()
+
+    def _popen(self, *args, **kwargs):
+        self.popen_calls.append(args)
+
+        class Launched:
+            pid = 901234
+
+        return Launched()
+
+    def _pass(self):
+        return obligations.ensure_observers(self.jobs)
+
+    def _finish_without_progress(self):
+        # The observer's own end-of-life write: only updated_at/observer move.
+        record = obligations.read(self.jobs, self.duty_id)
+        record["observer"] = {"pid": 1, "pid_start": "1"}
+        record["updated_at"] = record["updated_at"] + 1
+        obligations._write(obligations._record_path(self.jobs, self.duty_id), record)
+
+    def test_no_progress_end_waits_60_120_240_480_then_600(self):
+        self.assertEqual(self._pass(), 1)
+        for wait in (60, 120, 240, 480, 600, 600):
+            self._finish_without_progress()
+            self.assertEqual(self._pass(), 0)
+            self.clock[0] += wait - 1
+            self.assertEqual(self._pass(), 0, f"still inside the {wait} s wait")
+            self.clock[0] += 1
+            self.assertEqual(self._pass(), 1, f"relaunched after the {wait} s wait")
+        self.assertEqual(obligations._backoff_seconds(0), 60.0)
+        self.assertEqual(obligations._backoff_seconds(99), 600.0)
+
+    def test_each_progress_field_relaunches_at_once_and_resets_the_wait(self):
+        key = str(obligations._record_path(self.jobs, self.duty_id))
+        changes = (
+            ("state", "delivery-pending"), ("reason", "other-reason"), ("delivery", "other-delivery"),
+            ("outcome", "submitted"), ("effective_attempts", ["att-child", "att-more"]),
+            ("replacement_lineage", ["old-parent"]),
+        )
+        self.assertEqual(self._pass(), 1)
+        for field, value in changes:
+            with self.subTest(field=field):
+                self._finish_without_progress()
+                self.assertEqual(self._pass(), 0, "unchanged: still waiting")
+                self.assertIsNotNone(obligations._OBSERVER_RETRY[key][1])
+                obligations.update(self.jobs, self.duty_id, **{field: value})
+                self.assertEqual(self._pass(), 1, field)
+                self.assertEqual(obligations._OBSERVER_RETRY[key][2], 0)
+                self._finish_without_progress()
+                self.assertEqual(self._pass(), 0)
+                self.clock[0] += 60
+                self.assertEqual(self._pass(), 1, "the wait restarted at 60 s")
+
+    def test_observer_and_updated_at_alone_never_count_as_progress(self):
+        self.assertEqual(self._pass(), 1)
+        # Order one: the observer writes its end state after the launch.
+        self._finish_without_progress()
+        self.assertEqual(self._pass(), 0)
+        # Order two: an unrelated rewrite of the volatile fields between passes.
+        obligations.update(self.jobs, self.duty_id)
+        self.assertEqual(self._pass(), 0)
+        self.clock[0] += 60
+        self.assertEqual(self._pass(), 1)
+
+    def test_progress_written_between_the_snapshot_and_the_launch_relaunches_once_more(self):
+        self.assertEqual(self._pass(), 1)
+        obligations.update(self.jobs, self.duty_id, reason="changed-during-launch")
+        self.assertEqual(self._pass(), 1)
+        self._finish_without_progress()
+        self.assertEqual(self._pass(), 0)
+
+    def test_attempt_row_change_relaunches_at_once(self):
+        self.rows["att-child"] = ("running", {"attempt_id": "att-child"})
+        self.assertEqual(self._pass(), 1)
+        self._finish_without_progress()
+        self.assertEqual(self._pass(), 0)
+        self.rows["att-child"] = ("done", {"attempt_id": "att-child"})
+        self.assertEqual(self._pass(), 1)
+        self._finish_without_progress()
+        self.assertEqual(self._pass(), 0)
+
+    def test_unknowable_progress_keeps_the_old_relaunch_path(self):
+        with mock.patch.object(obligations, "_observer_progress", return_value=None):
+            for _ in range(3):
+                self.assertEqual(self._pass(), 1)
+                self._finish_without_progress()
+        self.assertEqual(obligations._OBSERVER_RETRY, {})
+
+    def test_leaving_pending_drops_the_key_and_the_table_is_bounded(self):
+        self.assertEqual(self._pass(), 1)
+        self.assertEqual(len(obligations._OBSERVER_RETRY), 1)
+        obligations.update(self.jobs, self.duty_id, state="complete")
+        self.assertEqual(self._pass(), 0)
+        self.assertEqual(obligations._OBSERVER_RETRY, {})
+        with mock.patch.object(obligations, "_UNSETTLED_OWNERS_LIMIT", 3):
+            for number in range(6):
+                obligations._observer_backoff_launched(f"key-{number}", ("p", number), 0)
+        self.assertEqual(list(obligations._OBSERVER_RETRY), ["key-3", "key-4", "key-5"])
+
+    def test_a_restart_forgets_the_wait_and_relaunches_at_once(self):
+        self.assertEqual(self._pass(), 1)
+        self._finish_without_progress()
+        self.assertEqual(self._pass(), 0)
+        obligations._OBSERVER_RETRY.clear()
+        self.assertEqual(self._pass(), 1)
+
+    def test_a_live_observer_is_untouched_by_the_backoff(self):
+        self.assertEqual(self._pass(), 1)
+        self._finish_without_progress()
+        held = obligations.acquire(self.jobs, self.duty_id)
+        self.addCleanup(obligations.release, held)
+        before = dict(obligations._OBSERVER_RETRY)
+        self.assertEqual(self._pass(), 0)  # live lease, no replace binding: same as today
+        self.assertEqual(obligations._OBSERVER_RETRY, before)
+
+
+class BatchExpiryTest(unittest.TestCase):
+    """A pending batch is closed as expired only past 14 days and with no Codex execution proven left."""
+
+    PARENT = "sid-parent"
+    DAY = 86400.0
+
+    def setUp(self):
+        obligations._OBSERVER_RETRY.clear()
+        obligations._EXPIRY_PROBE.clear()
+        self.addCleanup(obligations._OBSERVER_RETRY.clear)
+        self.addCleanup(obligations._EXPIRY_PROBE.clear)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.jobs = self.base / "jobs.log"
+        self.jobs.write_text("fixture\n", encoding="utf-8")
+        self.clock = [1000.0]
+        self.popen_calls = []
+        self.proof_state = "terminal"
+        self.rows = {"att-child": ("done", {"attempt_id": "att-child"})}
+        self.rows_error = None
+        self.settlement_error = None
+        self.absent_calls = []
+        self._real_absent = obligations._codex_execution_absent
+        import dispatch_supervision
+        self.supervision = dispatch_supervision
+        patches = (
+            mock.patch.object(obligations, "_OBSERVER_CLOCK", lambda: self.clock[0]),
+            mock.patch.object(obligations.subprocess, "Popen", side_effect=self._popen),
+            mock.patch.object(dispatch_supervision, "_rows", side_effect=self._rows),
+            mock.patch.object(dispatch_supervision, "_settlement_decision",
+                              side_effect=self._settlement),
+            mock.patch.object(obligations, "_codex_execution_absent",
+                              side_effect=self._absent),
+            mock.patch("peer_obligations.ensure_normal_runner", return_value=False),
+            mock.patch("peer_obligations.request_dispatch_reconciliation", return_value=False),
+        )
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.duty_id = self._create(self.PARENT, "att-child")
+        self._age(15)
+
+    def _create(self, parent_session, attempt):
+        args = Namespace(
+            jobs=self.jobs, sealed_batch_id="batch-fixture-" + attempt,
+            parent_attempt_id=None if parent_session else "att-parent",
+            parent_session_id=parent_session, attempt_id=[attempt],
+            delivery_parent_id=parent_session or "att-parent",
+            control_socket=self.base / "control.sock", queue_socket=self.base / "queue.sock",
+            thread_id=parent_session, interval=0.1, timeout=1.0,
+        )
+        duty_id, _record = obligations.create(args)
+        return duty_id
+
+    def _age(self, days, duty_id=None):
+        obligations.update(self.jobs, duty_id or self.duty_id,
+                           accepted_at=time.time() - days * self.DAY)
+
+    def _popen(self, *args, **kwargs):
+        self.popen_calls.append(args)
+
+        class Launched:
+            pid = 901234
+
+        return Launched()
+
+    def _rows(self, jobs, attempts=None, **kwargs):
+        if self.rows_error is not None:
+            raise self.rows_error
+        return dict(self.rows)
+
+    def _settlement(self, status, meta):
+        if self.settlement_error is not None:
+            raise self.settlement_error
+        return Namespace(state=self.proof_state), None
+
+    def _absent(self, jobs, record):
+        self.absent_calls.append(record.get("id"))
+        return self._real_absent(jobs, record)
+
+    def _pass(self):
+        return obligations.ensure_observers(self.jobs)
+
+    def _record(self, duty_id=None):
+        return obligations.read(self.jobs, duty_id or self.duty_id)
+
+    def _notice(self, duty_id=None):
+        import dispatch_pending_delivery as pending_delivery
+        import hashlib
+        key = f"batch-expired:{duty_id or self.duty_id}"
+        digest = hashlib.sha256(f"notice\0{key}".encode()).hexdigest()
+        return pending_delivery.read(self.jobs.parent, self.PARENT, "delivery-" + digest)
+
+    def _fresh(self, name):
+        """A new old batch (own attempt) whose attempt is proven ended; returns (duty, attempt)."""
+        attempt = "att-" + name.replace(" ", "-")
+        duty_id = self._create(self.PARENT, attempt)
+        self._age(15, duty_id)
+        self.rows = {attempt: ("done", {"attempt_id": attempt})}
+        self.proof_state = "terminal"
+        self.rows_error = self.settlement_error = None
+        obligations._EXPIRY_PROBE.clear()
+        return duty_id, attempt
+
+    def _close_after_restoring_proof(self, duty_id, attempt):
+        """Control: with the proof restored, the same batch closes on the next judgment."""
+        self.rows_error = self.settlement_error = None
+        self.proof_state = "terminal"
+        self.rows = {attempt: ("done", {"attempt_id": attempt})}
+        self.clock[0] += 601
+        self._pass()
+        self.assertEqual(self._record(duty_id)["state"], "expired")
+        self.assertIsNotNone(self._notice(duty_id))
+
+    def test_old_batch_with_proven_absent_execution_expires_notifies_and_keeps_record(self):
+        before = self._record()
+        self.assertEqual(self._pass(), 0)
+        record = self._record()
+        self.assertEqual(record["state"], "expired")
+        self.assertEqual(record["reason"], "expired-no-codex-execution")
+        self.assertEqual(record["expired_from"]["state"], "observing")
+        self.assertIsInstance(record["expired_at"], float)
+        for field in ("identity", "arguments", "outcome", "effective_attempts",
+                      "replacement_lineage", "accepted_at"):
+            self.assertEqual(record[field], before[field], field)
+        notice = self._notice()
+        self.assertIsNotNone(notice)
+        self.assertEqual(notice["delivery_id"], record["expiry_notice"])
+        self.assertIn(self.duty_id, notice["receipt"]["text"])
+        self.assertIn("record is kept", notice["receipt"]["text"])
+        self.assertEqual(self.popen_calls, [])
+        self.assertTrue(obligations._record_path(self.jobs, self.duty_id).is_file())
+
+    def test_old_batch_stays_pending_when_absence_cannot_be_confirmed(self):
+        cases = {
+            "read failure": lambda: setattr(self, "rows_error", OSError("registry unreadable")),
+            "ambiguous registry": lambda: setattr(
+                self, "rows_error", self.supervision.SupervisionError("supervision-attempt-ambiguous")),
+            "timeout": lambda: setattr(self, "settlement_error", TimeoutError("probe timed out")),
+            "subprocess timeout": lambda: setattr(
+                self, "settlement_error", subprocess.TimeoutExpired("probe", 5)),
+            "no row": lambda: setattr(self, "rows", {}),
+            "unverifiable": lambda: setattr(self, "proof_state", "unverifiable"),
+            "reconcile-needed": lambda: setattr(self, "proof_state", "reconcile-needed"),
+        }
+        for name, arrange in cases.items():
+            with self.subTest(name):
+                duty_id, attempt = self._fresh(name)
+                arrange()
+                self._pass()
+                record = self._record(duty_id)
+                self.assertEqual(record["state"], "observing")
+                self.assertNotIn("expired_at", record)
+                self.assertIsNone(self._notice(duty_id))
+                self._close_after_restoring_proof(duty_id, attempt)
+
+    def test_old_batch_stays_pending_when_the_supervision_tool_is_missing(self):
+        with mock.patch.dict(sys.modules, {"dispatch_supervision": None}):
+            self.assertFalse(self._real_absent(self.jobs, self._record()))
+        self.assertTrue(self._real_absent(self.jobs, self._record()))
+
+    def test_batch_inside_retention_is_untouched_and_costs_no_judgment(self):
+        accepted = 5_000_000.0
+        obligations.update(self.jobs, self.duty_id, accepted_at=accepted)
+        retention = 14 * self.DAY
+        self.assertFalse(obligations.expire_if_due(
+            self.jobs, self.duty_id, now=accepted + retention - 60))
+        self.assertFalse(obligations.expire_if_due(
+            self.jobs, self.duty_id, now=accepted + retention))
+        self.assertEqual(self.absent_calls, [])
+        self.assertEqual(self._record()["state"], "observing")
+        self.assertIsNone(self._notice())
+        self.assertTrue(obligations.expire_if_due(
+            self.jobs, self.duty_id, now=accepted + retention + 1))
+        self.assertEqual(self._record()["state"], "expired")
+        self.assertEqual(len(self.absent_calls), 1)
+
+    def test_live_execution_keeps_the_batch(self):
+        for name, status, state in (("running", "running", "alive"),
+                                    ("done but process live", "done", "alive")):
+            with self.subTest(name):
+                duty_id, attempt = self._fresh(name)
+                self.rows = {attempt: (status, {"attempt_id": attempt})}
+                self.proof_state = state
+                self._pass()
+                self.assertEqual(self._record(duty_id)["state"], "observing")
+                self.assertIsNone(self._notice(duty_id))
+                self._close_after_restoring_proof(duty_id, attempt)
+
+    def test_one_live_attempt_among_ended_ones_keeps_the_batch(self):
+        second = "att-second"
+        args = Namespace(
+            jobs=self.jobs, sealed_batch_id="batch-two", parent_attempt_id=None,
+            parent_session_id=self.PARENT, attempt_id=["att-child", second],
+            delivery_parent_id=self.PARENT, control_socket=self.base / "control.sock",
+            queue_socket=self.base / "queue.sock", thread_id=self.PARENT,
+            interval=0.1, timeout=1.0)
+        duty_id, _record = obligations.create(args)
+        self._age(15, duty_id)
+        self.rows = {"att-child": ("done", {}), second: ("running", {})}
+        self.assertFalse(obligations.expire_if_due(self.jobs, duty_id))
+        self.assertEqual(self._record(duty_id)["state"], "observing")
+
+    def _registry(self, *rows):
+        self.jobs.write_text("".join(
+            f"2026-10-01T00:00:00Z\t{status}\t/repo\t/repo\tslug-{aid}\t"
+            + ",".join(f"{k}={v}" for k, v in {"attempt_id": aid, **meta}.items()) + "\n"
+            for aid, status, meta in rows), encoding="utf-8")
+
+    def test_a_replacement_the_record_does_not_name_keeps_the_batch_while_it_runs(self):
+        # RV-PR1718 B1: the record names only the original attempt; its launched
+        # replacement (outside the batch observer) is still running. The completion
+        # join follows it, so the batch is not "no Codex-side execution".
+        self._registry(("att-child", "done", {}),
+                       ("att-retry", "running", {"automatic_retry_of": "att-child"}))
+        self.rows = {"att-child": ("done", {"attempt_id": "att-child"}),
+                     "att-retry": ("running", {"attempt_id": "att-retry"})}
+        self._pass()
+        record = self._record()
+        self.assertNotEqual(record["state"], "expired")
+        self.assertIsNone(self._notice())
+        # Once the replacement (and its own retry) ended too, the batch expires.
+        self._registry(("att-child", "done", {}),
+                       ("att-retry", "done", {"automatic_retry_of": "att-child"}),
+                       ("att-retry2", "done", {"replacement_original_attempt_id": "att-retry"}))
+        self.rows = {aid: ("done", {"attempt_id": aid})
+                     for aid in ("att-child", "att-retry", "att-retry2")}
+        obligations._EXPIRY_PROBE.clear()
+        self._pass()
+        self.assertEqual(self._record()["state"], "expired")
+
+    def test_a_replacement_claimed_but_not_registered_keeps_the_batch(self):
+        self._registry(("att-child", "done", {}))
+        root = self.jobs.parent / "automatic-replacements"
+        (root / "by-source").mkdir(parents=True)
+        (root / "claims").mkdir()
+        (root / "by-source" / "att-child.json").write_text(json.dumps({"family_id": "f" * 64}))
+        (root / "claims" / ("f" * 64 + ".json")).write_text(json.dumps({"replacement_attempt_id": "att-new"}))
+        self._pass()
+        self.assertNotEqual(self._record()["state"], "expired")
+        (root / "claims" / ("f" * 64 + ".json")).write_text("{")
+        obligations._EXPIRY_PROBE.clear()
+        self._pass()
+        self.assertNotEqual(self._record()["state"], "expired", "an unreadable claim is not absence")
+
+    def test_batch_without_parent_session_follows_the_current_rule(self):
+        orphan = self._create("", "att-orphan")
+        self._age(15, orphan)
+        self.rows["att-orphan"] = ("done", {})
+        self.assertEqual(self._pass(), 1)
+        self.assertEqual(self._record(orphan)["state"], "observing")
+        self.assertNotIn("expired_at", self._record(orphan))
+        # Control: the same inputs with a parent session do close.
+        self.assertEqual(self._record()["state"], "expired")
+
+    def test_batch_stays_pending_when_the_parent_cannot_be_told(self):
+        import session_notice
+        for name, patch in (
+                ("no carrier", mock.patch.object(session_notice, "notify", return_value=None)),
+                ("notify raises", mock.patch.object(
+                    session_notice, "notify", side_effect=ValueError("notice-key-identity-conflict")))):
+            with self.subTest(name):
+                obligations._EXPIRY_PROBE.clear()
+                with patch:
+                    self.assertFalse(obligations.expire_if_due(self.jobs, self.duty_id))
+                self.assertEqual(self._record()["state"], "observing")
+                self.assertNotIn("expired_at", self._record())
+        self.clock[0] += 601
+        self.assertTrue(obligations.expire_if_due(self.jobs, self.duty_id))
+        self.assertEqual(self._record()["state"], "expired")
+
+    def test_expiry_probe_is_rate_limited(self):
+        with mock.patch.object(obligations, "_codex_execution_absent",
+                               side_effect=lambda *a: self.absent_calls.append(1) or False):
+            for _ in range(3):
+                self._pass()
+            self.assertEqual(len(self.absent_calls), 1)
+            self.clock[0] += 599
+            self._pass()
+            self.assertEqual(len(self.absent_calls), 1)
+            self.clock[0] += 2
+            self._pass()
+            self.assertEqual(len(self.absent_calls), 2)
+        self.assertEqual(self._record()["state"], "observing")
+
+    def test_expired_record_is_not_pending_anywhere(self):
+        self._pass()
+        self.assertEqual(self._record()["state"], "expired")
+        snapshot = obligations.pending_observer_snapshot(self.jobs)
+        self.assertFalse(list(snapshot["paths_by_jobs"].get(str(self.jobs.resolve()), ())))
+        self.assertEqual(self._pass(), 0)
+        self.assertEqual(self.popen_calls, [])
+        self.assertEqual(self._record()["state"], "expired")
+
+    def test_live_observer_holding_the_lease_is_left_to_its_own_judgment(self):
+        fd = obligations.acquire(self.jobs, self.duty_id)
+        self.assertIsNotNone(fd)
+        try:
+            self.assertFalse(obligations.expire_if_due(self.jobs, self.duty_id))
+            self.assertEqual(self._record()["state"], "observing")
+            self.assertEqual(self.absent_calls, [])
+        finally:
+            obligations.release(fd)
+        self.clock[0] += 601
+        self.assertTrue(obligations.expire_if_due(self.jobs, self.duty_id))
+
+    def test_observer_holding_the_lease_closes_only_its_own_exact_record(self):
+        fd = obligations.acquire(self.jobs, self.duty_id)
+        try:
+            owner = {"pid": os.getpid(), "pid_start": obligations._pid_start(os.getpid())}
+            foreign = {"pid": 1, "pid_start": "1"}
+            obligations.update(self.jobs, self.duty_id, observer=owner)
+            self.assertFalse(obligations.expire_if_due(
+                self.jobs, self.duty_id, fd, observer=foreign))
+            self.assertEqual(self._record()["state"], "observing")
+            self.clock[0] += 601
+            self.assertTrue(obligations.expire_if_due(
+                self.jobs, self.duty_id, fd, observer=owner))
+            self.assertEqual(self._record()["state"], "expired")
+        finally:
+            obligations.release(fd)
+
+    def test_notice_before_write_is_idempotent(self):
+        with mock.patch.object(obligations, "_write_expired", side_effect=OSError("disk")):
+            self.assertFalse(obligations.expire_if_due(self.jobs, self.duty_id))
+        self.assertEqual(self._record()["state"], "observing")
+        first = self._notice()
+        self.assertIsNotNone(first)
+        self.clock[0] += 601
+        self.assertTrue(obligations.expire_if_due(self.jobs, self.duty_id))
+        record = self._record()
+        self.assertEqual(record["state"], "expired")
+        self.assertEqual(record["expiry_notice"], first["delivery_id"])
+        self.assertEqual(self._notice()["delivery_id"], first["delivery_id"])
+
+    def test_dormant_parent_session_ended_old_batch_expires(self):
+        obligations.update(self.jobs, self.duty_id, state="unknown",
+                           reason="parent-session-ended")
+        with mock.patch.object(obligations, "_parent_duty_has_recipient", return_value=False):
+            self.assertEqual(self._pass(), 0)
+        self.assertEqual(self._record()["state"], "expired")
+        self.assertEqual(self._record()["expired_from"]["reason"], "parent-session-ended")
+
+
+class OwnerProofReuseTest(unittest.TestCase):
+    """An unfinished owner's verdict is reused only while every input it read is unchanged.
+
+    Inputs (C3.0): the owner row and its related rows, the supervisor lease (read afresh),
+    every settlement dependency, the owner-route lifecycle files, the launch and the bound
+    route's parent-close journals; and never past the 600 s cap (60 s doubling for unknown).
+    """
+    LAUNCH, BOUND = "rt-launch", "rt-bound"
+    SETTLEMENT = (
+        "route-file", "commit-state", "outcome", "terminal-claim", "producer-binding",
+        "campaign-goal", "owner-envelope-json", "owner-envelope-txt", "terminal-marker",
+        "marker-evidence", "envelope-primary", "cycle-record", "cycle-manifest",
+        "admission-index", "root-identity", "canonical-route", "canonical-outcome",
+        "producer-route-marker", "snapshots-dir", "snapshot-file")
+    LIFECYCLE = ("attachment-record", "advance-dir", "refusal-attempts-dir")
+    JOURNALS = ("launch-journal", "bound-journal")
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.jobs = self.base / "jobs.log"
+        self.inputs = self.base / "inputs"
+        self.inputs.mkdir()
+        self.row_note = "completed-supervisor"
+        self.related = []
+        self._write_registry()
+        import workflow_state
+        self.ledger = workflow_state.ledger_root_for(self.jobs)[0]
+        self.paths = {}
+        for name in self.SETTLEMENT + self.LIFECYCLE:
+            path = self.inputs / name
+            if name.endswith("-dir"):
+                path.mkdir()
+            else:
+                path.write_text(name, encoding="utf-8")
+            self.paths[name] = path
+        for name, route in zip(self.JOURNALS, (self.LAUNCH, self.BOUND)):
+            path = self.ledger / route / "journal.jsonl"
+            path.parent.mkdir(parents=True)
+            path.write_text("{}\n", encoding="utf-8")
+            self.paths[name] = path
+        registry_cache.clear_cache()
+        self.clock = [1000.0]
+        self.lease = [True]
+        self.state = [PENDING]
+        self.calls = []
+        self.settled = []
+        self.deps = [self._settlement_paths()]
+        self.context = obligations.OwnerSettlementReadContext()
+        self.context._clock = lambda: self.clock[0]
+        self.addCleanup(self.context.close)
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(mock.patch(
+            "dispatch_contract.supervisor_lease_is_held", side_effect=lambda *a: self.lease[0]))
+        stack.enter_context(mock.patch(
+            "dispatch_terminal_commit.owner_completion_state", side_effect=self._classify))
+        stack.enter_context(mock.patch(
+            "dispatch_completion_join.materialize_after_terminal_close",
+            side_effect=lambda *a: self.settled.append(a)))
+        stack.enter_context(mock.patch.object(
+            obligations, "_owner_settlement_dependency_paths",
+            side_effect=lambda *a: self.deps[0]))
+        # The process-liveness answers a proof reads, when a test sets ``self.process``:
+        # one ProcessQuiescence state per answer, or an exception to raise.
+        self.process = None
+        self.stopped = [COMPLETE]  # what the verdict is once every answer is "quiescent"
+        stack.enter_context(mock.patch(
+            "dispatch_contract_process._attempt_process_quiescence",
+            side_effect=self._answer))
+
+    def _answer(self, metadata, **_kwargs):
+        from dispatch_contract_process import ProcessQuiescence
+        if isinstance(self.process, BaseException):
+            raise self.process
+        return ProcessQuiescence(self.process, "fixture")
+
+    def _fresh_context(self):
+        self.context.close()
+        self.context = obligations.OwnerSettlementReadContext()
+        self.context._clock = lambda: self.clock[0]
+        self.addCleanup(self.context.close)
+
+    def _classify(self, *args, **kwargs):
+        self.calls.append(args[2].get("attempt_id"))
+        if self.process is None:
+            return self.state[0]
+        # A proof that reads the owner's (or a child's) process through the real, recording
+        # observation. A failed read becomes a verdict, as `_owner_completion_state_scoped` does.
+        import dispatch_contract
+        try:
+            observed = dispatch_contract.attempt_process_quiescence(args[2], terminal_receipt=True)
+        except OSError:
+            return CompletionState("unknown")
+        return self.stopped[0] if observed.state == "quiescent" else self.state[0]
+
+    def _write_registry(self):
+        md = ",".join((
+            "attempt_schema_version=2", "dispatch_depth=1", "worker_type=owner",
+            "launch_started=1", "supervisor_lease=flock-v1",
+            "supervisor_lease_file=/fixture/owner.lease", "log_file=/fixture/owner.log",
+            "attempt_id=att-owner", "workflow_completion=runtime-v1", f"note={self.row_note}",
+            f"route_id={self.LAUNCH}", "route_hash=sha256:launch"))
+        rows = [f"2026-10-18T00:00:00Z\tdone\t/repo\t/wt\towner\t{md}"]
+        rows += [f"2026-10-18T00:00:01Z\tdone\t/repo\t/wt\tchild\t"
+                 f"attempt_id=att-child-{n},parent_attempt_id=att-owner" for n in self.related]
+        self.jobs.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    def _settlement_paths(self):
+        found = obligations._SettlementPaths(self.paths[name] for name in self.SETTLEMENT)
+        found.lifecycle = tuple(self.paths[name] for name in self.LIFECYCLE) + (self.jobs,)
+        found.route_id = self.BOUND
+        return found
+
+    def _pass(self):
+        with self.jobs.open("a", encoding="utf-8") as stream:
+            stream.write("\n")  # a registry change: the pass classifies its owners again
+        return obligations._resume_owner_settlements(self.jobs, context=self.context)
+
+    def _mutate(self, name):
+        path = self.paths[name]
+        if path.is_dir():
+            (path / f"new-{len(list(path.iterdir()))}").write_text("x", encoding="utf-8")
+        else:
+            path.write_text(path.read_text(encoding="utf-8") + "+", encoding="utf-8")
+
+    def test_every_input_that_changes_is_proved_again_and_unchanged_ones_are_reused(self):
+        for name in self.SETTLEMENT + self.LIFECYCLE + self.JOURNALS:
+            with self.subTest(input=name):
+                self.context.forget_unsettled_owner(self.jobs, "att-owner")
+                self.calls.clear()
+                self._pass()
+                self.assertEqual(len(self.calls), 1)
+                self._pass()
+                self._pass()
+                self.assertEqual(len(self.calls), 1, "unchanged inputs: the verdict is reused")
+                self._mutate(name)
+                self._pass()
+                self.assertEqual(len(self.calls), 2, "the changed input is proved again")
+
+    def test_the_lifecycle_files_are_watched_only_by_the_unfinished_owner(self):
+        watched = obligations._owner_unsettled_dependency_paths(
+            self.jobs, "done", {"attempt_id": "att-owner", "route_id": self.LAUNCH},
+            settlement_paths=self.deps[0])
+        for name in self.SETTLEMENT + self.LIFECYCLE + self.JOURNALS:
+            self.assertIn(self.paths[name], watched, name)
+        self.assertNotIn(self.jobs, watched, "the registry itself is compared as rows, not as a file")
+        self.assertEqual(obligations._owner_unsettled_dependency_paths(
+            self.jobs, "done", {"attempt_id": "att-owner"}, settlement_paths=None), None)
+
+    def test_row_related_rows_and_lease_are_inputs_too(self):
+        self._pass()
+        self.assertEqual(len(self.calls), 1)
+        self.row_note = "completed-again"
+        self._write_registry()
+        self._pass()
+        self.assertEqual(len(self.calls), 2, "the owner row changed")
+        self.related.append(1)
+        self._write_registry()
+        self._pass()
+        self.assertEqual(len(self.calls), 3, "a related row appeared")
+        self._pass()
+        self.assertEqual(len(self.calls), 3)
+        self.lease[0] = False
+        self._pass()
+        # The proof (+1) and then the settlement attempt a free lease allows, which reads the
+        # verdict once more (+1).
+        self.assertEqual(len(self.calls), 5, "the lease is read afresh and is part of the verdict")
+        self.assertEqual(len(self.settled), 1)
+
+    def test_an_unchanged_verdict_is_proved_again_at_the_cap_for_each_state(self):
+        for state, first in ((PENDING, 600.0), (CompletionState("unknown"), 60.0),
+                             (CompletionState("not-applicable"), 600.0)):
+            with self.subTest(state=state.state):
+                self.context.forget_unsettled_owner(self.jobs, "att-owner")
+                self.state[0] = state
+                self.calls.clear()
+                self._pass()
+                self._pass()
+                self.assertEqual(len(self.calls), 1)
+                self.clock[0] += first - 1
+                self._pass()
+                self.assertEqual(len(self.calls), 1, "still inside the wait")
+                self.clock[0] += 1.1
+                self._pass()
+                self.assertEqual(len(self.calls), 2, "due again at the cap")
+        self.assertEqual(obligations._owner_retry_delay("pending", 9), 600.0)
+        self.assertEqual([obligations._owner_retry_delay("unknown", n) for n in range(6)],
+                         [60.0, 120.0, 240.0, 480.0, 600.0, 600.0])
+
+    def test_an_input_that_cannot_be_read_is_proved_again(self):
+        self._pass()
+        self._pass()
+        self.assertEqual(len(self.calls), 1)
+        self.paths["route-file"].unlink()
+        self.deps[0] = self._settlement_paths()  # still names the removed file
+        self._pass()
+        self.assertEqual(len(self.calls), 2)
+
+    def test_a_pending_owner_without_an_input_list_is_proved_again_every_pass(self):
+        # No list, no signature: a pending verdict has nothing to wait on, so the next pass
+        # proves it again instead of holding it to the 600 s cap (base held it there).
+        self.deps[0] = None
+        for expected in (1, 2, 3):
+            self._pass()
+            self.assertEqual(len(self.calls), expected)
+        self.assertEqual(self.context._unsettled, {})
+        # With a list the same verdict is held (see the reuse test above).
+        self.deps[0] = self._settlement_paths()
+        before = len(self.calls)
+        self._pass()
+        self._pass()
+        self.assertEqual(len(self.calls), before + 1)
+
+    def test_an_unknown_owner_without_an_input_list_keeps_the_retry_wait(self):
+        # A proof that ended on a failed read is retried on the existing 60 s, doubling to
+        # 600 s wait. That is the interval between retries of a failed proof, not a reused
+        # verdict; per pass it would bring back the cost of thousands of unknown owners.
+        self.deps[0] = None
+        self.state[0] = CompletionState("unknown")
+        self._pass()
+        self._pass()
+        self.assertEqual(len(self.calls), 1)
+        self.clock[0] += 59
+        self._pass()
+        self.assertEqual(len(self.calls), 1, "still inside the first 60 s")
+        self.clock[0] += 2
+        self._pass()
+        self.assertEqual(len(self.calls), 2)
+        waits = []
+        for _ in range(6):
+            start, count = self.clock[0], len(self.calls)
+            while len(self.calls) == count:
+                self.clock[0] += 5
+                self._pass()
+            waits.append(round(self.clock[0] - start, -1))
+        self.assertLessEqual(max(waits), 600.0 + 10, "the 600 s cap holds")
+        self.assertEqual(waits[-1], 600.0)
+
+    def test_a_proof_that_dies_on_an_exception_keeps_the_retry_wait(self):
+        # The proof itself raising (not a read it turned into a verdict) is the same failed
+        # proof: held to the retry wait, never to a pass-by-pass retry.
+        self.process = RuntimeError("proof failed")
+        self._pass()
+        self._pass()
+        self.assertEqual(len(self.calls), 1)
+        self.clock[0] += 61
+        self._pass()
+        self.assertEqual(len(self.calls), 2)
+
+    def test_a_proof_that_read_a_process_not_stopped_is_proved_again_every_pass(self):
+        # Process liveness is no file or row: nothing in the signature changes when the owner
+        # (or a child) stops, so such a verdict is never held. The owner stops between two
+        # passes and that very pass completes it; nothing waits for 600 s.
+        for label, state in (("owner pending", PENDING),
+                             ("child unknown", CompletionState("unknown"))):
+            for answer in ("live", "unverifiable"):
+                with self.subTest(case=label, answer=answer):
+                    self._fresh_context()  # the previous case completed (and settled) the owner
+                    self.state[0], self.process, self.lease[0] = state, answer, True
+                    self.calls.clear()
+                    for expected in (1, 2, 3):
+                        self._pass()
+                        self.assertEqual(len(self.calls), expected, "proved again each pass")
+                    self.assertEqual(self.context._unsettled, {})
+                    metrics = self.context.metrics()
+                    self.assertEqual((metrics["owner_passes"], metrics["owner_proofs"],
+                                      metrics["owner_unquiet_uncached"]), (3, 3, 3),
+                                     "each pass proved it and could not hold it")
+                    self.process = "quiescent"  # the process ends; no row or file changed
+                    self._pass()
+                    self.assertEqual(len(self.calls), 4)
+                    self.assertTrue(self.context.has_settled_owner(self.jobs, "att-owner"),
+                                    "the pass that sees it stopped completes it")
+                    self._pass()
+                    self.assertEqual(len(self.calls), 4, "completed: settled cache from here")
+
+    def test_owner_proof_counters_ride_on_the_settled_proof_file(self):
+        # The runner's per-pass diagnostics: owner passes, proofs, and pending/unknown
+        # verdicts not reused because a process they read was not stopped. They are
+        # written with the settled proofs (no file of their own) and ignored on load.
+        self._fresh_context()
+        self.state[0], self.process, self.lease[0] = PENDING, "live", True
+        self._pass()
+        self._pass()
+        self.process = "quiescent"
+        self._pass()
+        self.assertTrue(self.context.has_settled_owner(self.jobs, "att-owner"))
+        proofs = self.jobs.parent / "settled-owners.json"
+        self.assertTrue(self.context.save_settled_proofs(proofs))
+        saved = json.loads(proofs.read_text())["metrics"]
+        self.assertEqual((saved["owner_passes"], saved["owner_proofs"],
+                          saved["owner_unquiet_uncached"]), (3, 3, 2))
+        self.assertLessEqual(saved["since_ns"], saved["saved_ns"])
+        restarted = obligations.OwnerSettlementReadContext()
+        self.assertEqual(restarted.load_settled_proofs(proofs), 1)
+        self.assertEqual(restarted.metrics()["owner_proofs"], 0, "counters are per runner")
+
+    def _redrive(self, materialized):
+        record = registry_cache.registry_view(self.jobs).settlement_owner_candidates()[0]
+        return self.context.registered_owner_redrive(
+            self.jobs, record.status, record.raw, record.completion_metadata(), (),
+            lease_held=False, materialize=lambda: materialized.append(1))
+
+    def test_a_redrive_that_read_a_process_not_stopped_leaves_no_entry_to_defer_by(self):
+        # The registered-owner redrive reads the verdict after its settlement attempt. It
+        # keeps no entry for a verdict the classify path would not hold either, so neither
+        # consumer is deferred by it: the next call proves and attempts again.
+        self.lease[0] = False
+        for answer in ("live", "unverifiable"):
+            with self.subTest(answer=answer):
+                self._fresh_context()
+                self.state[0], self.process = PENDING, answer
+                materialized = []
+                self.assertFalse(self._redrive(materialized))
+                self.assertEqual(self.context._unsettled, {})
+                self.assertFalse(self._redrive(materialized), "not deferred: tried again")
+                self.assertEqual(len(materialized), 2)
+                before = len(self.calls)
+                self._pass()
+                self.assertGreater(len(self.calls), before, "classify proves it again too")
+                self.assertFalse(self.context.is_deferred(self.jobs, "att-owner"))
+
+    def test_a_redrive_that_read_only_stopped_processes_keeps_its_entry(self):
+        self.lease[0] = False
+        self.state[0], self.stopped[0], self.process = PENDING, PENDING, "quiescent"
+        materialized = []
+        self.assertFalse(self._redrive(materialized))
+        self.assertTrue(self._redrive(materialized), "held on its signature")
+        self.assertEqual(len(materialized), 1)
+
+    def test_a_redrive_pending_verdict_without_an_input_list_leaves_no_entry(self):
+        self.lease[0] = False
+        self.deps[0] = None
+        materialized = []
+        self.assertFalse(self._redrive(materialized))
+        self.assertEqual(self.context._unsettled, {})
+        self.assertFalse(self._redrive(materialized))
+        self.assertEqual(len(materialized), 2)
+
+    def test_a_not_stopped_owner_with_a_free_lease_makes_its_settlement_attempt_every_pass(self):
+        self.process, self.lease[0] = "live", False
+        for expected in (1, 2, 3):
+            self._pass()
+            self.assertEqual(len(self.settled), expected)
+
+    def test_a_proof_that_read_only_stopped_processes_is_still_held(self):
+        # A stopped process never lives again, so that observation is monotonic: the
+        # verdict stands on its signature and the cap, as before.
+        for state in (PENDING, CompletionState("unknown")):
+            with self.subTest(state=state.state):
+                self.context.forget_unsettled_owner(self.jobs, "att-owner")
+                self.state[0], self.stopped[0], self.process = state, state, "quiescent"
+                self.calls.clear()
+                self._pass()
+                self._pass()
+                self._pass()
+                self.assertEqual(len(self.calls), 1)
+                self.clock[0] += 601
+                self._pass()
+                self.assertEqual(len(self.calls), 2, "due again at the cap")
+
+    def test_a_process_read_that_fails_is_proved_again_every_pass(self):
+        # An unreadable process is unknown, so "not stopped": proved again, never held.
+        self.state[0] = CompletionState("unknown")
+        self.process = OSError("process table unreadable")
+        for expected in (1, 2, 3):
+            self._pass()
+            self.assertEqual(len(self.calls), expected)
+        self.assertEqual(self.context._unsettled, {})
+
+    def test_a_process_record_is_closed_outside_its_scope_and_joins_the_enclosing_one(self):
+        import dispatch_contract
+        self.process = "live"
+        dispatch_contract.attempt_process_quiescence({"attempt_id": "x"})  # no scope: no record
+        with dispatch_contract.quiescence_record_scope() as outer:
+            with dispatch_contract.quiescence_record_scope() as inner:
+                self.process = "quiescent"
+                dispatch_contract.attempt_process_quiescence({"attempt_id": "x"})
+            self.assertEqual((inner.observed, inner.unquiet, outer.observed, outer.unquiet),
+                             (1, False, 1, False))
+            self.process = "live"
+            dispatch_contract.attempt_governed_process_quiescence({"attempt_id": "x"})
+        self.assertEqual((outer.observed, outer.unquiet), (2, True))
+        with dispatch_contract.quiescence_record_scope() as fresh:
+            pass
+        self.assertEqual((fresh.observed, fresh.unquiet), (0, False))
+
+    def test_a_settlement_attempt_is_never_cached_by_its_verdict(self):
+        self.lease[0] = False
+        self._pass()
+        self.assertEqual(len(self.settled), 1)
+        self._pass()
+        self.assertEqual(len(self.settled), 1, "not due: the attempt waits")
+        self.clock[0] += 601
+        self._pass()
+        self.assertEqual(len(self.settled), 2, "due again: the attempt is made again")
+
+    def test_one_proof_builds_its_input_list_once(self):
+        with mock.patch.object(obligations, "_owner_settlement_dependency_paths",
+                               side_effect=lambda *a: self.deps[0]) as built:
+            self._pass()
+        self.assertEqual(built.call_count, 1)
+
+    def test_a_jobs_path_is_resolved_once_per_pass_whatever_the_number_of_owners(self):
+        context = obligations.OwnerSettlementReadContext()
+        self.addCleanup(context.close)
+        seen, real = [], Path.resolve
+
+        def counted(path, *args, **kwargs):
+            seen.append(str(path))
+            return real(path, *args, **kwargs)
+
+        def keyed(owners):
+            for number in range(owners):
+                context.has_settled_owner(self.jobs, f"att-{number}")
+                context.is_deferred(self.jobs, f"att-{number}")
+                context.forget_unsettled_owner(self.jobs, f"att-{number}")
+            return seen.count(str(self.jobs))
+
+        with mock.patch.object(Path, "resolve", autospec=True, side_effect=counted):
+            self.assertEqual(keyed(40), 120, "outside a pass every key is resolved afresh")
+            del seen[:]
+            context.begin_owner_pass()
+            try:
+                self.assertEqual(keyed(40), 1, "inside a pass it is resolved once")
+            finally:
+                context.end_owner_pass()
+            del seen[:]
+            obligations._resume_owner_settlements(self.jobs, context=context)
+            self.assertLessEqual(seen.count(str(self.jobs)), 12,
+                                 "a whole pass over a registry resolves the jobs path a few times")
+
+    def test_the_jobs_key_is_the_same_string_inside_and_outside_a_pass_and_follows_a_retarget(self):
+        real_a, real_b = self.base / "real-a", self.base / "real-b"
+        for real in (real_a, real_b):
+            real.mkdir()
+            (real / "jobs.log").write_text("fixture\n", encoding="utf-8")
+        link = self.base / "link"
+        link.symlink_to(real_a)
+        via_link = link / "jobs.log"
+        context = obligations.OwnerSettlementReadContext()
+        self.addCleanup(context.close)
+        outside = context._jobs_key(via_link)
+        self.assertEqual(outside, str((real_a / "jobs.log").resolve()))
+        context.begin_owner_pass()
+        try:
+            self.assertEqual(context._jobs_key(via_link), outside)
+            self.assertEqual(context._jobs_key(via_link), outside)
+            context.remember_active_owner(via_link, type("R", (), {
+                "completion_metadata": lambda self: {"attempt_id": "att-x"}})())
+        finally:
+            context.end_owner_pass()
+        self.assertEqual(context.active_owner_ids(real_a / "jobs.log"), ("att-x",),
+                         "one owner, one key, through either spelling of the path")
+        link.unlink()
+        link.symlink_to(real_b)
+        context.begin_owner_pass()
+        try:
+            self.assertEqual(context._jobs_key(via_link), str((real_b / "jobs.log").resolve()))
+        finally:
+            context.end_owner_pass()
+
+    def test_ensure_observers_resolves_a_records_parent_once_per_jobs_path(self):
+        root = self.base / "supervisor-state" / "obligations"
+        root.mkdir(parents=True)
+
+        def passes(count):
+            for stale in root.glob("batch-*.json"):
+                stale.unlink()
+            for number in range(count):
+                (root / f"batch-{number:04d}.json").write_text(json.dumps({
+                    "schema_version": 1, "id": f"batch-{number:04d}", "state": "complete",
+                    "identity": {}, "arguments": {}}), encoding="utf-8")
+            seen, real = [], Path.resolve
+
+            def counted(path, *args, **kwargs):
+                seen.append((str(path), kwargs.get("strict")))
+                return real(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "resolve", autospec=True, side_effect=counted):
+                obligations.ensure_observers(self.jobs)
+            return len([item for item in seen if item[1] is True])
+
+        self.assertEqual(passes(2), passes(30), "strict resolves do not grow with the records")
+        outsider = self.base / "elsewhere"
+        outsider.mkdir()
+        foreign = outsider / "batch-9999.json"
+        foreign.write_text("{}", encoding="utf-8")
+        snapshot = {"paths_by_jobs": {str(self.jobs.resolve()): [foreign]}, "signature": ()}
+        with mock.patch.object(obligations.subprocess, "Popen") as launch:
+            obligations.ensure_observers(self.jobs, observer_snapshot=snapshot)
+        launch.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

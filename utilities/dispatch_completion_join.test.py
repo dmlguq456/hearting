@@ -37,11 +37,15 @@ assert SPEC.loader is not None
 sys.modules[SPEC.name] = JOIN
 SPEC.loader.exec_module(JOIN)
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import dispatch_contract as D  # noqa: E402
 import dispatch_observation_log as OBS  # noqa: E402
 import dispatch_terminal_commit as TERMINAL  # noqa: E402
 import dispatch_supervision  # noqa: E402
 from split_module_fixture import patch_split, split_patch  # noqa: E402
+
+MISSING_WATCHER_ATTEMPT = unique_attempt_id("att-missing-watcher")
 
 # D-42 hermeticity: `classify_supervised_shell_command` and the supervisor
 # state readers consult the LIVE session's dispatch environment on purpose, so
@@ -661,7 +665,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         self.assertEqual(saved.metadata["attempt_descendant_proof"], D.ATTEMPT_DESCENDANT_PROOF)
 
     def missing_watcher_row(self):
-        fields = self.residue_row(attempt="att-missing-watcher", with_envelope=True).strip().split("\t")
+        fields = self.residue_row(attempt=MISSING_WATCHER_ATTEMPT, with_envelope=True).strip().split("\t")
         metadata = D.parse_registry_metadata(fields[5])
         for key in tuple(metadata):
             if key.startswith(("group_reap_", "attempt_descendant_")) or key == "launch_outcome":
@@ -674,7 +678,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         # A real harmless process stays alive until its watcher has exited.
         worker = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
                                   stdin=subprocess.PIPE, start_new_session=True,
-                                  env={**os.environ, "AGENT_DISPATCH_ATTEMPT_ID": "att-missing-watcher"})
+                                  env={**os.environ, "AGENT_DISPATCH_ATTEMPT_ID": MISSING_WATCHER_ATTEMPT})
         try:
             start = D.process_start_ticks(worker.pid)
             watcher = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
@@ -693,7 +697,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
                 worker.wait(timeout=3)
             if worker.stdin and not worker.stdin.closed:
                 worker.stdin.close()
-        child = JOIN.current_attempt_row(self.jobs, "att-missing-watcher")
+        child = JOIN.current_attempt_row(self.jobs, MISSING_WATCHER_ATTEMPT)
         stalled = D.attempt_process_quiescence(child.metadata, terminal_receipt=True)
         self.assertEqual(stalled.reason, "post-exit-receipt-incomplete")
         with mock.patch.object(JOIN.subprocess, "run") as run:
@@ -732,7 +736,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         for name, helper, result in cases:
             self.jobs.write_bytes(original)
             with self.subTest(case=name), patch_split(D, helper, return_value=result):
-                recovery = D.resolve_residue_drain(self.jobs, "att-missing-watcher", apply=True)
+                recovery = D.resolve_residue_drain(self.jobs, MISSING_WATCHER_ATTEMPT, apply=True)
                 self.assertFalse(recovery.get("changed"), recovery)
                 self.assertEqual(self.jobs.read_bytes(), original)
 
@@ -1411,7 +1415,7 @@ class DispatchCompletionJoinTest(unittest.TestCase):
 
     def test_committed_marker_waits_for_live_descendant_cleanup_then_delivers_success(self):
         """A real live descendant is a cleanup obligation, never a failed PASS."""
-        attempt = "att-residue-marker"
+        attempt = unique_attempt_id("att-residue-marker")
         self.marker_delivery_fixture(attempt)
         residue = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(30)"],
@@ -3892,6 +3896,41 @@ class FinishedChildClosure(unittest.TestCase):
         self.assertIn("failure_class=capacity", text)
         self.assertIn(f"capacity_log={server_log}", text)
 
+    def test_close_finished_child_keeps_the_classified_kind_for_invalid_and_capacity(self):
+        from dispatch_contract_base import _terminal_delivery_receipt
+
+        claude = {"type": "result", "is_error": True, "stop_reason": "refusal", "api_error_status": 200}
+        cases = (
+            ("claude", "stage", claude, "dead-invalid-envelope", "refusal"),
+            ("claude", "frame", claude, "dead-invalid-envelope", "refusal"),
+            ("opencode", "review", {"type": "result", "runtime": "opencode", "is_error": True,
+                "error": {"name": "APIError", "status": 429}}, "dead-capacity", "APIError"),
+            ("codex", "review", {"type": "dispatch.supervisor.turn.failed",
+                "codex_error_info": "usageLimitExceeded"}, "dead-capacity", "usageLimitExceeded"),
+        )
+        for harness, worker, event, note, kind in cases:
+            with self.subTest(harness=harness, worker=worker):
+                attempt = f"att-provider-{harness}-{worker}"
+                row = self.child(quiescent=True, attempt_id=attempt)
+                log = self.base / f"worker.{attempt}.{harness}.jsonl"
+                log.write_text(json.dumps(event) + "\n")
+                meta = dict(row.metadata, harness=harness, log_file=str(log), worker_type=worker)
+                if worker == "review":
+                    meta.update(capability="unit", route_node="unit", dispatch_depth="1",
+                                workflow_completion="runtime-v1")
+                fields = row.raw.split("\t")
+                fields[5] = ",".join(f"{k}={v}" for k, v in meta.items())
+                self.jobs.write_text("\t".join(fields) + "\n")
+                row = JOIN.exact_attempt_row(self.jobs, attempt)
+                self.assertEqual(JOIN.close_finished_child(row, jobs=self.jobs), "")
+                closed = JOIN.exact_attempt_row(self.jobs, attempt)
+                self.assertEqual((closed.status, closed.metadata["note"]), ("done", note))
+                self.assertEqual(closed.metadata.get("provider_failure_kind"), kind)
+                followup = JOIN.completion_followup_text(_terminal_delivery_receipt(closed.metadata),
+                                                         jobs=str(self.jobs))
+                self.assertIn(f"Provider failure for {attempt} was {kind}.", followup)
+                self.assertEqual("same harness and model" in followup, kind == "refusal")
+
     def test_close_finished_child_classification_evidence_override(self):
         # plan.md item 5: `ExactReviewClassification.evidence`, when a typed
         # classifier already computed it (e.g. the route-free review absent
@@ -4791,10 +4830,10 @@ class NextLegReceiptTest(unittest.TestCase):
         receipt = {"children": [{"attempt_id": "owner", "required_action": "advance-completed",
                                  "next_leg": self.NEXT_LEG}]}
         text = JOIN.completion_followup_text(receipt, jobs=str(jobs))
-        self.assertIn("Original request/format apply", text)
+        self.assertIn("Close per §0.5", text)
         self.assertIn(self.NEXT_LEG["compose_command"], text)
         self.assertIn("If this next leg is already approved, execute it in this turn", text)
-        self.assertIn("Receipt/ACK isn't execution", text)
+        self.assertIn("Nothing starts it from receipt alone", text)
         plain = JOIN.completion_followup_text({"children": [{"attempt_id": "owner", "required_action": "advance-completed"}]},
                                               jobs=str(jobs))
         self.assertNotIn("next leg", plain)
@@ -4811,18 +4850,24 @@ class NextLegReceiptTest(unittest.TestCase):
             receipt, jobs=str(jobs))
         from dispatch_session_sweep import COMPLETION_DELIVERY_HEADER
         fixed_text = COMPLETION_DELIVERY_HEADER + "\n" + text
-        required = ("Original request/format apply", "Review the result",
-                    "continue approved work", "First close:",
-                    "one or two sentences", "important remaining failure",
-                    "ask only what only the person can decide", "in-scope, reversible next step", "as proceeding",
-                    "point to the detailed record",
-                    "No harvest/restart/manual finalize", "Receipt/ACK isn't execution",
-                    "handled exact repeats need no ACK", "new failures/conflicts",
-                    "unfinished work, questions")
+        # The receipt names the delivery, says no harvest is owed and points at the close
+        # contract; the contract itself lives once in every adapter bootstrap and WORKFLOW
+        # §0.5, which the session already holds, instead of on every notice.
+        required = ("Act on each required_action", "keep failures, unfinished work and questions",
+                    "Owner finished; no harvest.", "Close per §0.5")
         missing = [part for part in required if part not in fixed_text]
-        self.assertFalse(missing, f"missing completion-close obligations: {missing}")
+        self.assertFalse(missing, f"missing completion-close pointers: {missing}")
         receipt_only = "Receipt received. The queue was consumed and ACKed."
         self.assertFalse(all(part in receipt_only for part in required))
+        repo = Path(JOIN.__file__).resolve().parents[1]
+        contract = ("Close material work with the §0.5 contract: result in one or two sentences",
+                    "keep requested output", "A receipt, queue entry or ACK is not execution")
+        for bootstrap in ("adapters/claude/CLAUDE.md", "adapters/codex/AGENTS.md", "adapters/opencode/AGENTS.md"):
+            flat = " ".join((repo / bootstrap).read_text(encoding="utf-8").split())
+            missing = [part for part in contract if part not in flat]
+            self.assertFalse(missing, f"{bootstrap} lacks the close contract: {missing}")
+        workflow = (repo / "core/WORKFLOW.md").read_text(encoding="utf-8")
+        self.assertIn("first close gives\nthe result in one or two sentences", workflow)
 
     def test_completion_followup_carries_the_runtime_sealed_summary(self):
         import dispatch_terminal_commit as DTC
@@ -4842,19 +4887,37 @@ class NextLegReceiptTest(unittest.TestCase):
         summary = "[완료 요약] autopilot-code · route rt-owner\n결과: 완료\n산출물: 없음"
         (slot / work_intent.SUMMARY_NAME).write_text(summary + "\n")
         text = JOIN.completion_followup_text(receipt, jobs=str(jobs))
-        self.assertIn("First close: give the result in one or two sentences", before)
-        self.assertIn("point to the detailed record", before)
-        self.assertIn("ask only what only the person can decide", before)
-        self.assertIn("in-scope, reversible next step (such as fixing and re-testing) as proceeding", before)
-        self.assertNotIn("at most one", before)
+        self.assertEqual(before, "Owner finished; no harvest. Close per §0.5.")
         self.assertNotIn("[완료 요약]", before)
-        self.assertTrue(text.startswith("Original request/format apply."))
-        self.assertIn("one or two sentences", text)
-        self.assertIn("Keep the runtime summary below as agent context and record; do not reproduce it for the person.", text)
+        self.assertTrue(text.startswith("Owner finished; no harvest. Close per §0.5;"))
+        self.assertIn("the summary below is agent context: do not reproduce it for the person.", text)
         self.assertNotIn("show the runtime summary below to the person", text)
         self.assertIn("\n" + summary, text)
         self.assertNotIn("\n\n", text)
         self.assertEqual(text, JOIN.completion_followup_text(receipt, jobs=str(jobs)))
+
+
+    def test_a_notice_line_failure_never_loses_the_sealed_summary(self):
+        import dispatch_terminal_commit as DTC
+        import work_intent
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        route_file = root / "rt-owner.json"
+        route_file.write_text(json.dumps({"route_id": "rt-owner", "artifact_root": str(root)}))
+        jobs = root / "jobs.log"
+        jobs.write_text(row("done", "owner", "parent", "task", process_metadata={
+            "dispatch_depth": "1", "worker_type": "owner", "workflow_completion": "runtime-v1",
+            "owner_route_file": str(route_file)}))
+        slot = DTC.terminal_slot(root, "rt-owner", "owner")
+        slot.mkdir(parents=True)
+        summary = "[Completion summary] unit · route rt-owner\nResult: Done"
+        (slot / work_intent.SUMMARY_NAME).write_text(summary + "\n")
+        receipt = {"children": [{"attempt_id": "owner", "required_action": "advance-completed"}]}
+        for error in (OSError("store unreadable"), ValueError("bad row")):
+            with self.subTest(type(error).__name__), \
+                    mock.patch("unit_continue.notice_lines", side_effect=error):
+                text = JOIN.completion_followup_text(receipt, jobs=str(jobs))
+            self.assertIn("\n" + summary, text)
 
 
 class MaterializePendingDeliveryTest(unittest.TestCase):
@@ -6377,7 +6440,7 @@ class WorkContinuationReceiptTest(unittest.TestCase):
         text = self.render([("owner","advance-completed")])
         self.assertNotIn("capability-route.py start",text)
         self.assertNotIn("preflight.sh harvest",text)
-        self.assertIn("Original request/format apply",text)
+        self.assertIn("Owner finished; no harvest.",text)
         self.assertNotIn("advance the route",text)
 
     def test_parked_owner_followup_says_paused_and_keeps_start_handle(self):
@@ -7255,9 +7318,11 @@ class SettlingReceiptNoticeTest(unittest.TestCase):
 
 
 class RegisteredDeliveryExpiryHelperTest(unittest.TestCase):
-    def _completed_delivery(self, root, attempt, pid, start):
+    def _completed_delivery(self, root, attempt, pid, start, ns=None):
         jobs = root / "jobs.log"
         row = ReconcilePendingDeliveryTest()._row(attempt, ancestry=(str(pid), str(start)))
+        if ns is not None:
+            row += f",parent_runtime_ns={ns}"
         jobs.write_text(row + "\n", encoding="utf-8")
         self.assertTrue(D.close_attempt_row(jobs, attempt, "completed-marker"))
         self.assertIsNotNone(JOIN.materialize_after_terminal_close(jobs, attempt))
@@ -7317,6 +7382,60 @@ class RegisteredDeliveryExpiryHelperTest(unittest.TestCase):
                 reread = JOIN.pending_delivery.read(
                     jobs.parent, metadata["parent_sid"], record["delivery_id"])
                 self.assertEqual(reread["state"], "pending")
+
+    def test_replaced_recipient_expiry_requires_the_exact_live_runtime_and_original_parent(self):
+        # #1410: the session was replaced inside a live runtime, so the dead-recipient rule does
+        # not apply. Only the next session of that very runtime, with the original parent still
+        # the effective recipient, may expire the exact record.
+        helper = getattr(JOIN, "expire_pending_for_replaced_recipient", None)
+        self.assertTrue(callable(helper), "replaced-recipient expiry helper is missing")
+        import dispatch_seat_handover as handover
+        pid, start = os.getpid(), D.process_start_ticks(os.getpid())
+        ns = D.process_namespace_identity(pid)
+        binding = (str(pid), str(start), ns)
+        cases = (
+            ("exact", pid, start, ns, binding, "expired"),
+            ("other-pid", pid, start, ns, (str(pid + 1), str(start), ns), "pending"),
+            ("other-start", pid, start, ns, (str(pid), str(start) + "0", ns), "pending"),
+            ("other-namespace", pid, start, ns, (str(pid), str(start), ns + "0"), "pending"),
+            ("binding-missing-part", pid, start, ns, (str(pid), str(start), ""), "pending"),
+            ("row-without-namespace", pid, start, None, binding, "pending"),
+            ("dead-runtime", 999999999, "123456789", ns, ("999999999", "123456789", ns), "pending"),
+            ("wrong-digest", pid, start, ns, binding, "skipped"),
+            ("wrong-row-revision", pid, start, ns, binding, "skipped"),
+            ("changed-lineage", pid, start, ns, binding, "protected"),
+        )
+        for label, row_pid, row_start, row_ns, bound, expected in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                jobs, metadata, record = self._completed_delivery(
+                    Path(tmp), "att-replaced-" + label, row_pid, row_start, row_ns)
+                candidate = json.loads(json.dumps(record))
+                patches = []
+                if label == "wrong-digest":
+                    candidate["recipient_digest"] = "0" * 64
+                elif label == "wrong-row-revision":
+                    candidate["row_revisions"][candidate["attempt_ids"][0]] = "foreign-revision"
+                elif label == "changed-lineage":
+                    patches.append(mock.patch.object(
+                        handover, "effective_parent", return_value="successor-session"))
+                with contextlib.ExitStack() as stack:
+                    for patcher in patches:
+                        stack.enter_context(patcher)
+                    result = helper(jobs, metadata, candidate, attempt_id="att-replaced-" + label,
+                                    runtime_binding=bound)
+                self.assertEqual(result, expected)
+                reread = JOIN.pending_delivery.read(
+                    jobs.parent, metadata["parent_sid"], record["delivery_id"])
+                if expected == "expired":
+                    self.assertEqual((reread["state"], reread["expiry_reason"]),
+                                     ("expired", "recipient-session-replaced"))
+                else:
+                    self.assertEqual(reread["state"], "pending")
+        # The dead-recipient rule keeps its own reason and does not expire a live runtime.
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs, metadata, record = self._completed_delivery(Path(tmp), "att-replaced-dead-rule", pid, start, ns)
+            self.assertEqual(JOIN.expire_pending_for_dead_recipient(
+                jobs, metadata, record, attempt_id="att-replaced-dead-rule"), "pending")
 
     def test_periodic_sweep_calls_the_shared_single_record_rule(self):
         helper = getattr(JOIN, "expire_pending_for_dead_recipient", None)

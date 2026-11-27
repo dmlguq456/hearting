@@ -36,9 +36,11 @@ from dispatch_session_sweep import (  # noqa: E402
     CLAUDE_CONTEXT_CHARS,
     activate,
     ack_delivered,
-    claude_hook_evidence,
+    claude_receipt_observer,
     fit_inline,
     release_claims,
+    replaced_session_notices,
+    settle_replaced_session_notices,
     settle_stop_sends,
     request_obligation_reconciliation,
     sweep_deliver,
@@ -103,30 +105,9 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
         return 0
     seen: set[Path] = set()
     batches: list[tuple[Path, list[dict]]] = []
-    receipt_observer = None
-    if _event_name(payload) == "UserPromptSubmit" and isinstance(payload, dict):
-        transcript_path = payload.get("transcript_path", payload.get("transcriptPath"))
-        cwd = payload.get("cwd")
-        if isinstance(transcript_path, str) and isinstance(cwd, str):
-            cached_signature = object()
-            cached_evidence = None
-
-            def observe_receipt(_root, _storage, _record):
-                nonlocal cached_signature, cached_evidence
-                try:
-                    info = Path(transcript_path).stat()
-                    signature = (info.st_size, info.st_mtime_ns)
-                except OSError:
-                    signature = None
-                if signature != cached_signature:
-                    try:
-                        cached_evidence = claude_hook_evidence(payload, session_id)
-                    except (OSError, RuntimeError, TypeError, ValueError):
-                        cached_evidence = None
-                    cached_signature = signature
-                return cached_evidence
-
-            receipt_observer = observe_receipt
+    received: list[dict] = []
+    receipt_observer = (claude_receipt_observer(payload, session_id)
+                        if _event_name(payload) == "UserPromptSubmit" else None)
     from dispatch_notice_state import NoticeReadContext
     notice_context = NoticeReadContext()
     if _event_name(payload) == "UserPromptSubmit":
@@ -157,7 +138,7 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
             else:
                 records, _entries = sweep_deliver(
                     root, RECIPIENT_KIND, session_id,
-                    notice_context=notice_context, deadline_ns=deadline_ns,
+                    notice_context=notice_context, deadline_ns=deadline_ns, received_out=received,
                     **({"receipt_observer": receipt_observer} if receipt_observer else {}))
         except Exception:  # noqa: BLE001 -- fail-open (§13.33.1-(3))
             continue
@@ -181,8 +162,40 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
         # (peer-message-record.py stop) or the next prompt.
         context, batches, rest = fit_inline(batches, CLAUDE_CONTEXT_CHARS)
     prompt = _event_name(payload) == "UserPromptSubmit"
+    if received and prompt and str(payload.get("prompt") or "").lstrip().startswith("<task-notification>"):
+        # A notification woke this turn and is in its own prompt: received, and owed its
+        # follow-through like a carried record (PG-44). A typed prompt owes nothing for them.
+        _note_turn_received(payload, session_id, [(None, received)])
     if rest and prompt:
         release_claims(session_id, rest, RECIPIENT_KIND, reason="claude-prompt-context-over-limit")
+    # A plain `/clear` leaves the earlier session's completion with no recipient. One notice line per
+    # such completion joins this prompt's context when it fits whole; the rest wait for the next prompt.
+    # The notices are collected whole before any line joins the context, so a failure while collecting
+    # leaves the context exactly as the ordinary delivery built it. A completion the earlier session's
+    # wake already put into this conversation (its exact receipt is in this transcript) needs no line:
+    # it is ACKed as received here.
+    candidate_notices = []
+    evidence = None
+    if prompt:
+        try:
+            evidence = receipt_observer(None, None, None) if receipt_observer else None
+            candidate_notices = list(replaced_session_notices(
+                roots, session_id, deadline_ns=deadline_ns, evidence=evidence))
+        except Exception:  # noqa: BLE001 -- fail-open: a notice never blocks the prompt
+            candidate_notices = []
+    received_notices = [notice for notice in candidate_notices if notice.received]
+    if received_notices:
+        try:
+            settle_replaced_session_notices(received_notices, session_id=session_id, evidence=evidence)
+        except Exception:  # noqa: BLE001
+            pass
+    shown_notices = []
+    for notice in (notice for notice in candidate_notices if not notice.received):
+        joined = f"{context}\n{notice.line}" if context else notice.line
+        if len(joined) > CLAUDE_CONTEXT_CHARS:
+            break
+        context = joined
+        shown_notices.append(notice)
     if not context:
         return 0
     print(
@@ -206,6 +219,11 @@ def _process_session(payload: object, session_id: str, deadline_ns: int | None =
             except Exception:  # noqa: BLE001
                 pass
         _note_turn_received(payload, session_id, batches)
+        if shown_notices:
+            try:
+                settle_replaced_session_notices(shown_notices)
+            except Exception:  # noqa: BLE001
+                pass
     return 0
 
 
@@ -214,14 +232,19 @@ def _note_turn_received(payload: object, session_id: str, batches) -> None:
 
     The same per-turn record Codex's prompt bridge keeps; Claude's Stop
     (``peer-message-record.py stop``) applies the one pass. Keyed by Claude's
-    ``prompt_id``; fail-soft.
+    ``prompt_id``; fail-soft. ``batches`` holds the ordinary records the prompt showed. A prompt
+    that showed none (only a previous-session notice line, which is information and owes no
+    action) records nothing, as before the notice existed: ``note_received`` would otherwise
+    start this turn's state with nothing in it.
     """
     try:
         turn = payload.get("prompt_id") if isinstance(payload, dict) else None
         if not isinstance(turn, str) or not turn or str(payload.get("agent_id") or "").strip():
             return
-        import codex_turn_carrier as carrier
         records = [record for _root, rows in batches for record in rows]
+        if not records:
+            return
+        import codex_turn_carrier as carrier
         carrier.note_received(session_id, turn, carrier.owed_items(records),
                               rendered=[str(record.get("delivery_id")) for record in records])
     except Exception:  # noqa: BLE001

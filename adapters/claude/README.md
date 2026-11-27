@@ -27,7 +27,7 @@ and native completion remains separate from process liveness.
 
 The always-loaded `adapters/claude/CLAUDE.md` keeps purpose, judgment, where
 to look, and the instruction to follow the next action the runtime prints.
-Detail it used to carry lives here and in the core sections it names.
+Detail lives here and in the core sections it names.
 
 - Claude hooks realize portable invariants for workflow signals, spec-read
   observations, memory, and design checks. Main-session memory lifecycle does
@@ -67,9 +67,9 @@ so that residual runtime input is reported separately from profile masking.
 | artifact root | primary-checkout canonical `.agent_reports` via `utilities/artifact-root.sh`; linked-worktree snapshots are read-only; legacy fallback only at the canonical root |
 | worktree cleanup | `adapters/claude/bin/worktree-cleanup.sh`; dry-run first, apply only after merge + integrated verification + push |
 | interactive owner completion | `hooks/dispatch-owner-rewake.py`; `PostToolUse(Bash)` `asyncRewake` arms from the start receipt or the registry's same-session dispatch-depth-1 owner row — never from command text; `Stop` and `SessionStart` (a reopened conversation) watch every unwatched attempt of the session and wake once for the first due. The arm ledger keeps one waiter per attempt and re-arms after the owner's gate closes (SD-129); supervision wakes return their notice claims to the immediate prompt sweep. It waits outside the model and returns one exact-attempt receipt. |
-| in-turn records | `hooks/peer-message-record.py post-tool` hands the running turn the records owed to this session (a completion that closed during the tool call, a due check, a report notice) through the shared sweep the prompt carrier uses, and ACKs what it showed; a record the `asyncRewake` hook already claimed stays with it |
+| in-turn records | `hooks/peer-message-record.py post-tool` hands the running turn the notices owed to this session (a due check, a report notice) through the shared sweep the prompt carrier uses, and ACKs what it showed. It carries no completion: the `asyncRewake` hook sends it, and `stop` makes up what the transcript does not show received (a turn cut by Esc or an API error runs no `stop`, so the next prompt does) |
 | steward watch completion | `hooks/peer-steward-rewake.py`; `PostToolUse(Bash)` `asyncRewake` arms only from a same-session `peer-steward.py watch` armed line with `wake=hook`, waits on the watch receipt outside the model, acks it, and returns one exit-2 notice per watch; `hooks/peer-message-record.py prompt` sweeps un-acked receipts at the next prompt if the hook dies |
-| memory candidate exposure | `UserPromptSubmit` runs `hooks/mem-recall-inject.sh`: active current-project/global capsule headlines and IDs only, maximum six / 1,200 UTF-8 bytes, fail-open. The model decides relevance and reads full records. The bridge publishes the same-turn receipt required by main-session material mutation; explicit `recall-gate` is the fallback |
+| memory candidate exposure | `UserPromptSubmit` runs `hooks/mem-recall-inject.sh`: active current-project/global capsule headlines and IDs only, maximum three / 600 UTF-8 bytes, fail-open. The model decides relevance and reads full records. The bridge publishes the same-turn receipt required by main-session material mutation; explicit `recall-gate` is the fallback |
 | stage-session capacity | `dispatch-headless.py` projects the portable sub-session axes, phase brief, fixed-file fence, and `_internal/state/<attempt_id>.md`. `PreCompact` flushes the ledger, `PostCompact` re-reads it, and the edit hook denies missing/stale/out-of-list state. Sub-sessions carry `stage_authority=0`; only the dispatch-depth-1 owner aggregates the one stage gate. |
 
 ## Runtime Home Projection
@@ -115,7 +115,7 @@ The Claude Code adapter maps portable roles from `core/CONVENTIONS.md §2` to co
 | `deep orchestrator` | `opus` xhigh | Stage gates, failover, and evidence judgment for standard+ dispatch-depth-1 ownership |
 | `fast implementer` | `sonnet` | Routine implementation and refactoring; escalate complex API/library design |
 | `orchestrator` | `sonnet` medium | Balanced mechanical coordination of decided calls, paths, and states |
-| `external adversary` | Codex CLI via `codex-review-team` | Independent hostile review for the `adversarial` intensity pass. The same Codex engine may host a neutral cross-harness parallel leg, but that is a reviewer role, not this hostile role. |
+| `external adversary` | a different reviewer, engine or harness, proven by the adapter (`CONVENTIONS §1`) | Independent hostile review for the `adversarial` intensity pass. The same Codex engine may host a neutral cross-harness parallel leg, but that is a reviewer role, not this hostile role. |
 | `external adversary orchestrator` | `sonnet` wrapper | Invoke and summarize the external engine rather than perform the review |
 
 Route-bound registered work uses a second, independent execution-budget axis:
@@ -127,7 +127,7 @@ Route-bound registered work uses a second, independent execution-budget axis:
 | `balanced` | `sonnet` / `high` | long multi-step execution after the decision is settled |
 | `light` | `sonnet` / `medium` | routine implementation, verification, reporting, and breadth legs |
 | `mini` | `sonnet` / `low` | lifecycle and micro-semantic helpers only; substantive dispatch-depth-1/2 work is rejected |
-| `top` | `fable` / `max` | exception above deep: the main-session-only model, reachable only from a route that seals the explicit `top` profile on a dispatch-depth-1 owner (`model_source=profile-top`; the wrapper refuses `top` without that route); no cascade in or out, no `--model` override |
+| `top` | `fable` / `max` | exception above deep: the main-session-only model, reachable only from a route that seals the explicit `top` profile on a dispatch-depth-1 owner, or, at intensity `strong`+, on a depth-2 stage worker or review/verification leg the person named in `--explicit-profiles` (`model_source=profile-top`; the wrapper refuses `top` without that route); no cascade in or out, no `--model` override |
 
 These are the shipped defaults and equal the maintainer's runtime mapping
 (2026-09-09 maintainer decision: a runtime value changed by instruction becomes
@@ -217,7 +217,7 @@ need different models. The shipped deep point is the `deep` tier (`opus`/xhigh);
 balanced-deep rides its own `balanced-deep` tier (`opus`/medium), so the two
 deep-side profiles currently share a model and differ only in effort. The `top`
 tier (`fable`/max) is the one exception to `CFG_MAIN_SESSION_ONLY_MODELS`, and
-only through a route that sealed the `top` profile for its owner. A user-selected legacy tier continues to override the shipped profile.
+only through a route that sealed the `top` profile for its owner (or a person-named depth-2 stage worker or review/verification leg at `strong`+). A user-selected legacy tier continues to override the shipped profile.
 
 ## Window contract
 
@@ -255,3 +255,27 @@ New installations enable the shared session shell for new Claude, Codex and Open
 terminals. Updates preserve existing choices and older absent policies. Use
 `hearting session shell disable` to restore native launch behavior, or
 `hearting session shell enable` to enable it again. Existing sessions keep running.
+
+## Left arrow stays in the conversation
+
+Claude Code's `←` on an empty prompt sends the conversation to a background
+session under a new session id, which the Hearting shell, panel and message
+delivery do not follow. An install therefore adds `leftArrowOpensAgents: false`
+to Claude's global config file (`~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json`;
+Claude ignores this key in `settings.json`) only when the key is absent, so a
+value you set yourself, `true` or `false`, is never overwritten. `/bg`,
+`/background` and `claude agents` still work. To undo it, set it to `true` in
+`/config` ("← opens agents") or in that file; later installs keep your value.
+Uninstall removes the key only while it is still the `false` the install wrote.
+New Claude sessions pick it up for certain; a session that is already open can
+pick it up shortly afterwards (it re-reads the file), so restart it if the arrow
+still sends it to the background.
+
+The file is rewritten under the same `<file>.lock` directory lock Claude takes
+for each of its own saves, so an open Claude's save is never overwritten. If
+Claude is saving at that moment the install waits about two seconds, then skips
+the key with a report line and the next install tries again. Hearting never
+breaks a lock it did not take, never creates the file when it is missing (Claude
+creates it; the next install adds the key), leaves a file it cannot rewrite
+exactly (for example a number outside the JSON range) as it is, and skips a file
+that belongs to another user.

@@ -199,10 +199,8 @@ class QueueDeliveryTest(unittest.TestCase):
                 recipient.receipt_marker(row, THREAD)
             )
         expected_batch_body = (
-            "Hearting runtime delivery. Follow required_action/next-action receipt; "
-            "inspect-recovery: diagnostic. runtime-v1 finalizes. Tracked-Workflow Continuation. "
-            "Keep new failures/conflicts, unfinished work, questions; no extra "
-            "harness-scheduled calls/Monitor/dispatch-wait/polling.\n" +
+            "Hearting runtime delivery. Act on each required_action; keep failures, unfinished work "
+            "and questions; no polling.\n" +
             "\n".join("- " + line for line in batch_lines)
         )
         self.assertEqual(QUEUE.native_client_message_id(
@@ -233,6 +231,13 @@ class QueueDeliveryTest(unittest.TestCase):
             recipient.receipt_marker(singleton[0], THREAD)
         )
         self.assertEqual(QUEUE.prior_followup_text(current_followup), prior_followup)
+        # A queue item v4.32.4 wrote carries its own first line; the current one maps back to it.
+        import dispatch_completion_join as JOIN
+        for has_summary, rest in ((True, "\n[완료 요약] x · route rt-x"), (False, "")):
+            self.assertEqual(QUEUE.prior_followup_text(JOIN.RUNTIME_V1_FOLLOWUP_PREFIXES[has_summary] + rest),
+                             JOIN.SHIPPED_RUNTIME_V1_FOLLOWUP_PREFIXES[has_summary] + rest)
+        self.assertTrue(JOIN.SHIPPED_RUNTIME_V1_FOLLOWUP_PREFIXES[True].startswith(
+            "Original request/format apply. Review the result and continue approved work"))
         # PG-35: an open-row line from the previous release named the Codex wrapper.
         import dispatch_completion_join as JOIN
         harvest = JOIN.completion_harvest_command("att-q", "complete-open", jobs="/j/jobs.log")

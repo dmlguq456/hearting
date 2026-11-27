@@ -75,6 +75,7 @@ class AllocationReceiptTest(unittest.TestCase):
         self.assertEqual(row["depth_affinity"], {"owner": "claude", "worker": "codex"})
         self.assertEqual(row["rank"], ["claude", "codex"])
         self.assertEqual(row["capacity"]["codex"], 74.0)
+        self.assertNotIn("capacity_raw_headroom", row)
         self.assertEqual(row["counts"], {"claude": 3, "codex": 4, "opencode": 0})
         # The receipt names the keys the sealed strategy never read: this is
         # the evidence that was missing when depth-affinity looked "applied".
@@ -110,6 +111,45 @@ class AllocationReceiptTest(unittest.TestCase):
         )
         row = json.loads(Path(plain["path"]).read_text(encoding="utf-8").splitlines()[0])
         self.assertIsNone(row["harness_weights"])
+
+    def test_the_row_and_its_line_carry_the_field_and_the_weights_the_choice_used(self):
+        sealed = {**self._policy("balanced"), "harness_weights": {"opencode": 0.4, "codex": 0.7},
+                  "field_weights": {"claude": 0.95, "codex": 0.85, "opencode": 1.0}}
+        result = self.receipt.record_allocation_receipt(
+            route_id="rt-field", route_node="execute", writer="stage-dispatch-fallback.py",
+            child_harness="claude", allocation=sealed, field="code", jobs=self.jobs,
+        )
+        row = json.loads(Path(result["path"]).read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(row["field"], "code")
+        self.assertEqual(row["field_weights"], {"claude": 0.95, "codex": 0.85, "opencode": 1.0})
+        self.assertEqual(row["inert_keys"], {})
+        line = self.receipt.format_row(row)
+        self.assertTrue(line.endswith("field=code w=claude:0.95|codex:0.595|opencode:0.4"), line)
+        # a field with no row of its own still names the field and the user's flat weights
+        neutral = self.receipt.record_allocation_receipt(
+            route_id="rt-neutral", route_node="execute", writer="stage-dispatch-fallback.py",
+            child_harness="claude", field="admin",
+            allocation={**self._policy("balanced"), "harness_weights": {"opencode": 0.4}}, jobs=self.jobs,
+        )
+        row = json.loads(Path(neutral["path"]).read_text(encoding="utf-8").splitlines()[0])
+        self.assertIsNone(row["field_weights"])
+        self.assertTrue(self.receipt.format_row(row).endswith("field=admin w=opencode:0.4"))
+        # no field (frame, an older route): `field=-` and the row still reads
+        bare = self.receipt.record_allocation_receipt(
+            route_id="rt-bare", route_node="execute", writer="stage-dispatch-fallback.py",
+            child_harness="claude", allocation=self._policy("balanced"), jobs=self.jobs,
+        )
+        row = json.loads(Path(bare["path"]).read_text(encoding="utf-8").splitlines()[0])
+        self.assertIsNone(row["field"])
+        self.assertTrue(self.receipt.format_row(row).endswith(" field=-"))
+        old_row = {k: v for k, v in row.items() if k not in ("field", "field_weights")}
+        self.assertTrue(self.receipt.format_row(old_row).endswith(" field=-"))
+        # a continuation route keeps the sealed row but not the field name: the line still says
+        # what the choice multiplied (`field=- w=...`), not "no row"
+        kept = {**row, "field_weights": {"claude": 0.95, "codex": 0.85, "opencode": 1.0},
+                "harness_weights": {"opencode": 0.4, "codex": 0.7}}
+        self.assertTrue(self.receipt.format_row(kept).endswith(
+            " field=- w=claude:0.95|codex:0.595|opencode:0.4"), self.receipt.format_row(kept))
 
     def test_an_observed_affinity_names_its_source_and_a_sealed_one_adds_nothing(self):
         observed = self.receipt.record_allocation_receipt(
@@ -161,6 +201,24 @@ class AllocationReceiptTest(unittest.TestCase):
         self.assertEqual(summary["preferred_honored"], {"yes": 2, "no": 2, "n/a": 0})
         self.assertEqual(summary["rows_with_inert_keys"], 1)
         self.assertEqual(summary["by_unit"]["u/execute"], {"claude": 1})
+
+    def test_receipt_preserves_the_adjusted_score_and_adds_only_different_raw_quota(self):
+        spec = importlib.util.spec_from_file_location("capacity", MODULE.with_name("harness-capacity.py"))
+        capacity = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(capacity)
+        codex = capacity._headroom([(90, 1600.0, 18000)], now=1000.0)
+        self.receipt.record_allocation_receipt(
+            route_id="rt-timed", route_node="execute", writer="stage-dispatch-fallback.py",
+            child_harness="claude", capacity={"claude": 79.0, "codex": codex, "opencode": None},
+            jobs=self.jobs,
+        )
+        row, = self.receipt.read_rows(route_id="rt-timed", jobs=self.jobs)
+        self.assertEqual(row["capacity"], {"claude": 79.0, "codex": float(codex), "opencode": None})
+        self.assertEqual(row.pop("capacity_raw_headroom"), {"codex": 10.0})
+        raw_row = {**row, "capacity_raw_headroom": {"codex": 10.0}}
+        self.assertEqual(self.receipt.format_row(raw_row).splitlines(), [
+            self.receipt.format_row(row), "capacity_raw_headroom.codex=10.0",
+        ])
 
     def test_cli_list_and_summary_are_one_line_per_answer(self):
         self.receipt.record_allocation_receipt(

@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import contextlib
+import errno
 import datetime
 import fcntl
 import hashlib
@@ -51,6 +52,8 @@ CONNECT_TIMEOUT = 8
 PROBE_TIMEOUT = 40
 # Allow the SSH connection and both 5s NVIDIA queries before process attribution.
 GPU_PROBE_TIMEOUT = 20
+# Linux caps one argv word at 32 pages (131072 bytes); past it execve fails E2BIG.
+_MAX_ARG_BYTES = 131072
 LOCAL = "local"
 OWNER_CLAIMS = ".process-owners.json"
 OWNER_CLAIMS_LOCK = ".process-owners.lock"
@@ -122,6 +125,39 @@ def _path_contains(parent, child):
 
 def _paths_overlap(left, right):
     return left == right or _path_contains(left, right) or _path_contains(right, left)
+
+
+def run_raw_data_dir(host, value):
+    """The launcher's raw_data_dir as the run on `host` sees it, or "" when it cannot.
+
+    A `path_namespace` run sees each target at its launcher path, so a value
+    below exactly one target passes unchanged and any other value is not
+    visible there. A host without a namespace gets the value as is, like cwd.
+    """
+    if not _canonical_namespace_path(value):
+        return ""
+    mapping = host.get("path_namespace")
+    if not isinstance(mapping, dict):
+        return value
+    covers = [target for target in mapping
+              if isinstance(target, str) and (target == value or _path_contains(target, value))]
+    return value if len(covers) == 1 else ""
+
+
+def raw_data_dir_setup(host, environ=None):
+    """The run preamble line for AGENT_RAW_DATA_DIR; never an empty value.
+
+    A run is not given AGENT_RUNTIME_DIR, so the raw dir is passed only when it
+    is a separate place the run can see. Otherwise the key is unset, which also
+    clears a stale shell value; a script reading `$AGENT_RAW_DATA_DIR/...` then
+    fails loudly instead of writing to `/experiments/...`.
+    """
+    values = os.environ if environ is None else environ
+    raw = values.get("AGENT_RAW_DATA_DIR", "")
+    if raw == values.get("AGENT_RUNTIME_DIR", ""):
+        return "unset AGENT_RAW_DATA_DIR"
+    visible = run_raw_data_dir(host, raw)
+    return f"export AGENT_RAW_DATA_DIR={shlex.quote(visible)}" if visible else "unset AGENT_RAW_DATA_DIR"
 
 
 def _validate_path_namespace(name, host, run_root):
@@ -314,19 +350,44 @@ def ssh_prefix(host):
     return argv
 
 
-def remote(host, script, *, timeout=PROBE_TIMEOUT):
+def remote(host, script, *, timeout=PROBE_TIMEOUT, input=None):
     """Run one shell script on a host and return the completed process.
 
     ssh joins its command arguments and hands the result to a remote shell,
     which parses them a second time. The script therefore has to arrive as one
     already-quoted word, or any quoting inside it is re-interpreted and a
     command containing its own quotes silently falls apart.
+
+    One argument holds at most about 128 KiB (the kernel's per-argument
+    limit), so anything that grows with the host's state goes on standard
+    input instead: pass a short ``script`` that reads it (``python3 -`` or
+    ``bash -s``) and the body as ``input``.
     """
     prefix = ssh_prefix(host)
     argv = (prefix + [f"bash -lc {shlex.quote(script)}"] if prefix
             else ["bash", "-lc", script])
+    if input is None:
+        run = lambda: subprocess.run(argv, text=True, capture_output=True, timeout=timeout)  # noqa: E731
+    else:
+        def run():
+            done = subprocess.run(argv, input=input.encode("utf-8", "replace"),
+                                  capture_output=True, timeout=timeout)
+            return subprocess.CompletedProcess(
+                argv, done.returncode, done.stdout.decode("utf-8", "replace"),
+                done.stderr.decode("utf-8", "replace"))
     try:
-        return subprocess.run(argv, text=True, capture_output=True, timeout=timeout)
+        return run()
+    except OSError as exc:
+        if exc.errno != errno.E2BIG:
+            raise
+        # Say what is too big instead of a bare traceback: callers already
+        # print a failed launch's stderr as one line and record it.
+        size = max((len(word.encode("utf-8", "replace")) for word in argv), default=0)
+        return subprocess.CompletedProcess(
+            argv, 126, "",
+            f"argument too long: the remote command is {size} bytes in one argument "
+            f"(the limit is about {_MAX_ARG_BYTES} bytes); shorten the command "
+            f"or the values passed inside it")
     except subprocess.TimeoutExpired as exc:
         def output_text(value):
             if isinstance(value, bytes):
@@ -2529,7 +2590,8 @@ def probe_host(name, host, owner_claims=None, ssh_session_bridges=None):
               "export HEARTING_SSH_SESSION_BRIDGES_JSON=%s\n%s") % (
                   shlex.quote(claims_json), shlex.quote(bridges_json), probe_script)
     try:
-        result = remote(host, script, timeout=GPU_PROBE_TIMEOUT)
+        # Claims and bridges grow with the host's sessions: send on stdin.
+        result = remote(host, "bash -s", timeout=GPU_PROBE_TIMEOUT, input=script)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"host": name, "reachable": False, "detail": str(exc)[:120],
                 "gpus": [], "observed_at": observed_at}
@@ -3096,6 +3158,7 @@ def cmd_run(args):
              + [
                  f"export HEARTING_COMPUTE_RUN_ID={shlex.quote(run_id)}",
                  f"export HEARTING_COMPUTE_HOST={shlex.quote(name)}",
+                 raw_data_dir_setup(host),
              ])
     workdir = args.cwd or host.get("workdir")
     if workdir:
@@ -3187,8 +3250,9 @@ def cmd_run(args):
     script = source + ("\ntry:\n    print(json.dumps(%s(%%r, %%r)))\n"
                        "except Exception as exc:\n    print(str(exc), file=sys.stderr)\n    raise SystemExit(2)\n") % (
                            launch_function) % (options, payload_source)
-    launch = "python3 -c " + shlex.quote(script)
-    result = remote(host, launch)
+    # The script grows with the host's GPU observation, so it rides standard
+    # input rather than the one-argument limit of the remote command line.
+    result = remote(host, "python3 -", input=script)
     if agent_home_status in {"unmanaged-forwarded", "publish-failed", "unknown"}:
         print(f"note: AGENT_HOME {agent_home_status}: {agent_home_reason}", file=sys.stderr)
 

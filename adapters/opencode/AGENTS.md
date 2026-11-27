@@ -32,7 +32,7 @@ harness root above. Read documents only as needed.
   question; a helper never owns user input or approvals.
 - Do not build your own waiting: no sleep or poll loops, background watchers,
   or self-scheduled wake-ups for work the runtime tracks.
-  For experiments, runtime notices bring failures, warnings and new results, the LAB board shows normal progress, steward check handles periodic checks, and `experiment_catalog.py status` gives a one-time view.
+  For experiments, runtime notices bring failures, warnings and new results, the LAB board shows normal progress, steward check handles periodic checks, `hearting run experiment_catalog status` gives a one-time view, and `leaderboard` prints the results table to paste as printed.
 - Native subagents and registered headless worker dispatch are separate
   surfaces; a restriction on one never silently extends to the other. Preserve
   model role, intensity, dispatch depth, tests, safety, and validation on
@@ -51,7 +51,8 @@ In this Git worktree, handle one reversible outcome inline, including a small
 feature's source, tests and README: known scope, focused checks; no shared
 contract change, long resource work, artifact handoff or independent verifier.
 Read/edit/check/reply; recorded automatically without task/compose/finish/capability-info calls.
-Compose before scope grows. Other work starts with:
+Compose before scope grows. Work whose direction is clear opens with `--shape
+solo|staged --capability <kind>` (§0.2.1). Other work starts with:
 
 ```
 hearting run capability-route compose --start --prompt-file <task>
@@ -65,12 +66,13 @@ from the first draft; keep plans, reviews, versions and target references in
 `.agent_reports`.
 
 Use the receipt's `runtime` command prefixes. `hearting run <utility>` uses
-`AGENT_HOME`, else the installed release. Flags are hints unless the person
-or a frame already chose the shape; honor it, using `--shape staged --graph
-<stage,…>` for person-named stages (§0.2.1). Refusals name missing inputs.
+`AGENT_HOME`, else the installed release. Flags are hints; honor a shape the
+person or a frame already chose, using `--shape staged --capability
+<kind> --graph <stage,…>` for person-named stages (§0.2.1). Refusals name missing inputs.
 Before unapproved material work, present the §0.4 intent card (진행 / 수정 /
 중단). Peer requests need only compose's `[경로]` line and scope, except for
-destructive or external-facing work. Dispatch depth 3 is forbidden.
+destructive or external-facing work. Delegate a read-only job with `--unit <unit>`;
+a short check or lookup adds `--ephemeral` (no record, §0.2.1).
 
 ## Following the runtime
 
@@ -81,15 +83,19 @@ Do the next action the command or hook prints, in order:
 2. Then `parent_next`. `end-turn`: end the turn with no wait, poll, re-run,
    or recap; the runtime wakes you. `bounded-wait`: run `parent_next_command`
    once.
-3. `resume_command` and `correction_command` are handles, not orders: run
-   `resume_command` when woken or told to, and answer a BLOCKED owner with
-   `correction_command --message-file <file>`.
+3. `resume_command`, `correction_command` and `close_command` are handles,
+   not orders: run `resume_command` when woken or told to, answer a BLOCKED
+   owner with `correction_command --message-file <file>` (on a route closed
+   PASS it hands the same work a follow-up in scope), and run `close_command`
+   to accept the result or stop.
 
 No directive in view: read the printed `receipt_file`; a missing directive is
   not `end-turn`, so keep launch output unfiltered.
 
 To message another session, run `hearting run peer-steward prompt
-<name-or-pane> --body-file <file>`; reply text sends nothing.
+<name-or-pane> --body-file <file>`; reply text sends nothing. The person reads
+that message in the receiving window: write a few lines, keep the detail in a
+file and give its path.
 
 ## Finishing work (Tracked-Workflow Continuation)
 
@@ -155,8 +161,9 @@ Portable behavior contract = `roles/response-policy.md`.
   named `tool_contract`, `tool_contract_check`, `runtime_surface`, and `fallback`.
   Before claiming a tool works, run its check; exit 69 means unavailable, so
   use the reported fallback or keep the adapter row partial.
-- Register ordinary questions with `hearting run questions ask`; use the
-  shared response policy. Ask structured exceptions, including the §0.4 card, with `question`.
+- Every question, including the §0.4 card (진행(권장) /
+  수정 / 중단), is registered with `hearting run questions ask`; a text card is
+  the fallback.
 - If the hearting guard plugin is unavailable or untrusted, run the guards
   explicitly (README Session Command Reference).
 - While this session is idle, the hearting plugin hands it the completion

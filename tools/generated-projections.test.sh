@@ -402,14 +402,14 @@ for bootstrap in \
     esac
   done <<'BOOTSTRAP_PARITY_EOF'
 §5.11|OPERATIONS §5.11 same-turn commit/push policy
-dispatch depth 3 is forbidden|dispatch-depth-3 prohibition
+a short check or lookup adds `--ephemeral`|unit-route delegation clause
 genuinely non-obvious|genuinely-non-obvious ask clause
 if structured input is unavailable|structured-input fallback clause
 legacy `.claude_reports/` is only a fallback|legacy artifact-root fallback qualifier
 depth, tests, safety, and validation on fallback|fallback preservation guarantee
 before committing|expose-change-before-committing clause
 large scope, destructive work, or an external-system outcome|destructive-work structured-input clause
-using `--shape staged --graph <stage,…>` for person-named stages|person-named stage shape clause
+using `--shape staged --capability <kind> --graph <stage,…>` for person-named stages|person-named stage shape clause
 are handles, not orders|resume/correction handle clause
 BOOTSTRAP_PARITY_EOF
 done

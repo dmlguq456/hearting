@@ -36,7 +36,7 @@ Do not let stages write the same file concurrently without the OPERATIONS §5.8 
 ```text
 === Eval Spec ===
 Experiment:     <date>_<slug> or parent: <slug>
-Checkpoint:     $AGENT_RUNTIME_DIR/experiments/<slug>/runs/run-001/ckpt/best.pt
+Checkpoint:     $AGENT_RAW_DATA_DIR/experiments/<slug>/runs/run-001/ckpt/best.pt
 Mode:           eval
 Evaluation data:<existing test set or new data>
 Metrics:        <PSNR, SSIM, SI-SDR, ...>
@@ -53,7 +53,7 @@ Run the scaffolded `eval.py` against the checkpoint and data:
 
 ```bash
 cd experiments/<slug>
-python eval.py --config config.yaml --ckpt runs/run-001/ckpt/best.pt [--data <new_data>]
+python eval.py --config config.yaml --ckpt "$AGENT_RAW_DATA_DIR/experiments/<slug>/runs/run-001/ckpt/best.pt" [--data <new_data>]
 ```
 
 The user runs heavy evaluation. For an explicit lightweight request such as `가볍게 평가 돌려줘`, a small test set may be executed by dispatching the `qa/test` unit in functional eval mode with `eval.py` and the checkpoint. It returns final metrics summarized into `run.json best` and the per-step stream path `experiments/<slug>/metrics.jsonl`.
@@ -67,7 +67,7 @@ inference may publish `write_progress(done, "item", total=n)` for an earlier ETA
 
 ### E3 — Analysis, report, and completion
 
-**E3-1. Draft the result** when the user asks to organize results or the main agent observes eval completion. Use a localized one-screen preview with experiment, attempted change, best/final/delta metrics against the person's primary comparison (for example the unprocessed input, not only an internal control), sibling ablation table, parent delta, per-condition gains and losses, the worst representative cases read from existing outputs with facts kept apart from hypotheses, inline figure paths, and one next candidate: the smallest check of the leading cause, not a new tuning or training run by default. Ask whether to save, revise, or stop.
+**E3-1. Draft the result** when the user asks to organize results or the main agent observes eval completion. Use a localized one-screen preview with experiment, attempted change, best/final/delta metrics against the person's primary comparison (for example the unprocessed input, not only an internal control), sibling ablation table, the seed count and the variation across seeds, parent delta, per-condition gains and losses, the worst representative cases read from existing outputs with facts kept apart from hypotheses, inline figure paths, and one next candidate: the smallest check of the leading cause, not a new tuning or training run by default. Ask whether to save, revise, or stop.
 
 **E3-2. Optional plotting on user request.** For `결과 plot 그려줘` or `ablation 표 정리`, dispatch the `material/figure-gen` unit with `metrics.jsonl`, the project's figure conventions from memory or existing plots, and output paths under `figures/`.
 
@@ -100,6 +100,7 @@ consumer serves verified playback with CSP
 **E3-4. Save and finalize:**
 
 - `REPORT.md` is the self-contained final report. Put Executive Summary first, followed by background, hypothesis, method, results, interpretation, conclusion, next steps, and reproduction. Embed figures. Define every condition, structure, acronym, and metric so a reader without the conversation understands it. Consolidate summary, STORY, metrics, and figures here.
+- Give the results a "Seeds and variation" line: the number of seeds and their list, the mean, and the variation across seeds, naming whether the variation is a standard deviation or a standard error. With a single seed, write "1 seed — variation not counted". An absent or one-seed line is valid; nothing checks it.
 - `summary.md` is only a one-line index for RUNLOG and parent auto-loading, with a verdict and a pointer to `REPORT.md`; it is not the user deliverable.
 - `STORY.md` accumulates motivation, previous or parent context, this attempt, result, and next candidate.
 - For an evaluation executed in this work, update the existing experiment row in `<artifact-root>/experiments/_RUNLOG.md` from pending to done with result and next step. Do not append a second row. Mark the attempt with `(← <parent_slug>)` when applicable. Append only when an eval-only entry has no existing row. Use failed status for interruption or failure. Reporting existing results preserves the completed run's state and lineage.

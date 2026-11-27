@@ -5,11 +5,14 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
 import contextlib, errno, fcntl, hashlib, importlib.util, io, json, os, stat, subprocess, sys, tempfile, time, threading, types, unittest
 from unittest import mock
 from pathlib import Path
+import select
 from types import SimpleNamespace
 
 P=Path(__file__).with_name("dispatch_contract.py")
 ROOT=P.parent.parent
 sys.path.insert(0,str(P.parent))
+sys.path.insert(0,str(ROOT/"tools"))
+from fixture_processes import reap, unique_attempt_id  # noqa: E402
 import dispatch_contract as D
 from replica_batch_contract import build_manifest
 from split_module_fixture import patch_split
@@ -3388,6 +3391,37 @@ class DispatchContractTest(unittest.TestCase):
                         terminal_attempt_limit=2)
    self.assertEqual(caught.exception.reason,"quick-registered-headless-exhausted")
    self.assertEqual(len(jobs.read_text().splitlines()),2)
+ def test_a_later_turn_counts_each_earlier_turn_once_through_its_replacements(self):
+  # A BLOCKED, its replacement B PASS: turn 2 continues B with the limit one turn wider (1 + turn - 1).
+  # Only a later turn reads A as taken over; an ordinary launch counts as before.
+  with tempfile.TemporaryDirectory() as td:
+   jobs=Path(td)/"jobs.log"
+   def row(attempt,status="open",**extra):
+    pipe="".join(f",{key}={value}" for key,value in extra.items())
+    return (f"2026-11-26T00:00:00Z\t{status}\t/r\t/w\tquick\t{CURRENT},route_id=rt-t,"
+            f"route_node=one-shot,attempt_id={attempt}{pipe}")
+   exclusive={"route_id":"rt-t","route_node":"one-shot"}
+   first,second,later,other="att-turn00000a","att-turn00000b","att-turn00002a","att-turn0000xx"
+   self.assertTrue(D.claim_attempt_row(jobs,first,row(first),launch=True,
+                                       exclusive_live_metadata=exclusive,terminal_attempt_limit=1))
+   self.assertTrue(D.close_attempt_row(jobs,first,"dead-worker-blocked"))
+   with jobs.open("a") as handle:   # the runtime's replacement of A, settled PASS
+    handle.write(row(second,"done",automatic_retry_of=first,replacement_original_attempt_id=first,
+                     launch_claimed=1,note="completed-marker")+"\n")
+   with self.assertRaises(D.DispatchContractError) as caught:
+    D.claim_attempt_row(jobs,other,row(other),launch=True,exclusive_live_metadata=exclusive,
+                        terminal_attempt_limit=2)
+   self.assertEqual(caught.exception.reason,"quick-registered-headless-exhausted")
+   self.assertTrue(D.claim_attempt_row(jobs,later,row(later,continues_attempt_id=second,turn=2),launch=True,
+                                       exclusive_live_metadata=exclusive,terminal_attempt_limit=2))
+   # Turn 2 is replaced too; turn 3 counts B and the replacement of turn 2, under its limit of 3.
+   self.assertTrue(D.close_attempt_row(jobs,later,"dead-worker-blocked"))
+   with jobs.open("a") as handle:
+    handle.write(row("att-turn00002b","done",automatic_retry_of=later,launch_claimed=1,
+                     note="completed-marker")+"\n")
+   self.assertTrue(D.claim_attempt_row(jobs,"att-turn00003a",
+                                       row("att-turn00003a",continues_attempt_id="att-turn00002b",turn=3),
+                                       launch=True,exclusive_live_metadata=exclusive,terminal_attempt_limit=3))
  # Item 4: a failed terminal note in replacement_notes gets its own budget
  # (default 1) separate from terminal_attempt_limit, so one dead-protocol/
  # dead-permission-reject terminal allows exactly one same-route relaunch
@@ -3543,7 +3577,7 @@ class DispatchContractTest(unittest.TestCase):
  # asserts on _attempt_process_quiescence_impl are the point: they pin that this
  # fixture is red without the seam and green with it, permanently.
  def test_escaped_attempt_descendant_refuses_a_false_quiescent_verdict(self):
-  attempt="att-escaped-descendant-fixture"
+  attempt=unique_attempt_id("att-escaped-descendant-fixture")
   script=("import os,subprocess,sys\n"
           "env=dict(os.environ,AGENT_DISPATCH_ATTEMPT_ID=sys.argv[1])\n"
           "subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'],\n"
@@ -3566,15 +3600,13 @@ class DispatchContractTest(unittest.TestCase):
                     ("live","attempt-descendant-live"))
    self.assertEqual(verdict.pid,probe.members[0][0])
   finally:
-   for pid,_start,_state in probe.members if probe else ():
-    try:os.kill(pid,9)
-    except OSError:pass
+   reap(attempt)
 
  # SD-OPEN-47 (H7-b): the recorded parent leader is an ancestor of the child,
  # never its descendant. Even a mis-tagged owner process must not keep the
  # child's row alive for as long as the owner lives.
  def test_sd_open_47_parent_leader_pid_is_never_a_descendant_of_its_child(self):
-  attempt="att-child-of-owner-fixture"
+  attempt=unique_attempt_id("att-child-of-owner-fixture")
   owner=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],
                          env=dict(os.environ,AGENT_DISPATCH_ATTEMPT_ID=attempt),
                          start_new_session=True)
@@ -3611,7 +3643,7 @@ class DispatchContractTest(unittest.TestCase):
  # SD-OPEN-47 (H7): a sidecar-sealed residue receipt names the survivors as
  # leftovers of a finished worker; they never veto quiescence again.
  def test_historical_residue_receipt_does_not_lift_live_descendant_veto(self):
-  attempt="att-residue-receipt-fixture"
+  attempt=unique_attempt_id("att-residue-receipt-fixture")
   residue=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],
                            env=dict(os.environ,AGENT_DISPATCH_ATTEMPT_ID=attempt),
                            start_new_session=True)
@@ -3762,7 +3794,7 @@ class DispatchContractTest(unittest.TestCase):
  # A-P2. A sibling attempt whose row was closed by a false death verdict, but
  # whose tagged descendant is still running, stops the launch before any spawn.
  def test_live_sibling_attempt_blocks_the_node_before_any_spawn(self):
-  attempt="att-live-sibling-fixture"
+  attempt=unique_attempt_id("att-live-sibling-fixture")
   script=("import os,subprocess,sys\n"
           "env=dict(os.environ,AGENT_DISPATCH_ATTEMPT_ID=sys.argv[1])\n"
           "subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'],\n"
@@ -3785,9 +3817,7 @@ class DispatchContractTest(unittest.TestCase):
    # The one exit code every caller maps to "nothing spawned, waiting may help".
    self.assertIn("prior-attempt-still-live",D.PRELAUNCH_PROCESS_BLOCK_REASONS)
   finally:
-   for pid,_start,_state in probe.members if probe else ():
-    try:os.kill(pid,9)
-    except OSError:pass
+   reap(attempt)
 
  # A-N4/A-N5. An ordinary retry follows a sibling that really did stop, whether
  # it was cooled off for capacity or gave up on its own. This is the control
@@ -5251,11 +5281,12 @@ class TerminalCleanupResponsibilityTest(ControlledConsumerTestCase):
   self.assertEqual(self.jobs.read_bytes(),original)
 
  def test_live_terminal_child_remains_owned_then_real_exit_settles(self):
+  attempt=unique_attempt_id("att-cleanup-live")
   child=subprocess.Popen([sys.executable,"-c","import sys; sys.stdin.read()"],
                          stdin=subprocess.PIPE,start_new_session=True,
-                         env=dict(os.environ,AGENT_DISPATCH_ATTEMPT_ID="att-cleanup-live"))
+                         env=dict(os.environ,AGENT_DISPATCH_ATTEMPT_ID=attempt))
   self.addCleanup(lambda: child.poll() is None and (child.kill(),child.wait(timeout=5)))
-  metadata={**D.process_launch_identity(child.pid),"attempt_id":"att-cleanup-live",
+  metadata={**D.process_launch_identity(child.pid),"attempt_id":attempt,
             "note":"completed-marker","launch_lifecycle":"foreground-scoped",
             "pid_scope":"namespace-local"}
   self.jobs.write_text(attempt_row(metadata,"done")+"\n")
@@ -5376,6 +5407,24 @@ class ResidueDrainRefreshTest(ControlledConsumerTestCase):
                    ("drained",False,"residue-row-changed"))
 
 
+@contextlib.contextmanager
+def ready_tagged_process(test, attempt):
+    """Hold a fixture child after the exec that installed its attempt tag."""
+    hold = "import os; os.write(1, b'R'); os.read(0, 1)"
+    child = subprocess.Popen([sys.executable, "-c", hold],
+                             env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: attempt},
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    try:
+        with child.stdout:
+            test.assertTrue(select.select([child.stdout], [], [], 10)[0], "tagged child did not start")
+            test.assertEqual(child.stdout.read(1), b"R", "tagged child exited before it was ready")
+        yield child
+    finally:
+        child.stdin.close()
+        child.terminate()
+        child.wait(timeout=5)
+
+
 class DrainReceiptDeniedEnvironTest(unittest.TestCase):
  """A same-UID process born after a drained attempt whose environment cannot be read
  (one exiting, an sshd session) is outside that attempt once the watcher sealed it
@@ -5384,7 +5433,7 @@ class DrainReceiptDeniedEnvironTest(unittest.TestCase):
  def setUp(self):
   proc=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],start_new_session=True)
   identity=dict(D.process_launch_identity(proc.pid),pgid=str(proc.pid),
-                attempt_id="att-drained-denied-environ",launch_lifecycle="detached")
+                attempt_id=unique_attempt_id("att-drained-denied-environ"),launch_lifecycle="detached")
   proc.terminate();proc.wait(timeout=5)
   self.plain=identity
   self.sealed=dict(identity,launch_outcome="governed-process-group-drained",
@@ -5464,14 +5513,9 @@ class DrainReceiptDeniedEnvironTest(unittest.TestCase):
                     "attempt-descendant-unverifiable")
 
  def test_a_readable_tag_is_live_and_another_error_stays_unverifiable(self):
-  tagged=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],
-                          env=dict(os.environ,**{D.ATTEMPT_DESCENDANT_ENV:self.sealed["attempt_id"]}))
-  try:
-   with self.denied():
-    verdict=D.attempt_process_quiescence(self.sealed,terminal_receipt=True)
-    self.assertEqual((verdict.state,verdict.reason,verdict.pid),("live","attempt-descendant-live",tagged.pid))
-  finally:
-   tagged.terminate();tagged.wait(timeout=5)
+  with ready_tagged_process(self,self.sealed["attempt_id"]) as tagged, self.denied():
+   verdict=D.attempt_process_quiescence(self.sealed,terminal_receipt=True)
+   self.assertEqual((verdict.state,verdict.reason,verdict.pid),("live","attempt-descendant-live",tagged.pid))
   with self.denied(errno.EIO):
    probe=D.attempt_tagged_descendants(self.sealed)
    self.assertEqual((probe.state,probe.reason),
@@ -5491,7 +5535,7 @@ class LaunchCgroupDeniedEnvironTest(unittest.TestCase):
  def setUp(self):
   proc=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],start_new_session=True)
   self.plain=dict(D.process_launch_identity(proc.pid),pgid=str(proc.pid),
-                  attempt_id="att-launch-cgroup",launch_lifecycle="detached")
+                  attempt_id=unique_attempt_id("att-launch-cgroup"),launch_lifecycle="detached")
   proc.terminate();proc.wait(timeout=5)
   self.recorded=dict(self.plain,**D.launch_cgroup_values(self.LAUNCH,self.NS))
   self.late=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"])
@@ -5569,14 +5613,10 @@ class LaunchCgroupDeniedEnvironTest(unittest.TestCase):
     self.unverifiable(dict(self.recorded,launch_cgroup_ns=""))
 
  def test_a_readable_tag_still_wins_over_a_service_cgroup(self):
-  tagged=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],
-                          env=dict(os.environ,**{D.ATTEMPT_DESCENDANT_ENV:self.recorded["attempt_id"]}))
-  try:
-   with self.denied(),self.cgroup(self.DBUS),self.same_ns():
-    verdict=D.attempt_process_quiescence(self.recorded,terminal_receipt=True)
-    self.assertEqual((verdict.state,verdict.reason,verdict.pid),("live","attempt-descendant-live",tagged.pid))
-  finally:
-   tagged.terminate();tagged.wait(timeout=5)
+  with ready_tagged_process(self,self.recorded["attempt_id"]) as tagged, \
+       self.denied(),self.cgroup(self.DBUS),self.same_ns():
+   verdict=D.attempt_process_quiescence(self.recorded,terminal_receipt=True)
+   self.assertEqual((verdict.state,verdict.reason,verdict.pid),("live","attempt-descendant-live",tagged.pid))
 
  def test_a_changed_start_between_reads_is_not_excluded(self):
   real=Path.read_text
@@ -5761,28 +5801,6 @@ class StageAdvanceClaimTest(unittest.TestCase):
    jobs.write_text("\n".join(lines)+"\n",encoding="utf-8")
    started=SA.started_nodes(jobs,"rt-a11",route_hash)
   self.assertEqual(started,frozenset({"execute","impl-review","test"}))
-
-
-class LegacyReadWindowClosePureTest(unittest.TestCase):
- """B-13a: pure four-condition truth table. Never touches the filesystem and
- never calls `_succeed_dispatch_state()` -- that reachability question is
- Slice 3's B-13b."""
- def test_all_four_true_is_eligible(self):
-  self.assertTrue(D.legacy_read_window_may_close(
-   supported_releases_elapsed=2,legacy_bound_open_writers=0,delta=0,legacy_read_hits=0))
- def test_more_than_minimum_releases_still_eligible(self):
-  self.assertTrue(D.legacy_read_window_may_close(
-   supported_releases_elapsed=5,legacy_bound_open_writers=0,delta=0,legacy_read_hits=0))
- def test_each_condition_individually_flipped_keeps_window_open(self):
-  base=dict(supported_releases_elapsed=2,legacy_bound_open_writers=0,delta=0,legacy_read_hits=0)
-  for field,bad in (
-   ("supported_releases_elapsed",1),
-   ("legacy_bound_open_writers",1),
-   ("delta",1),
-   ("legacy_read_hits",1),
-  ):
-   values=dict(base); values[field]=bad
-   self.assertFalse(D.legacy_read_window_may_close(**values),field)
 
 
 class DispatchStateModeEnforcementTest(unittest.TestCase):
@@ -6963,7 +6981,7 @@ class FrameLegRegistrationTest(_AttemptPolicyFixture):
  node MISSING the axes still fails loudly rather than slipping through.
  """
  def frame_node(self,**overrides):
-  node={"id":"frame","dispatch_depth":1,"worker_type":"frame","unit":"plan/frame"}
+  node={"id":"frame","dispatch_depth":1,"worker_type":"frame","unit":"plan/frame","launch_authority":"depth-0"}
   node.update(overrides)
   return {key:value for key,value in node.items() if value is not None}
  def route(self,node,harnesses=("codex","claude")):
@@ -7069,9 +7087,9 @@ class FrameLegRegistrationTest(_AttemptPolicyFixture):
   route={"schema_version":2,"route_id":rt["route_id"],"effective_intensity":"standard",
    "dispatch_evidence":rt["dispatch_evidence"],
    "nodes":[{"id":"frame","dispatch_depth":1,"worker_type":"frame","unit":"plan/frame",
-             "perspective":"primary-frame"},
+             "launch_authority":"depth-0","perspective":"primary-frame"},
             {"id":"frame-alternative","dispatch_depth":1,"worker_type":"frame","unit":"plan/frame",
-             "perspective":"alternative-frame"},
+             "launch_authority":"depth-0","perspective":"alternative-frame"},
             {"id":"plan","dispatch_depth":2,"fallback_hops":[
              {"ordinal":1,"fallback_hop":"same-harness-headless","candidates":[]}]}]}
   self.assertEqual({r["status"] for r in rt["dispatch_evidence"]["tuples"] if r["child_harness"]=="opencode"},
@@ -7134,7 +7152,13 @@ class QuickThreeNodeRegistrationTest(_AttemptPolicyFixture):
                         ("frame-alternative",{"unit":"_kernel/owner"})):
    with self.subTest(node_id=node_id,wrong=wrong):
     exception=self.refusal(self.route(**{node_id:wrong}),route_node=node_id,intensity="quick")
-    self.assertEqual((exception.reason,exception.detail),("quick-route-shape-invalid",node_id))
+    if (node_id,wrong)==("one-shot",{"unit":"plan/frame"}):
+     # the owner is read from the nodes (a `one-shot` node of unit `_kernel/owner`): a one-shot node that is not
+     # one reads as no owner, so the route is not a serial-attempt route and its depth-1 node is refused by the
+     # checked-chain rule instead (still a refusal; only the rule that names it differs)
+     self.assertEqual((exception.reason,exception.detail),("route-fallback-hops-missing",node_id))
+    else:
+     self.assertEqual((exception.reason,exception.detail),("quick-route-shape-invalid",node_id))
 
  def test_a_node_id_outside_the_table_is_a_shape_refusal(self):
   """`mystery` is a real node in the route -- it is not `route-node-unknown`.

@@ -32,8 +32,8 @@ from artifact_producer_store import (
 # open-cycle checkpoint: the interim manifest
 # ---------------------------------------------------------------------------
 #
-# A consumer that mirrors artifacts (Cairn) can only read a sealed cycle's
-# `manifest.json`.  A checkpoint publishes the same closed D-6 document for a
+# A reader that follows only sealed manifests sees a cycle only once its
+# `manifest.json` is sealed.  A checkpoint publishes the same closed D-6 document for a
 # cycle that is still open -- `cycle.state` is `open` -- under
 # `.runtime/artifact-producer/v1/open-manifests/<cyc>.json`.
 #
@@ -154,7 +154,7 @@ def closed_cycle_refresh_off() -> bool:
     """A machine-local switch that pauses the §45 closed-cycle refresh (and its sweep).
 
     `${XDG_CONFIG_HOME:-~/.config}/hearting/cycle-refresh.off` present = paused.  It lets a
-    reader that does not yet follow updated closed-cycle manifests (Cairn sync) catch up
+    reader that does not yet follow updated closed-cycle manifests catch up
     before closed cycles start changing; open-cycle checkpoints are unaffected.  Absent
     file, the default, = on.  Read on every call so all three runtimes follow it at once."""
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
@@ -531,6 +531,9 @@ def _remove_empty_cycle(root: Path, record: Mapping[str, Any]) -> None:
             try:
                 campaign_path = campaign_dir(root, campaign["campaign_id"], campaign)
                 _campaign_path(root, campaign["campaign_id"], campaign).unlink()
+                import campaign_document  # its derived document must not keep this folder
+                campaign_document.remove_generated(campaign_path)
+                campaign_document.remove_generated_records(campaign_path)   # and the record page of its one open route
                 campaign_path.rmdir()
             except OSError:
                 _write_campaign(root, campaign, exclusive=False)

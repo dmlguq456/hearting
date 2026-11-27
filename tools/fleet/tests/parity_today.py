@@ -95,7 +95,7 @@ R14_RESIDUAL_CELL_PAIRS = {
         99: (("c", "hb_claude", None), (" ", None, None)),
     },
 }
-R14_MODELS_FOOT_TEXT = "→ .bak backup · new sessions and launches only · sealed routes keep their choice"
+R14_MODELS_FOOT_TEXT = "→ .bak backup · new sessions and launches only · routes keep their depth, launches read this table"
 R14_MODELS_SECTION_META = "  input tokens · new sessions only"
 
 # Exact root-view R14 cells whose final-column text the narrow Fleet2 pane clips.

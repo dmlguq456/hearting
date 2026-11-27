@@ -1,0 +1,1 @@
+../../../../../tools/fleet/tests/test_transcript_tables.py

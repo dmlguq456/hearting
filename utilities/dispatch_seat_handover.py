@@ -67,7 +67,7 @@ if str(HERE) not in sys.path:
 ROOT = HERE.parent
 SCHEMA = 1
 ROW_EVENT = "handover"
-WORKER_TYPES = frozenset({"owner", "frame", "review"})
+WORKER_TYPES = frozenset({"owner", "frame", "review", "support"})   # support: a lookup unit route's leg (route-bound only: `eligible_row`)
 OPEN_ROW_STATUSES = frozenset({"open", "running"})
 LINE_MAX_BYTES = 520
 KEEP_ROWS = 40
@@ -179,6 +179,11 @@ _TRUST_LEDGER_GENERATIONS = contextvars.ContextVar(
 def trust_unchanged_ledgers() -> None:
     """Let this thread reuse ledger reads whose stat generation is unchanged."""
     _TRUST_LEDGER_GENERATIONS.set(True)
+
+
+def trusting_unchanged_ledgers() -> bool:
+    """Whether this thread already reuses unchanged-generation ledger reads."""
+    return _TRUST_LEDGER_GENERATIONS.get()
 
 
 # Readable ledger bytes per lineage directory, keyed by each file's full stat
@@ -767,7 +772,7 @@ def route_identity(meta: dict) -> tuple:
 
 
 def eligible_row(meta: dict) -> bool:
-    """A route-bound depth-1 owner/frame; depth-2, route-free and unregistered rows never qualify."""
+    """A route-bound depth-1 owner, frame, review or support leg; depth-2, route-free and unregistered rows never qualify."""
     route, digest, _ = route_identity(meta)
     return (meta.get("dispatch_depth") == "1" and meta.get("worker_type") in WORKER_TYPES
             and bool(meta.get("parent_sid")) and bool(meta.get("attempt_id")) and bool(route) and bool(digest))

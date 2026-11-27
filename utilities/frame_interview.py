@@ -250,9 +250,7 @@ def understanding_draft(request: str) -> str:
 
 NATIVE_ANSWERS_NAME = "answers.native.json"
 NATIVE_PARTIAL_NAME = "answers.native.partial.json"   # never read as answers: the rows of an unfinished interview
-NATIVE_PARTIAL_SCHEMA = "frame_interview_native_partial_v1"
 UNDERSTANDING_SLOT = "_understanding"                  # question ids match [a-z][a-z0-9-]{0,31}, so no clash
-MAX_NATIVE_PARTIAL_BYTES = MAX_INTERVIEW_BYTES + MAX_ANSWERS_BYTES
 _RECOMMENDED = re.compile(r"\s*[(（](?:권장|recommended)[)）]\s*$", re.I)
 
 
@@ -281,13 +279,18 @@ def _native_option_index(value, labels):
 
 def _restatement_outcome(row):
     """`(confirmed, correction)` of the restatement's reply, or None when it is not an answer."""
+    note = _text(row.get("note")).strip()
     options = list(row.get("options") or [])
     reply = _text(row.get("answer")).strip()
     if not _plain(reply):
         return None
     index = _native_option_index(reply, options)
+    if index is not None:
+        note = _truncate_note(note, MAX_CORRECTION_CHARS)
     if options and index == 0:
-        return True, ""
+        return True, note
+    if note:
+        return False, note
     if index is not None:
         return None                                   # "no" without saying what is wrong: ask for it
     return False, reply
@@ -306,11 +309,15 @@ def _question_outcome(question: dict, row):
         return {"choice": NONE_SENTINEL, "note": picked}
     # The words the person added beside the option they picked; a reply is never asked again
     # for its length, so an over-long note keeps its head and says it was cut.
-    note = _text(row.get("note")).strip()
-    if len(note) > MAX_NOTE_CHARS:
-        mark = _truncated_mark()
-        note = note[:MAX_NOTE_CHARS - len(mark)] + mark
+    note = _truncate_note(_text(row.get("note")).strip(), MAX_NOTE_CHARS)
     return {"choice": option_index, "note": note}
+
+
+def _truncate_note(note: str, limit: int) -> str:
+    if len(note) <= limit:
+        return note
+    mark = _truncated_mark()
+    return note[:limit - len(mark)] + mark
 
 
 def _truncated_mark() -> str:
@@ -329,7 +336,7 @@ def native_slots(interview: dict, asked) -> dict | None:
     The restatement is asked as its own question (the understanding sentence, verbatim);
     every registered question is matched by its own text. A call may carry only some of
     them. None when a shown registered row is not an answer (empty, "no" without a
-    correction, an ambiguous label, a note over its cap): that call is asked again whole."""
+    correction, an ambiguous label, an off-menu answer over its cap): that call is asked again whole."""
     shown = [row for row in asked or [] if isinstance(row, dict) and _plain(row.get("question"))]
     find = lambda text: next((row for row in shown if _plain(text) and _plain(text) in _plain(row["question"])), None)
     keep = lambda row: {"question": _text(row.get("question")), "options": list(row.get("options") or []),
@@ -398,7 +405,7 @@ def approval_question_id(leg, key) -> str:
 # those parts keep their gate for the person.
 FRAME_REVIEW_SOURCES = ("user", "supervisor")
 PERSON_ONLY_START_APPROVALS = ("deploy", "handback", "preview")
-# A supervisor answer the runtime records for the depth-0 session when both frame legs agree, no
+# A supervisor answer the runtime records for the depth-0 session when the frame legs agree, no
 # start approval is in scope and no question is left (WORKFLOW §0.4): the existing on-behalf
 # authority, labelled so it is never mistaken for a session's own judgement.
 AUTOMATIC_BASIS = "automatic-agreement"
@@ -822,6 +829,28 @@ def pending_answer_response(interview: dict, response) -> bool:
     return True
 
 
+def route_scope_note(interview: dict, question_id, label) -> str:
+    """One line read from the structure, for an option mapped to a proposal of two or more legs.
+
+    Says whether the legs run on without asking again (`complete`) or stop at each leg's end
+    (`report`). Nothing is stored: it is added where a card is shown, and an option with no proposal,
+    or a proposal of one leg, gets none. The answer is still the option's `label`."""
+    field = interview.get("route_proposals") if isinstance(interview, dict) else None
+    if not isinstance(field, dict) or field.get("question") != question_id:
+        return ""
+    proposal = (field.get("by_option") or {}).get(label)
+    legs = proposal.get("legs") if isinstance(proposal, dict) else None
+    if not isinstance(legs, list) or len(legs) < 2:
+        return ""
+    try:
+        import work_intent
+        translate = work_intent.ui_translator()
+        return translate("frame.route_scope_report" if proposal.get("execution_scope") == "report"
+                         else "frame.route_scope_complete", legs=len(legs))
+    except Exception:  # noqa: BLE001 -- the catalog is optional here; the card stands without the line
+        return ""
+
+
 def pending_question_block(interview: dict) -> str:
     """The registered words and choices the parent leaves in ordinary conversation."""
     lines = [_text(interview.get("understanding"))]
@@ -829,6 +858,9 @@ def pending_question_block(interview: dict) -> str:
         lines.extend(["", _text(question.get("question"))])
         for option in question.get("options") or []:
             lines.append(f"- {_text(option.get('label'))}: {_text(option.get('means'))}")
+            note = route_scope_note(interview, question.get("id"), option.get("label"))
+            if note:
+                lines.append(f"  {note}")
     return "\n".join(lines)
 
 
@@ -996,7 +1028,7 @@ def render_intent(interview: dict, answers: dict, *, now: str | None = None, app
         "",
         _inline(interview.get("understanding")) or "-",
     ]
-    if not confirmed:
+    if not confirmed or _text(answers.get("correction")).strip():
         lines += ["", f"**{speaker}'s correction:** " + (_inline(answers.get("correction")) or "-")]
     section = {
         "problem": "Problem", "outcome": "Proposed Outcome",
@@ -1065,8 +1097,10 @@ def _route_lines(interview: dict, answers: dict, scope: dict) -> list[str]:
     for index, leg in enumerate(proposal.get("legs") or []):
         graph = ",".join(leg.get("graph") or []) or "whole recipe"
         size = f" (size {leg['size']})" if leg.get("size") else ""
+        later = ("  (waits for the person's word)" if proposal.get("execution_scope") == "report"
+                 else "  (starts when the leg before it ends, without asking again)")
         lines.append(f"- Leg {index}: {leg.get('capability')} / {leg.get('mode') or 'default mode'} / "
-                     f"{leg.get('shape')}{size} / {graph}" + ("  (starts now)" if index == 0 else "  (next step, decided separately)"))
+                     f"{leg.get('shape')}{size} / {graph}" + ("  (starts now)" if index == 0 else later))
         for condition in leg.get("done_when") or []:
             text = condition.get("text") if isinstance(condition, dict) else condition
             lines += _proposal_conflicts(text, fields)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -12,8 +13,11 @@ import re
 import subprocess
 import sys
 import frame_repository
+from route_plan import is_depth0_leg
+from route_form import serial_attempt_route, starts_depth2_nodes
 from owner_route_binding import OwnerRouteBindingError, validate_owner_route_binding, derive_quick_owner_binding, derive_frame_route_binding
 from dispatch_mode_contract import DispatchModeContractError, resolve_qa
+from dispatch_allocation_receipt import changed_raw_headroom, raw_headroom_lines
 from dispatch_contract import (DispatchContractError, frame_harness_admission,
                                parse_registry_metadata, record_frame_launch_degradation)
 from route_authority import (depth1_supported_harnesses, harness_admitted, pinned_launch_harness,
@@ -69,7 +73,8 @@ _REQUIRED = {
 # absent it is derived from `--intensity` below; when present it is checked
 # against that same derivation, both through resolve_qa (the single qa/intensity
 # SoT).
-_CAPTURED = _REQUIRED | {"--unit", "--review-output", "--model-role", "--qa"}
+_CAPTURED = _REQUIRED | {"--unit", "--review-output", "--model-role", "--qa",
+                         "--attempt-id", "--continues-attempt-id", "--automatic-retry-of"}
 # SD-OPEN-40: the depth-1 tuples this selector may launch. `review` exists so an
 # independent reviewer can be a *registered review worker* instead of an owner
 # wearing a reviewer's prompt. Before it, every ad-hoc independent review landed
@@ -80,6 +85,9 @@ _CAPTURED = _REQUIRED | {"--unit", "--review-output", "--model-role", "--qa"}
 # direct owner selection use this selector; the adapter's atomic attempt claim
 # remains the single registration authority.
 _LAUNCHABLE_WORKER_TYPES = {"owner", "review", "frame"}
+# A `support` unit (a lookup: `general/explore`) is launched only as the leg of a route that names it: the unit
+# route's one node. Route-free, it stays refused, as it was.
+_ROUTE_NODE_WORKER_TYPES = {"support"}
 # Legacy route-free frame calls must supply their own scope. Route-bound calls
 # derive it from the producer, so inherited/partial environment is not authority.
 _FRAME_ARTIFACT_ENV = (
@@ -115,17 +123,20 @@ _HINTS = {
                                                 "for one of those (solo/quick: --children <harness>; staged: --parent-harness <harness>), or add the "
                                                 "harness to harnesses.enabled and this profile's quality bands first. This is not a usage limit -- "
                                                 "see eligibility.* above",
-    "no-eligible-route-evidence-candidate": "no sealed candidate is usable: it is usage-limited, gated, or has no positive capacity score "
-                                            "(see eligibility.* and capacity_headroom.* above). Resume the same route after the reported reset, "
+    "no-eligible-route-evidence-candidate": "no sealed candidate is usable: it is usage-limited, gated, or has no positive quota "
+                                            "(see eligibility.* above). The usage gate reads actual quota from "
+                                            "capacity_raw_headroom.* when shown and capacity_headroom.* otherwise. "
+                                            "Resume the same route after the reported reset, "
                                             "or select an available candidate already sealed in this profile; changing the candidate set requires recomposition",
     "frame-harness-unavailable": "no candidate harness declares the top profile in its runtime model config "
                                  "(CFG_MODEL_PROFILE_TOP in the selected models.conf; top_undeclared= above names the ones "
                                  "left out). Declare it with hearting model set <harness> profile/top <model[@budget]> "
                                  "for a harness the route sealed, or name a harness with --pin frame=<harness>",
-    "no-eligible-candidate": "no configured owner harness is usable: usage-limited, gated, or no positive capacity score "
-                             "(see eligibility.* and capacity_headroom.* above; utilities/usage-check.sh --harness all)",
+    "no-eligible-candidate": "no configured owner harness is usable: usage-limited, gated, or no positive quota "
+                             "(see eligibility.* above and utilities/usage-check.sh --harness all). The usage gate reads "
+                             "actual quota from capacity_raw_headroom.* when shown and capacity_headroom.* otherwise.",
     "exactly-one-action-required": "pass exactly one of --dry-run | --register | --start",
-    "owner-tuple-required": "the launchable tuple is --dispatch-depth 1 --worker-type owner|review|frame",
+    "owner-tuple-required": "the launchable tuple is --dispatch-depth 1 --worker-type owner|review|frame (support only as a route node)",
     "invalid-model-profile": "--model-profile deep|balanced-deep|balanced|light (top only from a route that seals it)",
     "profile-top-route-required": "drop --model-profile top: the top exception profile is sealed by a route "
                                   "(compose/compile --profile-demands '{\"__owner__\": …}' --explicit-profiles "
@@ -136,7 +147,7 @@ _HINTS = {
     "frame-artifact-scope-missing": "launch frames through their route: compose --start (or the receipt's resume_command) "
                                     "binds each leg's cycle itself (OPERATIONS §5.10b)",
     "route-node-unknown": "--route-node must name an id present in the sealed route's nodes list",
-    "route-node-worker-type-forbidden": "--route-node selects a frame node's own profile and role; only --worker-type frame may use it",
+    "route-node-worker-type-forbidden": "--route-node selects a route leg's own profile and role; only --worker-type frame, review or support may use it",
     "forbidden-flag": "model, reasoning, effort, variant and completion-delivery are sealed by the profile and route; remove the flag. "
                       "To choose a tool or model, seal it once at compose time: capability-route.py compose --pin <owner|frame|worker>=<harness>[:<model>[@<effort>]]",
     "explicit-jobs-outside-parent-registry": "drop --jobs: an interactive Claude parent's completion hook trusts only the inherited "
@@ -198,8 +209,11 @@ def _route_defaults(path, route_node=None):
     if route_node is not None:
         values.update(_node_model_settings(route, route_node))
         node = next(row for row in route["nodes"] if row.get("id") == route_node)
-        if node.get("unit") == "plan/frame" and node.get("dispatch_depth") == 1:
-            values.update({"--worker-type": "frame", "--unit": "plan/frame", "--assigned-contract": "plan/frame"})
+        if is_depth0_leg(node):
+            # A leg the depth-0 session launches itself (a frame leg, or the one unit of a unit route):
+            # its tuple is the sealed node's, never the owner's.
+            values.update({"--worker-type": node.get("worker_type"), "--unit": node.get("unit"),
+                           "--assigned-contract": node.get("unit")})
     return {flag: (str(value) if value not in (None, "") else None) for flag, value in values.items()}
 
 
@@ -232,7 +246,10 @@ def _sealed_owner_context(path, *, worker_type="owner", route_node=None):
     intensity = route.get("effective_intensity")
     if intensity == "direct":
         raise OwnerError("route-evidence-direct-route-has-no-owner")
-    if not (intensity == "quick" or route.get("registered_headless_candidates") is not None):
+    if starts_depth2_nodes(route) or not (
+            serial_attempt_route(route) or route.get("registered_headless_candidates") is not None):
+        # B (the owner starts depth-2 nodes) re-checks the evidence in this worktree; the middle cell is
+        # both an owner with candidates and a route that starts a review.
         rows = (route.get("dispatch_evidence") or {}).get("tuples") or []
         if any(
             isinstance(row, dict)
@@ -248,8 +265,8 @@ def _sealed_owner_context(path, *, worker_type="owner", route_node=None):
     harnesses &= _defaults.DISPATCHABLE_HARNESSES
     if not harnesses:
         raise OwnerError("route-evidence-no-supported-owner-harness")
-    if worker_type == "frame":
-        # A frame leg reads the bands its own node was sealed with (a route
+    if worker_type == "frame" or route_node:
+        # A leg reads the bands its own node was sealed with (a route
         # sealed before nodes carried them has none and keeps reading the live
         # policy, as before).
         node = next(
@@ -275,6 +292,7 @@ def _sealed_owner_context(path, *, worker_type="owner", route_node=None):
         "harnesses": harnesses,
         "policy": policy,
         "allocation": route.get("dispatch_allocation"),
+        "field": route.get("field"),
     }
 
 
@@ -333,6 +351,18 @@ def _frame_alternative_tiebreak(first_harness, selected, band, ranks, scores, *,
             continue
         return name
     return selected
+
+
+@contextlib.contextmanager
+def _first_node_of_a_new_route():
+    """A leg started from inside a worker opens a route of its own: the starting worker's attempt is not
+    that route's owner, so producer admission must not read it as one (the worker's environment names it)."""
+    held = {key: os.environ.pop(key) for key in ("AGENT_DISPATCH_ATTEMPT_ID", "AGENT_DISPATCH_PARENT_ATTEMPT_ID")
+            if key in os.environ}
+    try:
+        yield
+    finally:
+        os.environ.update(held)
 
 
 def export_owner_route_env(child_env, binding):
@@ -503,9 +533,11 @@ def _parse(argv):
     if len(actions) != 1:
         raise OwnerError("exactly-one-action-required")
     worker_type = values["--worker-type"]
-    if values["--dispatch-depth"] != "1" or worker_type not in _LAUNCHABLE_WORKER_TYPES:
+    if values["--dispatch-depth"] != "1" or not (
+            worker_type in _LAUNCHABLE_WORKER_TYPES
+            or (worker_type in _ROUTE_NODE_WORKER_TYPES and route_node and route_evidence)):
         raise OwnerError("owner-tuple-required")
-    if route_node and worker_type != "frame":
+    if route_node and worker_type == "owner":
         raise OwnerError("route-node-worker-type-forbidden")
     unit = (values.get("--unit") or "").strip()
     if worker_type == "owner":
@@ -529,7 +561,7 @@ def _parse(argv):
         # than a shape that `foo/bar` also satisfies.
         if not (ROOT / "roles" / "units" / f"{unit}.md").is_file():
             raise OwnerError("unknown-review-worker-unit")
-        if worker_type == "review" and route_evidence:
+        if worker_type == "review" and route_evidence and not route_node:
             # A route node's review worker is launched by the stage dispatcher
             # with its node binding, not by this selector. Accepting route
             # evidence here would let one node be claimed by two launch paths.
@@ -616,6 +648,20 @@ def _usage(jobs, profile=None, recheck=False):
     return states
 
 
+def _unread_gauges(states, explicit):
+    """Harnesses whose capacity gauge this start does not read, with why.
+
+    A harness the usage state already reads as limited is never a candidate, so its headroom never
+    ranks or gates anything; and when the harness is named and eligible, it is the one used, so no
+    other is ranked. The receipt shows such a gauge as `skipped:<why>` instead of a reading. A gauge
+    whose read refreshes the shared usage cache (codex, opencode) is still read: the next start's
+    limit judgment depends on that refresh."""
+    skip = {harness: "limited" for harness, state in states.items() if not _eligible(state)}
+    if explicit is not None and _eligible(states.get(explicit, "unknown")):
+        skip.update({harness: "not-needed" for harness in states if harness != explicit})
+    return {harness: why for harness, why in skip.items() if harness not in _capacity.CACHE_WRITING_GAUGES}
+
+
 def _resolved_path(value):
     return Path(value).expanduser().resolve(strict=False)
 
@@ -698,7 +744,7 @@ def _audit(
     status, adapter, source, configured, explicit, states, *, allocation=None,
     counts=None, rejected=(), fallback=None, reason="none", capacity=None,
     quality_band=None, relief_promoted=False, capacity_sources=None,
-    capacity_freshness=None, top_excluded=(),
+    capacity_freshness=None, top_excluded=(), field=None,
 ):
     lines = [
         f"status={status}", f"adapter={adapter or '-'}", f"selection_source={source}",
@@ -717,6 +763,13 @@ def _audit(
         if "owner_order" in allocation:
             lines.append("owner_order=" + ",".join(allocation["owner_order"]))
         lines.append(f"usage_headroom_exponent={allocation.get('usage_headroom_exponent', 1)}")
+        # Why this harness: the user's flat weights, the route's field, and the field's
+        # applied row the selection multiplied them by (`none` / `-` when there is none).
+        flat = allocation.get("harness_weights") or {}
+        row = allocation.get("field_weights") or {}
+        lines.append("harness_weights=" + (",".join(f"{key}:{flat[key]}" for key in sorted(flat)) or "none"))
+        lines.append(f"field={field or '-'}")
+        lines.append("field_weights=" + (",".join(f"{key}:{row[key]}" for key in sorted(row)) or "none"))
     for harness in _allocation.HARNESSES:
         if counts is not None:
             lines.append(f"attempt_count.{harness}={counts.get(harness, 0)}")
@@ -746,6 +799,7 @@ def _audit(
                         f"basis:file-mtime;age-seconds:{age:.1f};"
                         f"stale-after-seconds:{stale_after};observation-time:unknown"
                     )
+    lines.extend(raw_headroom_lines(changed_raw_headroom(capacity, freshness=capacity_freshness)))
     if quality_band:
         lines.append(f"quality_band={quality_band}")
     if top_excluded:
@@ -775,7 +829,7 @@ def _explicit_capacity_warning(source, adapter, capacity, allocation):
     """Typed headroom caveat for an explicit owner choice; never a gate."""
     if source != "explicit" or not adapter or capacity is None:
         return None
-    value = capacity.get(adapter)
+    value = _capacity.raw_headroom(capacity, adapter)
     if value is None:
         return "headroom-unknown"
     if value <= 0:
@@ -860,7 +914,7 @@ def main(argv):
         # request outside the route evidence is replaced rather than refused; the usage state is known
         # only below, where a limited pin gives the request back to the checks it always had.
         requested, pin_doc, pinned = explicit, None, None
-        if route_evidence and values["--worker-type"] in {"owner", "frame"}:
+        if route_evidence and (values["--worker-type"] in {"owner", "frame"} or values.get("--route-node")):
             pin_doc = route_in_force(json.loads(Path(route_evidence).read_text(encoding="utf-8")))
             pinned = sealed_pin_harness(pin_doc, worker_type=values["--worker-type"])
             if pinned and pinned != explicit and (sealed is None or pinned in sealed):
@@ -920,6 +974,17 @@ def main(argv):
         if explicit is not None and explicit not in enabled and not admitted(explicit):
             raise OwnerError("explicit-adapter-disabled-by-user-policy")
         explicit_policy = "outside-profile-bands" if explicit is not None and explicit not in configured else None
+        refused_harness = None
+        if values.get("--automatic-retry-of"):
+            from dispatch_replacement import (PROVIDER_REFUSAL_NO_ALTERNATIVE, SAME_PROVIDER_REFUSAL,
+                                              refused_profile_harness, replacement_source)
+            from route_authority import pin_target
+            predecessor = replacement_source(jobs, values["--automatic-retry-of"], values.get("--attempt-id"))
+            pin = ((pin_doc or {}).get("selection_pins") or {}).get(pin_target(values["--worker-type"]))
+            refused_harness = refused_profile_harness(predecessor, profile, pin=pin, source_root=ROOT)
+            if refused_harness:
+                configured = [h for h in configured if h != refused_harness]
+                policy = _defaults.restrict_harness_policy(policy, configured)
         allocation = (
             sealed_context.get("allocation")
             if sealed_context and isinstance(sealed_context.get("allocation"), dict)
@@ -942,14 +1007,15 @@ def main(argv):
             )
 
         rejected = [h for h in sorted(states) if not _eligible(states[h])]
-        capacity_report = _capacity.capacity_report()
+        capacity_report = _capacity.capacity_report(skip=_unread_gauges(states, explicit))
         capacity = capacity_report["scores"]
         capacity_sources = capacity_report["sources"]
         capacity_freshness = capacity_report.get("freshness") or {}
 
         def automatically_available(harness):
-            score = capacity.get(harness)
-            return (harness in enabled and harness not in top_excluded and _eligible(states[harness])
+            score = _capacity.raw_headroom(capacity, harness)
+            return (harness != refused_harness and harness in enabled
+                    and harness not in top_excluded and _eligible(states[harness])
                     and score is not None and score > 0)
 
         selected = None
@@ -958,6 +1024,9 @@ def main(argv):
         quality_band = None
         relief_promoted = False
         ranks = None
+        if refused_harness and explicit == refused_harness and _eligible(states[explicit]):
+            print(f"check=failed\nreason={PROVIDER_REFUSAL_NO_ALTERNATIVE}\nchild_spawned=0\nhint={SAME_PROVIDER_REFUSAL}")
+            return 65
         if explicit and _eligible(states[explicit]):
             selected, source, quality_band = explicit, ("route-pin" if pin_chosen else "explicit"), "explicit"
         if selected is None and config_version in {3, 4}:
@@ -968,7 +1037,7 @@ def main(argv):
                 preferred=_capacity.preferred_for_depth(allocation, 1),
                 affinity_weight=allocation.get("depth_affinity_weight", 0.5),
                 headroom_exponent=allocation.get("usage_headroom_exponent", 1),
-                harness_weights=allocation.get("harness_weights"),
+                harness_weights=_allocation.effective_harness_weights(allocation),
                 preference_order=(allocation.get("owner_order")
                                   if values["--worker-type"] in {"owner", "frame"} else None),
             )
@@ -1003,14 +1072,21 @@ def main(argv):
                     quality_band = "outside-policy-fallback"
                     break
         if selected is None:
+            # The replacement controller checks capacity holds on these same candidates.
+            if refused_harness and not configured:
+                configured = [h for h in fallback_pool
+                              if h != refused_harness and h in enabled and h not in top_excluded]
             print("\n".join(_audit(
                 "unavailable", None, "none", configured, requested, states,
                 allocation=allocation, counts=counts, rejected=rejected,
                 capacity=capacity, capacity_sources=capacity_sources,
                 capacity_freshness=capacity_freshness,
                 relief_promoted=relief_promoted, top_excluded=top_excluded,
+                field=(sealed_context or {}).get("field"),
             )))
-            if dropped and not configured:
+            if refused_harness and not configured:
+                reason, detail = PROVIDER_REFUSAL_NO_ALTERNATIVE, SAME_PROVIDER_REFUSAL
+            elif dropped and not configured:
                 # Every candidate was left out for not declaring `top`; say that
                 # rather than blaming usage or capacity.
                 reason = "frame-harness-unavailable"
@@ -1055,10 +1131,13 @@ def main(argv):
                     alternatives = [h for h in configured if h != first_harness]
                     if alternatives:
                         reason = "frame-other-harness-unusable"
+                        excluded_scores = {h: capacity.get(h) for h in alternatives}
+                        raw = changed_raw_headroom(excluded_scores, freshness=capacity_freshness)
                         detail = json.dumps({
                             "excluded_harnesses": alternatives,
                             "states": {h: states.get(h, "unknown") for h in alternatives},
-                            "capacity": {h: capacity.get(h) for h in alternatives},
+                            "capacity": excluded_scores,
+                            **({"capacity_raw_headroom": raw} if raw else {}),
                             "quality_band": quality_band,
                             **({"gated": {h: _capacity.is_gated(
                                     capacity, h,
@@ -1123,7 +1202,8 @@ def main(argv):
                                       reason=reason, capacity=capacity, capacity_sources=capacity_sources,
                                       capacity_freshness=capacity_freshness,
                                       quality_band=quality_band,
-                                      relief_promoted=relief_promoted, top_excluded=top_excluded)))
+                                      relief_promoted=relief_promoted, top_excluded=top_excluded,
+                                      field=(sealed_context or {}).get("field"))))
             print("check=failed\nreason=wrapper-unavailable\nchild_spawned=0")
             return 65
         print("\n".join(_audit("eligible", selected, source, configured, requested, states,
@@ -1133,7 +1213,8 @@ def main(argv):
                                   reason=reason, capacity=capacity, capacity_sources=capacity_sources,
                                   capacity_freshness=capacity_freshness,
                                   quality_band=quality_band,
-                                  relief_promoted=relief_promoted, top_excluded=top_excluded)), flush=True)
+                                  relief_promoted=relief_promoted, top_excluded=top_excluded,
+                                  field=(sealed_context or {}).get("field"))), flush=True)
         if pair_model_reason != "not-applicable":
             print(f"model_diversity_proposal={pair_model_reason}", flush=True)
             print(f"model_diversity_proposal_profile={pair_model_profile or values.get('--model-profile', '-')}", flush=True)
@@ -1146,10 +1227,12 @@ def main(argv):
         child_env = {
             key: value for key, value in os.environ.items() if not _MODEL_ENV.fullmatch(key)
         }
-        if values["--worker-type"] in {"review", "frame"}:
-            # A direct reviewer is deliberately route-free.  The selector may
-            # itself run inside a route-owned owner, so inherited route
-            # variables must not silently bind the child to that owner/node.
+        if values["--worker-type"] in {"review", "frame"} | _ROUTE_NODE_WORKER_TYPES:
+            # A direct reviewer is deliberately route-free, and a route leg that is
+            # not the owner (a frame, a unit's support leg) never carries its
+            # caller's route binding.  The selector may itself run inside a
+            # route-owned owner, so inherited route variables must not silently
+            # bind the child to that owner/node.
             for key in (
                 "AGENT_OWNER_ROUTE_FILE", "AGENT_OWNER_ROUTE_ID",
                 "AGENT_OWNER_ROUTE_HASH", "AGENT_ROUTE_FILE",
@@ -1162,12 +1245,14 @@ def main(argv):
         child_env["AGENT_DISPATCH_OWNER_HARNESS"] = selected
         if route_evidence:
             route_data = json.loads(Path(route_evidence).read_text(encoding="utf-8"))
-            if values["--worker-type"] == "frame" or route_data.get("effective_intensity") == "quick":
-                # W3: quick is a three-node route, so the caller's own
+            leg_launch = bool(values.get("--route-node")) and values["--worker-type"] != "owner"
+            if leg_launch or serial_attempt_route(route_data):
+                # A route whose owner makes the work itself (and a unit leg) carries its route by
+                # argument, read from the route's nodes, not from its intensity: the middle cell
+                # (`solo·standard`) is an owner like quick's. W3: quick is a three-node route, so the caller's own
                 # `--route-node` selects which node this launch binds to. The
                 # default keeps every existing quick OWNER launch identical.
-                derive = (derive_frame_route_binding if values["--worker-type"] == "frame"
-                          else derive_quick_owner_binding)
+                derive = derive_frame_route_binding if leg_launch else derive_quick_owner_binding
                 binding = derive(
                     route_evidence, worktree=values["--worktree"],
                     capability=values["--capability"], capability_mode=values["--capability-mode"],
@@ -1180,16 +1265,20 @@ def main(argv):
                               "--completion-gate", binding.completion_gate]
                 if pair_model_profile:
                     forwarded += ["--pair-model-profile", pair_model_profile]
-                if values["--worker-type"] == "frame":
+                if leg_launch:
                     from artifact_producer import prepare_route_artifact_env, ProducerError
                     try:
                         child_env.pop("AGENT_ARTIFACT_PARENT_OUTPUT_DIR", None)  # SD-163: no stale source
                         # The alternative joins the cycle its live first leg's preparation began and
                         # looked the root over for, in this start or an earlier start of the route:
                         # it is not walked again; later hand changes go to the next begin or listing.
-                        child_env.update(prepare_route_artifact_env(
-                            Path(binding.route_file), start="--start" in forwarded, jobs=Path(jobs),
-                            sibling_looked=bool(first) and first.get("_status") in {"open", "running"}))
+                        with _first_node_of_a_new_route():
+                            child_env.update(prepare_route_artifact_env(
+                                Path(binding.route_file), start="--start" in forwarded, jobs=Path(jobs),
+                                sibling_looked=bool(first) and first.get("_status") in {"open", "running"},
+                                # A new request begins its own cycle. A capacity retry finishes the open turn.
+                                fresh_cycle=(values.get("--attempt-id") if values.get("--continues-attempt-id")
+                                             and not values.get("--automatic-retry-of") else None)))
                     except ProducerError as exc:
                         raise OwnerError(f"{exc.code}:{exc.detail}") from exc
                 # Deliberately NOT export_owner_route_env() here. The adapters
@@ -1214,7 +1303,10 @@ def main(argv):
                 try:
                     child_env.pop("AGENT_ARTIFACT_PARENT_OUTPUT_DIR", None)  # SD-163: no stale source
                     child_env.update(prepare_route_artifact_env(
-                        Path(binding.route_file), start="--start" in forwarded, jobs=Path(jobs)))
+                        Path(binding.route_file), start="--start" in forwarded, jobs=Path(jobs),
+                        # A later request on a closed route begins its own cycle, as a unit turn does.
+                        fresh_cycle=(values.get("--attempt-id") if values.get("--continues-attempt-id")
+                                     and not values.get("--automatic-retry-of") else None)))
                 except ProducerError as exc:
                     raise OwnerError(f"{exc.code}:{exc.detail}") from exc
         if overridden:

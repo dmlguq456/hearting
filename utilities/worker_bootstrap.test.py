@@ -216,7 +216,15 @@ class WorkerBootstrapTest(unittest.TestCase):
             prompt = W.artifact_context_prompt({"AGENT_ARTIFACT_OUTPUT_DIR": "/out",
                                                "AGENT_RUNTIME_DIR": str(explicit)})
             self.assertIn(f"- runtime_dir: {explicit}", prompt)
-            self.assertIn("checkpoints under runtime_dir", prompt)
+            # No separate raw_data_dir: the old runtime line, letter for letter.
+            self.assertIn("- Put environments, caches, external checkouts, and checkpoints under runtime_dir; "
+                          "keep reports and provenance in artifacts.\n", prompt)
+            prompt = W.artifact_context_prompt({"AGENT_ARTIFACT_OUTPUT_DIR": "/out",
+                                               "AGENT_RUNTIME_DIR": str(explicit),
+                                               "AGENT_RAW_DATA_DIR": "/raw/proj"})
+            self.assertIn("- Put environments, caches, external checkouts under runtime_dir; "
+                          "checkpoints and raw results under raw_data_dir (/raw/proj); "
+                          "reports and summaries in artifacts.\n", prompt)
 
     def test_runtime_root_survives_a_launcher_preparing_it_mid_write(self):
         # Two starts prepare one new root. The second ran while the first had
@@ -799,6 +807,43 @@ class WorkerBootstrapTest(unittest.TestCase):
         self.assertEqual(rendered.count("# Portable Worker Kernel"), 1)
         self.assertEqual(rendered.count("# Worker Type:"), 1)
 
+    def test_review_stance_is_carried_once_just_before_the_unit_body(self):
+        rendered = W.render_worker_bootstrap(ROOT, "review", unit="qa/code-review")
+        self.assertEqual(rendered.count("Refute first"), 1)
+        self.assertNotIn("# Shared Fragment: Review Stance", rendered)
+        self.assertNotIn("> Referenced by every review", rendered)
+        stance_at = rendered.index("Review adversarially by default")
+        self.assertLess(stance_at, rendered.index("# Unit: qa/code-review"))
+        self.assertLess(rendered.index("# Worker Type:"), stance_at)
+
+    def test_review_stance_reaches_the_five_auxiliary_checks(self):
+        for unit in ("assumption-check", "edge-case-check", "failure-mode-check",
+                     "simplicity-check", "test-gap-check"):
+            with self.subTest(unit=unit):
+                text = W.render_worker_bootstrap(ROOT, "review", unit=f"qa/{unit}")
+                self.assertEqual(text.count("Refute first"), 1)
+
+    def test_unit_without_stance_renders_its_body_only(self):
+        body = W.unit_persona_body(ROOT, "dev/backend")
+        bare = W.render_worker_bootstrap(ROOT, "stage")
+        self.assertEqual(W.render_worker_bootstrap(ROOT, "stage", unit="dev/backend"),
+                         bare + "\n" + body + "\n")
+        self.assertNotIn("Refute first", bare + body)
+
+    def test_unresolvable_stance_ref_renders_body_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "roles" / "worker-types").mkdir(parents=True)
+            (root / "roles" / "units" / "qa").mkdir(parents=True)
+            (root / "roles" / "worker-bootstrap.md").write_text("kernel\n")
+            (root / "roles" / "worker-types" / "review.md").write_text("type\n")
+            for name, ref in (("a", "_shared/missing.md"), ("b", "../../../outside.md")):
+                (root / "roles" / "units" / "qa" / f"{name}.md").write_text(
+                    f"---\nunit: qa/{name}\nstance: {ref}\n---\n\n# Unit: qa/{name}\nbody\n")
+                (root / "outside.md").write_text("# T\n\nleaked stance\n")
+                self.assertEqual(W.render_worker_bootstrap(root, "review", unit=f"qa/{name}"),
+                                 f"kernel\n\ntype\n\n# Unit: qa/{name}\nbody\n")
+
     def test_reserved_and_absent_units_render_unchanged(self):
         bare = W.render_worker_bootstrap(ROOT, "owner")
         self.assertEqual(W.render_worker_bootstrap(ROOT, "owner", unit="_kernel/owner"), bare)
@@ -1133,9 +1178,16 @@ class NodeScopeTest(unittest.TestCase):
         self.assertEqual(source, ["/task/worktree/**"])
         self.assertIn("approved task", W.node_scope_prompt(scope))
         self.assertEqual(json.dumps(route, sort_keys=True), before)
-        for changed in ({"capability": "autopilot-lab"}, {"effective_intensity": "standard"}):
+        for changed in ({"capability": "autopilot-lab"},):
             narrow = W.resolve_node_scope({**route, **changed}, "one-shot", env)
             self.assertEqual(W._resolved_write_scopes(narrow)[0], ["/primary/cycle/artifacts/plans/<cycle>/**"])
+        # the owner is the one that makes the work (a `one-shot` node), at any intensity: the middle cell's
+        # owner (standard) holds the same wide scope; a team owner (no `one-shot` node) keeps the narrow one
+        wide = W.resolve_node_scope({**route, "effective_intensity": "standard"}, "one-shot", env)
+        self.assertEqual(W._resolved_write_scopes(wide)[0], ["/primary/cycle/artifacts/**"])
+        team = {**route, "effective_intensity": "standard", "nodes": [{**node, "id": "execute"}]}
+        narrow = W.resolve_node_scope(team, "execute", env)
+        self.assertEqual(W._resolved_write_scopes(narrow)[0], ["/primary/cycle/artifacts/plans/<cycle>/**"])
         unbound = W.resolve_node_scope(route, "one-shot", {})
         self.assertIn("do not write durable artifacts", W.node_scope_prompt(unbound))
 
@@ -1516,7 +1568,7 @@ class OwnerRouteStepsPromptTest(unittest.TestCase):
         inline = re.search(r"`([^`]*capability-route\.py complete[^`]*)`", text).group(1)
         self.assertEqual(shlex.split(inline)[3:9], ["--inline", "--node", "plan", "--evidence", f"{self.output_dir}/plan.md", "--reason"])
         self.assertNotIn("<node>", text)
-        self.assertIn("do not export or pass them", text)
+        self.assertIn("do not export them or add them to the printed commands", text)
 
     def test_unbound_cycle_states_it_and_never_guesses_a_path(self):
         text = self.steps(environ={})
@@ -1592,6 +1644,55 @@ class OwnerRouteStepsPromptTest(unittest.TestCase):
         self.assertEqual(W.owner_route_steps_prompt(SimpleNamespace(worker_type="owner", route_file=None), {}), "")
         missing = SimpleNamespace(worker_type="owner", route_file=str(self.root / "missing.json"))
         self.assertEqual(W.owner_route_steps_prompt(missing, {}), "")
+
+    def spec_route(self, *, staged):
+        """An autopilot-spec update route shape: the owner-run PRD transaction, alone or after two stages."""
+        transaction = {"id": "prd-transaction", "kind": "capability-owner", "unit": "_kernel/owner",
+                       "terminal": True, "dispatch_depth": 1, "completion_gate": "spec-atomic-transaction",
+                       "depends_on": ["review"] if staged else [],
+                       "outputs": ["spec/prd.md", "spec/pipeline_state.yaml", "version-snapshot"],
+                       "write_scope": ["spec/prd.md", "spec/pipeline_state.yaml", "spec/pipeline_summary.md",
+                                       "spec/_internal/versions/**"]}
+        stages = [{"id": "research", "kind": "pipeline-stage", "depends_on": [], "inputs": ["task"],
+                   "outputs": ["research.md"], "dispatch_depth": 2},
+                  {"id": "review", "kind": "review-worker", "depends_on": ["research"], "inputs": ["research.md"],
+                   "outputs": ["review.md"], "dispatch_depth": 2}] if staged else []
+        return {"route_id": "rt-spec", "route_hash": "sha256:" + "b" * 64,
+                "artifact_root": str(self.root / "reports dir"), "cwd": str(self.root / "repo"),
+                "human_gates": [], "human_gate_bindings": [], "nodes": [*stages, transaction]}
+
+    def test_an_owner_run_prd_transaction_gets_its_exact_spec_transaction_command(self):
+        route_path = self.root / "route with space.json"
+        for staged in (False, True):
+            with self.subTest(staged=staged):
+                text = self.steps(self.spec_route(staged=staged))
+                self.assertEqual(text.count("Route steps (sealed route rt-spec"), 1)
+                commands = re.findall(r"`([^`]*spec-transaction\.py run[^`]*)`", text)
+                self.assertEqual(len(commands), 1, text)
+                argv = shlex.split(commands[0])
+                self.assertEqual(argv[0], "python3")
+                self.assertTrue(Path(argv[1]).is_file())
+                self.assertEqual(argv[2:], ["run", "--artifact-root", str(self.root / "reports dir"),
+                                            "--worktree", str(self.root / "repo"), "--route", str(route_path),
+                                            "--node", "prd-transaction", "--", "<apply", "command>"])
+                self.assertIn("Replace only `<apply command>`", text)
+                self.assertIn("prd-transaction" + (" after review" if staged else "") + " [you run it yourself]", text)
+                help_text = subprocess.run([sys.executable, argv[1], "run", "--help"], text=True,
+                                           capture_output=True).stdout
+                for flag in ("--artifact-root", "--worktree", "--route", "--node"):
+                    self.assertIn(flag, help_text)
+                if staged:
+                    self.assertIn("once every node it runs after is finished", text)
+                    self.assertIn("Start now: `" + W.route_start_command(route_path, "research") + "`", text)
+                else:
+                    self.assertNotIn("Start now", text)
+                    self.assertNotIn("--start", text)
+                    self.assertNotIn("complete --inline", text)
+                    self.assertNotIn("Use each node's printed start command", text)
+        assigned = self.steps(self.spec_route(staged=False), worktree=str(self.root / "owner worktree"))
+        self.assertIn(shlex.join(["--worktree", str(self.root / "owner worktree")]), assigned)
+        code_route = self.steps()
+        self.assertNotIn("spec-transaction", code_route)
 
     def test_the_assignment_carries_the_block_once_and_drops_the_template_marker(self):
         path = self.write(steps_route())
@@ -2263,31 +2364,135 @@ class UnitBootstrapDeclarationTest(unittest.TestCase):
         base.update(kw)
         return SimpleNamespace(**base)
 
-    def test_undeclared_unit_gets_nothing_and_spawns_nothing(self):
-        root = _fake_unit_root(self.tmp, "")
+    def _route(self, **kw):
+        route = {"field": "code", "nodes": [{"id": "n", "dispatch_depth": 2}]}
+        route.update(kw)
+        path = self.tmp / f"route-{len(list(self.tmp.glob('route-*.json')))}.json"
+        path.write_text(json.dumps(route), encoding="utf-8")
+        return str(path)
+
+    def _cmds(self, args, stdout="", root=None):
+        """The ``mem`` commands one prompt assembly runs, and its section."""
+        root = root or _fake_unit_root(self.tmp, "")
+        seen = []
+
+        def fake_run(cmd, **kw):
+            seen.append(cmd)
+            return SimpleNamespace(returncode=0, stdout=stdout)
+
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            section = W.unit_bootstrap_prompt(args, "t", {}, root=root)
+        return seen, section
+
+    @staticmethod
+    def _labels(cmd):
+        return [cmd[i + 1] for i, v in enumerate(cmd) if v == "--topic"]
+
+    def test_unit_without_a_record_gets_nothing(self):
+        for args in (self._args(), self._args(route_file=self._route())):
+            cmds, section = self._cmds(args)
+            self.assertEqual(len(cmds), 1)
+            self.assertEqual(section, "")
         with mock.patch("subprocess.run") as run, mock.patch.object(W, "_deliverable_exemplars") as scan:
-            self.assertEqual(W.unit_bootstrap_prompt(self._args(), "task", {}, root=root), "")
-            self.assertEqual(W.unit_bootstrap_prompt(self._args(unit="_kernel/owner", worker_type="owner"), "t", {}, root=root), "")
-            self.assertEqual(W.unit_bootstrap_prompt(self._args(unit=None), "t", {}, root=root), "")
-            self.assertEqual(W.unit_bootstrap_prompt(self._args(worker_type="frame", unit="plan/frame"), "t", {}, root=root), "")
+            root = _fake_unit_root(self.tmp, "")
+            for args in (self._args(unit=None), self._args(unit="_kernel/owner", worker_type="owner"),
+                         self._args(unit=None, worker_type="stage")):
+                self.assertEqual(W.unit_bootstrap_prompt(args, "t", {}, root=root), "")
         run.assert_not_called()
         scan.assert_not_called()
 
-    def test_owner_and_frame_ignore_a_declaration(self):
+    def test_every_unit_asks_for_its_unit_and_field_labels(self):
+        body = "## [durable/preference] id1 (global)\nshort review comments\n"
+        for worker_type, unit in (("stage", "editorial/report"), ("review", "qa/code-review"),
+                                  ("support", "ops/session-tidy-memory"), ("frame", None)):
+            args = self._args(unit=unit, worker_type=worker_type, route_file=self._route())
+            cmds, section = self._cmds(args, body)
+            want = ["unit:" + (unit or "plan/frame"), "field:code"]
+            self.assertEqual(self._labels(cmds[0]), want)
+            self.assertNotIn("--query", cmds[0])
+            self.assertIn("short review comments", section)
+            self.assertIn("Your user's working style for this work, from records tagged with its unit or field ("
+                          "after this turn's instruction and the project's conventions, before the unit's defaults; "
+                          "reference only; apply only what fits your assignment; "
+                          "do not write, curate, or sync memory):\n", section)
+            self.assertEqual(section.count("working style"), 1)
+            self.assertNotIn("come first", section)
+            self.assertNotIn("format follows", section)
+
+    def test_labels_without_a_route_field_are_the_unit_only(self):
+        for route in (self._route(field=None), self._route(field="Bad Value"), None):
+            cmds, _ = self._cmds(self._args(route_file=route))
+            self.assertEqual(self._labels(cmds[0]), ["unit:editorial/report"])
+
+    def test_an_unreadable_route_costs_only_its_field_label(self):
+        broken = self.tmp / "route-broken.json"
+        broken.write_text("{not json", encoding="utf-8")
+        listlike = self.tmp / "route-list.json"
+        listlike.write_text("[1, 2]", encoding="utf-8")
+        for route in (str(broken), str(listlike), str(self.tmp / "no-such-route.json")):
+            cmds, _ = self._cmds(self._args(route_file=route))
+            self.assertEqual(self._labels(cmds[0]), ["unit:editorial/report"], route)
+        cmds, _ = self._cmds(self._args(unit=None, worker_type="owner", route_file=str(broken)))
+        self.assertEqual(cmds, [])
+
+    def test_a_declared_unit_root_still_gives_frame_and_one_shot_owner_no_query_group(self):
         root = _fake_unit_root(self.tmp, "bootstrap:\n  memory: [report-format]\n")
-        with mock.patch("subprocess.run") as run:
-            for kind in ("owner", "frame"):
-                self.assertEqual(W.unit_bootstrap_prompt(self._args(worker_type=kind), "t", {}, root=root), "")
-        run.assert_not_called()
+        one_shot = self._route(nodes=[{"id": "one-shot", "dispatch_depth": 1, "unit": "_kernel/owner"}])
+        body = "## [durable/preference] i (global)\nb\n"
+        scenes = (
+            (self._args(worker_type="frame", route_file=self._route()), ["unit:editorial/report", "field:code"]),
+            (self._args(worker_type="owner", route_file=one_shot), ["field:code"]),
+        )
+        for args, want in scenes:
+            cmds, section = self._cmds(args, body, root=root)
+            self.assertEqual(len(cmds), 1)
+            self.assertEqual(self._labels(cmds[0]), want)
+            self.assertNotIn("--query", cmds[0])
+            self.assertNotIn("format follows", section)
+            self.assertNotIn("come first", section)
+
+    def test_one_shot_owner_gets_the_field_label_and_a_conductor_none(self):
+        one_shot = self._route(nodes=[{"id": "one-shot", "dispatch_depth": 1, "unit": "_kernel/owner"}])
+        args = self._args(unit="_kernel/owner", worker_type="owner", route_file=one_shot)
+        cmds, section = self._cmds(args, "## [durable/preference] i (global)\nb\n")
+        self.assertEqual(self._labels(cmds[0]), ["field:code"])
+        self.assertIn("Unit bootstrap material", section)
+        for route_file in (self._route(), None):
+            cmds, section = self._cmds(self._args(unit=None, worker_type="owner", route_file=route_file))
+            self.assertEqual((cmds, section), ([], ""))
+
+    def test_declared_and_labelled_records_share_one_call(self):
+        root = _fake_unit_root(self.tmp, "bootstrap:\n  memory: [report-format]\n")
+        cmds, section = self._cmds(self._args(route_file=self._route()), "## [durable/preference] i (global)\nb\n",
+                                   root=root)
+        self.assertEqual(len(cmds), 1)
+        self.assertEqual(self._labels(cmds[0]), ["unit:editorial/report", "field:code"])
+        self.assertEqual(cmds[0].count("--query"), 2)
+        self.assertEqual(section.count("## [durable/preference] i"), 1)
+        self.assertIn("format follows", section)
+        self.assertIn("Your user's working style and saved preferences from memory (after this turn's "
+                      "instruction and the project's conventions, before the unit's defaults; those tagged for "
+                      "this unit or field come first; reference only; apply only what fits your assignment; "
+                      "do not write, curate, or sync memory):\n", section)
+
+    def test_failures_and_no_records_leave_the_prompt_unchanged(self):
+        root = _fake_unit_root(self.tmp, "")
+        args = self._args(route_file=self._route())
+        for body in ("import sys; sys.exit(1)\n", "import time; time.sleep(10)\n", "print('')\n"):
+            _fake_mem(root, body)
+            started = time.monotonic()
+            self.assertEqual(W.unit_bootstrap_prompt(args, "t", {}, root=root), "", body)
+            self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(W.unit_bootstrap_prompt(self._args(route_file="/nonexistent"), "t", {}, root=root), "")
 
     def test_gate_limited_unit_skips_other_gates(self):
         root = _fake_unit_root(self.tmp, "bootstrap:\n  memory: [report-format]\n  gates: [research-report]\n",
                                unit="research/research-survey")
         _fake_mem(root, "print('# Saved preferences\\n## [durable/feedback] id (global)\\nbody')\n")
         args = self._args(unit="research/research-survey", completion_gate="research-retrieval")
-        with mock.patch("subprocess.run") as run:
-            self.assertEqual(W.unit_bootstrap_prompt(args, "t", {}, root=root), "")
-            run.assert_not_called()
+        cmds, section = self._cmds(args, root=root)
+        self.assertEqual(section, "")
+        self.assertNotIn("--query", cmds[0])
         args = self._args(unit="research/research-survey", completion_gate="research-report")
         section = W.unit_bootstrap_prompt(args, "t", {}, root=root)
         self.assertIn("Unit bootstrap material", section)
@@ -2330,9 +2535,9 @@ class UnitBootstrapDeclarationTest(unittest.TestCase):
 
     def test_unknown_topic_and_kind_are_ignored(self):
         root = _fake_unit_root(self.tmp, "bootstrap:\n  memory: [nope]\n  exemplar: nothing\n")
-        with mock.patch("subprocess.run") as run:
-            self.assertEqual(W.unit_bootstrap_prompt(self._args(), "t", {}, root=root), "")
-        run.assert_not_called()
+        cmds, section = self._cmds(self._args(), root=root)
+        self.assertEqual(section, "")
+        self.assertNotIn("--query", cmds[0])
 
     def test_memory_query_carries_topic_project_and_task_words(self):
         root = _fake_unit_root(self.tmp, "bootstrap:\n  memory: [report-format]\n")

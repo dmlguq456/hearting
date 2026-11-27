@@ -80,6 +80,35 @@ class FleetV20DispatchContractTest(unittest.TestCase):
             values, _ = dispatch._scan_jobs_log(str(jobs), set())
         self.assertIn("quick-shape", values[0].attempt_contract_status)
 
+    def test_the_middle_cells_owner_row_is_held_to_the_serial_owner_shape_and_its_review_is_not(self):
+        """`solo·standard`: the owner row (node `one-shot`, intensity standard) is a serial owner like quick's;
+        the depth-2 review it starts is a stage row and is not held to that shape."""
+        def read(*rows):
+            with tempfile.TemporaryDirectory() as td:
+                jobs = Path(td) / "jobs.log"
+                jobs.write_text("".join(rows))
+                return dispatch._scan_jobs_log(str(jobs), set())[0]
+        owner = row("2026-07-20T00:00:00+00:00", "open", "cell-owner", "att-owner", intensity="standard",
+                    worker_type="owner")
+        review = row("2026-07-20T00:00:01+00:00", "open", "cell-review", "att-review", dispatch_depth=2,
+                     intensity="standard", route_node="impl-review", worker_type="review", parent="cell-owner")
+        values = read(owner, review)
+        status = {v.route_node: v.attempt_contract_status for v in values}
+        self.assertEqual(status, {"one-shot": "current", "impl-review": "current"})
+        # two live attempts of the owner node: the same violation as quick's
+        again = row("2026-07-20T00:00:02+00:00", "open", "cell-owner-2", "att-owner-2", intensity="standard",
+                    worker_type="owner")
+        self.assertTrue(all(v.attempt_contract_status == "invalid:quick-multiple-live"
+                            for v in read(owner, again)))
+        # an owner row that is not depth 1 breaks the shape on this route too
+        deep = row("2026-07-20T00:00:03+00:00", "open", "cell-owner-deep", "att-deep", dispatch_depth=2,
+                   intensity="standard", worker_type="owner", parent="x")
+        self.assertIn("quick-shape", read(deep)[0].attempt_contract_status)
+        # a standard row on a team node is no serial owner: unchanged, no quick checks
+        team = row("2026-07-20T00:00:04+00:00", "open", "team-stage", "att-team", dispatch_depth=2,
+                   intensity="standard", route_node="execute", worker_type="stage")
+        self.assertEqual(read(team)[0].attempt_contract_status, "current")
+
     def test_terminal_retry_history_preserves_attempt_axes(self):
         with tempfile.TemporaryDirectory() as td:
             jobs = Path(td) / "jobs.log"

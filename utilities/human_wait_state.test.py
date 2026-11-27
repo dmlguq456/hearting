@@ -71,6 +71,28 @@ class HumanWaitStateTests(unittest.TestCase):
                                           "[답변 필요] 진행할까요?", sequence=3, now=200))
         self.assertEqual(state.read_signals(now=200)[0]["since"], 100)
 
+    def test_every_wait_but_a_blocked_owner_is_a_persons_to_answer(self):
+        # 11-14: the count holds every wait a person must answer, wherever it is answered (the
+        # panel, a Claude native request in its own window, a marker in that session's input,
+        # a human gate); only a blocked owner, its parent agent's to answer, stays out.
+        owner = {"harness": "claude", "session_id": "sid"}
+        waits = [
+            {"id": "S1:claude:sid:1", "source": "S1", "kind": "approval", "owner": owner},
+            {"id": "S1:codex:sid:2", "source": "S1-question", "kind": "decision",
+             "owner": {"harness": "codex", "session_id": "sid"}},
+            {"id": "S2:gate", "source": "S2", "kind": "decision", "owner": {}},
+            {"id": "S4:marker", "source": "S4", "kind": "marker", "owner": owner},
+            {"id": "S4:message", "source": "S4", "kind": "message", "owner": owner},
+            {"id": "S4:older", "source": "S4", "kind": "marker", "owner": owner, "stale": True},
+        ]
+        owners = [{"id": "S3:att-%d" % n, "source": "S3", "kind": "decision", "owner": owner}
+                  for n in range(8)]
+        self.assertEqual([state.person_wait(item) for item in waits], [True] * len(waits))
+        self.assertEqual({state.person_wait(item) for item in owners}, {False})
+        self.assertFalse(state.person_wait(None))
+        self.assertEqual(state.wait_counts([*owners, *waits]),
+                         {"total": 5, "older": 1, "ownerless": 0})
+
     def test_reader_is_read_only_and_user_prompt_closes_exact_seat(self):
         self.assertTrue(state.open_signal("codex", "sid-2", "seat-2",
                                           "[결정 필요] A 또는 B", sequence=2, now=100))
@@ -79,10 +101,12 @@ class HumanWaitStateTests(unittest.TestCase):
         result = observation.read_answer_waits(jobs_paths=(), now=101)
         after = (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
         self.assertEqual(before, after)
-        self.assertEqual(result["total"], 1)
+        # A marker question, answered in its own session's input, still waits for a person:
+        # listed and counted (11-14).
+        self.assertEqual((len(result["items"]), result["total"]), (1, 1))
         self.assertEqual(result["items"][0]["question"], "A 또는 B")
         self.assertTrue(state.close_signal("seat-2", sequence=3))
-        self.assertEqual(observation.read_answer_waits(jobs_paths=(), now=102)["total"], 0)
+        self.assertEqual(observation.read_answer_waits(jobs_paths=(), now=102)["items"], [])
 
     def test_stale_signal_remains_source_state_and_is_not_deleted_by_reader(self):
         self.assertTrue(state.open_signal("opencode", "sid-3", "seat-3",
@@ -92,7 +116,7 @@ class HumanWaitStateTests(unittest.TestCase):
         result = observation.read_answer_waits(jobs_paths=(), now=10 + 8 * 86400)
         self.assertEqual(len(result["items"]), 1)
         self.assertTrue(result["items"][0]["stale"])
-        self.assertEqual((result["total"], result["stale_total"]), (0, 1))
+        self.assertEqual((result["total"], result["stale_total"]), (0, 1))  # a marker counts, folded
         self.assertEqual(path.read_bytes(), before)
         self.assertTrue(state.close_signal("seat-3"))
         self.assertEqual(observation.read_answer_waits(jobs_paths=(), now=10 + 8 * 86400)["items"], [])
@@ -112,6 +136,8 @@ class HumanWaitStateTests(unittest.TestCase):
         self.assertFalse(by_id["s-current"]["stale"])
         self.assertTrue(by_id["s-older"]["stale"])
         self.assertTrue(by_id["s-expired"]["stale"])
+        # Marker questions fold by the shared rule and, answered in their own input, still
+        # wait for a person: counted (11-14).
         self.assertEqual((result["total"], result["stale_total"]), (1, 2))
 
     def test_s1_windows_kind_mapping_and_stale_activity_fixture(self):
@@ -345,17 +371,22 @@ class HumanWaitStateTests(unittest.TestCase):
         from tools.fleet.refresh import fleet_answer_wait_view
         now = 1_000_000.0
         result = {"observed_at": now, "complete": True, "health": [], "items": [
-            {"id": "S3:live", "source": "S3", "kind": "decision", "since": now - 60,
-             "stale": False, "fold": None, "route_id": "rt-1", "attempt_id": "att-1",
+            {"id": "S4:live", "source": "S4", "kind": "message", "since": now - 60,
+             "stale": False, "fold": None,
              "owner": {"harness": "claude", "session_id": "sid-new"},
              "owner_state": "successor", "attribution": "lineage", "cwd": "/work/repo",
              "registered_owner": {"harness": "claude", "session_id": "sid-old"},
              "question": "PRIVATE-BLOCKER"},
+            # A blocked owner: its parent agent's to answer, kept on the private board only.
+            {"id": "S3:owner", "source": "S3", "kind": "decision", "since": now - 60,
+             "stale": False, "fold": None, "route_id": "rt-1", "attempt_id": "att-1",
+             "owner": {"harness": "claude", "session_id": "sid-new"},
+             "owner_state": "live", "attribution": "lineage", "question": "PRIVATE-BLOCKER"},
             {"id": "S2:gone", "source": "S2", "kind": "decision", "since": now - 60,
              "stale": True, "fold": "ownerless", "route_id": "rt-2", "gate_id": "frame-review",
              "owner": {"harness": "codex", "session_id": "sid-gone"},
              "owner_state": "none", "attribution": "lineage"},
-            {"id": "S4:aged", "source": "S4", "kind": "decision", "since": now - 80 * 3600,
+            {"id": "S4:aged", "source": "S4", "kind": "message", "since": now - 80 * 3600,
              "stale": True, "fold": "older", "owner_state": "unknown", "attribution": "exact",
              "owner": {"harness": "codex", "session_id": "sid-4"}},
         ]}
@@ -363,17 +394,20 @@ class HumanWaitStateTests(unittest.TestCase):
         private = state._read_cache(now=now)
         self.assertEqual((private["total"], private["older"], private["ownerless"]), (1, 2, 1))
         rows = {row["id"]: row for row in private["items"]}
-        self.assertEqual(rows["S3:live"]["registered_owner"],
+        self.assertIn("S3:owner", rows)
+        self.assertEqual(rows["S4:live"]["registered_owner"],
                          {"harness": "claude", "session_id": "sid-old"})
-        self.assertEqual((rows["S3:live"]["owner_state"], rows["S3:live"]["cwd"]),
+        self.assertEqual((rows["S4:live"]["owner_state"], rows["S4:live"]["cwd"]),
                          ("successor", "/work/repo"))
         self.assertEqual((rows["S2:gone"]["owner_state"], rows["S2:gone"]["fold"]),
                          ("none", "ownerless"))
-        self.assertEqual(private["by_session"], {"claude\0sid-new": ["S3:live"]})
+        self.assertEqual(private["by_session"], {"claude\0sid-new": ["S4:live"]})
         fleet = state.cached_fleet_view(now=now, request=False)
         self.assertEqual((fleet["total"], fleet["older"], fleet["ownerless"]), (1, 2, 1))
         by_id = {row["id"]: row for row in fleet["items"]}
-        self.assertEqual((by_id["S3:live"]["registered_session_id"], by_id["S3:live"]["stale"]),
+        # Listed for whoever answers it (Fleet in its parent's own session), never counted.
+        self.assertEqual(by_id["S3:owner"]["kind"], "blocked owner")
+        self.assertEqual((by_id["S4:live"]["registered_session_id"], by_id["S4:live"]["stale"]),
                          ("sid-old", "current"))
         self.assertEqual((by_id["S2:gone"]["fold"], by_id["S2:gone"]["stale"]),
                          ("ownerless", "older"))
@@ -382,7 +416,8 @@ class HumanWaitStateTests(unittest.TestCase):
         self.assertEqual(state.wait_counts(view["items"]),
                          {"total": view["total"], "older": view["older"], "ownerless": 1})
         self.assertEqual({row["id"]: row.get("owner_state") for row in view["items"]},
-                         {"S3:live": "successor", "S2:gone": "none", "S4:aged": "unknown"})
+                         {"S4:live": "successor", "S3:owner": "live", "S2:gone": "none",
+                          "S4:aged": "unknown"})
         self.assertNotIn("PRIVATE-BLOCKER", state._fleet_cache_path().read_text(encoding="utf-8"))
         self.assertNotIn("PRIVATE-BLOCKER", state._cache_path().read_text(encoding="utf-8"))
 
@@ -403,6 +438,36 @@ class HumanWaitStateTests(unittest.TestCase):
         self.assertEqual([question["id"] for question in questions],
                          [FI.UNDERSTANDING_SLOT, "scope", "speed"])
         self.assertEqual([question.get("recommended") for question in questions], [0, 1, None])
+
+    def test_frame_interview_detail_carries_the_route_scope_line_in_the_choice_means_only(self):
+        import frame_interview as FI
+        leg = {"capability": "autopilot-code", "shape": "solo"}
+        options = [{"label": "Go", "means": "Run it"}, {"label": "Go bare"}, {"label": "Later", "means": "Not now"}]
+        interview = {"understanding": "Restated task", "questions": [
+            {"id": "go", "question": "Proceed?", "recommended": 0, "options": options},
+            {"id": "other", "question": "Also?", "options": [{"label": "Go", "means": "x"}]}],
+            "route_proposals": {"question": "go", "by_option": {
+                "Go": {"legs": [leg, leg], "execution_scope": "complete"},
+                "Go bare": {"legs": [leg, leg, leg], "execution_scope": "report"},
+                "Later": {"legs": [leg]}}}}
+        binding = {"route": {"route_id": "rt-x", "nodes": [],
+                             "human_gate_bindings": [{"gate": "frame-review", "node": "owner"}]},
+                   "resolution": {}}
+        for lang, first, second in (
+                ("en", "Run it Runs all 2 legs through to the end, without asking again in between.",
+                 "Stops each time a leg ends; the next leg starts when you say so."),
+                ("ko", "Run it leg 2개를 끝까지 이어서 진행합니다. 중간에 다시 묻지 않습니다.",
+                 "leg가 하나 끝날 때마다 멈춥니다. 다음 leg는 말씀하시면 시작합니다.")):
+            with self.subTest(lang=lang), mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}), \
+                    mock.patch.object(state, "_workflow_gate_interview", return_value=(interview, None)):
+                detail, error = state._workflow_gate_detail(binding, {"gate_id": "frame-review"})
+            self.assertIsNone(error)
+            route, other = detail["detail"]["questions"][1:]
+            self.assertEqual([choice["value"] for choice in route["choices"]], ["Go", "Go bare", "Later"])
+            self.assertEqual([choice["label"] for choice in route["choices"]], ["Go", "Go bare", "Later"])
+            self.assertEqual([choice.get("means") for choice in route["choices"]], [first, second, "Not now"])
+            self.assertEqual(other["choices"], [{"value": "Go", "label": "Go", "means": "x"}])
+            self.assertEqual(route["question"], "Proceed?")
 
     def test_absent_herdr_does_not_leave_a_dedupe_marker(self):
         with mock.patch("human_wait_state.shutil.which", return_value=None):
@@ -460,8 +525,8 @@ class HumanWaitStateTests(unittest.TestCase):
         lines = log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(lines, [
             "tmux [-S] [%s] [list-clients] [-F] [#{client_name}]" % sock,
-            "tmux [-S] [%s] [display-message] [-c] [/dev/pts/9] [-d] [10000] [--] [◑답변 필요: 배포 ##1 진행?]" % sock,
-            "notify-send [-a] [Hearting] [--] [◑답변 필요] [배포 #1 진행?]",
+            "tmux [-S] [%s] [display-message] [-c] [/dev/pts/9] [-d] [10000] [--] [◑답 필요: 배포 ##1 진행?]" % sock,
+            "notify-send [-a] [Hearting] [--] [◑답 필요] [배포 #1 진행?]",
         ])
 
     @mock.patch.dict("os.environ", {"FLEET_NOW_LANG": "Korean"})   # Korean notification words
@@ -480,7 +545,7 @@ class HumanWaitStateTests(unittest.TestCase):
         lines = log.read_text(encoding="utf-8").splitlines()
         herdr = [line for line in lines if line.startswith("herdr ")]
         self.assertEqual(len(herdr), 3)
-        self.assertTrue(all(line.startswith("herdr notification show ◑답변 필요 · ") and "--sound request" in line
+        self.assertTrue(all(line.startswith("herdr notification show ◑답 필요 · ") and "--sound request" in line
                             for line in herdr))
         self.assertEqual(sum("[display-message] [-c] [/dev/pts/9]" in line for line in lines), 1)
         self.assertFalse(any(line.startswith("notify-send") for line in lines))
@@ -566,6 +631,52 @@ class HumanWaitStateTests(unittest.TestCase):
         sleeps, refreshes = self._idle_producer(display_returns=True)
         self.assertEqual(sleeps, [30.0, 30.0])   # back on the live cadence
         self.assertEqual(refreshes, 2)
+
+    def test_producer_follows_the_installed_release_only_when_the_pointer_moved(self):
+        import parent_next_directive
+        import peer_obligations
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, read_fd)
+        self.addCleanup(os.close, write_fd)
+        os.set_inheritable(write_fd, False)
+        with mock.patch.object(parent_next_directive, "release_moved", return_value=False), \
+             mock.patch.object(peer_obligations, "follow_installed_release") as follow:
+            state._follow_installed_release(write_fd)
+        follow.assert_not_called()
+        self.assertFalse(os.get_inheritable(write_fd))
+        with mock.patch.object(parent_next_directive, "release_moved", return_value=True), \
+             mock.patch.object(peer_obligations, "follow_installed_release") as follow:
+            state._follow_installed_release(write_fd)
+        follow.assert_called_once_with(state.__file__, ["--refresh-cache", "--lock-fd", str(write_fd)])
+        self.assertTrue(os.get_inheritable(write_fd), "the lock descriptor must survive the exec")
+        with mock.patch.object(parent_next_directive, "release_moved", return_value=True), \
+             mock.patch.object(peer_obligations, "follow_installed_release", side_effect=OSError("x")):
+            state._follow_installed_release(write_fd)   # a failed move keeps this code, quietly
+
+    def test_producer_offers_itself_to_the_installed_release_before_any_pass_and_between_passes(self):
+        class Stop(BaseException):
+            pass
+        events = []
+        passes = []
+
+        def refresh():
+            events.append("refresh")
+            passes.append(1)
+            if len(passes) > 1:
+                raise Stop()
+            return (), 0.0
+
+        root = state.state_root()
+        root.mkdir(parents=True, exist_ok=True)
+        (root / ".demand").touch()
+        with mock.patch.object(state, "_follow_installed_release", side_effect=lambda fd: events.append(("follow", fd))), \
+             mock.patch.object(state, "_timed_refresh", side_effect=refresh), \
+             mock.patch.object(state, "_read_cache", return_value={"items": []}), \
+             mock.patch.object(state, "_sleep_until_registry_change"), \
+             mock.patch.object(state.fcntl, "flock"), mock.patch.object(state.os, "close"):
+            with self.assertRaises(Stop):
+                state._producer_loop(77)
+        self.assertEqual(events, [("follow", 77), "refresh", ("follow", 77), "refresh"])
 
     def _run_producer_with(self, *, during_refresh=None, during_sleep=None):
         """Run the real producer loop with an instant observation and an injected wait.
@@ -754,6 +865,65 @@ class HumanWaitStateTests(unittest.TestCase):
         self.assertFalse(value["complete"])
         self.assertEqual(value["items"], [])
         self.assertGreater(value["observed_at"], 0)
+
+    def test_an_applied_gate_or_native_answer_stays_out_of_the_counts_until_the_next_collection(self):
+        # Review 1633, follow-up 1: a human gate or an OpenCode/Codex request answered from the
+        # panel or Fleet left the counts while `submitted` and came back once `applied`, until the
+        # next collection dropped it (2 -> 1 -> 2 -> 1). The applied answer keeps its mark until a
+        # collection observed after it is published; that collection decides.
+        owner = {"harness": "opencode", "session_id": "sid-a"}
+        now = time.time()
+        gate = {"id": "S2:rt-1:frame-review:1", "source": "S2", "kind": "decision", "since": now,
+                "stale": False, "owner": owner, "route_id": "rt-1", "gate_id": "frame-review"}
+        native = {"id": "S1:opencode:sid-a:1", "source": "S1", "kind": "approval", "since": now,
+                  "stale": False, "owner": owner, "request_id": "per_1"}
+        def counts():
+            fleet = json.loads(state._fleet_cache_path().read_text())
+            return (state._read_cache_file()["total"], fleet["total"],
+                    state.cached_statusline("opencode", "sid-a")[0])
+        def answer(envelope, action_id):
+            claimed, entry = state._claim_selected_action(envelope, action_id, {"decision": "approve"})
+            self.assertTrue(claimed)
+            sent = counts()
+            self.assertTrue(state._store_selected_entry(envelope, dict(
+                entry, state="applied", result={"status": "applied"})))
+            return sent, counts()
+        self.assertTrue(state.publish_cache({"items": [gate, native], "observed_at": now, "complete": True}))
+        self.assertEqual(counts(), (2, 2, (2, 2)))
+        gate_envelope = {"harness": "opencode", "session_id": "sid-a", "request_id": gate["id"],
+                         "selected_id": gate["id"], "source": "S2", "gate_epoch": 1, "route_id": "rt-1",
+                         "turn_id": None, "native_ref": {"transport": "hearting-human-gate",
+                                                         "gate_epoch": 1, "route_id": "rt-1"}}
+        self.assertEqual(answer(gate_envelope, "act-gate"), ((1, 1, (1, 1)), (1, 1, (1, 1))))
+        # A collection read before the gate was applied may still list it: it stays out.
+        self.assertTrue(state.publish_cache({"items": [gate, native], "observed_at": now, "complete": True}))
+        self.assertEqual(counts(), (1, 1, (1, 1)))
+        # The next collection no longer lists the released gate.
+        self.assertTrue(state.publish_cache({"items": [native], "observed_at": time.time(), "complete": True}))
+        self.assertEqual(counts(), (1, 1, (1, 1)))
+        native_envelope = {"harness": "opencode", "session_id": "sid-a", "request_id": "per_1",
+                           "selected_id": native["id"], "source": "S1", "turn_id": "turn-1",
+                           "kind": "approval"}
+        self.assertEqual(answer(native_envelope, "act-native"), ((0, 0, (0, 0)), (0, 0, (0, 0))))
+        self.assertTrue(state.publish_cache({"items": [], "observed_at": time.time(), "complete": True}))
+        self.assertEqual(counts(), (0, 0, (0, 0)))
+
+    def test_a_changed_set_of_open_questions_asks_no_artifact_root_for_a_refresh(self):
+        """11-22: a question stands on the question screens only; the campaign document does not follow the question list."""
+        import artifact_entrance
+        folder = Path(self.tmp.name) / "mine"
+        (folder / ".agent_reports").mkdir(parents=True)
+        now = time.time()
+
+        def row(name):
+            return {"id": f"S1:{name}", "source": "S1", "kind": "decision", "since": now,
+                    "owner": {"harness": "claude", "session_id": "s-" + name}, "cwd": str(folder)}
+        with mock.patch.object(artifact_entrance, "request_refresh", side_effect=AssertionError("asked")) as refresh:
+            for items in ([row("a")], [row("a"), row("b")], [row("b")], []):    # asked, asked again, answered, all answered
+                self.assertTrue(state.publish_cache({"items": items, "complete": True, "observed_at": time.time()}))
+            refresh.assert_not_called()
+        self.assertEqual(state._read_cache()["items"], [])
+        self.assertFalse(hasattr(state, "_request_documents_for_changed_waits"))
 
 
 class _StrictOpenCodeTransport:
@@ -3254,6 +3424,119 @@ class SessionRouteDisplayCacheTests(unittest.TestCase):
             self.assertEqual(state.cached_statusline("claude", "sid-a"), (None, ""))
             request.assert_called_once_with("claude", "sid-a")
 
+    def test_an_incomplete_observation_shows_unknown_only_for_a_session_with_its_own_open_question(self):
+        # 11-26: an incomplete observation that lists no wait of a session leaves it without a badge,
+        # unless the session's own question source is open: then the status lines read one wait of
+        # an unknown total (`?`), as the panel's formula does for the same counts. A complete
+        # observation's counts stay as they were and never read the source.
+        import contextlib
+        import io
+        import re
+        import session_tidy as tidy
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+        from fleet import session_line
+
+        def statusline(sid):
+            painted = session_line.claude_native_statusline(
+                {"session_id": sid, "cwd": self.tmp.name}, {"COLUMNS": "200", "TERM": "xterm-256color"})
+            return re.sub(r"\x1b\[[0-9;]*m", "", painted)
+
+        def footer(sid):   # the OpenCode footer's helper read
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(state.main(["--statusline", "opencode", sid]), 0)
+            return out.getvalue().split("\n")[0]
+
+        def publish(complete):
+            now = time.time()
+            self.assertTrue(state.publish_cache({"items": [], "observed_at": now, "complete": complete,
+                "route_sessions": {key: now for key in ("claude\0sid-a", "claude\0sid-b", "opencode\0sid-o")}}))
+
+        wait = session_line.answer_wait_word()
+        with mock.patch.object(state, "_request_producer"):
+            publish(False)
+            self.assertEqual(state.cached_statusline("claude", "sid-a")[0], (-1, 0))
+            self.assertNotIn(wait, statusline("sid-a"))
+            signal = state.register_message("claude", "sid-a", tidy.Seat("project", "seat-a"), "질문?",
+                                            sequence=0, cwd=self.tmp.name)
+            self.assertEqual(state.cached_statusline("claude", "sid-a")[0], (-1, 1))
+            self.assertIn(wait + " ?", statusline("sid-a"))
+            # Another session's open question is not this one's.
+            self.assertEqual(state.cached_statusline("claude", "sid-b")[0], (-1, 0))
+            self.assertNotIn(wait, statusline("sid-b"))
+            state.register_message("opencode", "sid-o", tidy.Seat("project", "seat-o"), "질문?",
+                                   sequence=0, cwd=self.tmp.name)
+            self.assertEqual(footer("sid-o"), "? 1")
+            self.assertEqual(footer("sid-b"), "? 0")
+            # An answered question no longer waits.
+            path = state._signal_path(signal)
+            answered = {**state._read(path), "lifecycle": "answered"}
+            state._write(path, answered)
+            self.assertEqual(state.cached_statusline("claude", "sid-a")[0], (-1, 0))
+            self.assertNotIn(wait, statusline("sid-a"))
+            # A complete observation decides as before, the session's own source unread.
+            state._write(path, {**answered, "lifecycle": "open"})
+            publish(True)
+            with mock.patch.object(state, "_own_open_signal") as own:
+                self.assertEqual(state.cached_statusline("claude", "sid-a")[0], (0, 0))
+                self.assertNotIn(wait, statusline("sid-a"))
+                own.assert_not_called()
+
+    def test_the_own_question_read_keeps_the_producers_age_rule_and_opens_only_recent_files(self):
+        # 11-26 follow-up: a question older than OLDER_AFTER is not counted, as a complete
+        # observation would not count it; a source file last written longer ago than that is
+        # skipped by its stat alone: only the recent files are opened. Measured (one
+        # `cached_statusline`, incomplete, median of 20, other sessions' files four days old):
+        # 100 files 0.32 ms, 1,000 3.0 ms, 5,000 18 ms, none opened (before: 0.96, 10.6, 51 ms,
+        # every one opened); what is left is one stat per file.
+        import session_tidy as tidy
+
+        def publish():
+            now = time.time()
+            self.assertTrue(state.publish_cache({"items": [], "observed_at": now, "complete": False,
+                                                 "route_sessions": {"claude\0sid-a": now}}))
+
+        def old_source(index):
+            value = {"schema_version": 1, "mode": "message", "source": "S4", "id": "S4:%064x" % (index + 1),
+                     "harness": "claude", "session_id": "old-%d" % index, "seat_key": "pane:old-%d" % index,
+                     "sequence": 0, "question": "q?", "detail": {"questions": [{"id": "message-response",
+                     "question": "q?", "choices": [], "is_secret": False}]}, "since": then,
+                     "lifecycle": "open", "cwd": self.tmp.name, "incarnation": None}
+            path = state._session_signal_path(value)
+            state._write(path, value)
+            os.utime(path, (then, then))
+
+        with mock.patch.object(state, "_request_producer"):
+            publish()
+            # Bytes of this session's id in another harness's or another session's source count nothing.
+            state.register_message("codex", "sid-a", tidy.Seat("project", "seat-c"), "질문?",
+                                   sequence=0, cwd=self.tmp.name)
+            state.register_message("claude", "sid-b", tidy.Seat("project", "seat-b"), "sid-a",
+                                   sequence=0, cwd=self.tmp.name)
+            self.assertEqual(state.cached_statusline("claude", "sid-a")[0], (-1, 0))
+            signal = state.register_message("claude", "sid-a", tidy.Seat("project", "seat-a"), "질문?",
+                                            sequence=0, cwd=self.tmp.name)
+            path = state._signal_path(signal)
+            self.assertEqual(state.cached_statusline("claude", "sid-a")[0], (-1, 1))
+            state._write(path, {**state._read(path), "since": time.time() - state.OLDER_AFTER - 60})
+            self.assertEqual(state.cached_statusline("claude", "sid-a")[0], (-1, 0))
+            # Thirty sources last written four days ago are never opened.
+            then = time.time() - 4 * 86400
+            for index in range(30):
+                old_source(index)
+            root = str(state.state_root())
+            opened = []
+            real_open = os.open
+
+            def counting(target, *args, **kwargs):
+                if str(target).startswith(root):
+                    opened.append(str(target))
+                return real_open(target, *args, **kwargs)
+
+            with mock.patch.object(state.os, "open", side_effect=counting):
+                self.assertEqual(state.cached_statusline("claude", "sid-a")[0], (-1, 0))
+            self.assertEqual(len(opened), 3, opened)   # the three recent sources only
+
     def test_statusline_tidy_notice_is_a_third_line_only_when_asked(self):
         # PG-20: the OpenCode footer asks for the waiting session-tidy result the
         # Claude status line shows; Claude's two-line read stays unchanged.
@@ -3295,7 +3578,7 @@ class SessionRouteDisplayCacheTests(unittest.TestCase):
         def refresh():
             requests = state._route_demands(now=now)
             refreshes.append(dict(requests))
-            state.publish_cache({"items": [{"id": "S3:fixture", "source": "S3", "since": now,
+            state.publish_cache({"items": [{"id": "S2:fixture", "source": "S2", "since": now,
                 "owner": {"harness": "claude", "session_id": "other-wait"}}],
                 "observed_at": now, "complete": True, "route_sessions": requests,
                 "route_status": {key: "route 1 · frame" for key in requests}})
@@ -3372,6 +3655,78 @@ class MessageCompletionTests(unittest.TestCase):
         self.f = self.fixture.__enter__()
         self.addCleanup(self.fixture.__exit__, None, None, None)
 
+    def test_choice_and_note_use_the_private_answer_delivery(self):
+        for harness in ("claude", "codex", "opencode"):
+            signal, envelope = self.f.ask(harness, "mixed-"+harness, "Synthetic choice?", choices=["original-value", "other"])
+            values = ["original-value", "A separate note"]
+            response = {"answers": {"message-response": values}}
+            result = state.submit_selected_response(envelope, response, action_id="mixed-"+harness)
+            self.assertEqual(result["state"], "submitted", result)
+            wire, _, _ = self.f.prepare(signal)
+            self.assertIn(json.dumps(values), wire)
+            self.assertEqual(state._message_answer_error(state._message_body(response)), None)
+        self.assertIsNone(state._message_answer_error("a" * 4096))
+
+    def test_array_shaped_single_answers_are_distinct_from_two_values_in_the_prompt(self):
+        import session_notice
+        pair = ["original-value", "A separate note"]
+        cases = [pair, [json.dumps(pair)], ["[1,2]"], ["[]"], ['["x"]'], ["[plain"]]
+        bodies = []
+        for index, values in enumerate(cases):
+            with self.subTest(values=values):
+                signal, envelope = self.f.ask("claude", f"array-shape-{index}", choices=[pair[0], "other"])
+                result = state.submit_selected_response(envelope, {"answers": {"message-response": values}},
+                                                       action_id="fixture-array")
+                self.assertEqual(result["state"], "submitted")
+                header, body = session_notice.consumer_text(self.f.record(signal)["receipt"]).split("\n", 1)
+                self.assertEqual(header, f"Question answer (request={signal['id']}):")
+                try:
+                    decoded = json.loads(body)
+                except ValueError:
+                    decoded = None
+                self.assertEqual(decoded if isinstance(decoded, list) else [body], values)
+                bodies.append(body)
+        self.assertNotEqual(bodies[0], bodies[1])
+
+    def test_a_preexisting_unwrapped_answer_keeps_its_bound_bytes(self):
+        import session_notice
+        value = '["a","b"]'
+        signal, envelope = self.f.ask()
+        # The receipt was bound before single array-shaped text began to be wrapped.
+        with mock.patch.object(state, "_message_body", return_value=value):
+            self.assertEqual(self.f.submit(envelope, value)["state"], "submitted")
+        receipt = self.f.record(signal)["receipt"]
+        self.assertEqual(session_notice.consumer_text(receipt).split("\n", 1)[1], value)
+        wire, _, recipient = self.f.prepare(signal)
+        self.f.peer.receive_peer_message(wire, recipient)
+        self.assertEqual(self.source(signal)["completion"]["answer"], value)
+
+    def test_choice_and_note_use_separate_decision_fields_and_secret_answers_are_omitted(self):
+        import tidy_decisions
+        choice, note = "original-value", "A separate note"
+        for secret in (False, True):
+            with self.subTest(secret=secret):
+                signal, envelope = self.f.ask("claude", f"split-memory-{secret}",
+                                              choices=[choice, "other"], secret=secret)
+                result = state.submit_selected_response(envelope, {"answers": {"message-response": [choice, note]}},
+                                                       action_id="fixture-note")
+                self.assertEqual(result["state"], "submitted")
+                wire, _, recipient = self.f.prepare(signal)
+                self.f.peer.receive_peer_message(wire, recipient)
+                self.assertEqual(self.source(signal)["lifecycle"], "answered")
+                state.flush_message_decisions()
+                decisions = tidy_decisions.list_pending()
+                self.assertEqual(len(decisions), 1)
+                entry = decisions[0][1]
+                self.assertEqual((entry["answers"], entry["note"]), ([choice], note))
+                body = tidy_decisions.decision_body(entry)
+                self.assertIn("고른 답: " + choice, body)
+                self.assertIn("사용자 메모: " + note, body)
+                if secret:
+                    completion = self.source(signal)["completion"]
+                    self.assertNotIn("answer", completion)
+                    self.assertNotIn("note", completion)
+
     def test_shared_project_questions_remain_open_for_each_exact_session(self):
         import session_tidy as tidy
         for harness in ("claude", "codex", "opencode"):
@@ -3422,6 +3777,74 @@ class MessageCompletionTests(unittest.TestCase):
         # A direct answer in the session settles the same way.
         self.f.direct(b, "answer B")
         self.assertEqual(state._read_cache_file()["items"], [])
+
+    def test_a_sent_answer_leaves_every_count_while_it_travels_and_comes_back_if_it_fails(self):
+        # Rule 5 (11-14): a person answered a busy session's question from the panel; the answer
+        # waited for the turn to end while Fleet, `questions list` and the status line still
+        # counted it. The existing answer record (`submitted`) now marks that wait sent at once:
+        # listed, in no count or session index, its panel row the receipt with what was sent.
+        # The session taking it removes it; a failed delivery counts it again.
+        import contextlib, io
+        import questions as board_cli
+        import session_shell
+        def item(signal):
+            return {"id": signal["id"], "source": "S4", "kind": "message", "since": signal["since"],
+                    "owner": {"harness": signal["harness"], "session_id": signal["session_id"]}}
+        def surfaces(harness, sid):
+            private = state._read_cache_file()
+            fleet = json.loads(state._fleet_cache_path().read_text())
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), mock.patch.object(state, "read_selected_request", return_value=None):
+                board_cli.main(["list"])
+            return {"private": private["total"], "fleet": fleet["total"],
+                    "index": len(private["by_session"].get(harness + "\0" + sid, ())),
+                    "statusline": state.cached_statusline(harness, sid)[0][1],
+                    "list": out.getvalue().splitlines()[0].split(" · ")[0],
+                    "sent": sorted(row["id"] for row in fleet["items"] if row.get("answer") == "sent")}
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                for path in state.state_root().glob("*.json"):
+                    path.unlink()
+                a, ea = self.f.ask(harness, "session-a", "question A", choices=["Alpha", "Beta"])
+                b, _eb = self.f.ask(harness, "session-b", "question B")
+                self.assertTrue(state.publish_cache({"items": [item(a), item(b)], "complete": True}))
+                self.assertEqual(surfaces(harness, "session-a"),
+                                 {"private": 2, "fleet": 2, "index": 1, "statusline": 1,
+                                  "list": "questions: 2 current", "sent": []})
+                self.assertEqual(self.f.submit(ea, "Beta")["state"], "submitted")
+                sent = {"private": 1, "fleet": 1, "index": 0, "statusline": 0,
+                        "list": "questions: 1 current", "sent": [a["id"]]}
+                self.assertEqual(surfaces(harness, "session-a"), sent)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), mock.patch.object(state, "read_selected_request", return_value=None):
+                    board_cli.main(["list"])
+                head = out.getvalue().splitlines()[0]
+                self.assertIn(" · 1 answer on the way", head)
+                self.assertNotIn("blocked owner", head)
+                # The panel still holds it as its receipt, with what was sent.
+                panel = session_shell.session_questions(harness, "session-a", view=state.cached_view(request=False))
+                self.assertEqual([(row["id"], row.get("request_state"), row.get("sent")) for row in panel],
+                                 [(a["id"], "submitted", ["Beta"])])
+                # The next collection says the same (the source is still open while it travels).
+                self.assertTrue(state.publish_cache({"items": [item(a), item(b)], "complete": True}))
+                self.assertEqual(surfaces(harness, "session-a"), sent)
+                # Its session takes the answer: it leaves the list too.
+                wire, _, _ = self.f.prepare(a)
+                self.f.consume(a, wire)
+                self.assertEqual(surfaces(harness, "session-a"),
+                                 {"private": 1, "fleet": 1, "index": 0, "statusline": 0,
+                                  "list": "questions: 1 current", "sent": []})
+                # A delivery that could not be confirmed brings the wait back into every count.
+                c, ec = self.f.ask(harness, "session-c", "question C")
+                self.assertTrue(state.publish_cache({"items": [item(b), item(c)], "complete": True}))
+                self.f.submit(ec, "answer C")
+                self.assertEqual(surfaces(harness, "session-c")["sent"], [c["id"]])
+                entry = state._selected_entry(ec)
+                self.assertTrue(state._store_selected_entry(ec, dict(
+                    entry, state="unknown", result={"reason": "message-answer-delivery-unconfirmed"})))
+                self.assertEqual(surfaces(harness, "session-c"),
+                                 {"private": 2, "fleet": 2, "index": 1, "statusline": 1,
+                                  "list": "questions: 2 current", "sent": []})
 
     def test_a_collection_read_before_the_answer_does_not_publish_the_answered_question(self):
         # Review 1597-1 (11-13): one pass read A, A was answered from the panel and the same
@@ -3602,13 +4025,21 @@ class MessageCompletionTests(unittest.TestCase):
                                 self.assertTrue(state.publish_cache(published))
                             shared = state._read_cache_file()
                             fleet = json.loads(state._fleet_cache_path().read_text())
+                            elsewhere = []
                             panel = session_shell.session_questions(
-                                harness, sid, view=state.cached_view(request=False))
+                                harness, sid, view=state.cached_view(request=False), elsewhere=elsewhere)
                             seen = {"shared": a["id"] in [row["id"] for row in shared["items"]],
                                     "by_session": a["id"] in shared["by_session"].get(harness + "\0" + sid, ()),
                                     "fleet": a["id"] in [row["id"] for row in fleet["items"]],
                                     "panel": a["id"] in [item["id"] for item in panel]}
-                            self.assertEqual(seen, dict.fromkeys(seen, want == LOAD))
+                            expect = dict.fromkeys(seen, want == LOAD)
+                            if change == "replaced" and want == LOAD:
+                                # 11-14: the panel's block holds what the person can answer here.
+                                # A late publication still lists the replaced question, which its
+                                # session's next question ended: it is the guidance line instead.
+                                expect["panel"] = False
+                                self.assertIn(a["id"], [item["id"] for item in elsewhere])
+                            self.assertEqual(seen, expect)
                             for view in (shared, fleet):
                                 self.assertIn(b["id"], [row["id"] for row in view["items"]])
                                 self.assertEqual(view["total"], len(view["items"]))
@@ -3803,6 +4234,19 @@ class MessageCompletionTests(unittest.TestCase):
                           prompt_text=text, env=os.environ, render_context=True, emit=lines.append)
         return "\n".join(lines)
 
+    def test_a_question_asked_replaced_or_answered_never_asks_the_entrance_for_a_refresh(self):
+        """The prompt hook holds the seat lock and asks for nothing (11-22: the campaign document does not follow the question list)."""
+        import artifact_entrance
+        (self.f.root / ".agent_reports").mkdir()
+        with mock.patch.object(artifact_entrance, "request_refresh", side_effect=AssertionError("asked")) as refresh:
+            signal, envelope = self.f.ask(text="Which one?", choices=["Alpha", "Beta"])
+            self.prompt(signal, "2")                                    # answered at the prompt
+            self.assertEqual(self.source(signal)["lifecycle"], "answered")
+            self.f.ask(text="First?")
+            self.f.ask(text="Second?")                                  # the first is replaced
+            refresh.assert_not_called()
+        self.assertFalse(hasattr(state, "_refresh_campaign_documents"))
+
     def test_choice_question_closes_only_on_one_exact_choice_prompt(self):
         choices = ["Alpha plan", "Beta plan", "Gamma plan"]
         kept = ("질문 전송 중이라고 뜨고 바로 안가네..", "0", "4", "12", "1 2", "1, 2",
@@ -3846,6 +4290,7 @@ class MessageCompletionTests(unittest.TestCase):
             for text in ("질문 전송 중이라고 뜨고 바로 안가네..", "1", "C"):
                 context = self.prompt(signal, text)
                 self.assertEqual(self.source(signal)["lifecycle"], "open")
+                # The line judges this very input ("not recorded as the answer"): every typed prompt.
                 self.assertIn("Fleet에서 고른 답이 전달 대기 중입니다", context)
             self.f.peer.receive_peer_message(wire, recipient)
             completion = self.source(signal)["completion"]
@@ -4146,13 +4591,22 @@ class MessageCompletionTests(unittest.TestCase):
         self.assertEqual(self.source(signal)["lifecycle"], "open")
         self.assertFalse(state.close_signal(signal["seat_key"]))
 
-    def test_incarnation_change_and_proven_clear_leave_old_question_unresolved(self):
-        import session_tidy as tidy
+    def test_the_same_session_in_a_new_process_still_answers_its_question(self):
+        # 11-14: a native resume, a restart or a compaction keeps the session id; the question
+        # stays answerable and its answer reaches that session as it is now.
         signal, envelope = self.f.ask(incarnation={"pid": os.getpid(), "proc_start": state._proc_start_ticks(os.getpid())})
         with mock.patch.object(state, "_proc_start_ticks", return_value="replacement-start"):
-            self.assertFalse(state.read_selected_request(envelope)["support"]["supported"])
-            self.f.submit(envelope)
-        self.assertIsNone(self.f.record(signal))
+            selected = state.read_selected_request(envelope)
+            self.assertEqual((selected["state"], selected["support"]["supported"]), ("open", True))
+            self.assertIn(self.f.submit(envelope)["state"], {"submitted", "received", "applied"})
+            self.assertIsNotNone(self.f.record(signal))
+            wire, _ref, _recipient = self.f.prepare(signal)
+            self.f.consume(signal, wire)
+        self.assertEqual(self.source(signal)["lifecycle"], "answered")
+
+    def test_another_session_on_the_seat_leaves_the_old_question_unresolved(self):
+        import session_tidy as tidy
+        signal, envelope = self.f.ask(incarnation={"pid": os.getpid(), "proc_start": state._proc_start_ticks(os.getpid())})
         seat = self.f.seat()
         tidy._append_ledger_entry(seat, {"event": "succession", "source": "tidy-clear", "harness": "claude",
             "sid": "successor", "from": {"harness": "claude", "sid": signal["session_id"]}, "ts": time.time()})

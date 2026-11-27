@@ -30,6 +30,22 @@ globals().update({name: value for name, value in vars(FIXTURE).items()
                   and not (isinstance(value, type) and issubclass(value, unittest.TestCase))})
 
 
+def _resting_claude_shell():
+    """The runner holds a Claude completion only for a Hearting shell resting with an empty
+    input; these tests are about what it sends then, so the recipient has one."""
+    import contextlib
+    import session_shell
+    attachment = {"harness": "claude", "sid": "any", "incarnation": "i1", "host_pid": 4242,
+                  "host_start": "1", "native_pid": 4243, "native_start": "1",
+                  "socket": "/nonexistent.sock"}
+    stack = contextlib.ExitStack()
+    stack.enter_context(mock.patch.object(
+        peer_steward, "_current_shell_binding", return_value=(attachment, "")))
+    stack.enter_context(mock.patch.object(
+        session_shell, "control", return_value={"ok": True, "state": "idle", "empty": True}))
+    return stack
+
+
 class GridStartTest(_TmpRootMixin, unittest.TestCase):
     """Start through the shared pane opener; its placement cases live in terminal_surface.test.py."""
     FULL = [(10, 2, 200, 100)]
@@ -2904,7 +2920,7 @@ class _ShellHost:
         self.native(binding["harness"], binding["sid"], row["text"])
         return dict(self.result)
 
-    def presence(self, harness, sid):
+    def presence(self, harness, sid, **_kwargs):
         return "present" if (harness, sid) in self.seats else "absent"
 
     @contextlib.contextmanager
@@ -5464,6 +5480,8 @@ class NativeReceivingTurnRecoveryTest(_TmpRootMixin, unittest.TestCase):
              mock.patch("dispatch_terminal_commit.owner_completion_state",
                         return_value=CompletionState("pending")), \
              mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False), \
+             mock.patch.object(obligations, "_owner_unsettled_dependency_paths",
+                               return_value=(self.jobs_path,)), \
              mock.patch.object(peer_steward.peer_obligations,
                                "_registered_terminal_state", return_value=None), \
              mock.patch("dispatch_seat_handover._effective", return_value=(sid, "codex")):
@@ -5473,6 +5491,59 @@ class NativeReceivingTurnRecoveryTest(_TmpRootMixin, unittest.TestCase):
                 resume_external()
                 self.assertEqual(materialize.call_count, 1,
                                  "R1_THREE_PASSES_ONE_REGISTERED_REDRIVE")
+
+    def test_a_unit_leg_whose_close_stays_refused_backs_off_like_an_owner(self):
+        import dispatch_batch_obligations as obligations
+        import dispatch_completion_join as join
+        import dispatch_pending_delivery as pending
+        import dispatch_registry_cache
+        from dispatch_terminal_commit import CompletionState
+
+        for label, extra in (("owner", "worker_type=owner,workflow_completion=runtime-v1"),
+                             ("unit leg", "worker_type=review,workflow_completion=runtime-v1,dispatch_depth=1")):
+            with self.subTest(label), tempfile.TemporaryDirectory() as temporary:
+                self.tmp_root = Path(temporary)
+                self.jobs_path = self.tmp_root / "jobs.log"
+                self.jobs_path.touch()
+                with mock.patch.dict(os.environ, {
+                        "AGENT_DISPATCH_JOBS": str(self.jobs_path),
+                        "AGENT_PEER_LEDGER_ROOT": str(self.tmp_root)}):
+                    store, duty, aid, sid = self._duty()
+                    pending.record_path(self.tmp_root, sid, "delivery-native-crash").unlink()
+                    self.jobs_path.write_text(self.jobs_path.read_text(encoding="utf-8").replace(
+                        f"attempt_id={aid}", f"attempt_id={aid},{extra}"), encoding="utf-8")
+                    dispatch_registry_cache.clear_cache()
+                    context = obligations.OwnerSettlementReadContext()
+                    now = [1000.0]
+                    context._clock = lambda: now[0]
+                    self.addCleanup(context.close)
+
+                    def resume():
+                        peer_steward._resume_registered_obligation(
+                            store.get(duty["id"]), store, settlement_context=context)
+
+                    with mock.patch.object(join, "materialize_after_terminal_close") as materialize, \
+                         mock.patch("dispatch_terminal_commit.owner_completion_state",
+                                    return_value=CompletionState("unknown")), \
+                         mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False), \
+                         mock.patch.object(obligations, "_owner_unsettled_dependency_paths",
+                                           return_value=(self.jobs_path,)), \
+                         mock.patch.object(peer_steward.peer_obligations,
+                                           "_registered_terminal_state", return_value=None), \
+                         mock.patch("dispatch_seat_handover._effective", return_value=(sid, "codex")):
+                        resume()
+                        self.assertEqual(materialize.call_count, 1)
+                        waits = []
+                        for _ in range(4):
+                            before = materialize.call_count
+                            for step in range(1, 700):
+                                now[0] += 1.0
+                                resume()
+                                if materialize.call_count > before:
+                                    waits.append(step)
+                                    break
+                        # The same 60, 120, 240, 480 second backoff for either, not a 6 second loop.
+                        self.assertEqual(waits, [60, 120, 240, 480], label)
 
     def test_shared_owner_retry_observes_new_pending_before_due(self):
         import dispatch_batch_obligations as obligations
@@ -6185,7 +6256,8 @@ class NativeDispatchReceiptTest(unittest.TestCase):
                  mock.patch.object(peer_steward.subprocess, "run", return_value=SimpleNamespace(
                      stdout=json.dumps(agents), returncode=0)), \
                  mock.patch.object(peer_steward, "_resolve_target", return_value=("claude", sid)), \
-                 mock.patch.object(peer_steward, "cmd_prompt", side_effect=capture_prompt) as send:
+                 mock.patch.object(peer_steward, "cmd_prompt", side_effect=capture_prompt) as send, \
+                 _resting_claude_shell():
                 peer_steward._resume_registered_obligation(store.get(duty["id"]), store)
             send.assert_called_once()
             # Receipt evidence is checked against the stored record before and after the claim.
@@ -6356,7 +6428,8 @@ class RegisteredParentReceiptAfterSuccessorTest(unittest.TestCase):
                  stdout=json.dumps(agents), returncode=0)), \
              mock.patch.object(peer_steward, "_resolve_target", return_value=("claude", self.new)), \
              mock.patch.object(peer_steward, "_schedule_message_obligation"), \
-             mock.patch.object(peer_steward, "cmd_prompt", return_value=0) as send:
+             mock.patch.object(peer_steward, "cmd_prompt", return_value=0) as send, \
+             _resting_claude_shell():
             peer_steward._resume_registered_obligation(store.get(duty["id"]), store)
         return send, self.pending.read(self.root, self.old, self.did)
 
@@ -7557,9 +7630,12 @@ class RegisteredDeliverySettlementTest(_TmpRootMixin, unittest.TestCase):
     CARRIER = "claude-parent-runtime"
 
     def _registered_duty(self, attempt, *, status="done", pid=None, start=None,
-                         worker_type="stage", ns=None):
+                         worker_type="stage", ns=None, parent_harness="claude"):
         import dispatch_completion_join as join
         import dispatch_contract as D
+        from harness_capabilities import parent_completion
+
+        carrier = parent_completion(parent_harness)["carrier"]
 
         jobs = self.jobs_path
         artifact_root = self.tmp_root / "artifacts"
@@ -7579,8 +7655,8 @@ class RegisteredDeliverySettlementTest(_TmpRootMixin, unittest.TestCase):
             "worker_type": worker_type,
             "harness": "codex",
             "parent_sid": recipient,
-            "parent_harness": "claude",
-            "parent_completion_delivery": self.CARRIER,
+            "parent_harness": parent_harness,
+            "parent_completion_delivery": carrier,
             "route_id": route_id,
             "route_hash": route_hash,
             "route_node": "execute",
@@ -7591,7 +7667,7 @@ class RegisteredDeliverySettlementTest(_TmpRootMixin, unittest.TestCase):
         if start is not None:
             metadata["parent_runtime_pid_start"] = str(start)
         if ns is not None:
-            metadata["parent_runtime_ns"] = ns
+            metadata["parent_runtime_ns"] = str(ns)
         pipe = ",".join(f"{key}={value}" for key, value in metadata.items())
         initial_status = "open" if status == "done" else status
         jobs.write_text(
@@ -7604,9 +7680,9 @@ class RegisteredDeliverySettlementTest(_TmpRootMixin, unittest.TestCase):
             self.assertIsNotNone(join.materialize_after_terminal_close(jobs, attempt))
         store = peer_steward.peer_obligations.ObligationStore()
         duty_id = "registered-batch-d3-" + attempt.replace("-", "")
-        identity = {"jobs": str(jobs), "attempt_id": attempt, "harness": "claude",
+        identity = {"jobs": str(jobs), "attempt_id": attempt, "harness": parent_harness,
                     "session_id": recipient, "server": "default"}
-        duty = store.create(duty_id, "registered-batch", identity, {"carrier": self.CARRIER})
+        duty = store.create(duty_id, "registered-batch", identity, {"carrier": carrier})
         row = join.current_attempt_row(jobs, attempt)
         record = None
         if row is not None and row.metadata.get("delivery_id"):
@@ -7729,6 +7805,269 @@ class RegisteredDeliverySettlementTest(_TmpRootMixin, unittest.TestCase):
         retained = join.pending_delivery.read(
             self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])
         self.assertEqual(retained["state"], "pending")
+
+    def test_closed_route_rechecks_a_parent_the_pass_table_missed_before_dropping(self):
+        # RV-PR1714 follow-up 3: the pass's session table can be a pass old. The
+        # not-required drop trusts only a fresh census, so a parent that is present
+        # now (absent from the table) keeps its notice.
+        import artifact_lifecycle
+        import dispatch_completion_join as join
+        import peer_address
+
+        store, duty, row, record, root, route_id, route_hash = self._registered_duty(
+            "att-d3-closed-stale")
+        outcome_path = artifact_lifecycle.canonical_outcome_path(root, route_id)
+        outcome_path.parent.mkdir(parents=True, exist_ok=True)
+        outcome_path.write_text(json.dumps({
+            "schema_version": 4, "route_id": route_id, "route_hash": route_hash,
+            "closed_at": "2026-10-23T00:00:00Z",
+        }), encoding="utf-8")
+        calls = []
+
+        def presence(harness, sid, sessions=None):
+            calls.append(sessions is None)
+            return "present" if sessions is None else "absent"
+
+        stale_table = object()
+        with mock.patch.object(peer_steward, "_pass_native_sessions", return_value=stale_table), \
+             mock.patch.object(peer_address, "presence", side_effect=presence):
+            self._resume_with_agents(duty, store)
+        self.assertEqual(calls, [False, True])
+        kept = store.get(duty["id"])
+        self.assertEqual(kept["state"], "pending")
+        self.assertNotEqual(kept.get("delivery"), "not-required")
+        retained = join.pending_delivery.read(
+            self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])
+        self.assertEqual(retained["state"], "pending")
+
+    def _close_route(self, root, route_id, route_hash):
+        import artifact_lifecycle
+
+        outcome_path = artifact_lifecycle.canonical_outcome_path(root, route_id)
+        outcome_path.parent.mkdir(parents=True, exist_ok=True)
+        closed_at = "2026-10-23T00:00:00Z"
+        outcome_path.write_text(json.dumps({
+            "schema_version": 4, "route_id": route_id, "route_hash": route_hash,
+            "closed_at": closed_at,
+        }), encoding="utf-8")
+        return closed_at
+
+    def _own_runtime(self):
+        import dispatch_contract_process as process
+
+        _visibility, start, _state = process._proc_observation(os.getpid())
+        return os.getpid(), start
+
+    def test_closed_route_with_live_parent_runtime_keeps_completion_undelivered(self):
+        # #1410: a plain `/clear` leaves the registered parent runtime alive under a new session
+        # id. A closed route alone does not make the still-open completion "not required".
+        import dispatch_completion_join as join
+
+        pid, start = self._own_runtime()
+        store, duty, row, record, root, route_id, route_hash = self._registered_duty(
+            "att-d3-replaced", pid=pid, start=start)
+        closed_at = self._close_route(root, route_id, route_hash)
+        self._resume_with_agents(duty, store)
+        kept = store.get(duty["id"])
+        self.assertNotEqual(kept["state"], "complete")
+        self.assertEqual(kept["observation"], {
+            "reason": "completion-undelivered", "route_id": route_id, "route_hash": route_hash,
+            "closed_at": closed_at, "recipient_sid": row.metadata["parent_sid"],
+            "recipient_pid": str(pid), "recipient_pid_start": str(start)})
+        retained = join.pending_delivery.read(
+            self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])
+        self.assertEqual((retained["state"], retained["attempts"]), ("pending", record["attempts"]))
+        # The same observation is not written again on a later wake.
+        path = store._record_path(duty["id"])
+        before = (kept["revision"], kept["updated_at"], path.stat().st_mtime_ns)
+        self._resume_with_agents(kept, store)
+        again = store.get(duty["id"])
+        self.assertEqual((again["revision"], again["updated_at"], path.stat().st_mtime_ns), before)
+        # The session that holds the record may still receive it: its own ACK closes the duty
+        # through the ordinary settled-record branch.
+        sid = row.metadata["parent_sid"]
+        join.pending_delivery.claim(self.jobs_path.parent, sid, record["delivery_id"],
+                                    claim_owner="session-sweep:" + sid, lease_seconds=30,
+                                    require_generation_proof=False, jobs=self.jobs_path)
+        join.pending_delivery.ack(self.jobs_path.parent, sid, record["delivery_id"],
+                                  acked_by="session-sweep:" + sid)
+        self._resume_with_agents(again, store)
+        settled = store.get(duty["id"])
+        self.assertEqual((settled["state"], settled["delivery"], settled["cleanup"]),
+                         ("complete", "acked", "complete"))
+
+    def test_closed_route_with_dead_parent_runtime_expires_before_completing(self):
+        import dispatch_completion_join as join
+
+        store, duty, row, record, root, route_id, route_hash = self._registered_duty(
+            "att-d3-dead-closed", pid=999999999, start="123456789")
+        self._close_route(root, route_id, route_hash)
+        self._resume_with_agents(duty, store)
+        expired = join.pending_delivery.read(
+            self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])
+        self.assertEqual((expired["state"], expired["expiry_reason"]),
+                         ("expired", "recipient-session-gone"))
+        first = store.get(duty["id"])
+        self.assertEqual(first["state"], "pending")
+        self.assertEqual(first["observation"]["reason"], "recipient-session-gone")
+        self._resume_with_agents(first, store)
+        settled = store.get(duty["id"])
+        self.assertEqual((settled["state"], settled["delivery"], settled["cleanup"]),
+                         ("complete", "expired", "complete"))
+
+    def test_closed_route_with_unobservable_parent_runtime_stays_not_required(self):
+        import dispatch_completion_join as join
+
+        pid, start = self._own_runtime()
+        store, duty, row, record, root, route_id, route_hash = self._registered_duty(
+            "att-d3-unresolved", pid=pid, start=start)
+        self._close_route(root, route_id, route_hash)
+        with mock.patch("dispatch_contract.process_identity_disposition", return_value="unresolved"):
+            self._resume_with_agents(duty, store)
+        settled = store.get(duty["id"])
+        self.assertEqual((settled["state"], settled["delivery"], settled["cleanup"]),
+                         ("complete", "not-required", "complete"))
+        self.assertEqual(settled["observation"]["reason"], "route-closed")
+        self.assertEqual(join.pending_delivery.read(
+            self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])["state"], "pending")
+
+    def test_closed_route_with_live_runtime_still_settles_a_notice_duty_not_required(self):
+        # The new "stay open" rule is for the owner's completion record. A supervision or gate
+        # notice duty (`notice_delivery_id`) has no hook that shows or expires its record, so it
+        # keeps the route-closed settlement even while the registered runtime is live.
+        import dispatch_completion_join as join
+
+        pid, start = self._own_runtime()
+        store, completion_duty, row, _record, root, route_id, route_hash = self._registered_duty(
+            "att-d3-notice", pid=pid, start=start)
+        self._close_route(root, route_id, route_hash)
+        sid = row.metadata["parent_sid"]
+        body = {"schema_version": 1, "kind": "supervision", "owner_attempt_id": row.attempt_id,
+                "reason": "attempt-stalled"}
+        notice_id = "delivery-" + "9" * 32
+        notice = join.pending_delivery.create(
+            self.jobs_path.parent, recipient_kind=self.CARRIER, recipient_key=sid,
+            delivery_id=notice_id, session_generation="", session_generation_supported="0",
+            attempt_ids=[row.attempt_id], parent_attempt_id=row.attempt_id, route_id=route_id,
+            route_node="execute", receipt=body,
+            receipt_digest=join.pending_delivery._canonical_receipt_digest(body),
+            row_revisions={row.attempt_id: "revision-notice"})
+        identity = {"jobs": str(self.jobs_path), "attempt_id": row.attempt_id, "harness": "claude",
+                    "session_id": sid, "server": "default"}
+        notice_duty = store.create(
+            "registered-batch-d3-notice-duty", "registered-batch", identity,
+            {"carrier": self.CARRIER, "notice_delivery_id": notice_id,
+             "notice_digest": notice["receipt_digest"]})
+        # Control: the owner's completion duty on the same row and runtime stays open.
+        self._resume_with_agents(completion_duty, store)
+        self.assertEqual(store.get(completion_duty["id"])["observation"]["reason"],
+                         "completion-undelivered")
+        current = {"owner_attempt_id": row.attempt_id, "job_registry": str(self.jobs_path),
+                   "sealed_batch_id": ""}
+        with mock.patch("dispatch_supervision.validate", return_value=current), \
+             mock.patch("dispatch_supervision.notice_is_current", return_value=True):
+            self._resume_with_agents(notice_duty, store)
+        settled = store.get(notice_duty["id"])
+        self.assertEqual((settled["state"], settled["delivery"], settled["cleanup"]),
+                         ("complete", "not-required", "complete"))
+        self.assertEqual(settled["observation"]["reason"], "route-closed")
+        self.assertEqual(join.pending_delivery.read(
+            self.jobs_path.parent, sid, notice_id)["state"], "pending")
+
+    def test_clear_scenario_settles_through_notice_and_closes_the_duty(self):
+        # The whole #1410 path: the duty stays open, the next prompt of the new session in the same
+        # pane and runtime shows one notice and expires the record, and the duty then completes.
+        import dispatch_completion_join as join
+        import dispatch_contract_process as process
+        import session_tidy
+
+        pid, start = self._own_runtime()
+        ns = process.process_namespace_identity(os.getpid())
+        store, duty, row, record, root, route_id, route_hash = self._registered_duty(
+            "att-d3-clear", pid=pid, start=start, ns=ns)
+        self._close_route(root, route_id, route_hash)
+        os.environ["HERDR_PANE_ID"] = "fixture:clear-scenario-" + self.tmp_root.name
+        self.addCleanup(os.environ.pop, "HERDR_PANE_ID", None)
+        original = row.metadata["parent_sid"]
+        for sid, source in ((original, "startup"), ("sess-after-clear", "clear")):
+            session_tidy.run_hook("claude", "start", sid, source=source, cwd=str(self.tmp_root),
+                                  env=dict(os.environ), render_context=False)
+        self._resume_with_agents(duty, store)
+        self.assertEqual(store.get(duty["id"])["observation"]["reason"], "completion-undelivered")
+
+        hook_spec = importlib.util.spec_from_file_location(
+            "clear_scenario_sweep_hook", Path(__file__).resolve().parents[1] / "hooks/dispatch-session-sweep.py")
+        hook = importlib.util.module_from_spec(hook_spec)
+        hook_spec.loader.exec_module(hook)
+        output = io.StringIO()
+        with mock.patch.object(hook, "resolve_agent_home", return_value=Path(__file__).resolve().parents[1]), \
+             mock.patch.object(hook, "dispatch_state_roots", return_value=(self.jobs_path.parent,)), \
+             mock.patch.object(hook, "request_obligation_reconciliation"), \
+             mock.patch.object(process, "runtime_ancestry_binding", return_value=(str(pid), str(start), ns)), \
+             mock.patch.object(sys, "stdin", io.StringIO(json.dumps({
+                 "session_id": "sess-after-clear", "hook_event_name": "UserPromptSubmit"}))), \
+             mock.patch.object(sys, "stdout", output):
+            self.assertEqual(hook.main(), 0)
+        context = json.loads(output.getvalue())["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(sum(line.startswith("previous_session_completion:") for line in context.splitlines()), 1)
+        expired = join.pending_delivery.read(
+            self.jobs_path.parent, original, record["delivery_id"])
+        self.assertEqual((expired["state"], expired["expiry_reason"]),
+                         ("expired", "recipient-session-replaced"))
+        self._resume_with_agents(store.get(duty["id"]), store)
+        settled = store.get(duty["id"])
+        self.assertEqual((settled["state"], settled["delivery"], settled["cleanup"]),
+                         ("complete", "expired", "complete"))
+
+    def test_held_completion_never_pays_for_a_fresh_presence_read(self):
+        # The fresh presence read before a route-closed drop is a whole native census. A duty held
+        # open for a live runtime is judged again on every runner pass, so it must stop at the
+        # pass's own table: three passes, three table reads, no fresh census.
+        import peer_address
+
+        pid, start = self._own_runtime()
+        store, duty, row, record, root, route_id, route_hash = self._registered_duty(
+            "att-d3-held-census", pid=pid, start=start)
+        self._close_route(root, route_id, route_hash)
+        calls = []
+
+        def presence(harness, sid, sessions=None):
+            calls.append("fresh" if sessions is None else "pass-table")
+            return "absent"
+
+        with mock.patch.object(peer_steward, "_pass_native_sessions", return_value=object()), \
+             mock.patch.object(peer_address, "presence", side_effect=presence):
+            for _ in range(3):
+                self._resume_with_agents(store.get(duty["id"]), store)
+        self.assertEqual(calls, ["pass-table"] * 3)
+        held = store.get(duty["id"])
+        self.assertNotEqual(held["state"], "complete")
+        self.assertEqual(held["observation"]["reason"], "completion-undelivered")
+
+    def test_closed_route_with_live_runtime_settles_codex_and_opencode_parents_as_before(self):
+        # Only a Claude parent has a path that shows and settles a held completion (its next
+        # session's prompt hook). A Codex or OpenCode parent keeps the route-closed settlement.
+        import dispatch_completion_join as join
+        import peer_address
+
+        pid, start = self._own_runtime()
+        for harness in ("codex", "opencode"):
+            with self.subTest(harness=harness):
+                store, duty, row, record, root, route_id, route_hash = self._registered_duty(
+                    "att-d3-closed-" + harness, pid=pid, start=start, parent_harness=harness)
+                self.assertIsNotNone(record)
+                closed_at = self._close_route(root, route_id, route_hash)
+                with mock.patch.object(peer_address, "presence", return_value="absent"):
+                    self._resume_with_agents(duty, store)
+                settled = store.get(duty["id"])
+                self.assertEqual((settled["state"], settled["delivery"], settled["cleanup"]),
+                                 ("complete", "not-required", "complete"))
+                self.assertEqual(settled["observation"], {
+                    "reason": "route-closed", "route_id": route_id, "route_hash": route_hash,
+                    "closed_at": closed_at, "recipient_sid": row.metadata["parent_sid"]})
+                retained = join.pending_delivery.read(
+                    self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])
+                self.assertEqual(retained["state"], "pending")
 
     def test_first_same_seat_adoption_keeps_closed_route_duty_pending(self):
         import artifact_lifecycle
@@ -7911,7 +8250,8 @@ class RegisteredDeliverySettlementTest(_TmpRootMixin, unittest.TestCase):
                  mock.patch.object(supervision, "continue_for_parent", return_value=None), \
                  mock.patch("dispatch_session_sweep.delivery_context",
                             side_effect=lambda groups: "late completion for C\n" + delivery_context(groups)), \
-                 mock.patch.object(peer_steward, "cmd_prompt", side_effect=courier):
+                 mock.patch.object(peer_steward, "cmd_prompt", side_effect=courier), \
+                 _resting_claude_shell():
                 peer_steward._resume_registered_obligation(duty, store)
             self.assertEqual(len(sent), 1)
             recipient, text, ref = sent[0]

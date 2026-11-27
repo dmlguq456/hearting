@@ -433,6 +433,16 @@ def _main_runtime_state(row: _Row) -> str:
         return "unknown"
 
 
+def _window_seconds(snapshot, row) -> float:
+    """The idle window of a finished home: `IDLE_SECONDS`, longer for a unit route's last turn
+    (`unit_continue.keep_window`), whose session the next turn wakes."""
+    if row is None or row.meta.get("capability") != "unit":
+        return IDLE_SECONDS
+    import unit_continue
+    state = _main_runtime_state(row) if not row.meta.get("caller_attempt_id") else "unknown"
+    return unit_continue.keep_window(row.meta, snapshot.rows, IDLE_SECONDS, state)
+
+
 def _retain_raw_for_main(row: _Row, first_ns: int, now_ns: int) -> bool:
     harness = row.meta.get("harness", "")
     if harness not in {"claude", "opencode"}:
@@ -648,8 +658,17 @@ def _pruned_delivery_binding(value: dict, digest: str, delivery: str,
             and value.get("terminal_state") in TERMINAL_STATES)
 
 
-def _delivery_state(root: Path, meta: dict):
-    """(state, activity_ns): none | resolved | open | pending | unknown."""
+def _delivery_state(root: Path, meta: dict, *, legacy_empty_tombstone: bool = False):
+    """(state, activity_ns): none | resolved | open | pending | unknown.
+
+    ``legacy_empty_tombstone``: the pruner of 2026-09-06 to 10-15 left a
+    zero-byte ``<record>.json.pruned`` only for a terminal (acked/expired/rejected)
+    record, written before the record was removed. A caller that opts in reads such
+    a tombstone, with its record gone, as resolved. Log retention and worktree
+    cleanup's registry duty opt in.
+    Worker-home retention keeps refusing it (its folders can hold credentials and
+    evidence), and so does the registry archive: moving the row would let the
+    orphan-home path retire the home this tombstone still protects."""
     if meta.get("delivery_intent") != "1":
         return "none", 0
     digest, delivery = meta.get("delivery_recipient_digest", ""), meta.get("delivery_id", "")
@@ -666,6 +685,10 @@ def _delivery_state(root: Path, meta: dict):
     try:
         found = _read_json(str(record), MAX_DELIVERY_BYTES)
         if found is None:
+            if legacy_empty_tombstone:
+                raw = _read_regular(str(record) + ".pruned", MAX_DELIVERY_BYTES)
+                if raw is not None and raw[0] == b"":
+                    return "resolved", raw[1]
             tomb = _read_json(str(record) + ".pruned", MAX_DELIVERY_BYTES)
             if tomb is None:
                 return "pending", 0
@@ -2582,7 +2605,7 @@ def _declared_index(ctx_snapshot: _Snapshot, root: Path, workers_real: str) -> d
 
 
 def _protections(ctx: _Context, key: str, attempt: str, *, probe_processes: bool,
-                 protect_open_route: bool = False):
+                 protect_open_route: bool = False, legacy_empty_tombstone: bool = False):
     """Use the shared read-only terminal/consumer decision for this home."""
     from dispatch_retention import terminal_protection
     from dispatch_contract import attempt_process_quiescence
@@ -2590,7 +2613,8 @@ def _protections(ctx: _Context, key: str, attempt: str, *, probe_processes: bool
 
     return terminal_protection(
         ctx, attempt, probe_processes=probe_processes,
-        delivery_state=lambda meta: _delivery_state(ctx.root, meta),
+        delivery_state=lambda meta: _delivery_state(
+            ctx.root, meta, legacy_empty_tombstone=legacy_empty_tombstone),
         replacement_state=lambda identity: _replacement_state(ctx.root, ctx.snapshot, identity),
         route_state=lambda meta: _route_evidence(ctx.jobs, meta),
         owner_state=home_consumer_evidence,
@@ -3332,7 +3356,7 @@ def _detach(ctx: _Context, key: str, ident: list[int], attempt: str | None, raw:
                     except OSError:
                         return "late-evidence-unreadable"
                     idle_from = max(first_ns, verdict.activity_ns, mark, st.st_mtime_ns)
-                    if ctx.now_ns - idle_from < IDLE_SECONDS * 10**9:
+                    if ctx.now_ns - idle_from < _window_seconds(ctx.snapshot, row) * 10**9:
                         return "late-activity"
                     source_mount = _mount_id(layout.workers_fd)
                     target_mount = _mount_id(layout.retiring_fd)
@@ -3654,10 +3678,115 @@ def _codex_detach(ctx: _Context, name: str, ident: list[int], claimants: set[str
                 os.close(fd)
 
 
+CODEX_ROLLOUT_RE = re.compile(
+    r"rollout-.+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl")
+CODEX_THREAD_RE = re.compile(rb'"(?:thread_id|threadId)"\s*:\s*"([^"\\]{1,256})"')
+CODEX_DATE_RE = re.compile(r"[0-9]{1,4}")
+ROLLOUT_REMOVE_LIMIT = 64
+
+
+def _codex_threads(row: _Row) -> set[str] | None:
+    """The Codex threads an owner's log names from its first turn on; None when none is named yet or unreadable."""
+    try:
+        with open(row.meta.get("log_file") or "", "rb") as handle:
+            head = handle.read(MAX_EVIDENCE_BYTES)
+    except (OSError, ValueError):
+        return None
+    return {value.decode("utf-8", "replace") for value in CODEX_THREAD_RE.findall(head)} or None
+
+
+def _codex_held_threads(ctx: _Context, name: str, deadline: float) -> set[str] | None:
+    """The threads of this home an owner may still use: those of every claimant whose own home could not go
+    yet (running, waiting for a resource, about to be replaced or continued). None when that cannot be told."""
+    found = _codex_manifest_claims(ctx, name, ctx.codex_claims)
+    if isinstance(found, _Verdict):
+        return None
+    held: set[str] = set()
+    ctx.delivery_subject_id, ctx.candidate_binding = _codex_subject_id(name), None
+    try:
+        for attempt in sorted(found[0]):
+            row = ctx.snapshot.rows.get(attempt)
+            if row is None or time.monotonic() > deadline:
+                return None
+            if _protections(ctx, name, attempt, probe_processes=True).kind == "eligible":
+                continue
+            threads = _codex_threads(row)
+            if threads is None:
+                return None
+            held |= threads
+    finally:
+        ctx.delivery_subject_id = None
+    return held
+
+
+# destructive-ok: reason=remove the session files of a shared Codex owner home no owner can still wake; boundary=rollout-*.jsonl files under one homes/codex/<32-hex>.<12-hex>/sessions/<y>/<m>/<d>
+def _codex_prune_rollouts(ctx: _Context, name: str, deadline: float) -> int:
+    """While a shared nested Codex owner home is kept for its other owners, remove its session files that no
+    owner can still use: written longer ago than the window a later owner may wake one in, of no thread a
+    claimant still holds (`_codex_held_threads`), open in no process seen. A continuing owner writes the same
+    file, so its own thread is both held and recent."""
+    try:
+        held = _codex_held_threads(ctx, name, deadline)
+    except Exception:  # noqa: BLE001 -- what cannot be judged is kept; one home must not stall the pass
+        return 0
+    if held is None:
+        return 0
+    # As for the whole home, each claimant's own judgment above is what decides; a file a process still has
+    # open stays as well (a partly readable process table still names the files it could read).
+    ctx.home_process_evidence(name, base=ctx.codex_real)
+    refs, _partial = ctx.home_process_scan
+    cutoff = ctx.now_ns - IDLE_SECONDS * 10**9
+    removed = 0
+
+    def visit(parent: int, path: tuple) -> None:
+        nonlocal removed
+        with os.scandir(parent) as listing:
+            entries = sorted(entry.name for _, entry in zip(range(MAX_HOME_REFERENCE_ENTRIES), listing))
+        for entry in entries:
+            if removed >= ROLLOUT_REMOVE_LIMIT or time.monotonic() > deadline:
+                return
+            if len(path) < 3:       # sessions/<year>/<month>/<day>/rollout-<time>-<thread>.jsonl
+                if CODEX_DATE_RE.fullmatch(entry):
+                    with contextlib.suppress(OSError):
+                        child = os.open(entry, _DIR_FLAGS, dir_fd=parent)
+                        try:
+                            visit(child, (*path, entry))
+                        finally:
+                            os.close(child)
+                continue
+            thread = CODEX_ROLLOUT_RE.fullmatch(entry)
+            if not thread or thread.group(1) in held:
+                continue
+            with contextlib.suppress(OSError):
+                info = os.stat(entry, dir_fd=parent, follow_symlinks=False)
+                if (stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and info.st_mtime_ns < cutoff
+                        and os.path.join(ctx.codex_real, name, "sessions", *path, entry) not in refs):
+                    os.unlink(entry, dir_fd=parent)
+                    _note_freed(info)
+                    removed += 1
+
+    try:
+        home = os.open(name, _DIR_FLAGS, dir_fd=ctx.layout.codex_fd)
+    except OSError:
+        return 0
+    try:
+        sessions = os.open("sessions", _DIR_FLAGS, dir_fd=home)
+        try:
+            visit(sessions, ())
+        finally:
+            os.close(sessions)
+    except OSError:
+        pass
+    finally:
+        os.close(home)
+    return removed
+
+
 def _codex_pass(jobs: Path, root: Path, layout: _Layout, state: dict, snapshot: _Snapshot,
                 now_ns: int, budget: int, deadline: float) -> tuple[dict, set[str]]:
     """One bounded pass over shared nested Codex owner homes, after worker homes."""
-    result = {"examined": 0, "eligible": 0, "removed": 0, "partial": 0, "kept": {}, "unknown": {}}
+    result = {"examined": 0, "eligible": 0, "removed": 0, "partial": 0, "rollouts_removed": 0,
+              "kept": {}, "unknown": {}}
     present: set[str] = set()
     if layout.codex_fd is None:
         return result, present
@@ -3706,6 +3835,8 @@ def _codex_pass(jobs: Path, root: Path, layout: _Layout, state: dict, snapshot: 
             if verdict.kind != "eligible":
                 if verdict.kind == "keep":
                     since.pop(name, None)
+                    # The home stays for its other owners; the session files none of them can use go.
+                    result["rollouts_removed"] += _codex_prune_rollouts(ctx, name, examine_deadline)
                 _count(result["unknown" if verdict.kind == "unknown" else "kept"], verdict.reason)
                 continue
             result["eligible"] += 1
@@ -3716,6 +3847,7 @@ def _codex_pass(jobs: Path, root: Path, layout: _Layout, state: dict, snapshot: 
                 due.append((name, ident[:3], claimants, idle_from))
             else:
                 _count(result["kept"], "within-window")
+                result["rollouts_removed"] += _codex_prune_rollouts(ctx, name, examine_deadline)
     finally:
         scan.close()
     for name, ident, claimants, idle_from in due:
@@ -3944,7 +4076,7 @@ def _run_pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int,
                 start = ended if ended is not None else first
                 mark = _stat_mtime(key, dir_fd=layout.views_fd, follow_symlinks=False)
                 idle_from = max(start, verdict.activity_ns, mark, ident[3])
-                if now_ns - idle_from >= IDLE_SECONDS * 10**9:
+                if now_ns - idle_from >= _window_seconds(snapshot, candidate_row) * 10**9:
                     due.append((key, ident[:3], verdict, start, binding))
                     # Each detach re-reads the registry, so removal is the slow
                     # step. Once the removal budget is full, stop examining:

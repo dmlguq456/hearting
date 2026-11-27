@@ -16,8 +16,6 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import importlib.util
-import json
-import subprocess
 import time
 import unittest
 from dataclasses import replace
@@ -111,7 +109,8 @@ class Consumers(T.Base):
         epoch = 12 if row["comparison_state"] == "ok" else 10
         context = rp._experiment_context({"artifact_root": str(root), "run_id": "run-b"}, "run-b",
                                          {"summary": T.summary_of({"wer": [(epoch, 20.5)]})}, True)
-        out["notice"] = "\n".join(rp._experiment_lines(context, first=True, final=False))
+        out["notice"] = "\n".join(rp._experiment_lines(context, first=True, final=False) + [
+            piece(600) if callable(piece) else piece for _place, piece in rp._experiment_optional(context, first=True, final=False)])
         hosts = load_hyphen("compute_hosts_consumers", "compute-hosts.py")
         info = hosts._catalog_identity(str(root), "run-b")
         out["compute-hosts"] = f"{info['name']} {info['goal']}" if info else ""
@@ -135,7 +134,7 @@ class Consumers(T.Base):
         for harness in ("claude", "codex", "opencode"):
             with iso.patched_environ({"HERDR_PANE_ID": f"test:{harness}"}):
                 text = st.run_hook(harness, "start", f"sid-{harness}", cwd=str(root.parent))
-            blocks[harness] = text[text.index("실험 정본:"):] if "실험 정본:" in text else ""
+            blocks[harness] = text[text.index("결과 표"):] if "결과 표" in text else ""
         return blocks
 
     def test_a_renamed_condition_and_its_comparison_are_the_same_in_every_consumer(self):
@@ -143,20 +142,20 @@ class Consumers(T.Base):
         texts, board = self.consumers(root)
         row = next(r for r in board["groups"][0]["rows"] if r["name"] == NEW_B)
         self.assertEqual((row["comparison_state"], round(row["delta"], 2), row["delta_unit"]), ("ok", 0.5, "pp"))
-        from fleet import session_lab
         from fleet.explorer import lab_table
-        view = session_lab.view(board, NOW + 3)
-        shown = next(item for item in view["rows"] if item["name"]["text"] == NEW_B)
-        self.assertEqual(shown["cells"]["delta"]["text"], lab_table.cells(row, board["groups"][0], NOW + 3)["delta"][0])
-        self.assertIn("+0.5", shown["cells"]["delta"]["text"])
+        # (11-15: the shell panel's LAB section, one consumer here, left the panel; Fleet's cell stands.)
+        self.assertIn("+0.5", lab_table.cells(row, board["groups"][0], NOW + 3)["delta"][0])
+        # A former name shows only as the way to the current one (`old → new` in the words line).
+        bare = {k: v.replace(f"{OLD_B} → {NEW_B}", "").replace(f"{OLD_A} → {NEW_A}", "") for k, v in texts.items()}
         for consumer in ("board", "fleet", "notice", "compute-hosts", "leaderboard", "card"):
             self.assertIn(NEW_B, texts[consumer], consumer)
-            self.assertNotIn(OLD_B, texts[consumer], consumer)
+            self.assertNotIn(OLD_B, bare[consumer], consumer)
+        self.assertIn(f"{OLD_B} → {NEW_B}", texts["notice"])
         for consumer in ("fleet", "notice", "leaderboard"):                      # the three that show the comparison
             self.assertIn("+0.5%p", texts[consumer], consumer)
             self.assertIn(NEW_A, texts[consumer], consumer)                      # the control carries its new name too
-            self.assertNotIn(OLD_A, texts[consumer], consumer)
-        self.assertIn(f"| {NEW_B} | run-b | 20.50%@12 | 19.50%@11 |", texts["leaderboard"])  # latest and best are different values
+            self.assertNotIn(OLD_A, bare[consumer], consumer)
+        self.assertIn(f"| {NEW_B} | 진행 중 | 12/40 ep | 20.50@12 | 19.50@11 |", texts["leaderboard"])  # latest and best are different values
         self.assertIn(f"run-b (= {NEW_B})", texts["card"])                          # the bare run id got its name, the id stays
         self.assertEqual(texts["question-advice"], f"run-b={NEW_B}")
 
@@ -177,7 +176,7 @@ class Consumers(T.Base):
         blocks = self.start_blocks(root)
         for harness, block in blocks.items():
             self.assertIn(NEW_B, block, harness)
-            self.assertNotIn(OLD_B, block, harness)
+            self.assertNotIn(OLD_B, block.replace(f"{OLD_B} → {NEW_B}", ""), harness)
             self.assertLessEqual(len(block.encode("utf-8")), st.LAB_BLOCK_BYTES, harness)
         self.assertEqual(len({blocks["claude"], blocks["codex"], blocks["opencode"]}), 1, blocks)
 
@@ -193,7 +192,7 @@ class Consumers(T.Base):
         text = "\n".join(rp._notice_texts(run, "checkpoint", observation, None, [],
                                           rp._experiment_lines(context, first=True, final=False)))
         self.assertTrue(text.startswith(NEW_B + " — "), text)
-        self.assertIn("run=run-b", text)                                   # the trace stays
+        self.assertIn("실행=run-b", text)                                  # the trace stays
         self.assertEqual(E.scan_text(text, doc), [])
         self.assertEqual({w["token"] for w in E.scan_text("run-b 결과를 확인한다", doc)}, {"run-b"})
 
@@ -234,7 +233,7 @@ class CrossPresentation(T.Base):
             return SC._observe_lab({str(root.parent)})
 
     def test_counts_names_renderer_and_steward_new_unknown(self):
-        from fleet import session_lab
+        # (11-15: the shell panel's LAB section left the panel; Fleet's table and the supervisor's line stay.)
         from fleet.explorer import lab_table
         import steward_check as SC
         root = self.mixed()
@@ -254,43 +253,26 @@ class CrossPresentation(T.Base):
         summary = lab_table.summary(board, NOW)                                  # Fleet's header: the first group's numbers
         self.assertIn("조건 3 · 실패 1 · 정체 1", summary)
         self.assertNotIn("미확인", summary)
-        self.assertEqual(lab_table.cells(rows["긴 에폭 정상"], second, NOW)["state"][0], "진행")
+        self.assertEqual(lab_table.cells(rows["긴 에폭 정상"], second, NOW)["state"][0], "진행 중")
         self.assertEqual(lab_table.cells(rows["관측 끊긴 조건"], second, NOW)["state"][0], "미확인")
-        second_view = session_lab.view({**board, "selected": second["id"]}, NOW)
-        self.assertEqual([p[0]["text"] for p in second_view["counts"]], ["미확인 1", "이름 없음 1", "대기 1"])
-        for row, shown in zip(second["rows"], second_view["rows"]):
-            self.assertEqual(shown["cells"]["state"]["text"], lab_table.cells(row, second, NOW)["state"][0])
         fleet = self.fleet_page(board)
         for name in ("실패 조건", "정체 조건", "관측 끊긴 조건", "긴 에폭 정상"):
             self.assertIn(name, fleet)
         lines = fleet.splitlines()
-        self.assertIn("진행", next(line for line in lines if "긴 에폭 정상" in line))
+        self.assertIn("진행 중", next(line for line in lines if "긴 에폭 정상" in line))
         self.assertNotIn("미확인", next(line for line in lines if "긴 에폭 정상" in line))
         self.assertIn("미확인", next(line for line in lines if "관측 끊긴 조건" in line))
-        view = session_lab.view(board, NOW)
-        self.assertEqual([p[0]["text"] for p in view["counts"]], ["실패 1", "정체 1", "이름 없음 1", "대기 1"])
-        self.assertEqual(view["headline"]["left"][0]["text"], first["headline"]["name"])
-        for row, shown in zip(first["rows"], view["rows"]):
-            cells = lab_table.cells(row, first, NOW)
-            self.assertEqual(shown["name"]["text"], cells["name"][0])
-            self.assertEqual(shown["cells"]["delta"]["text"], cells["delta"][0])
-        self.assertEqual("".join(p["text"] for p in view["strip"]), "!2LB")
         seen = self.observe(root, board)
         line, names, notified = SC._lab_summary({"lab": seen}, [])
-        self.assertIn("미확인 1·미연결 1·실패 1·정체 1 (묶음 2개)", line)
+        self.assertIn("미확인 1·이름 없음 1·실패 1·정체 1 (묶음 2개)", line)
+        # One word for the runs without a catalog name: supervisor line and Fleet's lower line.
+        for lang, word in (("ko", "이름 없"), ("en", "unnamed")):
+            with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": lang}):
+                self.assertIn(word, SC._lab_summary({"lab": seen}, [])[0])
+                self.assertIn(word, lab_table.ui_text("experiment.unlinked", count=1, ids="loose-run"))
         self.assertIn("둘째 묶음 — 관측 끊긴 조건", names)
         _, fallback, _ = SC._lab_summary({"lab": seen}, notified)
         self.assertIn(GROUP + " — 실패 조건", fallback)
-        script = r"""
-const assert=require('node:assert/strict'),v=require(process.argv[1]),lab=JSON.parse(process.argv[2]);
-const draw=(open,folded)=>v.render({width:folded?8:40,height:60,side:true,fill:true,folded,harness:'codex',state:'idle',configuration:{},model:{lab,repo:[{text:'proj'}]},expandedKeys:open?[lab.key]:[],questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
-for(const open of [false,true]){const lines=draw(open,false).join('\n');assert(lines.includes('실패 조건'),lines);assert(lines.includes('3 LAB'),lines);}
-assert(draw(false,true).join('\n').includes('!2LB'));
-const head=draw(true,false).join('\n');assert(head.includes('3 LAB')&&head.includes('실패 1 정체 1'),head);
-"""
-        result = subprocess.run(["node", "-e", script, str(ROOT / "utilities/session-shell/panel-view.cjs"),
-                                 json.dumps(view, ensure_ascii=False)], capture_output=True, text=True, timeout=20)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_new_unknown_selects_its_groups_headline_not_necessarily_the_unknown(self):
         import steward_check as SC
@@ -303,8 +285,8 @@ const head=draw(true,false).join('\n');assert(head.includes('3 LAB')&&head.inclu
         _, names, _ = SC._lab_summary({"lab": self.observe(root, board)}, [])
         self.assertIn(second["name"] + " — " + second["headline"]["name"], names)
 
-    def test_fallback_matches_shell_even_when_failure_is_in_second_group(self):
-        from fleet import session_lab
+    def test_the_fallback_names_the_boards_selected_group_even_when_failure_is_in_second_group(self):
+        # (11-15: it matched the shell panel's LAB group too; that section left the panel.)
         import steward_check as SC
         root = self.make_root()
         second = "둘째 묶음"
@@ -320,7 +302,6 @@ const head=draw(true,false).join('\n');assert(head.includes('3 LAB')&&head.inclu
         _, names, _ = SC._lab_summary({"lab": seen}, [])
         selected = next(g for g in board["groups"] if g["id"] == board["selected"])
         self.assertIn(selected["name"] + " — " + selected["headline"]["name"], names)
-        self.assertEqual(session_lab._selected(board)["id"], selected["id"])
 
 
 def _reason_text(code):

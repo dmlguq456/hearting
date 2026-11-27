@@ -94,7 +94,9 @@ class OneShotOwnerTests(unittest.TestCase):
         line = next(row for row in overview.splitlines() if "Fixture solo" in row)
         self.assertIn("[s1]", line)
         self.assertIn("codex Opus 5.5 high", line)
-        self.assertIn("one-shot", line)
+        # 11-17 (route row 5): a route its owner does alone reads its kind and intensity, no stage word.
+        self.assertIn("code(solo·quick)", line)        # (11-19: the form leads the intensity)
+        self.assertNotIn("one-shot ", line)               # (the form is in the bracket, never a stage word of its own)
         page = draw(vm, NavState(view="ROUTES", scope="-"), 150, 40).text_rows()
         index = next(i for i, row in enumerate(page) if "Fixture solo" in row)
         self.assertIn("codex", page[index])
@@ -116,8 +118,9 @@ class OneShotOwnerTests(unittest.TestCase):
         script = r'''
 const v=require(process.argv[1]),m=JSON.parse(process.argv[2]);
 const out=[];for(const side of [true,false]){const r=v.render({width:side?44:120,height:side?30:8,side,model:m,
- sid:'sid-main',questions:()=>[],configuration:{},expandedKeys:['route:rt-solo']});out.push(r.rows.map(row=>row.map(s=>s.text).join('')).join('\n'));}
+ sid:'sid-main',questions:()=>[],configuration:{}});out.push(r.rows.map(row=>row.map(s=>s.text).join('')).join('\n'));}
 console.log(JSON.stringify(out));'''
+        rows_seen = []
         for harness in ("claude", "codex", "opencode"):
             # Wall clock: the row keeps an absolute start time and the panel ages it.
             labels, panels = shell_route_status(_snapshot(harness), include_details=True)
@@ -147,20 +150,25 @@ console.log(JSON.stringify(out));'''
                                      json.dumps(presented)], capture_output=True, text=True, check=True)
             side, bottom = json.loads(result.stdout)
             # Beside the native area a folded route reads who / context and time / what (spec
-            # rules 24, 36, 38, 43, 57): its glyph, role and harness, then its context row carrying
-            # its time (here, the context unknown, the time alone), then its title.
+            # rules 24, 36, 38, 43, 57; 11-15 the route box again): its glyph, role and harness, then its
+            # context row carrying its time (here, the context unknown, the time alone), then its title.
             lines = side.splitlines()
-            rows = [(lines[i - 2], lines[i - 1], line) for i, line in enumerate(lines)
-                    if i > 1 and "│ │ " in line and "Fixture solo route" in line]
-            self.assertTrue(any("owner" in who and "codex" in who and "5m" in ctx and "5m" not in title
-                                for who, ctx, title in rows), side)
-            # The staged route: its owner first, its live worker under it.
+            # 11-17 (route row 5): kind and intensity / title / the owner's row, its time beside its model (no context is
+            # known here, so no `CTX`; 11-17, the person: the context beside the model, no gauge).
+            rows = [(lines[i - 1], line, lines[i + 1]) for i, line in enumerate(lines)
+                    if 0 < i < len(lines) - 2 and "│ │ " in line and "Fixture solo route" in line]
+            # 11-18: the route's time (`5m`) is at the end of its first line and nowhere on the owner's row.
+            self.assertTrue(any("● code(solo·quick)" in kind and "5m" in kind and "owner" in who and "codex" in who and "5m" not in who
+                                and "5m" not in title and "CTX" not in who for kind, title, who in rows), side)
+            # The staged route: its owner first, its live worker in the box under its stage text (11-18).
             self.assertIn("owner  claude Opus 5.5 high", side)
-            self.assertIn("╭─ ⠋ worker codex", side)                 # in its box (spec rule 48)
-            self.assertIn("Opus 5.5 high", side)                      # the opened row
+            self.assertIn("┌ 2/2: code-execute", side)           # (11-19: `staged` is in the bracket, not repeated in the box title)
+            self.assertIn("⠋ worker codex", side)
             self.assertIn("codex Opus 5.5 high", bottom)
+            rows_seen.append([row for row in side.splitlines() if "Fixture" in row])
             self.assertNotIn("hb_", side + bottom)
             self.assertEqual(len(bottom.splitlines()), 8)             # the bottom panel does not grow
+        self.assertEqual(rows_seen[0], rows_seen[1]); self.assertEqual(rows_seen[0], rows_seen[2])
 
     def test_one_shot_summary_names_its_completion_gate_instead_of_staying_unknown(self):
         codes = lambda gate: {"codes": {"schema": "route_visibility_codes_v1", "shape": "solo",

@@ -14,8 +14,7 @@ SPEC = importlib.util.spec_from_file_location("release_plan", ROOT / "tools/rele
 PLAN = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PLAN)
 DOCUMENTS = {
-    "AGENTS.md", "CLAUDE.md", "INSTALL_LAYOUT.md", "LICENSE", "MANUAL.md",
-    "README.md", "README.ko.md", "RELEASE_POLICY.md",
+    "AGENTS.md", "CLAUDE.md", "LICENSE", "README.md", "README.ko.md",
 }
 
 

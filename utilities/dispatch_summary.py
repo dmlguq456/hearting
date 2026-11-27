@@ -730,8 +730,13 @@ def home_consumer_for_identity(attempt_id: str, harness: str,
     return home_consumer_evidence(metadata)
 
 
-def _owner_env() -> dict[str, str]:
+def _owner_env(jobs: str | Path | None = None) -> dict[str, str]:
     env = dict(os.environ)
+    if jobs is not None:
+        # Only a worker's own environment carries the registry path. An owner is
+        # launched from the depth-0 session that has none, and without it the
+        # worker-home refresh path and the opencode source lookup both give up.
+        env["AGENT_DISPATCH_JOBS"] = str(jobs)
     env["AGENT_SESSION_ROLE"] = "worker"
     env["AGENT_SUMMARY_OWNER"] = "dispatch"
     return env
@@ -745,6 +750,7 @@ def launch_summary_owner(
     review_lease_nonce: str | None = None,
     runtime_home: str | Path | None = None,
     attempt_cwd: str | Path | None = None,
+    jobs: str | Path | None = None,
 ) -> dict[str, str]:
     """Launch and prove one exact-attempt supervisor; return registry metadata."""
 
@@ -789,7 +795,7 @@ def launch_summary_owner(
     process = subprocess.Popen(
         argv,
         cwd=str(ROOT),
-        env=_owner_env(),
+        env=_owner_env(jobs),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -1389,6 +1395,7 @@ def ensure_attempt_owner(jobs: str | Path, attempt_id: str) -> dict[str, Any]:
                 prompt_path=retained_prompt,
                 runtime_home=metadata.get("runtime_home"),
                 attempt_cwd=fields[3],
+                jobs=jobs_path,
             )
         except (OSError, ValueError) as exc:
             return {"state": "failed", "reason": str(exc)}

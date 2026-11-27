@@ -27,6 +27,8 @@ from split_module_fixture import patch_split
 
 ROOT = Path(__file__).resolve().parents[1]
 SUPERVISOR = ROOT / "utilities" / "codex-app-server-supervisor.py"
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 PARENT = "att-parent"
 DELIVERY_TIMING_POINTS = (
     "last_child_terminal_ns", "join_completed_ns", "same_thread_resume_ns",
@@ -119,7 +121,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                                       'error':{'code':-32000,'message':'fixture resume failure'}})
                                 continue
                         else:
-                            record('thread-start')
+                            record('thread-start', ephemeral=value['params'].get('ephemeral'))
                         send({'jsonrpc':'2.0','id':value['id'],'result':{'thread':{'id':'thread-1'}}})
                     elif method == 'turn/start':
                         turns += 1
@@ -442,6 +444,26 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
             env=env,
             timeout=10,
         )
+
+    def test_an_owner_keeps_its_thread_and_a_later_owner_wakes_it_with_its_own_grants(self):
+        # The owner that takes over from an earlier owner of its route (an answer, an observation, a
+        # usage limit, a later request) wakes that thread; every owner keeps its thread for the next one.
+        self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
+        env = {**os.environ, "FAKE_TRACE": str(self.trace)}
+        kept = subprocess.run([*self.command(), "--keep-session"], input="initial assignment", text=True,
+                              capture_output=True, env=env, timeout=10)
+        self.assertEqual(kept.returncode, 0, kept.stderr + kept.stdout)
+        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        self.assertEqual([row.get("ephemeral") for row in trace if row["event"] == "thread-start"], [False])
+        self.trace.write_text("", encoding="utf-8")
+        self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
+        self.state.unlink(missing_ok=True)
+        woken = subprocess.run([*self.command(), "--keep-session", "--resume-thread", "thread-1"],
+                               input="the earlier owner's context", text=True, capture_output=True, env=env, timeout=10)
+        self.assertEqual(woken.returncode, 0, woken.stderr + woken.stdout)
+        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        self.assertEqual([row["event"] for row in trace if row["event"].startswith("thread-")], ["thread-resume"])
+        self.assertEqual(next(row["thread"] for row in trace if row["event"] == "thread-resume"), "thread-1")
 
     def test_context_window_is_captured_by_supervised_server_across_resume(self):
         self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
@@ -1397,7 +1419,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         worker_home = (jobs.parent / "codex-owner-home" if legacy_record
                        else runtime_dir / "codex-owner-home")
         route_path = base / "owner-route.json"
-        attempt = PARENT
+        attempt = unique_attempt_id("att-parent")
         parent_session = "fixture-parent"
         log_path = logs / f"owner.{attempt}.codex.jsonl"
         summary_prompt = logs / f"owner.{attempt}.codex.prompt.txt"
@@ -2980,6 +3002,91 @@ class OneTurnStageTransportTest(unittest.TestCase):
         self.assertEqual(sum(row.get("event") == "turn" for row in events), 1)
         self.assertIn({"event": "closed"}, events)
         self.assertNotIn("--parent-attempt-id", result.args)
+
+    def test_a_unit_leg_keeps_its_thread_and_a_later_turn_wakes_it_with_its_own_grants(self):
+        fake = self.root / "unit_fake.py"
+        trace = self.root / "unit_trace.jsonl"
+        fake.write_text(textwrap.dedent("""\
+            import json, os, sys
+            trace = os.environ['STAGE_TRACE']
+            def send(value): print(json.dumps(value), flush=True)
+            def record(value):
+                with open(trace, 'a', encoding='utf-8') as out:
+                    out.write(json.dumps(value) + '\\n')
+            for line in sys.stdin:
+                value = json.loads(line); method = value.get('method')
+                if method == 'initialize':
+                    send({'jsonrpc':'2.0','id':value['id'],'result':{}})
+                elif method in ('thread/start', 'thread/resume'):
+                    record({'event': method, 'params': value['params']})
+                    send({'jsonrpc':'2.0','id':value['id'],'result':{'thread':{'id':value['params'].get('threadId','thread-new')}}})
+                elif method == 'turn/start':
+                    send({'jsonrpc':'2.0','id':value['id'],'result':{'turn':{'id':'t'}}})
+                    send({'jsonrpc':'2.0','method':'item/completed','params':{'turnId':'t','item':{
+                        'type':'agentMessage','id':'m','text':'artifact: -\\nverdict: PASS\\nblocker: none'}}})
+                    send({'jsonrpc':'2.0','method':'turn/completed','params':{'turn':{'id':'t','status':'completed'}}})
+                elif method == 'shutdown':
+                    break
+        """), encoding="utf-8")
+        env = {**os.environ, "STAGE_TRACE": str(trace)}
+        common = [sys.executable, str(SUPERVISOR), "--one-turn", "--worktree", str(self.root),
+                  "--sandbox", "read-only", "--approval", "never", "--model", "m-1",
+                  "--app-server-command", f"{sys.executable} {fake}"]
+        first = subprocess.run([*common, "--keep-session"], input="turn one", text=True, capture_output=True,
+                               env=env, timeout=15)
+        woken = subprocess.run([*common, "--keep-session", "--resume-thread", "thread-new"], input="turn two",
+                               text=True, capture_output=True, env=env, timeout=15)
+        self.assertEqual((first.returncode, woken.returncode), (0, 0), first.stdout + woken.stdout)
+        events = [json.loads(line) for line in trace.read_text().splitlines()]
+        start, resume = events
+        self.assertEqual(start["event"], "thread/start")
+        self.assertIs(start["params"]["ephemeral"], False)
+        self.assertEqual(resume["event"], "thread/resume")
+        self.assertEqual(resume["params"]["threadId"], "thread-new")
+        self.assertNotIn("ephemeral", resume["params"])
+        # the woken thread is given this launch's own cwd, sandbox, approval and model again
+        for key in ("cwd", "sandbox", "approvalPolicy", "model"):
+            self.assertEqual(resume["params"][key], start["params"][key], key)
+        self.assertIn('"thread_id":"thread-new"', woken.stdout.replace(" ", ""))
+
+    def test_a_thread_that_cannot_be_woken_ends_the_turn_with_its_reason_and_starts_no_fresh_thread(self):
+        trace = self.root / "refuse_trace.jsonl"
+        env = {**os.environ, "STAGE_TRACE": str(trace)}
+        for name, answer in (("refused", "{'error': {'code': -32000, 'message': 'no rollout'}}"),
+                             ("renamed", "{'result': {'thread': {'id': 'thread-other'}}}")):
+            fake = self.root / f"{name}.py"
+            fake.write_text(textwrap.dedent(f"""\
+                import json, os, sys
+                trace = os.environ['STAGE_TRACE']
+                def send(value): print(json.dumps(value), flush=True)
+                def record(value):
+                    with open(trace, 'a', encoding='utf-8') as out:
+                        out.write(json.dumps(value) + '\\n')
+                for line in sys.stdin:
+                    value = json.loads(line); method = value.get('method')
+                    if method == 'initialize':
+                        send({{'jsonrpc':'2.0','id':value['id'],'result':{{}}}})
+                    elif method in ('thread/start', 'thread/resume', 'turn/start'):
+                        record({{'event': method}})
+                        if method == 'thread/resume':
+                            send({{'jsonrpc':'2.0','id':value['id'], **{answer}}})
+                        else:
+                            send({{'jsonrpc':'2.0','id':value['id'],'result':{{'thread':{{'id':'thread-new'}}}}}})
+                    elif method == 'shutdown':
+                        break
+                """), encoding="utf-8")
+            woken = subprocess.run([sys.executable, str(SUPERVISOR), "--one-turn", "--worktree", str(self.root),
+                                    "--sandbox", "read-only", "--keep-session", "--resume-thread", "thread-new",
+                                    "--app-server-command", f"{sys.executable} {fake}"],
+                                   input="turn two", text=True, capture_output=True, env=env, timeout=15)
+            rows = [json.loads(line) for line in woken.stdout.splitlines()]
+            self.assertEqual(woken.returncode, 70, name + woken.stdout)
+            reason = next(row["reason"] for row in rows if row.get("type") == "dispatch.supervisor.error")
+            self.assertEqual(reason, {"refused": "app-server-request-failed:thread/resume",
+                                      "renamed": "resume-native-session-changed"}[name])
+            self.assertFalse(any(row.get("type") == "turn.completed" for row in rows), name)
+        events = [json.loads(line)["event"] for line in trace.read_text().splitlines()]
+        self.assertEqual(events, ["thread/resume", "thread/resume"])     # no fresh thread, no turn
 
     def test_empty_prompt_and_app_server_eof_fail_without_terminal_success(self):
         marker = self.root / "started"

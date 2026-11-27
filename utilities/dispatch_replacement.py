@@ -23,6 +23,7 @@ from typing import Callable
 
 import dispatch_contract as DC
 from artifact_receipt import _write_once
+from dispatch_attempt_policy import SAME_PROVIDER_REFUSAL, content_refusal
 from dispatch_registry_cache import demand_replacement_rows, registry_lines, registry_view
 import route_authority
 
@@ -381,6 +382,67 @@ def launch_input(jobs, aid, meta):
             or _digest(value) != meta.get('replacement_input_digest')):
         raise DC.DispatchContractError('replacement-input-unproven', aid)
     return value
+
+
+_CARRY_CHAIN_LIMIT = 64
+
+
+def _sealed_claude_owner(jobs, rows, attempt):
+    """The sealed input of a Claude owner attempt, or ``None`` when it is not provably one."""
+    if attempt not in rows:
+        return None
+    _fields, meta = rows[attempt]
+    if meta.get('worker_type') != 'owner':
+        return None
+    try:
+        sealed = launch_input(jobs, attempt, meta)
+    except DC.DispatchContractError:
+        return None
+    return sealed if sealed.get('harness') == 'claude' else None
+
+
+def carried_allowed_tools(jobs, retry_of, *, harness, worker_type, agent_home, current_home=None):
+    """The sealed Claude allow list an owner replacement keeps after a release move.
+
+    A replacement owner of the same harness is held to the permissions its predecessor was
+    sealed with (``route_authority.require_recovery_work``). The launcher computes the Claude
+    allow list again from the release it runs on, so a release that grants more than the one
+    that sealed the lineage (task-branch publication, for example) would make every
+    replacement differ from its sealed predecessor. When the sealed Claude owner lineage ran
+    on another release than ``current_home`` (the predecessor's own input, or any earlier
+    link's), this returns the predecessor's sealed list with the spellings of its release
+    moved to ``agent_home``: no rule is added and none is removed, so nothing a release grants
+    later reaches the replacement. ``None`` leaves the ordinary launch computation in place:
+    no predecessor, a stage or other harness, a sealed input that does not prove itself, a
+    lineage that stayed on one release (a branch change there keeps being refused), or a list
+    that names no path in its release (one sealed while a Git operation was in progress),
+    which has nothing to move."""
+    if not retry_of or worker_type != 'owner' or harness != 'claude':
+        return None
+    current = os.path.realpath(str(ROOT if current_home is None else current_home))
+    rows = _rows(registry_text(jobs))
+    previous = _sealed_claude_owner(jobs, rows, retry_of)
+    if previous is None:
+        return None
+    claude = (previous.get('applied_permissions') or {}).get('claude')
+    tools = claude.get('allowed_tools') if isinstance(claude, dict) else None
+    sealed_home = previous.get('launch_home')
+    if (not isinstance(tools, list) or not all(isinstance(rule, str) for rule in tools)
+            or not isinstance(sealed_home, str) or not sealed_home):
+        return None
+    moved = False
+    attempt, seen, sealed = retry_of, set(), previous
+    while sealed is not None and attempt not in seen and len(seen) < _CARRY_CHAIN_LIMIT:
+        seen.add(attempt)
+        home = sealed.get('launch_home')
+        if isinstance(home, str) and home and os.path.realpath(home) != current:
+            moved = True
+            break
+        attempt = rows[attempt][1].get('automatic_retry_of')
+        sealed = _sealed_claude_owner(jobs, rows, attempt) if attempt else None
+    if not moved or not route_authority.release_root_aliases(json.dumps(tools), sealed_home):
+        return None
+    return route_authority.readdress_release_roots(tools, sealed_home, agent_home)
 
 
 def terminal_observation(fields, meta):
@@ -1309,6 +1371,76 @@ def _budget_exhausted(jobs, source, *, lines=None, route=None, capacity=False):
     return legacy_budget_exhausted(jobs, lines, source, route=route)
 
 
+def refused_candidate(source):
+    """The selected harness and model of an observed content refusal."""
+    if source.get("note") == "dead-capacity" or source.get("failure_class") == "capacity":
+        return None
+    if not content_refusal(source.get("provider_failure_kind")):
+        return None
+    harness = source.get("harness")
+    model = source.get("model")
+    if model in {None, "", "inherit", "unknown", "-"}:
+        model = source.get("resolved_model")
+    if harness in {"claude", "codex", "opencode"} and model not in {None, "", "inherit", "unknown", "-"}:
+        return harness, model
+    return None
+
+
+def refused_profile_harness(source, profile, *, pin=None, source_root=ROOT):
+    """Identify an unchanged pair in the ordinary selector's current profile."""
+    pair = refused_candidate(source)
+    if pair is None:
+        return None
+    harness, model = pair
+    from model_profile import ModelProfileError, resolve_runtime_profile
+    chosen = (pin or {}).get("model") if (pin or {}).get("harness") == harness else None
+    if not chosen:
+        try:
+            chosen = resolve_runtime_profile(harness, profile, source_root=source_root)[0]["model"]
+        except ModelProfileError:
+            return None
+    if chosen in {model, source.get("resolved_model")}:
+        return harness
+    return None
+
+
+def replacement_source(jobs, prior, successor):
+    """Find the exact claim's predecessor for the ordinary owner selector."""
+    if not prior or not successor:
+        return {}
+    try:
+        record, error = registry_view(Path(jobs)).completion_attempt(prior)
+    except FileNotFoundError:
+        return {}
+    if error or record is None or record.status != "done":
+        return {}
+    source = record.completion_metadata()
+    if not refused_candidate(source):
+        return {}
+    binding = source_binding(jobs, source)
+    if not binding or binding[1] != successor:
+        return {}
+    claim = _read(_record_path(jobs, binding[0])) or {}
+    if (claim.get("original_attempt_id") == prior and claim.get("replacement_attempt_id") == successor
+            and (claim.get("proof") or {}).get("death_kind") in {"silent", "runtime"}):
+        return source
+    return {}
+
+
+PROVIDER_REFUSAL_NO_ALTERNATIVE = "provider-refusal-no-alternative"
+
+
+def _fixed_provider_refusal(kind, source):
+    return (kind in {"silent", "runtime"} and source.get("worker_type") != "owner"
+            and refused_candidate(source) is not None)
+
+
+def _provider_refusal_attention(source):
+    return {"state": "needs-attention", "reason": PROVIDER_REFUSAL_NO_ALTERNATIVE,
+            "source_attempt_id": source["attempt_id"], "node": source.get("route_node") or "__owner__",
+            "failure": source["provider_failure_kind"], "detail": SAME_PROVIDER_REFUSAL}
+
+
 def _same_runtime_end(jobs, rows, source, *, explicit=False):
     """Whether `source` is itself a `runtime` replacement that ended on the same observed columns.
 
@@ -1328,6 +1460,11 @@ def _same_runtime_end(jobs, rows, source, *, explicit=False):
     if (record or {}).get('proof', {}).get('death_kind') != 'runtime':
         return False
     prior = rows[prior_id][1]
+    failed_pair, prior_pair = refused_candidate(source), refused_candidate(prior)
+    if failed_pair or prior_pair:
+        # The selector leaves out a refused pair, so a repeated pair cannot stop
+        # a refusal chain. A second refusal in a row returns to the parent.
+        return bool(failed_pair and prior_pair)
     return all(source.get(key, '') == prior.get(key, '')
                for key in ('failure_class', 'terminal_event', 'harness', 'model_profile'))
 
@@ -1532,15 +1669,23 @@ def accept_terminal_delivery_duty(jobs, aid):
     except (OSError, UnicodeError, DC.DispatchContractError):
         return None
     row = rows.get(aid)
-    if row is None or not row[1].get('delivery_intent'):
+    if row is None:
         return None
-    if not _parent_carrier_replaces(row[1]):
+    if row[1].get('capability') == 'unit':
+        # The existing parent notice carries this pause after the drain proof. It lets
+        # every session carrier schedule the ordinary start under the parent's identity.
+        if unit_capacity_pause(jobs, aid):
+            from dispatch_supervision import UNIT_CAPACITY_PAUSE, materialize
+            materialize(jobs, {aid}, reason=UNIT_CAPACITY_PAUSE)
+        return None
+    if not row[1].get('delivery_intent') or not _parent_carrier_replaces(row[1]):
         # Nothing bound to this parent would launch the reservation, and it would
         # only defer the notice: the parent gets the death notice and its `start`.
         return None
     try:
-        kind = death_kind(row[0], row[1], jobs=jobs)
-        if kind is None or kind in PAUSE_KINDS:
+        fields, source = row
+        kind = death_kind(fields, source, jobs=jobs)
+        if kind is None or kind in PAUSE_KINDS or _fixed_provider_refusal(kind, source):
             return None
         return claim(jobs, aid)
     except DC.DispatchContractError:
@@ -1985,7 +2130,16 @@ def _reuse_snapshot(jobs, route, lines, *, proof=None, pinned=None):
     invalidated = {}
     observations = {}
     present = []
-    for node in route.get('nodes', []):
+    unit = route.get('capability') == 'unit'
+    root = Path(route['artifact_root'])
+    from artifact_producer import route_cycle_for, cycle_route_admission
+    cycle = route_cycle_for(root, route)
+    # A later turn (a unit's, or a one-shot owner's later request on its closed route) began
+    # its own cycle, recorded as a continuation of the last turn's.
+    continued = bool(cycle and cycle.get('continuation_attempt_id') and cycle.get('continues_cycle_id'))
+    # A unit has one open turn, and so has a later turn. Any marker from an earlier turn is
+    # history that stays sealed in its own cycle, outside the current recovery.
+    for node in [] if unit or continued else route.get('nodes', []):
         path = directory/(str(node['id'])+'.json')
         if not path.exists():
             continue
@@ -2080,13 +2234,13 @@ def _reuse_snapshot(jobs, route, lines, *, proof=None, pinned=None):
                           **({'restored_from': restored_from} if restored_from else {})})
     pending = [str(node.get('id')) for node in route.get('nodes', [])
                if str(node.get('id')) not in {row['node'] for row in completed}]
-    root = Path(route['artifact_root'])
-    from artifact_producer import route_cycle_for, cycle_route_admission
-    cycle = route_cycle_for(root, route)
-    if not cycle or not cycle_route_admission(root, cycle, route).allow:
+    if (not cycle or (unit or continued) and cycle.get('state') != 'open'
+            or not cycle_route_admission(root, cycle, route).allow):
         raise DC.DispatchContractError('replacement-producer-not-open')
+    # A previous, finished turn left its workflow ledger complete. A new request
+    # already opened its own cycle, so recovery addresses that cycle only.
     return {'completed': completed, 'cycle_id': cycle['cycle_id'],
-            'producer_id': cycle.get('producer_id', ''), 'gates': _gate_snapshot(jobs, route),
+            'producer_id': cycle.get('producer_id', ''), 'gates': _gate_snapshot(jobs, route, continued_turn=continued),
             'invalidated': [invalidated[key] for key in sorted(invalidated)],
             'pending': pending}
 
@@ -2107,7 +2261,7 @@ def _reopened_outputs_note(route, invalidated, jobs):
             + '; '.join(rows) + '.\n') if rows else ''
 
 
-def _gate_snapshot(jobs, route):
+def _gate_snapshot(jobs, route, *, continued_turn=False):
     import workflow_state as WS
     ledger = WS.WorkflowLedger(route['route_id'], route['route_hash'], jobs=jobs)
     try:
@@ -2121,8 +2275,14 @@ def _gate_snapshot(jobs, route):
     if any(not isinstance(e,dict) or e.get('route_id') != route['route_id']
            or e.get('route_hash') != route['route_hash'] for e in entries):
         raise DC.DispatchContractError('replacement-workflow-journal-mismatch')
-    if ledger._rebuild(entries)['workflow_state'] in {'CANCELLED','COMPLETE'}:
-        raise DC.DispatchContractError('replacement-workflow-not-open')
+    state = ledger._rebuild(entries)['workflow_state']
+    if state == 'CANCELLED' or state == 'COMPLETE' and not continued_turn:
+        refusal = DC.DispatchContractError('replacement-workflow-not-open')
+        # Definitive (`advance` settles it): the same start refuses the same way every time.
+        refusal.next_step = (f"This route's workflow already ended ({state}), so no replacement owner can continue "
+                             "it, and running the same start again is refused the same way. Read the owner's result; "
+                             "to end the route as it is, run close_command; for more work, compose a new route.")
+        raise refusal
     names = {str(b['gate']) for b in route.get('human_gate_bindings',[]) if b.get('gate')}
     names.update(str((e.get('evidence') or {})['gate']) for e in entries
                  if e.get('workflow_state') == 'BLOCKED_HUMAN_GATE' and (e.get('evidence') or {}).get('gate'))
@@ -2428,6 +2588,12 @@ def _validate_launch(jobs, lines, metadata, *, owned_launch=None):
         raise DC.DispatchContractError('automatic-replacement-exhausted', prior)
     holder = route_authority.require_recovery_binding(record, source, metadata, jobs)
     _, source, replay = validate_claim_source(jobs, lines, record, owned_launch=owned_launch)
+    if source.get('capability') == 'unit':
+        # The selector and adapter both run on the ordinary launch path. Recheck a calling
+        # worker at registration and again at the launch fence, using its original row.
+        _authorized(jobs, rows, source)
+        if metadata.get('continues_attempt_id') != prior:
+            raise DC.DispatchContractError('replacement-launch-binding-mismatch', prior)
     candidate = launch_input(jobs, metadata['attempt_id'], metadata)
     parent_values = {}
     if source.get('dispatch_depth') == '1':
@@ -2446,6 +2612,11 @@ def _validate_launch(jobs, lines, metadata, *, owned_launch=None):
             parent_values['parent_completion_delivery'] = resolve_parent_completion_delivery(parent_args)
     expected_task = route_authority.recovery_task(record, source, replay)
     _, current_route = _route(jobs, prior, source)
+    if current_route.get('capability') == 'unit':
+        from unit_continue import capacity_turn_options
+        expected = capacity_turn_options(source, replay['argv'])
+        if any(_argv_value(candidate['argv'], flag) != value for flag, value in expected.items()):
+            raise DC.DispatchContractError('replacement-task-mismatch')
     route_authority.require_recovery_work(
         candidate, replay, route=current_route, worker_type=source.get('worker_type'),
         transition=_transition_of(record), access=record.get('execution_access'),
@@ -2585,11 +2756,11 @@ def _command(jobs, record, source, replay):
     raw = task.encode()
     if prompt.is_symlink() or (not _write_once(prompt.parent,prompt,raw) and prompt.read_bytes()!=raw):
         raise DC.DispatchContractError('replacement-task-conflict')
-    if (source.get('worker_type') == 'frame'
+    unit = source.get('capability') == 'unit'
+    if ((source.get('worker_type') == 'frame' or unit)
             and (record.get('proof') or {}).get('death_kind') == 'capacity'):
-        # A frame capacity successor with no top-to-deep claim follows the
-        # route's normal selector. The node supplies the exact profile and
-        # role; the original peer remains a completed row and is never started.
+        # Use the route's ordinary selector and the node's sealed profile, scope and role.
+        # A unit also uses the normal continuation session decision and the unfinished cycle.
         command = [sys.executable, str(root/'utilities/dispatch-owner.py'), '--start',
                    '--route-evidence', record['route_file'], '--route-node', source['route_node'],
                    '--jobs', str(Path(jobs).resolve()), '--worktree', replay['worktree'],
@@ -2597,11 +2768,19 @@ def _command(jobs, record, source, replay):
                        or record['replacement_attempt_id'],
                    '--attempt-id', record['replacement_attempt_id'],
                    '--automatic-retry-of', record['original_attempt_id'], '--prompt-file', str(prompt)]
-        for flag in ('--execution-access-file', '--parent-session-id', '--parent-harness'):
-            value = ((record.get('execution_access') or {}).get('request_path')
-                     if flag == '--execution-access-file' else
-                     _argv_value(replay.get('argv', []), flag))
-            if value:
+        access = (record.get('execution_access') or {}).get('request_path')
+        if unit:
+            access = access or _argv_value(replay['argv'], '--execution-access-file')
+        if access:
+            command += ['--execution-access-file', access]
+        if not unit:
+            for flag in ('--parent-session-id', '--parent-harness'):
+                value = _argv_value(replay['argv'], flag)
+                if value:
+                    command += [flag, value]
+        if unit:
+            from unit_continue import capacity_turn_options
+            for flag, value in capacity_turn_options(source, replay['argv']).items():
                 command += [flag, value]
         return command
     options = {'--start': None, '--attempt-id': record['replacement_attempt_id'],
@@ -2671,6 +2850,34 @@ def _capacity_wait(jobs, aid, source, hold=None):
     return result
 
 
+def unit_capacity_pause(jobs, aid, *, read_reset=False):
+    """A session's exact, still-unstarted unit replacement, for the existing notice and timer."""
+    try:
+        rows = registry_rows(jobs)
+        fields, source = rows[aid]
+        if (source.get('capability') != 'unit' or source.get('caller_attempt_id')
+                or death_kind(fields, source, jobs=jobs) != 'capacity'):
+            return None
+        binding = source_binding(jobs, source)
+        successor = rows.get(binding[1]) if binding else None
+        if successor and (successor[1].get('launch_started') == '1'
+                          or _replacement_in_flight(jobs, rows, source)):
+            return None
+        path, route = _route(jobs, aid, source)
+        if route.get('capability') != 'unit' or not source.get('parent_sid'):
+            return None
+        route_authority.require_continuation(route_authority.decide_continuation(
+            action='replacement-budget', facts={'budget_exhausted': _budget_exhausted(jobs, source, capacity=True)}))
+        death_proof(fields, source, jobs=jobs)
+        pin = route_authority.sealed_pin_harness(route, worker_type=source['worker_type'])
+        # A movable unit can try the ordinary selector now. A pinned one can report its known reset.
+        result = _capacity_wait(jobs, aid, {**source, 'harness': pin}) if pin and read_reset else {}
+        return {**result, 'source_attempt_id': aid, 'route_id': route['route_id'],
+                'route_hash': route['route_hash'], 'route_file': str(path), 'source': source}
+    except (OSError, ValueError, KeyError, DC.DispatchContractError):
+        return None
+
+
 def _capacity_reader():
     spec = importlib.util.spec_from_file_location('replacement_harness_capacity', ROOT/'utilities/harness-capacity.py')
     capacity = importlib.util.module_from_spec(spec); spec.loader.exec_module(capacity)
@@ -2698,10 +2905,11 @@ def _capacity_hold(jobs, source, model=None, *, allow_frame_peer=False):
             and not route_authority.harness_admitted(route, pin, node=node)
             and pin != launch_input(jobs, source.get('attempt_id'), source).get('harness')):
         raise DC.DispatchContractError('explicit-adapter-disabled-by-user-policy', pin)
-    if source.get('worker_type') == 'owner':
-        # The ordinary selector judges all candidates; the old owner's limit or
-        # soft allocation gate cannot prevent that selection. A named pin waits
-        # only at a real limit, and admission refuses a silently ignored pin.
+    if source.get('worker_type') == 'owner' or source.get('capability') == 'unit':
+        # The ordinary selector judges the movable candidates. A pinned unit or owner
+        # waits at a real limit. Include the unit's model so model-scoped holds are visible.
+        if source.get('capability') == 'unit' and pin:
+            model = model or _candidate_unit_model(source, pin)
         return harness_hold(jobs, pin, model=model, recheck=True) if pin else None
     if not harness:
         return None
@@ -2736,7 +2944,7 @@ def _capacity_hold(jobs, source, model=None, *, allow_frame_peer=False):
                     capacity = _capacity_reader()
                     report = capacity.capacity_report()
                     scores = report['scores']
-                    from dispatch_allocation import attempt_counts
+                    from dispatch_allocation import attempt_counts, effective_harness_weights
                     counts = attempt_counts(jobs, window=allocation.get('window', 30))
                     selected, _, _, _ = capacity.select(
                         policy, states, counts, allocation.get('harness_order', []), scores,
@@ -2745,7 +2953,7 @@ def _capacity_hold(jobs, source, model=None, *, allow_frame_peer=False):
                         preferred=capacity.preferred_for_depth(allocation, int(source.get('dispatch_depth', '1'))),
                         affinity_weight=allocation.get('depth_affinity_weight', .5),
                         headroom_exponent=allocation.get('usage_headroom_exponent', 1),
-                        harness_weights=allocation.get('harness_weights'),
+                        harness_weights=effective_harness_weights(allocation),
                     )
                     if selected == peer_harness:
                         # The following normal dispatch-owner start consumes the
@@ -2769,7 +2977,8 @@ def _capacity_hold(jobs, source, model=None, *, allow_frame_peer=False):
     policy = DC._route_module().DEFAULTS.restrict_harness_policy(policy, enabled)
     capacity = _capacity_reader()
     report = capacity.capacity_report()
-    scores = report['scores']; score = scores.get(harness)
+    scores = report['scores']
+    score = capacity.raw_headroom(scores, harness)
     gate = allocation.get('usage_gate_used_percent', 90)
     if (allocation['strategy'] == 'balanced' and not capacity.is_gated(
             scores, harness, usage_gate_used_percent=gate)):
@@ -2778,7 +2987,7 @@ def _capacity_hold(jobs, source, model=None, *, allow_frame_peer=False):
             scores, harness, usage_gate_used_percent=gate):
         return None
     states = usage_states(jobs, models={harness: model or source.get('model')}, recheck=True)
-    from dispatch_allocation import attempt_counts
+    from dispatch_allocation import attempt_counts, effective_harness_weights
     counts = attempt_counts(jobs, window=allocation.get('window', 30))
     selected, _, _, _ = capacity.select(
         policy, states, counts, allocation.get('harness_order', []), scores,
@@ -2786,7 +2995,7 @@ def _capacity_hold(jobs, source, model=None, *, allow_frame_peer=False):
         preferred=capacity.preferred_for_depth(allocation, int(source.get('dispatch_depth', '1'))),
         affinity_weight=allocation.get('depth_affinity_weight', .5),
         headroom_exponent=allocation.get('usage_headroom_exponent', 1),
-        harness_weights=allocation.get('harness_weights'),
+        harness_weights=effective_harness_weights(allocation),
     )
     if selected == harness:
         return None  # original all-gated recovery, quality bands and relief remain intact
@@ -2818,6 +3027,13 @@ def _launcher_budget(command, source):
     return True, LAUNCHER_TIMEOUT_SECONDS + timeout + FORWARDED_TERMINATION_GRACE
 
 
+def _candidate_unit_model(source, harness):
+    if harness == source.get('harness'):
+        return source.get('model')
+    from model_profile import resolve_runtime_profile
+    return resolve_runtime_profile(harness, source['model_profile'])[0]['model']
+
+
 def _retry_model(source, kind):
     """The model the replacement will run: the source's own, except a frame-rule transition's lower one."""
     if kind != FRAME_CAPACITY:
@@ -2836,11 +3052,19 @@ def _advance(jobs, aid, *, run=subprocess.run, authority_check=None, resume_capa
     rows = _rows(lines)
     if aid not in rows:
         return {'state':'unavailable','reason':'replacement-source-missing'}
-    if (recovery_delivery_state(jobs, aid) == 'settled'
-            and not (resume_capacity and _identity_refusal_reentry(
-                jobs, lines, aid, allow_registered=True))):
-        return {'state': 'not-applicable'}
     fields, source = rows[aid]
+    if recovery_delivery_state(jobs, aid) == "settled":
+        if not resume_capacity:
+            return {"state": "not-applicable"}
+        attention = _read(_directory(jobs) / "attention/by-source" / (_id(aid) + ".json")) or {}
+        can_reselect = (refused_candidate(source) is not None
+                        and (attention.get("attention") or {}).get("reason") == PROVIDER_REFUSAL_NO_ALTERNATIVE)
+        if not can_reselect and not _identity_refusal_reentry(jobs, lines, aid, allow_registered=True):
+            return {"state": "not-applicable"}
+    unit = source.get('capability') == 'unit'
+    if unit and not resume_capacity:
+        # Unit carriers deliver the pause. Only the route's normal start can advance it.
+        return {'state': 'not-applicable'}
     kind = death_kind(fields, source, jobs=jobs)
     progress = route_authority.decide_continuation(action='replacement-progress', jobs=jobs,
         status=fields[1], metadata=source, facts={'kind': kind, 'resume_capacity': resume_capacity,
@@ -2866,6 +3090,11 @@ def _advance(jobs, aid, *, run=subprocess.run, authority_check=None, resume_capa
                 or rows[binding[1]][1].get('launch_claimed') == '1')):
             # Nothing is launched yet: limit, drift and cleanup are judged before anything durable is written.
             _, current_route = _route(jobs, aid, source)
+            refused = refused_candidate(source) if kind in {"silent", "runtime"} else None
+            if not resume_capacity and _fixed_provider_refusal(kind, source):
+                # A direct or batch replay has fixed launch inputs. Let the
+                # caller see the failed pair before it chooses a new placement.
+                return _provider_refusal_attention(source)
             try:
                 restore = DC._route_module().restore_consumed_tombstones(current_route, jobs=Path(jobs))
                 if restore.get("errors"):
@@ -2877,12 +3106,19 @@ def _advance(jobs, aid, *, run=subprocess.run, authority_check=None, resume_capa
             moved = (route_authority.moved_owner_harness(current_route, launch_input(jobs, aid, source).get('harness'))
                      if source.get('worker_type') == 'owner' else None)
             hold_source = {**source, 'harness': moved, 'model': None} if moved else source
-            hold = _capacity_hold(jobs, hold_source, None if moved else _retry_model(source, kind),
-                                  allow_frame_peer=(kind == 'capacity'
-                                      and source.get('worker_type') == 'frame'))
+            hold = None if refused and source.get("worker_type") == "owner" else _capacity_hold(
+                jobs, hold_source, None if moved else _retry_model(source, kind),
+                allow_frame_peer=(kind == "capacity" and source.get("worker_type") == "frame"))
+            if unit:
+                _settle_terminal_cleanup(jobs, rows, aid, source)
+                fields, source = _rows(registry_text(jobs))[aid]
+                death_proof(fields, source, jobs=jobs)
             if hold:
+                if unit and (pin := route_authority.sealed_pin_harness(current_route, worker_type=source['worker_type'])):
+                    hold_source = {**source, 'harness': pin}
                 return _capacity_wait(jobs, aid, hold_source, hold)
-            _settle_terminal_cleanup(jobs, rows, aid, source)
+            if not unit:
+                _settle_terminal_cleanup(jobs, rows, aid, source)
         record = claim(Path(jobs), aid, resume_capacity=resume_capacity)
         rows = _rows(Path(jobs).read_text().splitlines())
         source = rows[aid][1]
@@ -2968,13 +3204,16 @@ def _advance(jobs, aid, *, run=subprocess.run, authority_check=None, resume_capa
             return {'state':'running','attempt_id':replacement,'record':record}
         output = '\n'.join(str(getattr(completed, name, '') or '') for name in ('stdout', 'stderr'))
         diagnostic = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
-        if source.get('worker_type') == 'owner' and diagnostic.get('reason') in {
+        if diagnostic.get("reason") == PROVIDER_REFUSAL_NO_ALTERNATIVE and refused_candidate(source):
+            return _provider_refusal_attention(source)
+        if (source.get('worker_type') == 'owner' or unit) and diagnostic.get('reason') in {
                 'no-eligible-candidate', 'no-eligible-route-evidence-candidate'}:
             # Use the ordinary selector's candidates. Only real limits on all of
             # them mean a pause; auth/unknown/policy failures keep their diagnostic.
             from dispatch_capacity_evidence import harness_hold
             candidates = [h for h in diagnostic.get('configured_candidates', '').split(',') if h]
-            holds = [(h, harness_hold(jobs, h, recheck=True)) for h in candidates]
+            holds = [(h, harness_hold(jobs, h, model=(
+                _candidate_unit_model(source, h) if unit else None), recheck=True)) for h in candidates]
             if holds and all(hold for _, hold in holds):
                 harness, hold = min(holds, key=lambda item: item[1].get('until_epoch') or float('inf'))
                 return _capacity_wait(jobs, aid, {**source, 'harness': harness}, hold)
@@ -3054,6 +3293,7 @@ def advance(jobs, aid, *, run=subprocess.run, authority_check=None, resume_capac
                 'replacement-human-gate-pending',
                 'replacement-workflow-not-open',
                 'pin-ignored-for-replacement',
+                PROVIDER_REFUSAL_NO_ALTERNATIVE,
             }
             or diagnostic.get('reason') in {
                 'replacement-registration-refused',

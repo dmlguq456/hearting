@@ -537,13 +537,12 @@ class OptsDialHierarchyTest(unittest.TestCase):
                         worker_role="planner", profile="boot")
         self.assertEqual(self._dial(j), "code(dev·std·planner) / boot")
 
-    def test_codex_orchestrator_phrase_normalizes_to_owner(self):
-        # user 2026-07-20: "codex랑 claude가 서로 다르게 뜨는데" — the codex writer puts the
-        # model-role phrase in worker_role; the conductor reads 'owner' on both harnesses.
+    def test_owner_reads_the_same_on_codex_and_claude(self):
+        # user 2026-07-20: "codex랑 claude가 서로 다르게 뜨는데" — the conductor reads
+        # 'owner' on both harnesses.
         codex = DispatchJob(key="code", slug="s", depth=1, harness="codex",
                             capability_mode="dev", intensity="strong",
-                            worker_type="owner", worker_role="deep orchestrator",
-                            capability_owner="autopilot-code")
+                            worker_type="owner", capability_owner="autopilot-code")
         claude = DispatchJob(key="code", slug="s", depth=1, harness="claude",
                              capability_mode="dev", intensity="strong",
                              worker_type="owner", worker_role="autopilot-code-owner",
@@ -551,17 +550,12 @@ class OptsDialHierarchyTest(unittest.TestCase):
         self.assertEqual(self._dial(codex), "code(dev·strong·owner)")
         self.assertEqual(self._dial(codex), self._dial(claude))
 
-    def test_legacy_team_metadata_and_maker_phrase_drop_from_knobs(self):
-        # Legacy 'plan-team' restates the stage and 'deep maker' restates the model cell;
-        # neither is a current worker identity on the dial.
+    def test_stage_label_comes_from_the_key(self):
         j = DispatchJob(key="code-plan", slug="s", depth=2, harness="codex",
-                        mode="dev/refactor", intensity="strong", worker_role="plan-team",
+                        mode="dev/refactor", intensity="strong",
                         capability_owner="autopilot-code")
         self.assertEqual(self._dial(j), "code-plan(strong)")
         self.assertEqual(render._dispatch_stage_label(j), "plan")
-        j2 = DispatchJob(key="code", slug="s", depth=1, worker_role="deep maker",
-                         capability_owner="autopilot-code", mode="dev")
-        self.assertEqual(self._dial(j2), "code(dev)")
 
 
 if __name__ == "__main__":

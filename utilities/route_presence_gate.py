@@ -431,25 +431,6 @@ def _slug_word(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40] or "work"
 
 
-def _campaign_key(root: str, top: Path) -> str:
-    newest, key = -1.0, ""
-    try:
-        entries = list(os.scandir(Path(root) / "campaigns"))
-    except OSError:
-        entries = []
-    for entry in entries:
-        match = re.match(r"^\d{4}-\d{2}-\d{2}_(.+)$", entry.name)
-        if not match or not entry.is_dir():
-            continue
-        try:
-            mtime = entry.stat().st_mtime
-        except OSError:
-            continue
-        if mtime > newest:
-            newest, key = mtime, match.group(1)
-    return key or _slug_word((_primary(top) or top).name)
-
-
 def _agent_home(env) -> Path:
     home = env.get("AGENT_HOME")
     if home and (Path(home) / "utilities" / "capability-route.py").is_file():
@@ -464,6 +445,7 @@ def _agent_home(env) -> Path:
 def refusal(root: str, top: Path, kind: str, target: str, env) -> str:
     # The cycle folder already carries the date, so the slug is the name alone; a
     # managed release is printed as its `current` pointer like every other printed command.
+    from capability_route_scope import compose_campaign_default
     from parent_next_directive import entrypoint
 
     stem = Path(target).stem if kind == "edit" and target else kind
@@ -474,16 +456,21 @@ def refusal(root: str, top: Path, kind: str, target: str, env) -> str:
         command_parts.extend(["--start", "--shape", "direct", "--prompt-file", shlex.quote("<task>")])
     else:
         command_parts.extend(["--shape", "direct"])
-    command_parts.extend([
-        "--campaign-key", shlex.quote(_campaign_key(root, top)),
-        "--slug", shlex.quote(_slug_word(stem)), "--cwd", shlex.quote(str(top))])
+    command_parts.extend(["--field", shlex.quote("<field>")])
+    # If ordinary compose would need a campaign choice, the small recovery command
+    # can still start its standalone work without selecting another stream.
+    if compose_campaign_default(root, top).source is None:
+        command_parts.append("--unassigned")
+    command_parts.extend(["--slug", shlex.quote(_slug_word(stem)), "--cwd", shlex.quote(str(top))])
     command = " ".join(command_parts)
     task_guidance = ("It prepares an isolated worktree; make the edit in the worktree it prints."
                      if kind == "edit" else "It records the route for changes already made in place.")
     return (f"hearting: this session has no route for {root} yet (core/WORKFLOW.md §0.4). "
             f"For one atomic, reversible inline change, run this once, then retry:\n{command}\n"
-            f"{task_guidance} "
-            "For other new work, omit --shape and use compose --start --prompt-file <task>; the frame decides the route. "
+            f"{task_guidance} Replace <field> with the work's field, e.g. code or docs "
+            "(compose names the others; admin and other also need --capability). "
+            "For other new work, open --shape solo|staged --capability <kind> when the direction is clear; otherwise omit --shape "
+            "and use compose --start --prompt-file <task>, and the frame decides the route. "
             "Follow an already-decided frame or person-specified route under core/WORKFLOW.md §0.2.1. "
             "To continue a route you already have: capability-route.py start --route <route-file>.")
 

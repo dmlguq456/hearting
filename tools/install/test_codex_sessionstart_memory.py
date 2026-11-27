@@ -11,14 +11,15 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools/install"))
+sys.path.insert(0, str(ROOT / "tools"))
 import fixture_env
+import fixture_processes
 
 spec = importlib.util.spec_from_file_location("codex_start_memory", ROOT / "adapters/codex/hooks/sessionstart-lifecycle.py")
 bridge = importlib.util.module_from_spec(spec)
@@ -27,7 +28,7 @@ spec.loader.exec_module(bridge)
 
 class SessionStartMemoryTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="codex-start-memory-")
+        self.tmp = fixture_processes.TemporaryDirectory(prefix="codex-start-memory-")
         self.addCleanup(self.tmp.cleanup)
         self.cwd = Path(self.tmp.name) / "project"
         self.cwd.mkdir()

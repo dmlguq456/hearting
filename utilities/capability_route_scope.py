@@ -12,6 +12,7 @@ import json
 import os
 import re
 from pathlib import Path
+from typing import NamedTuple
 
 import artifact_locator as ARTIFACT_LOCATOR
 import route_identity as ROUTE_IDENTITY
@@ -145,7 +146,8 @@ def declared_start_approvals(leg, registry=None):
     """
     registry = registry or TOPO.load_registry()
     capability = leg["capability"]
-    recipes = [r for r in registry["recipes"] if r["capability"] == capability and capability != ROUTE_FRAME_CAPABILITY]
+    recipes = [r for r in registry["recipes"] if r["capability"] == capability
+               and capability not in TOPO.COMPILER_INTERNAL_CAPABILITIES]
     if not recipes:
         return []
     mode = leg.get("mode")
@@ -166,7 +168,7 @@ def declared_start_approvals(leg, registry=None):
         }
         selected = internal.get((capability, mode)) or internal.get((capability, None))
         return [selected] if selected and TOPO.part_row(registry, selected[1]).get("start_approval") else []
-    known = {r["capability"] for r in registry["recipes"]} - {ROUTE_FRAME_CAPABILITY}
+    known = {r["capability"] for r in registry["recipes"]} - set(TOPO.COMPILER_INTERNAL_CAPABILITIES)
     tokens = leg.get("graph") or [n["id"] for n in base["standard_plus"]["nodes"] if not _frame_node(n)]
     rows = []
     for token in tokens:
@@ -182,9 +184,7 @@ COMPOSE_CAMPAIGN_LIST_CAP = 12
 
 
 def compose_campaign_summaries(artifact_root):
-    """Active campaigns of the root, newest first.  A fresh root has none
-    (empty list); a root that cannot be read returns None so the caller says
-    "unavailable" rather than mislabelling a join as a creation."""
+    """Campaigns of the root in all states, newest first, or None when unavailable."""
     try:
         import artifact_producer
         return artifact_producer.list_campaign_summaries(
@@ -204,6 +204,8 @@ def cwd_campaign_keys(artifact_root, cwd, rows=_CAMPAIGN_ROWS_UNSET):
     route files are read, and the scan stops at `CWD_CAMPAIGN_KEYS_SHOWN` keys)."""
     rows = compose_campaign_summaries(artifact_root) if rows is _CAMPAIGN_ROWS_UNSET else rows
     active = {r.get("key") for r in rows or [] if r.get("state") == "active"} - {None, "_unassigned"}
+    if not active:
+        return []
     here, keys = os.path.realpath(str(cwd)), []
     try:
         with os.scandir(canonical_routes_dir(artifact_root)) as entries:
@@ -225,30 +227,53 @@ def cwd_campaign_keys(artifact_root, cwd, rows=_CAMPAIGN_ROWS_UNSET):
     return keys
 
 
-def first_campaign_key(artifact_root, cwd):
-    """The work stream a root without any active one opens: named after the project folder.
+class CampaignDefault(NamedTuple):
+    key: str | None
+    source: str | None = None
+    skipped: tuple[str, str] | None = None
 
-    With nothing to choose from, the refusal only made the first person to start work in a
-    new repository type `--campaign-key <folder>` (W6-E). A root that already has an active
-    stream, or whose campaigns cannot be read, returns None and keeps the refusal that lists
-    them. The folder is the one that owns the artifact root (the primary checkout for a
-    linked worktree), else `cwd`; the word is the route presence gate's `--campaign-key`."""
+
+def _campaign_default_for_key(rows, key, source):
+    import artifact_producer
+    choice = artifact_producer.classify_campaign_key(rows, key)
+    if choice["mode"] in ("join", "create"):
+        return CampaignDefault(key, source)
+    reason = choice.get("code")
+    if choice["mode"] == "reopen" or reason in ("campaign-not-active", "campaign-key-reopen-ambiguous"):
+        states = sorted({r["state"] for r in rows if r.get("key") == key and r["state"] != "active"})
+        reason = "campaign-closed:" + ",".join(states)
+    return CampaignDefault(None, "unassigned", (key, reason))
+
+
+def compose_campaign_default(artifact_root, cwd, session_key=None):
+    """Select an implicit campaign once, using the same eligibility at every source."""
     rows = compose_campaign_summaries(artifact_root)
-    if rows is None or any(r.get("state") == "active" and r.get("key") not in (None, "_unassigned")
-                           for r in rows):
-        return None
+    if rows is None:
+        if session_key:
+            return CampaignDefault(None, "unassigned", (session_key, "campaign-scan-unavailable"))
+        return CampaignDefault(None)
+
+    session = (_campaign_default_for_key(rows, session_key, "this-session-latest-route")
+               if session_key else CampaignDefault(None))
+    if session.key is not None:
+        return session
+
+    here = cwd_campaign_keys(artifact_root, cwd, rows)
+    if len(here) == 1:
+        folder = _campaign_default_for_key(rows, here[0], "this-folder-only-active-stream")
+        if folder.key is not None:
+            return folder._replace(skipped=session.skipped)
+        return session if session.skipped else folder
+    if session.skipped or any(r.get("state") == "active" and r.get("key") not in (None, "_unassigned")
+                              for r in rows):
+        return session
+
+    # A first campaign can take its name from the project folder. An old campaign
+    # of that name is subject to the same eligibility check as a session default.
     root = Path(artifact_root)
     folder = root.parent if root.name in (".agent_reports", ".claude_reports") else Path(cwd)
     key = re.sub(r"[^a-z0-9]+", "-", folder.name.lower()).strip("-")[:40] or "work"
-    # A closed stream of that name reopens, as `--campaign-key <folder>` would; one that cannot
-    # be joined (abandoned, superseded, ambiguous) keeps the refusal, which lists the streams.
-    try:
-        import artifact_producer
-        if artifact_producer.classify_campaign_key(rows, key).get("mode") == "blocked":
-            return None
-    except (ImportError, AttributeError, TypeError, ValueError):
-        return None
-    return key
+    return _campaign_default_for_key(rows, key, "project-folder-first-stream")
 
 
 def compose_campaign_hint(artifact_root, cwd=None):
@@ -320,9 +345,10 @@ def compose_resolve_campaign_key(artifact_root, key):
 COMPOSE_SLUG_WORDS = 6
 
 
-def compose_default_slug(task_text, *, capability=None, shape=None):
+def compose_default_slug(task_text, *, field=None, capability=None, shape=None):
     """The slug a compose names from its own task, so `--slug` is optional.
 
+    The stem starts with the route's field (compose passes it), else the given kind or shape.
     The readable stem comes from request wording. A digest of the complete
     nonempty request remains at the end, even when the display stem is clipped,
     so similar and non-Latin requests retain separate deterministic names."""
@@ -343,8 +369,8 @@ def compose_default_slug(task_text, *, capability=None, shape=None):
         if len(words) >= COMPOSE_SLUG_WORDS:
             break
     base = ARTIFACT_LOCATOR.slugify("-".join(words[:COMPOSE_SLUG_WORDS]))[0] if words else ""
-    if capability or shape:
-        prefix = ARTIFACT_LOCATOR.slugify(str(capability or shape))[0]
+    if field or capability or shape:
+        prefix = ARTIFACT_LOCATOR.slugify(str(field or capability or shape))[0]
         stem = "-".join(part for part in (prefix, base) if part)
     else:
         stem = base or "work"
@@ -436,7 +462,9 @@ def compose_observations(route, t=None):
     answers = [
         (t("route.q.main_capability"), route["capability"]),
         (t("route.q.new_measurement"), t("route.a.lab_declared") if lab_run else t("route.a.depends_on_work")),
-        ("standard+", t("route.a.yes") if route["effective_intensity"] in {"standard", "strong", "thorough", "adversarial"} else t("route.a.no")),
+        # 11-20: a unit route has no intensity, so "is it standard+" has no answer (the record keeps `quick`).
+        ("standard+", t("route.a.not_applicable") if route.get("capability") == TOPO.UNIT_CAPABILITY
+         else t("route.a.yes") if route["effective_intensity"] in {"standard", "strong", "thorough", "adversarial"} else t("route.a.no")),
         (t("route.q.split_stages"), t("route.a.stages_declared", count=len(nodes)) if shape == "staged" else t("route.frame.pending") if shape == "framed" else t("route.a.single_run")),
         (t("route.q.inline_exception"), str(selection.get("inline_reason") or selection.get("selection_basis") or unknown) if shape == "direct" else t("route.a.not_applicable")),
         (t("route.q.delegation_surface"), t("route.a.surface", native=native_label, headless=seen if headless else unknown)),
@@ -489,13 +517,15 @@ def compose_decision_lines(route, non_git_decision=None, t=None):
     detail = t("route.intensity.unspecified") if source == "shape-default" else ""
     if requested and requested != route["effective_intensity"]:
         detail += f", requested={requested}"
-    lines = [f"  intensity={route['effective_intensity']} (source={source}{detail})"]
+    unit_route = route.get("capability") == TOPO.UNIT_CAPABILITY   # one leg, no owner; its intensity is not a choice
+    # 11-20: a unit route's card does not tell an intensity (the record keeps `effective_intensity`; only this text leaves it out).
+    lines = [] if unit_route else [f"  intensity={route['effective_intensity']} (source={source}{detail})"]
     shape = (route.get("selection") or {}).get("shape") or shape_for_intensity(route["effective_intensity"])
     if shape == "framed":
         legs = len(RP.frame_legs(route))
         lines = ["  " + t("route.intensity.framed", requested=requested or "default", legs=legs,
                            bootstrap=route["effective_intensity"], source=source)]
-    if source == "shape-default" and shape != "framed":
+    if source == "shape-default" and shape != "framed" and not unit_route:
         lines.append("  " + t("route.intensity.hint"))
     capability = basis.get("compose-capability", {})
     if capability.get("source") == "compose-default":
@@ -504,6 +534,8 @@ def compose_decision_lines(route, non_git_decision=None, t=None):
         lines.append("  " + t("route.capability.non_git_unresolved", capability=route['capability']))
     elif capability.get("source") == "non-git-task-classification":
         lines.append(f"  capability={route['capability']} (source=non-git-task-classification)")
+    elif capability.get("source") == "field-default":
+        lines.append(f"  capability={route['capability']} (source=field-default)")
     elif capability.get("source") == "frame-shape":
         lines.append("  " + t("route.capability.frame_pending"))
     elif not capability:
@@ -518,9 +550,15 @@ def compose_decision_lines(route, non_git_decision=None, t=None):
         profile = (t("route.tier.inline") if node.get("execution_surface") == "inline"
                    else node.get("model_profile") or "unknown")
         profiles.setdefault(anchor, []).append(profile)
+    workers = sum(n.get("dispatch_depth") == 2 or _frame_node(n) or (unit_route and RP.is_depth0_leg(n))
+                  for n in nodes)
+    owners = int(shape != "framed" and route["effective_intensity"] != "direct" and not unit_route)
+    owner_tier = route.get("owner_model_profile")
+    if owners and owner_tier and "one-shot" not in profiles:
+        # The owner's own tier is a sealed choice too (`top` is allowed for it at any intensity); a
+        # one-shot route's owner is already its `one-shot` node, listed below.
+        profiles = {"owner": [owner_tier], **profiles}
     lines.append("  tiers: " + (" ".join(f"{node}={'+'.join(values)}" for node, values in profiles.items()) or t("route.none")))
-    workers = sum(n.get("dispatch_depth") == 2 or _frame_node(n) for n in nodes)
-    owners = int(shape != "framed" and route["effective_intensity"] != "direct")
     resources = [n["id"] for n in nodes if n.get("kind") == "resource-runner"]
     size = "  " + t("route.size", nodes=len(nodes), workers=workers, owners=owners,
                       resources=",".join(resources) or t("route.none"))
@@ -550,19 +588,64 @@ def compose_decision_lines(route, non_git_decision=None, t=None):
     return lines + compose_omission_lines(route)
 
 
+def _compose_field_line(route):
+    """The card's field line, e.g. `  field code (preset)`; an older route reads its recipe's default."""
+    field, source = TOPO.route_field(route)
+    return f"  field {field} ({source})\n" if field else ""
+
+
+def frame_advice(route) -> list:
+    """`[(kind, detail), ...]`: why a directly opened `solo` or `staged` route may be worth a frame first.
+
+    Advice only -- the route opens either way, and nothing reads this to allow or refuse anything.
+    It reuses the signals the frame width already reads (`route_plan.frame_signals`). A part's start
+    approval is not one: the card already shows it and the approval itself stops that step. A framed route, a route made from a proposal (its direction was
+    settled), a route that carries its own frame legs, a unit route and the inline `direct` shape get none."""
+    selection = route.get("selection") or {}
+    if (selection.get("shape") not in ("solo", "staged") or route.get("route_plan")
+            or route.get("capability") in (ROUTE_PLAN.CAPABILITY, TOPO.UNIT_CAPABILITY)
+            or ROUTE_PLAN.frame_legs(route)):    # a preset that carries its own frame settles the direction itself
+        return []
+    text = (route.get("work_request") or {}).get("text") or ""
+    # The path pattern runs to the next space, so a Korean particle ("core/x.md의") rides along; drop it.
+    signals = [(kind, re.sub(r"[가-힣]+$", "", detail) if kind == "protected-path" else detail)
+               for kind, detail in ROUTE_PLAN.frame_signals(text, route.get("capability"))]
+    return signals
+
+
+def frame_advice_reason(signals, t=None) -> str:
+    """The one-line reason for `signals`, in the operator's language (`t`) or machine form (no `t`)."""
+    if t is None:
+        return ",".join(f"{kind}:{detail}" for kind, detail in signals)
+    return " · ".join(t("route.advice." + kind, detail=detail) for kind, detail in signals)
+
+
 def compose_card(route, plan=None, plan_source=None, *, owner_harness=None,
-                 campaign_selection=None, include_decisions=True, non_git_decision=None, intent_original=None):
-    """One-line `[경로]` notice the acting session pastes instead of a card."""
+                 campaign_selection=None, include_decisions=True, non_git_decision=None, intent_original=None,
+                 launches=None):
+    """One-line `[경로]` notice the acting session pastes instead of a card.
+
+    `launches` are the start's launch receipts: when the owner that started is not the
+    requested harness the card names it, and the owner advisory follows the harness that ran."""
     shape = route.get("selection", {}).get("shape") or shape_for_intensity(route["effective_intensity"])
     ids = [node["id"] for node in route["nodes"]]
     framed = shape == "framed"
     graph = "→".join(ids) if ids else "-"
     t = UI_TEXT.translator()
     gates = ",".join(sorted({row["gate"] for row in route.get("human_gate_bindings") or []})) or t("route.none")
+    if route.get("capability") == TOPO.UNIT_CAPABILITY:
+        # 11-20: a unit route has no procedure to weigh, so its header names the unit and no shape or intensity
+        # (`[경로] unit · qa/code-review · route …`); the sealed record keeps both values.
+        unit = next((n["unit"] for n in route["nodes"] if n.get("unit")), "-")
+        header = t("route.card.header_unit", capability=route['capability'], unit=unit,
+                   route_id=route['route_id'], gates=gates)
+    else:
+        header = t("route.card.header", capability=route['capability'], shape=shape,
+                   intensity=route['effective_intensity'], graph=graph, route_id=route['route_id'], gates=gates)
     card = (
-        t("route.card.header", capability=route['capability'], shape=shape,
-          intensity=route['effective_intensity'], graph=graph, route_id=route['route_id'], gates=gates)
+        header
         + f"\n  cwd {route['cwd']} · slug {route.get('slug', '-')}\n"
+        + _compose_field_line(route)
         + _compose_campaign_line(campaign_selection if campaign_selection is not None
                                  else compose_campaign_selection(route), t)
     )
@@ -574,6 +657,10 @@ def compose_card(route, plan=None, plan_source=None, *, owner_harness=None,
     import work_intent
     for line in work_intent.card_lines(route, original=intent_original, t=t):
         card += "\n" + line
+    changed = work_intent.owner_change_line(route, launches, t=t)
+    if changed:
+        card += "\n  " + changed
+    owner_harness = work_intent.launched_owner(launches).get("harness") or owner_harness
     observed = compose_observations(route, t)
     if include_decisions:
         card += "\n" + "\n".join(compose_decision_lines(route, non_git_decision, t))
@@ -585,6 +672,9 @@ def compose_card(route, plan=None, plan_source=None, *, owner_harness=None,
                           origin=observed['confirmation']['origin'])
     for answer in observed["pre_execution_answers"]:
         card += f"\n  {answer['question']}. {answer['name']}: {answer['answer']}"
+    advice = frame_advice(route)
+    if advice:  # advice only: the route is already open, whatever the session does with it
+        card += "\n  " + t("route.card.frame_advice", reason=frame_advice_reason(advice, t))
     if framed:
         pair = len([n for n in route.get("nodes", []) if _frame_node(n)]) == 2
         card += ("\n  " + t("route.card.frame_proposes")

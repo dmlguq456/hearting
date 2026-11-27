@@ -63,13 +63,13 @@ if grep -q 'body-marker-korean' "$TMP/korean.out"; then exit 1; fi
 [ ! -s "$TMP/body-only.out" ]
 if grep -q "$body_only" "$TMP/body-only.out"; then exit 1; fi
 
-# The six-record cap is checked with the display history off: session-a was already
+# The three-record cap is checked with the display history off: session-a was already
 # shown some of these records by the queries above.
 (cd "$TMP/project-a" && MEM_CANDIDATE_DEDUP=0 python3 "$MEM" candidates 'candidate cap shared' \
   --limit 99 --max-bytes 99999 --session-id session-a --turn-id turn-d \
   > "$TMP/cap.out")
-[ "$(grep -c '^- \[' "$TMP/cap.out")" -eq 6 ]
-[ "$(wc -c < "$TMP/cap.out")" -le 2401 ]
+[ "$(grep -c '^- \[' "$TMP/cap.out")" -eq 3 ]
+[ "$(wc -c < "$TMP/cap.out")" -le 601 ]
 
 after=$(python3 - "$MEM_STORE/memory.db" "$current" <<'PY'
 import sqlite3, sys
@@ -85,13 +85,13 @@ raw = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 rows = [json.loads(line) for line in raw.splitlines()]
 probes = [row for row in rows if row.get("event") == "candidate-probe"]
 assert len(probes) == 4
-assert all(row["query_sha256"] and row["output_utf8_bytes"] <= 1200 for row in probes)
+assert all(row["query_sha256"] and row["output_utf8_bytes"] <= 600 for row in probes)
 assert "automatic candidate recall" not in raw and "과거 결정 회수" not in raw
 receipts = list(pathlib.Path(sys.argv[2]).glob("*.json"))
 assert len(receipts) == 1
 receipt = json.loads(receipts[0].read_text())
 assert receipt["schema_version"] == 1 and receipt["turn_digest"]
-assert receipt["source"] == "candidate-probe" and len(receipt["result_ids"]) <= 6
+assert receipt["source"] == "candidate-probe" and len(receipt["result_ids"]) <= 3
 PY
 
 printf '{"hook_event_name":"UserPromptSubmit","prompt":"automatic candidate recall","cwd":"%s","session_id":"hook-session","turn_id":"hook-turn"}\n' "$TMP/project-a" \

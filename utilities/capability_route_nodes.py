@@ -12,19 +12,24 @@ from pathlib import Path
 
 import dispatch_runtime_support as RUNTIME_SUPPORT
 import model_profile as PROFILE
+import route_form as ROUTE_FORM
 
 from capability_route_base import (
     DEFAULTS, ROOT, TOPO,
 )
+from capability_route_dispatch import _expand_parallel_groups
+from replica_batch_contract import MAX_TOP_LEGS
 
 
-def _resolve_owner_profile(effective, registry, demand=None, explicit_profile=None):
+def _resolve_owner_profile(effective, registry, demand=None, explicit_profile=None, owner_default=None):
     """One selection for compile and verify: demand, otherwise legacy default.
 
     Intensity describes the workflow shape; its compatibility default must not
-    veto the independently validated judgment/execution demand.
+    veto the independently validated judgment/execution demand. `owner_default` is the default of an
+    owner that makes the work itself at a higher intensity (the middle cell `solo·standard`, whose
+    recipe declares it): that owner is read as the maker (A), not as the intensity's conductor.
     """
-    default = registry["owner_profile_by_intensity"].get(effective) or "light"
+    default = owner_default or registry["owner_profile_by_intensity"].get(effective) or "light"
     selection = PROFILE.resolve_profile_demand(
         demand, explicit_profile=explicit_profile if explicit_profile is not None else default if demand is None else None,
         legacy=explicit_profile is None, existing_versioned_stage=True)
@@ -42,16 +47,18 @@ def _resolve_owner_profile(effective, registry, demand=None, explicit_profile=No
     return profile, selection
 
 
-def _owner_node(node, effective):
-    """Whether `node` IS the route's owner: only the quick shape's `one-shot`
-    node (the owner and the node are one process there). A standard+ recipe's
+def _owner_node(node, effective, form=None):
+    """Whether `node` IS the route's owner: only the one-shot owner form's `one-shot`
+    node (the owner and the node are one process there). `form` is the route form
+    (`route_plan.form_of`); a caller with only an intensity leaves it out. A standard+ recipe's
     depth-1 `_kernel/owner` *stage* nodes (prd-transaction, handback, deploy,
     ...) are not the owner and never inherit its profile (review R2 B1: sealing
     `top` onto them made compile and verify disagree again, and would have
     spent the main-session model on stages nobody asked for). One predicate
     for the compiler and every verify check."""
 
-    return (effective == "quick" and node.get("id") == "one-shot"
+    form = form or ROUTE_FORM.form_of(None, effective)
+    return (form == "solo" and node.get("id") == "one-shot"
             and node.get("dispatch_depth") == 1 and node.get("unit") == "_kernel/owner")
 
 
@@ -72,6 +79,102 @@ def _frame_node(node):
     return (node.get("unit") == "plan/frame"
             and node.get("dispatch_depth") == 1
             and node.get("worker_type") == "frame")
+
+
+# The model grade a staged route gives one unit's worker is what the shipped recipes declare for it
+# (a stage node's `model_profile`, or the one its parallel-group leg declares); a unit no recipe
+# runs gets the staged default, `light`. A unit route reads that same declaration and keeps no table
+# of its own. `--profile` and `--explicit-profiles` still override it through the ordinary profile
+# sealing; `top` is not reachable here: it is for the owner and the frame legs only.
+_STAGED_DEFAULT_PROFILE = "light"
+_PROFILE_STRENGTH = {"light": 0, "balanced": 1, "balanced-deep": 2, "deep": 3}
+
+
+def staged_unit_profile(registry, unit):
+    """The grade the shipped staged recipes declare for `unit`'s worker (the strongest, if they differ)."""
+
+    declared = set()
+    check_unit = dict(registry.get("auxiliary_check_units") or {})
+    for recipe in registry["recipes"]:
+        plus = recipe.get("standard_plus") or {}
+        for node in plus.get("nodes") or []:
+            choices = node.get("unit_choices")
+            if node.get("model_profile") and (node.get("unit") == unit
+                                              or (isinstance(choices, list) and unit in choices)):
+                declared.add(node["model_profile"])
+        for group in plus.get("parallel_groups") or []:
+            for leg in group["legs"]:
+                if check_unit.get(leg.get("auxiliary_check")) == unit and leg.get("model_profile"):
+                    declared.add(leg["model_profile"])
+    declared &= set(_PROFILE_STRENGTH)
+    return max(declared, key=_PROFILE_STRENGTH.get) if declared else _STAGED_DEFAULT_PROFILE
+
+
+def unit_leg_node(recipe, unit, registry=None):
+    """The one depth-0 leg of a `unit` route: the recipe's template filled from the unit head.
+
+    ONE function for the compiler and `verify_route`: the unit, role and worker type are the
+    head's, the model grade is the one a staged route gives that unit (`staged_unit_profile`),
+    everything else is the recipe's. A unit that is not in the catalog, or whose head lacks what
+    a leg needs, raises."""
+
+    head = TOPO._unit_frontmatter(unit)
+    node = json.loads(json.dumps(recipe["standard_plus"]["nodes"][0]))
+    node.update({"role": head["role"], "unit": unit, "worker_type": head["worker_type"],
+                 "model_profile": staged_unit_profile(registry or TOPO.load_registry(), unit)})
+    return node
+
+
+def one_shot_review_declared(recipe):
+    """Whether this recipe declares the middle cell `solo·standard` (`one_shot_review`)."""
+    return isinstance(recipe, dict) and "one_shot_review" in recipe
+
+
+def one_shot_owner_default(recipe, effective, owner_makes_the_work):
+    """The default model role of the owner that makes the middle cell's work, or None for any other route.
+
+    `owner_makes_the_work` is A (a `one-shot` owner node / the `solo` form): a team conductor at the same
+    intensity keeps the intensity's default."""
+    if (not owner_makes_the_work or effective in (None, "direct", "quick")
+            or not one_shot_review_declared(recipe)):
+        return None
+    return recipe["one_shot_review"]["owner_model_profile"]
+
+
+def one_shot_review_node(recipe):
+    """The middle cell's review node: the recipe's own standard review node, borrowed.
+
+    ONE function for the compiler and `verify_route`. It keeps the node's unit, outputs, write scope and
+    completion gate; it depends on nothing (the owner's end node waits on it, never the reverse), reads
+    the declared inputs (the owner's source, not a plan), takes the declared model role, and its fallback
+    chain is the declared hops (no `inline`: the maker cannot close a review of its own work)."""
+    declared = recipe["one_shot_review"]
+    node = next(n for n in recipe["standard_plus"]["nodes"] if n.get("id") == declared["node"])
+    node = json.loads(json.dumps(node))
+    node.update({"depends_on": [], "inputs": list(declared["inputs"]),
+                 "fallback_hops": list(declared["fallback_hops"]), "model_profile": declared["model_profile"]})
+    return node
+
+
+def one_shot_review_nodes(recipe, effective="standard", registry=None, persona_policy=True):
+    """The middle cell's verification nodes at `effective`: the borrowed review node, widened from `strong`
+    into the kind's own declared review group.
+
+    ONE function for the compiler and `verify_route`. The group is the one the team route expands
+    (`parallel_groups`, `_expand_parallel_groups`): the same legs, perspectives and widths. Only the anchor
+    leg differs: it takes the cell's review model (`one_shot_review.model_profile`), so `strong` never
+    reviews more shallowly than `standard` does. The other legs keep the model the group declares."""
+    anchor = one_shot_review_node(recipe)
+    declared = recipe["one_shot_review"]["node"]
+    groups = [g for g in recipe["standard_plus"].get("parallel_groups") or [] if g.get("node") == declared]
+    if not groups:
+        return [anchor]
+    registry = registry or TOPO.load_registry()
+    nodes = _expand_parallel_groups([anchor], groups, effective, recipe["capability"],
+                                    auxiliary_check_units=registry.get("auxiliary_check_units"),
+                                    persona_policy=persona_policy)
+    nodes[0]["model_profile"] = recipe["one_shot_review"]["model_profile"]
+    return nodes
 
 
 def _quick_frame_diversity(candidates):
@@ -237,7 +340,11 @@ def _seal_profile_demands(nodes, profile_demands=None, explicit_profiles=None, *
     return nodes
 
 
-def _profile_input_maps(nodes, demands, explicit):
+def _profile_input_maps(nodes, demands, explicit, intensity=None):
+    """Validate the demand and explicit-profile maps a route is composed (or verified) with.
+
+    `intensity` is the route's effective intensity: it decides whether a person-named stage node or
+    review leg may hold `top` (strong and above). A caller that has none refuses such a name."""
     valid = {n["id"] for n in nodes if not _no_model_node(n)} | {"__owner__"}
     normalized = {}
     for label, values in (("profile_demands", demands), ("explicit_profiles", explicit)):
@@ -246,16 +353,44 @@ def _profile_input_maps(nodes, demands, explicit):
     for key, value in (demands or {}).items():
         normalized[key] = PROFILE.normalize_profile_demand(value)
     frame_ids = {n["id"] for n in nodes if _frame_node(n)}
+    by_id = {n["id"]: n for n in nodes}
     for key, value in (explicit or {}).items():
         if value not in PROFILE.KNOWN_PROFILES:
             raise ValueError("profile-explicit-input-invalid:" + key)
         if value == PROFILE.TOP_PROFILE and key != "__owner__" and key not in frame_ids:
-            # The top exception profile is a dispatch-depth-1 decision: a
-            # depth-2 stage node or parallel leg never spends the main-session
-            # model. A depth-1 frame leg is the one added exception -- it is an
-            # anchor for the whole route's direction, launched by the depth-0
-            # session itself.
-            raise ValueError("profile-explicit-top-owner-only:" + key)
+            # The top exception profile is the owner's, and a depth-1 frame leg's (the anchor for the
+            # whole route's direction, launched by the depth-0 session itself). A depth-2 stage node or
+            # review/verification leg holds it only when the person named that node (this map is the
+            # person's) and the route's intensity is strong or higher: never a default, never a
+            # route-wide choice, never an automatic promotion.
+            node = by_id.get(key, {})
+            if not PROFILE.top_stage_node(node):
+                depth, kind = node.get("dispatch_depth"), node.get("kind")
+                if depth == 2:
+                    why = (f"`{key}` is a depth-2 {kind} node that launches as a "
+                           f"{PROFILE.top_stage_node_type(node) or 'non-model'} worker, not a stage worker or "
+                           f"review/verification leg")
+                else:
+                    why = (f"`{key}` is a step the owner runs itself (depth {depth}); to give the owner `top` "
+                           f"name `__owner__`")
+                raise ValueError(f"profile-explicit-top-owner-only:{key}: {why} "
+                                 f"(top: the owner at any intensity, a depth-2 stage worker or "
+                                 f"review/verification leg at {PROFILE.TOP_STAGE_MIN_INTENSITY} or higher)")
+            if not PROFILE.top_stage_intensity(intensity):
+                raise ValueError(
+                    f"profile-explicit-top-owner-only:{key}: this route is {intensity or 'of unknown intensity'}, "
+                    f"below {PROFILE.TOP_STAGE_MIN_INTENSITY}: `top` for a depth-2 stage worker or "
+                    f"review/verification leg needs {PROFILE.TOP_STAGE_MIN_INTENSITY} or higher "
+                    f"(the owner, `__owner__`, can take `top` at any intensity)")
+    top_legs = {}
+    for key, value in (explicit or {}).items():
+        group = by_id.get(key, {}).get("parallel_group")
+        if value == PROFILE.TOP_PROFILE and group and key not in frame_ids:
+            top_legs.setdefault(group, []).append(key)
+    for group, keys in top_legs.items():
+        if len(keys) > MAX_TOP_LEGS:
+            raise ValueError(f"profile-explicit-top-group-width:{group}: at most {MAX_TOP_LEGS} leg of a "
+                             f"parallel group may be top, named {len(keys)} ({', '.join(sorted(keys))})")
     return normalized, dict(explicit or {})
 
 
@@ -266,10 +401,16 @@ def _verify_profile_contract(route):
         if route.get("owner_profile_selection") is not None or any(
             "profile_selection" in n or "profile_demand" in n for n in route.get("nodes", [])):
             raise ValueError("profile-selection-contract-missing")
+        # A route with no profile-selection contract predates a stage `top`: none of its depth-2
+        # nodes may hold one.
+        for node in route.get("nodes", []):
+            if node.get("dispatch_depth") == 2 and node.get("model_profile") == PROFILE.TOP_PROFILE:
+                raise ValueError("profile-top-needs-selection-contract:" + str(node.get("id")))
         return
     if type(version) is not int or version != 1:
         raise ValueError("profile-selection-version-unsupported")
-    demands, explicit = _profile_input_maps(route.get("nodes", []), route.get("profile_demands"), route.get("explicit_profiles"))
+    demands, explicit = _profile_input_maps(route.get("nodes", []), route.get("profile_demands"),
+                                            route.get("explicit_profiles"), route.get("effective_intensity"))
     if route.get("owner_profile_demand") != demands.get("__owner__"):
         raise ValueError("owner-profile-demand-map-mismatch")
     owner_profile = route.get("owner_model_profile") or "light"

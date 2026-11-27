@@ -105,7 +105,7 @@ full masking.
 
 The always-loaded `adapters/opencode/AGENTS.md` keeps purpose, judgment, where
 to look, and the instruction to follow the next action the runtime prints.
-The command detail it used to carry lives here. `preflight.sh` below means
+The command detail lives here. `preflight.sh` below means
 `AGENT_HOME="$AGENT_HOME" bash "$AGENT_HOME/adapters/opencode/bin/preflight.sh"`;
 no shim is installed at the harness root. Export `AGENT_HOME` to the installed
 root for release behavior, or to a checkout/worktree to use that tree as the
@@ -210,7 +210,7 @@ runtime config is written.
 | design post-write verification | `core/HOOKS.md` defines the invariant; run `adapters/opencode/bin/preflight.sh design <file>` after design HTML writes |
 | design visual harness | Tool-contract check: `adapters/opencode/bin/preflight.sh visual-harness <file.html>` runs the adapter-owned render/screenshot/console wrapper. Inspect the reported screenshot before claiming visual completion. Do not project Claude Design MCP files into OpenCode |
 | memory injection | OpenCode plugin system transform runs `adapters/opencode/bin/preflight.sh memory [cwd]` once per session and re-emits the cached block on every model call, because a system-transform block only lives for the one call it decorates; run it manually when plugins are unavailable |
-| memory candidate exposure and deeper retrieval | OpenCode captures the current user prompt in plugin memory, runs `preflight.sh candidates` once for that turn, and re-emits the result on every model call of the turn (see ADAPTATION "Delivery channel"). The result is capsule-only, active current-project/global, and bounded to six headlines/IDs and 1,200 UTF-8 bytes. The same-turn message ID flows into the mutation gate. The prompt is never written to disk and is dropped at `session.deleted`. The model decides relevance and reads full records; explicit `recall` remains available for deeper search and `recall-gate` for hook recovery |
+| memory candidate exposure and deeper retrieval | OpenCode captures the current user prompt in plugin memory, runs `preflight.sh candidates` once for that turn, and re-emits the result on every model call of the turn (see ADAPTATION "Delivery channel"). The result is capsule-only, active current-project/global, and bounded to three headlines/IDs and 600 UTF-8 bytes. The same-turn message ID flows into the mutation gate. The prompt is never written to disk and is dropped at `session.deleted`. The model decides relevance and reads full records; explicit `recall` remains available for deeper search and `recall-gate` for hook recovery |
 | oncall briefing injection | OpenCode plugin system transform runs `adapters/opencode/bin/preflight.sh briefing [cwd]`; run it manually when plugins are unavailable |
 | loop guidance | `adapters/opencode/bin/preflight.sh loop-info <oncall|note|study|drill|runtime-watch>` reports whether a loop has an OpenCode manual contract, unsupported executable projection, or missing native implementation; `note` is application-owned and the harness exposes only the optional app-neutral `artifact-sink` port |
 | capability mapping | `adapters/opencode/bin/preflight.sh capability-info <capability>` reports OpenCode's native Skill/command realization and instruction-only or tool-contract status; root Skill compatibility references are not projected and report `compat_reference=not-projected` |
@@ -317,8 +317,6 @@ expose `adapters/claude/commands/` as OpenCode-native commands.
 
 ## Native Guard Plugin Projection
 
-Write-denying hook gates are retired; no write preflight or core-read marker is required.
-
 ```bash
 node --check adapters/opencode/plugins/hearting-guards.js
 ```
@@ -390,7 +388,7 @@ role`, while route-bound registered work carries one of these sealed profiles:
 | `balanced` | configured light tier (variant `max`) | collapsed to `light` (`collapsed-balanced-to-light`) |
 | `light` | configured light tier (variant `max`) | distinct |
 | `mini` | configured mini tier (the light model, variant `high`, one step below light) | distinct variant; lifecycle/micro-only, substantive dispatch-depth-1/2 work is rejected |
-| `top` | configured balanced-deep tier | collapsed to `balanced-deep` (`collapsed-top-to-balanced-deep`): this account has no model above it, so a route that sealed the `top` exception profile for its owner still runs here, typed as a demotion; the wrapper refuses `top` without that route, and no `--model` override runs under the `top` label. `--inherit-model-settings` follows the rule every adapter shares: it is refused while `CFG_MAIN_SESSION_ONLY_MODELS` names a model, and the shipped file declares none, so it is accepted here. A user copy that declares the key gets the same main-session-only refusal as Claude and Codex (receipt `main_session_only_policy=declared|absent`) |
+| `top` | configured balanced-deep tier | collapsed to `balanced-deep` (`collapsed-top-to-balanced-deep`): this account has no model above it, so a route that sealed the `top` exception profile for its owner (or, at `strong`+, a person-named depth-2 stage worker or review/verification leg) still runs here, typed as a demotion; the wrapper refuses `top` without that route, and no `--model` override runs under the `top` label. `--inherit-model-settings` follows the rule every adapter shares: it is refused while `CFG_MAIN_SESSION_ONLY_MODELS` names a model, and the shipped file declares none, so it is accepted here. A user copy that declares the key gets the same main-session-only refusal as Claude and Codex (receipt `main_session_only_policy=declared|absent`) |
 
 The portable policy assigns `balanced-deep` to quick one-shot conduction and `deep` to
 every standard+ owner. OpenCode preserves those sealed labels, but its current

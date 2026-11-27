@@ -344,6 +344,76 @@ class RetentionPassesTest(unittest.TestCase):
         self.assertEqual(calls, expected * 2)
 
 
+class RouteLessRowTest(unittest.TestCase):
+    """The real `_route_closure` and `_delivery_settled` run: a row with no route keys has no closure to wait for."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name) / "dispatch"
+        self.root.mkdir()
+        self.jobs = self.root / "jobs.log"
+
+    def bare(self, attempt, *, days_ago=30, status="done", **extra):
+        meta = {"attempt_schema_version": "2", "attempt_id": attempt,
+                "log_file": f"/nonexistent-p3b/logs/{attempt}.log", **extra}
+        pipe = ",".join(f"{key}={value}" for key, value in meta.items())
+        return f"{stamp(days_ago)}\t{status}\t/repo\t/repo\tslug-{attempt}\t{pipe}"
+
+    def sweep(self, lines):
+        self.jobs.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+        return A.sweep(self.jobs, now_ns=NOW, force=True)
+
+    def live(self):
+        return self.jobs.read_text(encoding="utf-8").split("\n")[:-1]
+
+    def test_a_row_bound_to_no_route_moves_once_it_settled(self):
+        settled = self.bare("att-n1")
+        keep = self.bare("att-n0", days_ago=0, status="running")   # a rewrite never empties the registry
+        self.assertEqual(self.sweep([settled, keep])["removed"], 1)
+        self.assertEqual(self.live(), [keep])
+        self.assertEqual(A.archived_rows(self.jobs, "att-n1"), [settled])
+
+    def test_a_route_less_row_that_ended_recently_stays(self):
+        recent = self.bare("att-n2", days_ago=3)
+        self.assertEqual(self.sweep([recent])["removed"], 0)
+        self.assertEqual(self.live(), [recent])
+
+    def test_a_route_less_row_with_an_unproven_delivery_stays(self):
+        owed = self.bare("att-n3", delivery_intent="1")   # no recipient digest or record: unknown
+        self.assertEqual(self.sweep([owed])["removed"], 0)
+        self.assertEqual(self.live(), [owed])
+
+    def test_a_route_less_row_does_not_settle_later_rows_with_route_keys(self):
+        # Same pass, route-less row first: an empty route binding is unknown evidence and a
+        # batch-only binding has no proven closure, so both stay.
+        settled = self.bare("att-n6")
+        empty = self.bare("att-n7", route_id="")
+        batch = self.bare("att-n8", batch_route_id="rt-00000000deadbeef")
+        keep = self.bare("att-n0", days_ago=0, status="running")
+        self.assertEqual(self.sweep([settled, empty, batch, keep])["removed"], 1)
+        self.assertEqual(self.live(), [empty, batch, keep])
+        # And the other order: an unknown row first does not hold the route-less row back.
+        self.assertEqual(self.sweep([empty, batch, self.bare("att-n6"), keep])["removed"], 1)
+        self.assertEqual(self.live(), [empty, batch, keep])
+
+    def test_an_owner_that_bound_a_route_after_launch_stays(self):
+        from owner_route_binding import OWNER_ROUTE_ATTACHMENT_DIR, _attachment_key
+        owner = self.bare("att-n9", worker_type="owner")
+        keep = self.bare("att-n0", days_ago=0, status="running")
+        records = self.root / OWNER_ROUTE_ATTACHMENT_DIR
+        records.mkdir()
+        (records / _attachment_key("att-n9")).write_text("{}", encoding="utf-8")
+        self.assertEqual(self.sweep([owner, keep])["removed"], 0)
+        self.assertEqual(self.live(), [owner, keep])
+
+    def test_a_route_less_row_linked_to_an_open_row_stays_with_it(self):
+        settled = self.bare("att-n4")
+        open_child = self.bare("att-n5", days_ago=0, status="running", parent_attempt_id="att-n4")
+        self.assertEqual(self.sweep([settled, open_child])["removed"], 0)
+        self.assertEqual(self.live(), [settled, open_child])
+
+
 class ReaderCompatibilityTest(Fixture):
     def test_ids_of_moved_rows_still_resolve_and_are_not_copied_back(self):
         import importlib.util

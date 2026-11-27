@@ -44,7 +44,9 @@ class StageSkillsHiddenTest(unittest.TestCase):
 
     def test_stage_skill_files_still_generated(self):
         for runtime in ("claude", "codex", "opencode"):
-            for name in STAGE - {"route-frame"}:
+            # A compiler-internal capability (route-frame, unit) has a contract doc and no skill.
+            for name in STAGE - {n for n, s in MANIFEST["capabilities"].items()
+                                 if s["invocation"]["class"] == "compiler-internal"}:
                 self.assertTrue((ROOT / "adapters" / runtime / "skills" / name / "SKILL.md").is_file(), (runtime, name))
 
     def test_activation_projection_excludes_stage_skills(self):

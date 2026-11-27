@@ -292,7 +292,7 @@ class CompletionSummaryTest(unittest.TestCase):
         self.root = Path(tmp.name)
         self.route = {"route_id": "rt-5555555555555555", "capability": "autopilot-code",
                       "artifact_root": str(self.root),
-                      "work_request": {"text": '의도: 의도를 고정한다\n\nBody.\n사용자: "의도가 맞는지 체크하는 건 중요해"', "owner_harness": None}}
+                      "work_request": {"text": '의도: 의도를 고정한다\n\nBody. PR #12의 후속.\n사용자: "의도가 맞는지 체크하는 건 중요해"', "owner_harness": None}}
         record = self.root / ".runtime/intent/rt-5555555555555555.json"
         record.parent.mkdir(parents=True)
         record.write_text(json.dumps({"schema": WI.RECORD_SCHEMA, "route_id": self.route["route_id"],
@@ -436,6 +436,83 @@ class CompletionSummaryTest(unittest.TestCase):
         self.assertIn("검증: 명령 1개 · 결과 표시 없음", text)
         self.assertNotIn("통과 0 · 실패 0", text)
 
+    def _checks_and_result(self, rows):
+        self.report.write_text("## 변경 개요\n- x\n\n## 검증\n" + "\n".join("- " + row for row in rows) + "\n")
+        lines = WI.completion_summary(self.route, self.report).splitlines()
+        return (next(line for line in lines if line.startswith("검증:")),
+                next(line for line in lines if line.startswith("결과:")))
+
+    def test_a_row_that_says_what_failed_before_the_fix_is_not_a_failure(self):
+        passed = "`python3 tools/run-tests.py --select utilities/a.test.py`: 22 passed"
+        for before in ("`bash hooks/x.test.sh`를 고치기 전 hook으로 돌리면 FAIL (PASS 21·FAIL 1), 고친 뒤 PASS 22·FAIL 0",
+                       "python3 tools/run-tests.py --select utilities/b.test.py — 수정 전 코드에서 3 failed, 수정 후 12 passed",
+                       "python3 tools/run-tests.py --select utilities/b.test.py: before the fix 1 failed; now 12 passed"):
+            with self.subTest(before=before):
+                checks, result = self._checks_and_result([passed, before])
+                self.assertEqual(checks, "검증: " + WI.ui_translator()("completion.no_checks"))
+                self.assertNotIn("실패", checks.replace("확실히 추출하지 못함", ""))
+                self.assertEqual(result, "결과: 완료")
+        # A prose line about the failing-before check is not a failure either.
+        self.assertEqual(self._checks_and_result([passed, "고치기 전에는 FAIL 이었다"])[1], "결과: 완료")
+
+    def test_a_check_that_fails_now_is_still_seen_next_to_a_before_the_fix_row(self):
+        failing = "`python3 tools/run-tests.py --select utilities/a.test.py`: 20 passed, 2 failed"
+        before = "`bash hooks/x.test.sh`를 고치기 전 hook으로 돌리면 FAIL (PASS 21·FAIL 1), 고친 뒤 PASS 22·FAIL 0"
+        checks, result = self._checks_and_result([before, failing])
+        self.assertIn("확인", result)      # "완료 — 보고서의 남은 것 확인", never a clean "결과: 완료"
+        self.assertNotEqual(result, "결과: 완료")
+        # Without a before-the-fix row the failure is counted as before.
+        checks, _result = self._checks_and_result([failing])
+        self.assertEqual(checks, "검증: 명령 1개 · 통과 1 · 실패 1")
+
+    def test_a_failure_now_on_the_same_row_as_the_before_the_fix_words_is_still_seen(self):
+        # The before-fix clause is the evidence; a failure word outside it is a failure now, and
+        # a word that only starts like the phrase ("변경 전체") is not the phrase at all.
+        passed = "`python3 tools/run-tests.py --select utilities/a.test.py`: 22 passed"
+        for row in ("`bash x.test.sh`: 고치기 전 FAIL 1, 고친 뒤에도 여전히 FAIL 1",
+                    "`python3 tools/run-tests.py --select b`: 고친 뒤 20 passed, 2 failed (고치기 전 5 failed)",
+                    "`pytest b`: before the fix 3 failed; after the fix 1 failed",
+                    "`python3 tools/run-tests.py` 변경 전체 묶음: 40 passed, 2 failed",
+                    "`python3 tools/run-tests.py` 구현 전반 시험: PASS 40 · FAIL 2",
+                    "`python3 tools/run-tests.py --select s` (수정 전략 시험): FAIL 1",
+                    "`pytest c`: 2 failed (fails without the patch too)",
+                    "`python3 tools/run-tests.py` 수정하지 않은 모듈 시험 FAIL 1",
+                    "로컬에서 FAIL 1건이 남는다. 수정 전 HEAD 파일에서도 똑같이 실패한다"):
+            with self.subTest(row=row):
+                result = self._checks_and_result([passed, row])[1]
+                self.assertNotEqual(result, "결과: 완료")
+                self.assertIn("확인", result)
+        # Words that end the phrase (space, mark, particle, line end) are still the evidence.
+        for row in ("`bash x.test.sh`: 수정 전에는 FAIL 1, 수정 후 PASS 22·FAIL 0", "`bash x.test.sh`: 수정 전 FAIL 1 · 수정 후 PASS 22",
+                    "`bash x.test.sh`: 고치기 전(FAIL 1) 고친 뒤 PASS 22", "고치지 않은 코드로 돌리면 FAIL 이었다"):
+            with self.subTest(row=row):
+                self.assertEqual(self._checks_and_result([passed, row])[1], "결과: 완료")
+        # A look-alike row is a row like any other: its numbers are counted.
+        checks, _result = self._checks_and_result(["`python3 tools/run-tests.py` 변경 전체 묶음: 40 passed, 2 failed"])
+        self.assertEqual(checks, "검증: 명령 1개 · 통과 1 · 실패 1")
+
+    def test_two_results_inside_the_before_the_fix_words_or_a_failure_before_them_are_still_seen(self):
+        # Outside the phrase the row reads as it would without it (a code span a particle follows
+        # is a noun phrase, not a command); two results inside it cannot be told from a failure now.
+        passed = "`python3 tools/run-tests.py --select utilities/a.test.py`: 22 passed"
+        for row in ("`worker_home_retention`은 이 사본에서 8건 실패했으나, 고치기 전 main 사본에서도 같은 8건이 실패한다",
+                    "`bash x.test.sh`: 고치기 전 FAIL 3 → FAIL 1",
+                    "`bash x.test.sh`: 고치기 전 FAIL 1, 다시 돌려도 FAIL 1",
+                    "`pytest b`: before the fix: 3 failed, with the fix: 1 failed",
+                    "`pytest b`: pre-fix: 2 failed. post-fix: 1 failed",
+                    "`bash x.test.sh`: 고치기 전 PASS 20 · FAIL 2, 고친 뒤 PASS 21 · FAIL 1"):
+            with self.subTest(row=row):
+                result = self._checks_and_result([passed, row])[1]
+                self.assertNotEqual(result, "결과: 완료")
+                self.assertIn("확인", result)
+        # One result with its bracket, its diagnostics or a zero count is one statement: still evidence.
+        for row in ("새 시험 3개: 고치기 전 3개 모두 FAIL — 진단 기록에 `worker home collision` ×4, `PermissionError` 확인. 고친 뒤 PASS.",
+                    "두 시험은 고치기 전 소스(37e5a5a) 위에서 FAIL(2건), 고친 뒤 PASS.",
+                    "`bash x.test.sh`: 고친 뒤 PASS 22·FAIL 0 (고치기 전 FAIL 1)",
+                    "`bash x.test.sh`: 고치기 전 FAIL 1 (PASS 21·FAIL 0), 고친 뒤 PASS 22"):
+            with self.subTest(row=row):
+                self.assertEqual(self._checks_and_result([passed, row])[1], "결과: 완료")
+
     def test_command_line_with_only_an_error_word_is_not_zero_failures(self):
         self.report.write_text("## 검증\npython3 tools/check.py -> 오류 발생\n")
         text = WI.completion_summary(self.route, self.report)
@@ -496,8 +573,21 @@ class CompletionSummaryTest(unittest.TestCase):
         self.assertIn("전체 시험은 서버 부하로 돌리지 않음", lines[5])
         self.assertIn("2주 뒤 전달 비율 확인", lines[5])
         self.assertEqual(lines[6], "독립 리뷰 없이 닫힌 노드: review")
-        self.assertEqual(lines[7], f"산출물: {self.report} · PR https://github.com/o/r/pull/12")
+        self.assertEqual(lines[7], f"산출물: {self.report}")  # the request body names PR #12 only as a reference
         self.assertNotIn("\n\n", text)
+
+    def test_a_pr_the_report_names_is_carried_only_when_the_requests_title_names_it(self):
+        # The report's follow-up line links pull/12; no verdict line or title names a PR.
+        for request in ("PR #12 정리", "\nPR #12 정리\n\n본문 PR #13"):
+            with self.subTest(request=request):
+                route = {**self.route, "work_request": {"text": request, "owner_harness": None}}
+                text = WI.completion_summary(route, self.report, route_file=self.route_file)
+                self.assertTrue(text.splitlines()[-1].endswith(" · PR https://github.com/o/r/pull/12"))
+        for request in ("Fix the summary", "PR #12와 PR #13 비교", "Fix the summary\n\nBody. Follows PR #12."):
+            with self.subTest(request=request):
+                route = {**self.route, "work_request": {"text": request, "owner_harness": None}}
+                lines = WI.completion_summary(route, self.report, route_file=self.route_file).splitlines()
+                self.assertEqual(lines[-1], f"산출물: {self.report}")
 
     def test_the_first_user_cycle_adds_the_artifact_list_line_before_the_artifact_line(self):
         cycle = self.root / "campaigns/2026-01-02_c/2026-01-02_alpha/artifacts"
@@ -604,7 +694,7 @@ class CompletionSummaryLanguageTest(unittest.TestCase):
         self.root = Path(tmp.name)
         self.route = {"route_id": "rt-5555555555555555", "capability": "autopilot-code",
                       "artifact_root": str(self.root),
-                      "work_request": {"text": 'Intent: Seal the intent\n\nBody.\nUser: "check the intent"', "owner_harness": None}}
+                      "work_request": {"text": 'Intent: Seal the intent\n\nBody. Follows PR #12.\nUser: "check the intent"', "owner_harness": None}}
         record = self.root / ".runtime/intent/rt-5555555555555555.json"
         record.parent.mkdir(parents=True)
         record.write_text(json.dumps({"schema": WI.RECORD_SCHEMA, "route_id": self.route["route_id"],
@@ -630,7 +720,7 @@ class CompletionSummaryLanguageTest(unittest.TestCase):
         self.assertTrue(lines[4].startswith("Checks: "))
         self.assertTrue(lines[5].startswith("Unverified / remaining: "))
         self.assertEqual(lines[6], "Nodes closed without independent review: review")
-        self.assertEqual(lines[7], f"Artifact: {self.report} · PR https://github.com/o/r/pull/12")
+        self.assertEqual(lines[7], f"Artifact: {self.report}")  # the request body names PR #12 only as a reference
         runtime_lines = lines[:3] + lines[6:7] + [lines[7].split(str(self.report))[0]]   # not the report's own words
         self.assertIsNone(re.search(r"[\uac00-\ud7a3]", "\n".join(runtime_lines)))
 
@@ -689,13 +779,14 @@ class CompletionCostLineTest(unittest.TestCase):
         self.report.write_text("## 1. Change Overview\n- one\n")
         self.rows = []
 
-    def attempt(self, attempt, harness, stamp, rows, *, parent=None, status="done"):
+    def attempt(self, attempt, harness, stamp, rows, *, parent=None, status="done", extra=None):
         log = self.state / "logs" / f"slug-{attempt}.{attempt}.{harness}.jsonl"
         log.write_text("".join(json.dumps(row) + "\n" for row in rows))
         meta = {"attempt_schema_version": "2", "attempt_id": attempt, "harness": harness,
                 "log_file": str(log), "route_id": self.ROUTE_ID, "route_hash": self.route["route_hash"]}
         if parent:
             meta["parent_attempt_id"] = parent
+        meta.update(extra or {})
         line = "\t".join([stamp, status, str(self.root), str(self.root), f"slug-{attempt}",
                           ",".join(f"{k}={v}" for k, v in meta.items())])
         self.rows.append(line)
@@ -745,6 +836,20 @@ class CompletionCostLineTest(unittest.TestCase):
         line = WI.cost_line(cost, WI.ui_translator())
         self.assertEqual(line, "Cost: 1h 02m elapsed · 3,587 session tokens (4 sessions)")
         self.assertNotIn("%", line)
+
+    def test_a_continued_unit_turn_counts_its_own_attempt_only(self):
+        first = "2026-11-04T01:00:00.000000Z"
+        second = "2026-11-06T01:00:00.000000Z"                     # two days later
+        self.attempt("att-turn1", "claude", first, [
+            {"type": "result", "usage": {"input_tokens": 20, "output_tokens": 80}}])
+        self.attempt("att-turn2", "claude", second, [
+            {"type": "result", "usage": {"input_tokens": 3, "output_tokens": 2}}],
+            extra={"continues_attempt_id": "att-turn1", "turn": "2"})
+        import dispatch_terminal_commit as DTC
+        request = mock.Mock(jobs=self.jobs, owner_attempt_id="att-turn2", route_file=None)
+        cost = DTC._completion_cost(request, self.route, now=WI_epoch(second) + 95)
+        self.assertEqual((cost["sessions"], cost["tokens"], cost["elapsed_seconds"]), (1, 5, 95))
+        self.assertEqual(WI.cost_line(cost, WI.ui_translator()), "Cost: 1m 35s elapsed · 5 session tokens (1 sessions)")
 
     def test_a_session_without_counts_is_unknown_never_estimated(self):
         self.attempt("att-owner", "claude", "2026-11-04T01:00:00.000000Z", [
@@ -842,12 +947,16 @@ class ClaudeWakeSummaryTest(unittest.TestCase):
                 state, message = module.classified_receipt(launch, "ready", "terminal", Path("/home"))
             self.assertEqual(state, "success")
             reader.assert_called_once_with(row.metadata, "att-owner")
-            self.assertIn("the registered owner completed.", message)
+            self.assertIn("Owner finished; no harvest.", message)
             self.assertEqual(summary in message, bool(sealed))
-            self.assertEqual("one or two sentences" in message, bool(sealed))
-            self.assertEqual("Keep the runtime summary below as agent context" in message, bool(sealed))
+            self.assertEqual("do not reproduce it for the person" in message, bool(sealed))
             self.assertNotIn("show this runtime summary to the person", message)
-            self.assertTrue(message.endswith("Do not emit a periodic progress recap."))
+            # The close contract is the bootstrap's (§0.5); the receipt only points at it, and
+            # the runtime's own row hashes and fixed waiting rules are not carried.
+            self.assertIn("Close per §0.5", message)
+            for absent in ("one or two sentences", "row_revision=", "row_digest=",
+                           "periodic progress recap", "re-arm Background Bash"):
+                self.assertNotIn(absent, message)
 
 
 class NotDoingTest(unittest.TestCase):

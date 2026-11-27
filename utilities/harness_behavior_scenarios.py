@@ -107,12 +107,13 @@ class Reply:
     stays running on the model's side."""
 
     def __init__(self, text: str = "", shell: str | None = None, tool=None,
-                 input_tokens: int = 1, gate=None):
+                 input_tokens: int = 1, gate=None, http_error=None):
         self.gate = gate
         self.text = text
         self.shell = shell
         self.tool = tool
         self.input_tokens = input_tokens
+        self.http_error = http_error
 
     def call(self, protocol: str, names):
         """The (name, arguments) of this reply's tool call, or None."""
@@ -124,6 +125,8 @@ class Reply:
         value = {"text": self.text, "shell": self.shell}
         if self.tool:
             value["tool"] = list(self.tool)
+        if self.http_error:
+            value["http_status"] = self.http_error[0]
         return value
 
 
@@ -299,6 +302,9 @@ class ModelFixture:
                 self.send_response(code)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body)))
+                if code == 429:
+                    self.send_header("Retry-After", "1")
+                    self.send_header("x-should-retry", "false")
                 if ctype == "text/event-stream":
                     self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
@@ -340,8 +346,8 @@ class ModelFixture:
                 else:
                     self._send(404, b"{}")
                     return
-                body, ctype = owner._answer(protocol, payload, raw)
-                self._send(200, body, ctype)
+                status, body, ctype = owner._answer(protocol, payload, raw)
+                self._send(status, body, ctype)
 
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
@@ -379,12 +385,17 @@ class ModelFixture:
             self.requests.append(record)
         if reply.gate is not None:
             reply.gate.wait(GATE_LIMIT)
+        if reply.http_error is not None:
+            status, error = reply.http_error
+            return status, json.dumps(error).encode(), "application/json"
         streaming = bool(payload.get("stream", protocol != "anthropic"))
         if protocol == "anthropic":
-            return self._anthropic(reply, streaming, names)
-        if protocol == "responses":
-            return self._responses(reply, names)
-        return self._chat(reply, streaming, names)
+            body, ctype = self._anthropic(reply, streaming, names)
+        elif protocol == "responses":
+            body, ctype = self._responses(reply, names)
+        else:
+            body, ctype = self._chat(reply, streaming, names)
+        return 200, body, ctype
 
     def main_requests(self) -> list[dict]:
         with self.lock:
@@ -1388,10 +1399,10 @@ class Scenario:
         raise NotImplementedError
 
 
-# The local-evidence probe's own header: every harness injects it on the first
-# prompt through its lifecycle hook (Claude/Codex UserPromptSubmit, OpenCode the
-# plugin's system-context hook), and no static instruction file contains it.
-HOOK_CONTEXT_MARKER = "# Local evidence present"
+# The memory-candidate probe's own header: every harness injects it on the prompt
+# through its lifecycle hook (Claude/Codex UserPromptSubmit, OpenCode the plugin's
+# system-context hook), and no static instruction file contains it.
+HOOK_CONTEXT_MARKER = "# Memory candidates"
 
 
 class BootScenario(Scenario):
@@ -1400,13 +1411,15 @@ class BootScenario(Scenario):
                "first model request carries Hearting's hook-injected context.")
 
     def prepare(self, run):
-        # One artifact makes the local-evidence probe emit its block, so the check
-        # reads hook output rather than the bootstrap instructions every harness loads.
-        root = Path(run.home.env.get("AGENT_ARTIFACT_ROOT")
-                    or run.home.workspace / ".agent_reports")
-        seeded = root / "research" / "2026-01-01_boot-hook-context" / "report.md"
-        seeded.parent.mkdir(parents=True, exist_ok=True)
-        seeded.write_text("boot scenario hook-context probe\n", encoding="utf-8")
+        # One global record that the boot prompt matches makes the candidate probe emit
+        # its block, so the check reads hook output rather than the bootstrap
+        # instructions every harness loads. The store lives in the throwaway HOME.
+        subprocess.run(
+            [sys.executable, str(SOURCE / "tools" / "memory" / "mem.py"), "add", "--scope", "global",
+             "--headline", "SCENARIO-BOOT hello hook context probe", "working", "note",
+             "SCENARIO-BOOT hello hook context probe"],
+            env={**run.home.env, "MEM_INIT": "1"}, cwd=run.home.workspace, capture_output=True,
+            timeout=60, check=False)
 
     def drive(self, run):
         run.prompt("SCENARIO-BOOT hello")

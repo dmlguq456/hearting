@@ -21,6 +21,8 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+from tools import fixture_processes
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 
@@ -620,7 +622,7 @@ class OwnerPinChangeTest(unittest.TestCase):
     with only Codex-parent tuples -- moves its next owner to Claude; the sealed route stays."""
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = fixture_processes.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         tuples = [_tuple("codex", "codex"), _tuple("codex", "claude"), _tuple("codex", "opencode", status="unsupported")]
         self.route = {"route_id": "rt-96bab699717dba8f", "route_hash": "sha256:sealed",
@@ -1397,6 +1399,24 @@ class Case6UncappedAndEnvelopeTest(unittest.TestCase):
         self.assertIsNone(RA.pass_blocker_violation("FAIL", "G1 incomplete"))
         self.assertIsNone(RA.HANDOFF_RE.search("verdict: PASS\nblocker: none"))
 
+    def test_a_pass_memo_after_the_verdict_or_after_none_is_a_remark(self):
+        for verdict, blocker, memo, note in (
+                ("PASS (병합 가능)", "none", "(병합 가능)", ""),
+                ("PASS — 병합 가능", "none", "— 병합 가능", ""),
+                ("PASS: ok", "none — 필수 지적 2건", ": ok", "필수 지적 2건"),
+                ("PASS - ok", "none: 필수 지적 2건", "- ok", "필수 지적 2건")):
+            with self.subTest(verdict=verdict, blocker=blocker):
+                handoff = RA.HANDOFF_RE.search(f"artifact: -\nverdict: {verdict}\nblocker: {blocker}").groupdict()
+                self.assertEqual((handoff["verdict"], handoff["verdict_note"].lstrip()), ("PASS", memo))
+                self.assertIsNone(RA.pass_blocker_violation(handoff["verdict"], handoff["blocker"]))
+                self.assertEqual(RA.pass_blocker_note(blocker), note)
+        for verdict in ("not PASS", "FAIL (was PASS)", "BLOCKED — PASS pending", "PASSED", "PASS-ish", "PASS ("):
+            with self.subTest(verdict=verdict):
+                self.assertIsNone(RA.HANDOFF_RE.search(f"artifact: -\nverdict: {verdict}\nblocker: none"))
+        for blocker in ("none, but G1 skipped", "nonexistent: x", "none —", "none:", "none -x", "G1 skipped"):
+            with self.subTest(blocker=blocker):
+                self.assertEqual(RA.pass_blocker_violation("PASS", blocker), "pass-blocker-not-none")
+
     def test_a_fence_or_two_trailing_sentences_leave_the_verdict(self):
         # G1: the envelope plus a code fence and/or up to two sentences is
         # still that envelope. The captured fields never include the tail.
@@ -1418,7 +1438,7 @@ class Case6UncappedAndEnvelopeTest(unittest.TestCase):
                     self.assertIsNotNone(handoff)
                     self.assertEqual(
                         handoff.groupdict(),
-                        {"artifact": "-", "verdict": verdict, "blocker": blocker},
+                        {"artifact": "-", "verdict": verdict, "verdict_note": None, "blocker": blocker},
                     )
         # Three sentences, a verdict-mentioning tail, or no envelope still fail closed.
         for text in (

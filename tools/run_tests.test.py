@@ -265,6 +265,91 @@ class XPassFixture(RunTestsFixtureBase):
         self.assertEqual(verdicts, {"XPASS"})
 
 
+class SkippedSuiteFixture(RunTestsFixtureBase):
+    """A file that ran no assertion because everything was skipped is not a PASS; any real work keeps PASS."""
+
+    HEAD = "import unittest\n"
+    CASES = {
+        # (a) every test method skips
+        "methods_skipped.test.py": ("SKIPPED", """
+            class T(unittest.TestCase):
+                def test_a(self): self.skipTest('no node')
+                def test_b(self): self.skipTest('no node')
+            unittest.main()
+        """),
+        # (a') one skip, one pass
+        "skip_and_pass.test.py": ("PASS", """
+            class T(unittest.TestCase):
+                def test_a(self): self.skipTest('no node')
+                def test_b(self): pass
+            unittest.main()
+        """),
+        # setUpClass skips: `Ran 0 tests` / `OK (skipped=1)`, the shape of a PTY file without node/npm
+        "setup_class_skip.test.py": ("SKIPPED", """
+            class T(unittest.TestCase):
+                @classmethod
+                def setUpClass(cls): raise unittest.SkipTest('needs node/npm')
+                def test_a(self): pass
+            unittest.main()
+        """),
+        # setUpModule skips
+        "setup_module_skip.test.py": ("SKIPPED", """
+            def setUpModule(): raise unittest.SkipTest('needs node/npm')
+            class T(unittest.TestCase):
+                def test_a(self): pass
+            unittest.main()
+        """),
+        # one skipped class beside one passed test in another class: the two counts are equal (1 and 1)
+        "skipped_class_and_pass.test.py": ("PASS", """
+            class A(unittest.TestCase):
+                @classmethod
+                def setUpClass(cls): raise unittest.SkipTest('needs node/npm')
+                def test_a(self): pass
+            class B(unittest.TestCase):
+                def test_b(self): pass
+            unittest.main()
+        """),
+        # (c) a test whose subTests skip twice and assert once: three skip events, two tests, real work
+        "subtest_mixed.test.py": ("PASS", """
+            class T(unittest.TestCase):
+                def test_a(self):
+                    for i in range(3):
+                        with self.subTest(i=i):
+                            if i < 2: self.skipTest('no node')
+                            self.assertEqual(i, 2)
+                def test_b(self): self.skipTest('no node')
+            unittest.main()
+        """),
+        # (d) skips beside an expected failure
+        "expected_failure_mixed.test.py": ("PASS", """
+            class T(unittest.TestCase):
+                def test_a(self):
+                    for i in range(3):
+                        with self.subTest(i=i): self.skipTest('no node')
+                @unittest.expectedFailure
+                def test_b(self): self.fail('known')
+            unittest.main()
+        """),
+    }
+
+    def test_each_shape_gets_the_verdict_of_what_it_ran(self):
+        for name, (_expected, body) in self.CASES.items():
+            write_suite(self.root, name, self.HEAD + textwrap.dedent(body))
+        result, rows = self.run_fixture([])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        got = {r["suite_path"]: r["verdict"] for r in rows}
+        self.assertEqual(got, {name: expected for name, (expected, _body) in self.CASES.items()}, result.stdout)
+
+    def test_summary_names_the_skipped_files_and_counts_skip_events(self):
+        write_suite(self.root, "all_skipped.test.py", self.HEAD + textwrap.dedent(self.CASES["methods_skipped.test.py"][1]))
+        write_suite(self.root, "part_skipped.test.py", self.HEAD + textwrap.dedent(self.CASES["skip_and_pass.test.py"][1]))
+        result, rows = self.run_fixture([])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r"(?m)^SKIPPED=1$")
+        self.assertRegex(result.stdout, r"(?m)^PASS=1$")
+        self.assertRegex(result.stdout, r"(?m)^skip-events=3$")
+
+
 class UnlistedFailFixture(RunTestsFixtureBase):
     def test_unlisted_fail_is_hard_failure(self):
         write_suite(self.root, "surprise_fail.test.py", "import sys\nsys.exit(1)\n")
@@ -286,6 +371,13 @@ class HardFailSummaryLineFixture(RunTestsFixtureBase):
             result.stdout,
             r"hard-fail: surprise_fail\.test\.py::- verdict=FAIL kind=exit-nonzero signature=",
         )
+
+    def test_hard_fail_line_is_followed_by_the_end_of_the_failing_report(self):
+        # 11-17: a CI log named the failing test but not the assertion; the end of its report follows the line.
+        write_suite(self.root, "asserting.test.py",
+                    "import sys\nprint('the cell was NEVER_SHOWN', file=sys.stderr)\nsys.exit(1)\n")
+        result, _rows = self.run_fixture([])
+        self.assertRegex(result.stdout, r"hard-fail: asserting\.test\.py::- verdict=FAIL[^\n]*\n  \| the cell was NEVER_SHOWN")
 
 
 class XPassListingAndEnvLineFixture(RunTestsFixtureBase):
@@ -434,7 +526,10 @@ class DirectRunEntersIsolation(unittest.TestCase):
             "AGENT_RUNTIME_DIR", "AGENT_ARTIFACT_OUTPUT_DIR", "AGENT_MODEL_GOVERNOR_ROOT",
             "AGENT_DISPATCH_COMPLETION_STATE_FILE", "AGENT_DISPATCH_SUPERVISOR_LEASE_FILE",
             "CLAUDE_CONFIG_DIR", "CODEX_HOME", "HERDR_BIN_PATH", "XDG_RUNTIME_DIR",
-            "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "TMUX_TMPDIR")}
+            "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "TMUX_TMPDIR",
+            "AGENT_ARTIFACT_ROOT", "AGENT_ARTIFACT_CYCLE_DIR", "AGENT_RAW_DATA_DIR", "AGENT_DISPATCH_JOBS",
+            "AGENT_HOME", "AGENT_ROUTE_FILE", "REPORT_BUNDLE_ROOT", "HEARTING_MODEL_CONFIG_HOME",
+            "HEARTING_WORKER_HOME", "HEARTING_SHELL_SOCKET", "HEARTING_SHELL_TOKEN", "CLAUDE_PLUGIN_DATA")}
         worker.update(AGENT_DISPATCH_ATTEMPT_ID="att-real", AGENT_DISPATCH_PARENT_ATTEMPT_ID="att-parent",
                       HERDR_AGENT="claude", HERDR_TAB_ID="tab-real", HERDR_WORKSPACE_ID="ws-real",
                       TMUX_PANE="%0")
@@ -458,8 +553,26 @@ class DirectRunEntersIsolation(unittest.TestCase):
                            if part.startswith("/") and not Path(part).is_relative_to(private)}
                 self.assertEqual(outside, {})
                 self.assertEqual(seen["PYTHONPATH"], str(ROOT))
+                # Only the runner's own private values may carry a caller-state name.
+                rewritten = {"HOME", "TMPDIR", "TMUX_TMPDIR", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"}
+                self.assertEqual([key for key in worker if key not in rewritten and key in seen], [])
+                for key in rewritten & seen.keys():
+                    self.assertTrue(Path(seen[key]).is_relative_to(private), key)
                 self.assertFalse([key for key, value in seen.items()
                                   if str(real) in value or value in ("att-real", "tab-real", "%0")])
+
+    def test_a_one_off_utility_follows_its_working_directory_not_the_callers_artifact_root(self):
+        decoy = self.root / "decoy"
+        project = self.root / "project"
+        decoy.mkdir()
+        project.mkdir()
+        env = dict(self.caller, AGENT_ARTIFACT_ROOT=str(decoy))
+        command = ["sh", str(ROOT / "utilities" / "artifact-root.sh"), "."]
+        plain = subprocess.run(command, cwd=str(project), env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(plain.stdout.strip(), str(decoy), plain.stderr)  # the variable alone moves the root
+        isolated = subprocess.run([sys.executable, str(RUNNER), "--direct-run", *command], cwd=str(project),
+                                  env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(isolated.stdout.strip(), str(project / ".agent_reports"), isolated.stderr)
 
     def test_no_private_root_refuses_in_one_line_and_runs_nothing(self):
         mod = load_runner_module()
@@ -835,6 +948,14 @@ class CompareBaselineFixture(RunTestsFixtureBase):
     def test_known_fail_to_flaky_known_fail_is_not_regression(self):
         base = self._write_report("base-flaky.tsv", [("a.test.py", "-", "KNOWN-FAIL")])
         head = self._write_report("head-flaky.tsv", [("a.test.py", "-", "FLAKY-KNOWN-FAIL")])
+        result = run_runner(["--compare-baseline", "--base-report", str(base), "--head-report", str(head)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["regression"], [])
+
+    def test_pass_to_skipped_is_not_a_regression(self):
+        # A file that skips where it passed before (no node/npm here) is not a failure.
+        base = self._write_report("base-skip.tsv", [("a.test.py", "-", "PASS")])
+        head = self._write_report("head-skip.tsv", [("a.test.py", "-", "SKIPPED")])
         result = run_runner(["--compare-baseline", "--base-report", str(base), "--head-report", str(head)])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["regression"], [])

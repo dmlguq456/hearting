@@ -25,7 +25,7 @@ need core/WORKFLOW.md   '### 0.3. Pre-Execution Gate for Long-Running Work' 'WOR
 need core/WORKFLOW.md   'never absorbs a secondary'                         'WORKFLOW §0.2 상호 대체 금지 절'
 need core/WORKFLOW.md   'uses that entry as the primary route'              'matching entry-router primary preference 존재'
 need core/WORKFLOW.md   'explicit `direct` remains an intensity inside an entry route' 'explicit direct entry 유지 절'
-need core/WORKFLOW.md   'compose --start --shape direct --prompt-file'     'direct source edit starts isolated preparation before editing'
+need core/WORKFLOW.md   'compose --start --shape direct --field <field> --prompt-file'     'direct source edit starts isolated preparation before editing'
 need core/WORKFLOW.md   'Their receipt and explicit finish contracts are unchanged' 'explicit direct receipt/finish compatibility'
 need core/OPERATIONS.md 'Main-session role contract'                        'OPERATIONS §5.10 main-session role contract 존재'
 need core/OPERATIONS.md 'Inline exceptions'                                 'OPERATIONS §5.10 inline exceptions 존재'

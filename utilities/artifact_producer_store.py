@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -95,7 +95,15 @@ RUNTIME_OWNED_EXACT = ("_scratch",)          # `.`-prefix is a separate predicat
 # canonical records: admission, census and residue never take them as input, and
 # a same-named file without the generator's first-line marker is left to its
 # owner (never overwritten or moved).
-ENTRANCE_NAMES = ("README.md", "index.html", "all-campaigns.md", "all-campaigns.html")
+# The route reports page (`recent-route-reports.*`) and the spec topics page
+# (`all-spec.*`) are the same kind of file.
+ENTRANCE_NAMES = ("README.md", "index.html", "all-campaigns.md", "all-campaigns.html",
+                  "recent-route-reports.md", "recent-route-reports.html",
+                  "all-spec.md", "all-spec.html")
+# CORE §3 root documents that a person or a session writes (`backlog.md`). Not canonical records:
+# admission, census and residue never take them as input, and Hearting only reads them. They are
+# not entrance files (Hearting does not rewrite them), so they stay out of ENTRANCE_NAMES.
+ROOT_DOCUMENT_NAMES = ("backlog.md",)
 COMPAT_OVERRIDE_FIELDS = ("schema_version", "contract", "canonical_root",
                           "reason", "issuer", "created_at", "expires_at")
 WAIVER_FIELDS = ("reason", "issuer", "created_at", "expires_at")
@@ -129,7 +137,7 @@ STAGE_CAPABILITIES = (
 )
 # Compiler-internal capabilities: no Skill and no person invokes them, but the route
 # compiler seals routes for them and a producer cycle must be issuable for that route.
-INTERNAL_CAPABILITIES = ("route-frame",)
+INTERNAL_CAPABILITIES = ("route-frame", "unit")
 CANONICAL_ROOTS = ("campaigns", "shared")
 # Legacy capability buckets (CORE.md §3 C-DUR) plus the undeclared containers.
 LEGACY_TOP_LEVEL = (
@@ -173,8 +181,8 @@ PRIMARY_CANDIDATES = (
     "final_report.md", "report.md", "report.html", "prd.md", "plan.md", "handoff.md", "verdict.json",
 )
 # A project status document (one page: a `**한 줄**:` line, `## 결정 필요`, `## 다음`).
-# Directly under a cycle's `artifacts/` it is that cycle's automatic primary, so Cairn
-# pins it as the project's status row and Fleet's project line reads the same file.
+# Directly under a cycle's `artifacts/` it is that cycle's automatic primary, and Fleet's
+# project line reads the same file.
 STATUS_DOCUMENT_NAMES = ("현황.md", "STATUS.md")
 # What a person opens the artifact store for: reports, summaries, the canonical PRD and
 # the status document. Their manifest rows carry `audience: "user"`; other rows carry no
@@ -557,6 +565,17 @@ def _is_runtime_owned_top_level(name: str) -> bool:
     return name.startswith(".") or name in RUNTIME_OWNED_EXACT or name in ENTRANCE_NAMES
 
 
+def is_root_document(entry: Path) -> bool:
+    """A root document by name that is a regular file (CORE §3 "(file)").  A link, broken or not,
+    or a folder of that name is ordinary legacy content, as everywhere else."""
+    entry = Path(entry)
+    return entry.name in ROOT_DOCUMENT_NAMES and entry.is_file() and not entry.is_symlink()
+
+
+def _is_runtime_owned_entry(entry: Path) -> bool:
+    return _is_runtime_owned_top_level(entry.name) or is_root_document(entry)
+
+
 def _legacy_content_names(root: Path, *, exhaustive: bool = False) -> List[str]:
     """Top-level names holding non-runtime content.
 
@@ -570,7 +589,7 @@ def _legacy_content_names(root: Path, *, exhaustive: bool = False) -> List[str]:
     found: List[str] = []
     for entry in sorted(root.iterdir(), key=lambda p: p.name):
         name = entry.name
-        if _is_runtime_owned_top_level(name):
+        if _is_runtime_owned_entry(entry):
             continue
         has_content = False
         if entry.is_symlink():
@@ -768,7 +787,8 @@ def read_cycle_record(root: Path, cycle_id: str) -> Optional[Dict[str, Any]]:
     routes = document.get("routes") or []
     if not routes or cycle.get("cycle_id") != cycle_id:
         return None
-    campaign_path = artifact_locator.locate(root, cycle.get("campaign_id"))
+    # a reader: it finds the campaign to check membership and must not rewrite the index (a drawing reads through here)
+    campaign_path = artifact_locator.locate(root, cycle.get("campaign_id"), heal=False)
     campaign = _read_json(campaign_path / "campaign.json") if campaign_path is not None else None
     if campaign is not None and cycle_id not in (campaign.get("cycles") or []):
         return None  # an explicit removal from membership is not a missing cache
@@ -1561,6 +1581,19 @@ class _LayoutScan:
     folder_campaign: Dict[str, str]   # cycle ID -> ID of the campaign folder it sits in
     duplicates: Set[str]
     complete: bool                    # every folder was read and every entry was one this scan understands
+    # What made `complete` false: `(folder relative to the root, reason)` for each entry in the way, in the order met.
+    blockers: List[Tuple[str, str]] = field(default_factory=list)
+    # The cycle records read for the folders that carry no ID (a `not-a-cycle` entry): those whose `locator` is the
+    # name of such a folder, by that name.  Read once by the scan, so that no one reads the records again for them.
+    named: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+
+    def block(self, root: Path, path: Path, reason: str) -> None:
+        self.complete = False
+        try:
+            where = Path(path).relative_to(root).as_posix()
+        except ValueError:
+            where = str(path)
+        self.blockers.append((where, reason))
 
     def mapping(self, root: Path) -> Dict[str, str]:
         found = {identifier: _cycle_rel(root, path) for identifier, path in self.campaigns.items()}

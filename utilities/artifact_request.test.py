@@ -348,6 +348,64 @@ class RequestFolderTest(S.SourceRepoStartBase):
             self.assertEqual((S.L.manifest_snapshot_dir(self.root, record["cycle_id"]) / name).read_bytes(), raw)
         self.assertEqual(P.finalize(self.root, cycle_id=record["cycle_id"])["status"], "already-sealed")
 
+    def order_of_keeping_and_reading(self):
+        """Record, in order, each manifest kept and each time the cycle leaves the member list of a campaign."""
+        import artifact_producer_cycle_ops as OPS
+        order = []
+        real_keep, real_edit = OPS._preserve_current_manifest, OPS._edit_campaign_members
+
+        def keep(root, record, directory, **kwargs):
+            order.append(("kept", record["cycle_id"]))
+            return real_keep(root, record, directory, **kwargs)
+
+        def edit(root, folder, cycle_id, *, joining):
+            order.append(("joined" if joining else "left", cycle_id))
+            return real_edit(root, folder, cycle_id, joining=joining)
+        return order, mock.patch.object(OPS, "_preserve_current_manifest", keep), \
+            mock.patch.object(OPS, "_edit_campaign_members", edit)
+
+    def assert_members_kept_before_the_old_campaign_is_read(self, order, frame, record):
+        """The old campaign is read (the cycle leaves its list) only after every cycle of the request kept its manifest."""
+        first_read = next(i for i, (what, _cycle) in enumerate(order) if what == "left")
+        kept_before = {cycle for what, cycle in order[:first_read] if what == "kept"}
+        self.assertEqual(kept_before, {frame["cycle_id"], record["cycle_id"]}, order)
+
+    def test_request_move_keeps_every_member_manifest_before_the_old_campaign_is_read(self):
+        frame, record = self.completed_request()
+        target = self.target_campaign()
+        order, keep, edit = self.order_of_keeping_and_reading()
+        with keep, edit:
+            P.cycle_move(self.root, frame["cycle_id"], campaign=target["campaign_id"])
+        self.assert_members_kept_before_the_old_campaign_is_read(order, frame, record)
+
+    def test_hand_moved_request_keeps_every_member_manifest_before_the_old_campaign_is_read(self):
+        frame, record = self.completed_request()
+        target = self.target_campaign()
+        source = P.cycle_dir(self.root, frame["campaign_id"], frame["cycle_id"])
+        source.rename(P.campaign_dir(self.root, target["campaign_id"]) / source.name)
+        order, keep, edit = self.order_of_keeping_and_reading()
+        with keep, edit:
+            self.assertEqual(P.reconcile_root(self.root)["status"], "reconciled")
+        self.assert_members_kept_before_the_old_campaign_is_read(order, frame, record)
+
+    def test_request_move_does_not_use_whether_a_member_manifest_was_kept(self):
+        # As for the cycle itself: keeping the bytes is attempted and its answer is not a reason to stop the
+        # move (there is no refusal of its own; a document that cannot be replaced is met where it is replaced).
+        import artifact_producer_cycle_ops as OPS
+        frame, record = self.completed_request()
+        target = self.target_campaign()
+        source = P.cycle_dir(self.root, frame["campaign_id"], frame["cycle_id"])
+        kept = []
+
+        def cannot_keep(root, rec, directory, **kwargs):
+            kept.append(rec["cycle_id"])
+            return False
+        with mock.patch.object(OPS, "_preserve_current_manifest", side_effect=cannot_keep):
+            moved = P.cycle_move(self.root, frame["cycle_id"], campaign=target["campaign_id"])
+        self.assertEqual(moved["status"], "moved")
+        self.assertIn(record["cycle_id"], kept)  # the member's bytes were still asked to be kept
+        self.assertFalse(source.exists())
+
     def test_moved_open_member_resumes_same_cycle_in_current_campaign(self):
         leg, path, _ = self.selected([S.CODE_STAGED])
         record = self.cycle(leg)

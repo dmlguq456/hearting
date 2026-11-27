@@ -77,7 +77,7 @@ def save(result, jobs):
 
 
 _ANSWER_ACTIONS = {"answer-blocked-owner", "answer-failed-owner"}
-_STEP_COMMANDS = ("recovery_command", "correction_command", "resume_command", "parent_next_command")
+_STEP_COMMANDS = ("recovery_command", "correction_command", "resume_command", "parent_next_command", "close_command")
 
 
 def _finish_command(receipt):
@@ -115,8 +115,21 @@ def next_line(receipt):
                     f"{_finish_command(receipt)}")
         return f"next: do the work in this session, then run: {_finish_command(receipt)}"
     if action in _ANSWER_ACTIONS and receipt.get("correction_command"):
-        return ("next: get the person's answer to owner_report, then run: "
-                f"{receipt['correction_command']} --message-file <answer file>")
+        correct = f"{receipt['correction_command']} --message-file <answer file>"
+        close = receipt.get("close_command")
+        if not close or close == "-":
+            return f"next: get the person's answer to owner_report, then run: {correct}"
+        # The receipt's next_step in one line, in its order: who decides first, then the two commands.
+        if action == "answer-failed-owner":
+            # Where the result is, as the receipt itself says it (its owner_report, else its owner log).
+            where = (" (owner_report says what it needs)" if receipt.get("owner_report") else
+                     f" (its result is in owner_log_file {receipt['owner_log_file']})"
+                     if receipt.get("owner_log_file") else "")
+            return (f"next: the owner ended FAIL; the person decides{where}: to accept the result as it is or stop "
+                    f"the work, run: {close}; to give the owner a fix or an answer, put it in a file and run: "
+                    f"{correct}")
+        return ("next: the owner is waiting for an answer; get the person's answer to owner_report, then run: "
+                f"{correct}; to stop the work instead, run: {close}")
     if state == "completed" and action in {None, "advance-completed"}:
         return "next: the route is complete; report its result"
     step = " ".join(str(receipt.get("next_step") or "").split())
@@ -141,6 +154,27 @@ def print_next_line(receipt, stream=None):
         print(line, file=stream or sys.stderr, flush=True)
 
 
+def _route_closed(receipt):
+    """True only when the receipt's own route is read as closed; unreadable means not closed.
+
+    Reads the route file and its `.outcome.json` beside it through the notice state's
+    `closed_outcome`, the same closure read the dispatch notices use: two small files,
+    no registry. A closure whose inline finish is still pending does not count.
+    """
+    try:
+        path = Path(str(receipt.get("route_file") or ""))
+        if not path.is_absolute():
+            return False
+        route = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(route, dict) or route.get("route_id") != receipt.get("route_id"):
+            return False
+        from dispatch_notice_state import closed_outcome
+        outcome = closed_outcome(path, route)
+        return bool(outcome) and not outcome.get("finish_pending")
+    except Exception:
+        return False
+
+
 def context(harness, sid, jobs=None):
     """Observe once; a receipt is a hint, never completion or launch authority."""
     if harness not in {"claude", "codex", "opencode"} or not sid:
@@ -161,9 +195,8 @@ def context(harness, sid, jobs=None):
             receipt = row["receipt"]
             if not isinstance(receipt, dict) or not receipt.get("parent_next"):
                 return ""
-            seen = folder / (key + ".seen")
-            if seen.exists() and json.loads(seen.read_text()) == row["id"]:
-                return ""
+            if _route_closed(receipt):
+                return ""  # a finished route is no longer running; a compaction must not say it is
             text = "[start-receipt] " + " ".join(f"{k}={receipt[k]}" for k in ("route_id", "state") if k in receipt)
             text += f"\nreceipt_file={path}"
             for name in ("parent_next", "parent_next_reason", "parent_next_command", "required_action", "resume_command"):
@@ -174,8 +207,10 @@ def context(harness, sid, jobs=None):
                 text += "\n" + line
             if len(text.encode()) > 8000:
                 text = f"[start-receipt] parent_next={receipt['parent_next']}\nRead the full receipt: {path}"
-            _write(seen, row["id"])
-            return text
+            # The same text twice in a row adds nothing the session has not read; the first
+            # turn after a compaction or clear delivers it once more (context_repeat.reset).
+            import context_repeat
+            return context_repeat.fresh_once(harness, sid, "start-receipt", text)
     except (OSError, ValueError, TypeError, KeyError):
         return ""
 

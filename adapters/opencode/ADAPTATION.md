@@ -93,6 +93,14 @@ symlink, a differing one is written as an activation-owned regular file, and an 
 whose model is main-session-only in that config gets no file. Keep your own agents
 under other names.
 
+Registered workers reach the `light`, `balanced` and `deep` agents by name. A V2
+worker's shared service owns config, so it reads the agents the user's home
+already holds (measured on OpenCode 2.0.32 with `subagent-model`: each named
+spawn asked for its file's model). A V1 worker reads only its own config home,
+so `tools/profile/build-home.py` writes the three there as regular files from
+the same renderer and selected `models.conf` (structural test only; no V1
+binary was run). `general-purpose` is not added to a V1 worker home.
+
 Sub-agent role default (PG-13, limit). OpenCode gives a subagent with no
 configured model the parent session's model, and its `subagent` tool takes no
 model (https://opencode.ai/docs/agents/, https://opencode.ai/docs/tools/).
@@ -187,8 +195,6 @@ with a bounded timeout.
 
 ## Native Plugin Hook Surface
 
-Write-denying hook gates are retired; no write preflight or core-read marker is required.
-
 When changing the plugin:
 
 1. Keep it under `adapters/opencode/plugins/` as adapter-owned JS/TS.
@@ -258,9 +264,10 @@ native `read` tool; a successful marker command is not evidence of its contents.
 | `PostToolUse[Edit|apply_patch]` spec sync nudge | plugin `tool.execute.after` passes native input to shared `hooks/spec-sync-nudge.sh --format text`; V1 appends to tool output and V2 appends a native `event.result.content` text part for main and worker sessions, preserving existing parts and metadata | full — automatic, fail-open; fixture-verified, live V2 model delivery unobserved |
 | `PostToolUse` design post-write | plugin `tool.execute.after` → `preflight design` | full — auto enforced |
 | `SessionStart`-equivalent memory inject | plugin `experimental.chat.system.transform` → `memory`, computed once per session and re-emitted on every model call | full — auto injected, persists for the whole session |
-| `UserPromptSubmit` capsule candidates / routing-contract signal / briefing | plugin `chat.message` → prompt/turn capture, then `experimental.chat.system.transform` → `candidates` / `prompt-signal` / `briefing`, computed once per user turn and re-emitted on every model call of that turn | full — candidate output is active current-project/global capsule-only, maximum six / 1,200 UTF-8 bytes; the prompt is held in plugin memory only (never written) and dropped at `session.deleted` |
+| `UserPromptSubmit` capsule candidates / routing-contract signal / briefing | plugin `chat.message` → prompt/turn capture, then `experimental.chat.system.transform` → `candidates` / `prompt-signal` / `briefing`, computed once per user turn and re-emitted on every model call of that turn | full — candidate output is active current-project/global capsule-only, maximum three / 600 UTF-8 bytes; the prompt is held in plugin memory only (never written) and dropped at `session.deleted` |
 | `SessionEnd` memory sync | none — `session.idle` keeps summary, pane, heartbeat and the cycle checkpoint observation only (D-82); `mem.py` exchanges after writes and reads | n/a — no session-end memory step on any adapter |
 | `Stop` cycle checkpoint (`open-cycle-checkpoint.py`) | plugin `session.idle` → detached `utilities/artifact_checkpoint_trigger.py turn-end --harness opencode` with `{sessionID}` on stdin and the session's own environment (a worker's `AGENT_ARTIFACT_ROOT`/`AGENT_ARTIFACT_CYCLE_ID` included); main and worker both run it; `AGENT_ARTIFACT_CHECKPOINT=off` starts nothing | full — same launcher, interval and checkpoint child as Claude and Codex Stop (§45 D-124); no hook trust or user config is changed |
+| `PreToolUse[AskUserQuestion]` native question → Hearting question (deny after registering) | plugin `tool.execute.before` on `question` runs `utilities/native_question_redirect.py --opencode` (8 s cap); it registers the question on this session's board and the plugin throws its one-line reason (id, "end your turn"). Any failure, a worker or a subagent session lets the native `question` run | Same behavior as Claude/Codex; the frame-answer `tool.execute.after` bridge is retired |
 | `PreToolUse[Edit|Write|MultiEdit|NotebookEdit|Bash]` route presence gate (deny) | plugin `tool.execute.before` on `write`, `edit`, `multiedit`, `patch`, `apply_patch`, `bash` (V2: `shell`) → `utilities/route_presence_gate.py --opencode` with `{tool, args, sessionID, cwd}`; exit 1 throws the one-line compose instruction. The session id is the plugin's `input.sessionID`, the same id `shell.env` exports as `OPENCODE_SESSION_ID`, which the route-chain writer records. For a subagent (task tool) child `shell.env` also exports its root session, walking `parentID`, as `OPENCODE_ROOT_SESSION_ID`, so a dispatch or report the child starts names and wakes the root, as a Claude subagent's does (PG-49) | full — auto enforced |
 | `UserPromptSubmit`/`Stop` automatic change record | plugin `chat.message` → detached `utilities/turn_change_record.py start --harness opencode --session <id> --cwd <dir>`; `session.idle` → the same with `end`; main sessions only: a child session (`parentID`, the task tool's subagent) is skipped because its work falls inside the parent's turn, as a Claude subagent's does; the step applies the shared exemptions itself. V2 delivers `session.execution.succeeded`, `.failed` and `.interrupted` as `session.idle`, so a turn the person interrupts (Esc twice in the 2.0 TUI) also closes its record | full — the same shared step as Claude and Codex; an interrupted turn: OpenCode and Codex record it (`interrupt-change-record` pass), Claude runs no hook on a user interrupt (PG-36) |
 | `PostToolUse`/`PostToolUseFailure`/`Stop` Fleet wait clear (`fleet-interaction-state.py clear`) | plugin `tool.execute.after` (any tool, a failed shell included) and `session.idle` clear this session's wait sidecar only when it has no request id or its request id was seen closed (`*.replied`/`*.rejected`, V2 `form.replied`/`form.cancelled`); a request still open, or one the plugin never saw, keeps its wait until its own reply clears it by request id | full — `failed-shell-hint` pass on OpenCode 2.0.32 (fail before, PG-37) |
@@ -282,7 +289,7 @@ OpenCode runtime surface limits, not adapter debt:
    hook (https://opencode.ai/docs/build/plugins/migrate-v1). If an OpenCode
    update renames or drops it, lifecycle injection stops. The `boot` behaviour
    scenario (`utilities/harness_behavior_scenarios.py --scenario boot`) now
-   fails when Hearting's hook-injected local-evidence block is missing from the
+   fails when Hearting's hook-injected memory-candidate block is missing from the
    first model request — measured: a copy whose plugin registers the hook under
    another name fails `boot` — and the explicit preflight wrappers
    (`memory` / `prompt-signal` / `briefing`) remain the manual fallback.
@@ -343,7 +350,7 @@ Diagnostics that V1 sent to `app.log` go to a capped per-service file,
 **Session shell panel.** In a shell window OpenCode gets the same right (left
 or bottom by choice) HEARTING panel as Claude and Codex, folding into the same
 eight-cell strip that widens the native area (by hand, or by itself where the
-open panel would leave under 80 native columns; spec E9 rule 49): same
+open panel would leave under 60 native columns; spec E9 rule 49): same
 renderer, settings (layout, position, width, theme, shade) and content order. OpenCode's own sidebar is
 hidden there through its documented CLI settings: `session.sidebar` is `auto`
 ("Shows the sidebar when space permits") or `hide` ("always hides it"), and
@@ -393,9 +400,9 @@ from history, and only the existing 120 s claim lease, once expired, makes it de
 again. After `CARRIER_UNOBSERVED_SEND_LIMIT` (2) such sends of the same record in a row the
 carrier opens no further turn for it (log `resend_limit_reached`, then
 `resend-limit-deferred`): the record stays owed, and the session's next natural turn
-carries it, as Claude's `UserPromptSubmit`/`PostToolUse` context does: a user prompt puts
-it in that turn's context, a completed tool of a running turn appends it to the result,
-and either acks it there. A natural turn that comes while the limited send's claim is
+carries it (Claude's `Stop` and `UserPromptSubmit` carry what its rewake did not deliver in the
+same way: one send, one supplement): a user prompt puts it in that turn's context, a completed
+tool of a running turn appends it to the result, and either acks it there. A natural turn that comes while the limited send's claim is
 still live takes that exact claim over (the shared `settle` revalidates owner, lease and
 recipient) instead of claiming anew, which the live lease would refuse. The count lives in the plugin, so a service restart allows the
 limit again; nothing is dropped. Measured with the history read forced empty: before the
@@ -470,7 +477,6 @@ Harness-specific status signals need OpenCode-native realization:
 | routing-contract signal | OpenCode plugin system transform runs `adapters/opencode/bin/preflight.sh prompt-signal [cwd] [session-id]`; no statusline assumption |
 | memory inject | OpenCode plugin system transform runs `adapters/opencode/bin/preflight.sh memory [cwd]` once per session and re-emits that cached block on every model call; run it manually when plugins are unavailable |
 | memory candidate exposure / recall | The plugin captures the current user prompt in memory, runs `preflight.sh candidates <prompt> <cwd> <session-id> [turn-id]` once for that turn, and re-emits the result on every model call of the turn; the prompt is never written to disk and is dropped at `session.deleted`. It injects only bounded active capsule headlines/IDs and publishes the same-turn receipt; it does not inspect bodies or classify relevance. The model reads relevant records in full. Explicit `recall` provides deeper search and `recall-gate` recovers an unavailable probe |
-| local evidence exposure | Like Claude and Codex, the first user prompt owns the portable `hooks/local-evidence-inject.sh` presence probe (`preflight.sh local-evidence [cwd]`): bucket counts and at most nine entry paths, 2,400 UTF-8 bytes, no body reads, worker-exempt and fail-open. OpenCode computes it once in `chat.message`, caches it in `localEvidenceBySession`, and re-emits the same block in `experimental.chat.system.transform` for every model call. Session creation and earlier auxiliary calls do not probe or consume prompt context; the card also enters through `chat.message`. |
 | oncall briefing | OpenCode plugin system transform runs `adapters/opencode/bin/preflight.sh briefing [cwd]`; run it manually when plugins are unavailable |
 | loop guidance | Run `adapters/opencode/bin/preflight.sh loop-info <oncall|note|study|drill|runtime-watch>` before following loop guides; OpenCode reports manual contracts, missing implementations, and drill auto-run restrictions without executing loop scripts. The `note` loop and note semantics are application-owned; the harness exposes only the optional app-neutral `artifact-sink` port |
 | worklog state signal | Run `adapters/opencode/bin/preflight.sh worklog [cwd]` to inspect configured `<agent-notes-root>` / `<worklog-board-app>` paths read-only before OpenCode updates notes or diagnoses board state |

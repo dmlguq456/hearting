@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dispatch_allocation import inert_allocation_keys  # noqa: E402
+from dispatch_allocation import effective_harness_weights, inert_allocation_keys  # noqa: E402
 from dispatch_contract import resolve_agent_home as _resolve_agent_home  # noqa: E402
 from dispatch_contract import resolve_dispatch_state_root as _resolve_dispatch_state_root  # noqa: E402
 
@@ -73,8 +73,28 @@ def _policy_fields(allocation) -> dict:
     fields["depth_affinity"] = dict(affinity) if isinstance(affinity, dict) else None
     weights = allocation.get("harness_weights")
     fields["harness_weights"] = dict(weights) if isinstance(weights, dict) else None
+    field_weights = allocation.get("field_weights")
+    fields["field_weights"] = dict(field_weights) if isinstance(field_weights, dict) else None
     fields["inert_keys"] = inert_allocation_keys(allocation)
     return fields
+
+
+def changed_raw_headroom(capacity, *, freshness=None) -> dict:
+    """Return actual quota where it differs from the allocation score."""
+    if not isinstance(capacity, dict):
+        return {}
+    raw = {}
+    for harness in _HARNESSES:
+        score = capacity.get(harness)
+        detail = (freshness or {}).get(harness)
+        value = detail.get("raw_headroom") if isinstance(detail, dict) else getattr(score, "raw_headroom", None)
+        if score is not None and value is not None and value != score:
+            raw[harness] = value
+    return raw
+
+
+def raw_headroom_lines(raw) -> list[str]:
+    return [f"capacity_raw_headroom.{harness}={round(value, 1)}" for harness, value in raw.items()]
 
 
 def _append(path: Path, payload: bytes) -> bool:
@@ -130,6 +150,7 @@ def record_allocation_receipt(
     parallel_group=None,
     parallel_leg_index=None,
     parallel_leg_count=None,
+    field=None,
     agent_home=None,
     jobs=None,
 ):
@@ -141,6 +162,7 @@ def record_allocation_receipt(
     try:
         if writer not in _WRITERS or child_harness not in _HARNESSES:
             return None
+        raw = changed_raw_headroom(capacity)
         row = {
             "schema_version": SCHEMA_VERSION,
             "kind": KIND,
@@ -159,6 +181,7 @@ def record_allocation_receipt(
             "preferred": preferred,
             "rank": list(rank) if rank else None,
             "capacity": {h: capacity.get(h) for h in _HARNESSES} if isinstance(capacity, dict) else None,
+            **({"capacity_raw_headroom": raw} if raw else {}),
             "counts": {h: int(counts.get(h, 0)) for h in _HARNESSES} if isinstance(counts, dict) else None,
             "states": {h: states.get(h) for h in _HARNESSES} if isinstance(states, dict) else None,
             "quality_band": quality_band,
@@ -172,6 +195,7 @@ def record_allocation_receipt(
             "parallel_group": parallel_group,
             "parallel_leg_index": parallel_leg_index,
             "parallel_leg_count": parallel_leg_count,
+            "field": field if isinstance(field, str) else None,
             **_policy_fields(allocation),
         }
         row["preferred_honored"] = (
@@ -226,6 +250,19 @@ def read_rows(*, route_id=None, since=None, agent_home=None, jobs=None) -> list[
     return rows
 
 
+def _field_segment(row: dict) -> str:
+    """`field=<f> w=<weights>`: the field and the per-harness weight the choice
+    multiplied by (user harness_weights x the field's row). `field=-` only when no row was
+    multiplied; a continuation route keeps the sealed row but not the field name, so the row
+    decides: `field=- w=...`."""
+    field = row.get("field")
+    if not field and not row.get("field_weights"):
+        return "field=-"
+    weights = effective_harness_weights(
+        {"harness_weights": row.get("harness_weights"), "field_weights": row.get("field_weights")})
+    return f"field={field or '-'} w={_fmt_map(weights, digits=3)}"
+
+
 def _fmt_map(values, *, digits=1) -> str:
     if not isinstance(values, dict):
         return "-"
@@ -242,7 +279,7 @@ def format_row(row: dict) -> str:
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(float(row.get("ts") or 0)))
     inert = ",".join(sorted((row.get("inert_keys") or {}).keys())) or "-"
     honored = row.get("preferred_honored")
-    return (
+    line = (
         f"{ts} {row.get('route_id') or '-'} {row.get('route_node') or '-'} "
         f"unit={row.get('unit') or '-'} d={row.get('dispatch_depth')} "
         f"child={row.get('child_harness')} hop={row.get('fallback_hop') or '-'} "
@@ -251,8 +288,10 @@ def format_row(row: dict) -> str:
         f"rank={'>'.join(row.get('rank') or []) or '-'} "
         f"headroom={_fmt_map(row.get('capacity'))} counts={_fmt_map(row.get('counts'))} "
         f"inert={inert} writer={row.get('writer')} action={row.get('action') or '-'} "
-        f"attempt={row.get('attempt_id') or '-'} event={row.get('event_id')}"
+        f"attempt={row.get('attempt_id') or '-'} event={row.get('event_id')} "
+        f"{_field_segment(row)}"
     )
+    return "\n".join([line, *raw_headroom_lines(row.get("capacity_raw_headroom") or {})])
 
 
 def summarize(rows: list[dict]) -> dict:

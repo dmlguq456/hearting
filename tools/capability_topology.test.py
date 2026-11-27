@@ -54,8 +54,9 @@ PRESERVED_FULL_FIELD_DIGESTS = {
         "c74333f3c0ee7b5a6ca929a15027d71f16bc54d1aa84eb0a47840925990fc365",
         "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     ),
+    # Routing piece 11 (writing half): the apply node runs editorial/write (was dev/refactor).
     ("autopilot-apply", ('default',)): (
-        "500c7944f76dfdd6f0199659b723308355767411f7af45d5d20a3880ba4ebad0",
+        "a4bd104ec88edb946d93712b6342d64892f45635e51dccaa4a2d2d385a746896",
         "a9b802f929cb1efdf839e4bae6f9f7c03bad3466d6193b9ff23d22a4ba9faaa9",
     ),
     ("autopilot-code", ('audit', 'debug', 'dev')): (
@@ -66,8 +67,9 @@ PRESERVED_FULL_FIELD_DIGESTS = {
         "ada624f2f8ce6303a9be8e064525353a7a3099037494118552b16868af067389",
         "535ac7afb655d7d8040841733ed2b46bb7cb7d467279b7ed83cf34496659fca5",
     ),
+    # Routing piece 11 (writing half): draft-production runs editorial/write (was research/research-survey).
     ("autopilot-draft", ('doc', 'paper', 'presentation')): (
-        "3e6b5882583b1a42d4608f7373fd051f584944947acbf0d191379e3609c288c6",
+        "4a0ae305c9cce4c3311535d945a8751833269952d81c81e3968898aeefbef522",
         "e51f3d86b5ead6ac1573610fe55fb0994de2b86658fb1ef09a6c227bc487b0cb",
     ),
     ("autopilot-lab", ('setup',)): (
@@ -111,7 +113,7 @@ def full_field_digest(value):
 class TestTopology(unittest.TestCase):
     def setUp(self): self.r = T.load_registry()
     def test_exact_coverage_and_digest(self):
-        result = T.validate_registry(self.r); self.assertEqual((13, 29), (result["capabilities"], result["recipes"])); self.assertEqual(T.registry_digest(self.r), T.registry_digest(json.loads(json.dumps(self.r, sort_keys=True))))
+        result = T.validate_registry(self.r); self.assertEqual((14, 30), (result["capabilities"], result["recipes"])); self.assertEqual(T.registry_digest(self.r), T.registry_digest(json.loads(json.dumps(self.r, sort_keys=True))))
     def test_missing_coverage(self):
         r=copy.deepcopy(self.r); r["recipes"].pop(); self.assertRaises(T.TopologyError, T.validate_registry, r)
     def test_cycle(self):
@@ -544,6 +546,8 @@ class TestTopology(unittest.TestCase):
     def test_non_owner_nodes_and_parallel_groups_match_frozen_full_field_census(self):
         observed = {}
         for recipe in self.r["recipes"]:
+            if recipe["capability"] == T.UNIT_CAPABILITY:
+                continue  # added after this census was frozen; its shape check is route_unit.test.py
             key = (recipe["capability"], tuple(recipe["modes"]))
             non_owners = [
                 node for node in recipe["standard_plus"]["nodes"]
@@ -767,6 +771,8 @@ class DepthOneFrameNeverReachesWorkerTypeForKindTest(unittest.TestCase):
         for recipe in registry["recipes"]:
             nodes = recipe.get("standard_plus", {}).get("nodes", [])
             for node in nodes:
+                if T.is_unit_template_node(recipe, node):
+                    continue  # its worker type is the unit head's, declared on the realized node (route_unit.test.py)
                 if node.get("kind") in non_owner_kinds:
                     with self.subTest(
                         capability=recipe.get("capability"), node=node.get("id")
@@ -799,6 +805,8 @@ class DepthOneFrameNeverReachesWorkerTypeForKindTest(unittest.TestCase):
         seen = 0
         for recipe in registry["recipes"]:
             for node in recipe.get("standard_plus", {}).get("nodes", []):
+                if T.is_unit_template_node(recipe, node):
+                    continue  # its worker type is the unit head's, declared on the realized node (route_unit.test.py)
                 if (node.get("kind") in non_owner_kinds
                         and node.get("dispatch_depth") == 1):
                     with self.subTest(
@@ -826,11 +834,12 @@ class PartCatalogTest(unittest.TestCase):
     def test_every_recipe_stage_has_one_row_and_a_summary(self):
         T.validate_registry(self.r)
         stages = {f"{r['capability']}:{n['id']}" for r in self.r["recipes"] for n in r["standard_plus"]["nodes"]
-                  if r["capability"] != "route-frame"}  # compiler-internal: never composable, no catalog parts
+                  if r["capability"] not in T.COMPILER_INTERNAL_CAPABILITIES}  # never composable, no catalog parts
         optional = {part for part, row in self.parts.items() if "optional" in row}
         self.assertEqual(set(self.parts), stages | optional)
         self.assertEqual(optional, {"autopilot-lab:diagnose", "autopilot-lab:eval-spec", "autopilot-lab:eval-smoke",
-                                    "autopilot-lab:resume-run", "autopilot-lab:host-run"})
+                                    "autopilot-lab:resume-run", "autopilot-lab:host-run",
+                                    "analyze-project:analysis"})
         self.invalid(lambda c, r: c["parts"].pop("audit:inspect"), "lacks a row for recipe stages")
         self.invalid(lambda c, r: c["parts"]["audit:inspect"].update(summary=""), "one-line summary")
         self.invalid(lambda c, r: c["parts"]["audit:inspect"].update(gate="x"), "unknown catalog fields")
@@ -848,7 +857,7 @@ class PartCatalogTest(unittest.TestCase):
         self.invalid(lambda c, r: c["parts"]["autopilot-lab:publish"].update(shareable=True), "cannot be shared")
         self.invalid(lambda c, r: c["parts"]["autopilot-design:build"].update(shareable=True),
                      "only an implicit-anchor recipe")
-        self.invalid(lambda c, r: c["parts"]["audit:inspect"].update(hosts=["audit"]), "hosts is only valid")
+        self.invalid(lambda c, r: c["parts"]["audit:report"].update(hosts=["audit"]), "hosts is only valid")
         self.invalid(lambda c, r: c["parts"]["autopilot-lab:smoke"].update(hosts=["nope"]), "known capabilities")
     def test_widened_choices_and_name_mapping_are_checked(self):
         self.invalid(lambda c, r: c["parts"]["autopilot-code:execute"].update(unit_choices=["dev/backend"]),
@@ -944,9 +953,86 @@ class PartCatalogTest(unittest.TestCase):
                            (research, "autopilot-research:retrieval"), (apply, "autopilot-research:retrieval")):
             self.assertIsNone(T.resolve_shared_part(self.r, host, part), part)
         self.assertEqual(T.borrowable_parts(self.r, audit), [
-            "autopilot-research:retrieval", "autopilot-research:synthesis", "autopilot-lab:diagnose"])
+            "autopilot-draft:quality-review", "autopilot-draft:fact-verify", "autopilot-research:retrieval",
+            "autopilot-research:synthesis", "autopilot-lab:diagnose", "analyze-project:analysis"])
         self.invalid(lambda c, r: c["hosts"].update({"autopilot-code": {"map_anchor": "shards"}}),
                      "redeclares an anchor its recipe already has")
+    def test_only_read_workers_travel_and_resources_keep_their_hosts(self):
+        # Routing fragment 10: the parts another kind may borrow are read-only workers; the parts
+        # that hold a resource stay limited to their hosts; writers and owners stay home.
+        shared = sorted(part for part, row in self.parts.items() if row.get("shareable"))
+        self.assertEqual(shared, [
+            "analyze-project:analysis", "audit:inspect", "autopilot-draft:fact-verify",
+            "autopilot-draft:quality-review", "autopilot-lab:diagnose", "autopilot-lab:full-run",
+            "autopilot-lab:host-run", "autopilot-lab:smoke", "autopilot-research:retrieval",
+            "autopilot-research:synthesis"])
+        writers = []
+        for part in shared:
+            node = T.part_recipe(self.r, part)[1]
+            row = self.parts[part]
+            if node["kind"] == "resource-runner" or row.get("execution_needs"):
+                self.assertEqual(row.get("hosts"), ["autopilot-code", "autopilot-lab"], part)
+                continue
+            if T._unit_frontmatter(node["unit"])["read_only"] != "true":
+                writers.append(part)
+            self.assertIsNone(row.get("start_approval"), part)
+            self.assertNotEqual((node.get("continuation") or {}).get("kind"), "human-gate", part)
+        # The two research parts predate this rule; their unit writes shards and summaries only.
+        self.assertEqual(writers, ["autopilot-research:retrieval", "autopilot-research:synthesis"])
+        for part in ("autopilot-draft:draft-production", "autopilot-draft:finalize", "autopilot-research:report",
+                     "autopilot-refine:review", "autopilot-code:execute", "autopilot-code:report"):
+            self.assertNotIn(part, shared, part)
+        # The analysis part lands in every composable kind but its own.
+        hosts = [r for r in self.r["recipes"] if r["capability"] not in T.COMPILER_INTERNAL_CAPABILITIES]
+        for host in hosts:
+            found = T.resolve_shared_part(self.r, host, "analyze-project:analysis")
+            self.assertEqual(found is None, host["capability"] == "analyze-project", host["capability"])
+        analysis = T.part_recipe(self.r, "analyze-project:analysis")[1]
+        self.assertEqual((analysis["kind"], analysis["unit"], analysis["completion_gate"]),
+                         ("pipeline-stage", "analysis/analyze", "analysis-answer"))
+        self.assertEqual(self.r["completion_gate_contracts"]["analysis-answer"],
+                         {"kind": "unit-io", "unit": "analysis/analyze"})
+        self.assertIn("analysis", self.r["unit_families"])
+    def test_the_write_unit_takes_the_draft_and_apply_nodes_only(self):
+        # Routing fragment 11 (writing half): editorial/write drafts the document and applies an
+        # approved revision. Every other node of the two units it replaced keeps its unit.
+        def users(unit):
+            found = set()
+            for r in self.r["recipes"]:
+                for n in r["standard_plus"]["nodes"]:
+                    if n.get("unit") == unit:
+                        found.add(f"{r['capability']}:{n['id']}")
+                    elif unit in (n.get("unit_choices") or []):
+                        found.add(f"{r['capability']}:{n['id']}:choice")
+            for part, row in self.parts.items():
+                if unit in (row.get("unit_choices") or []):
+                    found.add(f"{part}:choice")
+                if ((row.get("optional") or {}).get("node") or {}).get("unit") == unit:
+                    found.add(part)
+            return found
+        self.assertEqual(users("editorial/write"), {"autopilot-draft:draft-production", "autopilot-apply:apply"})
+        self.assertEqual(users("research/research-survey"), {
+            "autopilot-draft:material-strategy", "autopilot-research:retrieval", "autopilot-research:synthesis",
+            "autopilot-research:report", "autopilot-spec:research", "analyze-project:analyze",
+            "analyze-user:profile", "audit:report:choice"})
+        self.assertEqual(users("dev/refactor"), {"autopilot-code:execute:choice", "autopilot-lab:scaffold:choice"})
+        # Same model grade, write scope and gate as before; only the unit and the role it names moved.
+        draft = next(n for n in T.resolve_recipe(self.r, "autopilot-draft", "doc")["standard_plus"]["nodes"]
+                     if n["id"] == "draft-production")
+        apply = next(n for n in T.resolve_recipe(self.r, "autopilot-apply", "default")["standard_plus"]["nodes"]
+                     if n["id"] == "apply")
+        self.assertEqual((draft["role"], draft["model_profile"], draft["write_scope"], draft["completion_gate"]),
+                         ("deep editor", "balanced-deep", ["target-artifact", "draft/**"], "draft-production"))
+        self.assertEqual((apply["role"], apply["model_profile"], apply["write_scope"], apply["completion_gate"]),
+                         ("deep editor", "light", ["target-artifact", "apply-log/**"], "apply-hash"))
+        self.assertEqual(self.r["completion_gate_contracts"]["draft-production"],
+                         {"kind": "unit-io", "unit": "editorial/write"})
+        # A writing worker is not lent to another kind (user decision, 11-26).
+        for part in ("autopilot-draft:draft-production", "autopilot-apply:apply"):
+            self.assertNotIn("shareable", self.parts[part], part)
+            self.assertIsNone(T.resolve_shared_part(self.r, T.resolve_recipe(self.r, "autopilot-code", "dev"), part))
+        head = T._unit_frontmatter("editorial/write")
+        self.assertEqual((head["worker_type"], head["read_only"], head["field"]), ("stage", "false", None))
     def test_digest_ignores_the_catalog_until_a_recipe_uses_it(self):
         before = {c: T.capability_registry_digest(self.r, c) for c in ("audit", "autopilot-lab", "autopilot-code")}
         r = copy.deepcopy(self.r)

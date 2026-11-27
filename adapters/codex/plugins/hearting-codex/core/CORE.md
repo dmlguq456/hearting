@@ -76,6 +76,7 @@ $HOME/hearting/                                       # canonical linked maintai
 $HOME/agent_setting/                                  # legacy linked checkout fallback
 $HOME/.claude/              # Claude Code runtime home, mostly runtime-owned
 $HOME/.codex/               # Codex runtime home, mostly runtime-owned
+$HOME/.config/opencode/     # OpenCode global config home
 ```
 
 General-user installation uses a checksum-verified managed release. Maintainer
@@ -97,8 +98,11 @@ check to accept a projection tree.
 Portable model profiles belong to core, while each adapter owns its shipped
 concrete model mapping. Installation seeds that mapping once as
 `<runtime-home>/agent-config/models.conf`. The seeded file is user-owned: it is
-never symlinked, refreshed, reapplied, or removed by a harness update or
-uninstall. Runtime consumers select a valid, complete user file as one unit and
+never symlinked, replaced as a whole, reapplied, or removed by a harness update or
+uninstall. An update (and a refresh) changes only the cells that are not held: each
+is moved, through the table's own edit path, to the newer same-family model the user's
+own harness model list shows, and every such edit leaves a `.bak` and an end-of-line
+record (`# auto-follow ...`) on that line. An update handles the harnesses it is run for; a cell goes to no model the outcome record shows refused; a table that is read-only, or whose lock is held past a second, is left for the next run with one line; a cell that goes back takes back the lines its own follow moved. Every other line stays byte for byte. Runtime consumers select a valid, complete user file as one unit and
 otherwise fall back to the shipped adapter default as one unit; they never merge
 the two. INST-D-20 permits one narrow, memory-only normalization: when only
 the new balanced profile and its optional granularity are absent, retain the
@@ -213,7 +217,8 @@ never orders a move or a delete.
 | `notes/`, `proposals/`, `spec-research-alternative/`, `research-alternative/` | present containers whose owner is not declared — recognized, not adopted | `C-LEG(undeclared-container)` |
 | `.git/`, `.agents/`, `.codex/`, `.probe-*/` | runtime residue that lives beside artifacts without being one | `C-LEG(runtime-residue)` |
 | `_scratch/` | the sole exact census exclusion | `C-SCR` |
-| `README.md`, `index.html`, `all-campaigns.md`, `all-campaigns.html` (files) | derived read entrance that Hearting rewrites (not canonical; not an admission, census or residue input; a same-named file without the generator's `<!-- hearting:artifact-entrance v1 -->` marker stays with its owner: the generator leaves it unchanged and in place) | `C-RT` |
+| `README.md`, `index.html`, `all-campaigns.md`, `all-campaigns.html`, `all-spec.md`, `all-spec.html`, `recent-route-reports.md`, `recent-route-reports.html` (files) | derived read entrance that Hearting rewrites (not canonical; not an admission, census or residue input; a same-named file without the generator's `<!-- hearting:artifact-entrance v1 -->` marker stays with its owner: the generator leaves it unchanged and in place) | `C-RT` |
+| `backlog.md` (file) | a root document that a person or a session writes (what was put off, `core/ARTIFACT_META.md` `backlog.md`); Hearting only reads it. Not canonical; not an admission, census or residue input, and not an entrance file (Hearting does not rewrite it) | `C-RT` |
 
 The following paths are a sealed-evidence exception set. These exact prefixes
 (and their descendants) or exact files take precedence over their parent
@@ -293,7 +298,11 @@ validation and payload reads, on both first close and later refreshes; existing
 profiles remain in place. Screenshots, browser logs and review reports beside
 them remain output. New browser work uses a process-owned temporary profile
 outside the cycle payload. `_internal/` and other non-hidden support paths, binary and large
-files are output. A payload name keeps UTF-8, spaces and the ASCII punctuation
+files are output. Raw experiment data is not written into the cycle: per-sample outputs, raw
+results, checkpoints and array or audio dumps (by kind: `raw-results`, `checkpoints*` and `ckpt`
+folders, `outputs` folders in the `experiments` bucket) go under `raw_data_dir` (CONVENTIONS
+§5.1), except a path a route node declares as its output. Artifacts keep reports, tables,
+figures, summary numbers, configs and records such as `run.json`. A payload name keeps UTF-8, spaces and the ASCII punctuation
 `_ . - ~ + ( ) @ , =` up to 255 bytes; other ASCII punctuation (quotes, `$`,
 backquotes, `;`, `|`, `&`, `<`/`>` and glob characters among them) makes it
 invalid. Absolute/escaping paths and out-of-payload files remain invalid. Cycle controls and legacy relocation/exclusion retain their contracts.
@@ -350,7 +359,7 @@ directly under the artifact root. Inside a cycle, the first segment below
 exactly the keys of `BUCKET_TYPES` in `utilities/artifact_producer.py`, and
 `artifact_producer.test.py` fails when the two differ. Another first segment (for example `shards/`) is not a
 bucket. A file outside a bucket stays where it was written and carries type
-`file`; nothing moves it. A `raw-results` directory and its ancestors also stay at their exact payload paths; first-seal finalize may register a non-empty tree with one directory-bundle descriptor, while `raw-results` is not a bucket. Compose shows the capability's default bucket as the
+`file`; nothing moves it. A `raw-results` directory in the payload (a route-declared output or older data; new raw results otherwise go under `raw_data_dir`) and its ancestors also stay at their exact payload paths; first-seal finalize may register a non-empty tree with one directory-bundle descriptor, while `raw-results` is not a bucket. Compose shows the capability's default bucket as the
 output folder.
 Payload paths retain valid UTF-8 names, so report images and audio with Korean
 filenames remain in checkpoint and sealed manifests.
@@ -360,8 +369,8 @@ is support material that is kept but not listed. When `finalize` picks a
 primary artifact itself, it skips any path through a top-level `C-INT` name
 that is not a cycle bucket (`_internal/`, `shards/`) while the cycle holds
 another file, then takes a project status document (`현황.md`, then `STATUS.md`)
-directly under `artifacts/`, so Cairn's status row and Fleet's project line read
-the same file, then the first `PRIMARY_CANDIDATES` name (including nested
+directly under `artifacts/`, the file Fleet's project line reads, then the
+first `PRIMARY_CANDIDATES` name (including nested
 `report.html`; a copy under `dev_logs/`, `test_logs/` or `evidence/` comes after
 the same name elsewhere), then a Markdown or HTML document, then the first
 remaining file; an explicit `--primary` is kept as given. A non-support row for a
@@ -408,8 +417,8 @@ other cycles, and sealed records stay unchanged.
 (`artifact-project-meta/v1`) carry an easy title, a one-line summary, branch and
 kind tags, and a short ID for each campaign and cycle; every change adds one line
 to the single history recorder under `.runtime/artifact-producer/v1/history/`.
-The one background job — the workflow-group review right after a seal — decides
-the groups and these fields together with one model call per campaign; a person or
+The one background job — the review right after a seal — decides
+these fields with one model call per campaign and does not touch workflow groups; a person or
 an agent corrects them with `utilities/artifact_meta.py` (one command for all three
 harnesses). The campaign title is read from a valid `meta.json`, else from
 `campaign-display-titles.json` (read-only: a title there is a person's title and is
@@ -472,8 +481,8 @@ success. `artifact_workflow_groups.py prepare|apply|verify` owns a checked
 single-file replacement, including corrections and withdrawal; no route
 parent/`depends_on` meaning or extra workflow gate is introduced.
 `artifact_workflow_group_review.py sweep` reviews newly sealed cycles in the
-background (groups and metadata in one model call per campaign, written together
-under one lock). The exact v1 schema and verification semantics are in
+background (title, summary, branches, and kinds in one model call per campaign;
+it never declares or changes a group). The exact v1 schema and verification semantics are in
 [WORKFLOW_GROUPS.md](WORKFLOW_GROUPS.md); the metadata is in
 [ARTIFACT_META.md](ARTIFACT_META.md).
 

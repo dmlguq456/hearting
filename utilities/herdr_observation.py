@@ -286,7 +286,14 @@ class ObservationTransport:
         self._status_pane_ids: set[str] = set()
         self._agents: tuple[dict, ...] = ()
         self._observed_at = 0.0
+        # Why the latest ``observe`` returned None; the collector records it so
+        # a failed round names its cause (None after a complete view).
+        self.last_failure: str | None = None
         self._lock = threading.RLock()
+
+    def _failed(self, why, exc=None):
+        self.last_failure = why if exc is None else "%s: %s %s" % (
+            why, type(exc).__name__, str(exc)[:60])
 
     def close(self):
         with self._lock:
@@ -328,7 +335,8 @@ class ObservationTransport:
                 raise ValueError("herdr-subscribe-rejected")
             self._socket = client
             return True
-        except (OSError, ValueError, TimeoutError, ConnectionError):
+        except (OSError, ValueError, TimeoutError, ConnectionError) as exc:
+            self._failed("subscribe", exc)
             client.close()
             self._buffer.clear()
             return False
@@ -339,9 +347,11 @@ class ObservationTransport:
         try:
             response = _request_once(self.socket_path, "session.snapshot", {},
                                      timeout=self.timeout, connector=self._connector)
-        except (OSError, ValueError, TimeoutError, ConnectionError):
+        except (OSError, ValueError, TimeoutError, ConnectionError) as exc:
+            self._failed("snapshot", exc)
             return None
         if "error" in response:
+            self._failed("snapshot refused")
             return None
         result = response.get("result")
         snapshot = result.get("snapshot") if isinstance(result, dict) else None
@@ -350,6 +360,7 @@ class ObservationTransport:
                 or snapshot.get("protocol") != HERDR_API_PROTOCOL
                 or not isinstance(snapshot.get("panes"), list)
                 or not isinstance(snapshot.get("agents"), list)):
+            self._failed("snapshot malformed")
             return None
         agents = tuple(dict(agent) for agent in snapshot["agents"]
                         if isinstance(agent, dict))
@@ -364,6 +375,7 @@ class ObservationTransport:
         try:
             while True:
                 if frames >= _EVENT_DRAIN_FRAME_LIMIT or time.monotonic() >= deadline:
+                    self._failed("event drain over its limit")
                     self._state.reconnect()
                     return False, saw_event
                 marker = self._buffer.find(b"\n")
@@ -389,14 +401,17 @@ class ObservationTransport:
                 if "error" in envelope:
                     # Includes `error.code == events_lost`; no event enum or
                     # sequence number is inferred from that server error.
+                    self._failed("events lost")
                     self._state.reconnect()
                     return False, saw_event
                 if not self._state.apply_event(self.endpoint, envelope):
+                    self._failed("event rejected")
                     self._state.reconnect()
                     return False, saw_event
                 saw_event = True
                 frames += 1
-        except (OSError, ValueError, TimeoutError, ConnectionError):
+        except (OSError, ValueError, TimeoutError, ConnectionError) as exc:
+            self._failed("event stream", exc)
             self._state.reconnect()
             return False, saw_event
 
@@ -444,11 +459,14 @@ class ObservationTransport:
                 self._state.reconnect()
                 continue
             if not self._state.replace_snapshot(self.endpoint, panes):
+                self._failed("snapshot rejected")
                 self._close_socket()
                 return False
             self._agents = agents
             self._observed_at = time.monotonic()
+            self.last_failure = None
             return True
+        self._failed("events overlapped every snapshot")
         self._close_socket()
         self._state.reconnect()
         return False

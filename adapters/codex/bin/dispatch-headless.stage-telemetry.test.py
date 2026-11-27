@@ -101,6 +101,36 @@ class StageTelemetryTransportTest(unittest.TestCase):
         self.assertIn("features.multi_agent=false", tokens)
         self.assertNotIn("--one-turn", tokens)
 
+    def test_a_unit_leg_keeps_its_thread_and_a_continued_turn_wakes_it(self):
+        patches = [mock.patch.object(WH, name, return_value=value) for name, value in (
+            ("progress_writable_dirs", ()), ("nested_owner_writable_dirs", ()), ("spec_read_marker_required", False),
+            ("route_bound_worker_writable_dirs", ()), ("linked_worktree_git_writable_dirs", ()),
+            ("registry_writable_launch", False), ("commit_profile_config", None),
+            ("effective_runtime_sandbox", "workspace-write"))]
+        def command(args, unit):
+            args.resolved_stage_telemetry_transport = "app-server-one-turn"
+            args.resolved_completion_delivery = "one-shot"
+            with mock.patch.object(WH, "is_unit_leg_launch", return_value=unit):
+                return shlex.split(WH.shell_command(args, Path("/tmp/stage/prompt.txt"), Path("/tmp/stage/attempt.jsonl")))
+        for patch in patches:
+            patch.start()
+        try:
+            import unit_continue
+            plain = command(args_for(worker_type="review"), False)
+            self.assertNotIn("--keep-session", plain)           # any other one-turn stage or review: as before
+            self.assertNotIn("--resume-thread", plain)
+            first = command(args_for(worker_type="review"), True)
+            self.assertIn("--keep-session", first)
+            self.assertNotIn("--resume-thread", first)
+            plan = unit_continue.SessionPlan("resumed", "", "thread-1", "/f", "sessions/x/rollout-thread-1.jsonl")
+            woken = command(args_for(worker_type="review", session_plan=plan), True)
+            self.assertEqual(woken[woken.index("--resume-thread") + 1], "thread-1")
+            self.assertEqual(sorted(set(woken) - set(first)), ["--resume-thread", "thread-1"])
+            self.assertEqual(woken[woken.index("--sandbox") + 1], "workspace-write")   # its own sandbox, given again
+        finally:
+            for patch in patches:
+                patch.stop()
+
     def test_stage_cannot_select_supervised_completion(self):
         args = args_for(completion_delivery="supervised")
         with self.assertRaises(WH.DispatchContractError):

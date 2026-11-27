@@ -68,8 +68,13 @@ STEWARD_CARRIER_WAKE = "hook"
 # an idle Codex for completions and peer reports) carries it into a turn. Chosen
 # by `watch --wake auto` only while that queue socket exists.
 STEWARD_QUEUE_WAKE = "queue"
+# An OpenCode steward's watch: its plugin wakes the idle session with the receipt through
+# `promptAsync`. Chosen by `watch --wake auto` only while a plugin that can do so says it on the
+# calling command (`AGENT_STEWARD_WATCH_WAKE=opencode`; an older plugin does not).
+STEWARD_OPENCODE_WAKE = "opencode"
 STEWARD_WAKES = {STEWARD_CARRIER_WAKE: "carrier-steward-watch",
-                 STEWARD_QUEUE_WAKE: "carrier-steward-watch-codex-queue"}
+                 STEWARD_QUEUE_WAKE: "carrier-steward-watch-codex-queue",
+                 STEWARD_OPENCODE_WAKE: "carrier-steward-watch-opencode-turn"}
 
 
 def command_home(agent_home) -> str:
@@ -212,7 +217,8 @@ def steward_next(
       accepts the initial and repeated `watch`/`rearm` states and validates
       the exact current recipient before arming.
     * `wake` names a carrier: Claude's rewake hook (`hook`) or a Codex
-      steward's native thread queue (`queue`). A watch armed with `wake=none`
+      steward's native thread queue (`queue`) or an OpenCode steward's plugin
+      carrier (`opencode`). A watch armed with `wake=none`
       (or `auto` resolved where neither exists) leaves its receipt on disk with
       nothing to deliver it.
 

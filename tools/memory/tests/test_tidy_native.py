@@ -3,6 +3,7 @@
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
+import base64
 import contextlib
 import importlib.util
 import json
@@ -11,6 +12,7 @@ import shutil
 from pathlib import Path
 import sys
 import textwrap
+import threading
 import time
 from types import SimpleNamespace
 import unittest
@@ -243,8 +245,142 @@ class NativeScreenTest(unittest.TestCase):
         self.assertEqual(peer._screen_ready("claude", view.read(timeout=1)), "draft")
 
 
+FIXTURES = HERE / "fixtures" / "native_attach"
+REAL_VIEW_READ = native.View.read
+
+
+def real_chunks(name):
+    """`(seconds since attach, bytes)` of one screen captured from a real `claude attach`.
+
+    Claude 2.1.327, isolated HOME and loopback model, private PTY of 40x120; only the
+    loopback model's fake conversation is on these screens.
+    """
+    data = json.loads((FIXTURES / f"{name}.json").read_text())
+    return [(at, base64.b64decode(raw)) for at, raw in data["chunks"]]
+
+
+def replay(test, name, *, scale=1.0, until=None):
+    """A pipe fed the real chunks at their real pacing (times times ``scale``); it stays open after."""
+    rfd, wfd = os.pipe()
+    test.addCleanup(os.close, rfd)
+    stop = threading.Event()
+
+    def feed():
+        start = time.monotonic()
+        for at, part in real_chunks(name):
+            if until is not None and at > until:
+                break
+            if stop.wait(max(0.0, start + at * scale - time.monotonic())):
+                return
+            os.write(wfd, part)
+    thread = threading.Thread(target=feed, daemon=True)
+    thread.start()
+
+    def finish():
+        stop.set(); thread.join(); os.close(wfd)
+    test.addCleanup(finish)
+    return rfd
+
+
+class NativeRealAttachTest(unittest.TestCase):
+    """The view must read what a real `claude attach` prints, not a hand-made frame."""
+
+    def setUp(self):
+        # The fixtures' repaints end within 0.15 s of the attach; the real quiet window is longer.
+        p = mock.patch.object(native.View, "QUIET", 0.3)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_real_output_has_no_synchronized_update_marker_so_the_old_gate_never_opened(self):
+        for name in ("idle", "draft", "working", "form"):
+            raw = b"".join(part for _at, part in real_chunks(name))
+            self.assertNotIn(b"?2026", raw, name)
+            # The rule View.read applied before: the last `?2026l` after the last `?2026h`.
+            self.assertFalse(raw.rfind(b"\x1b[?2026l") > raw.rfind(b"\x1b[?2026h"), name)
+            self.assertIn(b"\x1b[2J", raw)
+
+    def test_an_idle_screen_with_an_empty_input_line_is_read_and_ready(self):
+        view = native.View(replay(self, "idle"))
+        lines = view.read(timeout=5)
+        self.assertIsNotNone(lines)
+        self.assertEqual(view.why, "")
+        self.assertIsNone(peer._screen_ready("claude", lines))
+
+    def test_text_in_the_input_line_is_a_draft_and_is_not_ready(self):
+        # A person's own window attached to the same session is typing.
+        lines = native.View(replay(self, "draft")).read(timeout=5)
+        self.assertIsNotNone(lines)
+        self.assertEqual(peer._screen_ready("claude", lines), "draft")
+
+    def test_an_open_selection_list_is_not_ready(self):
+        lines = native.View(replay(self, "form")).read(timeout=5)
+        self.assertIsNotNone(lines)
+        self.assertEqual(peer._screen_ready("claude", lines), "form-open")
+
+    def test_a_working_session_keeps_repainting_and_is_never_taken_as_finished(self):
+        # Real pacing, 3 s of a held turn compressed to 1.2 s: the spinner's gaps stay under QUIET.
+        with mock.patch.object(native.View, "QUIET", 0.3):
+            view = native.View(replay(self, "working", scale=0.4, until=3.0))
+            self.assertIsNone(view.read(timeout=1.0))
+        self.assertEqual(view.why, "not-quiet")
+
+    def test_what_a_read_was_waiting_for_is_named(self):
+        rfd, wfd = os.pipe()
+        self.addCleanup(os.close, rfd); self.addCleanup(os.close, wfd)
+        view = native.View(rfd)
+        self.assertIsNone(view.read(timeout=0.4))
+        self.assertEqual(view.why, "no-output")
+        os.write(wfd, b"\x1b[?2026h\x1b[2J\x1b[H\xe2\x9d\xaf")             # a frame opened, never closed
+        self.assertIsNone(view.read(timeout=0.8))
+        self.assertEqual(view.why, "frame-open")
+        os.write(wfd, b"\x1b[?2026l")
+        self.assertIsNotNone(view.read(timeout=0.8))
+        self.assertEqual(view.why, "")
+        for payload, why in ((b"Attaching...", "no-full-repaint"),
+                             (b"\x1b[2J\x1b[HAttaching...", "no-input-line"),
+                             (b"\x1b[2J\x1b[2S\xe2\x9d\xaf", "undecodable-control")):
+            r, w = os.pipe()
+            self.addCleanup(os.close, r); self.addCleanup(os.close, w)
+            os.write(w, payload)
+            v = native.View(r)
+            self.assertIsNone(v.read(timeout=1.0), payload)
+            self.assertEqual(v.why, why, payload)
+        r, w = os.pipe()
+        self.addCleanup(os.close, r)
+        os.write(w, b"\x1b[2J"); os.close(w)
+        v = native.View(r)
+        self.assertIsNone(v.read(timeout=1.0))
+        self.assertEqual(v.why, "attach-closed")
+
+    def test_the_attacher_is_held_until_the_session_answers_the_typed_line(self):
+        # Measured on 2.1.327: closing the PTY right after the write ended the attacher before it
+        # forwarded the keys, so the typed /compact never ran.
+        fd, writer = os.pipe()
+        self.addCleanup(os.close, fd); self.addCleanup(os.close, writer)
+        threading.Timer(0.2, os.write, (writer, b"\x1b[2J repaint")).start()
+        started = time.monotonic()
+        native.keep_open_after_send(fd, limit=3.0)
+        self.assertGreaterEqual(time.monotonic() - started, 0.2 + 0.3)      # the answer, then quiet
+        self.assertLess(time.monotonic() - started, 2.0)
+        started = time.monotonic()
+        native.keep_open_after_send(fd, limit=0.5)                           # no answer: bounded
+        self.assertGreaterEqual(time.monotonic() - started, 0.45)
+        native.keep_open_after_send(99999, limit=0.5)                        # a closed PTY ends it at once
+
+    def test_a_bracketed_repaint_still_needs_its_frame_closed(self):
+        # Another terminal or version that brackets frames keeps the stricter rule.
+        fd, writer = os.pipe()
+        self.addCleanup(os.close, fd); self.addCleanup(os.close, writer)
+        os.write(writer, "\x1b[?2026h\x1b[2J\x1b[H❯ \r\n────────────────".encode())
+        view = native.View(fd)
+        self.assertIsNone(view.read(timeout=1.2))                       # quiet, but the frame is open
+        os.write(writer, b"\x1b[?2026l")
+        self.assertIsNotNone(view.read(timeout=1.0))
+
+
 class NativeCommandTest(NativeCase):
-    def prepare_transport(self):
+    def prepare_transport(self, screen=None):
+        """`screen`: a captured fixture name (or raw bytes) the attachment prints; None mocks the read."""
         from tools.fleet import collectors
         from tools.fleet.model import Session
         from tools.fleet.refresh import LiveSnapshot
@@ -261,9 +397,22 @@ class NativeCommandTest(NativeCase):
         proc = mock.Mock(); proc.poll.return_value = None
         @contextlib.contextmanager
         def attached(_target):
-            yield 99, proc
+            if screen is None:
+                yield 99, proc
+                return
+            rfd, wfd = os.pipe()    # the real view over bytes a real attach printed; held open, so quiet
+            os.write(wfd, screen if isinstance(screen, bytes) else b"".join(p for _at, p in real_chunks(screen)))
+            try:
+                yield rfd, proc
+            finally:
+                os.close(rfd); os.close(wfd)
         self.attach = self.patch(native, "attachment", side_effect=attached)
-        self.view = self.patch(native.View, "read", return_value=[[("❯", False)], [("─", False)]])
+        if screen is None:
+            self.view = self.patch(native.View, "read", return_value=[[("❯", False)], [("─", False)]])
+        else:
+            self.patch(native.View, "QUIET", new=0.1)
+            # The real read, with its 10 s first look shortened so a screen that never comes stays quick.
+            self.patch(native.View, "read", new=lambda view, timeout=10: REAL_VIEW_READ(view, timeout=min(timeout, 1.0)))
         proxy = SimpleNamespace(**vars(os))
         self.write = proxy.write = mock.Mock()
         self.patch(native, "os", new=proxy)
@@ -273,6 +422,81 @@ class NativeCommandTest(NativeCase):
     def run_command(self, req, path, *, continuing=False, ready=None):
         return native.command(req, path, req["nonce"], continuing=continuing,
                               screen_ready=ready or (lambda *_: None))
+
+    def book_idle_card(self):
+        req, path = self.book()
+        with st.seat_lock(self.seat.key):
+            held = clear.read_reservation(self.seat.key)
+            held.update(origin="idle", followup_kind="status-only", snapshot_state="ready",
+                        idle={"identity": "idle-event", "due_at": time.time() - 1, "tokens": 200000,
+                              "min_tokens": 200000,
+                              "compaction": clear.compaction_position(self.seat, "claude", "session-A")})
+            clear._write_reservation(held)
+        return clear.read_reservation(self.seat.key), path
+
+    def test_real_attach_bytes_type_compact_only_on_an_idle_empty_screen(self):
+        # Screens a real `claude attach` printed, through the real view and the real readiness
+        # judgement: only the idle, empty input line gets /compact, and exactly once.
+        cases = (("idle", ("unverified", "compact-pending")),
+                 ("draft", ("skipped", "draft")),
+                 ("form", ("skipped", "form-open")))
+        for name, expected in cases:
+            with self.subTest(screen=name):
+                self.reset_tidy(); self.publish(sessionId="session-A")
+                req, path = self.book(); self.prepare_transport(screen=name)
+                self.write.side_effect = lambda fd, text: len(text)
+                with mock.patch.object(native, "keep_open_after_send") as held:
+                    result = self.run_command(req, path, ready=peer._screen_ready)
+                self.assertEqual((result["cleared"], result["reason"]), expected)
+                if name == "idle":
+                    self.write.assert_called_once()
+                    self.assertEqual(self.write.call_args.args[1], b"/compact\r")
+                    held.assert_called_once()     # the attacher stays up until the session answers
+                else:
+                    self.write.assert_not_called()
+                    self.assertNotIn("clear_claim", clear.read_reservation(self.seat.key))
+
+    def test_a_working_session_is_held_by_its_state_even_though_its_screen_shows_an_empty_input_line(self):
+        # The picture of a working session has an empty input line below the spinner; what
+        # keeps /compact out is the session's own busy state, checked before and after the read.
+        raw = b"".join(part for _at, part in real_chunks("working"))
+        snap = native.Snapshot(); snap.feed(raw.decode("utf-8", "replace"))
+        self.assertIsNone(peer._screen_ready("claude", snap.lines()))
+        req, path = self.book(); self.prepare_transport(screen="working")
+        self.patch(native, "idle_reason", return_value="not-idle-native")
+        self.write.side_effect = lambda fd, text: len(text)
+        result = self.run_command(req, path, ready=peer._screen_ready)
+        self.assertEqual((result["cleared"], result["reason"]), ("skipped", "not-idle-native"))
+        self.write.assert_not_called()
+        # ...and a turn that starts between the read and the write is caught by the second look.
+        self.reset_tidy(); self.publish(sessionId="session-A")
+        req, path = self.book(); self.prepare_transport(screen="idle")
+        states = iter(["", "", "not-idle-native"])
+        self.patch(native, "idle_reason", side_effect=lambda *_a: next(states, "not-idle-native"))
+        result = self.run_command(req, path, ready=peer._screen_ready)
+        self.assertEqual((result["cleared"], result["reason"]), ("skipped", "not-idle-native"))
+        self.write.assert_not_called()
+
+    def test_screen_unknown_says_what_the_read_was_waiting_for(self):
+        req, path = self.book(); self.prepare_transport(screen=b"")
+        result = self.run_command(req, path, ready=peer._screen_ready)
+        self.assertEqual((result["cleared"], result["reason"], result["detail"]),
+                         ("skipped", "screen-unknown", "no-output"))
+        self.write.assert_not_called()
+
+    def test_idle_card_on_real_screens(self):
+        for name, accepted, reason in (("draft", "queued", "draft"), ("form", "queued", "form-open"),
+                                       ("idle", "true", "")):
+            with self.subTest(screen=name):
+                self.reset_tidy(); self.publish(sessionId="session-A")
+                req, path = self.book_idle_card(); self.prepare_transport(screen=name)
+                result = native.idle_card_request(req, path, req["nonce"], screen_ready=peer._screen_ready)
+                self.assertEqual((result["accepted"], result["reason"]), (accepted, reason))
+                self.write.assert_not_called()
+        self.reset_tidy(); self.publish(sessionId="session-A")
+        req, path = self.book_idle_card(); self.prepare_transport(screen=b"")
+        result = native.idle_card_request(req, path, req["nonce"], screen_ready=peer._screen_ready)
+        self.assertEqual(result, {"accepted": "queued", "reason": "screen-unknown", "detail": "no-output"})
 
     def test_deferred_snapshot_is_unsent_and_the_same_booking_compacts_after_recovery(self):
         req, path = self.book(); self.prepare_transport()
@@ -815,7 +1039,8 @@ raise SystemExit(code)
         with mock.patch.dict(os.environ, {"HEARTING_TIDY_TEST_ROOT": str(self.iso.root),
                                          "HEARTING_TIDY_PEER_STEWARD": str(script),
                                          # bounds the helper's wait for a boundary that never comes
-                                         "HEARTING_TIDY_COMPACT_CONFIRM": "1.5"}), \
+                                         "HEARTING_TIDY_COMPACT_CONFIRM": "1.5",
+                                         "HEARTING_TIDY_CONTINUE_WINDOW": "600"}), \
              mock.patch.object(clear, "STEWARD_TIMEOUT_SEC", .75), \
              mock.patch.object(clear.subprocess, "run", side_effect=capture), \
              mock.patch.object(native, "wait_idle", return_value="idle"):

@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 import json
 import math
+import unicodedata
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,40 @@ VIEWS = ("OVERVIEW", "PEERS", "ROUTES", "QUESTIONS", "HISTORY", "COMPUTE", "MEMO
 _MODEL_FIND_FOLDS = ("ui:mfind", "ui:mfocus", "ui:mcursor")
 
 
+def _draft(folds, offsets, key):
+    """Drop the drafts that cannot stand beside the one ``key`` is about to start.
+
+    A keep / follow / undo draft (``ui:fol``) and a model or effort draft exclude each other, and
+    choosing a cell drops them all. Every path that starts one goes through here."""
+    if key == "ui:sel":
+        gone = ("ui:sel", "ui:model", "ui:effort", "ui:fol") + _MODEL_FIND_FOLDS
+    elif key == "ui:fol":
+        gone = ("ui:model", "ui:effort") + _MODEL_FIND_FOLDS
+    elif key in ("ui:model", "ui:effort"):
+        gone = ("ui:fol",)
+    else:
+        return
+    for name in gone:
+        folds.pop(name, None)
+    if key in ("ui:sel", "ui:fol"):
+        offsets.pop("mpick", None)
+
+
+def finish_follow_draft(state, effects, result):
+    """``state`` without its keep / follow / undo draft once that draft was written (not before).
+
+    A written draft is a ``("models.apply", harness, "follow", target, word, False)`` effect whose
+    result says the table was changed or already was so; a refused or failed write, and a dry-run,
+    leave the draft where it was."""
+    if not isinstance(result, Mapping) or result.get("status") not in ("changed", "unchanged"):
+        return state
+    if not any(isinstance(effect, (tuple, list)) and len(effect) == 6 and effect[:1] == ("models.apply",)
+               and effect[-1] is False for effect in effects or ()):
+        return state
+    folds = {key: value for key, value in state.fold_map().items() if key != "ui:fol"}
+    return replace(state, folds=tuple(sorted(folds.items())))
+
+
 def models_finding(state):
     """The MODELS model list holds the keyboard: typed characters filter it instead of acting."""
     return (getattr(state, "view", None) == "MODELS" and getattr(state, "scope", "-") == "-"
@@ -72,6 +107,7 @@ def _models_find_key(state, key, hit):
         if not item:
             return state
         folds["ui:model"] = str(item)
+        _draft(folds, offsets, "ui:model")
     elif key == "backspace" or (isinstance(key, str) and key.startswith("text:")):
         text = folds.get("ui:mfind", "")
         text = text[:-1] if key == "backspace" else (text + key[5:])[:80]
@@ -139,6 +175,151 @@ def _question_binding_complete(ref):
 
 def _question_overlay(state):
     return state.question_overlay if isinstance(state.question_overlay, Mapping) else {}
+
+
+def _question_joins(char):
+    """A mark that belongs to the character before it (the shell's question input reads the same)."""
+    return (unicodedata.category(char).startswith("M") or char == "\u200d"
+            or "\U0001f3fb" <= char <= "\U0001f3ff" or "\u1160" <= char <= "\u11ff"
+            or "\ud7b0" <= char <= "\ud7ff")
+
+
+def question_char_after(text, at):
+    """The place after the character at ``at``: one character as the person sees it (with its marks)."""
+    i = at + 1
+    while i < len(text) and _question_joins(text[i]):
+        joiner = text[i] == "\u200d"
+        i += 1
+        if joiner and i < len(text):
+            i += 1
+    return min(i, len(text))
+
+
+def question_char_before(text, at):
+    i = at - 1
+    while i > 0 and (_question_joins(text[i]) or text[i - 1] == "\u200d"):
+        i -= 1
+    return max(i, 0)
+
+
+def _question_word_char(char):
+    return bool(char) and (char.isalnum() or char == "_" or unicodedata.category(char).startswith("M"))
+
+
+def question_word_left(text, at):
+    """The place a word back: past what is not a letter or digit, then past the run of them (11-26)."""
+    i = at
+    while i > 0 and not _question_word_char(text[question_char_before(text, i)]):
+        i = question_char_before(text, i)
+    while i > 0 and _question_word_char(text[question_char_before(text, i)]):
+        i = question_char_before(text, i)
+    return i
+
+
+def question_word_right(text, at):
+    i = at
+    while i < len(text) and not _question_word_char(text[i]):
+        i = question_char_after(text, i)
+    while i < len(text) and _question_word_char(text[i]):
+        i = question_char_after(text, i)
+    return i
+
+
+def question_line_start(text, at):
+    """The start of the line holding the place: Home and Ctrl+A go there (11-26)."""
+    return text.rfind("\n", 0, at) + 1
+
+
+def question_line_end(text, at):
+    end = text.find("\n", at)
+    return len(text) if end < 0 else end
+
+
+def question_answer_rows(text, width):
+    """The rows a written answer takes at ``width`` cells: ``(start, end)`` ranges of its characters, broken
+    at a line break (which no row shows) and where the next character no longer fits (11-26; the shell's
+    question popup lays its answer out the same way)."""
+    from .grid import cell_width
+    rows, start, used, width = [], 0, 0, max(1, int(width))
+    for i, char in enumerate(text):
+        if char == "\n":
+            rows.append((start, i))
+            start, used = i + 1, 0
+            continue
+        cells = cell_width(char)
+        if used + cells > width and i > start:
+            rows.append((start, i))
+            start, used = i, 0
+        used += cells
+    rows.append((start, len(text)))
+    return tuple(rows)
+
+
+def question_answer_row(rows, at):
+    """The row holding the place: the last one starting at or before it."""
+    return max((i for i, (start, _end) in enumerate(rows) if start <= at), default=0)
+
+
+def question_shown_text(text):
+    """A written answer as its rows show it: a line break stays one, any other control character a blank."""
+    return "".join(char if char == "\n" or not (ord(char) < 32 or 0x7f <= ord(char) < 0xa0) else " "
+                   for char in str(text))
+
+
+def _question_vertical(text, at, width, step, goal):
+    """``(place, goal)`` one row up or down at the cell column ``goal`` (the place's own when ``None``),
+    or ``None`` on the first or last row, where ↑↓ keep their meaning."""
+    from .grid import cell_width
+    shown = question_shown_text(text)
+    rows = question_answer_rows(shown, width)
+    home = question_answer_row(rows, at)
+    to = home + step
+    if not 0 <= to < len(rows):
+        return None
+    if goal is None:
+        goal = cell_width(shown[rows[home][0]:at])
+    start, end = rows[to]
+    i, used = start, 0
+    while i < end:
+        j = question_char_after(shown, i)
+        cells = cell_width(shown[i:j])
+        if used + cells > goal:
+            break
+        used, i = used + cells, j
+    # A wrapped row's end is the next row's start: the place stays on this row, before its last character.
+    if i == end and i > start and to + 1 < len(rows) and rows[to + 1][0] == end:
+        i = question_char_before(shown, i)
+    return i, goal
+
+
+def _question_secret(overlay):
+    """Whether the question being answered (the one typed to, else the first) is a secret."""
+    if not isinstance(overlay, Mapping):
+        return False
+    questions = question_items(overlay.get("detail"))
+    question_id = overlay.get("editing_question_id") or (questions[0]["id"] if questions else None)
+    spec = next((item for item in questions if item["id"] == question_id), {})
+    return bool(spec.get("is_secret") or spec.get("isSecret"))
+
+
+def question_caret(overlay, question_id, text):
+    """The place inside the typed text: a screen value only, the end unless set while typing (11-22)."""
+    caret = overlay.get("caret") if isinstance(overlay, Mapping) else None
+    if (isinstance(overlay, Mapping) and overlay.get("editing") and isinstance(caret, tuple)
+            and len(caret) == 2 and caret[0] == question_id and type(caret[1]) is int):
+        return max(0, min(len(text), caret[1]))
+    return len(text)
+
+
+def _question_with_caret(result, question_id, place):
+    state, effects = result
+    return replace(state, question_overlay=dict(_question_overlay(state), caret=(question_id, place))), effects
+
+
+def _question_without_caret(overlay):
+    overlay = dict(overlay)
+    overlay.pop("caret", None)
+    return overlay
 
 
 def _question_supports_reply(detail):
@@ -339,6 +520,8 @@ def question_free_text_supported(detail, question_id):
     if question is None:
         return False
     native_ref = detail.get("native_ref")
+    if (native_ref or {}).get("transport") == "hearting-message-answer":
+        return question.get("is_other") is not False   # a registered question takes words beside its choices (11-22)
     if _question_uses_workflow_transport(detail):
         choices = question.get("choices", question.get("options"))
         return (question.get("is_other") is True
@@ -634,20 +817,24 @@ def _question_draft_for_backend(draft, detail=None):
                     value for value in values
                     if (isinstance(value, (str, bool, int))
                         or isinstance(value, float) and math.isfinite(value))]
+    text_only = [key for key in normalized if key in draft.get("text_only", ())]
     fields = _question_schema_items(detail)
     native = detail.get("native_ref") if isinstance(detail, Mapping) else None
     v2_form = isinstance(native, Mapping) and native.get("transport") == "opencode-http-v2"
     single_string = (not v2_form or bool(fields)
                      and fields[0].get("field_type") == "string")
-    if (len(fields) == 1 and single_string
-            and len(normalized) == 1 and len(next(iter(normalized.values()))) <= 1
-            and all(isinstance(value, str) for value in next(iter(normalized.values())))):
+    if (len(fields) == 1 and single_string and not text_only and len(normalized) == 1):
         values = next(iter(normalized.values()))
-        return values[0] if values else ""
+        if not values:
+            return ""
+        if len(values) == 1 and isinstance(values[0], str) and not values[0].startswith(_QUESTION_DRAFT_PREFIX):
+            return values[0]
     if not normalized:
         return ""
-    return _QUESTION_DRAFT_PREFIX + json.dumps({"answers": normalized}, ensure_ascii=False,
-                                                separators=(",", ":"))
+    stored = {"answers": normalized}
+    if text_only:
+        stored["text_only"] = text_only
+    return _QUESTION_DRAFT_PREFIX + json.dumps(stored, ensure_ascii=False, separators=(",", ":"))
 
 
 def question_draft_from_backend(detail, draft):
@@ -661,12 +848,16 @@ def question_draft_from_backend(detail, draft):
         answers = value.get("answers") if isinstance(value, Mapping) else None
         if not isinstance(answers, Mapping):
             return None
-        return {"answers": {str(key): [
-                            item for item in values
-                            if (isinstance(item, (str, bool, int))
-                                or isinstance(item, float) and math.isfinite(item))]
-                            for key, values in answers.items()
-                            if isinstance(values, (list, tuple))}}
+        result = {"answers": {str(key): [
+                              item for item in values
+                              if (isinstance(item, (str, bool, int))
+                                  or isinstance(item, float) and math.isfinite(item))]
+                              for key, values in answers.items()
+                              if isinstance(values, (list, tuple))}}
+        text_only = value.get("text_only")
+        if isinstance(text_only, list):
+            result["text_only"] = [key for key in text_only if isinstance(key, str) and key in answers]
+        return result
     questions = _question_schema_items(detail)
     if not questions:
         return None
@@ -691,6 +882,7 @@ def _question_selection(state, ref):
     if _question_binding_complete(ref):
         retained = previous.get("draft") if previous.get("ref") == ref else None
         overlay = {"ref": ref, "state": "loading", "detail": None, "draft": retained,
+                   "choice_marks": previous.get("choice_marks", {}) if previous.get("ref") == ref else {},
                    "editing": False, "pending": False, "status": "Loading selected request…"}
         effects = (("questions.read", ref),)
     else:
@@ -701,11 +893,36 @@ def _question_selection(state, ref):
     return replace(state, folds=tuple(sorted(folds.items())), question_overlay=overlay), effects
 
 
+def question_mark(overlay, question):
+    """The explicit choice for a writable question, or -1 when no choice was picked."""
+    detail = overlay.get("detail")
+    qid = question["id"]
+    choices = question.get("choices", question.get("options", ()))
+    if (not choices or not question_free_text_supported(detail, qid)
+            or question_multiple_select(detail, qid)):
+        return None
+    mark = overlay.get("choice_marks", {}).get(qid)
+    if mark is not None:
+        return mark
+    draft = overlay.get("draft")
+    if isinstance(draft, Mapping) and qid in draft.get("text_only", ()):
+        return (-1, False)
+    values = draft.get("answers", {}).get(qid, ()) if isinstance(draft, Mapping) else ()
+    at = next((i for i, c in enumerate(choices) if values and _question_choice_value(c) == values[0]), -1)
+    return (at, at >= 0)
+
+
+def _question_mark_state(state, question_id, mark):
+    overlay = dict(_question_overlay(state))
+    marks = dict(overlay.get("choice_marks", {}))
+    marks[question_id] = mark
+    overlay["choice_marks"] = marks
+    return replace(state, question_overlay=overlay)
+
+
 def _question_draft_response(overlay, *, require_complete=False):
     draft = overlay.get("draft")
-    if not isinstance(draft, Mapping):
-        return None
-    answers = draft.get("answers")
+    answers = draft.get("answers", {}) if isinstance(draft, Mapping) else {}
     if not isinstance(answers, Mapping):
         return None
     questions = question_items(overlay.get("detail"))
@@ -716,9 +933,15 @@ def _question_draft_response(overlay, *, require_complete=False):
     for question in questions:
         question_id = question["id"]
         values = answers.get(question_id, ())
+        mark = question_mark(overlay, question)
+        if mark is not None and mark[1]:
+            choices = question.get("choices", question.get("options"))
+            allowed = {_question_choice_value(choice) for choice in choices}
+            note = values[-1] if values and (len(values) > 1 or values[0] not in allowed) else ""
+            values = [_question_choice_value(choices[mark[0]])] + ([note] if note else [])
         if isinstance(values, (list, tuple)):
             clean = [value for value in values if (
-                isinstance(value, str) and value != ""
+                isinstance(value, str) and (bool(value.strip()) if mark is not None else value != "")
                 or type(value) is bool
                 or isinstance(value, (int, float)) and not isinstance(value, bool)
                 and (not isinstance(value, float) or math.isfinite(value)))]
@@ -740,8 +963,14 @@ def _question_text_draft(overlay, question_id=None):
     values = answers.get(question_id, ()) if question_id else ()
     if values and question_free_text_supported(overlay.get("detail"), question_id):
         question = next((item for item in questions if item["id"] == question_id), None)
-        if question and question_multiple_select(overlay.get("detail"), question_id):
-            allowed = set(question.get("option_values", ()))
+        mark = question_mark(overlay, question) if question else None
+        if mark is not None:
+            return str(values[-1]) if mark[0] < 0 or len(values) > 1 else ""
+        if question and (question_multiple_select(overlay.get("detail"), question_id)
+                         or _question_uses_workflow_transport(overlay.get("detail"))):
+            allowed = {_question_choice_value(c) for c in question.get("choices", ())} | set(question.get("option_values", ()))
+            if _question_uses_workflow_transport(overlay.get("detail")) and len(values) > 1:
+                return str(values[-1])
             return str(next((value for value in values if value not in allowed), ""))
     return str(values[0]) if values else ""
 
@@ -757,6 +986,17 @@ def _question_store_answers(state, question_id, values, *, editing=False):
                for key, value in answers.items()} if isinstance(answers, Mapping) else {}
     answers[question_id] = list(values)
     draft["answers"] = answers
+    # A one-value draft normally stores just its value. Preserve how it was entered
+    # when typed text matches a listed choice and could be marked on reload.
+    text_only = set(draft.get("text_only", ()))
+    text_only.discard(question_id)
+    if (len(values) == 1 and overlay.get("choice_marks", {}).get(question_id) == (-1, False)
+            and _question_choice_allowed(detail, question_id, values[0])):
+        text_only.add(question_id)
+    if text_only:
+        draft["text_only"] = sorted(text_only)
+    else:
+        draft.pop("text_only", None)
     detail = question_ui_detail(detail, draft)
     supported = question_answer_supported(detail)
     overlay.update(detail=detail, draft=draft, editing=editing, editing_question_id=question_id,
@@ -780,11 +1020,17 @@ def _question_set_answer(state, question_id, answer):
                                                 (_question_draft_response(overlay) or {}).get(
                                                     "answers", {}).get(question_id, ()))):
         return state, ()
+    question = next(item for item in question_items(detail) if item["id"] == question_id)
+    mark = question_mark(overlay, question)
+    if mark == (-1, False):
+        state = _question_mark_state(state, question_id, mark)
     existing = ((_question_draft_response(overlay) or {}).get("answers", {}).get(question_id, ()))
-    if question_multiple_select(detail, question_id):
-        question = next(item for item in question_items(detail) if item["id"] == question_id)
-        allowed = set(question.get("option_values", ()))
-        values = [value for value in existing if value in allowed]
+    if question_multiple_select(detail, question_id) or _question_uses_workflow_transport(detail):
+        choices = question.get("choices", question.get("options")) or ()
+        allowed = {_question_choice_value(choice) for choice in choices} | set(question.get("option_values", ()))
+        values = [] if mark == (-1, False) else [value for value in existing if value in allowed]
+        if _question_uses_workflow_transport(detail):
+            values = values[:1]
         maximum = question.get("max_items")
         if answer and type(maximum) is int and len(values) >= maximum:
             return state, ()
@@ -896,7 +1142,13 @@ def _reduce(state, event, frame=None):
             return state, ()
         if action[0] in ("view", "tab") and len(action) > 1:
             view = str(action[1])
-            return replace(state, view=view, scope="-", opened="", title=view), ()
+            folds = state.folds
+            if view == "PEERS" and len(action) > 2 and action[2]:
+                # The session page's ``PEERS tab ›``: the tab opens with that session's card picked.
+                picked = state.fold_map()
+                picked["pfocus:PEERS"] = str(action[2])
+                folds = tuple(sorted(picked.items()))
+            return replace(state, view=view, scope="-", opened="", title=view, folds=folds), ()
         if action[0] == "fold" and len(action) > 2:
             slot, identity = str(action[1]), str(action[2])
             folds = state.fold_map()
@@ -911,7 +1163,9 @@ def _reduce(state, event, frame=None):
             folds = state.fold_map()
             if question_open_tag(state) == tag:
                 folds[QUESTION_OPEN_FOLD] = "-"
-                return replace(state, folds=tuple(sorted(folds.items()))), ()
+                overlay = dict(_question_overlay(state), editing=False)
+                overlay.pop("answer_full", None)
+                return replace(state, folds=tuple(sorted(folds.items())), question_overlay=overlay), ()
             folds[QUESTION_OPEN_FOLD] = tag
             state = replace(state, folds=tuple(sorted(folds.items())))
             if isinstance(ref, Mapping) and ref.get("id"):
@@ -923,6 +1177,9 @@ def _reduce(state, event, frame=None):
             return replace(state, folds=tuple(sorted(folds.items()))), ()
         if action[0] == "question.select" and len(action) > 2:
             return _question_selection(state, action[2])
+        if (action[0] in ("question.choice", "question.edit", "question.submit")
+                and state.opened_for(QUESTION_OPEN_FOLD) == "-"):
+            return state, ()
         if action[0] == "question.choice" and len(action) > 2:
             detail = _question_overlay(state).get("detail")
             question_id, answer = str(action[1]), str(action[2])
@@ -937,7 +1194,13 @@ def _reduce(state, event, frame=None):
                 return state, ()
             if question_multiple_select(detail, question_id):
                 return _question_toggle_choice(state, question_id, answer)
-            return _question_store_answers(state, question_id, [answer])
+            note = _question_text_draft(_question_overlay(state), question_id) if _question_uses_workflow_transport(detail) else ""
+            question = next(item for item in question_items(detail) if item["id"] == question_id)
+            if question_mark(_question_overlay(state), question) is not None:
+                choices = question.get("choices", question.get("options"))
+                at = next(i for i, c in enumerate(choices) if _question_choice_value(c) == answer)
+                state = _question_mark_state(state, question_id, (at, True))
+            return _question_store_answers(state, question_id, [answer] + ([note] if note else []))
         if action[0] == "question.edit":
             overlay = dict(_question_overlay(state))
             detail = overlay.get("detail")
@@ -979,10 +1242,7 @@ def _reduce(state, event, frame=None):
         if action[0] == "ui" and len(action) > 2:
             folds = state.fold_map()
             offsets = dict(state.scroll)
-            if action[1] == "sel":
-                folds = {key: value for key, value in folds.items()
-                         if key not in ("ui:sel", "ui:model", "ui:effort") + _MODEL_FIND_FOLDS}
-                offsets.pop("mpick", None)
+            _draft(folds, offsets, "ui:" + str(action[1]))
             folds["ui:" + str(action[1])] = str(action[2])
             return replace(state, folds=tuple(sorted(folds.items())),
                            scroll=tuple(sorted(offsets.items()))), ()
@@ -990,7 +1250,7 @@ def _reduce(state, event, frame=None):
             folds = state.fold_map()
             folds["ui:mfocus"] = "1"
             return replace(state, folds=tuple(sorted(folds.items()))), ()
-        if action[0] == "models.apply" and len(action) in (5, 7):
+        if action[0] == "models.apply" and len(action) in (5, 6, 7):
             return state, (action,)
         if action[0] == "alloc.apply" and len(action) == 3:
             return state, (action,)
@@ -1163,66 +1423,189 @@ def _reduce(state, event, frame=None):
         overlay = _question_overlay(state)
         refs = _question_refs(event)
         selected = state.opened_for("qsel:QUESTIONS", "")
+        unfolded = state.opened_for(QUESTION_OPEN_FOLD) != "-"
+        if overlay.get("answer_full"):
+            overlay = dict(overlay)
+            overlay.pop("answer_full")
+            state = replace(state, question_overlay=overlay)
+        if key == "newline" and _question_secret(overlay):
+            # 11-26: in a secret every line-break key is Enter, as Ctrl+J was before (the shell's popup does the same).
+            key = "enter"
+        # Review 1861: a paste that stalled goes in by parts as it comes (``paste-part:``). Whether one of them put a line
+        # break in a secret (``paste_lines``) is kept until the paste's end, which any other key is.
+        part = isinstance(key, str) and key.startswith("paste-part:")
+        if part:
+            key = "text:" + key[len("paste-part:"):]
+        paste_lines = bool(overlay.get("paste_lines"))
+        if "paste_lines" in overlay and not part:
+            overlay = dict(overlay)
+            overlay.pop("paste_lines")
+            state = replace(state, question_overlay=overlay)
+        # 11-26: the cell column ↑↓ hold while they repeat inside a written answer; any other key lets it go.
+        goal = overlay.get("caret_goal") if key in ("up", "down") else None
+        if "caret_goal" in overlay and key not in ("up", "down"):
+            overlay = dict(overlay)
+            overlay.pop("caret_goal")
+            state = replace(state, question_overlay=overlay)
+        if key in ("up", "down") and unfolded and overlay.get("editing") and overlay.get("state") == "open":
+            # In a written answer of several rows ↑↓ go between its rows (at the width Fleet drew it); from its
+            # first row ↑ leaves the typing and from its last ↓ goes on, as they did.
+            questions = question_items(overlay.get("detail"))
+            question_id = overlay.get("editing_question_id") or (questions[0]["id"] if questions else None)
+            text = _question_text_draft(overlay, question_id) if question_id else ""
+            width = dict(getattr(frame, "answer_layout", ()) or ()).get(question_id)
+            if text and width:
+                moved = _question_vertical(text, question_caret(overlay, question_id, text), width,
+                                           -1 if key == "up" else 1, goal)
+                if moved is not None:
+                    return replace(state, question_overlay=dict(
+                        overlay, caret=(question_id, moved[0]), caret_goal=moved[1])), ()
+        if key == "up" and unfolded and overlay.get("editing"):
+            overlay = _question_without_caret(dict(overlay, editing=False))
+            return replace(state, question_overlay=overlay), ()
         if key in ("up", "down") and refs:
             ids = [ref.get("id", "") for ref in refs]
             index = ids.index(selected) if selected in ids else (-1 if key == "down" else 0)
             step = -1 if key == "up" else 1
             return _question_selection(state, refs[(index + step) % len(refs)])
+        if (unfolded and overlay.get("state") == "open" and isinstance(key, str)
+                and (key.startswith("text:") or key == "newline" or len(key) == 1 and key.isprintable())):
+            detail = overlay.get("detail")
+            specs = question_items(detail)
+            qid = overlay.get("editing_question_id") or (specs[0]["id"] if specs else "")
+            if qid and question_free_text_supported(detail, qid):
+                # 11-26: a line break (Ctrl+J, Alt+Enter) is a character of the answer like any other.
+                addition = "\n" if key == "newline" else key[5:] if key.startswith("text:") else key
+                question = next(item for item in specs if item["id"] == qid)
+                secret_lines = False
+                if key.startswith("text:") and (question.get("is_secret") or question.get("isSecret")):
+                    if part:
+                        # A part never ends with line breaks (they wait for what comes after them).
+                        secret_lines = paste_lines or "\n" in addition
+                    else:
+                        # A pasted secret keeps its inner line breaks; of the ones it ends with, one stays when it was
+                        # pasted in several lines (a private key needs its last one), none for a one-line secret.
+                        body = addition.rstrip("\n")
+                        addition = body + ("\n" if body != addition and (paste_lines or "\n" in body) else "")
+                    if not addition:
+                        return state, ()
+                choices = question.get("choices", question.get("options"))
+                if overlay.get("editing") or not choices or not (len(addition) == 1 and addition in "123456789"):
+                    text = _question_text_draft(overlay, qid)
+                    at = question_caret(overlay, qid, text)
+                    joined = text[:at] + addition + text[at:]
+                    if len(joined.encode("utf-8")) <= 4096:
+                        result = _question_with_caret(_question_set_answer(state, qid, joined), qid,
+                                                      at + len(addition))
+                        if secret_lines:
+                            result = replace(result[0], question_overlay=dict(
+                                _question_overlay(result[0]), paste_lines=True)), result[1]
+                        return result
+                    # As much of a paste as fits goes in, and the limit is said (the shell's popup does the same).
+                    room = 4096 - len(text.encode("utf-8"))
+                    fit = addition.encode("utf-8")[:max(0, room)].decode("utf-8", "ignore")
+                    if fit and len(addition) > 1:
+                        result = _question_with_caret(_question_set_answer(state, qid, text[:at] + fit + text[at:]),
+                                                      qid, at + len(fit))
+                        return replace(result[0], question_overlay=dict(
+                            _question_overlay(result[0]), answer_full=True)), result[1]
+                    return replace(state, question_overlay=dict(overlay, answer_full=True)), ()
         if key in ("e", "E"):
             return _reduce(state, {"type": "click", "action": ("question.edit",)}, frame)
-        if (isinstance(key, str) and len(key) == 1 and key in "123456789"
+        if (unfolded and isinstance(key, str) and len(key) == 1 and key in "123456789"
                 and not overlay.get("editing")):
-            # A number picks that choice of the first question still waiting for one,
-            # exactly as pressing its line does.
+            # A number picks a choice in the first question still waiting for an
+            # answer (the first question once all are answered). Repeating the
+            # number that is already marked on that same question clears it.
             detail = overlay.get("detail")
             answers = ((_question_draft_response(overlay) or {}).get("answers", {}))
             specs = [item for item in question_items(detail)
                      if isinstance(item.get("choices", item.get("options")), (list, tuple))
                      and item.get("choices", item.get("options"))]
+            index = int(key) - 1
             target = next((item for item in specs if not question_values_valid(
                 detail, item["id"], answers.get(item["id"], ()))), specs[0] if specs else None)
             if target is None:
                 return state, ()
+            if question_mark(overlay, target) == (index, True):
+                note = _question_text_draft(overlay, target["id"])
+                state = _question_mark_state(state, target["id"], (-1, False))
+                return _question_store_answers(state, target["id"], [note] if note else [])
             values = [value for value in (_question_choice_value(choice) for choice in
                                           target.get("choices", target.get("options")))
                       if value]
-            index = int(key) - 1
             if index >= len(values):
                 return state, ()
             return _reduce(state, {"type": "click",
                                    "action": ("question.choice", target["id"], values[index])}, frame)
         if key in ("escape", "esc") and overlay.get("editing"):
-            overlay = dict(overlay)
+            overlay = _question_without_caret(overlay)
             overlay.update(editing=False, status="Editing paused; draft retained.")
             return replace(state, question_overlay=overlay), ()
+        text_keys = ("delete", "ctrl-a", "ctrl-e", "ctrl-u", "ctrl-k", "word-left", "word-right", "word-back",
+                     "word-delete", "text-start", "text-end")
+        if unfolded and overlay.get("editing") and overlay.get("state") == "open" and key in (
+                "left", "right", "home", "end", *text_keys):
+            # 11-22: while an answer is typed, these keys move inside its text, or delete at the place
+            # (Delete, Ctrl+A/E and the word and line keys belong to the text whether or not it has any yet).
+            # With no text ←→ and Home/End keep their meaning (the view switch, the pane scroll).
+            # 11-26: Home/End (Ctrl+A/E) go to the ends of the line holding the place, Ctrl+Home/End to the
+            # ends of the text; Alt/Ctrl+←→ step a word, Ctrl+W and Alt+Backspace delete the word before the
+            # place, Alt+D and Ctrl+Delete the one after it, Ctrl+U the line before it, Ctrl+K the line after it.
+            questions = question_items(overlay.get("detail"))
+            question_id = overlay.get("editing_question_id") or (
+                questions[0]["id"] if questions else None)
+            text = _question_text_draft(overlay, question_id) if question_id else ""
+            if text or key in text_keys:
+                at = question_caret(overlay, question_id, text)
+                cuts = {"delete": (at, question_char_after(text, at)),
+                        "word-back": (question_word_left(text, at), at),
+                        "word-delete": (at, question_word_right(text, at)),
+                        "ctrl-u": (question_line_start(text, at), at),
+                        "ctrl-k": (at, question_line_end(text, at))}
+                if key in cuts:
+                    start, end = cuts[key]
+                    if end > start:
+                        return _question_with_caret(
+                            _question_set_answer(state, question_id, text[:start] + text[end:]),
+                            question_id, start)
+                    return state, ()
+                place = (question_line_start(text, at) if key in ("home", "ctrl-a")
+                         else question_line_end(text, at) if key in ("end", "ctrl-e")
+                         else 0 if key == "text-start" else len(text) if key == "text-end"
+                         else question_word_left(text, at) if key == "word-left"
+                         else question_word_right(text, at) if key == "word-right"
+                         else question_char_after(text, at) if key == "right"
+                         else question_char_before(text, at) if at else 0)
+                return replace(state, question_overlay=dict(overlay, caret=(question_id, place))), ()
         if overlay.get("editing") and key == "backspace":
             questions = question_items(overlay.get("detail"))
             question_id = overlay.get("editing_question_id") or (
                 questions[0]["id"] if questions else None)
             text = _question_text_draft(overlay, question_id)
-            if text and question_id:
-                return _question_set_answer(state, question_id, text[:-1])
-            return state, ()
-        if overlay.get("editing") and isinstance(key, str) and key.startswith("text:"):
-            questions = question_items(overlay.get("detail"))
-            question_id = overlay.get("editing_question_id") or (
-                questions[0]["id"] if questions else None)
-            text = _question_text_draft(overlay, question_id)
-            addition = key[5:]
-            if question_id and addition and len(text) + len(addition) <= 16000:
-                return _question_set_answer(state, question_id, text + addition)
+            at = question_caret(overlay, question_id, text)
+            if text and question_id and at:
+                start = question_char_before(text, at)
+                return _question_with_caret(
+                    _question_set_answer(state, question_id, text[:start] + text[at:]),
+                    question_id, start)
             return state, ()
         if key in ("enter", "\n"):
-            if overlay.get("editing"):
-                if question_answer_supported(overlay.get("detail")):
-                    return _question_submit(state)
-                overlay = dict(overlay)
-                overlay.update(editing=False,
-                               status="Private draft saved; use the native prompt to respond.")
-                return replace(state, question_overlay=overlay), ()
-            if (_question_draft_response(overlay) is not None
-                    and isinstance(overlay.get("detail"), Mapping)
-                    and overlay["detail"].get("state") == "open"):
+            if unfolded and overlay.get("editing") and overlay.get("state") == "open":
+                # 11-26: `\` then Enter (the native input's own way): the `\` before the place becomes a line break.
+                questions = question_items(overlay.get("detail"))
+                question_id = overlay.get("editing_question_id") or (questions[0]["id"] if questions else None)
+                text = _question_text_draft(overlay, question_id) if question_id else ""
+                at = question_caret(overlay, question_id, text)
+                if at and text[at - 1] == "\\" and not _question_secret(overlay):
+                    return _question_with_caret(
+                        _question_set_answer(state, question_id, text[:at - 1] + "\n" + text[at:]), question_id, at)
+            if (unfolded and overlay.get("state") == "open"
+                    and _question_draft_response(overlay) is not None):
+                if overlay.get("editing") and not question_answer_supported(overlay.get("detail")):
+                    overlay = dict(overlay, editing=False,
+                                   status="Private draft saved; use the native prompt to respond.")
+                    return replace(state, question_overlay=overlay), ()
                 return _question_submit(state)
             if selected:
                 ref = next((item for item in refs if item.get("id") == selected), None)

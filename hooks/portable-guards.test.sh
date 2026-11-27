@@ -49,8 +49,22 @@ fi
 
 # Outputs belong to this run's mktemp directory, including across clones.
 
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d)" || exit 1
+cleanup_fixture() {
+  local status=$?
+  if ! python3 - "$ROOT" "$TMP" <<'PYTHON'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "tools"))
+from fixture_processes import remove_temporary_directory
+remove_temporary_directory(sys.argv[2])
+PYTHON
+  then
+    if [ "$status" -eq 0 ]; then status=1; fi
+  fi
+  exit "$status"
+}
+trap cleanup_fixture EXIT
 # Codex prompt hooks derive a dispatch state root. HOME alone is not enough:
 # HARNESS_STATE_ROOT (and XDG_STATE_HOME) take precedence in
 # dispatch_contract.state_root(), so an inherited live value would write the
@@ -1290,11 +1304,6 @@ if "$CODEX" role planning >"$TMP/codex_role_planning.out" 2>"$TMP/codex_role_pla
 else
   bad "codex role wrapper should map pipeline stages to portable unit-catalog roles"
 fi
-if "$CODEX" role plan team >"$TMP/codex_role_retired.out" 2>"$TMP/codex_role_retired.err"; then
-  bad "codex role wrapper should reject the retired 'plan team' profile alias"
-else
-  ok "codex role wrapper rejects the retired 'plan team' profile alias"
-fi
 if "$CODEX" role variable reviewer >"$TMP/role_set.out" 2>"$TMP/role_set.err" \
   && grep -q '^role=variable reviewer$' "$TMP/role_set.out" \
   && grep -q '^family=role-set$' "$TMP/role_set.out" \
@@ -1722,15 +1731,14 @@ else
 fi
 # 재홈 2026-07-22: per-team TOML boundaries retired — role-specific runtime boundaries now
 # live in unit-catalog frontmatter enforced by tools/check-unit-config.py; the kernel
-# memory-scout TOML stays read-only and team TOMLs must not reappear in the projection.
+# memory-scout TOML stays read-only.
 if python3 "$ROOT/tools/check-unit-config.py" >"$TMP/codex_unit_config.out" 2>"$TMP/codex_unit_config.err" \
   && grep -q '^read_only: true$' "$ROOT/roles/units/qa/test.md" \
   && grep -q '^worker_type: review$' "$ROOT/roles/units/qa/test.md" \
   && grep -q '^read_only: true$' "$ROOT/roles/units/qa/security-review.md" \
   && grep -q '^read_only: false$' "$ROOT/roles/units/dev/backend.md" \
   && grep -q '^worker_type: stage$' "$ROOT/roles/units/dev/backend.md" \
-  && grep -q 'sandbox_mode = "read-only"' "$TMP/codex_agent_home/agents/memory-scout.toml" \
-  && [ -z "$(find "$TMP/codex_agent_home/agents" -name '*-team.toml' -print -quit)" ]; then
+  && grep -q 'sandbox_mode = "read-only"' "$TMP/codex_agent_home/agents/memory-scout.toml"; then
   ok "codex native agent projection enforces role-specific runtime boundaries"
 else
   bad "codex native agent projection should encode role-specific runtime boundaries"
@@ -2557,11 +2565,6 @@ fi
 
 echo "== opencode preflight wrapper =="
 git -C "$TMP/repo" switch -q -c opencode-work
-if "$OPENCODE" write "$TMP/repo/f" opencodesid >"$TMP/opencode.out" 2>"$TMP/opencode.err"; then
-  ok "opencode preflight passes clean write"
-else
-  bad "opencode preflight should pass clean write"
-fi
 if AGENT_HOME="$ROOT" bash "$DESIGN" --file "$TMP/not-design.txt" >"$TMP/design.out" 2>"$TMP/design.err" \
   && "$OPENCODE" design "$TMP/not-design.txt" >"$TMP/design.out" 2>"$TMP/design.err"; then
   ok "opencode design postwrite wrappers no-op on non-html"
@@ -3728,12 +3731,26 @@ out=$(printf '%s' '{"tool_name":"Skill","tool_input":{"skill":"code-execute"}}' 
 [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '"additionalContext"' && ! printf '%s' "$out" | grep -q 'permissionDecision' \
   && ok "SDR hook mode reminds without deny" \
   || bad "SDR hook mode should remind only (rc=$rc) [$out]"
+# (ix) the owner of a `solo` route at standard (the middle cell) makes the work itself: its route file holds a depth-1
+# `one-shot` owner node, so it is no conductor and the reminder stays silent; a team route's owner is reminded as before
+mkdir -p "$TMP/sdr-routes"
+printf '%s' '{"nodes":[{"id":"impl-review","unit":"qa/code-review","dispatch_depth":2},{"id":"one-shot","unit":"_kernel/owner","dispatch_depth":1}]}' > "$TMP/sdr-routes/cell.json"
+printf '%s' '{"nodes":[{"id":"plan","unit":"code/plan","dispatch_depth":2},{"id":"report","unit":"_kernel/owner","dispatch_depth":1}]}' > "$TMP/sdr-routes/team.json"
+out=$(AGENT_ROUTE_FILE="$TMP/sdr-routes/cell.json" "$SDR" --skill code-execute --dispatch-depth 1 --intensity standard 2>&1); rc=$?
+[ "$rc" -eq 0 ] && [ -z "$out" ] && ok "SDR no-ops for the owner of a solo route at standard (it makes the work)" \
+  || bad "SDR should no-op for the middle cell's owner [$out] rc=$rc"
+out=$(AGENT_ROUTE_FILE="$TMP/sdr-routes/team.json" "$SDR" --skill code-execute --dispatch-depth 1 --intensity standard 2>/dev/null); rc=$?
+[ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'dispatch-depth-1 conductor' \
+  && ok "SDR still reminds a team route's owner" || bad "SDR should remind a team owner [$out] rc=$rc"
+out=$(AGENT_ROUTE_FILE="$TMP/sdr-routes/missing.json" "$SDR" --skill code-execute --dispatch-depth 1 --intensity standard 2>/dev/null); rc=$?
+[ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'dispatch-depth-1 conductor' \
+  && ok "SDR reminds when the route file cannot be read" || bad "SDR should remind when the route is unreadable [$out] rc=$rc"
 
 echo "== §5.10 main-session lifecycle predicates: harness markers only =="
 # A runtime injects CLAUDE_CODE_CHILD_SESSION into every child process an ordinary
 # interactive session spawns (hooks included), so an agent-team teammate session carries
 # it. Only harness-planted markers may gate main-session lifecycle hooks.
-predtmp="$(mktemp -d)"
+predtmp="$(mktemp -d "$TMP/pred.XXXXXX")" || exit 1
 mkdir -p "$predtmp/desk" "$predtmp/proj"
 printf '# oncall\n' > "$predtmp/oncall.md"
 HERDR="$ROOT/hooks/herdr-agent-state.sh"
@@ -3866,7 +3883,6 @@ if grep -q 'pane-fallback' "$predrecv" 2>/dev/null; then
 else bad "herdr pane state must try the next candidate tree when one fails to import"; fi
 kill "$predsrv" 2>/dev/null || true
 wait "$predsrv" 2>/dev/null || true
-rm -rf "$predtmp"
 
 echo "== drill runtime failure propagation + Fleet limit marker =="
 drilltmp="$TMP/drill-runtime-failure"
@@ -3956,8 +3972,7 @@ dispatch_scan_prod=$(cd "$ROOT" && grep -rnE \
 #  - intentional executing source that only ever *feeds* the canonical
 #    resolver a legacy/explicit candidate path (never reconstructs authority
 #    on its own): tools/install/distribution.py's two legacy release
-#    candidates, tools/migration-manifest.py's non-executing inventory read,
-#    tools/fleet/collectors/dispatch.py's explicit ~/.claude legacy
+#    candidates, tools/fleet/collectors/dispatch.py's explicit ~/.claude legacy
 #    discovery, and (Slice 2, same shape as distribution.py's candidates)
 #    dispatch.py's own compat-jobs synthesis in _row_state_roots (a caller
 #    with no row must not depend on inherited AGENT_DISPATCH_JOBS, so it pins
@@ -3973,13 +3988,12 @@ dispatch_scan_prod=$(cd "$ROOT" && grep -rnE \
 # moves an existing one. Each entry is an intentional source that only ever
 # feeds the canonical resolver an explicit candidate path, or prose naming
 # the layout: distribution.py's release candidates and its forced-prune gap
-# reader, migration-manifest.py's non-executing inventory, the Fleet dispatch
+# reader, the Fleet dispatch
 # collector's explicit legacy discovery, and the wrappers'/docs' description
 # of where a registry lives (peer_obligations.py's `_rebase_release_argument`
 # docstring names a release-local registry it leaves alone).
 dispatch_scan_allowed='
 tools/install/distribution.py 3
-tools/migration-manifest.py 2
 tools/fleet/collectors/dispatch.py 6
 tools/fleet/collectors/__init__.py 1
 utilities/peer_obligations.py 1

@@ -56,7 +56,7 @@ shown on the card. If both same-harness legs resolve to the same concrete model,
    and the approved leg's prompt names the list's path. A blocked or failed
    scan leaves one line and the launch goes on.
 2. `start` joins the frame legs.
-3. The existing single frame interview (`needs-interview`, then `needs-question`) asks the person once.
+3. The existing single frame interview (`needs-interview`, then `needs-question`) asks the person once, and only when there is something to choose; with nothing to choose the runtime records the supervisor answer itself and sends a one-line notice (`core/WORKFLOW.md` §0.4). That holds for a one-leg frame too.
 4. On `proceed` the runtime fixes one `route_decision_v1` record, completes the terminal with that record as its evidence, closes the route and finalizes the producer cycle.
 5. `revise` and `stop` behave as they do for every other frame route.
 
@@ -64,7 +64,11 @@ The record has an immutable `decision` part with its canonical digest and a sepa
 
 ## Hints
 
-`--capability`, `--capability-mode`, `--graph` and `--profile` given with `--shape framed` are recorded as `routing_hints` in the work request. They are never sealed as the route's capability and never refused as an argument conflict. `--pin`, `--campaign-key`, `--parent-cycle` and `--unassigned` apply as for any route.
+`--capability`, `--capability-mode`, `--field`, `--graph` and `--profile` given with `--shape framed` are recorded as `routing_hints` in the work request. They are never sealed as the route's capability or field and never refused as an argument conflict. `--pin`, `--campaign-key`, `--parent-cycle` and `--unassigned` apply as for any route.
+
+## Field
+
+The framed route records no field of its own: the frame proposes the field of the work it routes. Each `route_proposal_v1` leg may carry an optional `field` (one of `capabilities/topologies.json` `fields`). A leg composed from the approved record seals it with `field_source: frame`; a leg without one seals its proposed kind's default field, also as `frame`. An unknown value is left out and named in the review notes (`ignored:legs[<i>].field`); it never invalidates the leg. A `--field` typed beside `--route-plan` is the person's own and seals as `explicit`.
 
 ## Completion
 

@@ -128,7 +128,8 @@ def effort_label(effort):
     return "med" if text == "medium" else text
 
 
-def line_segments(values, columns, *, complete=False, reported_only=False, fields=None, branch_room=None):
+def line_segments(values, columns, *, complete=False, reported_only=False, fields=None, branch_room=None,
+                  jobs=False):
     """``[tag] project (git) │ model effort │ context ━━── N% │ ◑답 대기 N │ route N │ 5h … 7d …``.
 
     Shorten words before losing a known count; never invent an unknown value.
@@ -139,6 +140,10 @@ def line_segments(values, columns, *, complete=False, reported_only=False, field
     ``reported_only`` leaves out the context and quota readings the native
     callback has not reported yet (Claude sends them only after its first
     response), as the native statusline did, instead of painting ``?``.
+
+    ``jobs`` ends the line with the running jobs (``>_ name``) for a surface that
+    has no row of its own for them (Claude's one statusline row inside the shell);
+    their words are the first to shorten, and they go before another group shortens.
 
     Input is the same observed Session fields plus the shared question/route
     projection and the account's seven-day window. Exact native display telemetry
@@ -216,6 +221,8 @@ def line_segments(values, columns, *, complete=False, reported_only=False, field
     for label, used in values.get("model_quotas") or ():
         words("model_quota", _percent(used), _level(used), 8, 99,
               before=[(_text(label) + " ", _model_key(label))], minimum=8)
+    if jobs and values.get("jobs"):
+        words("jobs", values["jobs"], "loc_repo", 48 if complete else 24, 0, before=[(">_ ", "lvl_g")], minimum=4)
 
     separator = SEPARATOR
 
@@ -233,23 +240,60 @@ def line_segments(values, columns, *, complete=False, reported_only=False, field
     def size():
         return sum(cell_width(text) for text, _key in render())
 
-    for group in sorted(groups, key=lambda group: group["priority"]):
-        extra = max(0, size() - columns)
-        group["budget"] -= min(extra, group["budget"] - group["minimum"])
-    if size() > columns:
-        separator = " "
+    for group in groups:
+        group["room"] = group["budget"]
+
+    def fit():
+        # Each pass starts from the whole words, so a group that gave way returns its
+        # cells to the ones that stay (a dropped folder no longer leaves the model as `…`).
+        nonlocal separator
+        separator = SEPARATOR
+        for group in groups:
+            group["budget"] = group["room"]
+        for group in sorted(groups, key=lambda group: group["priority"]):
+            extra = max(0, size() - columns)
+            group["budget"] -= min(extra, group["budget"] - group["minimum"])
+        if size() > columns:
+            separator = " "
+
+    fit()
+    # The running jobs give way whole before another group gives a cell (the folder keeps its name).
+    if any(group["name"] == "jobs" for group in groups) and any(
+            group["budget"] < group["room"] for group in groups if group["name"] != "jobs"):
+        groups[:] = [group for group in groups if group["name"] != "jobs"]
+        fit()
     for group in groups:
         if size() > columns and group.get("short"):
-            group["text"] = group["short"]; group["budget"] = cell_width(group["short"])
-    for name in ("thread", "folder", "model"):
+            group["text"] = group["short"]
+            group["room"] = group["budget"] = group["minimum"] = cell_width(group["short"])
+            fit()
+    for name in ("jobs", "thread", "folder", "model"):
         if size() <= columns:
             break
         groups[:] = [group for group in groups if group["name"] != name]
+        fit()
     output = render()
     if size() > columns:
-        # At exceptionally small sizes the native terminal still gets its full
-        # viewport. Preserve the two action counts before optional telemetry.
-        groups[:] = [group for group in groups if group["name"] in {"route", "wait"}]
+        # At exceptionally small sizes the native terminal still gets its full viewport.
+        # What the person must act on stays, the most urgent last to go: the answer wait,
+        # compaction imminent, a context or usage reading at Fleet's red level, then the
+        # route count; calm readings go. The kept readings first lose their reset time, then
+        # the context gauge (words before values).
+        def urgency(group):
+            name, red = group["name"], group["key"] == "lvl_r"
+            return {"wait": 0, "compaction": 1}.get(name, 2 if name == "context" and red else
+                                                  3 if name in QUOTA_GROUPS and red else
+                                                  4 if name == "route" else None)
+        groups[:] = [group for group in groups if urgency(group) is not None]
+        for group in groups:
+            if size() > columns and group["name"] in QUOTA_GROUPS:
+                group["after"] = []
+        for group in groups:
+            if size() > columns and group["name"] == "context":
+                group["before"] = group["before"][:1]
+        while size() > columns and len(groups) > 1:
+            least = max(urgency(group) for group in groups)
+            groups.remove([group for group in groups if urgency(group) == least][-1])
         output = render()
     return output
 
@@ -372,10 +416,13 @@ def claude_native_statusline(callback, environ):
     except ValueError:
         columns = 100
     colors = 256 if "256color" in environ.get("TERM", "") or environ.get("COLORTERM") else 8
-    # Every field stays in this row on every callback. While the visible panel
-    # paints these values, the shell blanks exactly this recorded output; if the
-    # panel goes away, the native row is already complete.
-    rows = [clip_segments(line, columns) for line in status_lines(values, columns, reported_only=True)]
+    # One row on every callback (2026-11-14): Claude keeps as many rows under its
+    # input as this output has, so the common line at the native width, shortened
+    # by its own narrow-width rule, with the running jobs at its end. While the
+    # panel or its folded strip paints these values, the shell writes its one line (spec
+    # rule 60) over exactly this recorded row; where the panel is not painted (Fleet over
+    # the window, the settings screen, a window not yet bound) the row stays as Claude draws it.
+    rows = [clip_segments(line_segments(values, columns, reported_only=True, jobs=True), columns)]
     _record_claude_rows(environ, sid, ["".join(text for text, _key in row) for row in rows])
     return statusline_ansi(rows, colors=colors, no_color="NO_COLOR" in environ)
 
@@ -708,7 +755,7 @@ def route_doer(route, jobs, get, live):
                 "role": ((_worker_role(route) if shared.get("worker") is True else "owner")),
                 "tokens": shared.get("tokens") if type(shared.get("tokens")) is int else None,
                 "tool": shared.get("tool"), "agents": shared.get("agents") or 0,
-                **{key: shared[key] for key in ("target", "tool_age", "idle_tool", "after_tool")
+                **{key: shared[key] for key in ("target", "tool_age", "idle_tool", "after_tool", "now")
                    if shared.get(key)}}
     stage = (route or {}).get("worker_stage")
     owners = live._owner_jobs(jobs)
@@ -738,10 +785,12 @@ def route_doer(route, jobs, get, live):
             "agents": sum(1 for agent in agents if get(agent, "active") is True)
                       if working and isinstance(agents, (list, tuple)) else 0,
             **{key: activity[key] for key in ("target", "tool_age", "idle_tool", "after_tool")
-               if key in activity}}
+               if key in activity},
+            # The session's own NOW (Fleet's session row value, already on the job).
+            **({"now": live._text(get(job, "summary", "now"))} if live._text(get(job, "summary", "now")) else {})}
 
 
-_DOER_LIMITS = (("harness", 64), ("model", 128), ("effort", 64), ("tool", 64), ("target", 120), ("tool_age", 16))
+_DOER_LIMITS = (("harness", 64), ("model", 128), ("effort", 64), ("tool", 64), ("target", 120), ("tool_age", 16), ("now", 160))
 
 
 def _doer_values(doer):
@@ -755,7 +804,50 @@ def _doer_values(doer):
     return shown
 
 
-def route_tree(row, jobs, owner, doer, get, live, now, state=None):
+def called_tree(called, caller, now, depth=0):
+    """The unit legs the attempt ``caller`` started and still run, each with the ones it started in turn.
+
+    ``called`` is the route record's own list (``live._stand_called_units``: its values, in the order they were
+    called); this keeps bounded text values and the start time, as a stage worker's row does."""
+    out = []
+    for item in called or ():
+        if not isinstance(item, dict) or item.get("caller") != caller or not item.get("unit"):
+            continue
+        shown = {"unit": str(item["unit"])[:48],
+                 "marker": item["marker"] if item.get("marker") in ("working", "idle", "blocked", "dead", "stale") else "idle"}
+        for key, limit in (("harness", 64), ("effort", 64)):
+            if isinstance(item.get(key), str) and 0 < len(item[key]) <= limit:
+                shown[key] = item[key]
+        pair = item.get("model")
+        if isinstance(pair, (list, tuple)) and pair and isinstance(pair[0], str) and pair[0]:
+            shown["model"] = pair[0][:128]
+        if isinstance(item.get("title"), str) and item["title"]:
+            shown["title"] = item["title"][:160]
+        for key in ("kind", "field"):
+            if isinstance(item.get(key), str) and item[key]:
+                shown[key] = item[key][:32]
+        minutes = _number(item.get("elapsed_min"))
+        if minutes is not None:
+            shown["since"] = now - minutes * 60
+        if depth < 3 and item.get("attempt"):
+            below = called_tree(called, item["attempt"], now, depth + 1)
+            if below:
+                shown["called"] = below
+        out.append(shown)
+    return out[:8]
+
+
+def lead_called(called, placed, now):
+    """The unit legs started by attempts that no stage worker row carries (the owner, or a unit route's worker)."""
+    by_attempt = {item.get("attempt") for item in called or () if isinstance(item, dict)}
+    out = []
+    for caller in dict.fromkeys(item.get("caller") for item in called or () if isinstance(item, dict)):
+        if caller not in by_attempt and caller not in placed:
+            out.extend(called_tree(called, caller, now))
+    return out[:8]
+
+
+def route_tree(row, jobs, owner, doer, get, live, now, state=None, called=None, placed=None):
     """Spec E9 rule 43: the owner and each stage worker running now, apart.
 
     The workers are Fleet's own (the row's ``worker_contexts``, the live workers its route
@@ -766,10 +858,11 @@ def route_tree(row, jobs, owner, doer, get, live, now, state=None):
     earlier form. A finished stage's worker is not live, so not listed.
     """
     lead_works = bool(doer) and (doer.get("worker") is True or doer.get("role") in ("frame", "worker"))
-    if lead_works and owner is None:
+    # A frame route has no owner yet: its two legs hang straight under the route (11-17, route row 5).
+    if lead_works and owner is None and doer.get("role") != "frame":
         return {}
     tree = {"workers_live": []}
-    if lead_works:
+    if lead_works and owner is not None:
         values = route_doer({"state": state}, [owner], get, live)
         if values:
             tree["owner_doer"] = _doer_values(values)
@@ -810,6 +903,11 @@ def route_tree(row, jobs, owner, doer, get, live, now, state=None):
         elapsed = _number(get(job, "elapsed_min"))
         if elapsed is not None:
             worker["since"] = now - elapsed * 60
+        below = called_tree(called, get(job, "attempt_id"), now) if called else None
+        if below:
+            worker["called"] = below
+            if placed is not None:
+                placed.add(get(job, "attempt_id"))
         tree["workers_live"].append(worker)
     return tree
 
@@ -865,12 +963,18 @@ def route_details(snapshot, panels, routes=None, now=None):
                 else:
                     row["elapsed_min"] = round(max(elapsed), 1)
             doer = route_doer(route if isinstance(route, dict) else row, jobs, get, live)
+            called = route.get("called") if isinstance(route, dict) else None
+            placed = set()
             row.update(route_tree(row, jobs, owner, doer, get, live, now,
-                                  (route if isinstance(route, dict) else row).get("state")))
+                                  (route if isinstance(route, dict) else row).get("state"), called, placed))
+            # The unit legs a worker of this route started stand under that worker's row; the rest under the lead's.
+            lead = lead_called(called, placed, now) if called else None
+            if lead:
+                row["called"] = lead
             if not doer:
                 continue
             for key, limit in (("harness", 64), ("model", 128), ("effort", 64), ("tool", 64),
-                               ("target", 120), ("tool_age", 16), ("after_tool", 160)):
+                               ("target", 120), ("tool_age", 16), ("after_tool", 160), ("now", 160)):
                 if isinstance(doer.get(key), str) and 0 < len(doer[key]) <= limit:
                     row[key] = doer[key]
             if doer.get("idle_tool") is True:
@@ -888,7 +992,7 @@ def route_details(snapshot, panels, routes=None, now=None):
     return panels
 
 
-def session_route_status(snapshot, now=None, *, include_details=False):
+def session_route_status(snapshot, now=None, *, include_details=False, records_out=None):
     """Fleet's question-free route labels, with the row values the shell panel paints.
 
     Fleet's own route records are read from the same interpretation pass (no
@@ -896,7 +1000,7 @@ def session_route_status(snapshot, now=None, *, include_details=False):
     """
     from .explorer import live
     if not include_details:
-        return live.session_route_status(snapshot, now)
+        return live.session_route_status(snapshot, now, records_out=records_out)
     captured = []
     original = live._route_records
 
@@ -907,7 +1011,7 @@ def session_route_status(snapshot, now=None, *, include_details=False):
 
     live._route_records = observed
     try:
-        labels, panels = live.session_route_status(snapshot, now, include_details=True)
+        labels, panels = live.session_route_status(snapshot, now, include_details=True, records_out=records_out)
     finally:
         live._route_records = original
     try:
@@ -979,23 +1083,112 @@ def message_body(text):
     return " ".join(body.split()) or " ".join(str(text or "").split())
 
 
-def _message_when(at, now):
-    """``HH:MM`` today, ``MM-DD`` otherwise (local time); empty without a time."""
-    if not isinstance(at, (int, float)) or isinstance(at, bool) or at <= 0:
+def when_text(at, now=None):
+    """When something happened: ``HH:MM`` today, ``MM-DD`` on another day (local time); empty
+    without a time. The one form Fleet's screens and the shell panel write for a moment (how
+    long something took is :func:`elapsed_text`): never ``ago``, never seconds."""
+    if not isinstance(at, (int, float)) or isinstance(at, bool) or not math.isfinite(at) or at <= 0:
         return ""
-    stamp, today = time.localtime(at), time.localtime(now)
+    if not isinstance(now, (int, float)) or isinstance(now, bool) or not math.isfinite(now):
+        now = time.time()
+    try:
+        stamp, today = time.localtime(at), time.localtime(now)
+    except (OverflowError, OSError, ValueError):
+        return ""
     return time.strftime("%H:%M" if stamp[:3] == today[:3] else "%m-%d", stamp)
+
+
+_message_when = when_text
+
+
+def message_head_parts(row):
+    """``← [e4] claude · 21:02 · steer`` as painted parts: the head of one
+    :func:`peer_message_rows` row, the pieces the shell panel's MESSAGES head draws (the arrow
+    in its direction's color, the other session, then dim harness, time and kind, and a sent
+    message's delivery word in its own color). A value the row does not carry is left out."""
+    way = str(row.get("way") or "")
+    parts = [(way, "lvl_g" if way == "←" else "loc_repo"), (" ", "dim"), (str(row.get("who") or ""), "loc_repo")]
+    for name, lead in (("harness", " "), ("when", " · "), ("kind", " · ")):
+        if row.get(name):
+            parts.append((lead + str(row[name]), "dim"))
+    delivery = row.get("delivery")
+    if isinstance(delivery, (list, tuple)) and delivery and delivery[0]:
+        parts += [(" · ", "dim"), (str(delivery[0]), str(delivery[1]) if len(delivery) > 1 and delivery[1] else "dim")]
+    return parts
+
+
+# A large context left resting long is worth a word (its cache cools while it rests): the CTX
+# line then says since when it rests in place of when it was last cleared. One constant,
+# ``(tokens, seconds)``; the line is worked out from the moment the rest began whenever it is
+# drawn, so no timer keeps it.
+LONG_REST = (500_000, 60 * 60)
+
+
+def context_line_parts(percent, tokens=None, cleared_at=None, resting_since=None, now=None):
+    """``42% · 415K · cleared 04:48`` (Korean ``정리 04:48``) as painted parts: the context
+    percent in its level color, the exact token count and when the session was last cleared
+    (``cleared_at``: epoch seconds, or a time already in :func:`when_text`'s form). A large
+    context (``LONG_REST``) resting since long reads ``81% · 812K · idle 03:40`` instead, its
+    count and rest in the caution color. Each piece only when it is observed; ``[]`` when none
+    is (nothing is estimated)."""
+    from .config import ui_text
+    now = time.time() if now is None else now
+    parts = []
+
+    def add(text, key):
+        if parts:
+            parts.append((" · ", "dim"))
+        parts.append((text, key))
+
+    if _percent(percent) != "?":
+        add(_percent(percent), _level(percent))
+    rest = _number(resting_since)
+    resting = (type(tokens) is int and tokens >= LONG_REST[0] and rest is not None and rest > 0
+               and now - rest >= LONG_REST[1] and bool(when_text(rest, now)))
+    count = token_text(tokens)
+    if count:
+        add(count, "lvl_y" if resting else "dim")
+    if resting:
+        add(ui_text("fleet.context.resting", when=when_text(rest, now)), "lvl_y")
+    else:
+        cleared = (cleared_at.strip() if isinstance(cleared_at, str)
+                   and re.fullmatch(r"\d\d[:-]\d\d", cleared_at.strip()) else when_text(cleared_at, now))
+        if cleared:
+            add(ui_text("fleet.context.cleared", when=cleared), "dim")
+    return parts
+
+
+# What a still-pending message waits for, in the words ``peer-steward show`` uses (11-17: the sender's
+# panel and Fleet read the same pending row the same way): ``awaiting delivery · text stands in its
+# input · ...`` / ``전달 대기 · 입력창에 글 있음 · 보내거나 지우면 받음``. ``head`` is the first word alone,
+# the part a narrow row never cuts; a row from before the reason was kept has the word alone.
+def pending_wait(row):
+    """``(whole, head)`` for a pending row that has not gone in, else None."""
+    if not isinstance(row, dict) or row.get("state") != "pending":
+        return None
+    from .config import ui_text
+    head = ui_text("peer.delivery.waiting")
+    try:
+        from .explorer.output import utility
+        cause = utility("peer_request").hold_words(row, ui_text)
+    except Exception:  # noqa: BLE001 - a display word never costs the row
+        cause = ""
+    return (head + " · " + cause if cause else head), head
 
 
 # The sender's ledger status (peer-message `record --status`): the receiver's own
 # acknowledgement, the transport's acceptance, a failure, and `unknown`, written only
 # when the recipient could not be resolved (peer-steward), so it never arrives: `not
-# delivered`, with no age, in the caution color (it is not on its way).
-def _message_delivery(status, at, now):
+# delivered`, with no age, in the caution color (it is not on its way). A `sent` message whose
+# pending row has not gone in reads `awaiting delivery` and why (``pending``), as `peer-steward show` does.
+def _message_delivery(status, at, now, pending=None):
     from .config import ui_text
     if status == "received":
         return [ui_text("fleet.session_panel.message_delivered"), "dim"]
     if status == "sent":
+        waiting = pending_wait(pending)
+        if waiting:
+            return [waiting[0], "dim", waiting[1]]
         return [ui_text("fleet.session_panel.message_sent"), "dim"]
     if status == "failed":
         return [ui_text("fleet.session_panel.message_failed"), "lvl_r"]
@@ -1004,7 +1197,17 @@ def _message_delivery(status, at, now):
     return None
 
 
-def peer_message_rows(received, sent, tag_of, limit=8, now=None):
+def self_addressed(own, own_tag, harness, sid, tag):
+    """True when the other end of a message is this session itself: its exact identity, or the
+    Fleet number this session holds (a confirmed earlier id of the same seat reads the same
+    number). A session-tidy notice a session sends to its own seat is such a message: it is no
+    message between two sessions, so the MESSAGES lists leave it out (its tidy line still says it)."""
+    if own and (harness, sid) == tuple(own) and sid:
+        return True
+    return bool(own_tag) and bool(tag) and str(tag).strip("[]") == str(own_tag).strip("[]")
+
+
+def peer_message_rows(received, sent, tag_of, limit=8, now=None, own=None, pending_of=None, pending_limit=8):
     """The latest ``limit`` peer messages, oldest first.
 
     Each row: ``way`` (``←`` received, ``→`` sent), ``who`` (the other session's Fleet
@@ -1013,13 +1216,26 @@ def peer_message_rows(received, sent, tag_of, limit=8, now=None):
     ``body``. ``received`` are the exact session's retained received inputs (source
     ``peer``); ``sent`` are its own ledger records. Values are what those records
     already keep; nothing is fetched or reconstructed here, and an absent one is left out.
+
+    ``own`` is this session's ``(harness, session_id)``: a message whose other end is this
+    session itself (:func:`self_addressed`) is left out here, the one place the shell panel's
+    MESSAGES (its popup and the folded strip's count) and Fleet's session page read them from,
+    so a record already written reads the same as a new one.
+
+    ``pending_of(ref)`` (11-17) gives the pending row of a sent message, read once for each of the
+    (at most ``limit``) rows that stay and whose status is still ``sent``: a row that has not gone in
+    reads ``awaiting delivery`` and why. Without it, or where it gives nothing, the word is ``sent``.
+    Only the newest ``pending_limit`` such rows are read (a long list reads the few the eye is on).
     """
     now = time.time() if now is None else now
+    own_tag = tag_of(*own) if own else None
     rows = []
     for row in received or ():
         if not isinstance(row, dict) or row.get("source") != "peer":
             continue
         tag = tag_of(row.get("sender_harness"), row.get("sender_session_id"))
+        if self_addressed(own, own_tag, row.get("sender_harness"), row.get("sender_session_id"), tag):
+            continue
         who = "[" + tag.strip("[]") + "]" if tag else _text(row.get("sender"), "peer")
         rows.append({"way": "←", "who": who, "harness": _text(row.get("sender_harness"), ""),
                      "kind": _text(row.get("kind"), ""), "text": _text(row.get("text"), ""),
@@ -1027,14 +1243,26 @@ def peer_message_rows(received, sent, tag_of, limit=8, now=None):
     for record in sent or ():
         target = record.get("to") if isinstance(record.get("to"), dict) else {}
         tag = tag_of(target.get("harness"), target.get("session_id"))
+        if self_addressed(own, own_tag, target.get("harness"), target.get("session_id"), tag):
+            continue
         who = "[" + tag.strip("[]") + "]" if tag else _text(target.get("name"), "peer")
         rows.append({"way": "→", "who": who, "harness": _text(target.get("harness"), ""),
                      "kind": _text(record.get("kind"), ""), "text": _text(record.get("summary"), ""),
                      "at": record.get("at") or 0,
-                     "delivery": _message_delivery(record.get("status"), record.get("at"), now)})
+                     "delivery": _message_delivery(record.get("status"), record.get("at"), now),
+                     "_ref": record.get("message_id") if record.get("status") == "sent" else None})
     rows = [row for row in rows if row["text"]]
     rows.sort(key=lambda row: row["at"])
     rows = rows[-limit:]
+    reads = 0
+    for row in reversed(rows):
+        ref = row.pop("_ref", None)
+        if pending_of is not None and isinstance(ref, str) and ref and reads < pending_limit:
+            reads += 1
+            try:
+                row["delivery"] = _message_delivery("sent", row["at"], now, pending_of(ref))
+            except Exception:  # noqa: BLE001 - an unreadable row reads as before
+                pass
     for row in rows:
         row["when"] = _message_when(row["at"], now)
         row["body"] = message_body(row["text"])

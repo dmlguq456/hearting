@@ -169,8 +169,9 @@ class SessionShellSurvivalTest(unittest.TestCase):
                         if status.get('empty'):break
                         self.assertLess(time.monotonic(),deadline,(why,status))
                         drain(.01)
-                    # A narrow window starts with the panel folded by itself (#1586 review follow-up 7).
-                    self.assertEqual(status.get('expanded'),cols>=122,status)
+                    # A narrow window starts with the panel folded by itself (#1586 review follow-up 7):
+                    # a 40-column panel would leave the native under 60 columns below 102.
+                    self.assertEqual(status.get('expanded'),cols>=102,status)
                     peer=shell._peer_message()
                     peer_text,ref=peer.prepare_peer_message('PEER_NO_CALLBACK',
                         {'harness':'codex','session_id':'synthetic-sender'},
@@ -268,7 +269,7 @@ class SessionShellSurvivalTest(unittest.TestCase):
     def test_live_host_drains_the_same_transaction_before_direct_input(self):self.run_failure('held-control')
     # #1586 review follow-up 7: the folded panel keeps the same input: held bytes, the paste and
     # Enter reach the same native once, in order, across a host death.
-    def test_a_folded_panel_retains_held_bytes_across_a_host_death(self):self.run_failure('held-host',cols=110)
+    def test_a_folded_panel_retains_held_bytes_across_a_host_death(self):self.run_failure('held-host',cols=96)
 
 
 if __name__=='__main__':unittest.main()

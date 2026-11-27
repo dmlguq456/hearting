@@ -41,7 +41,7 @@ b.input(Buffer.from('\r'));await new Promise(setImmediate);assert.equal(sent.len
 const assert=require('node:assert/strict'),create=require(process.argv[1]);
 (async()=>{
 const item=(id,extra={})=>({id,revision:'r',answerable:true,questions:[{id:'q',question:'Which?',choices:['one','two','three'],...extra}]});
-const lit=b=>b.detail({budget:20,columns:60}).filter(row=>row[0]?.text==='▸').map(row=>row.slice(2).map(p=>p.text).join('').replace(/^\d+ /,''));
+const lit=b=>b.detail({budget:20,columns:60}).filter(row=>row[0]?.text==='▸').map(row=>row.slice(2).map(p=>p.text).join('').replace(/^\d+  /,''));
 for(const [keys,want] of [['\x1b[B\r','two'],['\x1bOB\x1bOB\x1b[A\r','two'],['2\r','two'],['\r','one'],['\x1b[A\x1b[A\r','one'],['\x1b[B\x1b[B\x1b[B\x1b[B\r','three']]){
  let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});
  b.update([item('id')]);b.enter();
@@ -53,13 +53,13 @@ for(const [keys,want] of [['\x1b[B\r','two'],['\x1bOB\x1bOB\x1b[A\r','two'],['2\
 // The recommended choice is where the highlight starts; the hint names the keys.
 {const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});b.update([item('rec',{recommended:2})]);b.enter();
  assert.deepEqual(lit(b),['three']);b.input(Buffer.from('\x1b[A'));assert.deepEqual(lit(b),['two']);
- assert.ok(b.detail({budget:20,columns:80}).some(row=>row.map(p=>p.text).join('').includes('↑↓ choose · Enter send · t text')));}
+ assert.ok(b.detail({budget:20,columns:80}).some(row=>row.map(p=>p.text).join('').includes('↑↓ choose · Enter send')));}
 // Without focus the arrows and Enter are the conversation's: every byte goes back.
 {let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});b.update([item('id')]);
  const rest=b.input(Buffer.from('\x1b[B\r'));assert.equal(rest.toString(),'\x1b[B\r');await new Promise(setImmediate);assert.equal(sent.length,0);}
-// `t` still types an answer, and arrows do not move a choice while typing.
-{let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});b.update([item('id')]);b.enter();
- b.input(Buffer.from('tmine\x1b[B\r'));await new Promise(setImmediate);assert.deepEqual(sent,[{question_id:'id',revision:'r',answers:{q:['mine']}}]);}
+// Free-text questions accept letters directly; down does not replace the draft.
+{let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});const q=item('id');q.questions[0].free_text=true;b.update([q]);b.enter();
+ b.input(Buffer.from('mine\x1b[B\r'));await new Promise(setImmediate);assert.deepEqual(sent,[{question_id:'id',revision:'r',answers:{q:['mine']}}]);}
 // A decision highlights nothing until ↑↓ or a number picks one; then Enter sends it.
 {let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});
  b.update([{id:'d',revision:'r',answerable:true,answer_kind:'decision',questions:[{id:'q',question:'Approve?'}]}]);b.enter();
@@ -113,14 +113,15 @@ for(const [styles,colored] of [[color,true],[plain,false]]){
  // The chosen choice moves with the arrows, the form with it.
  b.input(Buffer.from('\x1b[B'));const moved=options(b);assert.equal(moved[4][0].text,'▸');assert.equal(moved[1][0].text,'  ');
 }
-// The panel: `▸` keeps the harness color on the terminal's own background and on a known face; it is not rose.
-{const b=make(color);b.enter();b.input(Buffer.from('\x1b[B'));const q=o=>b.detail(o);
+// The popup the editor draws in (11-15): `▸` keeps the harness color on the terminal's own background
+// and on a known face; it is not rose.
+{const b=make(color);b.enter();b.input(Buffer.from('\x1b[B'));const rows=b.detail({budget:20,columns:72});
+ const pop=(configuration,background)=>view.popup({cols:120,rows:30,title:rows[0],body:rows.slice(1),sections:['QUESTIONS'],
+   model:{styles:color,colors:256},configuration,background}).rows.flat();
  for(const [cfg,background] of [[{},''],[{},'dark'],[{shade:'medium'},'dark']]){
-  const r=view.render({width:40,height:30,side:true,model:{styles:color,colors:256},configuration:cfg,background,questions:q});
-  const mark=r.rows.flat().find(p=>p.text==='▸');assert(mark,JSON.stringify(cfg));
+  const mark=pop(cfg,background).find(p=>p.text==='▸');assert(mark,JSON.stringify(cfg));
   assert.notEqual(mark.foreground,view.FACES.dark.accent,JSON.stringify(cfg));assert.equal(mark.foreground,173,JSON.stringify(cfg));assert.equal(mark.bold,true);}
- const mono=view.render({width:40,height:30,side:true,model:{styles:color,colors:256},configuration:{theme:'mono'},questions:q}).rows.flat();
- assert.equal(mono.find(p=>p.text==='▸').bold,true);
+ assert.equal(pop({theme:'mono'},'').find(p=>p.text==='▸').bold,true);
 }
 """)
 
@@ -156,20 +157,24 @@ for(const [state,reason,word] of [['answer_below','marker-has-no-bound-native-re
     def test_an_answered_question_leaves_the_panel_once_focus_returns(self):
         # Correction 3 (11-13): after a panel answer the question stayed in the panel for good
         # (`✓ consumed`): the editor held it, so the backend kept returning it as a retained
-        # reference. While focused the receipt stays readable; leaving focus, or a settled one
-        # arriving while unfocused, lets it go, and it is no longer asked for.
+        # reference. Rule 5 (11-14): the moment it is sent the box folds to one dim line and
+        # focus returns; its session having it, the line stays 10 minutes, then it goes and is no longer asked for.
         self.node(r"""
 const assert=require('node:assert/strict'),create=require(process.argv[1]);
+let now=Date.now();Date.now=()=>now;
 (async()=>{
 const open={id:'S4:q',revision:'r',answerable:true,questions:[{id:'q',question:'Which?',choices:['a','b']}]};
 const done={...open,answerable:false,request_state:'applied'};
 const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
 b.update([open]);b.enter();b.input(Buffer.from('\r'));await new Promise(setImmediate);
-b.update([done]);
-assert(JSON.stringify(b.detail()).includes('applied'),'the receipt reads while focused');
+assert.equal(b.focused,false);assert.deepEqual(b.detail(),[]);
+assert.deepEqual(b.sent().map(r=>r.map(x=>x.text).join('')),['✓ answer sent · a']);
 assert.deepEqual(b.references(),[{id:'S4:q',revision:'r'}]);
-b.leave();
-assert.deepEqual(b.references(),[]);assert.deepEqual(b.detail(),[]);
+b.update([done]);
+assert.deepEqual(b.references(),[{id:'S4:q',revision:'r'}]);assert.deepEqual(b.detail(),[]);
+assert.deepEqual(b.sent().map(r=>r.map(x=>x.text).join('')),['✓ answer sent · a']);
+now+=10*60*1000+1000;b.update([done]);
+assert.deepEqual(b.references(),[]);assert.deepEqual(b.detail(),[]);assert.deepEqual(b.sent(),[]);
 // The backend no longer asks for it; were it still sent while unfocused, it stays out.
 b.update([done]);assert.deepEqual(b.references(),[]);assert.deepEqual(b.detail(),[]);
 // An open question beside it stays, and so does one only sent (not settled).
@@ -189,6 +194,7 @@ b.enter();b.input(Buffer.from('\r'));await new Promise(setImmediate);assert.equa
     def test_question_roundtrip_preserves_choices_and_free_text_paste_for_a_complete_form(self):
         self.node(r'''
 const assert=require('node:assert/strict'),create=require(process.argv[1]);
+let now=Date.now();Date.now=()=>now;
 (async()=>{
 let sent=[];const b=create({changed(){},answer:async x=>{sent.push(x);return {state:'received'};},action(){}});
 const item={id:'form',revision:'revision',answerable:true,questions:[{id:'choice',question:'Which?',choices:['first','second']},{id:'text',question:'Why?'}]};
@@ -198,8 +204,10 @@ b.input(Buffer.from('\t\t'));assert.ok(JSON.stringify(b.detail()).includes('seco
 b.input(Buffer.from('\t'));assert.ok(JSON.stringify(b.detail()).includes('한글 j/k'));
 b.input(Buffer.from('\r'));await new Promise(setImmediate);
 assert.deepEqual(sent,[{question_id:'form',revision:'revision',answers:{choice:['second'],text:['한글 j/k\nline2']}}]);
-b.update([{...item,request_state:'applied',answerable:false}]);assert.ok(JSON.stringify(b.detail()).includes('applied'));
-const rest=b.input(Buffer.from('\x1dnative\r'));assert.equal(rest.toString(),'native\r');
+// Rule 5: once its session has the answer, its line stays 10 minutes, then nothing of it stays; keys go to the native input.
+b.update([{...item,request_state:'applied',answerable:false}]);assert.deepEqual(b.detail(),[]);assert.equal(b.sent().length,1);
+now+=10*60*1000+1000;b.update([{...item,request_state:'applied',answerable:false}]);assert.deepEqual(b.sent(),[]);
+const rest=b.input(Buffer.from('native\r'));assert.equal(rest.toString(),'native\r');
 })();''')
 
     def test_whole_form_collects_all_latest_text_drafts_after_tab_or_reediting(self):
@@ -207,17 +215,18 @@ const rest=b.input(Buffer.from('\x1dnative\r'));assert.equal(rest.toString(),'na
 const assert=require('node:assert/strict'),create=require(process.argv[1]);
 (async()=>{
 for(const edited of [false,true]){
- const sent=[],b=create({changed(){},answer:async x=>{sent.push(x);return {state:'received'};},action(){}});
+ const sent=[],b=create({changed(){},answer:async x=>{sent.push(x);return {state:'submitted'};},action(){}});
  b.update([{id:'exact',revision:'r',answerable:true,questions:[{id:'first',question:'First?'},{id:'second',question:'Second?'}]}]);b.enter();
- if(edited){b.input(Buffer.from('first\r'));await new Promise(setImmediate);b.input(Buffer.from('t-EDIT'));}
+ if(edited){b.input(Buffer.from('first\r'));await new Promise(setImmediate);b.input(Buffer.from('-EDIT'));}
  else b.input(Buffer.from('first'));
  b.input(Buffer.from('\tsecond\r'));await new Promise(setImmediate);
  assert.deepEqual(sent,[{question_id:'exact',revision:'r',answers:{first:[edited?'first-EDIT':'first'],second:['second']}}]);
- b.input(Buffer.from('\x1b[Z'));assert.ok(JSON.stringify(b.detail()).includes(edited?'first-EDIT':'first'));
+ // Rule 5: the one line of the sent answer carries the latest drafts.
+ assert.deepEqual(b.sent().map(r=>r.map(x=>x.text).join('')),['✓ answer sent · '+(edited?'first-EDIT':'first')+', second']);
 }
 const sent=[],b=create({changed(){},answer:async x=>{sent.push(x);return {state:'received'};},action(){}});
 b.update([{id:'cleared',revision:'r',answerable:true,questions:[{id:'first',question:'First?'},{id:'second',question:'Second?'}]}]);b.enter();
-b.input(Buffer.from('first\r'));await new Promise(setImmediate);b.input(Buffer.from('t\x7f\x7f\x7f\x7f\x7f\tsecond\r'));await new Promise(setImmediate);
+b.input(Buffer.from('first\r'));await new Promise(setImmediate);b.input(Buffer.from('\x7f\x7f\x7f\x7f\x7f\tsecond\r'));await new Promise(setImmediate);
 assert.equal(sent.length,0,'cleared latest text must not fall back to an older saved answer');
 })();""")
 
@@ -239,6 +248,7 @@ for(const picked of [false,true]){
     def test_single_active_action_keeps_another_questions_choice_without_claiming_consumption(self):
         self.node(r'''
 const assert=require('node:assert/strict'),create=require(process.argv[1]);
+let now=Date.now();Date.now=()=>now;
 (async()=>{
 let release,sent=[];const b=create({changed(){},answer:x=>{sent.push(x);return new Promise(r=>release=r);},action(){}});
 const item=id=>({id,revision:'r',answerable:true,questions:[{id,question:id,choices:['one','two']}]});
@@ -247,7 +257,11 @@ assert.equal(sent.length,1);assert.ok(JSON.stringify(b.detail()).includes('pendi
 release({state:'received'});await new Promise(setImmediate);
 b.input(Buffer.from('\r'));assert.equal(sent.length,2);assert.deepEqual(sent[1].answers,{B:['two']});
 release({state:'received'});await new Promise(setImmediate);
-b.input(Buffer.from('\t\t'));assert.ok(JSON.stringify(b.detail()).includes('received'));
+// Rule 5: B was sent where the person stood, so focus returns; both are with their session.
+assert.equal(b.focused,false);assert.deepEqual(b.detail(),[]);
+assert.deepEqual(b.sent().map(r=>r.map(x=>x.text).join('')),['✓ answer sent · one','✓ answer sent · two']);
+now+=10*60*1000+1000;b.update([{...item('A'),answerable:false,request_state:'received'},{...item('B'),answerable:false,request_state:'received'}]);
+assert.deepEqual(b.sent(),[]);
 assert.ok(!JSON.stringify(b.detail()).includes('consumed'));
 })();''')
 
@@ -256,9 +270,9 @@ assert.ok(!JSON.stringify(b.detail()).includes('consumed'));
 const assert=require('node:assert/strict'),create=require(process.argv[1]);
 const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
 const a={id:'a',revision:'r',answerable:true,questions:[{id:'q',question:'First?',display:{head:[{text:'Head'}],body:Array.from({length:12},(_,i)=>[{text:'row-'+i}]),options:[[{text:'choice'}]]}}]};
-b.update([a]);b.enter();b.input(Buffer.from('tdraft'));
+b.update([a]);b.enter();b.input(Buffer.from('draft'));
 let first=JSON.stringify(b.detail({budget:5,columns:80}));assert.ok(first.includes('row-0')&&first.includes('draft'));
-b.input(Buffer.from('\x1b[B\x1b[B'));assert.ok(!JSON.stringify(b.detail({budget:5})).includes('row-0'));
+b.input(Buffer.from('\x1b[6~'));assert.ok(!JSON.stringify(b.detail({budget:5})).includes('row-0'));
 b.update([a,{id:'late',revision:'r',answerable:true,questions:[{id:'q',question:'Late?'}]}]);assert.ok(JSON.stringify(b.detail({budget:5})).includes('draft'));
 b.update([{...a,revision:'changed'}]);assert.ok(JSON.stringify(b.detail({budget:5})).includes('changed'));
 ''')
@@ -272,7 +286,8 @@ for(const selected of [false,true]){
  if(selected)b.input(Buffer.from('1'));
  const rows=b.detail({budget:20,columns:40}).map(row=>row.map(part=>part.text).join(''));
  const hints=rows.filter(row=>row.includes('Esc/')||row.includes('choose')||row.includes('Enter send'));
- assert.ok(hints.every(row=>[...row].reduce((n,c)=>n+(c.charCodeAt(0)<128?1:2),0)<=36),'focus guidance must fit the panel');
+ // This English guide uses single-cell arrows and middots; columns is the body width.
+ assert.ok(hints.every(row=>[...row].length<=40),'focus guidance must fit the panel');
  assert.ok(hints.join(' ').includes('Esc/Ctrl+] back'));
  assert.ok(hints.join(' ').includes('↑↓ choose · Enter send'));
 }
@@ -284,7 +299,7 @@ for(const selected of [false,true]){
         view=item['questions'][0]['display']
         self.assertGreater(len(view['body']),1)
         options=''.join(t for row in view['options'] for t,_ in row)
-        self.assertIn('2 two',options);self.assertNotIn('✓',options)
+        self.assertIn('2  two',options);self.assertNotIn('✓',options)
         self.assertEqual(capacity(24),10)
         self.assertGreaterEqual(24-capacity(24),6)
 
@@ -317,72 +332,5 @@ for(const selected of [false,true]){
             publish.side_effect=OSError('optional unavailable')
             self.assertIn('lines',session_shell.panel_projection('claude','exact',pane_binding={'sid':'exact'}))
 
-
-    def test_the_route_page_reads_its_owner_output_with_fleets_reader(self):
-        # Fleet's `attempts`: the same read_owner_raw, once per opened page, for the
-        # routes the page shows, each through its current owner; bounded so the read
-        # reply stays inside its frame. A row without an owner is not guessed.
-        from fleet.explorer import focus
-        import human_wait_state
-        shown=[{'id':'rt-0123456789abcdef','owner_attempt':'att-new'},{'id':'rt-fedcba9876543210','owner_attempt':'att-b'},
-               {'id':'not-a-route','owner_attempt':'att-c'},{'id':'rt-1111111111111111'}]
-        view={'route_panels':{'claude\0exact':shown,'claude\0other':[{'id':'rt-2222222222222222','owner_attempt':'att-x'}]}}
-        calls=[]
-        def raw(route,attempt,rows,live,reader):
-            calls.append((route,attempt,rows,live))
-            return {'att':attempt,'route':route,'lines':['x'*500]+['line %d'%n for n in range(60)]} if route.endswith('cdef') else None
-        with mock.patch.object(human_wait_state,'cached_view',return_value=view), \
-             mock.patch.object(focus,'read_attempts',return_value=['ROWS']) as attempts, \
-             mock.patch.object(focus,'read_owner_raw',side_effect=raw):
-            result=session_shell._block_action({'sid':'exact','harness':'claude'},{'action':'raw'})
-        attempts.assert_called_once_with(None,'exact')
-        self.assertEqual([c[:2] for c in calls],[('rt-0123456789abcdef','att-new'),('rt-fedcba9876543210','att-b')])
-        self.assertTrue(all(c[2]==['ROWS'] and c[3]=={} for c in calls))
-        self.assertEqual(result['ok'],True);self.assertEqual(len(result['attempts']),1)
-        row=result['attempts'][0];self.assertEqual((row['route'],row['att']),('rt-0123456789abcdef','att-new'))
-        self.assertEqual(row['lines'][-1],'line 59');self.assertEqual(len(row['lines']),30)
-        self.assertLess(len(json.dumps(result,ensure_ascii=False).encode()),65536)
-        with mock.patch.object(human_wait_state,'cached_view',return_value=None), \
-             mock.patch.object(focus,'read_attempts') as attempts:
-            self.assertEqual(session_shell._block_action({'sid':'exact','harness':'claude'},{'action':'raw'}),{'ok':True,'attempts':[]})
-        attempts.assert_not_called()
-
-    def test_the_route_page_reads_the_current_owner_through_the_real_registry(self):
-        # Review [52]: an earlier owner of the same route, and finished routes recorded
-        # after the current one, must not replace the current route's owner output.
-        import tempfile
-        from fleet.explorer import focus, output
-        import human_wait_state
-        with tempfile.TemporaryDirectory() as tmp:
-            jobs=Path(tmp)/'jobs.log';logs=Path(tmp)/'logs';logs.mkdir()
-            rid='rt-0123456789abcdef';sid='sid-rv1537-current'
-            def make(aid,who,route,body,status='open',owner=True):
-                log=logs/('fixture.'+aid+'.claude.jsonl')
-                log.write_text(json.dumps({'type':'assistant','message':{'content':[{'type':'text','text':body}]}})+'\n')
-                meta={'attempt_schema_version':'2','dispatch_depth':'1','transport':'headless','execution_surface':'registered-headless',
-                      'registered_worker':'1','attempt_id':aid,'parent_sid':who,'worker_type':'owner' if owner else 'stage','harness':'claude',
-                      'route_id':route,'owner_route_id':route,'log_file':str(log),'launch_outcome':'never-launched','note':'fixture'}
-                return '2026-11-12T00:00:00Z\t'+status+'\t/synthetic\t/synthetic\tfixture\t'+','.join(k+'='+v for k,v in meta.items())+'\n'
-            old=make('att-rv1537-old',sid,rid,'OLD_OWNER_OUTPUT','done');new=make('att-rv1537-new',sid,rid,'CURRENT_OWNER_OUTPUT')
-            alien=make('att-rv1537-alien','sid-other','rt-fedcba9876543210','OTHER_SESSION_OUTPUT')
-            stage=make('att-rv1537-stage',sid,rid,'STAGE_OUTPUT',owner=False)
-            history=''.join(make('att-rv1537-history-'+str(i),sid,'rt-'+format(i+16,'016x'),'HISTORY_'+str(i),'done') for i in range(4))
-            view={'route_panels':{'claude\0'+sid:[{'id':rid,'owner_attempt':'att-rv1537-new'}]}}
-            def read(text):
-                jobs.write_text(text);output.attempt_view()._REGISTRY_READERS.clear()
-                with mock.patch.dict(os.environ,{'AGENT_DISPATCH_JOBS':str(jobs)}), \
-                     mock.patch.object(human_wait_state,'cached_view',return_value=view):
-                    return session_shell._block_action({'sid':sid,'harness':'claude'},{'action':'raw'})['attempts']
-            for label,text in (('single',new+alien+stage),('old-before-new',old+new+alien+stage),('four-later-routes',new+history)):
-                with self.subTest(label):
-                    got=read(text)
-                    self.assertEqual([(a['route'],a['att']) for a in got],[(rid,'att-rv1537-new')])
-                    body=' '.join(got[0]['lines'])
-                    self.assertIn('CURRENT_OWNER_OUTPUT',body)
-                    for other in ('OLD_OWNER','OTHER_SESSION','STAGE_OUTPUT','HISTORY_'):
-                        self.assertNotIn(other,body)
-            # An owner of another session is not read even when a row names it.
-            view={'route_panels':{'claude\0'+sid:[{'id':'rt-fedcba9876543210','owner_attempt':'att-rv1537-alien'}]}}
-            self.assertEqual(read(new+alien),[])
 
 if __name__=='__main__':unittest.main()

@@ -37,6 +37,9 @@ MAX_LOG_BYTES = 2 * 1024 * 1024 * 1024
 DUE_SECONDS = 300
 # While the last pass left removable files behind, the next pass may start sooner.
 BACKLOG_DUE_SECONDS = 60
+# After a round of the log directory ends, the next round opens at most once per
+# this interval. Not a setting.
+ROUND_REOPEN_SECONDS = 24 * 3600
 EXAMINE_LIMIT = 64
 MAX_DIRECTORY_ENTRIES = 50000
 MAX_PASS_SECONDS = 10
@@ -115,9 +118,40 @@ def _advisory_lock(layout):
 
 
 def _read_state(layout):
+    return _read_state_at(layout.root_fd)
+
+
+def follow_up_pass_ns(jobs, *, now_ns=None) -> int:
+    """Start (ns) of the last pass, only if it left ``more`` and the short interval passed.
+
+    Read-only and lock-free. Anything unreadable, malformed, missing or in the
+    future yields 0, so a caller that does not know does not hurry.
+    """
+    try:
+        now_ns = time.time_ns() if now_ns is None else int(now_ns)
+        root_fd = os.open(dispatch_state_root(Path(jobs).resolve(strict=False)), _DIR_FLAGS)
+    except Exception:  # noqa: BLE001
+        return 0
+    try:
+        state = _read_state_at(root_fd)
+        last = state.get("last_result")
+        passed = state.get("last_pass_ns")
+        if (isinstance(last, dict) and type(last.get("more")) is int and last["more"] == 1
+                and type(passed) is int and 0 < passed <= now_ns
+                and now_ns - passed >= BACKLOG_DUE_SECONDS * 1_000_000_000):
+            return passed
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(root_fd)
+    return 0
+
+
+def _read_state_at(root_fd):
     try:
         fd = os.open(STATE_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
-                     dir_fd=layout.root_fd)
+                     dir_fd=root_fd)
     except FileNotFoundError:
         return {"last_pass_ns": 0, "cursor": ""}
     with os.fdopen(fd, "rb") as handle:
@@ -236,7 +270,7 @@ def _log_protection(ctx, attempt, *, probe_processes):
     # Attempt logs remain route evidence for a live workflow even when the
     # attempt's separate worker HOME has no remaining consumer.
     verdict = _protections(ctx, "", attempt, probe_processes=probe_processes,
-                           protect_open_route=True)
+                           protect_open_route=True, legacy_empty_tombstone=True)
     row = ctx.snapshot.rows.get(attempt)
     if (verdict.kind == "eligible" and row is not None
             and row.meta.get("worker_type") == "review"
@@ -679,14 +713,14 @@ def _pass(jobs, root, layout, state, now_ns, started):
         candidate_kinds[name] = "prompt"
     unknown_names.update(unknown_prompt_names)
     referenced_names = set(candidate_rows)
-    ordered = sorted(referenced_names)
+    # A name whose file is already gone is never removable: examining it would spend the budget on nothing.
+    ordered = sorted(name for name in referenced_names if name in stamps)
     cursor = state.get("cursor", "")
     after = [name for name in ordered if name > cursor]
     selected_names = (after + [name for name in ordered if name <= cursor])[:EXAMINE_LIMIT]
 
     protected_names = set()
     eligible = []
-    unknown_bytes = 0
     reasons = {}
     examined_names = []
     removable = 0
@@ -775,13 +809,21 @@ def _pass(jobs, root, layout, state, now_ns, started):
 
     if examined_names:
         state["cursor"] = examined_names[-1]
-    selected_set = set(examined_names)
+    # Three disjoint counts of bytes this pass did not judge: names it ran out
+    # of room to look at, names whose verdict or registry evidence is unknown,
+    # and files no registry row names at all.
     known_names = set(candidate_rows)
-    unknown_names.update(set(stamps) - known_names)
-    unknown_names.update(known_names - selected_set)
-    unknown_bytes = sum(max(0, stamps[name][4]) for name in unknown_names if name in stamps)
-    unknown_bytes += recovery["pending_bytes"]
-    protected_bytes = sum(max(0, stamps[name][4]) for name in protected_names - unknown_names if name in stamps)
+    unexamined = known_names - set(examined_names)
+    verdict_unknown = unknown_names - unexamined
+    unreferenced = set(stamps) - known_names - verdict_unknown
+
+    def _size(names):
+        return sum(max(0, stamps[name][4]) for name in names if name in stamps)
+
+    unexamined_bytes = _size(unexamined)
+    unknown_verdict_bytes = _size(verdict_unknown)
+    unreferenced_bytes = _size(unreferenced)
+    protected_bytes = _size(protected_names - verdict_unknown)
     eligible_bytes = sum(max(0, item[2][4]) for item in eligible)
     expired = [item for item in eligible if now_ns - item[1] >= RETENTION_NS]
     expired.sort(key=lambda item: (item[1], item[0]))
@@ -829,11 +871,46 @@ def _pass(jobs, root, layout, state, now_ns, started):
                 unknown_names.add(name)
                 deferred += 1
     over_limit_bytes = max(0, total_bytes - removed_bytes - MAX_LOG_BYTES)
+    # A round is every name the rows point at, looked at once. While a round is
+    # open every pass keeps the short interval, whatever it removed: what it
+    # removed says nothing about the names not yet examined. A removal after the
+    # round is spent opens the next round, at most once a day.
+    left = state.get("round_left")
+    seen = state.get("round_left_seen")  # round_left as the last pass of this release left it
+    entry_ok = type(left) is int and left >= 0
+    if not entry_ok:
+        left = len(ordered)
+    closed = state.get("round_closed_ns")
+    recent = (type(closed) is int and 0 <= now_ns - closed < ROUND_REOPEN_SECONDS * 1_000_000_000)
+    if entry_ok and type(seen) is int and seen > 0 and not recent and (left == 0 or left > seen):
+        # Inside a round round_left only shrinks. An older release spent (or spent and
+        # reopened) the round this release left open, and it records no end. Take the
+        # end as now: a reopened round is closed below and the next removal does not
+        # reopen it within a day.
+        state["round_closed_ns"] = closed = now_ns
+        recent = True
+    if recent and left > 0:
+        # Within a day of the recorded end, an open round can only have been
+        # reopened by an older release that does not know the daily rule.
+        left = 0
+    spent_now = bool(left)
+    left = max(0, left - len(examined_names))
+    if spent_now and not left:
+        state["round_closed_ns"] = now_ns  # this pass ended the round
+        recent = True
+    if removed and not left and not recent:
+        # A new round opens only when the last one ended over a day ago or its
+        # end time is unknown; otherwise each newly expired log would reopen it.
+        left = len(ordered)
+    round_more = bool(examined_names) and left > 0
+    state["round_left"] = left
+    state["round_left_seen"] = left
     result = {
         "examined": len(examined_names), "eligible": len(eligible), "eligible_bytes": eligible_bytes,
         "removed": removed, "removed_bytes": removed_bytes, "deferred": deferred + discovery_deferred,
         "total_bytes": total_bytes, "protected_bytes": protected_bytes,
-        "unknown_bytes": unknown_bytes,
+        "unexamined_bytes": unexamined_bytes, "unknown_verdict_bytes": unknown_verdict_bytes,
+        "unreferenced_bytes": unreferenced_bytes, "round_left": left,
         "quarantine_pending_files": recovery["pending_files"],
         "quarantine_pending_bytes": recovery["pending_bytes"],
         "over_limit_bytes": over_limit_bytes,
@@ -842,7 +919,7 @@ def _pass(jobs, root, layout, state, now_ns, started):
         # reachable, so come back at the short interval. A pass that removed
         # nothing (bytes held by protected logs) waits the normal interval.
         "more": int(removed >= REMOVE_LIMIT or budget_deferred > 0
-                    or (removed > 0 and over_limit_bytes > 0)),
+                    or (removed > 0 and over_limit_bytes > 0) or round_more),
         "elapsed_ms": int((time.monotonic() - started) * 1000),
     }
     try:

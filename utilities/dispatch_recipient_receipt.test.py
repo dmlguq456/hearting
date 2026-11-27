@@ -424,6 +424,68 @@ class RecipientReceiptTest(unittest.TestCase):
         self.assertTrue(result["received"])
         self.assertTrue(result["settled"])
 
+    def _transcript_home(self, name=None, sid=None):
+        """A synthetic Claude home whose project folder is NOT where any cwd would point."""
+        home = Path(tempfile.mkdtemp(prefix="cl-", dir=self._tmp_dir()))
+        project = home / "projects" / "-started-here"
+        project.mkdir(parents=True)
+        path = project / ((name or self.session) + ".jsonl")
+        marker = receipt.receipt_marker(self.record, self.storage)
+        path.write_text(json.dumps({
+            "type": "user", "sessionId": sid or self.session,
+            "origin": {"kind": "task-notification", "producer": "session-task"},
+            "promptSource": "system", "turnOrigin": "task_notification",
+            "message": {"content": (
+                "<task-notification><task-id>fixture</task-id>"
+                "<summary>Stop hook feedback</summary>" + marker +
+                "</task-notification>")}}) + "\n", encoding="utf-8")
+        return home, path, marker
+
+    def _tmp_dir(self):
+        tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(tmp.cleanup)
+        return tmp.name
+
+    def test_claude_transcript_is_read_from_the_hook_path_wherever_the_session_now_is(self):
+        # The path is the one the hook was given; no folder is recomputed, so a
+        # session that moved folders reads the same record it started with.
+        home, path, marker = self._transcript_home()
+        evidence = receipt.claude_transcript_evidence(
+            transcript_path=path, session_id=self.session, runtime_home=str(home))
+        self.assertEqual(evidence["bindings"], [(self.delivery_id, marker.split()[-1])])
+
+    def test_claude_transcript_is_unknown_unless_the_file_itself_proves_it_is_this_sessions(self):
+        home, path, _marker = self._transcript_home()
+        base = dict(session_id=self.session, runtime_home=str(home))
+        outside = Path(self._tmp_dir()) / (self.session + ".jsonl")
+        outside.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        wrong_name = path.parent / "other-name.jsonl"
+        wrong_name.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        link_dir = home / "projects" / "-linked"
+        link_dir.mkdir()
+        link = link_dir / (self.session + ".jsonl")
+        link.symlink_to(outside)
+        foreign_home, foreign, _ = self._transcript_home(name="foreign", sid="foreign")
+        shapes = {
+            "outside-projects": outside,
+            "wrong-file-name": wrong_name,
+            "symlink-out": link,
+            "missing-file": path.parent / "gone" / (self.session + ".jsonl"),
+            "directory": path.parent,
+        }
+        for label, candidate in shapes.items():
+            self.assertIsNone(receipt.claude_transcript_evidence(
+                transcript_path=candidate, **base), label)
+        # Another session's id: the file name does not match, so it is unknown.
+        self.assertIsNone(receipt.claude_transcript_evidence(
+            transcript_path=foreign, session_id=self.session,
+            runtime_home=str(foreign_home)))
+        # Same name but a row of another session reads as no receipt (row check kept).
+        _home2, row_foreign, _ = self._transcript_home(sid="foreign")
+        again = receipt.claude_transcript_evidence(
+            transcript_path=row_foreign, session_id=self.session, runtime_home=str(_home2))
+        self.assertFalse(again["bindings"])
+
 
 if __name__ == "__main__":
     unittest.main()

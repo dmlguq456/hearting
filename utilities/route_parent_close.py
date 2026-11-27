@@ -252,9 +252,11 @@ def _owned_attempts(route, rows, owner):
     selected = {owner} if owner else set()
     while True:
         children = {aid for aid, (fields, meta) in rows.items()
-                    if meta.get("parent_attempt_id") in selected
-                    and fields[2] == rows[owner][0][2]
-                    and (fields[3] == rows[owner][0][3] or DC.is_linked_worktree_slice(meta))}
+                    if (meta.get("parent_attempt_id") in selected
+                        and fields[2] == rows[owner][0][2]
+                        and (fields[3] == rows[owner][0][3] or DC.is_linked_worktree_slice(meta)))
+                    # A unit leg a worker started is below that worker wherever its route reads.
+                    or meta.get("caller_attempt_id") in selected}
         if children <= selected:
             return selected
         selected |= children
@@ -366,7 +368,7 @@ def _settle_stopped(jobs, aid):
     materialize_after_terminal_close(jobs, aid)
 
 
-def _execute(jobs, work, settle, grace, kill_wait):
+def _execute(jobs, work, settle, grace, kill_wait, evidence=None):
     stopped, pending = [], []
     for current, fields, meta, resources in work:
         if fields[1] in OPEN:
@@ -378,7 +380,7 @@ def _execute(jobs, work, settle, grace, kill_wait):
                 jobs, current, STOP_NOTE,
                 lambda fresh, meta=meta: all(DC.parse_registry_metadata(fresh[5]).get(key, "")
                                              == meta.get(key, "") for key in identity),
-                evidence=dict(STOP_EVIDENCE))
+                evidence=dict(evidence or STOP_EVIDENCE))
             if not closed:
                 fresh = _rows(jobs, {current}).get(current)
                 if fresh and fresh[0][1] in OPEN:
@@ -418,6 +420,35 @@ def stop_attempt(attempt_id, *, jobs=None, grace=0.3, kill_wait=0.5):
             "state": "termination-pending" if pending else "cancelled" if _user_stopped(meta) else "terminal",
             "status": fields[1], "note": meta.get("note", ""), "stopped_attempts": stopped,
             "pending_attempts": pending}
+
+
+# A worker that ends leaves nothing running that it started: the called worker's result would reach no one.
+CALLER_ENDED_EVIDENCE = {**STOP_EVIDENCE, "reconcile_reason": "caller-ended"}
+
+
+def stop_called_workers(jobs, caller_attempt_id, *, grace=0.3, kill_wait=0.5):
+    """The worker `caller_attempt_id` has ended: stop the unit workers it started that still run.
+
+    Their results would reach no one, and a worker with no caller above it is left running by
+    nothing else. Each is closed as the same typed cancellation a stop makes, with everything
+    below it. A called worker that already ended stands; nothing here waits for a stopped one.
+    Returns the attempts stopped (empty when it started none, or none still runs)."""
+    try:
+        jobs = jobs_path(jobs)
+        rows = _rows(jobs)
+        called = [aid for aid, (fields, meta) in rows.items()
+                  if meta.get("caller_attempt_id") == caller_attempt_id and fields[1] in OPEN]
+        if not called:
+            return []
+        work, settle = [], []
+        for aid in called:
+            planned, settled, _unknown = _plan(jobs, rows, aid)
+            work += [item for item in planned if item[0] not in {w[0] for w in work}]
+            settle += settled
+        stopped, _pending = _execute(jobs, work, settle, grace, kill_wait, evidence=CALLER_ENDED_EVIDENCE)
+        return stopped
+    except (OSError, ValueError, DC.DispatchContractError):
+        return []   # a result already committed, or a registry that cannot be read, is left as it is
 
 
 def explain_stop(receipt, translate):
@@ -1283,13 +1314,7 @@ def continue_close(value, *, jobs=None, grace=0.3, kill_wait=0.5):
         prior = settled_result(route, ledger)
         if prior:
             return prior
-        state = ledger.state()
-        for node in route.get("nodes", []):
-            previous = (state["nodes"].get(node["id"]) or {}).get("state")
-            if previous not in {"STAGE_SUCCEEDED", "CANCELLED", "FAILED_TERMINAL"}:
-                ledger.record(node["id"], "CANCELLED", evidence={"reason": NOTE}, actor="parent-close")
-        if ledger.state()["workflow_state"] != "CANCELLED":
-            ledger.set_workflow_state("CANCELLED", evidence={"reason": NOTE}, actor="parent-close")
+        _cancel_ledger(route, ledger)
         target = path.with_suffix(".outcome.json")
         if target.exists():
             existing = json.loads(target.read_text())
@@ -1315,20 +1340,112 @@ def continue_close(value, *, jobs=None, grace=0.3, kill_wait=0.5):
     return outcome
 
 
-def _finish_existing_cycle(route, *, jobs=None):
+SETTLED_NODE_STATES = {"STAGE_SUCCEEDED", "CANCELLED", "FAILED_TERMINAL"}
+
+
+def _cancel_ledger(route, ledger, *, legal_only=False):
+    """The ledger a parent's close leaves: every node not settled and the workflow CANCELLED.
+
+    `legal_only`: a state the vocabulary does not let move to CANCELLED is left as it is (the COMPLETE an
+    earlier turn of the route reached stays that turn's record) instead of refusing the close."""
+    state = ledger.state()
+    for node in route.get("nodes", []):
+        previous = (state["nodes"].get(node["id"]) or {}).get("state")
+        if previous not in SETTLED_NODE_STATES and not (
+                legal_only and previous and not WS.can_transition(previous, "CANCELLED", ledger.registry_path)):
+            ledger.record(node["id"], "CANCELLED", evidence={"reason": NOTE}, actor="parent-close")
+    current = ledger.state()["workflow_state"]
+    if current != "CANCELLED" and not (
+            legal_only and not WS.can_transition(current, "CANCELLED", ledger.registry_path)):
+        ledger.set_workflow_state("CANCELLED", evidence={"reason": NOTE}, actor="parent-close")
+
+
+def finish_ended_owner_close(route, outcome, *, jobs=None):
+    """The rest of a `close` that found no running owner to stop and does not prove the route's gate.
+
+    The route's latest registered owner had already ended, and its end is a committed failure or
+    cancellation (FAIL, BLOCKED, a format error, a death the runtime committed as `dead-*`, a stop): the ledger
+    and the cycle end as the close
+    of a running owner leaves them (`continue_close`): the ledger CANCELLED and the open cycle sealed
+    `abandoned`, never `completed`. A proven close is the route's PASS and is not touched. Neither is a route
+    whose latest owner ended PASS or whose end is not settled yet (a deferred completion, a terminal conflict
+    under review, a row no outcome reads from), whose completion may still prove the gate and seal the cycle,
+    nor one with no registered owner (inline or legacy work, whose later exact completion may still consume
+    an unproven close), nor a cycle a continuation of this route writes into (its leaf route, `_finalize_route`,
+    is not this one): that route's own close or completion finishes it. The same close run again finishes what
+    a busy lock left (only while the cycle is still open; a sealed cycle is left as it is, and the ledger takes
+    no second entry). Nothing here waits or refuses: the closure stands."""
+    if outcome.get("terminal_gate_proven") is True:
+        return False
+    jobs = jobs_path(jobs)
+    try:
+        owners = [(fields, meta) for _aid, (fields, meta) in _rows(jobs).items()
+                  if meta.get("worker_type") == "owner" and str(meta.get("dispatch_depth")) == "1"
+                  and route["route_id"] in {meta.get("owner_route_id"), meta.get("route_id")}]
+    except (OSError, ValueError):
+        return False     # an unreadable registry decides nothing; the closure is the record
+    if not owners:
+        return False
+    status, latest = owners[-1][0][1], owners[-1][1]
+    if (status in OPEN or DC.committed_outcome(status, latest) not in ENDED_WITHOUT_PASS
+            or DC.terminal_conflict_pending(latest)):
+        return False
+    cycle = _open_cycle(route)
+    if cycle is None:
+        return False     # already sealed (an earlier or concurrent close), or no cycle: nothing to finish
+    if not _leaf_of(route, cycle):
+        return False     # a continuation shares this cycle; its own end decides it
+    if jobs.exists():
+        ledger = WS.WorkflowLedger(route["route_id"], route["route_hash"], jobs=jobs)
+        try:
+            with ledger.lock():
+                _cancel_ledger(route, ledger, legal_only=True)
+        except (OSError, ValueError, WS.WorkflowStateError):
+            pass
+    return _finish_existing_cycle(route, jobs=jobs, lock_timeout=5.0)
+
+
+# The committed ends (`dispatch_attempt_policy.committed_outcome`) a close seals abandoned.
+ENDED_WITHOUT_PASS = {"failed", "cancelled"}
+
+
+def _open_cycle(route):
+    import artifact_producer as AP
+    try:
+        cycle = AP.route_cycle_for(Path(route["artifact_root"]), route)
+    except (OSError, ValueError, AP.ProducerError):
+        return None
+    return cycle if cycle and cycle.get("state") == "open" else None
+
+
+def _leaf_of(route, cycle):
+    """Whether `route` is the route that finishes `cycle` (D-120's leaf: no continuation writes into it after it)."""
+    import artifact_producer as AP
+    try:
+        return AP._finalize_route(Path(route["artifact_root"]), cycle)["route_id"] == route["route_id"]
+    except (OSError, ValueError, KeyError, TypeError, AP.ProducerError):
+        return False     # an unreadable lineage decides nothing; the cycle stays for the next close
+
+
+def _finish_existing_cycle(route, *, jobs=None, lock_timeout=0.5):
     # This is ordinary producer closure, never a dependency on retaining its
     # files. Absence/deletion leaves the cancellation result fully replayable.
+    import artifact_admission
     import artifact_producer as AP
+    import dispatch_lock_order
     root = Path(route["artifact_root"])
     try:
         if verified_owner_pin_handoff_close(route, jobs=jobs):
-            return
+            return False
         cycle = AP.route_cycle_for(root, route)
         if cycle and cycle.get("state") == "open":
             AP.finalize(root, cycle_id=cycle["cycle_id"], state="abandoned",
-                        abandon_reason="operator-decision", lock_timeout=0.5)
-    except (OSError, ValueError, AP.ProducerError):
-        pass
+                        abandon_reason="operator-decision", lock_timeout=lock_timeout)
+            return True
+    except (OSError, ValueError, AP.ProducerError, artifact_admission.AdmissionBusy,
+            dispatch_lock_order.LockOrderError):
+        pass     # a busy or out-of-order lock leaves the cycle open; the same close run again finishes it
+    return False
 
 
 def _file_version(path):

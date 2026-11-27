@@ -19,7 +19,8 @@ import subprocess
 import sys
 
 from dispatch_supervisor_terminal import (
-    classify_session_result, opencode_terminal_boundary, supervisor_terminal_from_event,
+    classify_session_result, classify_supervisor_rows, latest_codex_turn_failure,
+    opencode_terminal_boundary, refused_without_result, supervisor_terminal_from_event,
 )
 
 # OPERATIONS §5.10 "Review verdict is a result, not a worker death": a review
@@ -29,7 +30,8 @@ from dispatch_supervisor_terminal import (
 # (`failure_class=fail`) is unchanged. Only a `worker_type=review` row with a
 # readable artifact earns it; every other FAIL keeps the dead-worker note.
 from dispatch_attempt_policy import REVIEW_BLOCKING_NOTE
-from route_authority import HANDOFF_RE, pass_blocker_note, pass_blocker_violation
+from route_authority import HANDOFF_RE, handoff_search, pass_blocker_note, pass_blocker_violation
+from route_plan import is_depth0_leg
 REVIEW_WORKER_TYPE = "review"
 
 
@@ -258,7 +260,19 @@ def _claude_completion_tail(lines: list[str], session_id: object) -> bool:
     return True
 
 
-def _read_terminal(path: str | Path | None) -> dict[str, object]:
+def _terminal_event_absent(rows, lines, harness: str) -> dict[str, object]:
+    evidence = {}
+    if harness in {"claude", "codex", "opencode"}:
+        classified = classify_supervisor_rows(rows, lines, harness)
+        if classified.provider_failure_kind:
+            evidence["provider_failure_kind"] = classified.provider_failure_kind
+        if harness == "codex" and classified.failure_class == "capacity":
+            evidence["failure_class"] = classified.failure_class
+    return _result(2, "absent", "none", "-", "unchecked", "-",
+                   reason="terminal-event-absent", **evidence)
+
+
+def _read_terminal(path: str | Path | None, *, harness: str = "") -> dict[str, object]:
     if not path:
         return _result(
             2, "absent", "none", "-", "unchecked", "-", reason="log-file-absent"
@@ -294,6 +308,11 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
             rows.append(value)
             row_line_indices.append(line_index)
 
+    if latest_codex_turn_failure(rows) is not None:
+        # The last turn ended without a handoff. A completed earlier turn
+        # cannot hide this failure from the existing missing-result classifier.
+        return _terminal_event_absent(rows, lines, "codex")
+
     terminal_index = next(
         (
             index
@@ -306,9 +325,7 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
     if terminal_index is None:
         terminal_index, opencode_final_message = opencode_terminal_boundary(rows)
     if terminal_index is None:
-        return _result(
-            2, "absent", "none", "-", "unchecked", "-", reason="terminal-event-absent"
-        )
+        return _terminal_event_absent(rows, lines, harness)
 
     terminal_row = rows[terminal_index]
     terminal_event = str(terminal_row.get("type"))
@@ -322,7 +339,9 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
     final_message: str | None = None
     if terminal_event == "result":
         subtype = terminal_row.get("subtype")
-        if terminal_row.get("is_error") is True or subtype not in {None, "success"}:
+        runtime = "opencode" if terminal_row.get("runtime") == "opencode" else "claude"
+        if (terminal_row.get("is_error") is True or subtype not in {None, "success"}
+                or refused_without_result(terminal_row, runtime)):
             # The live supervisor already separates a rate-limit or auth death
             # from a broken envelope (`classify_claude_result`). This post-hoc
             # reader used to call all three "claude-result-runtime-error", so
@@ -331,7 +350,6 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
             # is how a `top` review that simply ran out of Fable quota was
             # reported as a malformed handoff (2026-09-10, att-2164dce2).
             # One classifier, both readers.
-            runtime = "opencode" if terminal_row.get("runtime") == "opencode" else "claude"
             supervised = classify_session_result(terminal_row, 1, runtime=runtime)
             from dispatch_capacity_evidence import native_quota
             quota = native_quota(rows[:terminal_index + 1], observed_at=log_path.stat().st_mtime)
@@ -351,6 +369,8 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
                         else f"{runtime}-result-{supervised.failure_class}"),
                 failure_note=supervised.note,
                 failure_class=supervised.failure_class,
+                **({"provider_failure_kind": supervised.provider_failure_kind}
+                   if supervised.provider_failure_kind else {}),
                 **quota_fields,
             )
         text = terminal_row.get("result")
@@ -372,8 +392,8 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
     # search, not fullmatch: the pattern itself anchors the block to the end of
     # the message, so anything before it is ignored rather than fatal. A
     # trailing fence or up to two sentences are tolerated the same way (G1).
-    match = _HANDOFF_RE.search(final_message.strip())
-    if match is None:
+    handoff = handoff_search(final_message)
+    if handoff is None:
         return _result(
             3,
             "invalid",
@@ -384,7 +404,6 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
             reason="malformed-handoff",
         )
 
-    handoff = match.groupdict()
     if pass_blocker_violation(handoff["verdict"], handoff["blocker"]):
         return _result(
             3,
@@ -417,9 +436,15 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
 
     verdict = handoff["verdict"]
     # RA-8: a PASS whose blocker is `none (note)` is a PASS; the note is kept.
-    note = pass_blocker_note(handoff["blocker"]) if verdict == "PASS" else None
+    note = (pass_blocker_note(handoff["blocker"]) or (handoff.get("verdict_note") or "").strip(" \t—–:-")
+            if verdict == "PASS" else None)
     normalized = {"envelope_normalized": "pass-blocker-note",
                   "pass_note_excerpt": _escape_and_bound(note)[0]} if note else {}
+    if handoff.get("disposition"):
+        # A closed disposition word read as the verdict it names (route_authority.handoff_search).
+        normalized["disposition"] = _escape_and_bound(handoff["disposition"])[0]
+        normalized["envelope_normalized"] = ",".join(
+            filter(None, (normalized.get("envelope_normalized"), "verdict-disposition")))
     failure_note = (
         "dead-sandbox-init"
         if verdict == "BLOCKED" and sandbox_init
@@ -767,9 +792,9 @@ def _bound_terminal_output(
         producer_attempt_id = parent_attempt
         require_producer_binding = True
     else:
-        # The one legacy shape without a parent owner is a registered depth-1
-        # frame. Its exact sealed route and admitted cycle are its authority.
-        if (worker_type != "frame"
+        # The one shape without a parent owner is a registered depth-1 leg (a frame leg, or the one
+        # leg of a unit route). Its exact sealed route and admitted cycle are its authority.
+        if (worker_type not in {"frame", "review", "stage", "support"}
                 or str(binding.get("dispatch_depth", "")) != "1"):
             return None, None
         producer_attempt_id = None
@@ -790,7 +815,7 @@ def _bound_terminal_output(
                 or context.node_id != node_id):
             return None, None
         if not require_producer_binding and (
-                not context.node or context.node.get("worker_type") != "frame"
+                not is_depth0_leg(context.node) or context.node.get("worker_type") != worker_type
                 or str(context.node.get("dispatch_depth", "")) != "1"):
             return None, None
         return context.resolve_terminal_artifact(artifact), None
@@ -863,7 +888,8 @@ def inspect_terminal_attempt(
     type keep the compatibility note.
     """
 
-    return inspect_terminal_value(_read_terminal(path), worktree=worktree,
+    parsed = _read_terminal(path, harness=str((artifact_binding or {}).get("harness", "")))
+    return inspect_terminal_value(parsed, worktree=worktree,
         artifact_root_metadata=artifact_root_metadata, include_failure_detail=include_failure_detail,
         worker_type=worker_type, artifact_binding=artifact_binding)
 
@@ -1013,6 +1039,13 @@ def inspect_terminal_value(parsed, *, worktree, artifact_root_metadata,
                     else "artifact-missing"
                 ),
             )
+        if artifact_path.is_file():
+            import unit_ephemeral
+            if unit_ephemeral.is_scratch_root(root) and not unit_ephemeral.answer_text(artifact_path):
+                # An ephemeral route's report is its answer to the caller: no text is no answer, and an
+                # end with none has not done the work, whatever its handoff says.
+                return _result(3, "invalid", str(parsed["source"]), "-", "missing", "contract-violation",
+                               reason="empty-answer")
         parsed["artifact_state"] = "readable"
         parsed["artifact_shape"] = "directory" if artifact_path.is_dir() else "file"
         parsed["artifact_path_b64"] = _encode_path(artifact_path)
@@ -1029,6 +1062,7 @@ def inspect_terminal_value(parsed, *, worktree, artifact_root_metadata,
         worker_type == REVIEW_WORKER_TYPE
         and parsed.get("artifact_state") == "readable"
         and parsed.get("artifact_shape") == "file"
+        and "assessment_verdict" not in parsed   # a finished review's negative judgment is no PASS envelope
     ):
         declared = artifact_declared_verdict(artifact_path)
         parsed["review_artifact_verdict"] = declared
@@ -1059,42 +1093,125 @@ def inspect_terminal_value(parsed, *, worktree, artifact_root_metadata,
 
 
 def completed_audit_assessment(parsed, worker_type, binding, artifact_path=None):
-    """A negative subject judgment is not a failed audit execution.
+    """A negative subject judgment is not a failed execution of the review.
 
-    Only an exact registered audit owner with a completed negative review report
-    qualifies. Native success or a readable file alone cannot prove that review
-    work happened. Stage reviews and ordinary code work do not qualify.
+    Two registered depth-1 ends qualify, each only with a completed FAIL handoff naming a readable
+    report file: an exact audit owner, and the one leg that finishes a unit route (its review ends
+    FAIL when it found blocking issues, the most common end of a PR review), the latter only when
+    its report itself opens on a closed negative judgment (`_declares_negative_judgment`). Native
+    success or a readable file alone cannot prove that review work happened: an empty report, one
+    that says no review was done, or one that declares a pass stays a failed end. Stage reviews, a
+    frame leg and ordinary code work do not qualify.
     """
-    if (worker_type != "owner" or not isinstance(binding, Mapping)
-            or binding.get("worker_type") != "owner" or binding.get("dispatch_depth") != "1"
+    if (not isinstance(binding, Mapping) or binding.get("worker_type") != worker_type
+            or worker_type not in {"owner", REVIEW_WORKER_TYPE} or binding.get("dispatch_depth") != "1"
             or binding.get("workflow_completion") != "runtime-v1"
             or str(binding.get("note", "")).startswith("dead-")
             or parsed.get("state") != "valid" or parsed.get("verdict") != "FAIL"
             or parsed.get("artifact_state") != "readable"
             or parsed.get("artifact_shape") != "file"):
         return False
+    if worker_type == REVIEW_WORKER_TYPE:
+        return _is_unit_route_leg(binding) and _declares_negative_judgment(artifact_path)
+    if parsed.get("disposition"):
+        # The owner wrote a closed review disposition (e.g. `수정 후 병합`) as its verdict:
+        # a finished review of any capability only when its report opens on a closed
+        # negative review verdict and nothing blocks it (route_authority.handoff_search).
+        return (pass_blocker_note(parsed.get("blocker")) is not None
+                and closed_review_kind(artifact_path) in {"fix", "hold"})
     try:
-        import route_identity
-        path = binding.get("owner_route_file") or binding.get("route_file")
-        route = json.loads(Path(path).read_text())
-        digest = binding.get("owner_route_hash") or binding.get("route_hash")
-        rid = binding.get("owner_route_id") or binding.get("route_id")
+        route, rid = _sealed_route(binding)
         return (route.get("capability") == "audit" and route.get("route_id") == rid
-                and bool(digest) and route.get("route_hash") == digest
-                and route_identity.route_hash(route) == digest
                 and _completed_negative_audit_report(artifact_path))
     except (OSError, ValueError, TypeError):
         return False
 
 
-# Same whole-line forms/normalization as pr-chain.py (PR #1430). Only the
-# negative forms reconcile a legacy audit FAIL. Free prose is never evidence.
+def _declares_negative_judgment(path) -> bool:
+    """Whether the report opens on a closed negative review verdict (`수정 후 병합`/`changes requested` or
+    `hold`/`보류`). An audit owner's FAIL needs `closed_review_kind` (the verdict line with its `— head <sha>`);
+    a unit leg also takes the same names without the head (no repository), with the dash written `-` or `–`,
+    or the whole line in backticks. A report that declares nothing, a pass or an empty file does not. One
+    that also heads itself `verdict: FAIL`/`BLOCKED` does not either: the completion gates read that
+    heading as evidence that is not a pass, so it keeps the failed end."""
+    if path is None or not _opens_on_negative_verdict(path):
+        return False
+    return artifact_declared_verdict(Path(path)) not in {"FAIL", "BLOCKED"}
+
+
+def _opens_on_negative_verdict(path) -> bool:
+    if closed_review_kind(path) in {"fix", "hold"}:
+        return True
+    line = _opening_line(path)
+    if line is None:
+        return False
+    import work_intent
+    kinds, heads = set(), []
+    for part in _verdict_parts(line.replace("**", "").replace("__", "").strip()):
+        if len(part) > 1 and part.startswith("`") and part.endswith("`"):
+            part = part[1:-1].strip()
+        line_match = work_intent._VERDICT_LINE.match(part)
+        match = line_match and _UNIT_NEGATIVE_VERDICT.fullmatch(line_match["verdict"].strip())
+        if not match:
+            return False
+        kinds.add(_VERDICT_NAME_KINDS[re.sub(r"\s+", "", match["name"]).lower()])
+        if match["head"] and match["head"] != "<sha>":
+            heads.append(match["head"])
+    # One verdict, read once per form: two verdicts (`fix · hold`) or two heads on one line read as none.
+    return len(kinds) == 1 and _one_head(heads)
+
+
+def _one_head(heads):
+    """Whether the heads a verdict line names are one commit (a short form is a prefix of the long one)."""
+    longest = max(heads, key=len, default="").lower()
+    return all(longest.startswith(head.lower()) for head in heads)
+
+
+def _verdict_parts(line):
+    """The verdict line's forms: one, or the same verdict written in both languages on one line joined by
+    ` · ` (`Final verdict: changes requested — head <sha> · 최종 판정: 수정 후 병합 — head <sha>`), each
+    without a closing period."""
+    return [part[:-1].rstrip() if part.endswith(".") else part
+            for part in (part.strip() for part in _VERDICT_JOINER.split(line))]
+
+
+def _sealed_route(binding):
+    """The binding's sealed route record and its id, or ValueError when the file is not that exact route."""
+    import route_identity
+    path = binding.get("owner_route_file") or binding.get("route_file")
+    route = json.loads(Path(path).read_text())
+    digest = binding.get("owner_route_hash") or binding.get("route_hash")
+    rid = binding.get("owner_route_id") or binding.get("route_id")
+    if not (digest and route.get("route_hash") == digest and route_identity.route_hash(route) == digest):
+        raise ValueError("route-not-sealed")
+    return route, rid
+
+
+def _is_unit_route_leg(binding) -> bool:
+    """Whether the registered row is the one leg that finishes a unit route, read from the sealed route."""
+    try:
+        route, rid = _sealed_route(binding)
+        from route_plan import is_depth0_leg
+        leg = next((n for n in route.get("nodes") or [] if isinstance(n, dict) and n.get("id") == binding.get("route_node")), None)
+        return bool(route.get("capability") == "unit" and route.get("route_id") == rid
+                    and is_depth0_leg(leg) and leg.get("terminal") is True)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+# The whole-line forms/normalization of pr-chain.py (PR #1430), plus one verdict written in both
+# forms on one line joined by ` · ` (`_verdict_parts`), which pr-chain.py does not read (it leaves such
+# a line to a person). Only the negative forms reconcile a legacy audit FAIL. Free prose is never evidence.
+# A held review (`보류`/`hold`) is a closed judgment too; only a verdict-word
+# handoff reads it (`closed_review_kind`), an audit FAIL still needs `fix`.
 _AUDIT_OPENING_BYTES = 64 * 1024
 _AUDIT_VERDICT_FORMS = (
     ("merge", "최종 판정: 병합 가능"),
     ("merge", "Final verdict: mergeable"),
     ("fix", "최종 판정: 수정 후 병합"),
     ("fix", "Final verdict: changes requested"),
+    ("hold", "최종 판정: 보류"),
+    ("hold", "Final verdict: hold"),
 )
 
 
@@ -1108,38 +1225,71 @@ _AUDIT_CLOSED = re.compile(
     + r")\s+—\s+head\s+`?(?P<head>[0-9a-f]{7,40})`?$", re.I)
 _AUDIT_KINDS = {re.sub(r"\s+", "", label).replace("：", ":").lower(): kind
                 for kind, label in _AUDIT_VERDICT_FORMS}
+# Two forms of one verdict on one line (English and Korean, as the unit's instruction names both).
+_VERDICT_JOINER = re.compile(r"\s+·\s+")
 
 
-def _completed_negative_audit_report(path):
-    """Read only the first nonblank, non-heading line, like pr-chain.py.
+# A unit leg's closed negative verdict, with or without the commit it reviewed: a read-only unit also
+# runs where there is no repository to take a head from. The names are the closed ones above; the verdict
+# line is the one the summary reads (`work_intent._VERDICT_LINE`).
+_UNIT_NEGATIVE_VERDICT = re.compile(
+    r"(?P<name>" + "|".join(_audit_form_pattern(label.split(":", 1)[-1].strip())
+                            for kind, label in _AUDIT_VERDICT_FORMS if kind != "merge")
+    + r")(?:\s+[—–-]\s+head\s+`?(?P<head>[0-9a-f]{7,40}|<sha>)`?)?", re.I)
+# The kind of a verdict name without its label (`changes requested` -> fix).
+_VERDICT_NAME_KINDS = {re.sub(r"\s+", "", label.split(":", 1)[-1]).lower(): kind for kind, label in _AUDIT_VERDICT_FORMS}
 
-    The body is not an authority source: no prose, fence, history or conflicting
-    later verdict interpretation. A missing/unreadable opening retains FAIL.
-    """
+
+def _opening_line(path):
+    """The report's first nonblank, non-heading line (stripped), or None for a missing, unreadable or
+    non-regular file (a pipe or device is never opened) or one with no such line in its opening."""
     if path is None:
-        return False
+        return None
     try:
+        if not Path(path).is_file():
+            return None
         with Path(path).open("rb") as handle:
             remaining = _AUDIT_OPENING_BYTES
             while remaining > 0:
                 raw = handle.readline(remaining + 1)
                 if not raw or len(raw) > remaining:
-                    return False
+                    return None
                 remaining -= len(raw)
                 for line in raw.decode("utf-8").splitlines():
                     line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    line = line.replace("**", "").replace("__", "").strip()
-                    line = line[:-1].rstrip() if line.endswith(".") else line
-                    match = _AUDIT_CLOSED.fullmatch(line)
-                    if not match:
-                        return False
-                    label = re.sub(r"\s+", "", match["label"]).replace("：", ":").lower()
-                    return _AUDIT_KINDS[label] == "fix"
+                    if line and not line.startswith("#"):
+                        return line
     except (OSError, UnicodeError):
         pass
-    return False
+    return None
+
+
+def closed_review_kind(path):
+    """``merge``, ``fix`` or ``hold`` when the report opens on a closed review verdict.
+
+    Reads only the first nonblank, non-heading line, like pr-chain.py (which does not take the ` · `-joined
+    line of one verdict in both forms that this reads). The body is
+    not an authority source: no prose, fence, history or conflicting later verdict
+    interpretation. A missing, unreadable or differently shaped opening is ``None``,
+    as is anything but a regular file (a pipe or device is never opened).
+    """
+    line = _opening_line(path)
+    if line is None:
+        return None
+    kinds, heads = set(), []
+    for part in _verdict_parts(line.replace("**", "").replace("__", "").strip()):
+        match = _AUDIT_CLOSED.fullmatch(part)
+        if not match:
+            return None
+        kinds.add(_AUDIT_KINDS[re.sub(r"\s+", "", match["label"]).replace("：", ":").lower()])
+        heads.append(match["head"])
+    # The same verdict in both forms reads as that verdict; two verdicts or two heads on one line read as none.
+    return kinds.pop() if len(kinds) == 1 and _one_head(heads) else None
+
+
+def _completed_negative_audit_report(path):
+    """A legacy audit FAIL reconciles only on a report that opens on `수정 후 병합`."""
+    return closed_review_kind(path) == "fix"
 
 
 # P-4 (2026-09-10, top-tier review round 2 att-0be411a9): a review closed
@@ -1241,7 +1391,7 @@ def carrier_terminal_note(
     if not compat:
         return None, {}
     extra: dict[str, str] = {}
-    if compat.get("failure_note") == "dead-worker-fail" and worker_type == "owner":
+    if compat.get("failure_note") == "dead-worker-fail" and worker_type in {"owner", REVIEW_WORKER_TYPE}:
         view = inspect_terminal_attempt(path, worktree=worktree,
             artifact_root_metadata=artifact_root_metadata, worker_type=worker_type,
             artifact_binding=artifact_binding)
@@ -1249,15 +1399,7 @@ def carrier_terminal_note(
             compat = {**compat, "verdict": "PASS", "blocker": "none", "failure_note": "",
                       "failure_class": "pass"}
             extra["reconcile_reason"] = "completed-audit-with-findings"
-    if compat.get("failure_note") == "dead-worker-fail" and worker_type == REVIEW_WORKER_TYPE:
-        view = inspect_terminal_attempt(
-            path,
-            worktree=worktree,
-            artifact_root_metadata=artifact_root_metadata,
-            worker_type=REVIEW_WORKER_TYPE,
-            artifact_binding=artifact_binding,
-        )
-        if review_blocking_handoff(view, REVIEW_WORKER_TYPE):
+        elif worker_type == REVIEW_WORKER_TYPE and review_blocking_handoff(view, REVIEW_WORKER_TYPE):
             compat = {**compat, "failure_note": REVIEW_BLOCKING_NOTE}
             encoded = str(view.get("artifact_path_b64") or "")
             if encoded:

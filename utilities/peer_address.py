@@ -7,12 +7,16 @@ from what Hearting already holds, never from a Herdr or tmux answer:
 - ``[xx]`` / ``xx`` is the confirmed Fleet number (``fleet.session_tags``);
 - a name is the session's registry name (Claude's session registry, the
   Hearting ``session_registry`` for Codex/OpenCode), unique among live sessions;
+- a number or a name that finds the viewer of a conversation sent to the background reaches
+  the background session holding it (``_follow_parked``; both Claude facts must agree);
 - a window address (``wB:pB3``, tmux ``%N@socket``) is the pane value a live
   native session process received when its window started it
   (``HERDR_PANE_ID``/``TMUX_PANE`` in its own environment), on the same terminal
   server as the caller: the same server name and the same Herdr socket, where a
   missing socket value means the server's socket under that environment's own
   Herdr configuration. Another server's window with the same number never matches.
+  A session a native service process hosts (Claude's background daemon) carries the
+  value that service inherited, not one a window gave it, so it never matches.
 
 What cannot be resolved is refused with a named reason; nothing is guessed.
 """
@@ -211,6 +215,24 @@ def _identity(harness, sid, **extra):
     return {"harness": harness, "session_id": sid, **extra}
 
 
+def _follow_parked(identity):
+    """A number or a name that finds a window's viewer of a conversation sent to the background
+    reaches the background session that now holds it (``session_registry.parked_successor``:
+    both Claude facts agree, read live; any doubt keeps the exact session found).
+
+    Only a number or a name follows: ``harness:session_id`` is exact and a window address
+    names the window, so neither is moved here."""
+    if not identity or identity.get("harness") != "claude":
+        return identity
+    try:
+        _tools_path()
+        from fleet import session_registry
+        found = session_registry.parked_successor("claude", identity.get("session_id"))
+    except Exception:
+        return identity
+    return _identity("claude", found["session_id"]) if found else identity
+
+
 def _resolve_tag(tag):
     _tools_path()
     try:
@@ -224,7 +246,24 @@ def _resolve_tag(tag):
             and session_tags.assigned_tag(*key) == tag.lower()]
     if len(keys) != 1:
         return None, "fleet-tag-ambiguous" if keys else "fleet-tag-not-found"
-    return _identity(*keys[0]), None
+    return _follow_parked(_identity(*keys[0])), None
+
+
+def _service_hosted(pid):
+    """A native service process (Claude's background daemon) started this session.
+
+    Its window value is the one that service inherited from whichever window first
+    started it, so it is not the value a window gave this session."""
+    from pane_ownership import _process, _runtime
+    record = _process(pid)
+    for _ in range(32):
+        if not record or record[1] <= 1:
+            return False
+        harness, service = _runtime(record[1])
+        if harness and service:
+            return True
+        record = _process(record[1])
+    return False
 
 
 def _resolve_pane(target, endpoint):
@@ -243,6 +282,8 @@ def _resolve_pane(target, endpoint):
                 matches.append(row)
         elif env.get("HERDR_PANE_ID") == target and _same_herdr_server(env, endpoint):
             matches.append(row)
+    # A shell attachment is its window's own session; only a census row can be service-hosted.
+    matches = [row for row in matches if row.get("binding") is not None or not _service_hosted(row["pid"])]
     seats = {(row["harness"], row["sid"]) for row in matches}
     if len(seats) > 1:
         return None, "target-pane-ambiguous"
@@ -267,7 +308,7 @@ def _resolve_name(target):
         return None, "target-name-ambiguous"
     if not seats:
         return None, "target-name-not-found"
-    return _identity(*next(iter(seats))), None
+    return _follow_parked(_identity(*next(iter(seats)))), None
 
 
 def is_pane_address(target):

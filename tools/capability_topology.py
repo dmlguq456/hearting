@@ -49,10 +49,129 @@ _BLOCKING_VERDICT_TOKENS = frozenset({
 _UNIT_CACHE: dict = {}
 _UNIT_CONTRACT_VIEW: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "unit_contract_view", default=None)
+# routing/prd.md R5, R8: the closed field vocabulary (one English name each).
+# Which recipe each field opens, and which field each recipe carries, lives
+# only in `capabilities/topologies.json` (`field_default_recipes`, recipe `field`).
+FIELDS = ("plan", "design", "code", "lab", "research", "docs", "admin", "other")
+FIELD_SOURCES = ("explicit", "preset", "frame")
 
 
 class TopologyError(ValueError):
     pass
+
+
+def field_vocabulary(registry):
+    return list(registry.get("fields") or [])
+
+
+def recipe_field(recipe, mode=None):
+    """The default field a recipe (or one of its modes) records; None for route-frame."""
+    value = (recipe or {}).get("field")
+    if isinstance(value, dict):
+        return value.get(mode)
+    return value if isinstance(value, str) else None
+
+
+def field_default_recipe(registry, field):
+    """`(capability, mode-or-None)` a field alone opens, or None when it has no default recipe."""
+    row = (registry.get("field_default_recipes") or {}).get(field)
+    if not isinstance(row, dict):
+        return None
+    return row["capability"], row.get("mode")
+
+
+def route_field(route, registry=None):
+    """`(field, field_source)` of a sealed route.
+
+    A route sealed before fields existed carries neither key; read it from its
+    recipe's default field (a route made from a frame proposal reads as `frame`).
+    The old record itself is never rewritten."""
+    if not isinstance(route, dict):
+        return None, None
+    if isinstance(route.get("field"), str):
+        return route["field"], route.get("field_source")
+    capability = route.get("capability")
+    if capability in COMPILER_INTERNAL_CAPABILITIES or not isinstance(capability, str):
+        return None, None
+    try:
+        registry = registry or load_registry()
+        composed = route.get("composed_recipe") if route.get("composed") else None
+        base = ((composed or {}).get("compose") or {}).get("base_capability") or capability
+        recipe = resolve_recipe(registry, base, route.get("capability_mode") or "default")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None, None
+    field = recipe_field(recipe, route.get("capability_mode"))
+    if field is None:
+        return None, None
+    return field, ("frame" if route.get("route_plan") is not None else "preset")
+
+
+def _validate_fields(registry):
+    """Registry check only: the vocabulary, each recipe's default field, each field's default recipe."""
+    if registry.get("fields") != list(FIELDS):
+        raise TopologyError("fields must declare exactly " + ",".join(FIELDS))
+    defaults = registry.get("field_default_recipes")
+    if not isinstance(defaults, dict) or set(defaults) != set(FIELDS):
+        raise TopologyError("field_default_recipes must name every field (null when it has no default recipe)")
+    for recipe in registry["recipes"]:
+        capability, value = recipe["capability"], recipe.get("field")
+        if capability in COMPILER_INTERNAL_CAPABILITIES:
+            if "field" in recipe:
+                raise TopologyError(f"{capability}: its field comes from the route's own proposal or unit head; "
+                                    "its recipe declares none")
+            continue
+        if isinstance(value, dict):
+            if set(value) != set(recipe["modes"]) or any(item not in FIELDS for item in value.values()):
+                raise TopologyError(f"{capability}: a per-mode field must name one field for each mode")
+        elif value not in FIELDS:
+            raise TopologyError(f"{capability}: field must be one of {','.join(FIELDS)}")
+    for field, row in defaults.items():
+        if row is None:
+            continue
+        if (not isinstance(row, dict) or not isinstance(row.get("capability"), str)
+                or set(row) - {"capability", "mode"} or ("mode" in row and not isinstance(row["mode"], str))):
+            raise TopologyError(f"field_default_recipes[{field}] must be null or {{capability, mode?}}")
+        rows = [r for r in registry["recipes"] if r["capability"] == row["capability"]
+                and r["capability"] not in COMPILER_INTERNAL_CAPABILITIES and ("mode" not in row or row["mode"] in r["modes"])]
+        if not rows:
+            raise TopologyError(f"field_default_recipes[{field}]: unknown recipe {row['capability']}/{row.get('mode') or '-'}")
+        if any(recipe_field(r, mode) != field for r in rows for mode in r["modes"]
+               if "mode" not in row or mode == row["mode"]):
+            raise TopologyError(f"field_default_recipes[{field}]: {row['capability']} does not default to {field}")
+
+
+_FIELD_WEIGHT_HARNESSES = ("claude", "codex", "opencode")
+
+
+def _validate_field_harness_weights(registry):
+    """The default gradient of the harness choice by field (core/OPERATIONS.md §5.10).
+
+    Names a field's row only for fields in the vocabulary; a field without a
+    row (admin, other) weighs 1.0. Model names live only in the adapters'
+    models.conf, so the basis points at depth names, never at a model.
+    """
+    table = registry.get("field_harness_weights")
+    if not isinstance(table, dict) or set(table) != {"checked_on", "rule", "basis", "weights"}:
+        raise TopologyError("field_harness_weights must be {checked_on, rule, basis, weights}")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(table["checked_on"])) or not str(table["rule"]).strip():
+        raise TopologyError("field_harness_weights needs a YYYY-MM-DD checked_on and a rule")
+    basis = table["basis"]
+    profiles = basis.get("profiles") if isinstance(basis, dict) else None
+    if (not isinstance(basis, dict) or set(basis) != {"models", "profiles"} or not isinstance(profiles, dict)
+            or set(profiles) != set(_FIELD_WEIGHT_HARNESSES)
+            or any(not isinstance(v, list) or not v or not set(v) <= set(registry["model_profiles"])
+                   for v in profiles.values())):
+        raise TopologyError("field_harness_weights.basis must name each harness's depth profiles "
+                            "from model_profiles (never a vendor model name)")
+    weights = table["weights"]
+    if not isinstance(weights, dict) or not set(weights) <= set(FIELDS):
+        raise TopologyError("field_harness_weights.weights may name only declared fields")
+    for field, row in weights.items():
+        if (not isinstance(row, dict) or set(row) != set(_FIELD_WEIGHT_HARNESSES)
+                or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 < v <= 1
+                       for v in row.values())):
+            raise TopologyError(f"field_harness_weights.weights[{field}] must give claude, codex "
+                                "and opencode a number above 0 and at most 1")
 
 
 def load_registry(path: Path | str = REGISTRY):
@@ -109,8 +228,12 @@ def capability_registry_digest(registry, capability, extra_recipes=()):
     # The part catalog is never part of the shared projection: a route that uses
     # no catalog data keeps the digest it had before the catalog existed. Only
     # the rows a composed recipe actually used (`compose.parts`) are added.
+    # `field_harness_weights` is a default the route seals into its own allocation
+    # (`dispatch_allocation.field_weights`), like the user's dispatch defaults: editing the
+    # table does not make a sealed graph stale.
     projection = {k: v for k, v in registry.items()
-                  if k not in ("recipes", "completion_gate_contracts", "part_catalog")}
+                  if k not in ("recipes", "completion_gate_contracts", "part_catalog",
+                               "field_harness_weights")}
     projection["recipes"] = recipes
     projection["completion_gate_contracts"] = {k: v for k, v in contracts.items() if k in referenced}
     if used_parts:
@@ -139,6 +262,11 @@ def recipe_keys(registry):
 
 
 ROUTE_FRAME_CAPABILITY = "route-frame"
+# `unit`: a route that is one unit leg the depth-0 session launches itself, no owner (design 5).
+UNIT_CAPABILITY = "unit"
+UNIT_NODE_ID = "unit"
+# Recipes the compiler reaches by shape or `--unit`, never by a person's capability name.
+COMPILER_INTERNAL_CAPABILITIES = (ROUTE_FRAME_CAPABILITY, UNIT_CAPABILITY)
 ROUTE_DECISION_KIND = "runtime-terminal"
 ROUTE_FRAME_NODE_IDS = ["frame", "frame-alternative", "route-decision"]
 # A framed route that runs one frame leg seals this projection of the same recipe.
@@ -187,6 +315,48 @@ def _validate_route_frame_shape(recipe):
             or recipe["human_gate_bindings"] != [{"gate": "frame-review", "node": "route-decision",
                                                   "position": "entry"}]):
         raise TopologyError(f"{cap}: exactly one frame-review binding at the terminal entry is required")
+    if graph.get("parallel_groups") or recipe.get("conditional_extensions"):
+        raise TopologyError(f"{cap}: no parallel groups or extensions")
+
+
+def unit_names():
+    """Every unit of the catalog (`<family>/<name>`), in order; shared fragments (`_shared/`, `_*.md`) are not units."""
+    return sorted(path.relative_to(UNITS).with_suffix("").as_posix() for path in UNITS.glob("*/*.md")
+                  if not path.name.startswith("_") and not path.parent.name.startswith("_"))
+
+
+def is_unit_template_node(recipe, node):
+    """Whether ``node`` is the `unit` recipe's one leg template.
+
+    Its unit, role and worker type are not in the recipe: each route fills them from the
+    unit head it was opened for (`capability_route_nodes.unit_leg_node`), so the registry
+    cannot name a unit ref for it and the ordinary unit-ref check is skipped for exactly this node."""
+    return (isinstance(recipe, dict) and recipe.get("capability") == UNIT_CAPABILITY
+            and isinstance(node, dict) and node.get("id") == UNIT_NODE_ID)
+
+
+def _validate_unit_shape(recipe):
+    """Exact shape of the compiler-internal `unit` recipe: one depth-0 leg, nothing else."""
+    cap = UNIT_CAPABILITY
+    graph = recipe["standard_plus"]
+    nodes = graph.get("nodes", [])
+    if [n.get("id") for n in nodes] != [UNIT_NODE_ID]:
+        raise TopologyError(f"{cap}: nodes must be exactly {[UNIT_NODE_ID]}")
+    leg = nodes[0]
+    scope = [f"units/{UNIT_NODE_ID}/**"]
+    if (leg.get("kind") != "map-worker" or leg.get("depends_on") != []
+            or leg.get("dispatch_depth") != 1 or leg.get("launch_authority") != "depth-0"
+            or leg.get("terminal") is not True or leg.get("terminal_gate") != "unit-complete"
+            or leg.get("completion_gate") != "unit-complete" or leg.get("write_scope") != scope
+            or leg.get("execution_surface") != "registered-headless"
+            or leg.get("registered_worker") is not True):
+        raise TopologyError(f"{cap}:{UNIT_NODE_ID}: unit leg shape mismatch")
+    if any(key in leg for key in ("unit", "role", "worker_type", "fallback_hops", "continuation")):
+        raise TopologyError(f"{cap}:{UNIT_NODE_ID}: the unit, role and worker type come from the unit head")
+    if (recipe["modes"] != ["default"] or recipe["completion_gates"] != ["unit-complete"]
+            or recipe["human_gates"] != [] or recipe["human_gate_bindings"] != []
+            or recipe["quick"].get("write_scope") != scope):
+        raise TopologyError(f"{cap}: one default mode, one gate, no human gate, quick scope {scope}")
     if graph.get("parallel_groups") or recipe.get("conditional_extensions"):
         raise TopologyError(f"{cap}: no parallel groups or extensions")
 
@@ -499,7 +669,7 @@ def _parse_unit_frontmatter(unit, text):
         found = re.search(rf"^{name}:\s*([^#\n]+?)\s*(?:#.*)?$", block, re.MULTILINE)
         return found.group(1).strip() if found else None
 
-    fields = {name: scalar(name) for name in ("unit", "role", "worker_type", "read_only")}
+    fields = {name: scalar(name) for name in ("unit", "role", "worker_type", "read_only", "floor", "field")}
     if fields["unit"] != unit:
         raise TopologyError(f"unit {unit}: frontmatter unit id mismatch ({fields['unit']!r})")
     if not fields["role"]:
@@ -508,6 +678,8 @@ def _parse_unit_frontmatter(unit, text):
         raise TopologyError(f"unit {unit}: invalid worker_type {fields['worker_type']!r}")
     if fields["read_only"] not in ("true", "false"):
         raise TopologyError(f"unit {unit}: read_only must be true or false")
+    if fields["field"] is not None and fields["field"] not in FIELDS:
+        raise TopologyError(f"unit {unit}: field must be one of {','.join(FIELDS)}")
     verdict = re.search(r"^io:\s*\n\s+verdict:\s*\[([^\]]*)\]", block, re.MULTILINE)
     fields["verdict"] = (
         [token.strip() for token in verdict.group(1).split(",") if token.strip()]
@@ -902,6 +1074,34 @@ def _validate_continuations(recipe, registry, nodes, by_id):
             )
 
 
+
+ONE_SHOT_REVIEW_KEYS = {"node", "inputs", "fallback_hops", "model_profile", "owner_model_profile"}
+
+
+def _validate_one_shot_review(recipe, registry):
+    """The middle cell's review node: a kind that declares `one_shot_review` borrows one of its own
+    standard review nodes (inputs, registered fallback hops without `inline` or `native-subagent`, model role); everything else about the
+    node is that node's own. `owner_model_profile` is the model role of the owner that makes the work."""
+    where = f"{recipe['capability']}:one_shot_review"
+    declared = recipe["one_shot_review"]
+    if not isinstance(declared, dict) or set(declared) != ONE_SHOT_REVIEW_KEYS:
+        raise TopologyError(f"{where}: must declare exactly {sorted(ONE_SHOT_REVIEW_KEYS)}")
+    node = next((n for n in recipe["standard_plus"]["nodes"] if n.get("id") == declared["node"]), None)
+    if (node is None or node.get("kind") != "review-worker" or node.get("dispatch_depth") != 2
+            or not node.get("completion_gate")):
+        raise TopologyError(f"{where}: node must be one of the recipe's depth-2 review-worker nodes")
+    inputs = declared["inputs"]
+    if not isinstance(inputs, list) or not inputs or any(not isinstance(i, str) for i in inputs):
+        raise TopologyError(f"{where}: inputs must be a non-empty list")
+    hops = declared["fallback_hops"]
+    if (not isinstance(hops, list) or "inline" in hops or "native-subagent" in hops or len(hops) != len(set(hops))
+            or set(hops) - FALLBACK_HOPS or not hops):
+        # A native subagent's completion is recorded inline, which the cell refuses for the review of the owner's own work.
+        raise TopologyError(f"{where}: fallback_hops must be distinct registered dispatch hops without inline "
+                            "or native-subagent")
+    _validate_model_profile(registry, declared["model_profile"], where)
+    _validate_model_profile(registry, declared["owner_model_profile"], where + ":owner")
+
 def _validate_recipe(recipe, registry, standard_plus_owner_profile):
     required = {"capability", "modes", "topology_class", "direct_predicates", "promotion_signals",
                 "quick", "standard_plus", "completion_gates", "human_gates",
@@ -934,6 +1134,8 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
     _validate_guard_scope(recipe, quick.get("write_scope", []), quick.get("guard_preconditions", []), registry, "quick")
     _validate_bucket_anchor(recipe, registry, quick.get("write_scope", []), None, "quick")
     graph = recipe["standard_plus"]
+    if "one_shot_review" in recipe:
+        _validate_one_shot_review(recipe, registry)
     if any(key in graph for key in bare_depth_keys):
         raise TopologyError(f"{recipe['capability']}: bare standard+ dispatch-depth fields are forbidden")
     if graph.get("owner_dispatch_depth") != 1:
@@ -947,6 +1149,8 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
     by_id = {n["id"]: n for n in nodes}
     if recipe["capability"] == ROUTE_FRAME_CAPABILITY:
         _validate_route_frame_shape(recipe)
+    if recipe["capability"] == UNIT_CAPABILITY:
+        _validate_unit_shape(recipe)
     actual_max_dispatch_depth = max(
         (
             node.get("dispatch_depth", 0)
@@ -975,7 +1179,7 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
         runtime_terminal = is_route_frame_terminal(recipe, node)
         if node.get("kind") not in registry["worker_kinds"] and not runtime_terminal:
             raise TopologyError(f"{recipe['capability']}:{node['id']}: invalid worker kind")
-        if not runtime_terminal:
+        if not runtime_terminal and not is_unit_template_node(recipe, node):
             _validate_unit_ref(recipe, node, registry)
         if "profile_demand" in node:
             PROFILE.resolve_profile_demand(node["profile_demand"])
@@ -1666,7 +1870,7 @@ def _validate_part_catalog(registry, owner_profile):
     capabilities = {recipe["capability"] for recipe in registry["recipes"]}
     node_ids = {}
     for recipe in registry["recipes"]:
-        if recipe["capability"] == ROUTE_FRAME_CAPABILITY:
+        if recipe["capability"] in COMPILER_INTERNAL_CAPABILITIES:
             continue  # compiler-internal: never composable, so it has no catalog parts
         for node in recipe["standard_plus"]["nodes"]:
             key = f"{recipe['capability']}:{node['id']}"
@@ -1783,7 +1987,7 @@ def _validate_part_catalog(registry, owner_profile):
         raise TopologyError("part_catalog.frame.template lacks a template field")
     aliases = frame["aliases"]
     framed = {recipe["capability"] for recipe in registry["recipes"]
-              if recipe["capability"] != ROUTE_FRAME_CAPABILITY
+              if recipe["capability"] not in COMPILER_INTERNAL_CAPABILITIES
               and any(node["id"] in aliases for node in recipe["standard_plus"]["nodes"])}
     if not isinstance(frame["briefs"], dict) or set(frame["briefs"]) != framed:
         raise TopologyError("part_catalog.frame.briefs must cover exactly the recipes that carry a frame")
@@ -1891,6 +2095,8 @@ def validate_registry(registry, manifest=None):
     actual, expected = recipe_keys(registry), expected_recipe_keys(manifest)
     if actual != expected:
         raise TopologyError(f"coverage mismatch missing={sorted(expected-actual)} extra={sorted(actual-expected)}")
+    _validate_fields(registry)
+    _validate_field_harness_weights(registry)
     for recipe in registry["recipes"]:
         _validate_recipe(recipe, registry, standard_plus_owner_profile)
         _validate_gate_contracts(recipe, registry)

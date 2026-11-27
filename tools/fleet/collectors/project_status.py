@@ -24,6 +24,16 @@ _UTILITIES = str(Path(__file__).resolve().parents[3] / 'utilities')
 if _UTILITIES not in sys.path:
     sys.path.insert(0, _UTILITIES)
 import artifact_campaign_documents as campaign_documents
+try:
+    from .. import mdescape
+except ImportError:
+    # Loaded by its file path outside the ``fleet`` package (``experiment_catalog.root_for_cwd``):
+    # take the shared module from its file too, adding nothing to ``sys.path``.
+    import importlib.util as _importlib_util
+    _spec = _importlib_util.spec_from_file_location(
+        "project_status_mdescape", Path(__file__).resolve().parents[1] / "mdescape.py")
+    mdescape = _importlib_util.module_from_spec(_spec)
+    _spec.loader.exec_module(mdescape)
 
 STATUS_NAMES = campaign_documents.STATUS_NAMES
 RECENT_DAYS = 14
@@ -36,11 +46,12 @@ _ROOTS = {}               # cwd -> (resolved_at, root or None)
 _SCANS = {}               # root -> (scanned_at, record or None)
 _CYCLES = {}              # campaign dir -> (dir mtime, cycle dirs)
 _LISTED = {}              # folder -> (folder mtime, its status document path or None)
+_NO_PAGE = {}             # campaign folder -> its mtime when it had no campaign.md
 _DOCS = {}                # path -> (mtime, size, parsed)
 
 
 def clear_cache():
-    for cache in (_ROOTS, _SCANS, _CYCLES, _LISTED, _DOCS):
+    for cache in (_ROOTS, _SCANS, _CYCLES, _LISTED, _NO_PAGE, _DOCS):
         cache.clear()
 
 
@@ -157,6 +168,15 @@ def _status_selection(folder, *, canonical=False):
     stamp = _mtime(folder)
     if stamp is None:
         return {'status': 'absent', 'path': None}
+    if canonical and _NO_PAGE.get(folder) != stamp:
+        # A campaign folder: its own page is opened by name, never found by listing. Adding or
+        # removing it moves the folder's stamp, so "no page" is kept with the stamp and not asked
+        # again while the stamp stands; a page that is there is read every time, like the older names.
+        page = campaign_documents.campaign_page(folder)
+        if page is not None:
+            _NO_PAGE.pop(folder, None)
+            return page
+        _NO_PAGE[folder] = stamp
     known = _LISTED.get(folder)
     if known is None or known[0] != stamp:
         known = (stamp, campaign_documents.status_candidates(folder))
@@ -216,15 +236,24 @@ _UPDATED = re.compile(r"(?:갱신|updated)\s*[:：]?\s*[0-9]", re.IGNORECASE)
 # Heading words: the convention names "결정 필요" / "Decisions needed" (what waits on the
 # person: a decision or an action) and "다음" / "Next"; a few near spellings are read too.
 # A record of decisions already made is not counted.
-_DECISION_WORDS = ("결정 필요", "결정할", "결정 대기", "사용자에게 필요", "decisions needed", "decision needed",
+_DECISION_WORDS = ("결정 필요", "결정할", "결정 대기", "결정 기다리는", "기다리는 것", "사용자에게 필요", "decisions needed", "decision needed",
                    "needs decision", "to decide", "open decision", "pending decision", "needs you")
+# The campaign document Hearting generates (its first line is this marker) never lists what waits for the person: that is a
+# question, and stands on the question screens only (11-22).  An older one that still has a "기다리는 것" section is read
+# without it; a hand-written status page (no marker) keeps its decision section as written.
+CAMPAIGN_MARKER = "<!-- hearting:campaign-document v1 -->"       # utilities/campaign_document.MARKER (a test holds them equal)
 _RECORD_WORDS = ("기록", "내린", "log", "made", "history")
-_NEXT_WORDS = ("다음", "next", "할 일", "to do", "todo")
+_NEXT_WORDS = ("다음", "예정", "나중에 할", "next", "할 일", "to do", "todo")
 
 
 def _plain(text):
+    """One line of Markdown as plain words. A backslash escape outside a code span is held first (so
+    ``\\[a\\](x)`` is not a link and ``\\*x\\*`` is not emphasis) and given back as the bare mark last:
+    the campaign document escapes its titles that way, and a hand-written one reads as CommonMark does."""
+    text = mdescape.protect(text)
     text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
-    return re.sub(r"\s+", " ", text.replace("**", "").replace("__", "").replace("`", "")).strip()
+    text = re.sub(r"\s+", " ", text.replace("**", "").replace("__", "").replace("`", "")).strip()
+    return mdescape.restore(text)
 
 
 def _section_kind(title):
@@ -245,8 +274,10 @@ def parse(text):
     section (else the first plain paragraph there that is not the ``갱신``/``Updated``
     stamp, else the title), and the top-level bullets under a "decisions needed" heading
     and a "next" heading.
-    Anything else is ignored; a missing part stays empty.
+    Anything else is ignored; a missing part stays empty.  A generated campaign document (marker on its first line) has
+    no ``decisions``: its ``기다리는 것`` section, where an older one still has it, is not read.
     """
+    generated = campaign_documents.carries_marker(text, CAMPAIGN_MARKER)
     title = line = first_paragraph = None
     sections = {"decisions": [], "next": []}
     current, level, in_body = None, 0, False
@@ -292,7 +323,7 @@ def parse(text):
             paragraph.append(stripped)
     close_paragraph()
     return {"title": title, "line": line or first_paragraph or title,
-            "decisions": sections["decisions"], "next": sections["next"]}
+            "decisions": [] if generated else sections["decisions"], "next": sections["next"]}
 
 
 def read_document(path):

@@ -2355,7 +2355,7 @@ def _jobs_path(override=None):
 
 
 def _opencode_config_home():
-    """OpenCode global config home (INSTALL_LAYOUT.md target layout)."""
+    """OpenCode global config home (docs/INSTALL_LAYOUT.md target layout)."""
     return os.path.expanduser("~/.config/opencode")
 
 
@@ -2371,7 +2371,7 @@ def _installed_registry_paths():
     """Installed per-runtime-home dispatch registries that exist as files.
 
     An activated harness install roots its agent home at `<runtime-home>/.harness/`
-    (INSTALL_LAYOUT.md activation record), so that install's SD-49 canonical registry
+    (docs/INSTALL_LAYOUT.md activation record), so that install's SD-49 canonical registry
     is `<runtime-home>/.harness/dispatch/jobs.log`, NOT the maintainer checkout's
     `<agent-home>/.dispatch/jobs.log`. A managed Codex parent therefore registers its
     dispatch children under ~/.codex/.harness/; without reading these, fleet reports
@@ -5061,6 +5061,11 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
     latest = derived["latest_jobs"]
     selected, alive_keys, expired, observed_identities = _job_selection(
         derived, live_attempt_ids, include_stall=include_stall)
+    # A unit worker a worker started (`caller_attempt_id`) hangs below that worker's own row. Its `parent_slug` is
+    # only that hang for the older job list; the route readers follow `caller_attempt_id` itself (the job's own
+    # field), and the owner-child link (`projection._owner_children`) ignores a called row.
+    slug_of_attempt = {value[2].get("attempt_id"): value[1][4] for value in latest.values()
+                       if value[2].get("attempt_id")}
     for key in selected:
         registry_order, fields, parsed_meta = latest[key]
         if (allowed_attempt_ids is not None
@@ -5163,6 +5168,9 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
         parent_sid = meta.get("parent_sid") or meta.get("parent_session_id") or None
         parent_cwd = meta.get("parent_cwd") or meta.get("parent_worktree") or None
         parent_managed_dir = _managed_parent_dir(meta.get("managed_sidecar_log"))
+        called_by = slug_of_attempt.get(meta.get("caller_attempt_id")) if meta.get("caller_attempt_id") else None
+        if called_by and not parent_slug:
+            parent_slug = called_by
         harness = _infer_harness(meta, slug)
         worker_type = meta.get("worker_type")
         unit = meta.get("unit") or None
@@ -5185,6 +5193,7 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
             caller_pane=meta.get("caller_pane") or None, caller_cwd=meta.get("caller_cwd") or None,
             parent_managed_dir=parent_managed_dir,
             parent_slug=parent_slug,
+            caller_attempt_id=meta.get("caller_attempt_id") or None,
             is_child=bool(parent_slug or parent_sid or parent_cwd or parent_managed_dir),
             qa_source=qsrc, source="jobs", status=status,
             harness=harness, model=meta.get("model"), resolved_model=meta.get("resolved_model"),
@@ -5199,7 +5208,8 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
             pgid=int(pgid_s) if pgid_s.isdigit() else None,
             pid_identity_source=identity_source,
             profile=meta.get("profile"),
-            depth=_parse_depth(meta.get("dispatch_depth", meta.get("depth"))),
+            # The route-relative depth stays 1 in the registry; Fleet nests a called worker one level below its caller.
+            depth=max(_parse_depth(meta.get("dispatch_depth", meta.get("depth"))), 2 if called_by else 1),
             **attempt_contract,
             intensity=meta.get("intensity"),
             worker_type=worker_type,
@@ -5255,12 +5265,18 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
         # already settled history.
         if job.afterglow:
             continue
-        if job.intensity != "quick" or not job.route_id or not job.route_node:
+        # A serial owner row: a quick route's rows, and the owner of any route that makes its work itself
+        # (the node `one-shot`; the middle cell `solo·standard` is one). Its depth-2 review is not held to this shape.
+        serial_owner = job.worker_type == "owner" and job.route_node == "one-shot"
+        if not (job.intensity == "quick" or serial_owner) or not job.route_id or not job.route_node:
             continue
         key = (job.route_id, job.route_node)
         quick_groups.setdefault(key, []).append(job)
         violations = []
-        if job.dispatch_depth != 1 or job.parent_slug:
+        # (a unit leg a worker called hangs below that worker for the older job list through `parent_slug`, which is no
+        # owner link: that one is not held to the owner-child shape; its depth still is: `caller_attempt_receipt` writes the
+        # field only on a depth-1 unit leg, so a called row at another depth is a wrong row)
+        if job.dispatch_depth != 1 or (job.parent_slug and not job.caller_attempt_id):
             violations.append("quick-shape")
         if (
             job.execution_surface != "registered-headless"
@@ -6375,7 +6391,8 @@ def _collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=Fa
     paths = _candidate_jobs_paths(jobs_path)
     split_registries = _validated_split_registry_paths(paths, session_rows=session_rows)
     paths.extend(split_registries)
-    if (display_scope := _ROUTE_DISPLAY_ROWS.get()) is not None:
+    display_scope = _ROUTE_DISPLAY_ROWS.get()
+    if display_scope is not None:
         _prime_route_display_rows(paths, display_scope)
     orphan_rows_cache = ({} if _dispatch_registry_cache.registry_scope_active()
                          else None)
@@ -6445,7 +6462,9 @@ def _collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=Fa
     # a failed mark leaves the row on its already collected observations.
     for j in jobs:
         j._worker_home_admitted = _note_home_view(j, jobs_path)
-    if not fast_first:
+    # A route display (a session's popup or panel cache) draws no location, campaign label or
+    # pending-delivery count; the campaign label is still read once by `work_titles.annotate`.
+    if not fast_first and display_scope is None:
         _fill_locations(jobs)      # explanatory metadata, filled by live details
         _campaign_labels(jobs)
     # Typed-mode+profile backfill for proc jobs whose argv/env omitted metadata.
@@ -6618,7 +6637,9 @@ def _collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=Fa
     # last_malformed/last_route_nodes above -- additive, no return-signature
     # change. Enumeration failure fails open: keep every job row, drop the count.
     try:
-        if not fast_first:
+        if display_scope is not None:
+            collect.last_pending_delivery = None
+        elif not fast_first:
             collect.last_pending_delivery = _pending_delivery_counts(
                 paths, session_observation=session_observation)
     except Exception:

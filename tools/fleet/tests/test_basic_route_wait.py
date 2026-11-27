@@ -97,6 +97,11 @@ class RouteDetailsFixture(unittest.TestCase):
     def line(lines, needle):
         return next((line for line in lines if needle in line), "")
 
+    @staticmethod
+    def rule_line(lines):
+        """The OVERVIEW ROUTES section head (``1 ROUTES ───``, ``ROUTES · details wait ───``)."""
+        return next((line for line in lines if re.search(r"│ (?:[\d?]+ ROUTES|ROUTES ·)", line)), "")
+
 
 class DeferredRouteDetails(RouteDetailsFixture):
     def test_basic_frame_says_details_wait_for_running_routes(self):
@@ -116,9 +121,9 @@ class DeferredRouteDetails(RouteDetailsFixture):
         self.assertTrue(demo_app.get("routes_wait"))
         self.assertIn("route details wait", self.line(lines, "demo-app/"))
         # The OVERVIEW ROUTES rule says it in words, never "0 open".
-        rule = self.line(lines, "── ROUTES")
+        rule = self.rule_line(lines)
         self.assertIn("details wait", rule)
-        self.assertNotIn("0 open", rule)
+        self.assertNotRegex(rule, r"(^|[^\d])0 ROUTES")
         # Session a7's own route count is still to come (its title cell already says it).
         a7 = next(row for row in model.sessions if row["tag"] == "a7")
         self.assertTrue(a7.get("route_wait"))
@@ -136,7 +141,7 @@ class DeferredRouteDetails(RouteDetailsFixture):
         self.assertEqual(self.status(model, "demo-app").get("routes"), 1)
         self.assertNotIn("routes_wait", self.status(model, "demo-app"))
         self.assertIn("route 1 ⠏1", self.line(lines, "demo-app/"))
-        self.assertIn("1 open", self.line(lines, "── ROUTES"))
+        self.assertIn("1 ROUTES", self.rule_line(lines))
         self.assertIn("route 1", self.line(lines, "[a7]"))
         self.assertFalse(any("details wait" in line for line in lines))
 
@@ -183,10 +188,10 @@ class DeferredRouteDetails(RouteDetailsFixture):
         self.assertEqual(card["session_tag"], "a7")
         self.assertTrue(card.get("details_wait"))
         self.assertIsNone(card["current"])
-        rule_at = next(i for i, line in enumerate(lines) if "── ROUTES" in line)
-        # Not known is in no count: the rule says "details wait" in place of a count, never 1 open.
-        self.assertIn("ROUTES  details wait", lines[rule_at])
-        self.assertNotRegex(lines[rule_at], r"\d open")
+        rule_at = lines.index(self.rule_line(lines))
+        # Not known is in no count: the rule says "details wait" in place of a count, never 1 ROUTES.
+        self.assertIn("ROUTES · details wait", lines[rule_at])
+        self.assertNotRegex(lines[rule_at], r"\d ROUTES")
         self.assertIn("details wait", lines[rule_at + 1])      # the route row's stage cell
         self.assertIn("[a7]", lines[rule_at + 1])
 
@@ -259,8 +264,8 @@ class TriedRouteDetails(RouteDetailsFixture):
                 self.assertFalse(any("details wait" in line for line in lines), (error, attempt))
                 self.assertEqual(self.status(model, "demo-app").get("routes_wait"), "unread")
                 self.assertIn("route ?", self.line(lines, "demo-app/"))
-                self.assertIn("ROUTES  ? open", self.line(lines, "── ROUTES"))
-                self.assertNotIn("0 open", self.line(lines, "── ROUTES"))
+                self.assertIn("? ROUTES", self.rule_line(lines))
+                self.assertNotRegex(self.rule_line(lines), r"(^|[^\d])0 ROUTES")
 
     def test_a_partial_detail_pass_keeps_what_came_and_leaves_the_rest_unknown(self):
         source = {details.identity(entity): entity for entity in self.complete.sessions + self.complete.jobs}
@@ -282,7 +287,7 @@ class TriedRouteDetails(RouteDetailsFixture):
             self.assertFalse(routes[rid].get("details_wait"), rid)
         self.assertFalse(any("details wait" in line for line in lines))
         self.assertIn("route 1 ⠏1", self.line(lines, "demo-app/"))
-        self.assertIn("1 open", self.line(lines, "── ROUTES"))
+        self.assertIn("1 ROUTES", self.rule_line(lines))
 
     def test_the_wait_marker_leaves_the_title_header_once_the_details_were_tried(self):
         readiness = {"details_pending": ("required-details",),
@@ -308,8 +313,8 @@ class TriedRouteDetails(RouteDetailsFixture):
         grid = CellGrid(133, 60)
         tables._draw_overview_routes_rule(grid, model, NavState(), 34, 97, 132, 3, [card])
         rule = "".join(cell[0] for cell in grid.cells[3])
-        self.assertIn("ROUTES  details wait", rule)
-        self.assertNotRegex(rule, r"\d open")
+        self.assertIn("ROUTES · details wait", rule)
+        self.assertNotRegex(rule, r"\d ROUTES")
         keys = {cell[1] for cell in grid.cells[3]}
         self.assertFalse({"g_work", "g_work_off"} & keys)
         self.assertNotIn("claude 1", rule)                    # nor in the owner·worker mix
@@ -374,7 +379,7 @@ class TriedRouteDetails(RouteDetailsFixture):
         drawn = {}
         grid = CellGrid(200, 60)
         tables._draw_overview_routes_rule(grid, vm, NavState(), 34, 163, 199, 3, list(routes))
-        drawn["rule"] = lines(grid)[3].split("ROUTES  ", 1)[1].split(" ─", 1)[0]
+        drawn["rule"] = lines(grid)[3][34:].split(" ─", 1)[0]
         for name, scope, view in (("overview", "-", "OVERVIEW"), ("routes", "-", "ROUTES"),
                                   ("project", "repo:demo-app", "OVERVIEW")):
             grid = CellGrid(200, 60)
@@ -394,7 +399,8 @@ class TriedRouteDetails(RouteDetailsFixture):
         if name == "tab":
             found = re.fullmatch(r"(\d+)?(?: · )?(\?)?", text)
             return (int(found.group(1)) if found.group(1) else None), ("mark" if found.group(2) else None)
-        pattern = r"route (\d+)" if name == "overview" else r"(?:^|· )(\d+) open"
+        pattern = (r"route (\d+)" if name == "overview" else r"^(\d+) ROUTES" if name == "rule"
+                   else r"(?:^|· )(\d+) open")
         found = re.search(pattern, text)
         mark = "mark" if ("details wait" in text or re.search(r"(^|[ ·])\?( |$)", text)) else None
         return (int(found.group(1)) if found else None), mark
@@ -429,6 +435,7 @@ class TriedRouteDetails(RouteDetailsFixture):
             self.assertIn(mark, drawn["routes"])
             self.assertIn(mark, drawn["project"])
             self.assertNotRegex(" ".join(drawn.values()), r"(^|[^\d])0 open")
+            self.assertNotRegex(drawn["rule"], r"^0 ROUTES")
         # All known: the same count everywhere, and no mark.
         drawn = self.count_surfaces(model, known)
         read = {name: self.known_and_mark(name, text) for name, text in drawn.items()}

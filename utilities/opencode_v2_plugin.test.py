@@ -786,7 +786,7 @@ const flushed = path.join(process.env.FIXTURE_ROOT, 'flushed')
 while (!fs.existsSync(flushed) && Date.now() - started < 20000) {}
 const holdUntil = Date.now() + 300
 while (Date.now() < holdUntil) {}
-assert.equal(await pending, 'FLUSHED-BEFORE-KILL')
+assert.deepEqual(await pending, {text: 'FLUSHED-BEFORE-KILL', system: ''})
 assert(Date.now() - started < 25000)
 """)
             result = subprocess.run([node, str(script)], cwd=ROOT, env=dict(BASE_ENV,
@@ -1528,6 +1528,7 @@ const otherLocation = { directory: `${process.env.TEMP_ROOT}/other` }
 fs.mkdirSync(otherLocation.directory)
 const identityDir = `${process.env.XDG_STATE_HOME}/hearting/tui-identity`
 const policyDir = `${process.env.XDG_STATE_HOME}/agent-fleet/context-policy/opencode`
+const inheritedAttempt = process.env.AGENT_DISPATCH_ATTEMPT_ID
 fs.mkdirSync(identityDir, { recursive: true })
 fs.mkdirSync(policyDir, { recursive: true })
 const file = tui => `${identityDir}/${tui.pid}-${tui.start}.json`
@@ -1593,7 +1594,7 @@ const primary = async (sessionID = "ses_a", ref = { providerID: "p", id: "m" }, 
 }
 try {
   select(tuis[0], "ses_a"); select(tuis[1], "ses_a"); select(tuis[2], "ses_b")
-  const inherited = `${policyDir}/attempt-att-inherited.json`
+  const inherited = `${policyDir}/attempt-${inheritedAttempt}.json`
   fs.writeFileSync(inherited, "inherited sentinel")
   await primary(); await primary("ses_b", { providerID: "p", id: "other" })
   await flush()
@@ -1852,8 +1853,8 @@ try {
   lookup = () => ({ location, data: [model()] })
   await primary("ses_worker"); await flush()
   const worker = JSON.parse(fs.readFileSync(inherited))
-  assert.equal(worker.attempt_id, "att-inherited")
-  assert.equal(worker.policy.attempt_id, "att-inherited")
+  assert.equal(worker.attempt_id, inheritedAttempt)
+  assert.equal(worker.policy.attempt_id, inheritedAttempt)
   assert.equal(worker.session_id, "ses_worker")
   select(tuis[0], "ses_a")
   lookup = () => ({ location, data: [model()] })
@@ -1877,7 +1878,8 @@ try {
             env = {**BASE_ENV, "HOME": tmp, "XDG_STATE_HOME": str(Path(tmp) / "state"),
                    "XDG_CONFIG_HOME": str(Path(tmp) / "config"),
                    "FLEET_SESSION_REGISTRY_DIR": str(Path(tmp) / "state/agent-fleet/sessions"),
-                   "AGENT_DISPATCH_ATTEMPT_ID": "att-inherited", "AGENT_DISPATCH_CHILD": "1",
+                   "AGENT_DISPATCH_ATTEMPT_ID": fixture_processes.unique_attempt_id("att-inherited"),
+                   "AGENT_DISPATCH_CHILD": "1",
                    "OPENCODE_VERSION": "1.19.0",  # inherited v1 version cannot prove a v2 trigger
                    "PLUGIN_PATH": str(ROOT / "adapters/opencode/plugins/hearting-guards.js"),
                    "TUI_FIXTURES": json.dumps(tuis), "TEMP_ROOT": tmp,
@@ -1939,8 +1941,10 @@ try {
   // 2.0.32 order: execute.before, then create.before with no OPENCODE_SESSION_ID.
   const main = await shellEnv("ses_main", "echo main")
   assert.equal(main.AGENT_PARENT_COMPLETION_CARRIER, "opencode-turn:ses_main")
+  assert.equal(main.AGENT_STEWARD_WATCH_WAKE, "opencode")  // only a plugin that can wake says it
   const worker = await shellEnv("ses_worker", "echo worker")
   assert.equal(worker.AGENT_PARENT_COMPLETION_CARRIER, "")
+  assert.equal(worker.AGENT_STEWARD_WATCH_WAKE, "")
   await hooks.get("tool.execute.before")({ tool: "shell", sessionID: "ses_main",
                                            input: { command: "echo shared" } })
   await hooks.get("tool.execute.before")({ tool: "shell", sessionID: "ses_other",
@@ -2022,9 +2026,10 @@ try {
                                     cwd=ROOT, env=env, text=True, capture_output=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_v2_question_answers_reach_the_frame_answer_recorder(self):
-        # GA-A5-013: V2 hands the question tool's answers on `event.result.metadata`
-        # (OpenCode 2.0.32: `metadata: {answers}`); the shared after hook reads them as in V1.
+    def test_v2_question_call_is_refused_after_registration_and_passes_on_failure_and_a_child_session_is_left_alone(self):
+        # A native `question` call is registered as the session's Hearting question by the shared
+        # redirect (utilities/native_question_redirect.py): the plugin refuses the call with its
+        # one-line reason (exit 1), and lets it run when the redirect registers nothing (exit 0).
         node = shutil.which("node")
         if not node:
             self.skipTest("node is unavailable for the V2 plugin module contract")
@@ -2038,8 +2043,13 @@ try {
             (harness / "core" / "CORE.md").write_text("fixture\n")
             (harness / "adapters" / "opencode" / "bin" / "preflight.sh").write_text("exit 0\n")
             seen = Path(tmp) / "seen.json"
-            (harness / "utilities" / "frame_native_answer.py").write_text(
-                "import sys\nopen(%r, 'a').write(sys.stdin.read() + '\\n')\n" % str(seen))
+            (harness / "utilities" / "native_question_redirect.py").write_text(
+                "import os, sys\n"
+                "payload = sys.stdin.read()\n"
+                "open(%r, 'a').write(payload + '\\n')\n"
+                "if os.environ.get('REDIRECT_REGISTERS') == '1':\n"
+                "    print('Registered as Hearting question S4:fixture')\n"
+                "    raise SystemExit(1)\n" % str(seen))
             script = r"""
 import { pathToFileURL } from "node:url"
 const plugin = (await import(pathToFileURL(process.env.PLUGIN_PATH))).default
@@ -2048,7 +2058,8 @@ const ctx = {
   location: { directory: process.env.TEMP_ROOT, project: { id: "fixture" } },
   app: { log: async () => {} },
   session: {
-    get: async () => ({ data: { id: "ses_main", agent: "build", title: "Main", parentID: null } }),
+    get: async ({ sessionID }) => ({ data: { id: sessionID, agent: "build", title: "Main",
+                                             parentID: sessionID === "ses_child" ? "ses_main" : null } }),
     prompt: async () => ({ data: null }), context: async () => ({ data: [] }),
     hook: async (name, fn) => hooks.set("session." + name, fn),
   },
@@ -2060,23 +2071,37 @@ const ctx = {
   permission: { hook: async (name, fn) => hooks.set("permission." + name, fn) },
 }
 const cleanup = await plugin.setup(ctx)
+const call = { tool: "question", sessionID: "ses_main",
+  input: { questions: [{ question: "Which?", options: [{ label: "A (Recommended)" }, { label: "B" }] }] } }
 try {
-  await hooks.get("tool.execute.after")({ tool: "question", sessionID: "ses_main", status: "completed",
-    input: { questions: [{ question: "Which?", options: [{ label: "A" }, { label: "B" }] }] },
+  let refused = ""
+  try { await hooks.get("tool.execute.before")(call) } catch (error) { refused = String(error.message) }
+  let childRefused = ""
+  try { await hooks.get("tool.execute.before")({ ...call, sessionID: "ses_child" }) } catch (error) { childRefused = String(error.message) }
+  console.log(JSON.stringify({ refused, childRefused }))
+  await hooks.get("tool.execute.after")({ ...call, status: "completed",
     result: { content: [{ type: "text", text: "answered" }], metadata: { answers: [["B"]] } } })
 } finally { await cleanup() }
 """
-            env = {**BASE_ENV, "PLUGIN_PATH": str(ROOT / "adapters/opencode/plugins/hearting-guards.js"),
-                   "TEMP_ROOT": str(project), "HOME": str(home), "AGENT_HOME": str(harness),
-                   "PYTHONDONTWRITEBYTECODE": "1", "XDG_STATE_HOME": str(home / ".state"),
-                   "XDG_CONFIG_HOME": str(home / ".config"), "XDG_DATA_HOME": str(home / ".data"),
-                   "XDG_CACHE_HOME": str(home / ".cache")}
-            result = subprocess.run([node, "--input-type=module", "-e", script],
-                                    cwd=ROOT, env=env, text=True, capture_output=True, timeout=30)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            base = {**BASE_ENV, "PLUGIN_PATH": str(ROOT / "adapters/opencode/plugins/hearting-guards.js"),
+                    "TEMP_ROOT": str(project), "HOME": str(home), "AGENT_HOME": str(harness),
+                    "PYTHONDONTWRITEBYTECODE": "1", "XDG_STATE_HOME": str(home / ".state"),
+                    "XDG_CONFIG_HOME": str(home / ".config"), "XDG_DATA_HOME": str(home / ".data"),
+                    "XDG_CACHE_HOME": str(home / ".cache")}
+            outcomes = {}
+            for registers in ("1", "0"):
+                result = subprocess.run([node, "--input-type=module", "-e", script], cwd=ROOT,
+                                        env={**base, "REDIRECT_REGISTERS": registers}, text=True,
+                                        capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                outcomes[registers] = json.loads(result.stdout.strip().splitlines()[-1])
+            self.assertEqual(outcomes["1"]["refused"], "Registered as Hearting question S4:fixture")
+            self.assertEqual(outcomes["0"]["refused"], "")
+            # a child (task) session's question runs as before, even where the parent's is replaced
+            self.assertEqual((outcomes["1"]["childRefused"], outcomes["0"]["childRefused"]), ("", ""))
             recorded = [json.loads(line) for line in seen.read_text().splitlines() if line.strip()]
-            self.assertEqual(len(recorded), 1)
-            self.assertEqual(recorded[0]["answers"], [["B"]])
+            self.assertEqual(len(recorded), 2)       # only the parent's before hook runs the redirect, once per call
+            self.assertEqual(recorded[0]["sessionID"], "ses_main")
             self.assertEqual(recorded[0]["args"]["questions"][0]["question"], "Which?")
 
     def test_v2_worker_and_main_sessions_both_record_a_spec_read(self):

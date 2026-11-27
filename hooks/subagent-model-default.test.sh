@@ -221,6 +221,48 @@ printf '%s' '{"tool_name":"Agent","tool_input":{"description":"x","prompt":"y","
   && ok "hyphenated main-session-only id is denied as a whole id" \
   || bad "hyphenated main-session-only id was not denied"
 
+# (o) a worker's masked config home carries no definitions: a pin that exists
+#     only under the real ~/.claude is not loaded there, so an unnamed or
+#     `general-purpose` spawn must get the light tier; the main session (no
+#     CLAUDE_CONFIG_DIR) keeps reading ~/.claude/agents exactly as before.
+mkdir -p "$TMP/home/.claude/agents" "$TMP/worker-home" "$TMP/worker-home-with-defs/agents"
+cat > "$TMP/home/.claude/agents/general-purpose.md" <<'EOF'
+---
+name: general-purpose
+model: deep-fixture-model
+---
+Real-home definition that a masked worker never loads.
+EOF
+cp "$TMP/home/.claude/agents/general-purpose.md" "$TMP/worker-home-with-defs/agents/general-purpose.md"
+GP='{"tool_name":"Agent","tool_input":{"description":"x","prompt":"y","subagent_type":"general-purpose"}}'
+
+printf '%s' "$GP" | run_hook "$TMP/o.out" "$TMP/o.err" CLAUDE_CONFIG_DIR="$TMP/worker-home"
+[ $? = 0 ] && [ ! -s "$TMP/o.err" ] && assert_injected "$TMP/o.out" sonnet \
+  && ok "worker home without definitions: general-purpose gets light injected" \
+  || bad "worker home without definitions: general-purpose was left to inherit"
+
+printf '%s' '{"tool_name":"Agent","tool_input":{"description":"x","prompt":"y"}}' \
+  | run_hook "$TMP/o1.out" "$TMP/o1.err" CLAUDE_CONFIG_DIR="$TMP/worker-home"
+[ $? = 0 ] && [ ! -s "$TMP/o1.err" ] && assert_injected "$TMP/o1.out" sonnet \
+  && ok "worker home: unnamed spawn gets light injected" \
+  || bad "worker home: unnamed spawn was not injected"
+
+printf '%s' "$GP" | run_hook "$TMP/o2.out" "$TMP/o2.err"
+[ $? = 0 ] && [ ! -s "$TMP/o2.out" ] && [ ! -s "$TMP/o2.err" ] \
+  && ok "main session (no CLAUDE_CONFIG_DIR) still reads ~/.claude/agents pin" \
+  || bad "main session lookup changed"
+
+printf '%s' "$GP" | run_hook "$TMP/o3.out" "$TMP/o3.err" CLAUDE_CONFIG_DIR="$TMP/worker-home-with-defs"
+[ $? = 0 ] && [ ! -s "$TMP/o3.out" ] && [ ! -s "$TMP/o3.err" ] \
+  && ok "definition actually present under CLAUDE_CONFIG_DIR is respected" \
+  || bad "definition under CLAUDE_CONFIG_DIR was overridden"
+
+printf '%s' '{"tool_name":"Agent","tool_input":{"description":"x","prompt":"y","subagent_type":"general-purpose","model":"haiku"}}' \
+  | run_hook "$TMP/o4.out" "$TMP/o4.err" CLAUDE_CONFIG_DIR="$TMP/worker-home"
+[ $? = 0 ] && [ ! -s "$TMP/o4.out" ] && [ ! -s "$TMP/o4.err" ] \
+  && ok "worker home: explicit model is still untouched" \
+  || bad "worker home: explicit model was overridden"
+
 echo
 echo "RESULT: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" = 0 ]

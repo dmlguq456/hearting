@@ -17,13 +17,15 @@ import threading
 import unittest
 from unittest import mock
 
+from tools import fixture_processes
+
 sys.path[:0] = [str(Path(__file__).resolve().parent)]
 import session_shell as shell
 
 
 class SessionShellTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="hearting-shell-", dir="/var/tmp")
+        self.tmp = fixture_processes.TemporaryDirectory(prefix="hearting-shell-")
         self.root = Path(self.tmp.name)
         self.addCleanup(self.tmp.cleanup)
         self.env = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.root / "config"),
@@ -94,7 +96,7 @@ class SessionShellTest(unittest.TestCase):
     def test_optional_side_geometry_uses_the_existing_policy_and_validates_only_present_values(self):
         path=shell.policy_path();path.parent.mkdir(parents=True)
         path.write_text(json.dumps({'enabled':True}));path.chmod(0o600)
-        self.assertEqual(shell.display_policy(),{'layout':'side','side_width':40,'side_min_columns':100,'narrow':'bottom','auxiliary':'summary','bottom_rows':14,'position':'right','theme':'terminal','shade':'none','route_line':'time','rule_motion':'on'})
+        self.assertEqual(shell.display_policy(),{'layout':'side','side_width':40,'side_min_columns':100,'narrow':'bottom','auxiliary':'summary','bottom_rows':14,'position':'right','theme':'terminal','shade':'none','route_line':'time','worker_box':'closed','rule_motion':'rule'})
         path.write_text(json.dumps({'enabled':True,'layout':'side','side_width':48,'side_min_columns':150}))
         self.assertTrue(shell.policy()[0]);self.assertEqual(shell.display_policy()['side_width'],48)
         for field,value in (('layout','other'),('side_width',True),('side_width',-1),('side_min_columns','132')):
@@ -229,6 +231,10 @@ class SessionShellTest(unittest.TestCase):
         with ExitStack() as patches:
             patches.enter_context(mock.patch.object(human_wait_state, "cached_statusline", return_value=((2, 1), "route 2")))
             patches.enter_context(mock.patch.object(human_wait_state, "cached_view", return_value={"items": [], "by_session": {("claude", row["sid"]): ["wait-one"]}}))
+            # The panel counts the questions it can answer itself (11-14): two here.
+            patches.enter_context(mock.patch.object(shell, "session_questions", return_value=[
+                {"id": "S4:one", "answerable": True, "questions": []},
+                {"id": "S4:two", "answerable": True, "questions": []}]))
             patches.enter_context(mock.patch.object(session_tidy, "prompt_display", return_value={"human_state": "known", "human": {"at": 123, "text": "A real person's private draft"}, "received": []}))
             patches.enter_context(mock.patch.object(session_tags, "assigned_tag", return_value="52"))
             patches.enter_context(mock.patch.object(session_view, "observe", return_value=(observed, [])))

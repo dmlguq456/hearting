@@ -13,6 +13,11 @@
 # Static plan audit without test execution
 /audit 2026-05-11_audit-skill-infra --scope all --read-only
 
+# Method, results and conclusion of one version in one request (one route, one report)
+/audit 2026-11-20_demo-paper --scope all
+  v3 §2 Method, §4 Results, §5 Conclusion: does §2 describe what §4 ran,
+  and does every claim in §5 rest on a table in §4? Report each section.
+
 # Compatibility spelling; audits always end with the report
 /audit 2026-05-06_se-seminar-tfenhancer --report-only
 ```

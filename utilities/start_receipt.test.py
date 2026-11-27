@@ -141,6 +141,55 @@ hooks.dispose();'''
         self.assertTrue(output['output'].startswith('FILTERED\n[start-receipt]'))
         self.assertIn('parent_next=bounded-wait', output['output'])
 
+    def route_files(self, route_id='rt-test', closed=False, outcome_text=None):
+        """A route file and, once closed, its outcome beside it; the receipt names the route file."""
+        routes = Path(self.tmp.name) / '.runtime' / 'routes'
+        routes.mkdir(parents=True, exist_ok=True)
+        route = {'route_id': route_id, 'route_hash': 'sha256:' + 'b' * 64}
+        path = routes / (route_id + '.json')
+        path.write_text(json.dumps(route))
+        if closed or outcome_text is not None:
+            (routes / (route_id + '.outcome.json')).write_text(
+                outcome_text if outcome_text is not None else json.dumps(dict(route, closed_at='2026-11-26T00:00:00Z')))
+        return path
+
+    def after_compaction(self):
+        import context_repeat
+        context_repeat.reset('codex', 'own', compaction=True)
+
+    def test_a_closed_routes_receipt_is_not_published_again_after_a_compaction(self):
+        self.result['route_file'] = str(self.route_files(closed=True))
+        self.save()
+        self.after_compaction()
+        self.assertEqual(receipt.context('codex', 'own', self.jobs), '')
+
+    def test_an_open_routes_receipt_is_published_again_after_a_compaction(self):
+        self.result['route_file'] = str(self.route_files())
+        self.save()
+        self.assertIn('state=running', receipt.context('codex', 'own', self.jobs))
+        self.after_compaction()
+        self.assertIn('state=running', receipt.context('codex', 'own', self.jobs))
+
+    def test_an_unreadable_closure_leaves_the_receipt_published(self):
+        saved = self.save()                                  # no route_file at all
+        self.assertIn('parent_next=bounded-wait', receipt.context('codex', 'own', self.jobs))
+        for route_file, outcome in (('relative/rt-test.json', None),                  # not absolute
+                                    (str(Path(self.tmp.name) / 'gone.json'), None),   # route file missing
+                                    (None, 'not json'),                               # outcome unreadable
+                                    (None, json.dumps({'route_id': 'rt-test', 'route_hash': 'sha256:other'}))):  # other generation
+            self.result['route_file'] = route_file or str(self.route_files(outcome_text=outcome))
+            self.save()
+            self.after_compaction()
+            self.assertIn('state=running', receipt.context('codex', 'own', self.jobs), (route_file, outcome))
+
+    def test_a_closed_routes_receipt_gives_way_to_the_sessions_newer_route(self):
+        # One receipt file per session: a later start overwrites it, so the next Bash shows that route.
+        self.result['route_file'] = str(self.route_files(closed=True))
+        self.save()
+        self.result.update(route_id='rt-next', route_file=str(self.route_files('rt-next')))
+        self.save()
+        self.assertIn('route_id=rt-next', receipt.context('codex', 'own', self.jobs))
+
 
 class NextLineTest(unittest.TestCase):
     """One plain line restating the receipt's directive, so nobody parses the JSON to act."""
@@ -156,10 +205,48 @@ class NextLineTest(unittest.TestCase):
               'required_action': 'wait-for-auto-resume', 'auto_resume': {'resume_at': '2026-11-02T00:53:37Z'}},
              'next: end this turn; nothing to run - the runtime starts this route again at '
              '2026-11-02T00:53:37Z and leaves one notice'),
+            # (나) A failed owner: the person decides; close first (accept as it is, or stop), then the correction.
+            ({'state': 'needs-attention', 'required_action': 'answer-failed-owner', 'owner_report': '/r/report.md',
+              'correction_command': 'py capability-route.py correct --attempt-id att-o',
+              'close_command': 'env AGENT_DISPATCH_JOBS=/j py capability-route.py close --route /r/rt-x.json'},
+             'next: the owner ended FAIL; the person decides (owner_report says what it needs): to accept the result '
+             'as it is or stop the work, run: env AGENT_DISPATCH_JOBS=/j py capability-route.py close --route '
+             '/r/rt-x.json; to give the owner a fix or an answer, put it in a file and run: '
+             'py capability-route.py correct --attempt-id att-o --message-file <answer file>'),
+            # No readable report: the line names what the receipt names instead (its log), or nothing.
+            ({'state': 'needs-attention', 'required_action': 'answer-failed-owner', 'owner_log_file': '/l/o.jsonl',
+              'correction_command': 'py correct --attempt-id att-o', 'close_command': 'py close --route rt-x'},
+             'next: the owner ended FAIL; the person decides (its result is in owner_log_file /l/o.jsonl): to '
+             'accept the result as it is or stop the work, run: py close --route rt-x; to give the owner a fix or '
+             'an answer, put it in a file and run: py correct --attempt-id att-o --message-file <answer file>'),
+            ({'state': 'needs-attention', 'required_action': 'answer-failed-owner',
+              'correction_command': 'py correct --attempt-id att-o', 'close_command': 'py close --route rt-x'},
+             'next: the owner ended FAIL; the person decides: to accept the result as it is or stop the work, run: '
+             'py close --route rt-x; to give the owner a fix or an answer, put it in a file and run: '
+             'py correct --attempt-id att-o --message-file <answer file>'),
+            # A BLOCKED owner waits for an answer: the answer first, the stop after.
+            ({'state': 'needs-attention', 'required_action': 'answer-blocked-owner',
+              'correction_command': 'py capability-route.py correct --attempt-id att-o',
+              'close_command': 'env AGENT_DISPATCH_JOBS=/j py capability-route.py close --route /r/rt-x.json'},
+             "next: the owner is waiting for an answer; get the person's answer to owner_report, then run: "
+             'py capability-route.py correct --attempt-id att-o --message-file <answer file>; to stop the work '
+             'instead, run: env AGENT_DISPATCH_JOBS=/j py capability-route.py close --route /r/rt-x.json'),
+            # A receipt that carries no close_command keeps the answer alone.
             ({'state': 'needs-attention', 'required_action': 'answer-blocked-owner',
               'correction_command': 'py capability-route.py correct --attempt-id att-o'},
              "next: get the person's answer to owner_report, then run: "
              'py capability-route.py correct --attempt-id att-o --message-file <answer file>'),
+            # (다) A refusal the same start repeats: its own next step and the close it names, no resume_command.
+            ({'state': 'needs-attention', 'reason': 'replacement-workflow-not-open',
+              'required_action': 'inspect-preparation', 'resume_command': 'py start --route rt-x',
+              'close_command': 'py close --route rt-x',
+              'next_step': "This route's workflow already ended (COMPLETE), so no replacement owner can continue "
+                           "it, and running the same start again is refused the same way. Read the owner's result; "
+                           "to end the route as it is, run close_command; for more work, compose a new route."},
+             'next: inspect-preparation (replacement-workflow-not-open): This route\'s workflow already ended '
+             '(COMPLETE), so no replacement owner can continue it, and running the same start again is refused the '
+             "same way. Read the owner's result; to end the route as it is, run close_command; for more work, "
+             'compose a new route. close_command=py close --route rt-x'),
             ({'state': 'completed', 'required_action': 'advance-completed'},
              'next: the route is complete; report its result'),
             ({'state': 'needs-attention', 'reason': 'frame-launch-not-admitted', 'required_action': 'inspect-preparation',

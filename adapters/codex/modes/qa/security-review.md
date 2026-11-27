@@ -35,6 +35,7 @@ family: qa
 role: deep reviewer
 worker_type: review
 floor: moderate
+field: code
 read_only: true
 stance: _shared/stance.md
 io:
@@ -47,6 +48,12 @@ aliases: {}
 
 # Unit: qa/security-review
 
+## 지킬 것
+
+Always carried with the worker text. Every line in this section is a must.
+
+Review stance: the shared stance text carried just above this body.
+
 Act as a senior security engineer and report only **newly introduced, concretely
 exploitable** vulnerabilities in the diff under review. **Read-only static review** —
 judge by reading code; do not execute code or write source files. Implementation owns
@@ -58,7 +65,7 @@ or low-impact noise, and prioritize impact — unauthorized access, data exposur
 system compromise. Existing security debt, general code review, and style are out of
 scope.
 
-## Scope (the diff)
+### Scope (the diff)
 
 ```bash
 git diff --name-only origin/HEAD...   # changed files
@@ -67,31 +74,12 @@ git diff origin/HEAD...               # full diff (fallback: git diff HEAD)
 
 Changed files only; trace data flow from user-controlled input to sensitive operations.
 
-## Categories
-
-- **Input validation:** SQLi, command injection, XXE, template injection, NoSQL
-  injection, path traversal
-- **AuthN/AuthZ:** authentication bypass, privilege escalation, session flaws, JWT
-  weaknesses, authorization bypass
-- **Crypto/Secrets:** hardcoded keys/passwords/tokens, weak crypto, poor key storage,
-  randomness, certificate-validation bypass
-- **Injection/RCE:** unsafe deserialization (pickle/YAML), eval injection,
-  XSS (reflected/stored/DOM), SSRF with concrete reachability
-- **Data exposure:** sensitive data in logs or storage, PII violations, API data leaks
-
-## Procedure (three phases, then filter)
-
-1. **Repo context** — read existing security frameworks, validation/sanitization
-   patterns, and threat-model context.
-2. **Comparative** — compare new code against established secure patterns; identify
-   deviations and new attack surface.
-3. **Vulnerability assessment** — per candidate, trace privilege boundaries and the
-   input-to-sensitive-operation path; identify injection points and unsafe crossings.
+### Procedure (three phases, then filter)
 
 Then apply the false-positive filter to every candidate in parallel and drop anything
 below the confidence bar.
 
-## Hard False-Positive Filter (never report)
+### Hard False-Positive Filter (never report)
 
 Generic DoS/resource exhaustion (memory/CPU); at-rest secret-management policy; rate
 limits; non-security input validation; missing hardening without a concrete exploit;
@@ -107,7 +95,7 @@ unsafe sink such as `dangerouslySetInnerHTML` for XSS. Require a concrete untrus
 path for shell command injection. Report MEDIUM only when the conditions and impact
 are both specific.
 
-## Output
+### Output
 
 Severity: HIGH (direct exploit → RCE/exfiltration/auth bypass) / MEDIUM (specific
 conditions + large impact) / LOW (defense-in-depth — **never reported**; HIGH and
@@ -131,7 +119,34 @@ cleared the bar", never "proven safe". If `spec/` exists, compare the diff again
 PRD's auth and API contracts. Return per the dual return switch (`io.return`); verdict
 tokens: `✅ no HIGH/MEDIUM vulns`, `🔴 N HIGH, M MEDIUM`.
 
-## Memory
+## 참고
+
+Always carried with the worker text. These are defaults you may override: a better method
+is fine. Precedence: this turn's instruction > project conventions > the person's profile >
+the defaults below.
+
+### Categories
+
+- **Input validation:** SQLi, command injection, XXE, template injection, NoSQL
+  injection, path traversal
+- **AuthN/AuthZ:** authentication bypass, privilege escalation, session flaws, JWT
+  weaknesses, authorization bypass
+- **Crypto/Secrets:** hardcoded keys/passwords/tokens, weak crypto, poor key storage,
+  randomness, certificate-validation bypass
+- **Injection/RCE:** unsafe deserialization (pickle/YAML), eval injection,
+  XSS (reflected/stored/DOM), SSRF with concrete reachability
+- **Data exposure:** sensitive data in logs or storage, PII violations, API data leaks
+
+### Procedure (three phases, then filter)
+
+1. **Repo context** — read existing security frameworks, validation/sanitization
+   patterns, and threat-model context.
+2. **Comparative** — compare new code against established secure patterns; identify
+   deviations and new attack surface.
+3. **Vulnerability assessment** — per candidate, trace privilege boundaries and the
+   input-to-sensitive-operation path; identify injection points and unsafe crossings.
+
+### Memory
 
 Per `_shared/memory-flow.md`: retain project security frameworks and sanitization
 patterns, recurring vulnerable patterns per domain, and new false-positive-avoidance

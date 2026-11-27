@@ -374,7 +374,7 @@ def supervisor_resource_watch_for_run(supervisor, ledger, node, registry, run_id
 
 def resource_operation_binding(route, route_file, node, run_id, command, cwd,
                                launch_request_value, owner_wait, *, registry_path=None,
-                               log_path=None):
+                               log_path=None, environ=None, legacy_lookup=False):
     """Bind an existing operation request to this exact supervised launch.
 
     The live sealed owner/controller selects an operation within the approved
@@ -486,7 +486,8 @@ def resource_operation_binding(route, route_file, node, run_id, command, cwd,
         if payload_environment is None:
             return None
     execution_environment = RESOURCE_ENV.execution_identity(
-        payload_argv, payload_cwd, environ=os.environ, remote=remote_environment)
+        payload_argv, payload_cwd, environ=environ, remote=remote_environment,
+        legacy_lookup=legacy_lookup)
     if not RESOURCE_ENV.valid_execution_identity(execution_environment):
         return None
 
@@ -716,7 +717,20 @@ def start_watch(route_file, jobs, cwd, runtime):
             os.close(ready_write)
 
 
-def start_verified(registry, args, route, route_file, placeholder, *, controller=None):
+def resource_operation_for_launch(stored, *binding_args, **binding_kwargs):
+    """This launch's operation binding, keeping a stored one made before the
+    interpreter lookup followed exec's search: it is still this launch's."""
+    current = resource_operation_binding(*binding_args, **binding_kwargs)
+    kind = (((stored or {}).get("payload") or {}).get("execution_environment") or {}).get("kind")
+    if (stored is not None and current != stored and kind == "local"
+            and resource_operation_binding(*binding_args, **binding_kwargs,
+                                           legacy_lookup=True) == stored):
+        return stored
+    return current
+
+
+def start_verified(registry, args, route, route_file, placeholder, *,
+                   controller=None, launch_inputs=None):
     """Own the existing watch before releasing an exact, once-only payload."""
     from artifact_producer import prepare_route_artifact_env
     from dispatch_contract import resolve_agent_home, resolve_dispatch_state_root
@@ -734,9 +748,13 @@ def start_verified(registry, args, route, route_file, placeholder, *, controller
                        route=str(route_file), jobs=str(jobs))
     if owner_wait:
         request = launch_request(args)
-        if controller is not None and request != controller.expected.get("launch_request"):
+        if ((controller is not None and request != controller.expected.get("launch_request"))
+                or (launch_inputs is not None and request != launch_inputs)):
             fail("resource-launch-request-changed")
         placeholder["launch_request"] = request
+        launch_inputs = request
+    if launch_inputs is None:
+        launch_inputs = launch_request(args)
     keys = ("run_id", "cwd", "log", "command", "route", "node", "parent_attempt_id", "jobs",
             "config_ref", "config_sha256", "source_commit", "source_dirty", "source_git_state", "config_layout",
             "resource_policy", "owner_wait", "launch_request", "resource_operation", "share")
@@ -920,22 +938,24 @@ def start_verified(registry, args, route, route_file, placeholder, *, controller
         data["runs"][args.run_id] = placeholder
         return True, placeholder
     with ledger.lock() if ledger else contextlib.nullcontext():
-        if placeholder.get("resource_operation") is not None:
-            current_operation = resource_operation_binding(
-                route, route_file, args.node, args.run_id, placeholder["command"],
-                placeholder["cwd"], placeholder.get("launch_request") or {}, owner_wait,
-                registry_path=registry, log_path=placeholder.get("log"))
-            if current_operation != placeholder["resource_operation"]:
-                raise ValueError("resource-operation-authorization-changed")
-        launch_inputs = placeholder.get("launch_request") or launch_request(args)
-        if launch_inputs.get("smoke_attestation"):
-            operation = placeholder.get("resource_operation") or {}
-            expected_environment = (operation.get("payload") or {}).get("execution_environment")
-            if expected_environment is None:
-                expected_environment = RESOURCE_ENV.execution_identity(
-                    placeholder["command"], placeholder["cwd"], environ=os.environ)
-            verify_smoke_execution_environment(launch_inputs["smoke_attestation"],
-                                               expected_environment)
+        command, cwd = placeholder["command"], placeholder.get("cwd")
+        attestation = read_smoke_attestation(launch_inputs)
+        # The native sandbox can rewrite PATH after the controller's check.
+        payload_environ, payload_prefix = RESOURCE_ENV.smoke_payload_environment(
+            command, attestation, os.environ, pin_inherited=controller is not None)
+        launch_command = controller.command if controller else command
+        if payload_prefix:
+            if launch_command[-len(command):] != command:
+                raise ValueError("resource-controller-command-mismatch")
+            launch_command = [*launch_command[:-len(command)], *payload_prefix, *command]
+        operation = placeholder.get("resource_operation")
+        if operation is not None and resource_operation_for_launch(
+                operation, route, route_file, args.node, args.run_id, command, cwd,
+                launch_inputs, owner_wait, registry_path=registry,
+                log_path=placeholder.get("log"), environ=payload_environ) != operation:
+            raise ValueError("resource-operation-authorization-changed")
+        verify_smoke_execution_environment(attestation, command, cwd,
+                                           environ=payload_environ, operation=operation)
         if ledger and sup.resource_continuation_cancelled(route, ledger):
             raise ValueError("resource-parent-close-requested")
         history_pairs = sup.resource_predecessors(ledger, args.node) if ledger else []
@@ -1039,7 +1059,7 @@ def start_verified(registry, args, route, route_file, placeholder, *, controller
         # -p skips ambient Bash startup files/functions/options before the release
         # fence, while leaving the payload's environment intact.
         launch_argv = ["/bin/bash", "-p", "-c", 'IFS= read -r launch <&"$AGENT_RESOURCE_LAUNCH_FD" || exit 125; '
-                       + SENTINEL_SCRIPT, "resource-runner", *(controller.command if controller else placeholder["command"])]
+                       + SENTINEL_SCRIPT, "resource-runner", *launch_command]
         environment.update(progress_environment(placeholder))
         environment.update(HEARTING_GPU_LEASE_RELEASE="")
         environment.update(gpu_env)
@@ -1067,13 +1087,12 @@ def start_verified(registry, args, route, route_file, placeholder, *, controller
         with ledger.lock():
             if sup.resource_continuation_cancelled(route, ledger):
                 raise ValueError("resource-parent-close-requested")
-            if row.get("resource_operation") is not None:
-                current_operation = resource_operation_binding(
-                    route, route_file, args.node, args.run_id, row["command"],
-                    row["cwd"], row.get("launch_request") or {}, owner_wait,
-                    registry_path=registry, log_path=row.get("log"))
-                if current_operation != row["resource_operation"]:
-                    raise ValueError("resource-operation-authorization-changed")
+            if row.get("resource_operation") is not None and resource_operation_for_launch(
+                    row["resource_operation"], route, route_file, args.node, args.run_id,
+                    row["command"], row["cwd"], row.get("launch_request") or {}, owner_wait,
+                    registry_path=registry, log_path=row.get("log"),
+                    environ=payload_environ) != row["resource_operation"]:
+                raise ValueError("resource-operation-authorization-changed")
             with controller.guard() if controller else contextlib.nullcontext():
                 publish_verified_run(registry, args.run_id, placeholder, row)
                 os.write(release, b"start\n")
@@ -2273,20 +2292,38 @@ def verify_launch_input(command, **kwargs):
         print(result.stderr, file=sys.stderr, end="")
 
 
-def verify_smoke_execution_environment(attestation_path, expected_environment):
-    """Bind smoke inputs to the environment the controller will actually run."""
+def read_smoke_attestation(launch_inputs):
+    """Read the identity from the exact smoke bytes bound to this launch."""
+    attestation_path = launch_inputs.get("smoke_attestation")
     if not attestation_path:
-        return
+        return None
     try:
-        data = json.loads(Path(attestation_path).read_text(encoding="utf-8"))
+        raw = Path(attestation_path).read_bytes()
+        data = json.loads(raw)
     except (OSError, ValueError, TypeError) as error:
         raise ValueError("smoke-execution-environment-unreadable") from error
+    if hashlib.sha256(raw).hexdigest() != launch_inputs["smoke_attestation_sha256"]:
+        raise ValueError("resource-launch-request-changed")
     recorded = data.get("execution_environment") if isinstance(data, dict) else None
     if not RESOURCE_ENV.valid_execution_identity(recorded):
         raise ValueError("smoke-execution-environment-unbound")
-    if (not RESOURCE_ENV.valid_execution_identity(expected_environment)
-            or recorded != expected_environment):
-        raise ValueError("smoke-execution-environment-mismatch")
+    return data
+
+
+def verify_smoke_execution_environment(attestation, command, cwd, *, environ, operation):
+    """Bind smoke inputs to the environment the payload will actually receive."""
+    if attestation is None:
+        return
+    recorded = attestation["execution_environment"]
+    expected = ((operation or {}).get("payload") or {}).get("execution_environment")
+    if expected is not None and recorded == expected:
+        return
+    # A proof made before the exact lookup keeps matching its own lookup. A bound
+    # operation fixes the payload (and any remote), so only local ones re-derive.
+    if ((expected is None or expected.get("kind") == "local")
+            and RESOURCE_ENV.identity_matches(recorded, command, cwd, environ=environ)):
+        return
+    raise ValueError("smoke-execution-environment-mismatch")
 
 
 def settle_queued_validation_failure(controller, error):
@@ -2590,6 +2627,7 @@ def _main(argv=None, *, controller=None):
                 fail(getattr(exc, "reason", None) or str(exc))
         if not args.smoke_attestation and not resume and not host_payload:
             fail("hash-bound smoke attestation required")
+        launch_inputs = launch_request(args) if args.smoke_attestation else None
         if args.smoke_attestation:
             verify_launch_input([sys.executable,str(Path(__file__).parents[1]/"tools/smoke-attestation.py"),"verify","--attestation",args.smoke_attestation])
         provenance = {}
@@ -2649,6 +2687,13 @@ def _main(argv=None, *, controller=None):
                      "workflow_state":"READY","started_at":time.time()}
         if args.share:
             placeholder["share"] = True
+        try:
+            attestation = read_smoke_attestation(launch_inputs or {})
+            payload_environ, payload_prefix = RESOURCE_ENV.smoke_payload_environment(
+                command, attestation, os.environ)
+        except ValueError as error:
+            fail(str(error))
+        operation = None
         owner_wait = None
         if not resume and (node.get("continuation") or {}).get("kind") == "supervised":
             import dispatch_resource_wait as OWNER_RESOURCE
@@ -2656,33 +2701,29 @@ def _main(argv=None, *, controller=None):
                           OWNER_RESOURCE.start_binding(route, route_file, args, os.environ))
             if owner_wait:
                 placeholder.update(parent_attempt_id=args.parent_attempt_id, owner_wait=owner_wait)
-                placeholder["launch_request"] = launch_request(args)
-                if owner_wait.get("launch_scope") == "codex-owner-controller":
-                    if controller is not None and placeholder["launch_request"] != controller.expected.get("launch_request"):
-                        fail("resource-launch-request-changed")
+                launch_inputs = launch_inputs or launch_request(args)
+                placeholder["launch_request"] = launch_inputs
+                if controller is not None and launch_inputs != controller.expected.get("launch_request"):
+                    fail("resource-launch-request-changed")
                 try:
-                    operation = resource_operation_binding(
-                        route, route_file, args.node, args.run_id, command, cwd,
-                        placeholder["launch_request"], owner_wait,
-                        registry_path=registry, log_path=log)
+                    operation = resource_operation_for_launch(
+                        controller.expected.get("resource_operation") if controller is not None else None,
+                        route, route_file, args.node, args.run_id, command, cwd, launch_inputs,
+                        owner_wait, registry_path=registry, log_path=log, environ=payload_environ)
                 except (OSError, ValueError, KeyError, TypeError):
                     operation = None
                 if operation is not None:
                     placeholder["resource_operation"] = operation
-        if args.smoke_attestation:
-            operation = placeholder.get("resource_operation") or {}
-            expected_environment = (operation.get("payload") or {}).get("execution_environment")
-            if expected_environment is None:
-                expected_environment = RESOURCE_ENV.execution_identity(command, cwd, environ=os.environ)
-            try:
-                verify_smoke_execution_environment(args.smoke_attestation,
-                                                   expected_environment)
-            except ValueError as error:
-                fail(str(error))
+        try:
+            verify_smoke_execution_environment(attestation, command, cwd,
+                                               environ=payload_environ, operation=operation)
+        except ValueError as error:
+            fail(str(error))
         if controller is not None and (not owner_wait or owner_wait.get("launch_scope") != "codex-owner-controller"):
             fail("resource-controller-scope-invalid")
         if resume or owner_wait:
-            start_verified(registry, args, route, route_file, placeholder, controller=controller)
+            start_verified(registry, args, route, route_file, placeholder, controller=controller,
+                           launch_inputs=launch_inputs)
             return
         def reserve(data):
             if args.run_id in data["runs"]: raise ValueError("run id already exists")
@@ -2708,7 +2749,7 @@ def _main(argv=None, *, controller=None):
             raise
         wait_read, release = os.pipe()
         launch_argv=["/bin/bash","-p","-c",'IFS= read -r launch <&"$AGENT_RESOURCE_LAUNCH_FD" || exit 125; '
-                     + SENTINEL_SCRIPT,"resource-runner",*command]
+                     + SENTINEL_SCRIPT,"resource-runner",*payload_prefix,*command]
         environment={**os.environ,**progress_environment(placeholder),"AGENT_RESOURCE_SENTINEL":str(sentinel),
                      "HEARTING_RESOURCE_RUN_ID": args.run_id, "HEARTING_RESOURCE_REGISTRY": str(registry.resolve()),
                      "HEARTING_GPU_LEASE_RELEASE": "", **gpu_env, "AGENT_RESOURCE_LAUNCH_FD": str(wait_read)}

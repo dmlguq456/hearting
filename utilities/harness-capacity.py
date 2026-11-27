@@ -21,6 +21,23 @@ import urllib.request
 
 
 HARNESSES = ("claude", "codex", "opencode")
+FIVE_HOURS = 5 * 3600
+ONE_WEEK = 7 * 24 * 3600
+_CLAUDE_TAP_DURATIONS = {
+    "five_hour": FIVE_HOURS,
+    "seven_day": ONE_WEEK,
+    "seven_day_opus": ONE_WEEK,
+    "seven_day_sonnet": ONE_WEEK,
+    "seven_day_overage_included": ONE_WEEK,
+    "seven_day_oauth_apps": ONE_WEEK,
+}
+# Go's rolling meter covers a fixed five-hour window starting on first use.
+_OPENCODE_WINDOW_DURATIONS = {"5h": FIVE_HOURS, "wk": ONE_WEEK}
+
+# Gauges whose read writes the shared usage cache (`_codex_api_score`, `_opencode_api_score`). The next
+# start's limit judgment (`gauge_limits`) reads that cache, so a read that is left out is a refresh that
+# is left out. Only a gauge that merely reads (Claude's) may be skipped.
+CACHE_WRITING_GAUGES = frozenset({"codex", "opencode"})
 
 
 def _limited(state: str) -> bool:
@@ -43,11 +60,57 @@ def _manual_scores() -> dict[str, float]:
     return scores
 
 
-def _headroom(values) -> float | None:
-    used = [float(value) for value in values if isinstance(value, (int, float))]
-    if not used:
+class _CapacityScore(float):
+    """A numeric allocation score carrying its raw quota for policy checks."""
+
+    def __new__(cls, adjusted, raw):
+        score = super().__new__(cls, adjusted)
+        score.raw_headroom = raw
+        return score
+
+    def __getnewargs__(self):
+        return float(self), self.raw_headroom
+
+
+def raw_headroom(scores, harness):
+    """Observed quota left, with plain scores usable as raw-only readings."""
+    value = scores.get(harness)
+    return getattr(value, "raw_headroom", value)
+
+
+def _finite_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _window_score(headroom, remaining, duration):
+    """Compare quota left with expected use at the window's average pace."""
+    if (headroom in (0.0, 100.0) or not _finite_number(duration)
+            or remaining is None or not 0 < remaining < duration):
+        return headroom
+    # Count at least 10% elapsed so the first usage sample cannot dominate the forecast.
+    fraction_left = min(remaining / duration, 0.9)
+    reserve = headroom * (1 - fraction_left)
+    expected = (100 - headroom) * fraction_left
+    return 100 * reserve / (reserve + expected)
+
+
+def _headroom(windows, now) -> float | None:
+    """Reduce (used, reset epoch, duration seconds) windows by their tightest score."""
+    raw = []
+    adjusted = []
+    for used, reset, duration in windows:
+        if not _finite_number(used):
+            continue
+        remaining = reset - now if _finite_number(reset) else None
+        if remaining is not None and remaining <= 0:
+            continue
+        left = max(0.0, min(100.0, 100.0 - used))
+        raw.append(left)
+        adjusted.append(_window_score(left, remaining, duration))
+    if not raw:
         return None
-    return max(0.0, min(100.0, 100.0 - max(used)))
+    score, unadjusted = min(adjusted), min(raw)
+    return _CapacityScore(score, unadjusted) if score != unadjusted else score
 
 
 def _claude_capacity_reading(now: float, stale_after: int) -> tuple[float | None, dict | None]:
@@ -99,7 +162,7 @@ def _claude_capacity_reading(now: float, stale_after: int) -> tuple[float | None
             if not isinstance(row, dict):
                 continue
             used = row.get("used_percentage")
-            if isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used) or not 0 <= used <= 100:
+            if not _finite_number(used) or not 0 <= used <= 100:
                 continue
             reset = row.get("resets_at")
             if reset is not None:
@@ -122,7 +185,9 @@ def _claude_capacity_reading(now: float, stale_after: int) -> tuple[float | None
                 contributing_mtimes.append(mtime)
     if not latest_used and not window_used:
         return None, None
-    score = _headroom([*latest_used.values(), *window_used.values()])
+    windows = [(used, None, None) for used in latest_used.values()]
+    windows += [(used, reset, _CLAUDE_TAP_DURATIONS.get(key)) for (key, reset), used in window_used.items()]
+    score = _headroom(windows, now)
     if score is None or not contributing_mtimes:
         return score, None
     return score, {
@@ -162,14 +227,26 @@ def _usage_cache():
     return usage_cache
 
 
-def _fleet_windows_headroom(payload) -> float | None:
-    windows = (payload or {}).get("windows") if isinstance(payload, dict) else None
-    if not isinstance(windows, list):
+def _fleet_windows_headroom(payload, now, *, opencode=False) -> float | None:
+    if not isinstance(payload, dict):
         return None
-    return _headroom(row[1] for row in windows if isinstance(row, (list, tuple)) and len(row) >= 2)
+    rows = payload.get("rl_windows" if opencode else "windows")
+    if not isinstance(rows, list):
+        return None
+    durations = payload.get("window_durations_seconds")
+    if not isinstance(durations, list) or len(durations) != len(rows):
+        durations = [None] * len(rows)
+    windows = []
+    for row, duration in zip(rows, durations):
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            continue
+        if opencode:
+            duration = _OPENCODE_WINDOW_DURATIONS.get(row[0]) if isinstance(row[0], str) else None
+        windows.append((row[1], row[2] if len(row) >= 3 else None, duration))
+    return _headroom(windows, now)
 
 
-def _codex_api_score() -> float | None:
+def _codex_api_score(now=None) -> float | None:
     """Live account headroom via the codex TUI's own `/wham/usage` endpoint.
 
     Rollout samples update only when a codex session runs, so a rollout-only
@@ -195,7 +272,7 @@ def _codex_api_score() -> float | None:
     if cache is not None:
         cache.record("codex", payload)
     _LAST_PROBE_REASON.pop("codex", None)
-    return _fleet_windows_headroom(payload)
+    return _fleet_windows_headroom(payload, time.time() if now is None else now)
 
 
 def _cached_score(harness: str, now: float, stale_after: int) -> tuple[float | None, str | None]:
@@ -207,12 +284,7 @@ def _cached_score(harness: str, now: float, stale_after: int) -> tuple[float | N
     payload = snapshot.get("payload")
     if not isinstance(payload, dict) or not payload:
         return None, None
-    if harness == "opencode":
-        used = [row[1] for row in (payload.get("rl_windows") or [])
-                if isinstance(row, (list, tuple)) and len(row) >= 2]
-        score = _headroom(used)
-    else:
-        score = _fleet_windows_headroom(payload)
+    score = _fleet_windows_headroom(payload, now, opencode=harness == "opencode")
     if score is None:
         return None, None
     age = int(max(0.0, now - float(snapshot.get("observed_at") or now)))
@@ -239,12 +311,14 @@ def _claude_cache_score(now: float, stale_after: int) -> tuple[float | None, str
     payload = snapshot.get("payload")
     if not isinstance(payload, dict) or payload.get("error"):
         return None, None
-    used = [payload.get("rl_5h"), payload.get("rl_7d")]
-    used += [row[1] for row in (payload.get("rl_ms") or [])
-             if isinstance(row, (list, tuple)) and len(row) >= 2]
-    score = _headroom(value for value in used
-                      if not isinstance(value, bool) and isinstance(value, (int, float))
-                      and math.isfinite(value) and 0 <= value <= 100)
+    windows = [(payload.get("rl_5h"), payload.get("rs_5h"), FIVE_HOURS),
+               (payload.get("rl_7d"), payload.get("rs_7d"), ONE_WEEK)]
+    resets = payload.get("rs_ms")
+    resets = resets if isinstance(resets, dict) else {}
+    windows += [(row[1], resets.get(row[0]), ONE_WEEK) for row in (payload.get("rl_ms") or [])
+                if isinstance(row, (list, tuple)) and len(row) >= 2 and isinstance(row[0], str)]
+    score = _headroom(((used, reset, duration) for used, reset, duration in windows
+                       if _finite_number(used) and 0 <= used <= 100), now)
     if score is None:
         return None, None
     age = int(max(0.0, now - float(snapshot.get("observed_at") or now)))
@@ -256,7 +330,7 @@ def _codex_probe(now: float, stale_after: int) -> tuple[float | None, str]:
     own rollout samples (≤ stale_after) → unknown with the live probe's reason.
     A transient backend failure at compose time therefore reuses the most recent
     true reading instead of turning into `unknown` (2026-09-16 10:36)."""
-    score = _codex_api_score()
+    score = _codex_api_score(now)
     if score is not None:
         return score, "live"
     reason = _LAST_PROBE_REASON.get("codex", "probe-failed")
@@ -270,6 +344,11 @@ def _codex_probe(now: float, stale_after: int) -> tuple[float | None, str]:
 
 
 def _codex_score(now: float, stale_after: int) -> float | None:
+    _fleet_collectors()
+    try:
+        from fleet.collectors import codex as fleet_codex
+    except Exception:
+        fleet_codex = None
     home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
     try:
         files = sorted(
@@ -295,18 +374,22 @@ def _codex_score(now: float, stale_after: int) -> float | None:
             except (ValueError, AttributeError):
                 continue
             limits = payload.get("rate_limits") or {}
-            score = _headroom(
-                row.get("used_percent")
-                for row in limits.values()
-                if isinstance(row, dict)
+            if not isinstance(limits, dict):
+                continue
+            windows = (
+                (row.get("used_percent"),
+                 fleet_codex._limit_reset(row) if fleet_codex else None,
+                 fleet_codex._limit_window_seconds(row) if fleet_codex else None)
+                for row in limits.values() if isinstance(row, dict)
             )
+            score = _headroom(windows, now)
             if score is not None:
                 return score
     return None
 
 
 def _opencode_probe(now: float, stale_after: int) -> tuple[float | None, str]:
-    score = _opencode_api_score()
+    score = _opencode_api_score(now)
     if score is not None:
         return score, "live"
     reason = _LAST_PROBE_REASON.get("opencode", "probe-failed")
@@ -316,7 +399,7 @@ def _opencode_probe(now: float, stale_after: int) -> tuple[float | None, str]:
     return None, f"unknown:{reason}"
 
 
-def _opencode_api_score() -> float | None:
+def _opencode_api_score(now=None) -> float | None:
     """Live Go-plan headroom via the same reader the Fleet gauge uses.
 
     Until 2026-09-10 this slot was hardcoded to `None` behind the comment "no
@@ -354,39 +437,87 @@ def _opencode_api_score() -> float | None:
     if cache is not None:
         cache.record("opencode", usage)
     _LAST_PROBE_REASON.pop("opencode", None)
-    # Every window the account exposes counts, exactly as the Claude reader
-    # merges its own: the tightest one decides the headroom. `weekly` here is
-    # a Monday-anchored window, not a rolling 7d, but for "how much room is
-    # left right now" that distinction does not change the answer.
-    used = [row[1] for row in (usage.get("rl_windows") or [])
-            if isinstance(row, (list, tuple)) and len(row) >= 2]
-    return _headroom(used)
+    return _fleet_windows_headroom(usage, time.time() if now is None else now, opencode=True)
 
 
-def capacity_report(*, stale_after: int = 3600, now: float | None = None) -> dict[str, dict]:
+def _warm_collectors() -> None:
+    """Import the two networked collectors once, before they are read side by side."""
+    _fleet_collectors()
+    for name in ("codex", "zen_go_usage"):
+        try:
+            __import__("fleet.collectors." + name)
+        except Exception:
+            pass  # the probe itself reports an unusable collector (`collector-unavailable:...`)
+
+
+def capacity_report(*, stale_after: int = 3600, now: float | None = None,
+                    skip: dict[str, str] | None = None) -> dict[str, dict]:
     """Headroom percentages plus where each one came from.
 
     ``scores``: unknown is ``None`` and never invented. ``sources``: ``manual``,
     ``live``, ``cache:<age>s`` (Claude: Fleet's credential-bound account cache, tried
     before the taps), ``cache:<age>s;live=<reason>``, ``rollout;live=<reason>``,
-    ``taps``, ``active-limit`` or ``unknown:<reason>`` — the receipt prints it so
+    ``taps``, ``active-limit``, ``skipped:<why>`` or ``unknown:<reason>`` — the receipt prints it so
     an unknown gauge says why (timeout, http-503, no-auth) instead of nothing.
-    ``freshness`` optionally describes admitted Claude tap file mtimes; an mtime
-    does not establish when usage was observed.
+    ``freshness`` describes admitted Claude tap file mtimes and carries
+    ``raw_headroom`` when the time-adjusted score differs. An mtime does not
+    establish when usage was observed.
+
+    ``skip`` maps a harness to why its gauge is not read: a caller that has already ruled the
+    harness out (its usage state is limited, or the harness is named and eligible so no other is
+    asked) never selects on that gauge, so it is not read. Only a gauge that merely reads can be
+    skipped (``CACHE_WRITING_GAUGES`` are always read: a read refreshes the cache the next start's
+    limit judgment uses). A manual score still stands, and an active limit still reads 0 as before.
+
+    The two networked gauges (codex, opencode) are read side by side: each is its own HTTP call
+    with its own timeout, so one start waits for the slower of them, not for both.
     """
     now = time.time() if now is None else now
     manual = _manual_scores()
+    skipped = {name: why for name, why in (skip or {}).items() if name not in CACHE_WRITING_GAUGES}
     scores: dict[str, float | None] = {}
     sources: dict[str, str] = {}
     freshness: dict[str, dict] = {}
-    if "codex" in manual:
-        scores["codex"], sources["codex"] = manual["codex"], "manual"
-    else:
+    networked = {name: probe for name, probe in (("codex", _codex_probe), ("opencode", _opencode_probe))
+                 if name not in manual and name not in skipped}
+    results: dict[str, tuple] = {}
+    errors: dict[str, BaseException] = {}
+
+    def read(name):
+        try:
+            results[name] = networked[name](now, stale_after)
+        except BaseException as exc:  # noqa: BLE001 - re-raised below, as the sequential read raised it
+            errors[name] = exc
+
+    side = None
+    if len(networked) == 2:
         # Active probe first: the rollout gauge only refreshes while codex runs,
         # so on its own it starves an idle harness into permanent unknown.
-        scores["codex"], sources["codex"] = _codex_probe(now, stale_after)
+        _warm_collectors()
+        import threading
+        side = threading.Thread(target=read, args=("codex",), name="capacity-codex")
+        side.start()
+    for name in networked:
+        if side is None or name != "codex":
+            read(name)
+    if side is not None:
+        side.join()
+    if errors:
+        raise next(iter(errors.values()))
+
+    def settle(name):
+        if name in manual:
+            scores[name], sources[name] = manual[name], "manual"
+        elif name in skipped:
+            scores[name], sources[name] = None, "skipped:" + skipped[name]
+        else:
+            scores[name], sources[name] = results[name]
+
+    settle("codex")
     if "claude" in manual:
         scores["claude"], sources["claude"] = manual["claude"], "manual"
+    elif "claude" in skipped:
+        scores["claude"], sources["claude"] = None, "skipped:" + skipped["claude"]
     else:
         # The account's own cached reading first; the per-session taps only when it is
         # absent, stale, or bound to another credential.
@@ -398,10 +529,7 @@ def capacity_report(*, stale_after: int = 3600, now: float | None = None) -> dic
             scores["claude"], sources["claude"] = claude, ("taps" if claude is not None else "unknown:no-fresh-taps")
             if claude is not None and claude_freshness is not None:
                 freshness["claude"] = claude_freshness
-    if "opencode" in manual:
-        scores["opencode"], sources["opencode"] = manual["opencode"], "manual"
-    else:
-        scores["opencode"], sources["opencode"] = _opencode_probe(now, stale_after)
+    settle("opencode")
 
     from dispatch_capacity_evidence import active_limits
     jobs = os.environ.get("AGENT_DISPATCH_JOBS")
@@ -410,11 +538,14 @@ def capacity_report(*, stale_after: int = 3600, now: float | None = None) -> dic
             scores[harness] = 0.0
             sources[harness] = "active-limit"
             freshness.pop(harness, None)
+    for harness, score in scores.items():
+        if isinstance(score, _CapacityScore):
+            freshness.setdefault(harness, {})["raw_headroom"] = score.raw_headroom
     return {"scores": scores, "sources": sources, "freshness": freshness}
 
 
 def capacity_scores(*, stale_after: int = 3600, now: float | None = None) -> dict[str, float | None]:
-    """Return headroom percentages; unknown is ``None`` and never invented."""
+    """Return time-adjusted allocation scores, or ``None`` when unknown."""
     return capacity_report(stale_after=stale_after, now=now)["scores"]
 
 
@@ -470,13 +601,11 @@ def within_affinity_margin(scores, preferred, candidates, *, affinity_weight=0.5
     """
     if preferred is None or float(affinity_weight) == 0.5 or preferred not in candidates:
         return False
-    value = scores.get(preferred)
-    if value is None or float(value) <= 0:
+    eligible = [name for name in candidates if (raw_headroom(scores, name) or 0) > 0]
+    if preferred not in eligible:
         return False
-    known = [
-        float(scores[name]) for name in candidates
-        if scores.get(name) is not None and float(scores[name]) > 0
-    ]
+    value = scores[preferred]
+    known = [float(scores[name]) for name in eligible]
     if not known:
         return False
     return round(max(known) - float(value), 9) <= affinity_margin(affinity_weight)
@@ -563,8 +692,8 @@ def allocation_deficit(scores, counts, candidates, *, neutral=ORDERING_NEUTRAL_S
 def gate_cutoff(usage_gate_used_percent=90):
     """Headroom cutoff below which a `balanced` candidate is gated.
 
-    Scores are headroom (`100 - used`), so the cutoff is the complement of the
-    configured used-percent threshold.
+    The gate uses observed headroom (`100 - used`), so the cutoff is the
+    complement of the configured used-percent threshold.
     """
     return 100.0 - float(usage_gate_used_percent)
 
@@ -572,13 +701,13 @@ def gate_cutoff(usage_gate_used_percent=90):
 def is_gated(scores, harness, *, usage_gate_used_percent=90):
     """Is `harness` gated under the `balanced` cross-band usage gate?
 
-    A known score at or below `gate_cutoff` is gated. An absent/unknown score
+    Known raw headroom at or below `gate_cutoff` is gated. An unknown reading
     is optimistically ungated — the same unknown-is-not-exclusion reading
     `ordering_score` and `allocation_deficit` already use for `balanced`
     ordering, deliberately distinct from `rank_band`'s capacity-aware
     eligibility branch, which excludes unknown gauges instead.
     """
-    value = scores.get(harness)
+    value = raw_headroom(scores, harness)
     return value is not None and float(value) <= gate_cutoff(usage_gate_used_percent)
 
 
@@ -589,8 +718,8 @@ def window_release_epoch(harness, *, usage_gate_used_percent=100, now=None, stal
     eligibility reader judges the same rows at 100% instead of parsing them a
     second time. Codex `windows` and opencode `rl_windows` carry
     `[label, used, reset_epoch]`; a window at the gate without a future reset
-    makes the answer unknown (a time is never guessed), and a cache older than
-    `stale_after` carries no answer at all.
+    makes the answer unknown when the reset timestamp is missing. Expired
+    windows are ignored. A cache older than `stale_after` carries no answer.
     """
     cache = _usage_cache()
     if cache is None:
@@ -612,10 +741,10 @@ def _payload_release_epoch(payload, harness, usage_gate_used_percent, now):
         used, reset = row[1], row[2]
         if isinstance(used, bool) or not isinstance(used, (int, float)) or used < float(usage_gate_used_percent):
             continue
-        if (isinstance(reset, bool) or not isinstance(reset, (int, float))
-                or not math.isfinite(reset) or reset <= now):
+        if not _finite_number(reset):
             return None
-        release = reset if release is None else max(release, reset)
+        if reset > now:
+            release = reset if release is None else max(release, reset)
     return release
 
 
@@ -694,7 +823,8 @@ def rank_band(candidates, states, counts, declared_order, scores, *, strategy="c
             for name in candidates
         )
         if all_gated:
-            key = lambda name: (-float(scores[name]), int(counts.get(name, 0)), order.get(name, len(order)))
+            key = lambda name: (-float(raw_headroom(scores, name)), int(counts.get(name, 0)),
+                                order.get(name, len(order)))
         else:
             deficit = allocation_deficit(scores, counts, candidates, preferred=preferred,
                                          affinity_weight=affinity_weight,
@@ -738,8 +868,7 @@ def rank_band(candidates, states, counts, declared_order, scores, *, strategy="c
         name
         for name in candidates
         if not _limited(states.get(name, "unknown"))
-        and scores.get(name) is not None
-        and float(scores[name]) > 0
+        and (raw_headroom(scores, name) or 0) > 0
     ]
     order = {name: index for index, name in enumerate(declared_order)}
     ranked = sorted(
@@ -780,7 +909,7 @@ def ordered_candidates(ranks, band_order, scores, *, strategy="capacity-aware", 
     ungated = [pair for pair in flat if not is_gated(scores, pair[1], usage_gate_used_percent=usage_gate_used_percent)]
     gated = [pair for pair in flat if is_gated(scores, pair[1], usage_gate_used_percent=usage_gate_used_percent)]
     if flat and len(gated) == len(flat):
-        return sorted(flat, key=lambda pair: -float(scores[pair[1]]))
+        return sorted(flat, key=lambda pair: -float(raw_headroom(scores, pair[1])))
     return ungated + gated
 
 
@@ -805,7 +934,7 @@ def select(policy, states, counts, declared_order, scores, *, strategy="capacity
         for band, rows in ranks.items():
             ranks[band] = sorted(rows, key=lambda name: order.get(name, len(order)))
     threshold = int(policy.get("promote_relief_below", 0))
-    primary_headroom = [scores.get(name) for name in ranks["primary"]]
+    primary_headroom = [raw_headroom(scores, name) for name in ranks["primary"]]
     primary_headroom = [value for value in primary_headroom if value is not None]
     promote = bool(
         ranks["relief"]

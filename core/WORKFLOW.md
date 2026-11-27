@@ -98,7 +98,7 @@ deciding that reanalysis is needed.
 
 - **Spec-backed implementation:** if a code request has no `spec/`, run `autopilot-spec` first, except a known-scope local completion unit under §0.2.1 (including a small new feature) or a one-off throwaway. Repeated new behavior graduates to a spec.
 - **No spec without prior evidence:** if neither `research/` nor `analysis_project/` grounds the spec, run `autopilot-research` or `analyze-project` first. Enforce this more strongly in unfamiliar domains and for new intent.
-- Hook write gates are retired; artifact creation order remains a routing convention.
+- Artifact creation order is a routing convention.
 
 **The owning capability also owns revisions.** The routing reminder and convention govern edits.
 
@@ -324,23 +324,47 @@ observed command outcomes and the final reply.
 `COMPLETE` for that automatic route means the record was saved, not that the
 work or its tests passed. Missing, interrupted and running results stay unknown.
 
-Explicit `compose --start --shape direct --prompt-file <task>` still prepares
-an isolated worktree and an inline route; `compose --shape direct` records work
-already made in place. Their receipt and explicit finish contracts are unchanged.
-Otherwise use `compose --start --prompt-file <task>` with no `--shape`; the
+Explicit `compose --start --shape direct --field <field> --prompt-file <task>`
+still prepares an isolated worktree and an inline route; `compose --shape direct
+--field <field>` records work already made in place. Their receipt and explicit finish contracts are unchanged.
+When the direction is clear, open `--shape solo|staged` (below); otherwise use
+`compose --start --prompt-file <task>` with no `--shape`; the
 frame chooses the capability, stages, and solo or staged shape, judging each
 leg's optional `size` (`one-change`, `one-pass`, `multi-stage`) first; an
 omitted shape follows it. Direct has no review-worker path of its own: work that
-needs an independent review is not direct (omit `--shape`, or `staged`), and a
-light check of a direct change may use the harness's own native subagent
-(decision 2026-11-03).
+needs an independent review is not direct. Open it with `--shape solo --intensity standard`
+(one session and one independent review, where the kind declares a one-shot review;
+`--intensity strong` or higher adds review legs: two at `strong`, three at `thorough`
+and `adversarial`; the owner starts the route's declared review nodes with the command
+its task gives, and cannot close any of them itself), or omit `--shape` and let the frame choose, or use
+`staged` when the size of the work calls for stages (`staged` is chosen for size, not to
+obtain a review where the kind declares a one-shot review; where it declares none, work that
+needs an independent review opens `staged`). The session checks a direct change itself; a second look it
+wants from another worker is a short check that keeps no record (below).
 
 | Main decision | Command | Result |
 |---|---|---|
 | One reversible local completion unit in the current Git worktree, including a small feature with its tests and README | read → edit → check → reply | automatic record; no start/finish round trip |
-| Explicit direct source change needing preparation | `compose --start --shape direct --prompt-file <task>` | isolated worktree, inline node, dispatch depth 0 |
-| One reversible local completion unit already made in place | `compose --shape direct` | records the in-place change as an inline node |
-| Other new work | `compose --start --prompt-file <task>` | framed; frame proposes the smallest route and the existing interview confirms it |
+| Explicit direct source change needing preparation | `compose --start --shape direct --field <field> --prompt-file <task>` | isolated worktree, inline node, dispatch depth 0 |
+| One reversible local completion unit already made in place | `compose --shape direct --field <field>` | records the in-place change as an inline node |
+| New work whose direction is clear | `compose --start --shape solo\|staged --capability <kind> --prompt-file <task>` | opened directly; a sign may add the one advice line below |
+| Other new work (more than one reading is plausible) | `compose --start --prompt-file <task>` | framed; frame proposes the smallest route and the existing interview confirms it |
+
+Handing one read-only job to another worker opens that unit as a route of its own, with no owner
+(decisions 2026-11-17 and 2026-11-26: every call to another agent is a route, and one that needs no record keeps none).
+A short check (a sentence, a term, whether a bounded finding was applied, a second look at a direct change) or
+gathering material (a lookup, many files to read) keeps none: `compose --start --unit editorial/review --ephemeral
+--prompt-file <brief>` (`qa/code-review` for code, `general/explore` for a lookup) writes nothing to the artifact folder
+or campaign records and brings the answer back in the notice (`stages --capability unit` lists the units). A review
+whose verdict and evidence need keeping (an independent judgment, evidence read later) keeps its report: the same
+command without `--ephemeral`, or `audit`. After one revision, that review is one request naming every section it
+checks (`capabilities/audit.md`). A unit route's one worker starts with the brief, and its end closes
+the route and returns the sealed summary to the session that opened it; a worker opens one the same way (`core/OPERATIONS.md` §5.10c). A unit route has no intensity
+(one unit does one job and nothing checks it; `core/CONVENTIONS.md` §1). This adds a
+way to start; it does not change the choices above. `--prompt-file -` reads the brief
+once from standard input (a heredoc), so no file has to be written first; it means the
+same in every `compose` form that takes `--prompt-file`, and an input that is empty, a
+terminal, or too large ends the command in one line before anything starts.
 
 Examples of the same boundary:
 
@@ -351,23 +375,84 @@ Examples of the same boundary:
   security or data risk, even when the edit is short.
 
 `solo` means one registered owner; `staged` means separate stages. Shape
-omission starts a framed route. `--capability`, `--capability-mode`, `--graph`,
-and `--profile` without a shape are routing hints recorded for the frame, not
-sealed choices. `--pin` applies as usual.
+omission starts a framed route. `--capability`, `--capability-mode`, `--field`,
+`--graph`, and `--profile` without a shape are routing hints recorded for the
+frame, not sealed choices. `--pin` applies as usual.
 
-Skip a new frame only when a frame or the person already decided the shape:
-resume a stopped route, follow the runtime-printed `next_leg`, continue within
-an approved frame decision of the same campaign, or follow the person's
-explicit capability and stages. The main session judges whether follow-up
-stays within that approved scope. Its own judgment that work is already
-decided is not an exception. Use the decided shape explicitly; a person-named
-stage list uses `--shape staged --graph <stage,…>`. A route made from a
+**Fields** (`routing/prd.md` R5, R8). Every route records the field of its work
+beside its kind (the preset recipe, `capability`): the route's `field` and
+`field_source` — `explicit` when named with `--field`, `preset` when taken from
+the kind's default, `frame` when a frame proposal's leg names it or its proposed
+kind supplies it. A `direct`, `solo` or `staged` compose names `--capability`,
+`--field`, or both; naming neither is refused with the missing option named,
+and nothing silently becomes code. A field alone opens its default kind;
+`admin` and `other` have none and come with a kind (`--capability
+autopilot-draft --field admin`). A framed route records no field of its own; its
+frame proposes one per leg. A route sealed before fields reads its kind's
+default field below; its record is not rewritten. Field names are the same
+English words in every language.
+
+| Field | Opens alone | Default field of |
+|---|---|---|
+| `plan` | `autopilot-spec` | `autopilot-spec` |
+| `design` | `autopilot-design` | `autopilot-design` |
+| `code` | `autopilot-code` | `autopilot-code`, `autopilot-ship`, `audit`, `analyze-project` code |
+| `lab` | `autopilot-lab` setup | `autopilot-lab` |
+| `research` | `autopilot-research` | `autopilot-research` |
+| `docs` | `autopilot-draft` | `autopilot-draft`, `autopilot-refine`, `autopilot-apply`, `analyze-project` doc and paper |
+| `admin` | — (name a kind) | — |
+| `other` | — (name a kind) | `analyze-user` |
+
+`capabilities/topologies.json` (`fields`, `field_default_recipes`, each recipe's
+`field`) is the only source of these pairs. `capability-route.py stages` prints
+each kind's field on its first line, and the `[경로]` card shows one line
+`field <field> (<field_source>)` under its `cwd · slug` line.
+
+Open a route directly (`--shape solo|staged`) when the direction is clear. The
+opening session judges that: a frame or the person already decided the shape
+(resume a stopped route, follow the runtime-printed `next_leg`, continue within
+an approved frame decision of the same campaign, follow the person's explicit
+capability and stages), or the request itself leaves one admissible direction.
+When more than one reading is plausible, omit the shape and let a frame settle
+it. The main session also judges whether follow-up stays within an approved
+scope. Use the decided shape explicitly; a person-named
+stage list uses `--shape staged --capability <kind> --graph <stage,…>`.
+
+**Direction advice.** Where the request shows a sign that settling the direction
+first is worth it — a protected path (`core/`, `capabilities/`, `roles/`,
+`spec/`, a PRD), two or more adapters, or a spec or ship kind — the `[경로]` card of a `solo` or `staged` route adds
+one line, `방향 잡기 권함: <reason>` (`Direction check advised: <reason>` in
+English), and the receipt's stderr one machine line, `frame_advice=<reason>`.
+It is advice only: nothing blocks, no input is required, and the route is open
+whether or not the session follows it; `--explain` shows the line before the
+route starts. These are the signs the frame width
+already reads (`route_plan.frame_signals`); a unit route, `direct`, a framed
+route and a route made from a proposal get no advice.
+
+**Screen first.** Development that changes what the person sees (layout,
+color, wording, the order of lines) shows a mockup before it opens, and opens
+from the mockup the person chose. The opening session judges whether the screen
+changes; no path signal is added. A small fix handled inline (one line of screen
+wording, read→edit→check→reply) is not covered by this default. A change in one or two places: the opening
+session draws one mockup (one HTML page) itself. A larger change: open a design
+route (`--capability autopilot-design`) whose end product is one to three
+options with their comparison. The choice is one registered question
+(`hearting run questions ask`) whose options are the mockups, not a unit and
+not a series of free questions. Hand the chosen mockup's path to the
+development task as a decision (받는 것: 결정); development does not decide the
+look again. Development that changes no screen opens at once. When the person
+says to go without a mockup, open at once: this is a default, not a gate, and
+no flag or check refuses it. To open the design route ahead of the choice, leave
+the packaging stage for the development job that follows:
+`--shape staged --capability autopilot-design --graph refs,build,visual-verify,critic-review`.
+
+A route made from a
 proposal (`compose --route-plan <record>#<i>`, a command the runtime prints)
 has no frame nodes, and neither has a `solo` or `staged` compose: those shapes
 compile without the recipe's frame pair (a route sealed earlier keeps the
 frame nodes it was sealed with).
 
-A `framed` route runs two `top` legs by default; the simplified one-leg route runs at `deep`. A preset recipe's own frame pair is also `top`: the route seals each leg profile and a concrete model pin is preserved. `frame-alternative` prefers another harness only when one is ungated in the same quality band (`CONVENTIONS.md §1.1`). Shared verification may rotate only `frame-alternative` for the same-harness, same-model case described in `CONVENTIONS.md §1.1`, keeping its route-sealed profile. Without an eligible, usage-available alternative, the leg runs immediately at its sealed profile and records why. A frame-rule `top` that stops at a usage limit is still retried once at `deep` through the SD-157 replacement lineage, and that capacity lowering is recorded separately. The `[경로]` card of `framed` adds the compiler's two lines: "frame이 방향과 경로를 조립해 제안합니다" and the cost line, "비용: frame 한 갈래 · 방향 확인 질문 1회" or, with both legs, "비용: 최상위 모델 두 갈래 · 방향 확인 질문 1회".
+A `framed` route runs two `top` legs by default; the simplified one-leg route runs at `deep`. A preset recipe's own frame pair is also `top`: the route seals each leg profile and a concrete model pin is preserved. `frame-alternative` prefers another harness only when one is ungated in the same quality band (`CONVENTIONS.md §1.1`). Shared verification may rotate only `frame-alternative` for the same-harness, same-model case described in `CONVENTIONS.md §1.1`, keeping its route-sealed profile. Without an eligible, usage-available alternative, the leg runs immediately at its sealed profile and records why. A frame-rule `top` that stops at a usage limit is still retried once at `deep` through the SD-157 replacement lineage, and that capacity lowering is recorded separately. The `[경로]` card of `framed` adds the compiler's two lines: "frame이 방향과 경로를 조립해 제안합니다" and the cost line, "비용: frame 한 갈래 · 방향 확인 질문 최대 1회" or, with both legs, "비용: 최상위 모델 두 갈래 · 방향 확인 질문 최대 1회".
 
 **Staged assembly guidance.** Staged assembly guidance is for frame brief
 authors and routes whose capability and stages the person explicitly named.
@@ -389,7 +474,9 @@ These advisory points add no prerequisite or required stage:
   judge whether that frame's scope covers the work.
 - Choose `--intensity` for the work's purpose and, when needed,
   `--explicit-profiles` for judgment or verification nodes. Check the selection
-  reasons and actual node/leg profiles in the compose output.
+  reasons and actual node/leg profiles in the compose output. `top` on a depth-2 stage
+  worker or review/verification leg is for the person to name, at `strong` or higher only
+  (one top leg per parallel group), and an agent picks it only when the person asks.
 - Use `compose --explain` to check the displayed stage/worker/resource scale.
   At `strong` or higher, default to the eligible declared groups on retained
   anchors, with two-way as the baseline unless the registry widens it. Check
@@ -429,7 +516,10 @@ leg's approval question may be left out, and that leg then keeps its gate. When
 the interview is submitted the runtime builds `route_proposals`
 `{question, by_option}` from the marks and the validated proposals and records
 it with the question. An interview that writes `route_proposals` itself is read
-as written and offers only routes a brief proposed. After the answers, the
+as written and offers only routes a brief proposed, started as the brief wrote them;
+the one exception is a `solo` leg of a kind that declares one review, whose card says
+`standard` where the brief reads `strong`, `thorough` or `adversarial` (a card an
+earlier version drew), which starts at `standard`. After the answers, the
 same `start` records the decision, compiles and starts the first leg only
 (`--route-plan <record>#0`, `--parent-cycle <frame cycle>`), and closes the frame
 route once that start receipt exists; its receipt is the first leg's own.
@@ -512,7 +602,7 @@ budget and start approval) and writing under
 
 For execution, use `compose --campaign-key <stream> --start --prompt-file
 <task>` with no `--shape` for framed work or an explicit decided shape. Use
-`--shape direct` only for one reversible local completion unit (§0.2.1). The slug comes from the task; the
+`--shape direct` (with its `--field` or `--capability`) only for one reversible local completion unit (§0.2.1). The slug starts with the route's field and comes from the task; the
 campaign defaults to this session's latest stream in the same artifact root
 (including temporary directories and returning from a prepared worktree to
 the primary checkout; another session or artifact root supplies no default),
@@ -611,7 +701,14 @@ declared `unit_choices` (`execute:dev/refactor`). A `capability:stage` token
 it keeps its unit and gate, is written under `parts/<capability>/<stage>/`
 inside the host's artifact scope, and seals the name mapping as `part_io`; the
 host capability still owns the artifacts, and a token that is not a registered
-shareable part is the same unknown-node refusal as any other. A human gate a kept node
+shareable part is the same unknown-node refusal as any other. To borrow another kind's read
+worker, name the kind and write its part in `--graph`
+(`--capability autopilot-code --shape staged --graph analyze-project:analysis,autopilot-draft:quality-review,report`);
+that refusal names what the kind can borrow, and `stages --capability <kind>` lists it with a
+summary that says which text each borrowable review fits. The worker stage after a review also
+receives the borrowed result that review read (a resource run or an owner step keeps only what it
+names). There is no new kind, flag or setting, and `--unit` stays
+one worker without `--graph`. A human gate a kept node
 raises is rebound to the entry of the node that now follows it and dropped
 when nothing follows; a declared parallel group survives only when its anchor
 is kept and is not the new terminal. Composition changes route *shape* only —
@@ -627,7 +724,12 @@ so it is called from the dispatch-depth-0 session in the final worktree; inside
 a registered owner (`AGENT_DISPATCH_DEPTH` ≠ 0) it needs `--dispatch-evidence`
 or `--registered-headless-evidence` from the parent, exactly like `compile`.
 The stderr `[경로]` notice (§0.4) keeps the campaign choice observed before
-compose starts, and accompanies an admitted first leg. A no-wait snapshot is
+compose starts, and accompanies an admitted first leg. When the owner that
+started is not the harness the work asked for (`--owner`/owner pin), the notice
+adds one line naming the request, the harness and model that started, and why
+(`담당 변경: 요청 codex → opencode <model>(deep) — codex 사용 한도 소진(<reset> 재설정)`),
+and the per-harness owner advisory follows the harness that started. The
+switch itself is unchanged and needs no approval. A no-wait snapshot is
 pending; only an elapsed bounded wait is a timeout.
 
 Start receipts for open work include `runtime.run_command` and, when the adapter
@@ -713,13 +815,13 @@ information, not a second question. `범위` (Scope) stays the approved scope th
 execution access reads for an owner's write roots (`OPERATIONS` execution
 access). `compose --explain` prints the same `[의도]` lines without writing
 anything, so the card can come before `compose --start`. When the runtime
-exposes a native structured-question surface (Claude `AskUserQuestion`, Codex
-`request_user_input`, OpenCode `question`), deliver this confirmation through
-it: the card's fields form the question body; the optional start-approval line
-is scope metadata, and the options are exactly 진행 (recommended) / 수정 / 중단
-(in English Proceed (recommended) / Edit / Stop). The plain-text card above is the fallback when
-no such surface exists or it fails. The structured form changes only the
-delivery surface — never the fields, their order, the one-time approval
+can register a Hearting question (`hearting run questions ask`), register this
+confirmation as one: the card's fields form the question text; the optional
+start-approval line is scope metadata, and the choices are exactly 진행 / 수정 /
+중단 (in English Proceed / Edit / Stop) with 진행 (Proceed) recommended. Then end the
+turn; the answer arrives as the next prompt. The plain-text card above is the
+fallback when registration is unavailable or fails. The registered form changes
+only the delivery surface — never the fields, their order, the one-time approval
 semantics, or the exemptions below.
 
 Keep each confirmation value to one line. Include the start-approval line only
@@ -856,10 +958,9 @@ card and the interview. User approval precedes the owner and the §0.4 notice:
 → 진행(권장) / 수정: <틀린 부분> / 중단
 ```
 
-Deliver this card through the native question tool (Claude `AskUserQuestion`,
-Codex `request_user_input`, OpenCode `question`) when one is
-available, the plain-text form otherwise — the same fallback rule as the §0.4
-card. Only once the direction is confirmed does the owner start, and the §0.4
+Register this card as a Hearting question (`hearting run questions ask`; choices
+진행(권장) / 수정 / 중단, the first recommended) when the runtime can, the
+plain-text form otherwise — the same fallback rule as the §0.4 card. Only once the direction is confirmed does the owner start, and the §0.4
 gate then arrives as a non-blocking `[실행 통지]` — the same card fields, in
 order. It announces the route the confirmed direction produced; it does not
 re-ask a direction the user has already settled.
@@ -904,7 +1005,9 @@ same registered question goes to the person. This meaning is shared
 by Claude, Codex and OpenCode.
 
 When there is nothing to choose — both frame legs return valid, equal
-proposals, no start approval is in scope, and neither brief's section 7 lists a
+proposals (a one-leg frame needs only its one valid proposal), no start
+approval is in scope, no part needs the repository prepared, the proposal stays
+inside the intent's `안 할 것`, and no brief's section 7 lists a
 question only the user can answer — the runtime records that interview itself as
 the depth-0 session's on-behalf answer (`supervisor`, basis
 `automatic-agreement`), releases frame-review through the same commands, and
@@ -918,23 +1021,19 @@ The interview proceeds in this order:
 1. Ask first whether the restatement is right — that sentence, verbatim,
    with 예 / 아니오(고쳐 말하기) — and record a correction in the user's words.
 2. Put the `[방향 확인]` five-field summary as the card above.
-3. Ask the understanding sentence first, then the registered interview
-   questions, in one native question call when the tool accepts them all;
-   otherwise continue with the remaining questions verbatim in the next call,
-   and the runtime combines the calls of one interview. Use Claude `AskUserQuestion`,
-   Codex `request_user_input`, or OpenCode `question`, one topic
-   per question, the recommended option first and labelled
-   (권장), each option with its one-line meaning; never paraphrase a question
-   into harness vocabulary, and never add questions the interview does not
-   carry. A tired reader must be able to answer without opening the plan.
-4. The native tool's reply is kept by the harness's post-tool hook beside the
-   registered question (`answers.native.json`; the restatement asked verbatim,
-   its first option confirming it — a partial reply waits beside it until every
-   registered question has an answer), so `resume_command` alone continues. A
-   reply given in conversation goes into the returned `answers_template` and
-   `start --route <file> --answers <file>`. The runtime renders intent and
-   records the release that authorizes owner launch. A repeated submission
-   reuses it.
+3. The registered interview is already on the Hearting question board (the panel,
+   Fleet and `hearting run questions`), the understanding sentence first, then the
+   registered questions one topic each with the recommended option first and labelled
+   (권장) and each option's one-line meaning. It is not asked again through another
+   tool; never paraphrase a question into harness vocabulary, and never add questions
+   the interview does not carry. A tired reader must be able to answer without
+   opening the plan.
+4. The person answers on the board, which releases the gate; when no owner continues
+   by itself the runtime then sends this session one notice carrying `resume_command`.
+   Present the question and end the turn; the notice is the next input, and running
+   `resume_command` then renders intent and starts the owner. A reply given in
+   conversation goes into the returned `answers_template` and
+   `start --route <file> --answers <file>`. A repeated submission reuses the release.
 
 `OPERATIONS §5.10b` owns selector mechanics and the one-time `top`→`deep`
 demotion; the public work entry owns launch calls and artifact context. Both legs
@@ -1033,7 +1132,8 @@ plan says a later leg remains), one cost line (time from the route's first
 registered attempt to the seal, and the session tokens its owner, workers and
 retries wrote into their own attempt logs, summed; a session that wrote none is
 counted as `unknown`, and one whose started turn or step left no count makes
-the total `at least`; the line shows token counts, not a share of a plan), what
+the total `at least`; the line shows token counts, not a share of a plan), the
+owner harness and model that ran when they differ from the requested owner, what
 changed, what was checked, what stayed
 unverified or remains, nodes closed without an independent review, and the
 artifact path, in the shared UI-text catalog's language (English by default,
@@ -1227,9 +1327,32 @@ to the other things a finished attempt leaves behind: a merged worktree and
 branch, a spec `pipeline_state.yaml` still naming a live phase, and a memory
 handoff still `pending` after its obligation is met. Registered delivery
 reconciliation expires only the exact record whose original recipient has
-positive dead PID/start evidence; a closed identity-matched route settles its
-bound duty as not-required while retaining the record. Unknown liveness and a
-live successor remain pending, and unchanged observations are not rewritten.
+positive dead PID/start evidence. A closed identity-matched route settles its
+bound duty as not-required while retaining the record, once a fresh presence
+read still finds the parent absent. The one exception is an owner's completion
+to a Claude parent whose record is still open: while the registered parent
+runtime is live, as after a plain `/clear` that gave the session a new id, the
+duty stays open as undelivered (`completion-undelivered`) without that fresh
+read; the next prompt of the session a plain `/clear` started in its place, in
+the same pane and runtime, adds one informational line to the model's context
+(naming the route, the attempt and, when the route close sealed one, its report
+path; it asks for nothing and may be passed to the person in one line), and the
+record then expires as `recipient-session-replaced`, or is ACKed when that
+session's transcript already holds its exact receipt. Only a session whose own
+start in the pane's seat ledger is `clear` reads it, reaching back through
+earlier plain clears; a resume, select, fork or startup start does not, so a
+session left that way keeps its completion for its own next prompt. The
+ledger shows only starts the hook recorded: when it is ambiguous (another
+session started or prompted between the two starts, or started after the
+clear) nothing is inferred, and when a long session's start has been folded
+away nothing is shown; in both cases the completion stays open. The line
+stands in for the receipt: if the cleared session is resumed afterwards, even
+in the same process, its completion is already settled. A dead runtime expires
+that record first.
+Gate and supervision notices, Codex and OpenCode parents, and a runtime with
+no PID/start evidence or one this host cannot observe keep the not-required
+settlement. Unknown liveness and a live successor remain pending, and
+unchanged observations are not rewritten.
 Close what the attempt opened, or the next session pays for it in reconstruction.
 
 ### 0.6. Tracked-Workflow Lifecycle and Continuation
@@ -1451,7 +1574,12 @@ Only a real user decision reaches a person: the continuation names it and ends
 `correct` starts one replacement owner that receives it. A readable FAIL keeps
 waiting for an approved fix. An owner that ended `PASS` with declared stages undone is
 continued the same way once: its PASS stays as recorded, and the replacement receives the
-undone stages as observations. No gate, close, or recompose is needed.
+undone stages as observations. No gate, close, or recompose is needed. A replacement on the same
+harness wakes the earlier owner's session when it still exists and the runtime did not end it
+without a result, and starts fresh otherwise (`session: resumed | fresh:<reason>`, OPERATIONS §5.10c). The answer receipt names both actions a
+parent can take, and the person chooses: `correction_command` with the answer when the owner has something to
+do (a BLOCKED owner waits for one), or `close_command` to accept a FAIL's result as it is or stop the route (the closure stays unproven and the cycle is sealed
+`abandoned`). A later turn of a route closed PASS that ends without a PASS is answered the same way.
 
 A continuation route projects this contract onto its suffix. It drops a gate
 whose gated entry node was cut, never rebinds a retained raising continuation to
@@ -1498,6 +1626,8 @@ Autopilot entrypoints choose `intensity`; verification rigor is derived from it 
 | Important multi-file or risk-bearing work | `strong` | A `deep` owner plus the declared plan/review groups; selected high-value anchors may widen to a third profile/perspective leg while other groups remain width two |
 | Complex cross-domain or cross-harness work | `thorough` | Bounded dispatch-depth-2 perspective and verifier workers |
 | High-stakes, irreversible, security, or external-facing work | `adversarial` | Thorough plus an explicit adversary, failure-mode, or security pass |
+
+The rows from `standard` up describe the `staged` (team) form. A `solo` route (`--shape solo`, one owner that makes the work) can carry `standard` through `adversarial` where its kind declares a one-shot review (code does): it keeps its `balanced` owner and adds only that kind's review legs after the work (one at `standard`, two at `strong`, three at `thorough` and `adversarial`), with no frame bootstrap, plan or plan check.
 
 The quick row describes the lighter procedure, not a smaller deliverable. The original request, approved endpoint, and assigned scope remain the completion boundary: examples and concise reports do not replace requested investigation, results, or verification. A report endpoint ends with the approved report; a bounded stage finishes only its assigned work and reports any actual unfinished duty through the existing outcome semantics.
 
@@ -1564,14 +1694,14 @@ under §0.4, and internal routing is automatic. Portable model roles come from
 | `analyze-project` | One capability analyzing code, paper, or document mode itself |
 | `autopilot-spec` | Planning role for PRD, material role for research import, and setup logic for hosting and CI/CD |
 | `autopilot-design` | Design maker and critic plus material web-image-search |
-| `autopilot-code` | Direct is dispatch-depth-0 inline. From `quick`, depth-0 first runs the two-leg frame bootstrap (see above). Quick defaults to `balanced-deep` and standard+ to `deep`; explicit profile choices take precedence. Each uses one registered dispatch-depth-1 owner. At `strong+`, plan/implementation-review open asymmetric declared groups; `thorough+` adds implementation-risk and failure-mode legs. Planning, implementation, test, report, and task-aware review remain separate file-handoff stages. |
+| `autopilot-code` | Direct is dispatch-depth-0 inline. From `quick`, depth-0 first runs the two-leg frame bootstrap (see above). Quick defaults to `balanced-deep` and standard+ to `deep`; explicit profile choices take precedence. Each uses one registered dispatch-depth-1 owner. At `strong+`, plan, plan-check and implementation-review open asymmetric declared groups; `thorough+` adds each group's declared third leg (implementation-risk, simplicity check, failure-mode). Planning, implementation, test, report, and task-aware review remain separate file-handoff stages. |
 | `autopilot-code` in app mode | General code flow plus design critique at plan review and after render, DB migration safety, and automatic deploy after an authorized push |
 | `autopilot-draft` | Material figure/data/reference work, writing implementation, editorial polish, and research fact-check |
 | `autopilot-refine` | Reuse the draft roles plus editorial review |
 | `autopilot-lab` | Setup uses research plan review, implementation scaffold, and QA smoke tests. Evaluation uses functional QA, figure generation, and research survey; at `standard+`, checkpoint evaluation, media generation, report assembly, and independent verification dispatch as stage workers under the eval execution topology in `capabilities/autopilot-lab.md`. The actual long-running training run is asynchronous and supervised through RUNLOG ⏳ rather than a stage-worker dispatch. |
 | `analyze-user` | Cross-project material collection plus editorial review |
 
-For every durable stage at `standard+`, use an independent headless session under `OPERATIONS §5.10`; the named team roles run inside that session, and the dispatch-depth-1 conductor passes only artifact paths. Direct stays dispatch depth 0, and a depth-0-run bootstrap layer — two frame legs with distinct personas and usage-aware harness selection, joined and interviewed directly by the depth-0 session, both `top` — runs ahead of quick, which stays one registered-headless dispatch-depth-1 one-shot conductor.
+For every durable stage at `standard+`, use an independent headless session under `OPERATIONS §5.10`; the node's unit runs inside that session, and the dispatch-depth-1 conductor passes only artifact paths. Direct stays dispatch depth 0, and a depth-0-run bootstrap layer — two frame legs with distinct personas and usage-aware harness selection, joined and interviewed directly by the depth-0 session, both `top` — runs ahead of quick, which stays one registered-headless dispatch-depth-1 one-shot conductor.
 
 Each entrypoint is an explicit unit of intent. The §0.4 confirmation is the
 single top-level route handshake. Capability-local review controls such as
@@ -1642,7 +1772,8 @@ entry composes its own route from the same catalog (**compose-on-demand**, §0.2
 `capability-route.py compose` defaults to `framed`; `--shape direct` selects
 inline work. Explicit `solo` and `staged` shapes remain available for decisions
 already made by a frame or the person; `--shape staged --graph <stage,…>`
-selects that decided subgraph. Both use the same
+selects that decided subgraph. Each decided shape names its kind, its field, or
+both (Fields, §0.2.1). Both use the same
 validator and seal; a subgraph embeds its recipe as `composed: true`. Confirmation
 follows §0.4 (`[경로]` for small work, the card or SD-123 pair otherwise).
 Composition changes route *shape only* — it never bypasses the §0.1

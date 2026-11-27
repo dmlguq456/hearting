@@ -363,6 +363,9 @@ class CrossHarnessWorkerTest(_EnvMixin, unittest.TestCase):
         original_schedule = rt.schedule_sessions
         rt.schedule_sessions = lambda *_args, **_kwargs: calls.append("called")
         render.run_live = lambda collector, hfilter, section, interval: collector(hfilter) and 0
+        # Keep --json's version header off git in the checkout under test.
+        original_info = fleet_main.installinfo.collect
+        fleet_main.installinfo.collect = lambda *_args, **_kwargs: {}
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(fleet_main.main(["--json"]), 0)
@@ -373,6 +376,7 @@ class CrossHarnessWorkerTest(_EnvMixin, unittest.TestCase):
             fleet_main.collect_all = original_collect
             rt.schedule_sessions = original_schedule
             render.run_live = original_run_live
+            fleet_main.installinfo.collect = original_info
 
 
 if __name__ == "__main__":

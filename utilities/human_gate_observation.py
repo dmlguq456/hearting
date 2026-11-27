@@ -792,6 +792,17 @@ class _SkipSource(Exception):
     """A narrowed read does not observe this source."""
 
 
+def _parent_took_result(jobs, attempt, meta, parent):
+    """Whether the owner's parent holds its exact ACKed completion receipt (BLOCKED/FAIL too)."""
+    try:
+        from dispatch_completion_join import acknowledged_attempt_receipt
+        return acknowledged_attempt_receipt(
+            jobs, attempt, recipient_sid=str(parent),
+            parent_completion_delivery=str(meta.get("parent_completion_delivery") or "")) is not None
+    except Exception:  # noqa: BLE001 -- an unreadable delivery proves nothing; the wait stays
+        return False
+
+
 def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None, only_id=None):
     """Project current and folded older answer waits without changing sources.
 
@@ -1049,6 +1060,11 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
                             # successor: keep the registered parent, owner unknown.
                             lineage_read = False
                             parent, parent_harness = meta.get("parent_sid"), meta.get("parent_harness")
+                        # A finished owner whose parent already took its result (the exact ACKed
+                        # completion receipt) waits for no one: its parent decides what follows,
+                        # as with a closed route (11-14). An unproven delivery keeps the wait.
+                        if lineage_read and parent and _parent_took_result(path, attempt, lineage_meta, parent):
+                            continue
                         deciding.add((route_id, route_digest, route_file))
                         add({"id": "S3:" + str(attempt), "source": "S3",
                              "kind": "decision", "question": blocker, "choices": [],
@@ -1200,7 +1216,8 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
     for item in items:
         owner = item.get("owner") or {}
         key = (owner.get("harness"), owner.get("session_id"))
-        if key[0] and key[1] and not item.get("stale"):
+        # A blocked owner is answered by its parent agent, not from a session's panel.
+        if key[0] and key[1] and not item.get("stale") and item.get("source") != "S3":
             by_session[key].append(item["id"])
     counts = human_wait_state.wait_counts(items)
     unattributed = [item["id"] for item in items if item.get("attribution") == "unattributed" and not item.get("stale")]

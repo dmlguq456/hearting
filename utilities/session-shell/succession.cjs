@@ -12,13 +12,15 @@ function color(c,bg) {
   if(bg?c.isBgPalette():c.isFgPalette())return `${bg?48:38};5;${v}`;
   return bg?'49':'39';
 }
-// The bytes the outer terminal receives for one VT row; the seed uses the same text.
-function serialize(line,width,from=0) {
+// The bytes the outer terminal receives for one VT row; the seed uses the same text. `mark` is a
+// range of cells [from,to] drawn with the opposite of their own video (a selection).
+function serialize(line,width,from=0,mark=null) {
   let s='',previous='';
   for(let x=from;x<width;x++) {
     const c=line?.getCell(x); if(!c||!c.getWidth())continue;
     const a=[0,color(c,false),color(c,true)];
-    for(const [method,sgr] of [['isBold',1],['isDim',2],['isItalic',3],['isUnderline',4],['isBlink',5],['isInverse',7],['isInvisible',8],['isStrikethrough',9],['isOverline',53]])if(c[method]())a.push(sgr);
+    const flipped=!!mark&&x>=mark[0]&&x<=mark[1];
+    for(const [method,sgr] of [['isBold',1],['isDim',2],['isItalic',3],['isUnderline',4],['isBlink',5],['isInverse',7],['isInvisible',8],['isStrikethrough',9],['isOverline',53]])if(!!c[method]()!==(method==='isInverse'&&flipped))a.push(sgr);
     const attr=a.join(';');if(attr!==previous)s+=`\x1b[${attr}m`;
     s+=c.getChars()||' ';previous=attr;
   }
@@ -117,7 +119,7 @@ function validate(seed) {
   for(const key of ['sequence','selection','epoch','nativeEpoch','submitted','lastEnter'])if(!INTEGER(seed[key]))return key;
   if(typeof seed.state!=='string')return 'state';
   if(typeof seed.cursorVisible!=='boolean'||typeof seed.expanded!=='boolean')return 'flags';
-  if(!seed.displayConfiguration||typeof seed.displayConfiguration!=='object'||!Array.isArray(seed.panelOpen))return 'display';
+  if(!seed.displayConfiguration||typeof seed.displayConfiguration!=='object'||seed.panelOpen!==undefined&&!Array.isArray(seed.panelOpen))return 'display';
   if(!Array.isArray(seed.deliveries)||seed.deliveries.length>128||!seed.deliveries.every(row=>Array.isArray(row)&&typeof row[0]==='string'
      &&['submitted','transport-submitted'].includes(row[1])))return 'deliveries';
   const t=seed.terminal;

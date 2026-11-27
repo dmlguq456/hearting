@@ -27,14 +27,16 @@ from typing import Callable, Iterable
 from dispatch_attempt_policy import decide_attempt, terminal_conflict_digest
 from dispatch_receipt_identity import receipt_digest
 from dispatch_registry_cache import registry_view
+from foreground_activity import BLOCKING_COMMAND_MAX_SECONDS
 import dispatch_pending_delivery as pending_delivery
+from capacity_auto_resume import UNIT_CAPACITY_PAUSE
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 KIND = "supervision"
-REASONS = frozenset({"owner-input-undelivered", "no-progress", "attempt-stalled", "process-unverifiable", "join-deadline", "supervisor-exited", "join-observer-failed", "terminal-evidence-conflict", "workflow-completion-pending", "closure-blocked", "watch-deadline", "receiver-unavailable", "answer-awaiting-parent", "parent-session-ended"})
+REASONS = frozenset({"owner-input-undelivered", "no-progress", "attempt-stalled", "process-unverifiable", "join-deadline", "supervisor-exited", "join-observer-failed", "terminal-evidence-conflict", "workflow-completion-pending", "closure-blocked", "watch-deadline", "receiver-unavailable", "answer-awaiting-parent", "parent-session-ended", UNIT_CAPACITY_PAUSE})
 # Notices that only say "still waiting / cannot classify": confirmed execution is not a reason to ask anyone.
 CONFIRMED_WAIT_REASONS = frozenset({"join-deadline", "process-unverifiable"})
 # Another session answered a BLOCKED owner; only the route's parent launches the continuation.
@@ -261,6 +263,74 @@ def runtime_tool_progress(metadata, previous=None):
     if in_flight:
         return next(reversed(in_flight.values()))[0]
     return latest
+
+
+# Rows a runtime appends as its own turn or step moves, in each harness's shape. Bare
+# speech rows (``text``) and the supervisor's ``dispatch.supervisor.*`` bookkeeping are not
+# turns, so long talk or a supervisor's own writes never read as progress. The one
+# exception is ``dispatch.supervisor.step_tokens``: a supervised OpenCode owner's log keeps
+# no native step rows, and this row is written only when a native step finishes.
+_TURN_EVENT_TYPES = frozenset({
+    "turn.started", "turn.completed", "turn.failed", "item.started", "item.completed",  # codex
+    "assistant", "user",  # claude transcript
+    "step_start", "step_finish", "tool_use",  # opencode, written by its own flow
+    "dispatch.supervisor.step_tokens"})  # opencode, supervised owner: one per finished step
+
+
+def runtime_turn_mark(metadata):
+    """Where the worker's own newest turn/step row sits in its event source, plus what its
+    subagents have written, or ``None``.
+
+    A live worker's new turn is progress even when it ran no tool, and so is the activity of
+    a subagent it started and waits on. Only a byte offset and file sizes are read; never prose.
+    """
+    raw_path = metadata.get("log_file", "")
+    if not raw_path or not Path(raw_path).is_absolute():
+        return None
+    source = _tool_event_source(metadata, Path(raw_path))
+    mark = None
+    try:
+        with source.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            start = max(0, handle.tell() - 262144)
+            handle.seek(start)
+            if start:
+                start += len(handle.readline())
+            data = handle.read(262144)
+        offset = start
+        for line in data.splitlines(keepends=True):
+            try:
+                event = json.loads(line)
+            except (ValueError, UnicodeDecodeError):
+                event = None
+            if isinstance(event, dict) and event.get("type") in _TURN_EVENT_TYPES:
+                mark = offset
+            offset += len(line)
+    except OSError:
+        pass
+    subagents = _subagent_signature(source)
+    return [mark, subagents] if subagents else mark
+
+
+def _subagent_signature(source):
+    """(name, size) of the session's subagent transcripts, or ``None`` when it has none.
+
+    Claude writes each subagent of a session to ``<session>/subagents/*.jsonl`` beside the
+    session transcript; a growing file is that subagent's new event. Codex and OpenCode keep
+    a child in its own thread/session, which this attempt's log does not point to, so nothing
+    is read for them here.
+    """
+    try:
+        folder = source.parent / source.stem / "subagents"
+        entries = []
+        for item in folder.iterdir():
+            if item.suffix == ".jsonl" and not item.is_symlink():
+                entries.append((item.name, item.stat().st_size))
+                if len(entries) >= 64:
+                    break
+        return sorted(entries) or None
+    except OSError:
+        return None
 
 
 # Retry waits each supervisor writes (`session_supervisor_decisions.wait_transient_retry`,
@@ -820,6 +890,7 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
         fingerprint = deterministic_progress_fingerprint({
             "attempt_id": attempt_id, "route_id": route_id, "route_node": route_node,
             "heartbeat": hb or None, "tool": tool_event,
+            "turn": runtime_turn_mark(metadata),
             "registry_transition": {"status": status, "note": metadata.get("note", "")},
             "file_signature": scoped_file_signature(
                 metadata, worktree if worktree is not None else metadata.get("_stall_worktree", "")),
@@ -937,6 +1008,15 @@ def update_attempt_stall_observation(jobs, attempt_id, *, now=None,
             # An unfinished call record is not progress by itself: it counts inside the
             # quiet windows, or while the exact tool command started for it still runs.
             observation_state, reason = "active", "native-tool-active"
+        elif (quiet >= max_quiet_windows and now - last_progress < BLOCKING_COMMAND_MAX_SECONDS
+              and _call_command_running(
+                  metadata, last_progress - max(1.0, progress_window_seconds))):
+            # One blocking command (a CI watch) that started after the last event and still
+            # runs is the worker's wait, whether or not its call row is still in flight, for
+            # as long as one command may run (the headless Bash maximum); past that, a
+            # stuck command is quiet like any other and the notice names its program. An
+            # older resident shell is not a wait: it started before the last event.
+            observation_state, reason = "active", "tool-command-running"
         elif quiet >= max_quiet_windows:
             observation_state, reason = "stalled", "no-comparable-progress"
         else:
@@ -1045,6 +1125,42 @@ def _open_attempt_rows(jobs):
         seen.add(attempt_id)
         result.append((record.status, metadata))
     return result
+
+
+def running_route_ids(jobs, candidates, session_id=None):
+    """Which of the ``candidates`` route ids have a worker that works or waits on its own work now.
+
+    With ``session_id``, only routes that session launched count (an attempt whose
+    ``parent_sid`` is that session): another session's running route is not its hand-off.
+
+    Read-only, from the same observer the stall notice uses: an open attempt of the route
+    whose observation reads ``active``, or ``waiting`` on something other than a person
+    (a parked owner on its child or resource run). A stalled, unverifiable or finished
+    route is not running, so its unreceived result stays open work.
+    """
+    wanted = {str(item) for item in candidates or ()}
+    if not wanted:
+        return set()
+    from dispatch_contract import process_table_scan_scope
+    running = set()
+    try:
+        jobs = Path(jobs).resolve(strict=True)
+        with process_table_scan_scope():
+            for status, metadata in _open_attempt_rows(jobs):
+                route = metadata.get("owner_route_id") or metadata.get("route_id")
+                if route not in wanted or route in running:
+                    continue
+                if session_id is not None and metadata.get("parent_sid") != session_id:
+                    continue
+                observation = update_attempt_stall_observation(
+                    jobs, metadata.get("attempt_id", ""), persist=False, row=(status, metadata))
+                if observation and (observation.get("state") == "active" or (
+                        observation.get("state") == "waiting"
+                        and observation.get("reason") != "raised-human-gate")):
+                    running.add(route)
+    except (OSError, ValueError, SupervisionError):
+        return running
+    return running
 
 
 def has_unowned_stall_observation(jobs):
@@ -1288,6 +1404,9 @@ def _pending(rows: dict, attempts: list[str], jobs: Path, reason=None, *, notice
             if status and status.get("state") in {"stalled", "unknown"}:
                 return True
         return False
+    if reason == UNIT_CAPACITY_PAUSE:
+        from dispatch_replacement import unit_capacity_pause
+        return any(unit_capacity_pause(jobs, aid) for aid in attempts)
     if reason == "no-progress":
         from dispatch_replacement import parent_resume_obligation
         for aid in attempts:
@@ -1425,6 +1544,7 @@ def materialize(jobs: Path, attempts: set[str], *, reason: str) -> list[dict]:
         if reason == "attempt-stalled":
             for monitored_attempt in receipt["monitored_attempt_ids"]:
                 _attach_stall_delivery(jobs, monitored_attempt, record)
+        if reason in {"attempt-stalled", UNIT_CAPACITY_PAUSE}:
             try:
                 from peer_obligations import retain_registered_notice
                 retain_registered_notice(jobs, record)
@@ -1875,7 +1995,7 @@ def continue_for_parent(record: dict, *, session_id: str, recipient_kind: str,
     their existing answer-resume behavior."""
     receipt = record.get("receipt") if isinstance(record, dict) else None
     if (not session_id or not isinstance(receipt, dict) or receipt.get("kind") != KIND
-            or receipt.get("reason") not in {ANSWER_AWAITING_PARENT, "no-progress"}):
+            or receipt.get("reason") not in {ANSWER_AWAITING_PARENT, "no-progress", UNIT_CAPACITY_PAUSE}):
         return None
     try:
         from dispatch_replacement import _route, source_reservation
@@ -1889,7 +2009,7 @@ def continue_for_parent(record: dict, *, session_id: str, recipient_kind: str,
         if arm is None:
             from capacity_auto_resume import arm
         result = {"reason": receipt["reason"], "route_id": route.get("route_id")}
-        if receipt["reason"] == "no-progress" or source_reservation(jobs, owner):
+        if receipt["reason"] in {"no-progress", UNIT_CAPACITY_PAUSE} or source_reservation(jobs, owner):
             result["source_attempt_id"] = owner
         return arm(result, route_file, jobs, environ=env)
     except Exception:  # noqa: BLE001 -- the notice still carries the start command
@@ -2076,6 +2196,14 @@ def render_text(receipt: dict, *, continued: dict | None = None, notice_context=
                 "the answer is kept. Only this route's parent session launches its continuation, so "
                 "continue the work with the route's start command: the new owner receives the answer "
                 "first. Do not ask for the answer again." + (" " + command if command else ""))
+    if receipt["reason"] == UNIT_CAPACITY_PAUSE:
+        command = _resume_text(receipt)
+        if continued:
+            return (f"The unit worker stopped at a usage limit. The same route will try to continue "
+                    f"at {continued['resume_at']} or when the usage gate clears. Its result comes back here. "
+                    f"You can also read the result with {command or 'start --route <route-id>'}.")
+        return ("The unit worker stopped at a usage limit. The existing route can continue when capacity returns."
+                + (" " + command if command else ""))
     if receipt["reason"] == "no-progress":
         if continued:
             return ("The route parent has an armed start for the remaining replacement work. Its runtime "
@@ -2213,7 +2341,8 @@ def wait_for_batch(*, join: Callable[[set[str]], dict], attempts: set[str],
                    on_timeout: Callable[[set[str]], None] | None = None,
                    deadline: float | None = None,
                    stop_check: Callable[[], str] | None = None,
-                   replacement_checkpoint: Callable | None = None) -> dict:
+                   replacement_checkpoint: Callable | None = None,
+                   on_observer_error: Callable[[BaseException], None] | None = None) -> dict:
     """One shared wait loop. Join deadlines are checkpoints, never death votes.
 
     Execution boundaries retain their finite budgets. The parent receives one
@@ -2230,6 +2359,13 @@ def wait_for_batch(*, join: Callable[[set[str]], dict], attempts: set[str],
     REASONS token it returns halts the same way, under that reason). Neither
     ever fires mid-join -- only at the same checkpoint an ordinary
     `join-deadline` notice already used.
+
+    A round whose join or replacement checkpoint raised skips both `stop_check`
+    and the deadline.
+    `on_observer_error`, also optional and `None` for every other caller, is
+    the one call such a round still makes: it receives the exception, may end
+    the wait by raising `StopWaiting`, and anything else it raises leaves the
+    round an ordinary observer-error round.
     """
     ordinal = 0
     lineage_edges = []
@@ -2237,7 +2373,7 @@ def wait_for_batch(*, join: Callable[[set[str]], dict], attempts: set[str],
     roots = set(attempts)
     attention = []
     while True:
-        observer_error, deferred = "", None
+        observer_error, deferred, failure = "", None, None
         try:
             receipt = join(set(attempts))
             if replacement_checkpoint is not None:
@@ -2261,8 +2397,15 @@ def wait_for_batch(*, join: Callable[[set[str]], dict], attempts: set[str],
                 deferred = exc
             else:
                 # Observation failure retains the exact batch and diagnostic.
-                observer_error = str(exc)
+                observer_error, failure = str(exc), exc
         ordinal += 1
+        if failure is not None and on_observer_error is not None:
+            try:
+                on_observer_error(failure)
+            except StopWaiting:
+                raise
+            except Exception:  # noqa: BLE001 -- the round stays an ordinary error round
+                pass
         halt_reason = ""
         if not observer_error:
             if stop_check is not None:

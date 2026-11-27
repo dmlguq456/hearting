@@ -135,6 +135,36 @@ def _headline(rows: Sequence[Mapping[str, Any]], metric: Mapping[str, Any]) -> D
     return {"kind": "none", "condition_id": None, "name": None, "reason": None}
 
 
+def look_order(rows: Sequence[Mapping[str, Any]], metric: Optional[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
+    """The rows in the order the headline picks from (what to look at first): failed, stuck,
+    unconfirmed, not comparable, waiting, then the comparable ones from the best latest value, then
+    the rest; rows of one kind keep their catalog order."""
+    direction = (metric or {}).get("direction")
+
+    def rank(row: Mapping[str, Any]) -> int:
+        if row.get("failed"):
+            return 0
+        if row.get("stagnant"):
+            return 1
+        if row.get("unknown_flag"):
+            return 2
+        state = row.get("comparison_state")
+        if state == "not-comparable":
+            return 3
+        if state == "no-data" or (row.get("waiting") and state != "no-target"):
+            return 4
+        if state == "ok":
+            return 5
+        return 6
+
+    def value(row: Mapping[str, Any]) -> float:
+        latest = (row.get("latest") or {}).get("value") if rank(row) == 5 else None
+        if type(latest) not in (int, float):
+            return 0.0
+        return -latest if direction == "max" else latest if direction == "min" else 0.0
+    return [row for _index, row in sorted(enumerate(rows), key=lambda item: (rank(item[1]), value(item[1]), item[0]))]
+
+
 def _group(group: Mapping[str, Any]) -> Dict[str, Any]:
     metric = group.get("metric") if isinstance(group.get("metric"), dict) else None
     rows = [_row(cond, group) for cond in group.get("conditions") or []]

@@ -12,23 +12,23 @@
 <text x="153" y="54" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">◇</text>
 <text x="171" y="54" textLength="63" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">gpu-box</text>
 <text x="243" y="54" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">2/2</text>
-<text x="756" y="54" textLength="27" lengthAdjust="spacing" fill="#ffffd7" xml:space="preserve">⠏ 3</text>
-<text x="792" y="54" textLength="63" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">working</text>
-<text x="873" y="54" textLength="27" lengthAdjust="spacing" fill="#6b8656" xml:space="preserve">● 4</text>
-<text x="909" y="54" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">idle</text>
-<text x="963" y="54" textLength="27" lengthAdjust="spacing" fill="#ffa9a9" xml:space="preserve">● 1</text>
-<text x="999" y="54" textLength="117" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">answer needed</text>
-<text x="1143" y="54" textLength="72" lengthAdjust="spacing" fill="#ffffd7" font-weight="700" xml:space="preserve">hearting</text>
-<text x="1224" y="54" textLength="54" lengthAdjust="spacing" fill="#68699f" xml:space="preserve">v4.0.0</text>
+<text x="747" y="54" textLength="27" lengthAdjust="spacing" fill="#ffffd7" xml:space="preserve">⠏ 4</text>
+<text x="783" y="54" textLength="63" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">working</text>
+<text x="864" y="54" textLength="27" lengthAdjust="spacing" fill="#6b8656" xml:space="preserve">● 3</text>
+<text x="900" y="54" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">idle</text>
+<text x="954" y="54" textLength="27" lengthAdjust="spacing" fill="#ffa9a9" xml:space="preserve">● 1</text>
+<text x="990" y="54" textLength="117" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">answer needed</text>
+<text x="1134" y="54" textLength="72" lengthAdjust="spacing" fill="#ffffd7" font-weight="700" xml:space="preserve">hearting</text>
+<text x="1215" y="54" textLength="63" lengthAdjust="spacing" fill="#68699f" xml:space="preserve">v4.46.0</text>
 <text x="1287" y="54" textLength="81" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">· managed</text>
 <text x="1386" y="54" textLength="45" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">11:59</text>
-<text x="9" y="72" textLength="54" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">claude</text>
+<text x="9" y="72" textLength="54" lengthAdjust="spacing" fill="#d97757" xml:space="preserve">claude</text>
 <text x="81" y="72" textLength="18" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">5h</text>
 <text x="108" y="72" textLength="27" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">38%</text>
 <text x="135" y="72" textLength="135" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">(↻ 3h 20m) │ 7d</text>
 <text x="279" y="72" textLength="27" lengthAdjust="spacing" fill="#dbdb81" xml:space="preserve">52%</text>
 <text x="306" y="72" textLength="81" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">(↻ 3d 0h)</text>
-<text x="414" y="72" textLength="45" lengthAdjust="spacing" fill="#db81db" xml:space="preserve">codex</text>
+<text x="414" y="72" textLength="45" lengthAdjust="spacing" fill="#a9a9ff" xml:space="preserve">codex</text>
 <text x="477" y="72" textLength="18" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">5h</text>
 <text x="504" y="72" textLength="27" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">24%</text>
 <text x="531" y="72" textLength="135" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">(↻ 2h 10m) │ 7d</text>
@@ -52,44 +52,47 @@
 <text x="1062" y="126" textLength="27" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">NOW</text>
 <text x="1404" y="126" textLength="27" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">AGE</text>
 <text x="9" y="144" textLength="45" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">PEERS</text>
-<text x="270" y="144" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">2 │</text>
+<text x="270" y="144" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">5 │</text>
 <text x="315" y="144" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">┈</text>
 <text x="333" y="144" textLength="72" lengthAdjust="spacing" fill="#858689" xml:space="preserve">web-api/</text>
 <text x="414" y="144" textLength="126" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│ route 1 ⠏1 │</text>
 <text x="549" y="144" textLength="117" lengthAdjust="spacing" fill="#ffa9a9" xml:space="preserve">◑ to answer 1</text>
-<text x="675" y="144" textLength="756" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈</text>
+<text x="675" y="144" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
+<text x="693" y="144" textLength="99" lengthAdjust="spacing" fill="#dbdb81" xml:space="preserve">2 to decide</text>
+<text x="801" y="144" textLength="630" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈</text>
 <text x="9" y="162" textLength="54" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">ROUTES</text>
 <text x="270" y="162" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">2 │</text>
-<text x="333" y="162" textLength="9" lengthAdjust="spacing" fill="#ffffd7" xml:space="preserve">⠏</text>
+<text x="333" y="162" textLength="9" lengthAdjust="spacing" fill="#d97757" xml:space="preserve">⠏</text>
 <text x="351" y="162" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">[</text>
 <text x="360" y="162" textLength="18" lengthAdjust="spacing" fill="#ffafff" font-weight="700" xml:space="preserve">4f</text>
 <text x="378" y="162" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
 <text x="396" y="162" textLength="9" lengthAdjust="spacing" fill="#ffafff" font-weight="700" xml:space="preserve">⚑</text>
-<text x="432" y="162" textLength="135" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">claude Opus 5.5</text>
+<text x="432" y="162" textLength="54" lengthAdjust="spacing" fill="#d97757" xml:space="preserve">claude</text>
+<text x="495" y="162" textLength="72" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">Opus 5.5</text>
 <text x="576" y="162" textLength="45" lengthAdjust="spacing" fill="#db81db" font-weight="700" xml:space="preserve">xhigh</text>
 <text x="648" y="162" textLength="45" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">━━━━━</text>
 <text x="693" y="162" textLength="45" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">─────</text>
 <text x="756" y="162" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">46%</text>
-<text x="810" y="162" textLength="117" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">Rate limiting</text>
+<text x="810" y="162" textLength="117" lengthAdjust="spacing" fill="#d97757" xml:space="preserve">Rate limiting</text>
 <text x="936" y="162" textLength="63" lengthAdjust="spacing" fill="#addb81" font-weight="700" xml:space="preserve">route 1</text>
 <text x="1062" y="162" textLength="225" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">Running the limiter tests</text>
 <text x="1368" y="162" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">1h 12m</text>
 <text x="9" y="180" textLength="81" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">QUESTIONS</text>
 <text x="270" y="180" textLength="9" lengthAdjust="spacing" fill="#ffa9a9" xml:space="preserve">1</text>
 <text x="288" y="180" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
-<text x="333" y="180" textLength="9" lengthAdjust="spacing" fill="#6b8656" xml:space="preserve">●</text>
+<text x="333" y="180" textLength="9" lengthAdjust="spacing" fill="#a9a9ff" xml:space="preserve">⠏</text>
 <text x="351" y="180" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">[</text>
 <text x="360" y="180" textLength="18" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">b2</text>
 <text x="378" y="180" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
-<text x="432" y="180" textLength="45" lengthAdjust="spacing" fill="#db81db" xml:space="preserve">codex</text>
+<text x="432" y="180" textLength="45" lengthAdjust="spacing" fill="#a9a9ff" xml:space="preserve">codex</text>
 <text x="486" y="180" textLength="63" lengthAdjust="spacing" fill="#dbdb81" xml:space="preserve">gpt-5.5</text>
 <text x="558" y="180" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">high</text>
 <text x="648" y="180" textLength="63" lengthAdjust="spacing" fill="#dbdb81" xml:space="preserve">━━━━━━━</text>
 <text x="711" y="180" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">───</text>
 <text x="756" y="180" textLength="27" lengthAdjust="spacing" fill="#dbdb81" xml:space="preserve">71%</text>
-<text x="810" y="180" textLength="153" lengthAdjust="spacing" fill="#db81db" font-weight="700" xml:space="preserve">Pagination review</text>
+<text x="810" y="180" textLength="153" lengthAdjust="spacing" fill="#a9a9ff" font-weight="700" xml:space="preserve">Pagination review</text>
 <text x="972" y="180" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">(main)</text>
-<text x="1062" y="180" textLength="243" lengthAdjust="spacing" fill="#858689" xml:space="preserve">Review done; ready for more</text>
+<text x="1062" y="180" textLength="261" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">Test run for [4f]: 31/40 pass</text>
 <text x="1395" y="180" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">38m</text>
 <text x="9" y="198" textLength="63" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">HISTORY</text>
 <text x="288" y="198" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
@@ -97,13 +100,13 @@
 <text x="351" y="198" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">[</text>
 <text x="360" y="198" textLength="18" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">9c</text>
 <text x="378" y="198" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
-<text x="432" y="198" textLength="54" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">claude</text>
+<text x="432" y="198" textLength="54" lengthAdjust="spacing" fill="#d97757" xml:space="preserve">claude</text>
 <text x="495" y="198" textLength="90" lengthAdjust="spacing" fill="#a9a9ff" xml:space="preserve">Sonnet 5.5</text>
 <text x="594" y="198" textLength="27" lengthAdjust="spacing" fill="#c8c8c8" xml:space="preserve">med</text>
 <text x="648" y="198" textLength="27" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">━━━</text>
 <text x="675" y="198" textLength="63" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">───────</text>
 <text x="756" y="198" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">33%</text>
-<text x="810" y="198" textLength="153" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">Release notes 2.4</text>
+<text x="810" y="198" textLength="153" lengthAdjust="spacing" fill="#d97757" xml:space="preserve">Release notes 2.4</text>
 <text x="972" y="198" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">(main)</text>
 <text x="1062" y="198" textLength="135" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">Choose a layout</text>
 <text x="1395" y="198" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">19m</text>
@@ -116,38 +119,39 @@
 <text x="90" y="234" textLength="54" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">MODELS</text>
 <text x="171" y="234" textLength="54" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">SYSTEM</text>
 <text x="288" y="234" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
-<text x="333" y="234" textLength="9" lengthAdjust="spacing" fill="#ffffd7" xml:space="preserve">⠏</text>
+<text x="333" y="234" textLength="9" lengthAdjust="spacing" fill="#d97757" xml:space="preserve">⠏</text>
 <text x="351" y="234" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">[</text>
 <text x="360" y="234" textLength="18" lengthAdjust="spacing" fill="#ffafff" font-weight="700" xml:space="preserve">d1</text>
 <text x="378" y="234" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
 <text x="396" y="234" textLength="9" lengthAdjust="spacing" fill="#ffafff" font-weight="700" xml:space="preserve">⚑</text>
-<text x="432" y="234" textLength="135" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">claude Opus 5.5</text>
+<text x="432" y="234" textLength="54" lengthAdjust="spacing" fill="#d97757" xml:space="preserve">claude</text>
+<text x="495" y="234" textLength="72" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">Opus 5.5</text>
 <text x="576" y="234" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">high</text>
 <text x="648" y="234" textLength="36" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">━━━━</text>
 <text x="684" y="234" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">──────</text>
 <text x="756" y="234" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">38%</text>
-<text x="810" y="234" textLength="135" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">Checkpoint eval</text>
+<text x="810" y="234" textLength="135" lengthAdjust="spacing" fill="#d97757" xml:space="preserve">Checkpoint eval</text>
 <text x="954" y="234" textLength="63" lengthAdjust="spacing" fill="#addb81" font-weight="700" xml:space="preserve">route 1</text>
 <text x="1062" y="234" textLength="207" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">Waiting on the ASR eval</text>
 <text x="1395" y="234" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">54m</text>
 <text x="9" y="252" textLength="288" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈ │</text>
-<text x="333" y="252" textLength="9" lengthAdjust="spacing" fill="#ffffd7" xml:space="preserve">⠏</text>
+<text x="333" y="252" textLength="9" lengthAdjust="spacing" fill="#afd7ff" xml:space="preserve">⠏</text>
 <text x="351" y="252" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">[</text>
 <text x="360" y="252" textLength="18" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">e8</text>
 <text x="378" y="252" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
-<text x="432" y="252" textLength="144" lengthAdjust="spacing" fill="#a9a9ff" xml:space="preserve">opencode glm-5.2</text>
+<text x="432" y="252" textLength="144" lengthAdjust="spacing" fill="#afd7ff" xml:space="preserve">opencode glm-5.2</text>
 <text x="585" y="252" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">high</text>
 <text x="648" y="252" textLength="27" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">━━━</text>
 <text x="675" y="252" textLength="63" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">───────</text>
 <text x="756" y="252" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">29%</text>
-<text x="810" y="252" textLength="126" lengthAdjust="spacing" fill="#a9a9ff" xml:space="preserve">Loader workers</text>
+<text x="810" y="252" textLength="126" lengthAdjust="spacing" fill="#afd7ff" xml:space="preserve">Loader workers</text>
 <text x="945" y="252" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">(main)</text>
 <text x="1062" y="252" textLength="234" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">Profiling 4, 8, 16 workers</text>
 <text x="1395" y="252" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">26m</text>
 <rect x="0" y="256" width="288" height="18" fill="#1c2030"/>
 <text x="9" y="270" textLength="72" lengthAdjust="spacing" fill="#8a8c93" xml:space="preserve">SESSIONS</text>
-<text x="207" y="270" textLength="18" lengthAdjust="spacing" fill="#ffffd7" xml:space="preserve">⠏3</text>
-<text x="234" y="270" textLength="18" lengthAdjust="spacing" fill="#708c5f" xml:space="preserve">●4</text>
+<text x="207" y="270" textLength="18" lengthAdjust="spacing" fill="#ffffd7" xml:space="preserve">⠏4</text>
+<text x="234" y="270" textLength="18" lengthAdjust="spacing" fill="#708c5f" xml:space="preserve">●3</text>
 <text x="261" y="270" textLength="18" lengthAdjust="spacing" fill="#ffa9a9" xml:space="preserve">●1</text>
 <text x="288" y="270" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
 <text x="315" y="270" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">┈</text>
@@ -160,12 +164,12 @@
 <text x="351" y="288" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">[</text>
 <text x="360" y="288" textLength="18" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">31</text>
 <text x="378" y="288" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
-<text x="432" y="288" textLength="144" lengthAdjust="spacing" fill="#a9a9ff" xml:space="preserve">opencode glm-5.2</text>
+<text x="432" y="288" textLength="144" lengthAdjust="spacing" fill="#afd7ff" xml:space="preserve">opencode glm-5.2</text>
 <text x="585" y="288" textLength="27" lengthAdjust="spacing" fill="#c8c8c8" xml:space="preserve">med</text>
 <text x="648" y="288" textLength="9" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">━</text>
 <text x="657" y="288" textLength="81" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">─────────</text>
 <text x="756" y="288" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">14%</text>
-<text x="810" y="288" textLength="108" lengthAdjust="spacing" fill="#a9a9ff" xml:space="preserve">Broken links</text>
+<text x="810" y="288" textLength="108" lengthAdjust="spacing" fill="#afd7ff" xml:space="preserve">Broken links</text>
 <text x="927" y="288" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">(main)</text>
 <text x="1062" y="288" textLength="171" lengthAdjust="spacing" fill="#858689" xml:space="preserve">Link check is clean</text>
 <text x="1395" y="288" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">44m</text>
@@ -173,29 +177,28 @@
 <text x="36" y="306" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">├─ [</text>
 <text x="72" y="306" textLength="18" lengthAdjust="spacing" fill="#ffafff" font-weight="700" xml:space="preserve">4f</text>
 <text x="90" y="306" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
-<text x="108" y="306" textLength="54" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">claude</text>
+<text x="108" y="306" textLength="54" lengthAdjust="spacing" fill="#d97757" xml:space="preserve">claude</text>
 <text x="171" y="306" textLength="9" lengthAdjust="spacing" fill="#ffafff" font-weight="700" xml:space="preserve">⚑</text>
-<text x="189" y="306" textLength="9" lengthAdjust="spacing" fill="#9a9b88" xml:space="preserve">⠏</text>
+<text x="189" y="306" textLength="9" lengthAdjust="spacing" fill="#844c3d" xml:space="preserve">⠏</text>
 <text x="288" y="306" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
 <text x="333" y="306" textLength="9" lengthAdjust="spacing" fill="#6b8656" xml:space="preserve">●</text>
 <text x="351" y="306" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">[</text>
 <text x="360" y="306" textLength="18" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">7a</text>
 <text x="378" y="306" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
-<text x="432" y="306" textLength="54" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">claude</text>
+<text x="432" y="306" textLength="54" lengthAdjust="spacing" fill="#d97757" xml:space="preserve">claude</text>
 <text x="495" y="306" textLength="90" lengthAdjust="spacing" fill="#a9a9ff" xml:space="preserve">Sonnet 5.5</text>
 <text x="594" y="306" textLength="27" lengthAdjust="spacing" fill="#c8c8c8" xml:space="preserve">med</text>
 <text x="648" y="306" textLength="54" lengthAdjust="spacing" fill="#dbdb81" xml:space="preserve">━━━━━━</text>
 <text x="702" y="306" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">────</text>
 <text x="756" y="306" textLength="27" lengthAdjust="spacing" fill="#dbdb81" xml:space="preserve">63%</text>
-<text x="810" y="306" textLength="99" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">Quick start</text>
+<text x="810" y="306" textLength="99" lengthAdjust="spacing" fill="#d97757" xml:space="preserve">Quick start</text>
 <text x="918" y="306" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">(main)</text>
 <text x="1062" y="306" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">·</text>
 <text x="1368" y="306" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">6h 50m</text>
 <text x="9" y="324" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
 <text x="36" y="324" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
 <text x="81" y="324" textLength="72" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">└─ code:</text>
-<text x="162" y="324" textLength="54" lengthAdjust="spacing" fill="#51868a" xml:space="preserve">claude</text>
-<text x="225" y="324" textLength="9" lengthAdjust="spacing" fill="#9a9b88" xml:space="preserve">⠏</text>
+<text x="162" y="324" textLength="72" lengthAdjust="spacing" fill="#844c3d" xml:space="preserve">claude ⠏</text>
 <text x="288" y="324" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
 <text x="315" y="324" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">┈</text>
 <text x="333" y="324" textLength="99" lengthAdjust="spacing" fill="#858689" xml:space="preserve">mobile-app/</text>
@@ -204,20 +207,20 @@
 <text x="36" y="342" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">├─ [</text>
 <text x="72" y="342" textLength="18" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">b2</text>
 <text x="90" y="342" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
-<text x="108" y="342" textLength="45" lengthAdjust="spacing" fill="#db81db" xml:space="preserve">codex</text>
-<text x="162" y="342" textLength="9" lengthAdjust="spacing" fill="#6b8656" xml:space="preserve">●</text>
+<text x="108" y="342" textLength="45" lengthAdjust="spacing" fill="#a9a9ff" xml:space="preserve">codex</text>
+<text x="162" y="342" textLength="9" lengthAdjust="spacing" fill="#68699f" xml:space="preserve">⠏</text>
 <text x="288" y="342" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
 <text x="333" y="342" textLength="9" lengthAdjust="spacing" fill="#6b8656" xml:space="preserve">●</text>
 <text x="351" y="342" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">[</text>
 <text x="360" y="342" textLength="18" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">c5</text>
 <text x="378" y="342" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
-<text x="432" y="342" textLength="45" lengthAdjust="spacing" fill="#db81db" xml:space="preserve">codex</text>
+<text x="432" y="342" textLength="45" lengthAdjust="spacing" fill="#a9a9ff" xml:space="preserve">codex</text>
 <text x="486" y="342" textLength="63" lengthAdjust="spacing" fill="#dbdb81" xml:space="preserve">gpt-5.5</text>
 <text x="558" y="342" textLength="27" lengthAdjust="spacing" fill="#c8c8c8" xml:space="preserve">med</text>
 <text x="648" y="342" textLength="18" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">━━</text>
 <text x="666" y="342" textLength="72" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">────────</text>
 <text x="756" y="342" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">21%</text>
-<text x="810" y="342" textLength="99" lengthAdjust="spacing" fill="#db81db" font-weight="700" xml:space="preserve">Login crash</text>
+<text x="810" y="342" textLength="99" lengthAdjust="spacing" fill="#a9a9ff" font-weight="700" xml:space="preserve">Login crash</text>
 <text x="918" y="342" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">(main)</text>
 <text x="1062" y="342" textLength="153" lengthAdjust="spacing" fill="#858689" xml:space="preserve">Fixed, test added</text>
 <text x="1377" y="342" textLength="45" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">3h 5m</text>
@@ -225,10 +228,10 @@
 <text x="36" y="360" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">└─ [</text>
 <text x="72" y="360" textLength="18" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">9c</text>
 <text x="90" y="360" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
-<text x="108" y="360" textLength="54" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">claude</text>
+<text x="108" y="360" textLength="54" lengthAdjust="spacing" fill="#d97757" xml:space="preserve">claude</text>
 <text x="171" y="360" textLength="9" lengthAdjust="spacing" fill="#9a696d" xml:space="preserve">●</text>
 <text x="288" y="360" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
-<text x="315" y="360" textLength="459" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">8 sessions · 3 working · ◑ to answer 1 · 4 projects</text>
+<text x="315" y="360" textLength="459" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">8 sessions · 4 working · ◑ to answer 1 · 4 projects</text>
 <text x="9" y="378" textLength="18" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">├─</text>
 <text x="36" y="378" textLength="81" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">ml-train/</text>
 <text x="288" y="378" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
@@ -236,28 +239,26 @@
 <text x="36" y="396" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">├─ [</text>
 <text x="72" y="396" textLength="18" lengthAdjust="spacing" fill="#ffafff" font-weight="700" xml:space="preserve">d1</text>
 <text x="90" y="396" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
-<text x="108" y="396" textLength="54" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">claude</text>
+<text x="108" y="396" textLength="54" lengthAdjust="spacing" fill="#d97757" xml:space="preserve">claude</text>
 <text x="171" y="396" textLength="9" lengthAdjust="spacing" fill="#ffafff" font-weight="700" xml:space="preserve">⚑</text>
-<text x="189" y="396" textLength="9" lengthAdjust="spacing" fill="#9a9b88" xml:space="preserve">⠏</text>
-<text x="288" y="396" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│ ──</text>
-<text x="333" y="396" textLength="54" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">ROUTES</text>
-<text x="405" y="396" textLength="54" lengthAdjust="spacing" fill="#addb81" font-weight="700" xml:space="preserve">2 open</text>
-<text x="468" y="396" textLength="639" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">────────────────────────────────────────────────────────── owner·worker</text>
-<text x="1116" y="396" textLength="54" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">claude</text>
+<text x="189" y="396" textLength="9" lengthAdjust="spacing" fill="#844c3d" xml:space="preserve">⠏</text>
+<text x="288" y="396" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
+<text x="306" y="396" textLength="9" lengthAdjust="spacing" fill="#addb81" font-weight="700" xml:space="preserve">2</text>
+<text x="324" y="396" textLength="783" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">ROUTES ─────────────────────────────────────────────────────────────────── owner·worker</text>
+<text x="1116" y="396" textLength="54" lengthAdjust="spacing" fill="#d97757" xml:space="preserve">claude</text>
 <text x="1179" y="396" textLength="9" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">2</text>
 <text x="1197" y="396" textLength="234" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">· codex 0 · opencode 0 ───</text>
 <text x="9" y="414" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
 <text x="36" y="414" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
 <text x="81" y="414" textLength="63" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">└─ lab:</text>
-<text x="153" y="414" textLength="54" lengthAdjust="spacing" fill="#51868a" xml:space="preserve">claude</text>
-<text x="216" y="414" textLength="9" lengthAdjust="spacing" fill="#9a9b88" xml:space="preserve">⠏</text>
+<text x="153" y="414" textLength="72" lengthAdjust="spacing" fill="#844c3d" xml:space="preserve">claude ⠏</text>
 <text x="288" y="414" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
-<text x="333" y="414" textLength="9" lengthAdjust="spacing" fill="#ffffd7" xml:space="preserve">⠏</text>
+<text x="333" y="414" textLength="9" lengthAdjust="spacing" fill="#d97757" xml:space="preserve">⠏</text>
 <text x="351" y="414" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">[</text>
 <text x="360" y="414" textLength="18" lengthAdjust="spacing" fill="#ffafff" font-weight="700" xml:space="preserve">4f</text>
 <text x="378" y="414" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
 <text x="396" y="414" textLength="9" lengthAdjust="spacing" fill="#ffafff" font-weight="700" xml:space="preserve">⚑</text>
-<text x="432" y="414" textLength="54" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">claude</text>
+<text x="432" y="414" textLength="54" lengthAdjust="spacing" fill="#d97757" xml:space="preserve">claude</text>
 <text x="495" y="414" textLength="90" lengthAdjust="spacing" fill="#a9a9ff" xml:space="preserve">Sonnet 5.5</text>
 <text x="594" y="414" textLength="27" lengthAdjust="spacing" fill="#c8c8c8" xml:space="preserve">med</text>
 <text x="648" y="414" textLength="27" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">━━━</text>
@@ -265,23 +266,24 @@
 <text x="756" y="414" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">34%</text>
 <text x="810" y="414" textLength="72" lengthAdjust="spacing" fill="#858689" xml:space="preserve">web-api/</text>
 <text x="891" y="414" textLength="117" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">Rate limiting</text>
-<text x="1062" y="414" textLength="90" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">staged 2/4</text>
-<text x="1161" y="414" textLength="63" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">execute</text>
-<text x="1233" y="414" textLength="9" lengthAdjust="spacing" fill="#addb81" font-weight="700" xml:space="preserve">●</text>
+<text x="1062" y="414" textLength="36" lengthAdjust="spacing" fill="#5f87ff" font-weight="700" xml:space="preserve">code</text>
+<text x="1098" y="414" textLength="135" lengthAdjust="spacing" fill="#5f87ff" xml:space="preserve">(team·standard)</text>
+<text x="1242" y="414" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">· 2/4:</text>
+<text x="1305" y="414" textLength="63" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">execute</text>
 <text x="1395" y="414" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">31m</text>
 <text x="9" y="432" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
 <text x="36" y="432" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">└─ [</text>
 <text x="72" y="432" textLength="18" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">e8</text>
 <text x="90" y="432" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
-<text x="108" y="432" textLength="72" lengthAdjust="spacing" fill="#a9a9ff" xml:space="preserve">opencode</text>
-<text x="189" y="432" textLength="9" lengthAdjust="spacing" fill="#9a9b88" xml:space="preserve">⠏</text>
+<text x="108" y="432" textLength="72" lengthAdjust="spacing" fill="#afd7ff" xml:space="preserve">opencode</text>
+<text x="189" y="432" textLength="9" lengthAdjust="spacing" fill="#6c849f" xml:space="preserve">⠏</text>
 <text x="288" y="432" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
-<text x="333" y="432" textLength="9" lengthAdjust="spacing" fill="#ffffd7" xml:space="preserve">⠏</text>
+<text x="333" y="432" textLength="9" lengthAdjust="spacing" fill="#d97757" xml:space="preserve">⠏</text>
 <text x="351" y="432" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">[</text>
 <text x="360" y="432" textLength="18" lengthAdjust="spacing" fill="#ffafff" font-weight="700" xml:space="preserve">d1</text>
 <text x="378" y="432" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
 <text x="396" y="432" textLength="9" lengthAdjust="spacing" fill="#ffafff" font-weight="700" xml:space="preserve">⚑</text>
-<text x="432" y="432" textLength="54" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">claude</text>
+<text x="432" y="432" textLength="54" lengthAdjust="spacing" fill="#d97757" xml:space="preserve">claude</text>
 <text x="495" y="432" textLength="90" lengthAdjust="spacing" fill="#a9a9ff" xml:space="preserve">Sonnet 5.5</text>
 <text x="594" y="432" textLength="27" lengthAdjust="spacing" fill="#c8c8c8" xml:space="preserve">med</text>
 <text x="648" y="432" textLength="18" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">━━</text>
@@ -289,9 +291,10 @@
 <text x="756" y="432" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">22%</text>
 <text x="810" y="432" textLength="81" lengthAdjust="spacing" fill="#858689" xml:space="preserve">ml-train/</text>
 <text x="900" y="432" textLength="135" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">Checkpoint eval</text>
-<text x="1062" y="432" textLength="90" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">staged 2/4</text>
-<text x="1161" y="432" textLength="72" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">eval-asr</text>
-<text x="1242" y="432" textLength="9" lengthAdjust="spacing" fill="#addb81" font-weight="700" xml:space="preserve">●</text>
+<text x="1062" y="432" textLength="27" lengthAdjust="spacing" fill="#ffaf00" font-weight="700" xml:space="preserve">lab</text>
+<text x="1089" y="432" textLength="135" lengthAdjust="spacing" fill="#ffaf00" xml:space="preserve">(team·standard)</text>
+<text x="1233" y="432" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">· 2/4:</text>
+<text x="1296" y="432" textLength="72" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">eval-asr</text>
 <text x="1395" y="432" textLength="27" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">24m</text>
 <text x="9" y="450" textLength="18" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">├─</text>
 <text x="36" y="450" textLength="90" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">docs-site/</text>
@@ -300,29 +303,27 @@
 <text x="36" y="468" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">├─ [</text>
 <text x="72" y="468" textLength="18" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">31</text>
 <text x="90" y="468" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
-<text x="108" y="468" textLength="72" lengthAdjust="spacing" fill="#a9a9ff" xml:space="preserve">opencode</text>
+<text x="108" y="468" textLength="72" lengthAdjust="spacing" fill="#afd7ff" xml:space="preserve">opencode</text>
 <text x="189" y="468" textLength="9" lengthAdjust="spacing" fill="#6b8656" xml:space="preserve">●</text>
-<text x="288" y="468" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│ ──</text>
-<text x="333" y="468" textLength="54" lengthAdjust="spacing" fill="#dadada" font-weight="700" xml:space="preserve">RECENT</text>
-<text x="405" y="468" textLength="1026" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">completed results ────────────────────────────────────────────────────────────────────────────────────────────────</text>
+<text x="288" y="468" textLength="1143" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│ RECENT · completed results ──────────────────────────────────────────────────────────────────────────────────────────────────</text>
 <text x="9" y="486" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
 <text x="36" y="486" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">└─ [</text>
 <text x="72" y="486" textLength="18" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">7a</text>
 <text x="90" y="486" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
-<text x="108" y="486" textLength="54" lengthAdjust="spacing" fill="#81dbdb" xml:space="preserve">claude</text>
+<text x="108" y="486" textLength="54" lengthAdjust="spacing" fill="#d97757" xml:space="preserve">claude</text>
 <text x="171" y="486" textLength="9" lengthAdjust="spacing" fill="#6b8656" xml:space="preserve">●</text>
 <text x="288" y="486" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
 <text x="315" y="486" textLength="9" lengthAdjust="spacing" fill="#addb81" xml:space="preserve">✓</text>
 <text x="333" y="486" textLength="72" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">web-api/</text>
 <text x="468" y="486" textLength="261" lengthAdjust="spacing" fill="#858689" xml:space="preserve">Fix the pagination off-by-one</text>
-<text x="1359" y="486" textLength="63" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">52m ago</text>
+<text x="1377" y="486" textLength="45" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">11:08</text>
 <text x="9" y="504" textLength="18" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">└─</text>
 <text x="36" y="504" textLength="99" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">mobile-app/</text>
 <text x="288" y="504" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
 <text x="36" y="522" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">└─ [</text>
 <text x="72" y="522" textLength="18" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">c5</text>
 <text x="90" y="522" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">]</text>
-<text x="108" y="522" textLength="45" lengthAdjust="spacing" fill="#db81db" xml:space="preserve">codex</text>
+<text x="108" y="522" textLength="45" lengthAdjust="spacing" fill="#a9a9ff" xml:space="preserve">codex</text>
 <text x="162" y="522" textLength="9" lengthAdjust="spacing" fill="#6b8656" xml:space="preserve">●</text>
 <text x="288" y="522" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
 <text x="288" y="540" textLength="9" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">│</text>
@@ -356,11 +357,11 @@
 <text x="225" y="774" textLength="9" lengthAdjust="spacing" fill="#ffffd7" xml:space="preserve">●</text>
 <text x="261" y="774" textLength="36" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">0% │</text>
 <text x="0" y="792" textLength="1440" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</text>
-<text x="9" y="810" textLength="81" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">≋ 11:19 [</text>
-<text x="90" y="810" textLength="9" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">·</text>
-<text x="99" y="810" textLength="90" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">] hearting</text>
-<text x="207" y="810" textLength="81" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">mem saved</text>
-<text x="297" y="810" textLength="450" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">· use a sliding-window limiter, not a token bucket</text>
+<text x="9" y="810" textLength="81" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">≋ 11:58 [</text>
+<text x="90" y="810" textLength="18" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">b2</text>
+<text x="108" y="810" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">] peer</text>
+<text x="180" y="810" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">report</text>
+<text x="243" y="810" textLength="612" lengthAdjust="spacing" fill="#dadada" xml:space="preserve">· rq-7d21c4 · partial answer · 31 of 40 suites pass; 9 still running</text>
 <text x="9" y="828" textLength="18" lengthAdjust="spacing" fill="#ffffd7" font-weight="700" xml:space="preserve">↑↓</text>
 <text x="36" y="828" textLength="54" lengthAdjust="spacing" fill="#7a7b7f" xml:space="preserve">move ·</text>
 <text x="99" y="828" textLength="18" lengthAdjust="spacing" fill="#ffffd7" font-weight="700" xml:space="preserve">←→</text>

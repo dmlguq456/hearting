@@ -24,8 +24,7 @@ shared-utility-deferred	artifact_spec_storage.py
 shared-utility-deferred	artifact_viewer.py
 shared-utility-deferred	artifact_workflow_group_review.py
 shared-utility-deferred	atomic_publish.py
-shared-utility-deferred	cairn-artifact-read.sh
-shared-utility-deferred	cairn-artifact-read.ts
+shared-utility-deferred	backlog_items.py
 shared-utility-deferred	campaign_title_repair.py
 shared-utility-deferred	claude_process_identity.py
 shared-utility-deferred	detached_lifetime.py
@@ -34,6 +33,7 @@ shared-utility-deferred	codex_permission_profile.py
 shared-utility-deferred	completion_close_probe.py
 shared-utility-deferred	compute-hosts
 shared-utility-deferred	context_alert.py
+shared-utility-deferred	context_repeat.py
 shared-utility-deferred	conversation_reader.py
 shared-utility-deferred	dispatch-readiness.py
 shared-utility-deferred	dispatch_attempt_policy.py
@@ -56,8 +56,10 @@ shared-utility-deferred	execution_access.py
 shared-utility-deferred	execution_access_diagnose.py
 shared-utility-deferred	governor_identity.py
 shared-utility-deferred	harness_behavior_cases_a.py
+shared-utility-deferred	harness_behavior_cases_answer_lines.py
 shared-utility-deferred	harness_behavior_cases_b.py
 shared-utility-deferred	harness_behavior_cases_c.py
+shared-utility-deferred	harness_behavior_cases_context_rearm.py
 shared-utility-deferred	harness_behavior_cases_codex_hooks.py
 shared-utility-deferred	harness_behavior_cases_d.py
 shared-utility-deferred	harness_behavior_cases_design_mcp.py
@@ -72,7 +74,15 @@ shared-utility-deferred	harness_behavior_cases_subagent_model.py
 shared-utility-deferred	harness_behavior_cases_tidy.py
 shared-utility-deferred	harness_behavior_cases_token_budget.py
 shared-utility-deferred	harness_behavior_cases_tidy_compact.py
+shared-utility-deferred	harness_behavior_cases_solo_review.py
+shared-utility-deferred	harness_behavior_cases_unit_route.py
+shared-utility-deferred	harness_behavior_cases_unit_nested.py
+shared-utility-deferred	harness_behavior_cases_unit_continue.py
+shared-utility-deferred	harness_behavior_cases_owner_continue.py
+shared-utility-deferred	harness_behavior_cases_owner_fail.py
+shared-utility-deferred	harness_behavior_cases_unit_explore.py
 shared-utility-deferred	harness_behavior_cases_request.py
+shared-utility-deferred	harness_behavior_cases_parked.py
 shared-utility-deferred	harness_behavior_scenarios.py
 shared-utility-deferred	hearting_gates.py
 shared-utility-deferred	herdr_integration_live.py
@@ -84,6 +94,7 @@ shared-utility-deferred	human_wait_state.py
 shared-utility-deferred	interactive-main-recovery.py
 shared-utility-deferred	memory-store.sh
 shared-utility-deferred	merge-line.py
+shared-utility-deferred	memory_work_labels.py
 shared-utility-deferred	opencode_context_window.py
 shared-utility-deferred	opencode_session_runtime.py
 shared-utility-deferred	owner_write_advisory.py
@@ -103,6 +114,7 @@ shared-utility-deferred	review_watchdog.py
 shared-utility-deferred	session_resume.py
 shared-utility-deferred	session_route_resume.py
 shared-utility-deferred	session_shell.py
+shared-utility-deferred	status_popup_picture.py
 shared-utility-deferred	session_tidy_idle.py
 shared-utility-deferred	session_tidy_policy.py
 shared-utility-deferred	session_card_format.py
@@ -111,7 +123,7 @@ shared-utility-deferred	route_parent_close.py
 shared-utility-deferred	route_plan.py
 shared-utility-deferred	route_presence_gate.py
 shared-utility-deferred	turn_change_record.py
-shared-utility-deferred	frame_native_answer.py
+shared-utility-deferred	native_question_redirect.py
 shared-utility-deferred	git_index_lock.py
 shared-utility-deferred	codex_tui_exit.py
 shared-utility-deferred	spec_merge.py
@@ -124,7 +136,8 @@ shared-utility-deferred	verification-background-lease.py
 shared-utility-deferred	work_start.py
 shared-utility-deferred	frame_repository.py
 shared-utility-deferred	work_intent.py
-shared-utility-deferred	status_board.py
+shared-utility-deferred	unit_continue.py
+shared-utility-deferred	unit_ephemeral.py
 shared-utility-deferred	start_receipt.py
 shared-utility-deferred	recipient_lifetime.py
 shared-utility-deferred	verification_runtime.py
@@ -139,6 +152,8 @@ utility-deferred	artifact_cutover.py
 utility-deferred	artifact_cross_root_move.py
 utility-deferred	artifact_entrance.py
 utility-deferred	artifact_entrance.test.py
+utility-deferred	campaign_document.py
+utility-deferred	campaign_document.test.py
 utility-deferred	artifact_history.py
 utility-deferred	artifact_identity.py
 utility-deferred	artifact_index.py
@@ -305,6 +320,9 @@ utility-deferred	launch_receipt.py
 utility-deferred	model-config.sh
 utility-deferred	model-worker-governor.py
 utility-deferred	model_config.py
+utility-deferred	model_follow.py
+utility-deferred	model_follow_mark.py
+utility-deferred	model_outcome_record.py
 utility-deferred	model_profile.py
 utility-deferred	native_agents.py
 utility-deferred	model_worker_governor.test.py
@@ -352,6 +370,8 @@ utility-deferred	ripple-map.py
 utility-deferred	route_authority.py
 utility-deferred	route_authority.test.py
 utility-deferred	route_autoclose.py
+utility-deferred	route_form.py
+utility-deferred	route_form.test.py
 utility-deferred	route_format.py
 utility-deferred	route_identity.py
 utility-deferred	route_lineage.py
@@ -436,6 +456,8 @@ tool-deferred	dispatch-refusal-census.py
 tool-deferred	dispatch_refusal_census.test.py
 tool-deferred	e2e_latency
 tool-deferred	entry-skill-layer.test.py
+tool-deferred	field-weights-table.py
+tool-deferred	field_weights_table.test.py
 tool-deferred	figure-semantic-verify.test.py
 tool-deferred	fixture_processes.py
 tool-deferred	fixture_processes.test.py
@@ -455,8 +477,8 @@ tool-deferred	measure_e2e_latency.py
 tool-deferred	measure_e2e_latency.test.py
 tool-deferred	measure_hook_before_after.py
 tool-deferred	measure_state_file_before_after.py
-tool-deferred	migration-manifest.py
-tool-deferred	migration_manifest.test.py
+tool-deferred	measure-unit-pilot.py
+tool-deferred	measure_unit_pilot.test.py
 tool-deferred	native-skill-discovery.test.py
 tool-deferred	non-git-headless-acceptance.py
 tool-deferred	opencode-text-request.test.py
@@ -499,3 +521,4 @@ utility-deferred	artifact_journal_migration.py
 utility-deferred	artifact-journal.py
 utility-deferred	journal_finish.py
 tool-deferred	check_utility_census.test.py
+shared-utility-deferred	parent_context_fixture.py

@@ -49,8 +49,8 @@ spec-impact where D-23 has no row):
                      is begun and no sealed manifest is rewritten: the compat
                      row (`kind: symlink`, `link_target`, `relocated_from`)
                      is the record (spec-impact, D-23-b symlink row).
-  deferred           `spec/` (consumers still read the legacy PRD: cairn's
-                     nightly backfill, `spec-skill-gate` `find_prd`; opt in
+  deferred           `spec/` (an outside viewer's nightly backfill may still
+                     fall back to the legacy PRD; opt in
                      with `--include-spec-top` to dispose of it as root
                      support residue), a live symlink with no mapped ancestor
                      or whose relative target would not resolve after the
@@ -204,6 +204,10 @@ def _is_runtime_owned(name: str) -> bool:
     return P._is_runtime_owned_top_level(name) or name in {"campaigns", "shared"}
 
 
+def _is_runtime_owned_entry(entry: Path) -> bool:
+    return P._is_runtime_owned_entry(entry) or entry.name in {"campaigns", "shared"}
+
+
 def _date_from_prefix(name: str) -> Optional[str]:
     match = _DATE_PREFIX.match(name)
     if not match:
@@ -246,7 +250,7 @@ def iter_residue_files(root: Path) -> Iterator[str]:
     """Every regular file at the legacy top level, root-relative, sorted."""
     root = Path(root).resolve()
     for entry in sorted(root.iterdir(), key=lambda p: p.name):
-        if _is_runtime_owned(entry.name):
+        if _is_runtime_owned_entry(entry):
             continue
         if entry.is_symlink() or entry.is_file():
             yield entry.name
@@ -675,8 +679,8 @@ def build_plan(root: Path, *, include_spec_top: bool = False) -> Dict[str, Any]:
         if inside in moving or any(m.startswith(inside + "/") for m in moving):
             row.update(disposition="deferred", reason="symlink-target-moving", rejoin_target=row["target"], target=None)
     if include_spec_top and any(r.get("spec_top") for r in rows) and C.latest_shared_revision(root, "spec") is None:
-        # `spec/` is the only PRD this root has: the spec gate and `find_prd`
-        # would resolve nothing once it moves. Refuse, typed.
+        # `spec/` is the only PRD this root has: a reader that falls back to the
+        # legacy PRD would resolve nothing once it moves. Refuse, typed.
         raise ResidueError("spec-top-no-shared-fallback", str(root / "spec"))
     by_disposition: collections.Counter = collections.Counter(r["disposition"] for r in rows)
     by_shape: collections.Counter = collections.Counter(r["shape"] for r in rows)
@@ -726,7 +730,7 @@ def build_plan(root: Path, *, include_spec_top: bool = False) -> Dict[str, Any]:
                                        "group": cycle["cycle_key"], "target": f["target"]})
     empty_dirs = []
     for entry in sorted(root.iterdir(), key=lambda p: p.name):
-        if _is_runtime_owned(entry.name) or entry.is_symlink() or not entry.is_dir():
+        if _is_runtime_owned_entry(entry) or entry.is_symlink() or not entry.is_dir():
             continue
         if not any(p.is_file() or p.is_symlink() for p in P._walk_files(entry)):
             empty_dirs.append(entry.name)
@@ -1124,7 +1128,7 @@ def _phase_compat(root: Path, run_dir: Path, journal: Dict[str, Any], plan: Dict
 def _prune_empty(root: Path) -> List[str]:
     pruned = []
     for entry in sorted(root.iterdir(), key=lambda p: p.name):
-        if _is_runtime_owned(entry.name) or entry.is_symlink() or not entry.is_dir():
+        if _is_runtime_owned_entry(entry) or entry.is_symlink() or not entry.is_dir():
             continue
         if any(p.is_file() or p.is_symlink() for p in P._walk_files(entry)):
             continue
@@ -1239,7 +1243,7 @@ def _rollback(root: Path, run_dir: Path, journal: Dict[str, Any]) -> None:
         found = artifact_locator.find_path_by_id(root, campaign_id)
         if found is not None and (found / "campaign.json").is_file():
             (found / "campaign.json").unlink()
-            RS._prune_empty_tree(found)
+            RS._prune_empty_tree(found, campaign_dir=found)   # the campaign folder this run made
     RS._release_created_routes(root, pre.get("created_routes", []))
     compat_pre = pre.get("compat_json")
     if compat_pre is not None:

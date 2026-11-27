@@ -29,7 +29,8 @@ def event(kind,identity=sid):
     registry=Path(os.environ['CLAUDE_CONFIG_DIR'])/'sessions'/str(os.getpid())
     registry=registry.with_suffix('.json');registry.parent.mkdir(parents=True,exist_ok=True)
     registry.write_text(json.dumps({'pid':os.getpid(),'procStart':start,'sessionId':identity,
-        'status':'busy' if kind=='prompt' else 'idle'}))
+        'status':'busy' if kind=='prompt' else 'waiting' if kind=='blocked' else 'idle',
+        **({'waitingFor':'permission prompt'} if kind=='blocked' else {})}))
     with socket.socket(socket.AF_UNIX) as channel:
         channel.settimeout(5);channel.connect(os.environ['HEARTING_SHELL_SOCKET'])
         channel.sendall((json.dumps(request)+'\n').encode());channel.recv(8192)
@@ -110,11 +111,12 @@ while True:
         line=line.replace('\x1b[200~','').replace('\x1b[201~','')
         if line.startswith('live-'):live(line);continue
         callback_missing='PEER_NO_CALLBACK' in line
-        if not callback_missing and line!='turn-close':event('prompt')
+        if not callback_missing and line not in ('turn-close','turn-wait'):event('prompt')
+        if line=='turn-wait':event('blocked')
         if line=='spawn-child':
             subprocess.run([sys.executable,__file__,sid,'--headless-event'],
                 stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
-        if not callback_missing and line!='turn-open':event('stop')
+        if not callback_missing and line not in ('turn-open','turn-wait'):event('stop')
         print('\x1b[2J\x1b[HDONE_'+line+'\r\n❯ '+pending+'\r\n──────────────────\r\n',end='',flush=True)
         if line.startswith('geometry'):print('GEOMETRY_'+line+'_'+str(os.get_terminal_size(0).columns)+'x'+str(os.get_terminal_size(0).lines)+'\r\n',end='',flush=True)
         if '\x1b' in line:print('NATIVE_ESC_'+line.replace('\x1b','^')+'\r\n',end='',flush=True)
@@ -155,7 +157,7 @@ DRIVER=r"""
 const fs=require('node:fs'),net=require('node:net'),path=require('node:path');
 const pty=require('node-pty'),cfg=JSON.parse(fs.readFileSync(process.env.LOOP_CONFIG,'utf8'));
 let raw='',alive=true,ended,child,barrier;
-const sideTerm=['side-columns','route-pages','side-left','state-border','late-route','startup-state','live-state','rule-motion','native-bg','request-panel'].includes(cfg.scenario)?new (require('@xterm/headless').Terminal)({cols:cfg.columns||180,rows:cfg.rows||40,allowProposedApi:true}):null;
+const sideTerm=['side-columns','side-left','state-border','late-route','startup-state','live-state','border-motion','border-motion-bottom','rule-motion','native-bg'].includes(cfg.scenario)?new (require('@xterm/headless').Terminal)({cols:cfg.columns||180,rows:cfg.rows||40,allowProposedApi:true}):null;
 const listeners=[];
 const exit=new Promise(resolve=>ended=resolve);
 function waitFor(pattern){return new Promise((resolve,reject)=>{
@@ -197,7 +199,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  const file=path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json');
  await existing(file);
  // A published identity is not yet a completed display/readiness observation.
- await waitFor(/project\/|(?:\]|REPO +) (?:\x1b\[[0-9;]*m)*project/);
+ await waitFor(/project\/|(?:\]|REPO)(?:\x1b\[[0-9;]*m)* +(?:\x1b\[[0-9;]*m)*project/);
  const startup={};
  if(cfg.scenario==='startup-state'){
    // No key, no status request (which would run the readiness observation): the
@@ -306,63 +308,70 @@ function existing(file){return new Promise((resolve,reject)=>{
    await rpc(cfg.inlet,{batch:Buffer.from('geometry-left\r').toString('base64')});await waitFor(/GEOMETRY_geometry-left_138x40/);
    await new Promise(r=>setTimeout(r,100));await new Promise(r=>sideTerm.write('',r));
    const row=y=>sideTerm.buffer.active.getLine(y).translateToString(true);
-   // Spec rule 49 (a): the gear stands on the panel's last row inside, the fold button `«` of a left panel before it.
+   // Spec rule 49 (a): the gear stands on the panel's last row inside, the fold button `▾` at its right end, in a left panel too.
    if(!row(0).startsWith('┌')||row(0).slice(0,40).includes('⚙')||row(0)[39]!=='┐')throw Error('left panel frame moved: '+row(0));
-   if(!/«   ⚙ │$/.test(row(38).slice(0,40)))throw Error('left panel last row: '+row(38));
+   if(!/⚙   ▾ │$/.test(row(38).slice(0,40)))throw Error('left panel last row: '+row(38));
    if(row(1).slice(40,42).trim()||!/^DONE_geometry-left/.test(row(1).slice(42))&&!/DONE_geometry-left/.test(row(0).slice(42)))throw Error('native area not beside the left panel: '+row(0)+'|'+row(1));
    if(/⚙/.test(row(38).slice(42)))throw Error('panel painted twice');
-   // #1586 review follow-up 7: folded at the left the native stands nine cells right (the strip
-   // and its blank cell): a press in the native area reaches the native at its own column, a press
-   // on the strip opens the panel.
+   // #1586 review follow-up 7, spec rule 49 (c): folded, a left panel's strip stands under the native
+   // area, which takes the whole width again from the first column (one row fewer, 11-15: the strip is
+   // one row): a press in the native area reaches the native at the same column, a press on the strip
+   // opens the panel.
    const pinnedLeft=JSON.parse(fs.readFileSync(path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json'),'utf8'));
    await rpc(pinnedLeft.socket,{...pinnedLeft,op:'panel',expanded:false});
    await rpc(cfg.inlet,{batch:Buffer.from('mouse-on\r').toString('base64')});await waitFor(/DONE_mouse-on/);
-   await rpc(cfg.inlet,{batch:Buffer.from('geometry-strip\r').toString('base64')});await waitFor(/GEOMETRY_geometry-strip_171x40/);
+   await rpc(cfg.inlet,{batch:Buffer.from('geometry-strip\r').toString('base64')});await waitFor(/GEOMETRY_geometry-strip_180x39/);
    await rpc(cfg.inlet,{batch:Buffer.from('\x1b[<0;12;5M\x1b[<0;12;5mMOUSE_AT\r').toString('base64')});
-   await waitFor(/NATIVE_ESC_\^\[<0;3;5M\^\[<0;3;5mMOUSE_AT/);
-   await rpc(cfg.inlet,{batch:Buffer.from('\x1b[<0;4;10M\x1b[<0;4;10m').toString('base64')});await new Promise(r=>setTimeout(r,150));
+   await waitFor(/NATIVE_ESC_\^\[<0;12;5M\^\[<0;12;5mMOUSE_AT/);
+   await rpc(cfg.inlet,{batch:Buffer.from('\x1b[<0;4;40M\x1b[<0;4;40m').toString('base64')});await new Promise(r=>setTimeout(r,150));
    await rpc(cfg.inlet,{batch:Buffer.from('geometry-opened\r').toString('base64')});await waitFor(/GEOMETRY_geometry-opened_138x40/);
  }
  if(cfg.scenario==='side-layout'){
    await rpc(cfg.inlet,{batch:Buffer.from('geometry1\r').toString('base64')});await waitFor(/GEOMETRY_geometry1_138x40/);
-   // Spec rule 49 (d): where the open panel would leave the native under 80 columns it folds by
-   // itself into the eight-cell strip (one blank cell apart) and opens again with room.
-   child.resize(80,24);await new Promise(r=>setTimeout(r,80));
-   await rpc(cfg.inlet,{batch:Buffer.from('geometry2\r').toString('base64')});await waitFor(/GEOMETRY_geometry2_71x24/);
-   child.resize(180,40);await new Promise(r=>setTimeout(r,80));
-   await rpc(cfg.inlet,{batch:Buffer.from('geometry3\r').toString('base64')});await waitFor(/GEOMETRY_geometry3_138x40/);
    const press=async(x,y)=>{await rpc(cfg.inlet,{batch:Buffer.from(`\x1b[<0;${x};${y}M\x1b[<0;${x};${y}m`).toString('base64')});await new Promise(r=>setTimeout(r,80));};
    const geometry=async(name,size)=>{await rpc(cfg.inlet,{batch:Buffer.from(name+'\r').toString('base64')});await waitFor(new RegExp('GEOMETRY_'+name+'_'+size));};
-   // The fold button `»` (the last row inside, three cells left of the gear) folds by hand; a hand fold stays folded when wider.
-   await press(174,39);await geometry('geometry4','171x40');
-   child.resize(200,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry5','191x40');
-   // Any cell of the strip opens it.
-   await press(198,10);await geometry('geometry6','158x40');
-   child.resize(110,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry7','101x40');
-   // Opened by hand where it would fold, it stays open at that width; the next width folds it again.
-   await press(108,10);await geometry('geometry8','68x40');
-   child.resize(112,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry9','103x40');
-   // A window of nine cells or fewer folds the panel to the one row under the native (the strip
-   // would leave the native no cell), and the open panel stands again once the window widens.
+   const resize=async(c,r)=>{child.resize(c,r);await new Promise(r=>setTimeout(r,80));};
+   // Spec rule 49 (d): where the open panel would leave the native under 60 columns it folds by
+   // itself into the strip under the native area (the native keeps the whole width, one row
+   // fewer: rule 49 (c), 11-15), and it opens again three columns past it.
+   await resize(102,24);await geometry('geometry2','60x24');
+   await resize(101,24);await geometry('geometry2a','101x23');
+   await resize(104,24);await geometry('geometry2b','104x23');
+   await resize(105,24);await geometry('geometry2c','63x24');
+   await resize(80,24);await geometry('geometry2d','80x23');
+   await resize(180,40);await geometry('geometry3','138x40');
+   // The fold button `▾` (the last row inside, three cells right of the gear) folds by hand; a hand fold stays folded when wider.
+   await press(178,39);await geometry('geometry4','180x39');
+   await resize(200,40);await geometry('geometry5','200x39');
+   // Any cell of the strip (the window's last row, 11-15) opens it.
+   await press(198,40);await geometry('geometry6','158x40');
+   // Opened by hand it stays open however the window is resized: beside while the native keeps 48
+   // columns (here where it would fold by itself), under the native area narrower, and beside
+   // again once the width returns.
+   await resize(100,40);await geometry('geometry7','58x40');
+   await resize(89,40);await geometry('geometry8','89x(?:[1-9]|[1-3]\\d)(?!\\d)');
+   await resize(112,40);await geometry('geometry9','70x40');
+   // A window of nine cells or fewer leaves the native a cell, and the open panel stands beside
+   // again once the window widens.
    child.resize(9,40);await new Promise(r=>setTimeout(r,150));
    child.resize(180,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry10','138x40');
    // #1586 review follow-up 6: folding by hand while the settings editor is open closes the
    // editor first; the strip stands and the keys reach the native.
    const pinnedFold=JSON.parse(fs.readFileSync(path.join(cfg.registry,'claude','session-shell-'+hostPID+'.json'),'utf8'));
-   raw='';await press(178,39);await waitFor(/rule motion/);
+   raw='';await press(174,39);await waitFor(/rule motion/);
    await rpc(pinnedFold.socket,{...pinnedFold,op:'panel',expanded:false});await new Promise(r=>setTimeout(r,150));
-   await geometry('geometry11','171x40');
+   await geometry('geometry11','180x39');
    const after=await rpc(pinnedFold.socket,{...pinnedFold,op:'status'});
    if(after.expanded!==false||after.focused!==false)throw Error('the editor outlived the fold '+JSON.stringify(after));
-   await press(177,10);await geometry('geometry12','138x40');
+   await press(177,40);await geometry('geometry12','138x40');
    // #1586 review follow-up 3: a width set in the settings editor counts as opening the panel by
-   // hand at this window width (as a drag does): applying a wider panel that would fold keeps it
-   // open; the next window width judges again.
-   child.resize(125,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry13','83x40');
-   raw='';await press(123,39);await waitFor(/rule motion/);
+   // hand (as a drag does): applying a wider panel that would fold keeps it open, at the next
+   // window width too.
+   await resize(106,40);await geometry('geometry13','64x40');
+   raw='';await press(100,39);await waitFor(/rule motion/);
    await rpc(cfg.inlet,{batch:Buffer.from('\t\t++++++\r').toString('base64')});await new Promise(r=>setTimeout(r,300));
-   await geometry('geometry14','77x40');
-   child.resize(126,40);await new Promise(r=>setTimeout(r,80));await geometry('geometry15','117x40');
+   await geometry('geometry14','58x40');
+   await resize(107,40);await geometry('geometry15','59x40');
  }
  if(cfg.scenario==='fleet-modal'){
    await rpc(cfg.inlet,{batch:Buffer.from('\x1df').toString('base64')});await waitFor(/OWN_FLEET_READY/);
@@ -451,132 +460,90 @@ function existing(file){return new Promise((resolve,reject)=>{
    await until(async()=>(await rpc(pinned.socket,{...pinned,op:'status'})).projection_state==='current','a current projection');
    lateRoute.done=mark();lateRoute.final=lines().match(/ROUTE_[A-Z]+/g);
  }
- if(cfg.scenario==='request-panel'){
-   // R27: a request line stands in the route box, a press opens it in place and a second press
-   // opens its read page with the sealed body; a typed draft and the native state stay as they were.
-   await waitFor(/REQ_TITLE/);
-   await new Promise(resolve=>sideTerm.write('',resolve));
-   const pinnedRequest=JSON.parse(fs.readFileSync(file,'utf8'));
-   const screen=()=>Array.from({length:sideTerm.rows},(_,y)=>sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y)?.translateToString()||'');
-   const press=async(needle)=>{
-     let row;
-     for(let n=0;n<60&&!row;n++){
-       await new Promise(resolve=>sideTerm.write('',resolve));
-       screen().forEach((line,y)=>{const x=line.indexOf(needle);if(x>=0&&!line.includes('╭─'))row={x:x+2,y:y+1};});
-       if(!row)await new Promise(resolve=>setTimeout(resolve,50));
-     }
-     if(!row)throw Error('request target absent: '+needle+'\n'+screen().join('\n'));
-     await rpc(cfg.inlet,{batch:Buffer.from(`\x1b[<0;${row.x};${row.y}M\x1b[<0;${row.x};${row.y}m`).toString('base64')});
-   };
-   await rpc(cfg.inlet,{batch:Buffer.from('REQ_DRAFT').toString('base64')});
-   await new Promise(resolve=>setTimeout(resolve,300));
-   const before=await rpc(pinnedRequest.socket,{...pinnedRequest,op:'status'});
-   const settled=async()=>{let after;for(let n=0;n<40;n++){after=await rpc(pinnedRequest.socket,{...pinnedRequest,op:'status'});if(after.empty===before.empty)break;await new Promise(resolve=>setTimeout(resolve,50));}
-     for(const key of ['empty','focused','state'])if(after[key]!==before[key])throw Error('a request press changed '+key+' '+JSON.stringify([before,after]));};
-   const opened={};
-   // The panel is painted cell by cell, so its words are read from the terminal screen.
-   // The catalog's language is the machine's (English here, Korean on a Korean one): either word stands.
-   const shows=async(needle)=>{const any=needle.split('|');for(let n=0;n<120;n++){await new Promise(resolve=>sideTerm.write('',resolve));if(any.some(word=>screen().join('\n').includes(word)))return;await new Promise(resolve=>setTimeout(resolve,50));}
-     throw Error('screen never showed '+needle+'\n'+screen().join('\n'));};
-   await press('REQ_TITLE');await shows('+ body|+ 본문');await settled();opened.details=screen().join('\n').includes('rq-');
-   await press(screen().join('\n').includes('+ body')?'+ body':'+ 본문');await shows('REQ_BODY_NONCE');await settled();opened.page=screen().join('\n');
-   // Esc closes the page (no native Esc), then the draft goes to the native as typed.
-   raw='';
-   await rpc(cfg.inlet,{batch:Buffer.from('\x1b').toString('base64')});
-   await shows('REQ_TITLE');await settled();
-   await rpc(cfg.inlet,{batch:Buffer.from('\r').toString('base64')});await waitFor(/DONE_REQ_DRAFT/);
-   if(/NATIVE_ESC_/.test(raw))throw Error('the page keys reached the native');
-   opened.panel=screen().join('\n');
-   console.log(JSON.stringify({request_panel:opened,status:before}));return;
- }
- if(cfg.scenario==='route-pages'){
-   const value=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));
-   value.observed_at=Date.now()/1000;value.route_panels['claude\0'+cfg.sid]=[{
-     id:'rt-detail',title:'ROUTE_PAGE',state:'working',worker_stage:'inline',stages:[{name:'inline',st:'active'}],
-     harness:'codex',model:'gpt-fixture',effort:'high',ctx_pct:40,agents:2,
-     visibility:{codes:{schema:'route_visibility_codes_v1',shape:'direct',next:{kind:'closed'},verification:{gate:'unproven'},quoted:Array.from({length:8},(_,i)=>['test','EVIDENCE_'+i+' '+'bounded detail '.repeat(5)])}}}];
-   fs.writeFileSync(cfg.routeCache+'.new',JSON.stringify(value),{mode:0o600});fs.renameSync(cfg.routeCache+'.new',cfg.routeCache);
-   await waitFor(/ROUTE_PAGE/);
-   await new Promise(resolve=>sideTerm.write('',resolve));
-   // A press on a route row opens it in place and closes it again. Display only:
-   // like any outer input it invalidates the in-flight observation, then `empty`
-   // and focus settle back to what they were (PG-50 class); no native draft.
-   const pinnedRoute=JSON.parse(fs.readFileSync(file,'utf8'));
-   const before=await rpc(pinnedRoute.socket,{...pinnedRoute,op:'status'});
-   let row;
-   for(let y=0;y<sideTerm.rows;y++){
-     const line=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y)?.translateToString()||'';
-     const x=line.indexOf('ROUTE_PAGE');if(x>=0&&!line.includes('╭─ route'))row={x:x+2,y:y+1};
-   }
-   if(!row)throw Error('route row absent');
-   for(const marker of [/\+2 agent/,/ROUTE_PAGE/]){
-     await rpc(cfg.inlet,{batch:Buffer.from(`\x1b[<0;${row.x};${row.y}M\x1b[<0;${row.x};${row.y}m`).toString('base64')});
-     await waitFor(marker);
-     let after;
-     for(let n=0;n<40;n++){after=await rpc(pinnedRoute.socket,{...pinnedRoute,op:'status'});if(after.empty===before.empty)break;await new Promise(resolve=>setTimeout(resolve,50));}
-     for(const key of ['empty','focused','state'])if(after[key]!==before[key])throw Error('a route row press changed '+key+' '+JSON.stringify([before,after]));
-   }
-   let point;
-   for(let n=0;n<60&&!point;n++){
-   await new Promise(resolve=>setTimeout(resolve,50));await new Promise(resolve=>sideTerm.write('',resolve));
-   for(let y=0;y<sideTerm.rows;y++){
-     const line=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y);
-     // The route section's heading opens the evidence pages; its rows open in place.
-     if(!line?.translateToString().includes('╭─ route 1'))continue;
-     let s='';for(let x=0;x<sideTerm.cols;x++){const c=line.getCell(x);if(!c||!c.getWidth())continue;s+=c.getChars()||' ';if(s.endsWith('╭─ r'))point={x:x+1,y:y+1};}
-   }
-   }
-   if(!point)throw Error('route detail target absent\n'+Array.from({length:sideTerm.rows},(_,y)=>sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y)?.translateToString()).join('\n'));
-   await rpc(cfg.inlet,{batch:Buffer.from(`\x1b[<0;${point.x};${point.y}M\x1b[<0;${point.x};${point.y}m`).toString('base64')});
-   await waitFor(/PgUp\/PgDn/);
-   await rpc(cfg.inlet,{batch:Buffer.from('\x1b[6~').toString('base64')});await waitFor(/‹ 2\//);
-   // A collapsed panel shows no page, so its page keys and Esc reach the native.
-   await rpc(pinnedRoute.socket,{...pinnedRoute,op:'panel',expanded:false});
-   await rpc(cfg.inlet,{batch:Buffer.from('\x1b[6~HIDDEN_PGDN\r').toString('base64')});await waitFor(/NATIVE_ESC_\^\[6~HIDDEN_PGDN/);
-   await rpc(cfg.inlet,{batch:Buffer.from('\x1b').toString('base64')});
-   await rpc(cfg.inlet,{batch:Buffer.from('HIDDEN_ESC\r').toString('base64')});await waitFor(/NATIVE_ESC_\^HIDDEN_ESC/);
-   // Shown again, the same page takes them again.
-   raw='';
-   await rpc(pinnedRoute.socket,{...pinnedRoute,op:'panel',expanded:true});await waitFor(/PgUp\/PgDn/);
-   await rpc(cfg.inlet,{batch:Buffer.from('\x1b[5~').toString('base64')});await waitFor(/‹ 1\//);
-   await rpc(cfg.inlet,{batch:Buffer.from('\x1dAFTER_DETAIL\r').toString('base64')});await waitFor(/DONE_AFTER_DETAIL/);
-   if(/NATIVE_ESC_[^\r]*\^\[5~/.test(raw))throw Error('a shown page let PgUp reach the native');
- }
  // Registry publication precedes the first complete display observation.
- if(cfg.scenario==='display')await waitFor(/project\/|(?:\]|REPO +) (?:\x1b\[[0-9;]*m)*project/);
+ if(cfg.scenario==='display')await waitFor(/project\/|(?:\]|REPO)(?:\x1b\[[0-9;]*m)* +(?:\x1b\[[0-9;]*m)*project/);
  if(cfg.scenario==='display')for(let index=0;index<4;index++){
    const title='event-title-'+index,before=process.hrtime.bigint();
    const projection=JSON.parse(fs.readFileSync(cfg.routeCache,'utf8'));projection.observed_at=Date.now()/1000;projection.route_status['claude\0'+cfg.sid]='route 1 · '+title;projection.route_sessions['claude\0'+cfg.sid]=Date.now()/1000;
    fs.writeFileSync(cfg.routeCache+'.new',JSON.stringify(projection),{mode:0o600});fs.renameSync(cfg.routeCache+'.new',cfg.routeCache);
    await waitFor(new RegExp(title));displayLag.push(Number(process.hrtime.bigint()-before)/1e6);
  }
+ const borderMotion={};
+ if(cfg.scenario==='border-motion'||cfg.scenario==='border-motion-bottom'){
+   // Spec E9 rule 47 (d) (11-14): while the session runs, an arc goes round the panel's outer
+   // frame on the spinner's beat, and a beat sends only the frame's changed cells; a wait breathes
+   // the frame red; idle, nothing is sent. Beside the native area and under it alike.
+   const bottom=cfg.scenario==='border-motion-bottom';
+   const flush=()=>new Promise(resolve=>sideTerm.write('',resolve)),sleep=ms=>new Promise(r=>setTimeout(r,ms));
+   const lineAt=y=>sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y);
+   // The panel's box: beside the native area its 40 columns at the right edge; under it, from its top border down.
+   const box=()=>{if(!bottom)return {top:0,left:sideTerm.cols-40,W:40,H:sideTerm.rows};
+     for(let y=0;y<sideTerm.rows;y++){const t=lineAt(y)?.translateToString()||'';if(t.startsWith('┌')&&t.endsWith('┐'))return {top:y,left:0,W:sideTerm.cols,H:sideTerm.rows-y};}return null;};
+   // A frame cell's look: an arc shade (`0` the head .. `3`), `b` the neutral frame (the terminal's dim),
+   // `p<N>` another color, `t` the head's words.
+   const RAMP=[216,173,137,102];    // (11-18: this window is Claude's, and a running session's arc is its harness's ramp: `FACES.dark.ramp.claude.orbit`)
+   const look=c=>{const ch=c.getChars();if(!ch||!'┌┐└┘─│'.includes(ch))return 't';
+     if(c.isFgPalette()){const i=RAMP.indexOf(c.getFgColor());return i>=0?String(i):'p'+c.getFgColor();}return c.isFgDefault()&&c.isDim()?'b':'x';};
+   const word=()=>{const m=(lineAt(box()?.top??0)?.translateToString()||'').match(/┌ ([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏●◑]) /);return m?m[1]==='●'?'idle':m[1]==='◑'?'waiting':'running':'';};
+   const read=()=>{const b=box();if(!b)return null;const at=(y,x)=>lineAt(b.top+y).getCell(b.left+x),cells=[];
+     for(let x=0;x<b.W;x++)cells.push(at(0,x));for(let y=1;y<b.H-1;y++)cells.push(at(y,b.W-1));
+     for(let x=b.W-1;x>=0;x--)cells.push(at(b.H-1,x));for(let y=b.H-2;y>0;y--)cells.push(at(y,0));
+     return {at:Date.now(),looks:cells.map(look),top:b.top,left:b.left,W:b.W,H:b.H,word:word(),
+       native:Array.from({length:bottom?b.top:sideTerm.rows},(_,y)=>(lineAt(y)?.translateToString()||'').slice(0,bottom?undefined:b.left-2)),
+       inside:Array.from({length:b.H-2},(_,y)=>(lineAt(b.top+1+y)?.translateToString()||'').slice(b.left+1,b.left+b.W-1)),
+       cursor:[sideTerm.buffer.active.cursorX,sideTerm.buffer.active.cursorY],
+       screen:Array.from({length:sideTerm.rows},(_,y)=>lineAt(y)?.translateToString()||'')};};
+   const until=async want=>{const began=Date.now();while(Date.now()-began<6000){await flush();if(word()===want)return true;await sleep(10);}return false;};
+   const watch=async ms=>{const chunks=[];const sub=child.onData(t=>chunks.push(t));await sleep(ms);sub.dispose();await flush();return chunks;};
+   const send=text=>rpc(cfg.inlet,{batch:Buffer.from(text).toString('base64')});
+   // The title first, so the panel has its rows before the turn (a row added later changes the frame's size).
+   const now=Date.now()/1000;
+   fs.writeFileSync(cfg.title,JSON.stringify({title:'BORDER_MOTION_TITLE',title_ts:now,ts:now,source:'test'}));
+   {const began=Date.now();while(Date.now()-began<5000&&!read()?.screen.some(row=>row.includes('BORDER_MOTION_TITLE'))){await flush();await sleep(20);}}
+   // Running, with a draft standing in the native's input row.
+   await send('turn-open\rDRAFT_TEXT');await waitFor(/DONE_turn-open/);
+   const opened=Date.now();let first=null;
+   while(Date.now()-opened<6000){await flush();const r=read();if(r&&r.looks.some(x=>/^[0-3]$/.test(x))){first=r;break;}await sleep(10);}
+   borderMotion.lit_after_ms=Date.now()-opened;
+   // (The terminal here takes a large paint in pieces: the readings start once that paint is in.)
+   await sleep(60);await flush();first=first&&read();
+   const chunks=[];const sub=child.onData(t=>chunks.push(t));
+   await sleep(950);await flush();const second=read();
+   await sleep(950);await flush();const third=read();sub.dispose();
+   Object.assign(borderMotion,{first,second,third,chunks,window_ms:third&&first?third.at-first.at:0});
+   // Waiting: the whole frame breathes red (256 colors here: a shade every 1.2 s).
+   // (The draft goes in as its own line first.)
+   await send('\rturn-wait\r');await waitFor(/DONE_turn-wait/);borderMotion.waiting=await until('waiting');
+   await sleep(100);await flush();const w1=read();const waitChunks=await watch(1300);const w2=read();
+   Object.assign(borderMotion,{w1,w2,wait_chunks:waitChunks});
+   // Idle: the still neutral frame, nothing sent for it.
+   await send('turn-close\r');await waitFor(/DONE_turn-close/);borderMotion.idle=await until('idle');
+   await sleep(300);await flush();const i1=read();const idleChunks=await watch(600);const i2=read();
+   Object.assign(borderMotion,{i1,i2,idle_chunks:idleChunks});
+ }
  const ruleMotion={};
  if(cfg.scenario==='rule-motion'){
-   // Spec E9 rule 47 (d): while the session runs, the head's rule moves on the spinner's beat
-   // and only its changed cells go out; the native half of that row is never written again.
+   // 11-15 (panel polish 4): under the default `rule motion` (`rule`), while the session runs the outer
+   // frame stands lit and still and the head rule's light moves on the spinner's beat; only its changed
+   // cells go out; through the light's rest nothing is written for the rule's row.
    const now=Date.now()/1000;
    fs.writeFileSync(cfg.title,JSON.stringify({title:'RULE_MOTION_TITLE',title_ts:now,ts:now,source:'test'}));
+   {const began=Date.now();while(Date.now()-began<5000&&!Array.from({length:sideTerm.rows},(_,y)=>sideTerm.buffer.active.getLine(y)?.translateToString()||'').some(l=>l.includes('RULE_MOTION_TITLE'))){await new Promise(r=>sideTerm.write('',r));await new Promise(r=>setTimeout(r,20));}}
    await rpc(cfg.inlet,{batch:Buffer.from('turn-open\r').toString('base64')});await waitFor(/DONE_turn-open/);
    const opened=Date.now();
    const flush=()=>new Promise(resolve=>sideTerm.write('',resolve));
-   // The rule's row: the thin rule (spec rule 52) whose cells are not all the plain dim line.
-   // (`at`: that row however it stands, lit or dark.)
+   // The rule's row (`at`: that row however it stands) and the frame's right column, as colors.
    const rule=(at=-1)=>{for(let y=0;y<sideTerm.rows;y++){const row=sideTerm.buffer.active.getLine(sideTerm.buffer.active.viewportY+y),line=row?.translateToString()||'';
-     const m=line.slice(140).match(/^│ ([─━]{36}) │$/);
+     const m=line.slice(140).match(/^│ (─{36}) │$/);   // (11-22: the light runs over the SESSION head's rule alone; 11-26, panel B: the head is that rule, no word)
      const colors=m&&Array.from({length:36},(_,i)=>{const c=row.getCell(142+i);return c.isFgDefault()?'d':c.getFgColor()+(c.isDim()?'d':'');}).join(',');
-     if(m&&(at<0?colors.split(',').some(c=>!c.endsWith('d')):y===at))return {y,native:line.slice(0,138),cells:m[1],colors};}return null;};
+     if(m&&(at<0?colors.split(',').some(c=>!c.endsWith('d')):y===at))return {y,native:line.slice(0,138),colors};}return null;};
+   const frame=()=>Array.from({length:sideTerm.rows},(_,y)=>{const c=sideTerm.buffer.active.getLine(y)?.getCell(179);return c?(c.isFgDefault()?'d':c.getFgColor())+(c.isDim()?'d':''):'';}).join(',');
    let first=null;const began=Date.now();
    while(Date.now()-began<6000&&!(first=rule())){await flush();await new Promise(r=>setTimeout(r,20));}
-   // Correction 8: the light comes in on the paint that shows the turn (it never waits out a rest).
-   const litAfter=Date.now()-opened;
+   const litAfter=Date.now()-opened,frames=[frame()];
    let bytes=0,writes=0;const sub=child.onData(t=>{bytes+=Buffer.byteLength(t);writes++;});
-   // (1.95 s: not a whole number of the light's 3.5 s period, so the two readings differ.)
-   await new Promise(r=>setTimeout(r,1950));sub.dispose();await flush();
-   // (The same row, lit or resting: the light may be out on its rest by then.)
-   const second=first&&rule(first.y);
-   // Spec rule 51 (c): the rest (the dark rule for 1 s once the light has left on its first side;
-   // the far end's dark beat lasts 0.1 s). Seen dark and still dark 0.25 s later, it is the rest:
-   // for the next 0.5 s the host writes nothing for the rule's row, only the spinner's own glyph.
+   await new Promise(r=>setTimeout(r,950));await flush();const second=first&&rule(first.y);frames.push(frame());
+   await new Promise(r=>setTimeout(r,1000));sub.dispose();await flush();frames.push(frame());
    const dark=()=>{const r=first&&rule(first.y);return !!r&&r.colors.split(',').every(c=>c.endsWith('d'));};
    let restAt=0;const looking=Date.now();
    while(!restAt&&Date.now()-looking<6000){await flush();if(dark()){await new Promise(r=>setTimeout(r,250));await flush();if(dark())restAt=Date.now();}else await new Promise(r=>setTimeout(r,20));}
@@ -585,7 +552,7 @@ function existing(file){return new Promise((resolve,reject)=>{
    const resting=first&&rule(first.y);
    let back=null;const waiting=Date.now();
    while(Date.now()-waiting<1500&&!(back=rule())){await flush();await new Promise(r=>setTimeout(r,20));}
-   Object.assign(ruleMotion,{first,second,bytes,writes,rest,rest_seen:!!restAt,lit_after_ms:litAfter,rest_row:resting&&resting.y,resting:resting&&resting.colors,back:back&&back.colors});
+   Object.assign(ruleMotion,{first,second,bytes,writes,rest,frames,rest_seen:!!restAt,lit_after_ms:litAfter,rest_row:resting&&resting.y,resting:resting&&resting.colors,back:back&&back.colors});
    await rpc(cfg.inlet,{batch:Buffer.from('turn-close\r').toString('base64')});await waitFor(/DONE_turn-close/);
  }
  const nativeBg={};
@@ -606,7 +573,7 @@ function existing(file){return new Promise((resolve,reject)=>{
  }
  const binding=JSON.parse(fs.readFileSync(file,'utf8'));
  const status=await rpc(binding.socket,{...binding,op:'status'});
- console.log(JSON.stringify({native_bg:nativeBg,rule_motion:ruleMotion,ack_ms:ack,status,display_lag_ms:displayLag,state_lag_ms:stateLag,state_colors:stateColors,late_route:lateRoute,startup,live_state:liveState,peer}));
+ console.log(JSON.stringify({native_bg:nativeBg,border_motion:borderMotion,rule_motion:ruleMotion,ack_ms:ack,status,display_lag_ms:displayLag,state_lag_ms:stateLag,state_colors:stateColors,late_route:lateRoute,startup,live_state:liveState,peer}));
  }catch(error){console.error(error.stack);process.exitCode=1;}
  finally{
    if(fs.existsSync(cfg.diagnostic)){console.error(fs.readFileSync(cfg.diagnostic,'utf8'));process.exitCode=1;}
@@ -703,22 +670,6 @@ class SessionShellPTYTest(unittest.TestCase):
                                ' return original(*args,**kwargs)\n'
                                'm.panel_projection=projection\nraise SystemExit(m._backend())\n')
             backend.chmod(0o700)
-        if scenario=='request-panel':
-            # A sent request with a really sealed body, read from the request records by the backend.
-            with mock.patch.dict(os.environ,self.env,clear=True):
-                import importlib.util as _util
-                import peer_request
-                spec=_util.spec_from_file_location('peer_message_pty_seed',ROOT/'utilities/peer-message.py')
-                peer_message=_util.module_from_spec(spec);spec.loader.exec_module(peer_message)
-                me={'harness':'claude','session_id':sid,'name':'e9'}
-                other={'harness':'codex','session_id':'00000000-0000-4000-8000-0000000000e7','name':'e7'}
-                request_id=peer_request.reserve(me,other,title='REQ_TITLE 한글 제목')
-                line=peer_request.render_line(peer_request.load(request_id),'request',revision=1,label='판1',body_lines=2)
-                _text,ref=peer_message.prepare_peer_message(
-                    'REQ_BODY_NONCE\nsecond line',me,other,defer=True,
-                    refs=[peer_request.ref_for(request_id,1,'request')],
-                    request={'seal':peer_request.request_seal(request_id,1,'request'),'line':line})
-                peer_request.commit_open(request_id,ref,label='판1')
         config={'directory':str(directory),'host':str(ROOT/'utilities/session-shell/host.cjs'),
                 'startFile':str(directory/'started'),'inlet':str(directory/'input.sock'),
                 'entry':str(ROOT/'utilities/session-shell/entry.py'),'hostPidFile':str(directory/'host-pid'),
@@ -747,9 +698,9 @@ class SessionShellPTYTest(unittest.TestCase):
             config.update(peer=peer,audit=str(audit),peerCount=str(directory/'count'),
                           steward=str(ROOT/'utilities/peer-steward.py'),
                           tags=str(Path(self.env['XDG_STATE_HOME'])/'agent-fleet/tag-assignments.json'))
-        if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state','rule-motion','native-bg','request-panel'}:
+        if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state','border-motion','rule-motion','native-bg'}:
             config.update(columns=180,rows=40)
-        if scenario=='route-pages':config.update(columns=80,rows=24)  # the bottom layout's pages (policy below)
+        if scenario=='border-motion-bottom':config.update(columns=120,rows=30)  # the bottom layout (policy below)
         if scenario=='fleet-modal':
             fleet=directory/'fleet.py';read=directory/'fleet-read'
             fleet.write_text("import os,tty\nfrom pathlib import Path\ntty.setraw(0)\nprint('OWN_FLEET_READY\\r\\n',end='',flush=True)\nwhile True:\n data=os.read(0,65536)\n with open("+repr(str(read))+",'ab') as f:f.write(data)\n if b'q' in data:break\n")
@@ -762,9 +713,11 @@ class SessionShellPTYTest(unittest.TestCase):
         env=dict(self.env,LOOP_CONFIG=str(configfile))
         policy=Path(self.env.get('XDG_CONFIG_HOME') or Path(self.env['HOME'])/'.config')/'hearting/session-shell.json'
         previous_policy=policy.read_bytes()
+        # (11-15: the moving frame is the `border` value's; `rule-motion` keeps the default.)
         policy.write_text(json.dumps({'enabled':True,'layout':'side','side_width':40,'side_min_columns':132,
-                                      **({'position':'left'} if scenario=='side-left' else {})}) if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state','rule-motion','native-bg','request-panel'}
-                          else '{"enabled":true,"layout":"bottom"}' if scenario=='route-pages' else '{"enabled":true}')
+                                      **({'position':'left'} if scenario=='side-left' else {}),
+                                      **({'rule_motion':'border'} if scenario=='border-motion' else {})}) if scenario in {'side-layout','side-columns','side-left','state-border','late-route','startup-state','live-state','border-motion','rule-motion','native-bg'}
+                          else '{"enabled":true,"layout":"bottom","rule_motion":"border"}' if scenario in {'border-motion-bottom'} else '{"enabled":true}')
         self.addCleanup(policy.write_bytes,previous_policy)
         child=subprocess.Popen([self.node,str(self.driver)],env=env,cwd=self.project,
                                stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
@@ -880,26 +833,130 @@ class SessionShellPTYTest(unittest.TestCase):
         self.assertNotEqual(colors['idle'],colors['running'])
         self.assertEqual(result['state_colors'][2][1],colors['idle'])
 
-    def test_the_head_rule_moves_on_the_spinner_beat_sending_only_its_changed_cells(self):
-        # Spec E9 rule 47 (d): a running session's head rule (every cell heavy) carries a moving light on the beat the
-        # spinner already keeps; each beat sends only the rule's changed cells beside the spinner's
-        # row, so a beat stays small (the whole row each beat would be about 500 bytes), and the
-        # native half stays put.
+    @staticmethod
+    def written_cells(chunk):
+        # The cells a chunk of terminal output writes (1-based row, column), following its cursor.
+        import re,unicodedata
+        row=col=0;out=[]
+        for token in re.findall(r'\x1b\[[0-9;?]*[A-Za-z]|\x1b[78]|\x1b\][^\x07]*\x07|[\s\S]',chunk):
+            if token.startswith('\x1b'):
+                m=re.fullmatch(r'\x1b\[(\d+);(\d+)H',token)
+                if m:row,col=int(m.group(1)),int(m.group(2))
+                continue
+            out.append((row,col));col+=2 if unicodedata.east_asian_width(token) in 'WF' else 1
+        return out
+
+    def beats(self,chunks):
+        # The beat's own writes (the spinner and the moving frame): each in one synchronized update with the cursor kept.
+        return [c for c in chunks if c.startswith('\x1b[?2026h\x1b7') and c.endswith('\x1b8\x1b[?2026l')]
+
+    @staticmethod
+    def frame_cells(reading):
+        top,left,W,H=reading['top']+1,reading['left']+1,reading['W'],reading['H']
+        return ({(top,left+x) for x in range(W)}|{(top+H-1,left+x) for x in range(W)}
+                |{(top+y,left) for y in range(H)}|{(top+y,left+W-1) for y in range(H)})
+
+    @staticmethod
+    def turned(a,b):
+        # How many cells the arc moved on clockwise from reading a to reading b (the best match of their looks).
+        n=len(a);score=lambda s:sum(1 for i in range(n) if a[i]!='t' and b[(i+s)%n]!='t' and a[i]==b[(i+s)%n])
+        return max(range(n),key=score)
+
+    def check_border_motion(self,result,cells):
+        first,second,third=result['first'],result['second'],result['third']
+        for value in (first,second,third):self.assertIsNotNone(value,result)
+        P=len(first['looks'])
+        self.assertEqual(P,cells(first),first)
+        # Shown within 0.3 s of the turn (the arc starts with the state).
+        self.assertLess(result['lit_after_ms'],300,result)
+        for value in (first,second,third):
+            # A quarter of the frame (of its size at that reading), less the cells behind the head's words.
+            arc=round(cells(value)/4);lit=sum(1 for x in value['looks'] if x in '0123')
+            self.assertTrue(arc-20<=lit<=arc,(lit,arc,''.join(x[0] for x in value['looks'])))
+            self.assertTrue(set(value['looks'])<={'0','1','2','3','b','t'},value['looks'])
+            self.assertEqual(value['word'],'running')
+        # One way round, at one lap every 6 s whatever the size: clockwise by the elapsed time's share
+        # of the frame (two readings of one size; a panel that grew a row between them is not compared).
+        pairs=[(a,b) for a,b in ((first,second),(second,third)) if len(a['looks'])==len(b['looks'])]
+        self.assertTrue(pairs)
+        for a,b in pairs:
+            n=len(a['looks']);moved=self.turned(a['looks'],b['looks']);expected=n*(b['at']-a['at'])/6000
+            self.assertTrue(0<moved<n/2 and abs(moved-expected)<=10,(moved,expected))
+        # The native area (with its draft) and the cursor never move for it.
+        self.assertEqual(first['native'],second['native']);self.assertEqual(second['native'],third['native'])
+        self.assertTrue(any('DRAFT_TEXT' in row for row in first['native']),first['native'])
+        self.assertEqual(first['cursor'],second['cursor']);self.assertEqual(second['cursor'],third['cursor'])
+        # The beat: at most ten a second, each only the frame's changed cells and the spinner glyph,
+        # never the native area, never the panel's inside, never the whole frame.
+        frame=self.frame_cells(first)|self.frame_cells(second)|self.frame_cells(third)
+        beats=self.beats(result['chunks']);seconds=result['window_ms']/1000
+        self.assertTrue(len(beats)>=7*seconds and len(beats)<=10.5*seconds+1,(len(beats),seconds))
+        for chunk in beats:
+            written=self.written_cells(chunk)
+            self.assertTrue(written and set(written)<=frame,[c for c in written if c not in frame][:5])
+            self.assertLess(len(written),P//2,chunk)
+        sizes=[len(c.encode()) for c in beats]
+        return {'beats':len(beats),'seconds':round(seconds,2),'beats_per_second':round(len(beats)/seconds,1),
+                'bytes_per_beat':round(sum(sizes)/len(sizes)),'max_beat_bytes':max(sizes),
+                'cells_per_beat':round(sum(len(self.written_cells(c)) for c in beats)/len(beats),1),
+                'other_writes':len(result['chunks'])-len(beats)}
+
+    def check_border_wait_and_idle(self,result):
+        w1,w2,i1,i2=result['w1'],result['w2'],result['i1'],result['i2']
+        self.assertTrue(result['waiting'],result);self.assertTrue(result['idle'],result)
+        # Waiting: every line cell of the frame one red at a time, the brightest first, a shade 1.2 s on.
+        tones=[{x for x in w['looks'] if x!='t'} for w in (w1,w2)]
+        self.assertEqual(tones,[{'p217'},{'p210'}],tones)
+        self.assertEqual(w1['native'],w2['native']);self.assertEqual(w1['cursor'],w2['cursor'])
+        waits=self.beats(result['wait_chunks'])
+        self.assertTrue(1<=len(waits)<=2,len(waits))
+        for chunk in waits:self.assertTrue(set(self.written_cells(chunk))<=self.frame_cells(w1))
+        # Idle: the still neutral frame; nothing is sent for it.
+        self.assertTrue(set(i1['looks'])<={'b','t'},i1['looks']);self.assertEqual(i1['looks'],i2['looks'])
+        self.assertEqual(self.beats(result['idle_chunks']),[])
+        return {'wait_beats':len(waits),'wait_bytes':[len(c.encode()) for c in waits]}
+
+    def test_the_outer_frame_turns_on_the_spinner_beat_sending_only_its_changed_cells(self):
+        # Spec E9 rule 47 (d) (11-14: the outer frame instead of the head rule): a running session's
+        # frame carries an arc round it on the beat the spinner already keeps; each beat sends only
+        # the frame's changed cells (and the spinner glyph), so a beat stays small and the native
+        # area, its draft and the cursor stay put. A wait breathes the frame red; idle sends nothing.
+        result=self.run_loop('border-motion')['border_motion']
+        load=self.check_border_motion(result,lambda reading:2*40+2*38)
+        load.update(self.check_border_wait_and_idle(result))
+        print(json.dumps({'event':'session-shell-border-motion',**load}))
+        # A beat is a small part of the frame's 156 cells: about 2 KB would repaint the whole frame.
+        self.assertLess(load['bytes_per_beat'],700,load)
+
+    def test_the_outer_frame_turns_alike_under_the_native_area(self):
+        # The bottom layout's frame moves the same way, and its beats never write the native rows above it.
+        result=self.run_loop('border-motion-bottom')['border_motion']
+        first=result['first'];self.assertIsNotNone(first,result)
+        load=self.check_border_motion(result,lambda reading:2*120+2*(reading['H']-2))
+        load.update(self.check_border_wait_and_idle(result))
+        print(json.dumps({'event':'session-shell-border-motion-bottom','rows':first['H'],**load}))
+        top=min(result[k]['top'] for k in ('first','second','third'))
+        for chunk in self.beats(result['chunks']):
+            self.assertTrue(all(row>top for row,_ in self.written_cells(chunk)),chunk)
+
+    def test_the_head_rule_moves_under_a_lit_still_frame_by_default(self):
+        # 11-15 (panel polish 4): the default `rule motion` (`rule`): a running session's outer frame
+        # stands lit and still (one color down every row, the same on every reading), and the head
+        # rule carries the moving light on the beat the spinner already keeps; each beat sends only the
+        # rule's changed cells, so a beat stays small, and the native half stays put. Through the
+        # light's rest nothing is written to the rule's row; then the light comes back in.
         result=self.run_loop('rule-motion')['rule_motion']
         print(json.dumps({'event':'session-shell-rule-motion','bytes':result['bytes'],'writes':result['writes'],
                           'rest_writes':len(result['rest']),'rest_bytes':[len(c.encode()) for c in result['rest']]}))
         first,second=result['first'],result['second']
         self.assertIsNotNone(first);self.assertIsNotNone(second)
-        # Spec E9 rule 52: the moving rule is the thin rule; no heavy cell anywhere on it.
-        for value in (first,second):self.assertEqual(value['cells'],'─'*36,value)
         self.assertNotEqual(first['colors'],second['colors'])
         self.assertEqual(first['native'],second['native'])
         self.assertGreaterEqual(result['writes'],15)
         self.assertLess(result['bytes']/result['writes'],400,result)
-        # Spec E9 rule 51 (c): through the rest the rule's row stands dark and nothing is written
-        # to it; the host's writes there are the spinner's glyph alone (one cell each). Then the
-        # light comes back in.
-        # Correction 8: the light shows on the first paint of the turn (within 0.3 s of it).
+        # The frame: lit (173, never dim) and still on every reading.
+        frames=result['frames'];self.assertEqual(len(set(frames)),1,frames)
+        column=[c for c in frames[0].split(',')[1:39]];self.assertTrue(column and all(c=='173' for c in column),frames[0])      # (11-18: Claude's lit frame, `FACES.dark.ramp.claude.orbit[1]`; was the vanilla 187)
         self.assertLess(result['lit_after_ms'],300,result)
         self.assertTrue(result['rest_seen'],result)
         y=result['rest_row'];self.assertIsNotNone(y,result)
@@ -967,17 +1024,6 @@ class SessionShellPTYTest(unittest.TestCase):
     def test_native_start_ack_does_not_wait_for_a_blocked_display_backend(self):
         result=self.run_loop('start',blocked_backend=True)
         self.assertLess(result['ack_ms'],250)
-
-    def test_a_request_line_opens_in_place_and_on_its_read_page_and_the_draft_survives(self):
-        result=self.run_loop('request-panel')['request_panel']
-        self.assertTrue(result['details'])
-        self.assertIn('REQ_BODY_NONCE',result['page'])
-        self.assertIn('REQUEST',result['page'].upper())
-        self.assertIn('REQ_TITLE',result['panel'])
-
-    def test_route_detail_pages_keep_navigation_out_of_native_input(self):
-        result=self.run_loop('route-pages')
-        self.assertTrue(result['status']['alive'])
 
     def test_native_model_paints_before_the_optional_backend_is_released(self):
         result=self.run_loop('startup-model',blocked_backend=True)

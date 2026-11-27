@@ -96,6 +96,9 @@ while True:
 PRELOAD = r"""
 const Module=require('node:module'),fs=require('node:fs'),load=Module._load,dir=process.env.SUCC_DIR;
 if(process.argv.some(arg=>arg.endsWith('/session-shell/host.cjs'))){
+ // The backend as it is, but for the one seam a popup's reading would otherwise cross: Fleet's
+ // collection of this machine's processes and terminals (a synthetic, empty view model instead).
+ process.env.HEARTING_SHELL_PYTHON=dir+'/backend.py';
  const mode=()=>{try{return fs.readFileSync(dir+'/fault','utf8').trim();}catch{return '';}};
  const from=name=>new Error().stack.includes(name);
  if(process.env.HEARTING_SHELL_SUCCESSOR==='1'){
@@ -135,6 +138,36 @@ if(process.argv.some(arg=>arg.endsWith('/session-shell/host.cjs'))){
    return terminal;}})};
   return value;};
 }
+"""
+
+# The popups' backend: `session_shell.py backend` with Fleet's machine collection replaced by a synthetic
+# view model, so an open popup here reads no real session or process.
+BACKEND = r"""#!{python}
+import os,sys
+if sys.argv[2:]!=['backend']:os.execv({python!r},[{python!r},*sys.argv[1:]])
+here=os.path.dirname(os.path.abspath(sys.argv[1]))
+sys.path[:0]=[here,os.path.join(here,'..','tools')]
+import session_shell as m
+def vm(harness,sid,kind):
+    from fleet.explorer.view_model import ExplorerViewModel
+    open(os.path.join(os.environ['SUCC_DIR'],'popup-vm'),'a').write(kind+'\n')
+    return ExplorerViewModel.from_mapping({{'routes':[],'sessions':[],'repos':[],'system':{{}}}})
+m._popup_view_model=vm
+# A question this session registered and has not answered (a `question` file in the fixture folder
+# keeps it on the panel); an answer sent from the panel is written to `answers`, not sent anywhere.
+projection=m.panel_projection
+def with_question(*args,**kwargs):
+    value=projection(*args,**kwargs)
+    if os.path.exists(os.path.join(os.environ['SUCC_DIR'],'question')):
+        value['questions']=[{{'id':'owned-question','revision':'0'*64,'answerable':True,
+            'questions':[{{'id':'q','question':'Pending demo question','choices':['Yes','No']}}]}}]
+    return value
+m.panel_projection=with_question
+def answer(binding,request):
+    open(os.path.join(os.environ['SUCC_DIR'],'answers'),'a').write(repr((request.get('question_id'),request.get('answers'),request.get('decision')))+'\n')
+    return {{'ok':False,'reason':'ANSWER_SEEN'}}
+m._block_answer=answer
+raise SystemExit(m._backend())
 """
 
 VT = r"""
@@ -209,6 +242,7 @@ class Window:
         native = self.root/'native.py'; native.write_text(NATIVE)
         (self.root/'fault.cjs').write_text(PRELOAD)
         (self.root/'vt.cjs').write_text(VT); (self.root/'unit.cjs').write_text(UNIT)
+        backend = self.root/'backend.py'; backend.write_text(BACKEND.format(python=sys.executable)); backend.chmod(0o700)
         self.exit_fifo = self.root/'exit'; os.mkfifo(self.exit_fifo, 0o600)
         env = dict(case.env, LOOP_NATIVE_EXIT=str(self.exit_fifo), SUCC_HARNESS=harness, SUCC_DIR=str(self.root),
                    SUCC_PID=str(self.root/'native.json'), SUCC_READ=str(self.root/'native-read'),
@@ -493,8 +527,8 @@ class SessionShellSuccessionTest(unittest.TestCase):
 
     def test_a_hand_fold_carries_over_to_the_new_host(self):
         # #1586 review follow-up 7: the person's fold choice rides the hand-over seed. Folded by
-        # hand in a window wide enough to stand open, the new host keeps the strip, and a press on
-        # the strip still opens it there.
+        # hand in a window wide enough to stand open, the new host keeps the strip (under the native
+        # area: the last of the window's 30 rows, 11-15), and a press on the strip still opens it there.
         window = self.window('claude')
         first = window.wait_binding()
         self.settle(window)
@@ -507,7 +541,7 @@ class SessionShellSuccessionTest(unittest.TestCase):
         window.pump(.6)
         self.assertNotEqual(second['host_pid'], first['host_pid'])
         self.assertFalse(window.status(second)['expanded'])
-        window.type('\x1b[<0;127;10M\x1b[<0;127;10m'); window.pump(.4)
+        window.type('\x1b[<0;127;30M\x1b[<0;127;30m'); window.pump(.4)
         self.assertTrue(window.status(second)['expanded'])
 
     def wait_empty_then_switch(self, window, first):
@@ -608,6 +642,54 @@ class SessionShellSuccessionTest(unittest.TestCase):
         self.assertEqual((window.root/'native-read').read_bytes().count(b'draft\r'), 1)
         self.assert_keeps_native(window, native)
 
+    def test_a_pending_question_does_not_hold_the_hand_over_and_is_still_answerable_after_it(self):
+        # A question left open for days must not keep the window on an old release. The new host draws
+        # the QUESTIONS box again from the next projection, and the same keys answer it.
+        window = self.window()
+        first = window.wait_binding(); self.settle(window)
+        (window.root/'question').write_text('1')
+        window.until('Pending demo question', 60); window.pump(.5)
+        self.assertTrue(window.status().get('empty'))
+        native = process_row(window.native_pid())
+        window.point('rel-b')
+        second = self.switched(window, first['host_pid'])
+        self.assertNotEqual(second['host_pid'], first['host_pid'])
+        self.assertEqual(second['native_pid'], first['native_pid'])
+        # The new host's own paint, not the old one's: the box is on the screen it restored.
+        window.pump(1.5)
+        lines = window.screen()['lines']
+        self.assertTrue(any('QUESTIONS' in row for row in lines), lines)
+        self.assertTrue(any('Pending demo question' in row for row in lines), lines)
+        read_before = (window.root/'native-read').read_bytes()
+        window.type(b'\x1d1\r')
+        end = time.monotonic()+15
+        while not (window.root/'answers').exists() and time.monotonic() < end:
+            window.pump(.1)
+        self.assertEqual((window.root/'answers').read_text().count('owned-question'), 1,
+                         (window.root/'answers').read_text() if (window.root/'answers').exists() else 'no answer reached the backend')
+        window.pump(.5)
+        self.assertEqual((window.root/'native-read').read_bytes(), read_before, 'the answer keys stay out of the native')
+        # The fixture's backend refuses the answer (it only records it), so the editor may stay open:
+        # one more Ctrl+] hands the keys back to the native.
+        if window.status()['focused']:
+            window.type(b'\x1d'); window.pump(.3)
+        self.assertFalse(window.status()['focused'])
+        self.assert_keeps_native(window, native)
+
+    def test_an_answer_in_progress_still_defers_the_hand_over(self):
+        # The person is inside the question editor (the panel has the keys): the hand-over waits.
+        window = self.window()
+        first = window.wait_binding(); self.settle(window)
+        (window.root/'question').write_text('1')
+        window.until('Pending demo question', 60); window.pump(.5)
+        window.type(b'\x1d'); window.pump(.3)
+        self.assertTrue(window.status()['focused'])
+        window.point('rel-b'); window.pump(2.0)
+        self.assertEqual(window.binding()['host_pid'], first['host_pid'])
+        self.assertEqual(window.spawns(), [])
+        window.type(b'\x1d'); window.pump(.3)
+        self.switched(window, first['host_pid'])
+
     def test_an_open_form_defers_the_hand_over_until_it_is_gone(self):
         window = self.window()
         first = window.wait_binding(); self.settle(window)
@@ -681,14 +763,20 @@ class SessionShellSuccessionTest(unittest.TestCase):
         cache.with_suffix('.new').write_text(json.dumps(value)); cache.with_suffix('.new').chmod(0o600)
         os.replace(cache.with_suffix('.new'), cache)
         window.until('ROUTE_PAGE'); window.pump(.5)
+        # 11-15 (popup design E): a press on the ROUTE section opens the routes popup over the window.
         point = None
         for y, line in enumerate(window.screen()['lines']):
-            if '╭─ 1 ROUTE' in line:
-                point = (line.index('╭─ 1')+4, y+1)
+            if '1 ROUTE ' in line and '─' in line:
+                point = (line.index('1 ROUTE')+2, y+1)
         self.assertIsNotNone(point, window.screen()['lines'])
-        window.type('\x1b[<0;%d;%dM\x1b[<0;%d;%dm' % (point[0], point[1], point[0], point[1])); window.until('PgUp/PgDn')
+        window.type('\x1b[<0;%d;%dM\x1b[<0;%d;%dm' % (point[0], point[1], point[0], point[1])); window.until('╰─ ')
+        # The popup read the synthetic view model: nothing here collects this machine's sessions.
+        end = time.monotonic()+15
+        while not (window.root/'popup-vm').exists() and time.monotonic() < end:
+            window.pump(.1)
+        self.assertIn('routes', (window.root/'popup-vm').read_text() if (window.root/'popup-vm').exists() else '')
 
-    def test_an_open_read_page_defers_the_hand_over_until_it_is_closed(self):
+    def test_an_open_popup_defers_the_hand_over_until_it_is_closed(self):
         window = self.window()
         first = window.wait_binding(); self.settle(window)
         self.open_read_page(window)
@@ -696,25 +784,19 @@ class SessionShellSuccessionTest(unittest.TestCase):
         window.point('rel-b'); window.pump(2.0)
         self.assertEqual(window.binding()['host_pid'], first['host_pid'])
         self.assertEqual(window.spawns(), [])
-        # The page has no notice slot: its head says a new release waits, one row under the page counter.
-        wait = re.compile(r'New release waiting|새 판 대기')
-        end = time.monotonic()+8
-        while time.monotonic() < end and not any(wait.search(row) for row in window.screen()['lines']):
-            window.pump(.3)
-        rows = window.screen()['lines']
-        counter = [index for index, row in enumerate(rows) if 'PgUp/PgDn' in row]
-        self.assertEqual([index for index, row in enumerate(rows) if wait.search(row)], [counter[0]+1], rows)
-        window.type(b'\x1b')  # closes the page; nothing else happens
+        # The popup stands over the window: the panel under it keeps its notice slot (a new release waits).
+        self.assertTrue(any('✕ ─╮' in row for row in window.screen()['lines']), window.screen()['lines'])
+        window.type(b'\x1b')  # closes the popup; nothing else happens
         self.switched(window, first['host_pid'])
         self.assert_keeps_native(window, native)
 
-    def test_an_opencode_plugin_reload_keeps_an_open_read_page_and_the_hand_over_waits_for_its_close(self):
+    def test_an_opencode_plugin_reload_keeps_an_open_popup_and_the_hand_over_waits_for_its_close(self):
         window = self.window('opencode')
         first = window.wait_binding(); self.settle(window)
         self.open_read_page(window)
         native = process_row(window.native_pid())
         os.kill(native['pid'], signal.SIGUSR1); window.pump(1.0)
-        window.until('PgUp/PgDn')
+        window.until('╰─ ')
         window.point('rel-b'); window.pump(2.5)
         self.assertEqual(window.binding()['host_pid'], first['host_pid'])
         self.assertEqual(window.spawns(), [])

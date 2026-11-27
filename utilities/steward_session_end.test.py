@@ -86,6 +86,192 @@ class SessionEndTest(f.GrantFixture):
                     other.assert_called_once_with('claude', 'owner',
                         process if kind == 'receipt' else marker['session_process'], observation=observation)
 
+    def test_checks_of_one_round_share_one_process_table_census(self):
+        import claude_process_identity
+        import peer_obligations
+        sc = f._load('steward_check_round_census', 'steward_check.py')
+        store = peer_obligations.ObligationStore(f.peer_message.peer_state_root())
+        duties = []
+        for number in range(3):
+            sid = 'round-%d' % number
+            self.session(sid, self.primary)
+            f.peer_message.grant_steward('claude', sid, f.EXPLICIT_TO, 'explicit', f.TS,
+                                         source='explicit', steward_seat=None)
+            duties.append((sid, sc.register('claude', sid, store=store, ensure_runner=False)))
+
+        holders = {sid for sid, _duty in duties}
+
+        def release_all(observation):
+            with mock.patch.object(f.fleet_steward, '_peer_message_module', return_value=f.peer_message), \
+                 mock.patch.object(f.fleet_steward, '_registry_record', return_value=None), \
+                 mock.patch.object(claude_process_identity, 'claude_session_census',
+                                   return_value=(True, holders, set())) as census:
+                released = [sc._release_if_window_closed(duty, store, 'claude', sid, 1e10, observation)
+                            for sid, duty in duties]
+            self.assertEqual(released, [False] * len(duties))
+            return census.call_count
+
+        # Each check taking its own reading walks the process table every time ...
+        alone = release_all(None)
+        self.assertGreaterEqual(alone, 3)
+        # ... while one reading shared by the round's checks walks it once. (Only a
+        # release the shared reading points to reads the table again; see below.)
+        self.assertEqual(release_all(f.fleet_steward.end_observation()), 1)
+
+    def _round_release(self, sid, readings):
+        """One steward check of a granted Claude session against the round's shared
+        reading; ``readings`` answers each process-table census in order. The session
+        has native history, so a complete census that misses it reads as ended."""
+        import claude_process_identity
+        import peer_obligations
+        import recipient_lifetime
+        sc = f._load('steward_check_round_recheck', 'steward_check.py')
+        store = peer_obligations.ObligationStore(f.peer_message.peer_state_root())
+        self.session(sid, self.primary)
+        f.peer_message.grant_steward('claude', sid, f.EXPLICIT_TO, 'explicit', f.TS,
+                                     source='explicit', steward_seat=None)
+        duty = sc.register('claude', sid, store=store, ensure_runner=False)
+        answers = iter(readings)
+
+        def census():
+            answer = next(answers)
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
+        with mock.patch.object(f.fleet_steward, '_peer_message_module', return_value=f.peer_message), \
+             mock.patch.object(f.fleet_steward, '_registry_record', return_value=None), \
+             mock.patch.object(claude_process_identity, 'claude_session_census', side_effect=census), \
+             mock.patch.object(recipient_lifetime, '_has_native_existence_evidence', return_value=True), \
+             mock.patch.object(f.peer_message, 'release_closed_session',
+                               wraps=f.peer_message.release_closed_session) as release:
+            released = sc._release_if_window_closed(duty, store, 'claude', sid, 1e10,
+                                                    f.fleet_steward.end_observation())
+        return released, release.call_count
+
+    def test_a_session_still_ended_on_the_fresh_reading_is_released(self):
+        self.assertEqual(self._round_release('round-ended', [(True, set(), set())] * 2), (True, 1))
+
+    def test_a_session_reopened_after_the_round_reading_keeps_its_role(self):
+        # The round read the process table before this same session id came back in a
+        # new process; the release it pointed to is decided on a fresh reading.
+        sid = 'round-reopened'
+        self.assertEqual(self._round_release(sid, [(True, set(), set()), (True, {sid}, set())]),
+                         (False, 0))
+
+    def test_an_unreadable_fresh_reading_is_unknown_not_ended(self):
+        self.assertEqual(self._round_release('round-unreadable',
+                                             [(True, set(), set()), OSError('proc')]), (False, 0))
+
+    # A holder that comes back after the round's first reading of the session holders,
+    # through the real `_reconcile_obligations` with a round `PeerReadContext`: the shared
+    # reading only nominates a release, which acts on a fresh reading (as the message
+    # cancel re-checks lifetime afresh), so the holder keeps its duty and its watches.
+    RESUME_SIDS = {
+        'claude': ('aaaaaaaa-0000-4000-8000-000000000001', 'bbbbbbbb-0000-4000-8000-000000000002'),
+        'codex': ('aaaaaaaa-1111-4000-8000-000000000001', 'bbbbbbbb-1111-4000-8000-000000000002'),
+        'opencode': ('ses_gone000000000000000000', 'ses_resumed000000000000000'),
+    }
+    LIVE_SID = 'cccccccc-0000-4000-8000-000000000003'
+    NEW_SID = 'dddddddd-0000-4000-8000-000000000004'
+
+    def round_with_resume(self, harness, resume):
+        """``resume``: None (the holder stays gone), 'same' (the same id comes back in a
+        new process after the first holder's check), or 'new' (Claude only: a new id
+        resumes the old transcript and names the old id only in its launch argument)."""
+        import claude_process_identity
+        import dispatch_seat_handover as handover
+        import peer_obligations
+        from types import SimpleNamespace
+        from fleet import session_registry
+        from fleet.collectors import codex, opencode, procscan
+        from peer_read_context import PeerReadContext
+        sc = f._load('steward_check_round_resume', 'steward_check.py')
+        store = peer_obligations.ObligationStore(f.peer_message.peer_state_root())
+        gone, resumed = self.RESUME_SIDS[harness]
+        # With 'new', the first holder is live, so no earlier question fills the round's
+        # registry snapshot: the stale process reading alone decides.
+        first = self.LIVE_SID if resume == 'new' else gone
+        home = Path(os.environ['CLAUDE_CONFIG_DIR'])
+        (home / 'projects' / 'p').mkdir(parents=True, exist_ok=True)
+        regdir = Path(session_registry._dir_for('claude'))
+        regdir.mkdir(parents=True, exist_ok=True)
+        for sid in (first, resumed):
+            self.session(sid, self.primary, harness)
+            f.peer_message.grant_steward(harness, sid, f.EXPLICIT_TO, 'explicit', f.TS,
+                                         source='explicit', steward_seat=None)
+            (home / 'projects' / 'p' / (sid + '.jsonl')).write_text('{}\n')
+            sc.register(harness, sid, store=store, ensure_runner=False)
+        birth = procscan.read_proc_start(os.getpid())
+        process = dict(f.peer_message._steward_process_context(), pid=os.getpid(), pid_start=birth)
+        # The old window's process ended: its recorded birth is gone (never this test's
+        # own ancestry, which a run inside an agent session would otherwise record).
+        with mock.patch.object(f.peer_message, '_steward_ending_process',
+                               return_value=dict(process, pid_start='0')):
+            f.peer_message.observe_steward_end(harness, resumed, reason='logout')
+        live = {first} if resume == 'new' else set()
+
+        def come_back():
+            if resume is None or resumed in live:
+                return
+            live.add(resumed)
+            if harness == 'claude':
+                (regdir / ('%d.json' % os.getpid())).write_text(json.dumps(dict(
+                    pid=os.getpid(), procStart=birth,
+                    sessionId=self.NEW_SID if resume == 'new' else resumed,
+                    cwd=str(self.primary), kind='interactive', status='idle')))
+            if resume == 'new':
+                live.add(self.NEW_SID)
+                return
+            with mock.patch.object(f.peer_message, '_steward_process_evidence', return_value=dict(process)):
+                f.peer_message.observe_steward_resume(harness, resumed)
+
+        settled = []
+        steward_module = SimpleNamespace(settle_steward_exited_watch=lambda wid: settled.append(wid) or True)
+
+        def watches(harness=None, sid=None, **_kwargs):
+            if sid == resumed:
+                return [{'watch_id': 'resumed-watch', 'storage_root': str(f.peer_message.peer_state_root())}]
+            return []
+
+        ordered = [store.get(sc.duty_id(harness, sid)) for sid in (first, resumed)]
+        with mock.patch.object(f.fleet_steward, '_peer_message_module', return_value=f.peer_message), \
+             mock.patch.object(f.peer_message, '_fleet_steward', return_value=f.fleet_steward), \
+             mock.patch.object(claude_process_identity, 'claude_session_census',
+                               side_effect=lambda *a, **k: (True, set(live), set())), \
+             mock.patch.object(codex, 'open_rollout_sessions',
+                               side_effect=lambda *a, **k: {'complete': True, 'open': frozenset(live)}), \
+             mock.patch.object(codex, 'exact_rollout_for_session_id',
+                               side_effect=lambda sid, homes=None: '/rollout/%s' % sid), \
+             mock.patch.object(opencode, 'session_visibility', side_effect=lambda *a, **k: {
+                 'complete': True, 'visible': frozenset(live), 'earliest_start_ms': 5_000}), \
+             mock.patch.object(opencode, 'session_activity', return_value=(4_000, None)), \
+             mock.patch.object(handover, 'resolved_watch_references', side_effect=watches), \
+             mock.patch.object(f.peer_message, '_peer_steward_module', return_value=steward_module), \
+             mock.patch.object(f.peer_steward, '_steward_check_module', return_value=sc), \
+             mock.patch.dict(sys.modules, {'steward_check': sc}):
+            f.peer_steward._reconcile_obligations(store, ordered,
+                                                  read_context=PeerReadContext(registry_append_only=True),
+                                                  between_duties=come_back)
+        duty = store.get(sc.duty_id(harness, resumed))
+        return duty['state'], (duty.get('observation') or {}).get('reason'), settled
+
+    def test_a_holder_that_stays_gone_is_released_in_the_round(self):
+        for harness in self.RESUME_SIDS:
+            with self.subTest(harness=harness):
+                self.assertEqual(self.round_with_resume(harness, None),
+                                 ('complete', 'session-ended', ['resumed-watch']))
+
+    def test_a_holder_resumed_after_the_round_reading_keeps_duty_and_watch(self):
+        for harness in self.RESUME_SIDS:
+            with self.subTest(harness=harness):
+                state, _reason, settled = self.round_with_resume(harness, 'same')
+                self.assertEqual((state, settled), ('pending', []))
+
+    def test_a_claude_holder_resumed_under_a_new_id_keeps_duty_and_watch(self):
+        state, _reason, settled = self.round_with_resume('claude', 'new')
+        self.assertEqual((state, settled), ('pending', []))
+
     def test_other_registry_process_keeps_watch_for_three_harnesses(self):
         import subprocess
         from types import SimpleNamespace

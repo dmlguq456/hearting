@@ -12,11 +12,14 @@ import importlib.util
 import json
 import os
 import re
+import select
+import sys
 from pathlib import Path
 
 import harness_state_roots as HARNESS_STATE_ROOTS
 import route_identity as ROUTE_IDENTITY
 import route_plan as ROUTE_PLAN
+import route_form as ROUTE_FORM
 import route_authority as ROUTE_AUTHORITY
 import gpu_execution_sandbox as GPU_SANDBOX
 from dispatch_contract import DispatchContractError, stable_state_root
@@ -48,16 +51,19 @@ SHAPE_INTENSITY = ROUTE_PLAN.SHAPE_INTENSITY
 # The compiler-internal capability behind `--shape framed`. No person and no model names it; a
 # route of any other shape can never seal it (`compose-shape-invalid`).
 ROUTE_FRAME_CAPABILITY = TOPO.ROUTE_FRAME_CAPABILITY
-INTENSITY_SHAPE = {"direct": "direct", "quick": "solo"}
+INTENSITY_SHAPE = ROUTE_FORM.INTENSITY_SHAPE
 ROUTE_ORIGINS = ("preset", "compose")
+# No longer the default of a decided shape: compose opens a named field's default recipe
+# (`field_default_recipes`) and refuses a direct/solo/staged shape naming neither kind nor
+# field. It remains only the existing non-Git explicit-direct fallback when the task
+# classification finds no single kind (`capability-route.py` compose, `non-git-unresolved`).
 COMPOSE_DEFAULT_CAPABILITY = "autopilot-code"
 # Fallback when the user's policy names no enabled harnesses (no file, unreadable):
 # the shipped default enables all three.
 COMPOSE_DEFAULT_CHILDREN = ("claude", "codex", "opencode")
 
 
-def shape_for_intensity(effective):
-    return INTENSITY_SHAPE.get(effective, "staged")
+shape_for_intensity = ROUTE_FORM.shape_for_intensity
 
 
 def parse_graph_spec(text, capabilities=None):
@@ -387,9 +393,15 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec, find_input=None, 
         follower = rows[after[0] + 2][1]
         order[follower] = {"depends_on": list(order.get(follower, {}).get("depends_on") or []) + [node_id]}
     if unknown:
+        # The kind stays the one named; another kind's shareable part is written as `capability:stage`.
+        # A part of the named kind itself is not "from another kind" here (`stages` still lists it).
+        borrowable = [part for part in TOPO.borrowable_parts(registry, base_recipe)
+                      if part.partition(":")[0] != host]
         raise ValueError(
             "compose-graph-unknown-node:" + ",".join(unknown)
             + " (available: " + ",".join(view) + ")"
+            + (" (borrow from another kind as capability:stage: " + ",".join(borrowable) + ")"
+               if borrowable else "")
             + " (run `capability-route.py stages --capability "
             + base_recipe["capability"] + "` to list valid stage ids)"
         )
@@ -540,6 +552,7 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec, find_input=None, 
                          "catalog": bool(part) or node_id in optional}
     # SD-165 name mapping, sealed as `part_io` (absent on a route that uses no catalog part).
     produced = {}
+    borrowed_results = set()   # sealed outputs of the borrowed parts placed so far
     for index, node in enumerate(nodes):
         info = meta[node["id"]]
         io = {}
@@ -560,6 +573,18 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec, find_input=None, 
             handed = [out for out in nodes[index - 1]["outputs"] if not TOPO._is_semantic_output(out)]
             if handed and not set(handed) & (set(inputs) | set(io.values())):
                 inputs.extend(handed)
+        if (index and nodes[index - 1].get("kind") == "review-worker"
+                and node.get("kind") not in ("capability-owner", "resource-runner")):
+            # A review hands on the borrowed result it read together with its verdict, whether the
+            # review is borrowed or the host's own: the worker stage after it reads what was reviewed.
+            # A kernel node binds exactly what it names (a resource run its attestation and config,
+            # a deploy every review whose output it reads as a judge of its command), so it gets none.
+            review = nodes[index - 1]
+            reviewed = [name for name in review["inputs"] if name in borrowed_results]
+            if reviewed:
+                verdict = [out for out in review["outputs"] if not TOPO._is_semantic_output(out)]
+                inputs.extend(name for name in dict.fromkeys(reviewed + verdict)
+                              if name not in inputs and name not in io.values())
         node["inputs"] = inputs
         io.update(info["moved"])
         if io:
@@ -567,6 +592,8 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec, find_input=None, 
         for original, sealed in zip(info["originals"], node["outputs"]):
             if not TOPO._is_semantic_output(original):
                 produced[original] = sealed
+                if node.get("part") and not node.get("plan_stage"):
+                    borrowed_results.add(sealed)
     declared_groups = [(group, False) for group in base_recipe["standard_plus"].get("parallel_groups") or []]
     for _, node_id, _, part in rows:
         if part:  # a borrowed anchor brings its own group, re-keyed to the borrowed node id
@@ -590,7 +617,13 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec, find_input=None, 
             closing_boundaries = set(terminal_ids)
             owner_id, suffix = "owner-close", 1
             occupied = {node["id"] for node in nodes} | {out for node in nodes for out in node["outputs"]}
-            while owner_id in occupied or owner_id + ".md" in occupied:
+            # A literal-anchor kind (design, spec) spells its bucket in every write scope:
+            # the summary sits at each anchor's root, the first being the output.
+            literal_roots = scope.get("cycle_anchors") if scope.get("anchor_mode") == "literal" else None
+
+            def closing(name, _roots=tuple(literal_roots or ())):
+                return [f"{root}/{name}.md" for root in _roots] or [name + ".md"]
+            while owner_id in occupied or set(closing(owner_id)) & occupied:
                 suffix += 1
                 owner_id = f"owner-close-{suffix}"
             terminals = [node for node in nodes if node["id"] in terminal_ids]
@@ -599,7 +632,7 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec, find_input=None, 
                 "depends_on": [node["id"] for node in terminals], "role": "deep orchestrator",
                 "inputs": list(dict.fromkeys(item for node in terminals
                                              for item in node["inputs"] + node["outputs"])),
-                "outputs": [owner_id + ".md"], "write_scope": [owner_id + ".md"],
+                "outputs": closing(owner_id)[:1], "write_scope": closing(owner_id),
                 "resource_class": "normal", "completion_gate": "compose-owner-close",
                 "dispatch_depth": 1, "model_profile": registry["owner_profile_by_intensity"]["standard"],
                 "fallback_hops": ["same-harness-headless", "cross-harness-headless", "inline"],
@@ -812,7 +845,7 @@ def _compose_default_jobs():
 
 
 def _compose_readiness(cwd, jobs, parent_harness, children, *, gpu_route=None,
-                       owner_harnesses=None):
+                       owner_harnesses=None, worker_caller=False):
     spec = importlib.util.spec_from_file_location(
         "hearting_dispatch_readiness", ROOT / "utilities" / "dispatch-readiness.py")
     module = importlib.util.module_from_spec(spec)
@@ -824,7 +857,7 @@ def _compose_readiness(cwd, jobs, parent_harness, children, *, gpu_route=None,
         return module.generate(
             worktree=Path(cwd), jobs=Path(jobs),
             owner_harnesses=list(owner_harnesses) if owner_harnesses is not None else [parent_harness],
-            child_harnesses=list(children),
+            child_harnesses=list(children), worker_caller=worker_caller,
             **({"codex_execution_selection": selection}
                if selection and selection["gpu_scope"] else {}),
         )
@@ -1041,24 +1074,29 @@ def _pin_change_probe(route, jobs, target, harness, caller):
     owner: from the new owner harness to the route's children. worker: from the owner
     harness in force to the new worker harness. frame: from this depth-0 session to the new
     frame harness. A quick route (one owner, its registered-headless candidates) is probed for
-    candidates instead; it starts no stage, so a worker change there needs nothing probed.
+    candidates instead; it starts no stage, so a worker change there needs nothing probed. The middle
+    cell (an owner that makes the work, A, and starts one review, B) is both: an owner pin is probed for
+    the owner's candidates and the review's tuples, a worker pin for the review's tuples.
     Nothing supported for the new pin is refused before anything is recorded."""
     if harness not in DEFAULTS.current_enabled_harnesses():
         raise ValueError(f"explicit-adapter-disabled-by-user-policy:{target}={harness}")
     import route_authority as RA
     view = RA.route_in_force(route)
-    quick = route.get("effective_intensity") == "quick" or route.get("registered_headless_candidates") is not None
+    quick = ROUTE_FORM.serial_attempt_route(route) or route.get("registered_headless_candidates") is not None
+    stages = ROUTE_FORM.starts_depth2_nodes(route)   # B: the owner starts depth-2 nodes
     rows = [row for row in (view.get("dispatch_evidence") or {}).get("tuples") or [] if isinstance(row, dict)]
-    if quick and target == "worker":
+    if quick and not stages and target == "worker":
         return [], []
-    if target == "owner" or quick:
+    if target == "owner" or (quick and not stages):
         children = sorted({row.get("child_harness") for row in rows if row.get("child_harness")}) \
             or list(_compose_default_children())
         probe = _compose_readiness(route["cwd"], jobs, harness, children, gpu_route=route)
-        tuples = [] if quick else [row for row in probe.get("tuples") or [] if row.get("parent_harness") == harness]
+        tuples = ([row for row in probe.get("tuples") or [] if row.get("parent_harness") == harness]
+                  if stages or not quick else [])
         candidates = [row for row in probe.get("candidates") or [] if row.get("harness") == harness] if quick else []
-        ready = (any(row.get("status") == "supported" for row in candidates) if quick else
-                 any(row.get("status") == "supported" and row.get("launch_authority") == "conductor" for row in tuples))
+        ready = ((any(row.get("status") == "supported" for row in candidates) if quick else True)
+                 and (any(row.get("status") == "supported" and row.get("launch_authority") == "conductor"
+                          for row in tuples) if stages or not quick else True))
     else:
         if target == "worker":
             owner = ((view.get("selection_pins") or {}).get("owner") or {}).get("harness")
@@ -1350,6 +1388,65 @@ def _route_plan_preparation_key(binding):
             "frame_route_id": frame_route.get("route_id")}
 
 
+# `--prompt-file -`: the task comes from standard input. It is read once, here, into the same text a
+# task file gives; the route keeps that text (`work_request`), and nothing after this reads the path
+# again, so no later place can read standard input a second time. The refusals are one line each and
+# never wait: a terminal, an empty or closed input, a producer that sends nothing for a while, and an
+# input larger than a brief needs all end the command before anything starts.
+# The size limit keeps a brief typed in the command small (it is a few lines, not a document); a task
+# given as a file has no such limit, which is why the refusal points there.
+PROMPT_STDIN_LIMIT = 65536
+PROMPT_STDIN_IDLE_SECONDS = 10.0
+
+
+def prompt_from_stdin():
+    """The task text on standard input, or a one-line `compose-prompt-stdin-*` refusal."""
+    try:
+        fd = sys.stdin.fileno()
+    except (AttributeError, ValueError, OSError):
+        raise ValueError("compose-prompt-stdin-empty: standard input is closed; pipe the task in "
+                         "(`--prompt-file - <<'EOF'`) or pass --prompt-file <file>") from None
+    if os.isatty(fd):
+        raise ValueError("compose-prompt-stdin-terminal: standard input is a terminal, not a pipe; pipe the "
+                         "task in (`--prompt-file - <<'EOF'`) or pass --prompt-file <file>")
+    chunks, size = [], 0
+    while True:
+        try:
+            ready, _, _ = select.select([fd], [], [], PROMPT_STDIN_IDLE_SECONDS)
+            data = os.read(fd, 65536) if ready else None
+        except OSError:
+            data = b""
+        if data is None:
+            raise ValueError(f"compose-prompt-stdin-timeout: no input for {int(PROMPT_STDIN_IDLE_SECONDS)} seconds; "
+                             "pipe the task in (`--prompt-file - <<'EOF'`) or pass --prompt-file <file>")
+        if not data:
+            break
+        chunks.append(data)
+        size += len(data)
+        if size > PROMPT_STDIN_LIMIT:
+            raise ValueError(f"compose-prompt-stdin-too-large: standard input is over {PROMPT_STDIN_LIMIT} bytes; "
+                             "put the task in a file and pass --prompt-file <file>")
+    try:
+        # A file's `read_text()` turns `\r\n` and `\r` into `\n`; standard input gives the same text.
+        text = b"".join(chunks).decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    except UnicodeDecodeError:
+        raise ValueError("compose-prompt-stdin-not-utf8: standard input is not UTF-8 text; "
+                         "pass --prompt-file <file>") from None
+    if not text.strip():
+        raise ValueError("compose-prompt-stdin-empty: standard input holds no task; pipe the task in "
+                         "(`--prompt-file - <<'EOF'`) or pass --prompt-file <file>")
+    return text
+
+
+def read_compose_task(prompt_file):
+    """The task text of `--prompt-file`: the file's text, or standard input for `-` (read once)."""
+    if prompt_file is None:
+        return ""
+    if str(prompt_file) == "-":
+        return prompt_from_stdin()
+    return Path(prompt_file).read_text()
+
+
 def _compose_preparation_key(compose_args, route_plan_binding, prompt_file=None):
     if route_plan_binding is not None:
         return _route_plan_preparation_key(route_plan_binding)
@@ -1363,7 +1460,7 @@ def _compose_preparation_key(compose_args, route_plan_binding, prompt_file=None)
     # and its ordinary retry. They describe current launch eligibility, not the
     # identity of the user's prepared worktree allocation.
     return {"kind": "compose-start", "caller": caller,
-            "request_path": str(Path(prompt_file).resolve()) if prompt_file else None,
+            "request_path": str(Path(prompt_file).resolve()) if prompt_file and str(prompt_file) != "-" else None,
             "request_sha256": hashlib.sha256(str(text or "").encode("utf-8")).hexdigest(),
             "capability": compose_args.get("capability"),
             "mode": compose_args.get("capability_mode"), "shape": compose_args.get("shape"),

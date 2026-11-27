@@ -11,12 +11,16 @@ import json
 import os
 from pathlib import Path
 import pty
+import select
+import shlex
 import subprocess
 import sys
 import tempfile
 import termios
 import unittest
 from unittest import mock
+
+from tools import fixture_processes
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
@@ -25,6 +29,16 @@ import pane_ownership as po
 import session_tidy as st
 import session_tidy_native as native
 from split_module_fixture import patch_split
+
+
+_FIXTURE_RUNTIME = "import signal; print('ready', flush=True); signal.pause()"
+
+
+def _wait_for_runtime(test, process):
+    # A launcher PID can still name its old argv while exec is setting up the runtime.
+    with process.stdout:
+        test.assertTrue(select.select([process.stdout], [], [], 10)[0], "fixture runtime did not start")
+        test.assertEqual(process.stdout.readline(), b"ready\n", "fixture runtime exited before it was ready")
 
 
 class PaneOwnershipTest(unittest.TestCase):
@@ -128,7 +142,7 @@ class PaneOwnershipTest(unittest.TestCase):
             successor: {"pid": 1234, "pid_start": "77", "session_id": successor,
                         "pane": "w:p1", "socket_path": "/run/herdr/actual.sock"},
         }
-        with tempfile.TemporaryDirectory() as temp, \
+        with fixture_processes.TemporaryDirectory() as temp, \
                 mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(Path(temp) / "state"),
                                              "XDG_CONFIG_HOME": str(Path(temp) / "config"),
                                              "CODEX_THREAD_ID": current, "HERDR_PANE_ID": "foreign-pane",
@@ -182,7 +196,7 @@ class PaneOwnershipTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="pane-ownership-")
+        self.temp = fixture_processes.TemporaryDirectory(prefix="pane-ownership-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.info = self.root / "process-info.json"
@@ -208,9 +222,9 @@ class PaneOwnershipTest(unittest.TestCase):
             os.setsid()
             fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
-        proc = subprocess.Popen([harness, "-c", "import time; time.sleep(60)", *extra_argv],
+        proc = subprocess.Popen([harness, "-c", _FIXTURE_RUNTIME, *extra_argv],
                                 executable=sys.executable, stdin=slave,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
                                 preexec_fn=terminal)
         os.close(slave)
         self.addCleanup(os.close, master)
@@ -218,6 +232,7 @@ class PaneOwnershipTest(unittest.TestCase):
             proc.terminate()
             proc.wait(timeout=5)
         self.addCleanup(stop)
+        _wait_for_runtime(self, proc)
         return proc
 
     def foreground(self, proc, pane="wB:p3N"):
@@ -358,9 +373,10 @@ class PaneOwnershipTest(unittest.TestCase):
     def test_daemon_or_spare_with_no_controlling_terminal_is_not_foreground(self):
         foreground = self.runtime()
         self.foreground(foreground)
-        proc = subprocess.Popen(["claude", "-c", "import time; time.sleep(60)"],
-                                executable=sys.executable, start_new_session=True)
+        proc = subprocess.Popen(["claude", "-c", _FIXTURE_RUNTIME], executable=sys.executable,
+                                stdout=subprocess.PIPE, start_new_session=True)
         self.addCleanup(lambda: (proc.terminate(), proc.wait(timeout=5)))
+        _wait_for_runtime(self, proc)
         self.assertEqual(self.verify(proc.pid), "")
 
     def test_stale_foreground_pid_foreign_pane_and_changed_process_start_fail_closed(self):
@@ -730,7 +746,7 @@ class NativeCurrentSelectionTest(unittest.TestCase):
         self.codex = self.root / "codex"
         self.codex.write_text(
             "#!/bin/bash\n"
-            "exec -a codex /usr/bin/python3 -c 'import time; time.sleep(60)'\n"
+            f"exec -a codex /usr/bin/python3 -c {shlex.quote(_FIXTURE_RUNTIME)}\n"
         )
         self.codex.chmod(0o755)
         self.proc = self._spawn_codex()
@@ -755,7 +771,7 @@ class NativeCurrentSelectionTest(unittest.TestCase):
 
         process = subprocess.Popen(
             [str(self.codex)], stdin=slave if tty else subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
             preexec_fn=terminal if tty else None,
         )
         if slave is not None:
@@ -769,6 +785,7 @@ class NativeCurrentSelectionTest(unittest.TestCase):
                 process.wait(timeout=5)
 
         self.addCleanup(stop)
+        _wait_for_runtime(self, process)
         return process
 
     def _set_screens(self, screens, *, group=None, foreground_pid=None):
@@ -899,37 +916,54 @@ class TerminalCallerTest(unittest.TestCase):
         env = {k: v for k, v in os.environ.items() if k not in
                (*po._WORKER_ENV, "AGENT_SESSION_ROLE") and not k.startswith("OPENCODE_DISPATCH")}
         script = '''
-import os, subprocess, sys, json, signal, time
+import os, subprocess, sys, json, signal
 signal.signal(signal.SIGTTOU, signal.SIG_IGN)
-def stop(*_): raise SystemExit(0)
-signal.signal(signal.SIGTERM, stop)
-child = subprocess.Popen([sys.executable, '-u', '-c', "import time; print('ready', flush=True); time.sleep(60)"],
+stop_fd = int(sys.argv[2])
+job = "import os, sys; print('ready', flush=True); os.read(int(sys.argv[1]), 1)"
+with subprocess.Popen([sys.executable, '-u', '-c', job, str(stop_fd)],
     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-    preexec_fn=lambda: os.setpgid(0, 0))
-try:
-    assert child.stdout.readline() == b'ready\\n'
-    os.tcsetpgrp(0, child.pid if sys.argv[1] == '1' else os.getpgrp())
-    print(json.dumps({'shell_pid':os.getpid(), 'pid':child.pid, 'tty':os.ttyname(0),
-        'foreground_process_group_id':os.tcgetpgrp(0),
-        'foreground_processes':[{'pid':os.tcgetpgrp(0)}]}), flush=True)
-    time.sleep(60)
-finally:
-    child.terminate()
-    child.wait(timeout=5)
-    child.stdout.close()
+    pass_fds=(stop_fd,), preexec_fn=lambda: os.setpgid(0, 0)) as child:
+    try:
+        assert child.stdout.readline() == b'ready\\n'
+        os.tcsetpgrp(0, child.pid if sys.argv[1] == '1' else os.getpgrp())
+        print(json.dumps({'shell_pid':os.getpid(), 'pid':child.pid, 'tty':os.ttyname(0),
+            'foreground_process_group_id':os.tcgetpgrp(0),
+            'foreground_processes':[{'pid':os.tcgetpgrp(0)}]}), flush=True)
+        os.read(stop_fd, 1)
+    except BaseException:
+        child.kill()
+        raise
 '''
         def terminal():
             os.setsid()
             fcntl.ioctl(0, termios.TIOCSCTTY, 0)
-        proc = subprocess.Popen([sys.executable, "-u", "-c", script, "1" if foreground else "0"],
-                                stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                preexec_fn=terminal, env=env)
-        os.close(slave)
+        # EOF ends both processes even if teardown begins before either read.
+        # SIGTERM could arrive between the driver's ready line and its sleep.
+        stop_read, stop_write = os.pipe()
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-u", "-c", script, "1" if foreground else "0", str(stop_read)],
+                stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+                pass_fds=(stop_read,), preexec_fn=terminal)
+        except BaseException:
+            os.close(stop_write)
+            raise
+        finally:
+            os.close(stop_read)
+            os.close(slave)
+
         def settle():
-            proc.terminate()
-            _out, err = proc.communicate(timeout=5)
+            os.close(stop_write)
+            try:
+                _out, err = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate(timeout=5)
+                raise
             self.assertEqual(proc.returncode, 0, err.decode())
         self.addCleanup(settle)
+        self.assertTrue(select.select([proc.stdout], [], [], 5)[0],
+                        "private PTY driver did not report readiness")
         line = proc.stdout.readline()
         self.assertTrue(line, "private PTY driver did not report readiness")
         info = json.loads(line)

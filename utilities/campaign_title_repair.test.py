@@ -228,7 +228,7 @@ def data_of(prompt):
 
 
 def unified(title, summary="한 일과 결과를 한 줄로 적음", harness="claude", **over):
-    """An `invoke` that records prompts and answers the unified v2 reply (groups: none; one title for
+    """An `invoke` that records prompts and answers the metadata-only reply (one title for
     the campaign); the model is never called."""
     calls = []
 
@@ -237,10 +237,7 @@ def unified(title, summary="한 일과 결과를 한 줄로 적음", harness="cl
         data = data_of(prompt)
         vocab = [item["code"] for item in data["project_meta"]["branches"]]
         entity = {"title": title, "summary": summary, "branches": [vocab[0] if vocab else "GEN"], "kinds": ["평가"]}
-        reply = {"decisions": [{"cycle_id": cid, "verdict": "none", "reason": "근거 한 문장"}
-                               for cid in data["group_target_ids"]],
-                 "new_groups": [], "relations": [],
-                 "metadata": {"campaign": dict(entity), "cycles": {cid: dict(entity, title=f"{title} 사이클")
+        reply = {"metadata": {"campaign": dict(entity), "cycles": {cid: dict(entity, title=f"{title} 사이클")
                                                                      for cid in data["metadata_target_ids"]}},
                  "new_branches": [] if vocab else [{"code": "GEN", "label": "일반", "note": "기본 갈래"}]}
         reply.update(over)
@@ -438,9 +435,7 @@ class AutoSelectionAndWriteTest(AutoBase):
             def invoke(prompt):
                 data = data_of(prompt)
                 vocab = [item["code"] for item in data["project_meta"]["branches"]]
-                body = {"decisions": [{"cycle_id": c, "verdict": "none", "reason": "r"} for c in data["group_target_ids"]],
-                        "new_groups": [], "relations": [],
-                        "metadata": {"campaign": entity(title=title, branches=[vocab[0] if vocab else "GEN"]),
+                body = {"metadata": {"campaign": entity(title=title, branches=[vocab[0] if vocab else "GEN"]),
                                      "cycles": {c: entity(branches=[vocab[0] if vocab else "GEN"])
                                                 for c in data["metadata_target_ids"]}},
                         "new_branches": [] if vocab else [{"code": "GEN", "label": "일반", "note": ""}]}
@@ -481,7 +476,7 @@ class AutoSelectionAndWriteTest(AutoBase):
         result = self.auto(begun, unified("다시 시도해서 얻은 제목"))
         self.assertEqual(result["targets"][0]["status"], "written")
         self.assertEqual(self.meta(begun)["campaign"]["title"], "다시 시도해서 얻은 제목")
-        self.assertEqual({self.record()["cycles"][cid]["verdict"] for cid in self.meta(begun)["cycles"]}, {"unassigned"})
+        self.assertEqual({self.record()["cycles"][cid]["verdict"] for cid in self.meta(begun)["cycles"]}, {"titled"})
 
     def test_a_later_sealed_cycle_gets_its_own_metadata_and_refreshes_the_campaign_summary(self):  # A8
         begun = self.seal(key="later", slug="first", now=PAST)
@@ -768,7 +763,7 @@ class HumanRaceAndContractTest(AutoBase):
         self.assertEqual(self.declaration_path.read_bytes(), applied_declaration)
         self.assertEqual(repair.rollback(package)["status"], "rolled-back")
 
-    def test_the_cairn_declaration_reader_port_is_kept_and_auto_leaves_declarations_alone(self):  # A18
+    def test_auto_leaves_the_declaration_alone(self):  # A18
         single = self.seal(key="c-single", slug="a", now=PAST)
         multi = self.seal(key="c-multi", slug="b", now=PAST + 10)
         self.seal(key="c-multi", slug="c", now=PAST + 20)
@@ -781,38 +776,7 @@ class HumanRaceAndContractTest(AutoBase):
         before = self.declaration_path.read_bytes()
         self.assertEqual(self.auto(target, unified("계약을 통과하는 제목"))["targets"][0]["status"], "written")
         self.assertEqual(self.declaration_path.read_bytes(), before)  # auto never edits the declaration now
-        document = self.declaration()
-        repair.check_cairn_declaration(document, fixture.ROOT_ID)
-        self.assertEqual(len(document["entries"]), 2)
-
-        def broken(mutate):
-            copy = json.loads(json.dumps(document))
-            mutate(next(row for row in copy["entries"] if row["campaign_id"] == multi["campaign_id"]))
-            return copy
-
-        negatives = {
-            "bindings-empty": lambda e: e.update(manifest_bindings=[], manifest_revision_ids=[], manifest_digests=[]),
-            "bindings-invalid": lambda e: e.update(manifest_bindings=e["manifest_bindings"][::-1],
-                                                   manifest_revision_ids=e["manifest_revision_ids"][::-1],
-                                                   manifest_digests=e["manifest_digests"][::-1]),
-            "bindings-duplicate": lambda e: (e["manifest_bindings"][1].update(manifest_digest=e["manifest_bindings"][0]["manifest_digest"]),
-                                             e.update(manifest_digests=[e["manifest_bindings"][0]["manifest_digest"]] * 2)),
-            "binding-arrays-length": lambda e: e.update(manifest_digests=e["manifest_digests"][:1]),
-            "binding-arrays-mismatch": lambda e: e.update(manifest_revision_ids=e["manifest_revision_ids"][::-1]),
-            "campaign-id-duplicate": lambda e: e.update(campaign_id=single["campaign_id"]),
-            "campaign-id-or-title-empty": lambda e: e.update(display_title="  "),
-        }
-        for code, mutate in negatives.items():
-            with self.subTest(code):
-                with self.assertRaises(repair.AutoTitleError) as ctx:
-                    repair.check_cairn_declaration(broken(mutate), fixture.ROOT_ID)
-                self.assertEqual(ctx.exception.code, f"cairn-contract:{code}")
-        with self.subTest("digest-format"):
-            def bad_digest(e):
-                e["manifest_bindings"][0]["manifest_digest"] = "md5:abc"
-            with self.assertRaises(repair.AutoTitleError) as ctx:
-                repair.check_cairn_declaration(broken(bad_digest), fixture.ROOT_ID)
-            self.assertEqual(ctx.exception.code, "cairn-contract:bindings-invalid")
+        self.assertEqual(len(self.declaration()["entries"]), 2)
 
     def test_membership_that_changes_during_the_call_is_refused_and_nothing_is_written(self):  # A19
         first = self.seal(key="anchor-a", slug="first", now=PAST)

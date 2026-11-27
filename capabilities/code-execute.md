@@ -17,9 +17,10 @@ This is the portable capability contract for `code-execute`. It defines runtime-
 
 Execute an implementation plan with progress tracking
 
-Put environments, caches, external checkouts, temporary work and training
-checkpoints under the supplied `runtime_dir` or an established external project
-location. Keep reports/configs and compact provenance in artifacts; use
+Put environments, caches, external checkouts and temporary work under the
+supplied `runtime_dir` or an established external project location, and
+checkpoints and raw outputs under `raw_data_dir`. Keep reports/configs and
+compact provenance in artifacts; use
 `runtime_dir` or system temporary storage for pytest and tool scratch data.
 
 Adapters may expose this capability through native commands, skill files, prompt instructions, or explicit wrappers. The adapter must report unsupported runtime mechanics instead of silently treating another runtime's native file format as portable.

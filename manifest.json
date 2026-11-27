@@ -3,9 +3,9 @@
   "canonical_manifest": "harness-manifest.json",
   "topology_registry": {
     "source": "capabilities/topologies.json",
-    "digest": "sha256:85c20c05dfced8484f5f867d7bd9b78e9b68507a9557bd6ca2a414cb831e417a",
-    "capabilities": 13,
-    "recipes": 29
+    "digest": "sha256:d85489b2bb1f599c74f144b70c2eaa108c2394b21004e7cde4631e1e02d07267",
+    "capabilities": 14,
+    "recipes": 30
   },
   "manifest_version": "2.0.0",
   "skills": [
@@ -39,18 +39,6 @@
       "use_when": "Use when durable cross-project user preferences must be inferred from coding, writing, or analysis evidence and stored as a profile. Owns profile; default preset.",
       "not_for": "Not for one-project context recovery, casual preference acknowledgment, or ordinary task execution.",
       "argument_hint": "<aspect> [--source <path>] [--mode init|update] [--from discover|analyze|verify|qa|output|summary] [--user-refine]"
-    },
-    {
-      "slug": "skill__artifact-projection-read",
-      "name": "artifact-projection-read",
-      "group": "support",
-      "fam": "support",
-      "modes": [],
-      "blurb": "Read-only lookup of Cairn artifact projections through the canonical W3a contract.",
-      "invocation_class": "model-support",
-      "use_when": "Use when an agent or operator needs to browse or query an existing Cairn artifact projection without changing artifacts or runtime state.",
-      "not_for": "Not for primary task routing, ingest, mutation, activation, deactivation, apply, migration, namespace switching, or flat-browse fallback ownership.",
-      "argument_hint": "one JSON read request on stdin"
     },
     {
       "slug": "skill__audit",
@@ -383,6 +371,12 @@
     }
   ],
   "units": {
+    "analysis/analyze": {
+      "family": "analysis",
+      "role": "deep maker",
+      "worker_type": "stage",
+      "floor": "high"
+    },
     "design/critic": {
       "family": "design",
       "role": "fast reviewer",
@@ -447,6 +441,18 @@
       "family": "editorial",
       "role": "deep editor",
       "worker_type": "stage",
+      "floor": "low"
+    },
+    "editorial/write": {
+      "family": "editorial",
+      "role": "deep editor",
+      "worker_type": "stage",
+      "floor": "low"
+    },
+    "general/explore": {
+      "family": "general",
+      "role": "fast tool worker",
+      "worker_type": "support",
       "floor": "low"
     },
     "material/browser-fetch": {
@@ -589,6 +595,10 @@
     }
   },
   "modes": {
+    "analysis/analyze": {
+      "unit": "analysis/analyze",
+      "status": "portable-persona"
+    },
     "design/_design_rules": {
       "status": "adapter-coupled",
       "internal": true
@@ -635,6 +645,14 @@
     },
     "editorial/translate": {
       "unit": "editorial/translate",
+      "status": "portable-persona"
+    },
+    "editorial/write": {
+      "unit": "editorial/write",
+      "status": "portable-persona"
+    },
+    "general/explore": {
+      "unit": "general/explore",
       "status": "portable-persona"
     },
     "material/browser-fetch": {
@@ -798,13 +816,6 @@
       "hard_block": false
     },
     {
-      "slug": "hook__frame-native-answer.py__PostToolUse",
-      "name": "frame-native-answer.py",
-      "mono": "frame-native-answer.py",
-      "event": "PostToolUse",
-      "hard_block": false
-    },
-    {
       "slug": "hook__git-index-lock-context.py__PostToolUse",
       "name": "git-index-lock-context.py claude",
       "mono": "git-index-lock-context.py",
@@ -882,9 +893,9 @@
       "hard_block": false
     },
     {
-      "slug": "hook__fleet-interaction-state.py__PreToolUse",
-      "name": "fleet-interaction-state.py set",
-      "mono": "fleet-interaction-state.py",
+      "slug": "hook__native-question-redirect.py__PreToolUse",
+      "name": "native-question-redirect.py",
+      "mono": "native-question-redirect.py",
       "event": "PreToolUse",
       "hard_block": false
     },

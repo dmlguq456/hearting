@@ -53,10 +53,8 @@ Adapters may expose this capability through native commands, skill files, prompt
 
 **One gate, raised from the frame legs (SD-123/SD-129).** A `quick+` route seals `human_gates: ["frame-review"]` and both
 `frame` and `frame-alternative` continuations as that human gate, bound at
-`one-shot`'s entry for `quick` and `material-strategy`'s entry for `standard+`. `frame-review` is the recipe's only human gate:
-the old `user-refine-disposition` declaration is retired, because it named a
-terminal-position binding that no node ever raised and no launch surface ever
-checked. A route sealed before this cycle keeps its own generation's gate
+`one-shot`'s entry for `quick` and `material-strategy`'s entry for `standard+`. `frame-review` is the recipe's only human gate.
+A route sealed before this cycle keeps its own generation's gate
 name, binding and node shape and is **never retro-fitted** — the entry fence
 in `utilities/dispatch_contract.py` reads only the route object it was handed.
 
@@ -134,6 +132,10 @@ binds `direct`, `quick`, and `standard+`; only the acting owner differs.
 Use portable role names from `roles/README.md` and `core/CONVENTIONS.md`. Concrete model names, subagent frontmatter, and runtime-specific tool lists belong in adapter files.
 
 Pipeline intensity follows `core/CONVENTIONS.md §1`: `direct` has no plan stage or durable plan artifact; `quick` is one registered-headless dispatch-depth-1 one-shot conductor with its inline micro-plan plus plan-check-lite; `standard+` uses the capability's durable work-cycle plan when applicable. This recipe has no separate `plan-check` node (only `autopilot-code` declares one): `quick` checks its micro-plan inline (plan-check-lite), and `standard+` reviews through the recipe's own review stages — `strategy-review`, `quality-review`, and `fact-verify` — rather than after every stage. Verification rigor for those reviews and final verify is derived from intensity; it does not name a model or introduce a separate stage graph. `capabilities/topologies.json` (recipe plus `part_catalog`) is the one stage list; `capability-route.py stages --capability autopilot-draft` prints it.
+
+`quality-review` and `fact-verify` are shareable read parts: another kind's explicit graph may
+borrow `autopilot-draft:quality-review` or `autopilot-draft:fact-verify` with the same unit and
+gate, written under that host's review anchor in `parts/autopilot-draft/<stage>/`.
 
 ## Guard Requirements
 

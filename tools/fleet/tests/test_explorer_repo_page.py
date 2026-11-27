@@ -59,7 +59,7 @@ class RepoPageTest(unittest.TestCase):
         frame = draw(self.vm, self.state, 168, 90, beat=1)
         text = pane(frame)
         names = ("STATUS", "OPEN WORK", "OPEN ROUTES", "RECENT RESULTS", "RECENT WORK", "SESSIONS")
-        positions = [text.index("── " + name) for name in names]
+        positions = [text.index(name + " ─") for name in names]   # section heads: ``N NAME ───``
         self.assertEqual(positions, sorted(positions))
         for value in ("status-from-doc", "doing-item", "waiting-item", "active-route",
                       "confirmed-result", "closed-route", "small-work", "greet.py", "now-line"):
@@ -93,7 +93,7 @@ class RepoPageTest(unittest.TestCase):
         times = [1799999600, 1799999700, 1799999800, 1799999900]
         model = self.recent_model(times)
         text = pane(draw(model, self.state, 168, 90, beat=1))
-        recent = text.split("── RECENT RESULTS", 1)[1].split("── RECENT WORK", 1)[0]
+        recent = text.split("RECENT RESULTS ─", 1)[1].split("RECENT WORK ─", 1)[0]
         self.assertIn("completed-route-3", recent)  # Independent review's original counterexample.
         names = [f"completed-route-{i}" for i in (3, 2, 1)]
         self.assertEqual([recent.index(name) for name in names], sorted(recent.index(name) for name in names))
@@ -105,7 +105,7 @@ class RepoPageTest(unittest.TestCase):
                                   {"name": "recorded-result", "result": "success", "at": 90})
         self.assertEqual(model.repos[0].get("done_at"), 90)
         recent = pane(draw(model, self.state, 168, 90, beat=1)).split(
-            "── RECENT RESULTS", 1)[1].split("── RECENT WORK", 1)[0]
+            "RECENT RESULTS ─", 1)[1].split("RECENT WORK ─", 1)[0]
         names = ["recorded-result", "completed-route-3", "completed-route-2"]
         self.assertEqual([recent.index(name) for name in names], sorted(recent.index(name) for name in names))
         self.assertNotIn("completed-route-0", recent)
@@ -115,7 +115,7 @@ class RepoPageTest(unittest.TestCase):
         model = self.recent_model([True, float("nan"), "not-a-time", None])
         self.assertTrue(all(route["result_at"] is None for route in model.routes))
         recent = pane(draw(model, self.state, 168, 90, beat=1)).split(
-            "── RECENT RESULTS", 1)[1].split("── RECENT WORK", 1)[0]
+            "RECENT RESULTS ─", 1)[1].split("RECENT WORK ─", 1)[0]
         names = [f"completed-route-{i}" for i in (0, 1, 2)]
         self.assertEqual([recent.index(name) for name in names], sorted(recent.index(name) for name in names))
 
@@ -144,7 +144,7 @@ class RepoPageTest(unittest.TestCase):
             with self.subTest(state=state, stale=stale):
                 system = dict(self.vm.system, project_memory={"state": state, "stale": stale, "projects": {}})
                 text = pane(draw(replace(self.vm, system=system), self.state, 168, 90, beat=1))
-                block = text.split("── OPEN WORK", 1)[1].split("── OPEN ROUTES", 1)[0]
+                block = text.split("OPEN WORK ─", 1)[1].split("OPEN ROUTES ─", 1)[0]
                 self.assertIn(expected, block)
                 if state == "unknown":
                     self.assertNotIn("No open work", block)
@@ -153,14 +153,14 @@ class RepoPageTest(unittest.TestCase):
         repos = tuple(dict(row, done_result=None) for row in self.vm.repos)
         vm = replace(self.vm, repos=repos, routes=())
         text = pane(draw(vm, self.state, 168, 90, beat=1))
-        recent = text.split("── RECENT RESULTS", 1)[1].split("── RECENT WORK", 1)[0]
+        recent = text.split("RECENT RESULTS ─", 1)[1].split("RECENT WORK ─", 1)[0]
         self.assertIn("No confirmed completed results.", recent)
         self.assertNotIn("confirmed-result", recent)
 
     def test_paused_open_route_uses_the_existing_history_boundary(self):
         paused = dict(self.vm.routes[0], state="idle", current=False, activity="ended", title="paused-route")
         text = pane(draw(replace(self.vm, routes=(paused,)), self.state, 168, 90, beat=1))
-        block = text.split("── OPEN ROUTES", 1)[1].split("── RECENT RESULTS", 1)[0]
+        block = text.split("OPEN ROUTES ─", 1)[1].split("RECENT RESULTS ─", 1)[0]
         self.assertIn("paused-route", block)
 
     def test_now_remains_visible_when_the_table_has_no_now_column(self):
@@ -169,7 +169,7 @@ class RepoPageTest(unittest.TestCase):
         for cols in (80, 100, 140, 168):
             with self.subTest(cols=cols):
                 text = pane(draw(self.vm, self.state, cols, 90, beat=1))
-                sessions = text.split("── SESSIONS", 1)[1]
+                sessions = text.split("SESSIONS ─", 1)[1]
                 self.assertIn("now-line", sessions)
                 self.assertNotIn("human-line", sessions)
 
@@ -178,7 +178,7 @@ class RepoPageTest(unittest.TestCase):
         vm = replace(self.vm, sessions=(session,))
         for cols in (80, 100, 140, 168):
             with self.subTest(cols=cols):
-                sessions = pane(draw(vm, self.state, cols, 90, beat=1)).split("── SESSIONS", 1)[1]
+                sessions = pane(draw(vm, self.state, cols, 90, beat=1)).split("SESSIONS ─", 1)[1]
                 lines = sessions.splitlines()
                 notice = next(i for i, line in enumerate(lines) if ui_text("fleet.resume.stopped") in line)
                 prompt = next(i for i, line in enumerate(lines) if "now-line" in line)

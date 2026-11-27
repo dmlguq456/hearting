@@ -47,6 +47,7 @@ import route_format
 import route_identity as ROUTE_IDENTITY
 import route_lineage as ROUTE_LINEAGE
 import route_plan as ROUTE_PLAN
+import route_form as ROUTE_FORM
 import dispatch_runtime_support as RUNTIME_SUPPORT
 import dispatch_terminal_commit
 import model_profile as PROFILE
@@ -175,9 +176,10 @@ from capability_route_nodes import (  # noqa: F401
     _capture_unit_frontmatter, _expected_nodes_under_frame_policy, _frame_node,
     _frameless_recipe, _load_sd160_snapshots, _no_model_node, _one_leg_frame_recipe,
     _owner_node, _profile_input_maps, _quick_frame_diversity, _quick_gate_bindings,
+    one_shot_owner_default, one_shot_review_declared, one_shot_review_node, one_shot_review_nodes,
     _recipe_has_frame, _resolve_owner_profile, _sd160_snapshot_path, _seal_confirmation_mode,
     _seal_profile_demands, _seal_small_work_confirmation, _seal_terminal_commit_support,
-    _stamp_frame_profiles, _unit_blocks_digest, _verify_profile_contract,
+    _stamp_frame_profiles, _unit_blocks_digest, _verify_profile_contract, unit_leg_node,
     SD160_REGISTRY_DIGEST, SD160_SNAPSHOT_DIR, SD160_UNIT_CATALOG_DIGEST, unit_catalog_digest,
 )
 from capability_route_compose import (  # noqa: F401
@@ -194,17 +196,18 @@ from capability_route_compose import (  # noqa: F401
     _versioned_subgraph, _without_implicit_frame_briefs, COMPOSE_DEFAULT_CAPABILITY,
     COMPOSE_DEFAULT_CHILDREN, COMPOSE_SHAPES, compose_spec_read, compose_subgraph_recipe,
     DECIDED_SHAPES, DEFAULT_ARTIFACT_GUARD, DEFAULT_DRIFT_VERDICT, INTENSITY_SHAPE,
-    parse_graph_spec, proposal_readiness, ROUTE_FRAME_CAPABILITY, ROUTE_ORIGINS,
+    parse_graph_spec, proposal_readiness, read_compose_task, ROUTE_FRAME_CAPABILITY, ROUTE_ORIGINS,
     shape_for_intensity, SHAPE_INTENSITY, SPEC_READ_MARKER_PREFIX, SPEC_READ_SHARED_PREFIX,
 )
 from capability_route_scope import (  # noqa: F401
     _bind_entry_execution_scope, _CAMPAIGN_ROWS_UNSET, _compose_campaign_line,
     _project_entry_scope_nodes, compose_campaign_hint, COMPOSE_CAMPAIGN_LIST_CAP,
-    compose_campaign_selection, compose_campaign_summaries, compose_card,
+    compose_campaign_default, compose_campaign_selection, compose_campaign_summaries, compose_card,
+    frame_advice, frame_advice_reason,
     compose_decision_lines, compose_default_slug, compose_observations, compose_omission_lines,
     compose_resolve_campaign_key, COMPOSE_SLUG_WORDS, cwd_campaign_keys,
     CWD_CAMPAIGN_KEYS_SHOWN, CWD_CAMPAIGN_SCAN_ROUTES, declared_start_approvals,
-    first_campaign_key, project_entry_execution_scope, route_plan_execution_scope,
+    project_entry_execution_scope, route_plan_execution_scope,
     route_start_approvals, valid_entry_execution_scope_marker,
 )
 from capability_route_verify import (  # noqa: F401
@@ -268,7 +271,7 @@ from capability_route_worktree import (  # noqa: F401
     _worktree_cwd, _worktree_git, attempt_route_file, caller_open_route,
     compose_campaign_snapshot, compose_command_snapshot, compose_receipt,
     prepare_isolated_worktree, publish_composed_route, resolve_route_argument,
-    ROUTE_ATTEMPT_FIELDS, route_attempts, ROUTE_ID_FORM, route_owner_attempt, stages_block,
+    ROUTE_ATTEMPT_FIELDS, route_attempts, ROUTE_ID_FORM, route_owner_attempt, stages_block, unit_stages_block,
 )
 
 # Moved classes report the module they were defined in before the split (for
@@ -860,7 +863,7 @@ def _note_warning(line):
         DISPATCH_DEFAULTS_WARNINGS.append(line)
 
 
-def _seal_dispatch_defaults(nodes, capability, owner_profile=None):
+def _seal_dispatch_defaults(nodes, capability, owner_profile=None, field=None, field_table=None):
     """Return defaults digest/allocation and stamp each dispatch-depth-2 node's
     harness_affinity, BEFORE route_hash is computed. Absent config -> all
     'unspecified' + digest None. Structurally corrupt config -> fail-loud
@@ -869,14 +872,17 @@ def _seal_dispatch_defaults(nodes, capability, owner_profile=None):
     Each depth-2 node and each depth-1 frame leg carries its profile's sealed
     harness_policy, so a frame launched later reads the same bands the route
     was sealed with instead of re-reading the live file. registry_digest is a
-    separate field and is never touched here."""
+    separate field and is never touched here. A route with a field seals that
+    field's applied weight row beside the allocation (`field_weights`, from the
+    registry's default table plus the user's override); a neutral row or no
+    field seals no key, so those routes keep their bytes."""
     config_path = DEFAULTS.default_config_path()
     if not os.path.exists(config_path):
         for node in nodes:
             if node.get("dispatch_depth") == 2:
                 node["harness_affinity"] = "unspecified"
                 node["harness_policy"] = None
-            elif _frame_node(node):
+            elif ROUTE_PLAN.is_depth0_leg(node):
                 node["harness_policy"] = None
         return None, None, None
     try:
@@ -893,13 +899,17 @@ def _seal_dispatch_defaults(nodes, capability, owner_profile=None):
             node["harness_policy"] = DEFAULTS.query_profile_policy(
                 cfg, node["model_profile"]
             )
-        elif _frame_node(node):
+        elif ROUTE_PLAN.is_depth0_leg(node):
             node["harness_policy"] = DEFAULTS.query_profile_policy(
                 cfg, node["model_profile"]
             )
+    allocation = DEFAULTS.query_allocation(cfg)
+    field_weights = DEFAULTS.query_field_weights(cfg, field, field_table)
+    if field_weights:
+        allocation["field_weights"] = field_weights
     return (
         "sha256:" + hashlib.sha256(canonical(cfg)).hexdigest(),
-        DEFAULTS.query_allocation(cfg),
+        allocation,
         DEFAULTS.query_profile_policy(cfg, owner_profile) if owner_profile else None,
     )
 
@@ -931,7 +941,8 @@ def compile_route(capability, capability_mode, requested_intensity, cwd, artifac
                   registered_headless_evidence=None, slug=None,
                          route_origin="preset", shape=None, profile_demands=None,
                          explicit_profiles=None, campaign_key=None, parent_cycle_id=None, profile=None,
-                         route_plan=None, frameless=False, frame_legs=2):
+                         route_plan=None, frameless=False, frame_legs=2, field=None, field_source=None,
+                         unit=None):
     registry=TOPO.load_registry(); TOPO.validate_registry(registry)
     recipe=TOPO.resolve_recipe(registry, capability, capability_mode)
     return _compile_from_recipe(
@@ -944,7 +955,77 @@ def compile_route(capability, capability_mode, requested_intensity, cwd, artifac
         campaign_key=campaign_key, parent_cycle_id=parent_cycle_id,
         route_origin=route_origin, shape=shape, profile_demands=profile_demands,
         explicit_profiles=explicit_profiles, profile=profile,
-        route_plan=route_plan, frameless=frameless, frame_legs=frame_legs)
+        route_plan=route_plan, frameless=frameless, frame_legs=frame_legs,
+        field=field, field_source=field_source, unit=unit)
+
+
+def _compose_default_mode(candidates):
+    """The mode compose picks when none is named: `dev` where the kind has it, else its first mode."""
+    base = next((r for r in candidates if "dev" in r["modes"]), candidates[0])
+    return "dev" if "dev" in base["modes"] else sorted(base["modes"])[0]
+
+
+def _compose_slug_field(a, shape, route_plan_binding=None):
+    """The field a default slug starts with: the named one, a proposal leg's, or the kind's default."""
+    registry = TOPO.load_registry()
+    fields = TOPO.field_vocabulary(registry)
+    if a.field in fields:
+        return a.field
+    if getattr(a, "unit", None):
+        try:
+            return TOPO._unit_frontmatter(a.unit).get("field")
+        except TOPO.TopologyError:
+            return None
+    leg = (route_plan_binding or {}).get("leg") or {}
+    if leg.get("field") in fields:
+        return leg["field"]
+    candidates = [r for r in registry["recipes"] if r["capability"] == a.capability
+                  and r["capability"] not in TOPO.COMPILER_INTERNAL_CAPABILITIES]
+    if not candidates:
+        return None
+    mode = a.capability_mode or _compose_default_mode(candidates)
+    recipe = next((r for r in candidates if mode in r["modes"]), None)
+    return TOPO.recipe_field(recipe, mode) if recipe is not None else None
+
+
+def _compose_unit_arguments(registry, unit, *, capability, capability_mode, shape, intensity, field,
+                            graph, route_plan, signals, execution_scope):
+    """What `--unit <family/name>` means for compose: the kind `unit`, one quick solo leg, the unit's field.
+
+    `--unit` names the kind itself, so nothing else has to be typed. An argument that contradicts it
+    is refused by name. A unit the catalog lacks, a unit that writes (v1 opens read-only units only)
+    and a unit with no default field (and no `--field`) are refused the same way."""
+    given = [("--capability", capability, (None, TOPO.UNIT_CAPABILITY)),
+             ("--capability-mode", capability_mode, (None, "default")),
+             ("--shape", shape, (None, "solo")),
+             ("--intensity", intensity, (None, ROUTE_FORM.UNIT_RECORDED_INTENSITY)),   # `quick` is an old command's habit: accepted, ignored
+             ("--graph", graph, (None,)), ("--route-plan", route_plan, (None,)),
+             ("--signal", signals or None, (None,)), ("--execution-scope", execution_scope, (None,))]
+    for flag, value, allowed in given:
+        if value not in allowed:
+            if flag == "--intensity":
+                reason = ("a unit route has no intensity: one unit does one job and nothing checks it; to have the work "
+                          "checked open --shape solo or staged with --intensity, and to judge more deeply use --profile")
+            else:
+                reason = "--unit is the kind unit: one leg of that unit"
+            raise ValueError(f"compose-unit-conflict:{flag} {value if isinstance(value, str) else ''}".rstrip()
+                             + f" ({reason})")
+    try:
+        head = TOPO._unit_frontmatter(unit) if re.fullmatch(r"[a-z-]+/[a-z-]+", unit) else None
+    except TOPO.TopologyError:
+        head = None
+    if head is None:
+        raise ValueError(f"compose-unit-unknown:{unit} (units: {','.join(TOPO.unit_names())})")
+    if head["read_only"] != "true":
+        raise ValueError(f"compose-unit-writes:{unit} (this unit writes; a unit route opens read-only units "
+                         "only for now, and a writing unit runs inside a staged route)")
+    if field is not None:
+        return TOPO.UNIT_CAPABILITY, "default", "solo", field, "explicit"
+    if head["field"] is None:
+        fields = TOPO.field_vocabulary(registry)
+        raise ValueError(f"compose-field-required:--unit {unit} (unit {unit} has no default field; "
+                         f"name --field <field>; fields: {','.join(fields)})")
+    return TOPO.UNIT_CAPABILITY, "default", "solo", head["field"], "preset"
 
 
 def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artifact_root,
@@ -954,15 +1035,23 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
                   transport_evidence="compose-default", jobs=None, profile_demands=None, explicit_profiles=None,
                   campaign_key=None, parent_cycle_id=None, profile=None, work_request=None, unassigned=False,
                   selection_pins=None, route_plan=None, frameless=False, execution_scope=None,
-                  extra_stages=None, selection_only=False, capability_source=None):
+                  extra_stages=None, selection_only=False, capability_source=None, field=None, unit=None,
+                  campaign_default=None):
     """Resolve every default, then compile through the ordinary sealer.
 
     `route_plan` (a binding read by `route_plan.read_route_plan`) seals `{decision, digest, index}`
     and compiles without frame nodes; `frameless` alone is the same compile without the seal, the form
     a proposal leg is validated in. A `solo` or `staged` shape is chosen for work that is already
     decided, so it compiles without the recipe's frame pair too; `framed` is where a frame runs.
+
+    Every decided shape names its kind, its field, or both (routing/prd.md R8): a field alone
+    opens that field's default recipe; neither is refused, naming what is missing.
     """
     import route_plan as RP
+    registry = TOPO.load_registry()
+    fields = TOPO.field_vocabulary(registry)
+    if field is not None and field not in fields:
+        raise ValueError(f"compose-field-unknown:{field} (fields: {','.join(fields)})")
     if route_plan is not None and shape == "framed":
         leg = route_plan["leg"]
         shape = leg["shape"]
@@ -971,8 +1060,28 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
         graph = graph or (",".join(leg["graph"]) if leg.get("graph") else None)
         intensity = intensity or leg.get("intensity")
     given_intensity, given_capability = intensity, capability
+    field_source = "explicit" if field is not None else None
+    if unit is not None:
+        capability, capability_mode, shape, field, field_source = _compose_unit_arguments(
+            registry, unit, capability=capability, capability_mode=capability_mode, shape=shape,
+            intensity=intensity, field=field, graph=graph, route_plan=route_plan, signals=signals,
+            execution_scope=execution_scope)
+        capability_source = capability_source or "explicit"
+    if route_plan is not None and field is None:
+        # A frame proposal's leg may name its field; otherwise the proposed kind's default one.
+        leg_field = route_plan["leg"].get("field")
+        field, field_source = (leg_field if leg_field in fields else None), "frame"
     if capability is None and shape != "framed":
-        capability = COMPOSE_DEFAULT_CAPABILITY
+        if field is None:
+            raise ValueError(f"compose-capability-required:{shape} (name --capability <capability> "
+                             f"or --field <field>; fields: {','.join(fields)})")
+        default = TOPO.field_default_recipe(registry, field)
+        if default is None:
+            raise ValueError(f"compose-capability-required:--field {field} (field {field} has no default "
+                             f"recipe; also name --capability, e.g. --capability autopilot-draft --field {field})")
+        capability, default_mode = default
+        capability_mode = capability_mode or default_mode
+        capability_source = capability_source or "field-default"
     sealed_plan = RP.sealed_form(route_plan) if route_plan is not None else None
     frameless = frameless or route_plan is not None or shape in DECIDED_SHAPES
     if execution_scope is None and route_plan is not None:
@@ -989,8 +1098,9 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
         # route's capability, never refused as an argument conflict, never applied to a model.
         routing_hints = {key: value for key, value in (
             ("capability", capability), ("capability_mode", capability_mode),
-            ("graph", graph), ("profile", profile)) if value}
+            ("field", field), ("graph", graph), ("profile", profile)) if value}
         capability, capability_mode, graph, profile = ROUTE_FRAME_CAPABILITY, "default", None, None
+        field, field_source = None, None  # the frame proposes the field of the work it routes
         if intensity is not None and intensity not in ORDER:
             raise ValueError("invalid intensity")
         # The framed route stays standard; its declared frame width is sealed separately.
@@ -1002,17 +1112,15 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
         capability, capability_mode or "setup", graph.split(",") if graph else None))
     if shape != "staged" and graph and not resume_graph:
         raise ValueError(f"compose-graph-only-staged:{shape}")
-    registry = TOPO.load_registry()
     # A capability may own several recipes (autopilot-lab: setup, eval); the
     # requested mode picks the recipe that declares it. The internal framed
     # capability exists only for the framed shape.
     candidates = [r for r in registry["recipes"] if r["capability"] == capability
-                  and (capability != ROUTE_FRAME_CAPABILITY or shape == "framed")]
+                  and (capability != ROUTE_FRAME_CAPABILITY or shape == "framed")
+                  and (capability != TOPO.UNIT_CAPABILITY or unit is not None)]
     if not candidates:
         raise ValueError(f"compose-capability-unknown:{capability}")
-    if capability_mode is None:
-        base = next((r for r in candidates if "dev" in r["modes"]), candidates[0])
-        capability_mode = "dev" if "dev" in base["modes"] else sorted(base["modes"])[0]
+    capability_mode = capability_mode or _compose_default_mode(candidates)
     base = next((r for r in candidates if capability_mode in r["modes"]), None)
     if base is None:
         modes = sorted({mode for r in candidates for mode in r["modes"]})
@@ -1020,25 +1128,20 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
     requested = intensity or SHAPE_INTENSITY[shape]
     if requested not in ORDER:
         raise ValueError("invalid intensity")
-    if shape == "direct" and requested != "direct":
-        raise ValueError("compose-shape-intensity-mismatch:direct (allowed: direct)")
-    if shape == "solo" and requested != "quick":
-        raise ValueError("compose-shape-intensity-mismatch:solo (allowed: quick)")
-    if shape == "staged" and ORDER[requested] < ORDER["standard"]:
-        raise ValueError("compose-shape-intensity-mismatch:staged (allowed: standard,strong,thorough,adversarial)")
+    mismatch = ROUTE_FORM.intensity_mismatch(shape, requested, one_shot_review_declared(base))
+    if mismatch is not None:
+        raise ValueError(mismatch)
     cwd = str(Path(cwd).resolve(strict=True))
     artifact_root = str(Path(artifact_root).resolve())
-    # The campaign is the agent's proposal for the work stream (CONVENTIONS
-    # "Campaign or cycle").  A route sealed without one silently landed in the
-    # root's degraded `_unassigned` container (Project-C 2026-09-15: nine
-    # routes, zero keys), so compose demands the proposal, shows the streams
-    # that already exist, and accepts only an explicit opt-out.
     if unassigned and (campaign_key is not None or parent_cycle_id is not None):
         raise ValueError("compose-campaign-selection-conflict:--unassigned excludes --campaign-key and --parent-cycle")
     if campaign_key is None and parent_cycle_id is None and not unassigned:
-        campaign_key = first_campaign_key(artifact_root, cwd)
-        if campaign_key is None:
+        # The CLI picks in the source folder before it prepares an isolated worktree.
+        if campaign_default is None:
+            campaign_default = compose_campaign_default(artifact_root, cwd)
+        if campaign_default.source is None:
             raise ValueError("compose-campaign-key-required:" + compose_campaign_hint(artifact_root, cwd))
+        campaign_key = campaign_default.key
     if tracking is None:
         tracking = "tracked" if shape in ("staged", "framed") or resume_graph else "untracked"
     gate = None if selection_only else {
@@ -1051,6 +1154,10 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
     if resume_graph:
         predicates = [p for p in predicates if p not in ("no-resource-run", "no-independent-verifier")]
     signals = sorted(set(signals or ()))
+    # The middle cell `solo·standard`: a `solo` route of a kind that declares a review, raised above quick
+    # by an explicit `--intensity standard` or a promotion signal (a signal raises the intensity, not the form).
+    middle_cell = (shape == "solo" and one_shot_review_declared(base) and not resume_graph
+                   and max((requested, "standard" if signals else "quick"), key=ORDER.get) != "quick")
     if shape == "direct" and signals:
         raise ValueError("compose-direct-signals-conflict")
     if selection_pins:
@@ -1071,7 +1178,7 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
         except ImportError:
             find_input = None
     capabilities = {recipe["capability"] for recipe in registry["recipes"]
-                    if recipe["capability"] != ROUTE_FRAME_CAPABILITY}
+                    if recipe["capability"] not in TOPO.COMPILER_INTERNAL_CAPABILITIES}
     if find_input is not None and frameless:
         if parent_cycle_id is None and route_plan is None:
             find_input = _without_implicit_frame_briefs(registry, find_input)
@@ -1097,6 +1204,13 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
     if selection_only:
         if shape == "direct":
             nodes = [{"id": "inline", "write_scope": list(base["quick"]["write_scope"])}]
+        elif unit is not None:
+            nodes = [{"id": TOPO.UNIT_NODE_ID, "write_scope": list(base["quick"]["write_scope"])}]
+        elif middle_cell:
+            # The middle cell: the kind's declared verification nodes at this intensity, then the owner's end node.
+            cell_intensity = max((requested, "standard" if signals else "quick"), key=ORDER.get)
+            nodes = [*one_shot_review_nodes(base, cell_intensity, registry),
+                     {"id": "one-shot", "write_scope": list(base["quick"]["write_scope"])}]
         elif shape == "solo" and not signals:
             if resume_graph and RESOURCE_RESUME.recipe_selected(base):
                 nodes = RESOURCE_RESUME.nodes(base, registry["owner_profile_by_intensity"]["quick"])
@@ -1147,7 +1261,7 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
                 row for row in dispatch_evidence["tuples"] if row.get("parent_harness") != "codex"
             ] + readiness["tuples"]}
     owner_pin = (selection_pins or {}).get("owner", {}).get("harness")
-    if shape in ("staged", "framed") and not owner_only and dispatch_evidence is None:
+    if (shape in ("staged", "framed") or middle_cell) and not owner_only and dispatch_evidence is None:
         readiness = _compose_readiness(cwd, jobs or _compose_default_jobs(), parent_harness,
                                        children or _compose_default_children(selection_pins),
                                        gpu_route=gpu_route if shape == "staged" else None,
@@ -1166,7 +1280,8 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
     if (shape == "solo" or owner_only or resume_graph) and registered_headless_evidence is None:
         readiness = readiness or _compose_readiness(
             cwd, jobs or _compose_default_jobs(), parent_harness,
-            children or _compose_default_children(selection_pins))
+            children or _compose_default_children(selection_pins),
+            worker_caller=unit is not None and os.environ.get("AGENT_DISPATCH_DEPTH", "0") != "0")
         registered_headless_evidence = {"candidates": readiness["candidates"]}
     common = dict(
         signals=signals, transport=None, transport_evidence=transport_evidence,
@@ -1176,8 +1291,9 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
         registered_headless_evidence=registered_headless_evidence,
         route_origin="compose", shape=shape,
         profile_demands=profile_demands, explicit_profiles=explicit_profiles, profile=profile,
-        route_plan=sealed_plan, frameless=frameless,
+        route_plan=sealed_plan, frameless=frameless, field=field, field_source=field_source,
         **({"frame_legs": frame_legs} if shape == "framed" else {}),
+        **({"unit": unit} if unit is not None else {}),
     )
     if graph_spec is not None:
         recipe = selected_recipe
@@ -1304,6 +1420,32 @@ def _compile_first_leg(leg, *, frame_route, frame_cycle_id, context, binding, wo
     return route
 
 
+def _sealed_field(registry, recipe, capability, capability_mode, field=None, field_source=None):
+    """`{field, field_source}` beside the selection record; empty for route-frame (its frame proposes one).
+
+    A field the caller named is `explicit`; otherwise the recipe's default field, which
+    is `preset` unless the caller says it came from a frame proposal (`frame`)."""
+    if field is None:
+        base = recipe
+        if "field" not in recipe and capability not in TOPO.COMPILER_INTERNAL_CAPABILITIES:
+            # A composed recipe is cut from its registry recipe and carries no field of its own.
+            origin = (recipe.get("compose") or {}).get("base_capability") or capability
+            try:
+                base = TOPO.resolve_recipe(registry, origin, capability_mode)
+            except TOPO.TopologyError:
+                base = recipe
+        field = TOPO.recipe_field(base, capability_mode)
+        if field is None:
+            return {}
+        field_source = field_source or "preset"
+    if field not in TOPO.field_vocabulary(registry):
+        raise ValueError(f"compose-field-unknown:{field} (fields: {','.join(TOPO.field_vocabulary(registry))})")
+    field_source = field_source or "explicit"
+    if field_source not in TOPO.FIELD_SOURCES:
+        raise ValueError(f"invalid field source: {field_source}")
+    return {"field": field, "field_source": field_source}
+
+
 def compile_composed_route(composed_recipe, capability_mode, requested_intensity, cwd, artifact_root,
                            **kwargs):
     """Compile a compose-on-demand recipe through the SAME validate/seal path (composed: true)."""
@@ -1331,13 +1473,16 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
                          registered_headless_evidence=None, slug=None, composed=False,
                   route_origin="preset", shape=None, profile_demands=None,
                   explicit_profiles=None, campaign_key=None, parent_cycle_id=None, profile=None,
-                  route_plan=None, frameless=False, frame_legs=2):
+                  route_plan=None, frameless=False, frame_legs=2, field=None, field_source=None,
+                  unit=None):
     dispatch_terminal_commit.require_current_cleanup("route-compile")
     if route_origin not in ROUTE_ORIGINS: raise ValueError("invalid route origin")
     if (capability==ROUTE_FRAME_CAPABILITY) != (shape=="framed"):
         raise ValueError(f"compose-shape-invalid:{shape}")
     if capability==ROUTE_FRAME_CAPABILITY and frame_legs==1:
         recipe=_one_leg_frame_recipe(recipe)
+    if (capability==TOPO.UNIT_CAPABILITY) != (unit is not None):
+        raise ValueError("compose-unit-required: the kind unit is opened with --unit <family/name>")
     cwd=Path(cwd).resolve(strict=True); artifact=Path(artifact_root).resolve()
     if not cwd.is_absolute() or not artifact.is_absolute(): raise ValueError("cwd and artifact root must be absolute")
     slug_fields={}
@@ -1363,11 +1508,19 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         raise ValueError(f"invalid transport: {transport!r}")
     inferred="standard" if signals else ("direct" if set(predicates)==known_pred else "quick")
     effective=max((requested,inferred),key=ORDER.get)
-    resume_recipe = composed and RESOURCE_RESUME.recipe_selected(recipe) and effective == "quick"
-    if composed and effective in ("direct","quick") and not resume_recipe:
+    if capability==TOPO.UNIT_CAPABILITY and effective!=ROUTE_FORM.UNIT_RECORDED_INTENSITY:
+        raise ValueError(f"compose-unit-conflict:{effective} (a unit route has no intensity)")
+    # The route form this request builds; every form-dependent step below reads it, never `effective`.
+    review_declared=one_shot_review_declared(recipe)
+    form=ROUTE_FORM.form_of(capability,effective,shape,review_declared)
+    serial_attempt=ROUTE_FORM.serial_attempt_form(form)
+    # The middle cell: one owner makes the work and starts its kind's one declared review node.
+    review_cell=form=="solo" and effective!="quick"
+    resume_recipe = composed and RESOURCE_RESUME.recipe_selected(recipe) and form == "solo"
+    if composed and not ROUTE_FORM.staged_form(form) and not resume_recipe:
         raise ValueError("composed routes require a standard+ effective intensity")
     registered_headless_candidates=None
-    if effective=="direct":
+    if form=="direct":
         transport="interactive"
         if inline_reason is None: inline_reason="atomic-direct"
         owner_model_profile=None
@@ -1381,11 +1534,26 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         # flag); label them so the record never claims the caller asserted them.
         predicate_source="compose-default" if route_origin=="compose" else "caller"
         selection_basis=[{"axis":"direct-predicate","signal":p,"source":predicate_source} for p in predicates]
-    elif effective=="quick":
+    elif form=="unit":
+        # One depth-0 leg and no owner: the leg is the whole route. Its tuple comes from the recipe
+        # template and the unit head (`unit_leg_node`), not from a table of node ids.
         if transport not in (None, "headless"):
             raise ValueError(f"invalid quick transport: {transport!r}")
-        if frameless:
-            # A leg of an approved route plan was framed already: its one-shot runs without the quick frame pair.
+        registered_headless_candidates=_validate_registered_headless_evidence(
+            registered_headless_evidence
+        )
+        transport="headless"
+        owner_model_profile=registry["owner_profile_by_intensity"]["quick"]
+        nodes=[unit_leg_node(recipe, unit)]
+        TOPO._validate_unit_ref(recipe, nodes[0], registry)
+        gates=list(recipe["completion_gates"])
+        selection_basis=[]
+    elif form=="solo":
+        if transport not in (None, "headless"):
+            raise ValueError(f"invalid quick transport: {transport!r}")
+        if frameless or review_cell:
+            # A leg of an approved route plan was framed already: its one-shot runs without the quick frame pair
+            # (and the middle cell, whose owner is a decided shape, never has one).
             recipe=_frameless_recipe(recipe)
         if (requested=="direct" and set(predicates)!=known_pred
                 and registered_headless_evidence is None):
@@ -1414,6 +1582,8 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         _frame_diversity=_quick_frame_diversity(registered_headless_candidates)
         transport="headless"
         owner_model_profile=registry["owner_profile_by_intensity"]["quick"]
+        if review_cell:
+            owner_model_profile=recipe["one_shot_review"]["owner_model_profile"]  # the maker, not a conductor
         # What quick's frame legs LOSE compared to standard+: no
         # `dispatch_evidence.tuples` per-field sealing of
         # parent_transport/parent_sandbox/child_harness, and no `fallback_hops`
@@ -1452,6 +1622,14 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         if resume_recipe:
             nodes = RESOURCE_RESUME.nodes(recipe, owner_model_profile)
             gates = ["resource-exit", "quick-complete"]
+        if review_cell:
+            # The middle cell (`solo` at `standard` and up): the kind's declared verification nodes at this
+            # intensity (one review, or its review legs from `strong`), then the owner's end node, which waits
+            # on all of them (a review never waits on the owner). No frame pair (a decided shape).
+            review_nodes = one_shot_review_nodes(recipe, effective, registry)
+            nodes = [*review_nodes, nodes[-1]]
+            nodes[-1]["depends_on"] = [n["id"] for n in review_nodes]
+            gates = [review_nodes[0]["completion_gate"], "quick-complete"]
         selection_basis=[{"axis":"direct-predicate-gap","signal":p,"source":"compiler"} for p in sorted(known_pred-set(predicates))]
     else:
         if transport not in (None, "headless"):
@@ -1468,15 +1646,18 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
             node.pop("fallback_hops", None)
         selection_basis=[{"axis":"promotion","signal":s,"source":"caller"} for s in signals]
     _validate_output_scopes(nodes)
-    if effective != "direct" and inline_reason is not None:
+    if form != "direct" and inline_reason is not None:
         raise ValueError("inline_reason only applies to direct")
-    if effective=="direct" and inline_reason not in registry["inline_reasons"]:
+    if form=="direct" and inline_reason not in registry["inline_reasons"]:
         raise ValueError("structured inline_reason required")
     evidence=_validate_tracking_evidence(tracking, tracked_gate_evidence)
     checked_dispatch=None
-    if effective not in ("direct","quick") and _single_owner_nodes(nodes):
+    # B: the owner starts depth-2 nodes. Read from the nodes just built, so the middle cell (an owner that
+    # makes the work and starts one review) takes the dispatch evidence a team route takes.
+    starts_stages=ROUTE_FORM.starts_depth2_nodes({"nodes":nodes})
+    if ROUTE_FORM.staged_form(form) and _single_owner_nodes(nodes):
         registered_headless_candidates = _validate_registered_headless_evidence(registered_headless_evidence)
-    elif effective not in ("direct","quick"):
+    elif starts_stages or ROUTE_FORM.staged_form(form):
         parent_dispatch_depth=_evidence_parent_dispatch_depth(
             nodes, recipe["standard_plus"]["owner_dispatch_depth"])
         checked_dispatch=_validate_dispatch_evidence(
@@ -1487,22 +1668,26 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
             expected_worktree=cwd, require_scope=True)
         for node in nodes:
             if node.get("dispatch_depth")==2:
-                node["fallback_hops"]=json.loads(json.dumps(chain))
+                # A node that declared its hops (the middle cell's review, no `inline`) keeps only those.
+                declared_hops=node.get("fallback_hops") if review_cell else None
+                node["fallback_hops"]=json.loads(json.dumps(
+                    [hop for hop in chain if declared_hops is None or hop["fallback_hop"] in declared_hops]))
     if profile is not None:
         if profile not in PROFILE.PORTABLE_PROFILES:
             raise ValueError("profile-explicit-unknown:" + str(profile))
         explicit_profiles = {**{n["id"]: profile for n in nodes if not _no_model_node(n)},
                              "__owner__": profile, **(explicit_profiles or {})}
-    profile_demands, explicit_profiles = _profile_input_maps(nodes, profile_demands, explicit_profiles)
+    profile_demands, explicit_profiles = _profile_input_maps(nodes, profile_demands, explicit_profiles, effective)
     owner_demand = profile_demands.get("__owner__")
     owner_model_profile, owner_profile_selection = _resolve_owner_profile(
-        effective, registry, owner_demand, explicit_profiles.get("__owner__"))
+        effective, registry, owner_demand, explicit_profiles.get("__owner__"),
+        owner_default=one_shot_owner_default(recipe, effective, form == "solo"))
     resolved_owner_profile = owner_profile_selection["resolved_profile"]
     if owner_demand is not None or "__owner__" in explicit_profiles:
         # Quick's one-shot is the owner process, so there is one selection.
         # Semantic owner stages in standard+ remain independently selected.
         for node in nodes:
-            if _owner_node(node, effective):
+            if _owner_node(node, effective, form):
                 node["model_profile"] = resolved_owner_profile
                 node["profile_explicit"] = True
                 node["profile_demand"] = owner_demand
@@ -1519,10 +1704,15 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
     legacy_nodes = not composed or _versioned_subgraph(registry, recipe)
     _seal_profile_demands(nodes, profile_demands, explicit_profiles, legacy=legacy_nodes)
     for node in nodes:
-        if _owner_node(node, effective) and node["model_profile"] != owner_model_profile:
+        if _owner_node(node, effective, form) and node["model_profile"] != owner_model_profile:
             raise ValueError("owner-node-profile-selection-conflict:" + node["id"])
+    try:
+        route_field = _sealed_field(registry, recipe, capability, capability_mode, field, field_source).get("field")
+    except ValueError:
+        route_field = None  # the same call below refuses an unknown field
     dispatch_defaults_digest,dispatch_allocation,owner_harness_policy=_seal_dispatch_defaults(
-        nodes, capability, owner_model_profile
+        nodes, capability, owner_model_profile,
+        field=route_field, field_table=registry.get("field_harness_weights"),
     )
     spec_touch=any(_scope_touches_spec(scope) for node in nodes for scope in node["write_scope"])
     # Seal the same finite workload derivation used by legacy bound routes.
@@ -1555,9 +1745,10 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
       "persona_independence_contract_version":1,
       "profile_demands":profile_demands,"explicit_profiles":explicit_profiles,
       "owner_profile_demand":owner_demand,"owner_profile_selection":owner_profile_selection,
-      "execution_topology":("resource+verification" if resume_recipe else "inline" if effective=="direct" else recipe["quick"]["topology"] if effective=="quick" else recipe["topology_class"]),
-      "owner_dispatch_depth":0 if effective=="direct" else (recipe["quick"]["owner_dispatch_depth"] if effective=="quick" else recipe["standard_plus"]["owner_dispatch_depth"]),
-      "max_dispatch_depth":recipe["quick"]["max_dispatch_depth"] if effective=="quick" else (0 if effective=="direct" else recipe["standard_plus"]["max_dispatch_depth"]),
+      "execution_topology":("resource+verification" if resume_recipe else "inline" if form=="direct" else recipe["quick"]["topology"] if serial_attempt else recipe["topology_class"]),
+      "owner_dispatch_depth":0 if form=="direct" else (recipe["quick"]["owner_dispatch_depth"] if serial_attempt else recipe["standard_plus"]["owner_dispatch_depth"]),
+      "max_dispatch_depth":(recipe["quick"]["max_dispatch_depth"] if serial_attempt and not starts_stages
+                            else 0 if form=="direct" else recipe["standard_plus"]["max_dispatch_depth"]),
       "tracking":tracking,"tracked_gate_evidence":evidence,"spec_touch":spec_touch,
       "artifact_storage_contract_version":2,
       "cwd":str(cwd),"artifact_root":str(artifact),"source_commit":_git_commit(cwd),
@@ -1576,27 +1767,27 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
                    "route_origin":route_origin,"shape":shape or shape_for_intensity(effective)},
       "continuation_budget":continuation_budget,
       "nodes":nodes,"parallel_groups":_realized_parallel_groups(nodes),
-      "conditional_extensions":_realize_conditional_extensions(recipe, effective),
+      "conditional_extensions":_realize_conditional_extensions(recipe, form),
       "completion_gates":gates,
       # The portable recipe owns whether this capability has a frame layer.
       # Quick must not extend it to capabilities outside the five recipes.
       "human_gates":(sorted(set(recipe["human_gates"])|{"frame-review"})
-                     if effective=="quick" and _recipe_has_frame(recipe) else recipe["human_gates"]),
+                     if serial_attempt and _recipe_has_frame(recipe) else recipe["human_gates"]),
       # Quick binds the frame gate at `one-shot`'s entry: that is quick's only
       # fence point, and without it quick runs with no check at all. Only
       # `direct` (which has no owner and no worker) still binds nothing.
       "human_gate_bindings":json.loads(json.dumps(
-          _quick_gate_bindings(recipe) if effective=="quick"
-          else recipe["human_gate_bindings"] if effective!="direct" else [])),
+          _quick_gate_bindings(recipe) if serial_attempt
+          else recipe["human_gate_bindings"] if form!="direct" else [])),
       "workflow_contract":_workflow_contract(
           registry, nodes,
-          _quick_gate_bindings(recipe) if effective=="quick"
-          else recipe["human_gate_bindings"] if effective!="direct" else []),
+          _quick_gate_bindings(recipe) if serial_attempt
+          else recipe["human_gate_bindings"] if form!="direct" else []),
       "resume_retry_boundaries":recipe["resume_retry_boundaries"],
       "dispatch_evidence":checked_dispatch,
       "dispatch_contract_version":DISPATCH_CONTRACT_VERSION,
       "registered_headless_candidates":registered_headless_candidates,
-      "registered_headless_policy":"serial-attempt" if effective=="quick" else None,
+      "registered_headless_policy":"serial-attempt" if serial_attempt else None,
       "unit_catalog_digest":unit_catalog_digest(),
       "validation_basis":validation_basis,
       "launch_compatibility_tuple":{
@@ -1611,6 +1802,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
     if GPU_SANDBOX.fresh_gpu_resource_nodes(payload):
         payload["codex_execution_sandbox"] = GPU_SANDBOX.select_fresh(payload)
     payload.update(slug_fields)
+    payload.update(_sealed_field(registry, recipe, capability, capability_mode, field, field_source))
     for key, value in (("campaign_key", campaign_key), ("parent_cycle_id", parent_cycle_id)):
         if value is not None:
             _validate_campaign_selection(key, value)
@@ -1651,6 +1843,23 @@ def _route_autoclose(artifact_root, trigger, route=None):
         print(f"route_autoclose error={type(exc).__name__}",file=sys.stderr)
 
 
+def _close_unstarted_record_free(route, path, started):
+    """A record-free route a worker started and the start refused (the governor's wait, or a root the governor
+    does not accept) has a route file and an open cycle and no row; nothing will start it (no resume is armed
+    for a worker, which is told not to ask again). Close it the way the runtime closes any route nobody works
+    on, so none is left open in the scratch root."""
+    if (started.get("state") not in ("waiting-capacity", "needs-attention") or started.get("registered_attempts")
+            or started.get("auto_resume") or os.environ.get("AGENT_DISPATCH_CHILD") != "1"):
+        return
+    try:
+        import time
+        import route_autoclose
+        route_autoclose.close_one(Path(route["artifact_root"]), Path(path), route, "start-refused",
+                                  sys.modules[__name__], trigger="compose", now=time.time())
+    except Exception as exc:  # noqa: BLE001
+        print(f"route_close_unstarted error={type(exc).__name__}", file=sys.stderr)
+
+
 @compose_command_snapshot
 def main():
     from dispatch_parent_completion import default_parent_harness
@@ -1662,7 +1871,7 @@ def main():
     c.add_argument("--campaign-key",help="explicit work stream passed to the producer owner")
     c.add_argument("--parent-cycle",help="open or sealed predecessor cycle; causal link, not input approval")
     c.add_argument("--profile-demands", help="JSON file mapping node ids and __owner__ to full SD-88 demands")
-    c.add_argument("--explicit-profiles", help="JSON file mapping demanded node ids to explicit profiles")
+    c.add_argument("--explicit-profiles", help="JSON file mapping node ids to explicit profiles; keys: __owner__ (the owner) or a node id (a parallel-group leg by its realized id, e.g. impl-review-alternative); a value of top is for the owner at any intensity, or for a depth-2 stage worker or review/verification leg you name at strong or higher (set --intensity; one top leg per parallel group; a route-wide worker pin's model still wins; never route-wide)")
     c.add_argument("--intensity",default="auto"); c.add_argument("--cwd",required=True); c.add_argument("--artifact-root",required=True)
     c.add_argument("--predicate",action="append",default=[]); c.add_argument("--signal",action="append",default=[])
     c.add_argument("--transport",default=None); c.add_argument("--transport-evidence",default="caller-selected")
@@ -1679,28 +1888,35 @@ def main():
     cp=sub.add_parser("compose",help="preset-free work route: name the shape (and stage subgraph), defaults fill the rest")
     cp.add_argument("--slug",default=None,help="default: named from the task's first line with ASCII words")
     cp.add_argument("--start",action="store_true",help="prepare and start the selected work; the runtime owns frame launches and waiting")
-    cp.add_argument("--prompt-file",type=Path,help="the user's task, stored with the route for frame and owner execution")
+    cp.add_argument("--prompt-file",type=Path,help="the user's task, stored with the route for frame and owner execution; `-` (and `./-`) reads it once from standard input (a pipe or a heredoc), with no file to write first; a file named `-` cannot be given here")
     cp.add_argument("--owner",choices=("claude","codex","opencode"),help="explicit owner runtime; otherwise use normal selection (same as --pin owner=<harness>)")
     cp.add_argument("--pin",action="append",default=[],metavar="TARGET=HARNESS[:MODEL[@EFFORT]]",
                     help="choose the tool (and optionally model and effort) once; the route seals it for the owner, "
                          "frame legs or depth-2 workers and every resume/replacement reuses it. TARGET is owner|frame|worker, "
                          "e.g. --pin owner=opencode:<provider/model>@<effort> --pin worker=opencode. "
                          "Top models are accepted for frame only (owner/worker keep the tool and drop the model with a warning)")
-    cp.add_argument("--campaign-key",help="the work stream this route joins or creates (default: this session's latest campaign in the same artifact root; a folder name or near spelling of one active campaign joins it); `artifact_producer.py campaign-list` shows active keys. Size it as a stream with a one-sentence closing condition — not a project name, not a one-cycle task (join the stream that task serves)")
+    cp.add_argument("--campaign-key", help="the work stream this route joins, creates, or reopens. "
+                    "Defaults check this session's latest route in the same artifact root and the current "
+                    "folder's sole active stream, skipping closed campaigns. A folder name or near spelling "
+                    "can join an active stream. `artifact_producer.py campaign-list` shows active keys. "
+                    "Give the stream a one-sentence closing condition.")
     cp.add_argument("--unassigned",action="store_true",help="explicit opt-out: keep this work in the root's degraded _unassigned container, proposing no stream")
     cp.add_argument("--parent-cycle",help="open or sealed predecessor cycle; causal link, not input approval")
     cp.add_argument("--plan",default=None,help="optional declared capability sequence for this session's route chain, e.g. research,draft,apply; shown in Fleet, not sealed into the route")
     cp.add_argument("--route-plan",default=None,metavar="RECORD#INDEX",help="runtime-generated: leg INDEX of an approved route decision record; compiles without frame nodes and seals its reference")
     cp.add_argument("--profile-demands", help="JSON file mapping node ids and __owner__ to full SD-88 demands")
-    cp.add_argument("--explicit-profiles", help="JSON file mapping demanded node ids to explicit profiles")
+    cp.add_argument("--explicit-profiles", help="JSON file mapping node ids to explicit profiles; keys: __owner__ (the owner) or a node id (a parallel-group leg by its realized id, e.g. impl-review-alternative); a value of top is for the owner at any intensity, or for a depth-2 stage worker or review/verification leg you name at strong or higher (set --intensity; one top leg per parallel group; a route-wide worker pin's model still wins; never route-wide)")
     cp.add_argument("--profile", choices=sorted(PROFILE.PORTABLE_PROFILES),
                     help="explicit model budget for owner and model nodes; node-specific --explicit-profiles takes precedence; mini only with --shape direct (a registered owner or stage needs light or higher)")
     cp.add_argument("--shape",choices=COMPOSE_SHAPES,default=None,help="direct (inline) | solo (one registered owner) | staged (capability recipe, optionally narrowed by --graph) | framed (two top frame legs propose the route by default; explicit quick/direct may use one deep leg for unprotected work; --capability, --capability-mode, --graph and --profile are recorded as hints only); default: framed; use --shape direct for inline work; --graph without --shape is a frame routing hint")
     cp.add_argument("--graph",default=None,help="optional staged subgraph in your order (see `capability-route.py stages --capability <cap>` for valid ids); incompatible inherited parallel presets are omitted; optional :unit override, e.g. execute,test,report")
     cp.add_argument("--execution-scope", choices=("complete", "report"), default=None,
                     help="optional scope already selected in the existing start confirmation; it is not approval evidence")
-    cp.add_argument("--capability",default=None,help=f"default {COMPOSE_DEFAULT_CAPABILITY}; a hint only with --shape framed"); cp.add_argument("--capability-mode",default=None)
-    cp.add_argument("--intensity",default=None,help="default by shape: direct/quick/standard; framed defaults to two frame legs, while explicit quick/direct may use one for unprotected work; staged accepts strong+")
+    cp.add_argument("--capability",default=None,help="the kind (preset recipe); a direct, solo or staged shape names it, --field, or both; a hint only with --shape framed"); cp.add_argument("--capability-mode",default=None)
+    cp.add_argument("--unit",default=None,metavar="FAMILY/NAME",help="open one read-only unit as a route of its own (the kind unit, one leg, no owner, no intensity); its field is the unit head's `field:`, or name --field; with --start --prompt-file the unit's one worker starts with the brief and its end closes the route")
+    cp.add_argument("--ephemeral",action="store_true",help="with --unit: leave nothing in the project's artifact folder or campaign records; the route's files stay in a scratch root under the runtime directory and the worker's answer comes back with its completion")
+    cp.add_argument("--field",default=None,help="the field of the work (plan, design, code, lab, research, docs, admin, other); alone it opens that field's default recipe, and admin or other also need --capability; a hint only with --shape framed")
+    cp.add_argument("--intensity",default=None,help="default by shape: direct/quick/standard; framed defaults to two frame legs, while explicit quick/direct may use one for unprotected work; solo accepts standard and higher where the kind declares a one-shot review; staged accepts standard and higher")
     cp.add_argument("--cwd",default=None,help="default: current directory"); cp.add_argument("--artifact-root",default=None,help="default: utilities/artifact-root.sh for cwd")
     cp.add_argument("--signal",action="append",default=[],
                     help="promotion signal (repeatable), e.g. shared-contract: promotes shared spec/contract "
@@ -1720,7 +1936,7 @@ def main():
     cp.add_argument("--full-record",action="store_true",help="print all sealed evidence; default prints choices and the canonical route_file")
     cp.add_argument("--help-all",action="help",help="also show advanced/compatibility inputs")
     if "--help-all" not in sys.argv:
-        advanced = {"route_plan", "parent_cycle", "profile_demands", "explicit_profiles", "intensity", "artifact_root",
+        advanced = {"route_plan", "parent_cycle", "profile_demands", "artifact_root",
                     "drift_verdict", "tracking", "artifact_guard", "parent_harness", "jobs",
                     "dispatch_evidence", "registered_headless_evidence", "transport_evidence", "output", "full_record"}
         for option in cp._actions:
@@ -1835,10 +2051,12 @@ def main():
     if a.command=="stages":
         registry=TOPO.load_registry()
         rows=[r for r in registry["recipes"] if r["capability"]!=ROUTE_FRAME_CAPABILITY
+              and (r["capability"]!=TOPO.UNIT_CAPABILITY or a.capability==TOPO.UNIT_CAPABILITY)
               and (a.capability is None or r["capability"]==a.capability)]
         if not rows:
             raise ValueError(f"unknown capability: {a.capability}")
-        blocks=[stages_block(registry,recipe) for recipe in rows]
+        blocks=[unit_stages_block(registry,recipe) if recipe["capability"]==TOPO.UNIT_CAPABILITY
+                else stages_block(registry,recipe) for recipe in rows]
         if a.json:
             print(json.dumps(blocks,sort_keys=True))
         else:
@@ -1856,7 +2074,10 @@ def main():
                         f"{approval} in={','.join(node['inputs'])}{extra} out={','.join(node['outputs'])}"
                         f" -- {node['summary']}")
             for block in blocks:
-                print(f"capability={block['capability']} modes={','.join(block['modes'])} "
+                field=block.get("field")
+                if isinstance(field,dict):  # one field per mode, e.g. analyze-project
+                    field=",".join(f"{mode}:{field[mode]}" for mode in block["modes"] if mode in field)
+                print(f"capability={block['capability']} field={field or '-'} modes={','.join(block['modes'])} "
                       f"topology={block['topology_class']}")
                 for node in block["nodes"]:
                     print("  "+line(node))
@@ -1864,33 +2085,40 @@ def main():
                     print("  borrow "+line(node))
         return 0
     if a.command=="compose":
-        shape=a.shape or "framed"
+        shape=a.shape or ("solo" if a.unit is not None else "framed")
         if a.start and (a.explain or a.prompt_file is None):
             raise ValueError("compose-start-requires-task: use --start --prompt-file <task>, without --explain")
-        compose_task = a.prompt_file.read_text() if a.prompt_file else ""
+        compose_task = read_compose_task(a.prompt_file)
         cwd_was_explicit = a.cwd is not None
         cwd=a.cwd or os.getcwd()
         promotion_cwd = cwd
         artifact_root=a.artifact_root or _compose_artifact_root(cwd)
+        if a.ephemeral:
+            if a.unit is None or a.artifact_root:
+                raise ValueError("compose-ephemeral-refused: --ephemeral opens one unit worker (--unit family/name) and "
+                                 "keeps its files in a scratch root of its own; it takes no --artifact-root")
+            import unit_ephemeral
+            artifact_root=a.artifact_root=str(unit_ephemeral.scratch_root(artifact_root))
+            a.unassigned=True
+        campaign_default = None
         if a.campaign_key is None and a.parent_cycle is None and not a.unassigned:
-            a.campaign_key=_session_campaign_key(artifact_root)
-            if a.campaign_key:
-                print(f"campaign_key_default={a.campaign_key} source=this-session-latest-route",file=sys.stderr)
-            else:
-                # A session's first compose joins this folder's one active stream; with several, the
-                # refusal names them first.
-                here=cwd_campaign_keys(artifact_root,cwd)
-                if len(here)==1:
-                    a.campaign_key=here[0]
-                    print(f"campaign_key_default={a.campaign_key} source=this-folder-only-active-stream",file=sys.stderr)
+            campaign_default = compose_campaign_default(artifact_root, cwd, _session_campaign_key(artifact_root))
+            a.campaign_key, source, skipped = campaign_default
+            if source is not None:
+                detail = f" skipped={skipped[0]} reason={skipped[1]}" if skipped else ""
+                print(f"campaign_key_default={a.campaign_key or 'none'} source={source}{detail}", file=sys.stderr)
         elif a.campaign_key is not None:
-            a.campaign_key,given=compose_resolve_campaign_key(artifact_root,a.campaign_key)
+            a.campaign_key, given = compose_resolve_campaign_key(artifact_root, a.campaign_key)
             if given is not None:
-                print(f"campaign_key_resolved={a.campaign_key} given={given}",file=sys.stderr)
-        if a.slug is None:
-            a.slug=compose_default_slug(compose_task,
-                                        capability=a.capability or (None if shape=="framed" else COMPOSE_DEFAULT_CAPABILITY),
-                                        shape=shape)
+                print(f"campaign_key_resolved={a.campaign_key} given={given}", file=sys.stderr)
+            else:
+                explicit = compose_campaign_selection({"artifact_root": artifact_root, "campaign_key": a.campaign_key})
+                if explicit["mode"] == "reopen":
+                    print(f"campaign_key_default={a.campaign_key} source=explicit action=reopen", file=sys.stderr)
+                elif explicit.get("blocked_reason") == "campaign-not-active":
+                    print(f"campaign_key_default={a.campaign_key} source=explicit action=blocked "
+                          "reason=campaign-not-active", file=sys.stderr)
+        slug_named = a.slug is not None
         route_plan_binding = None
         if a.route_plan:
             # An explicit approved plan must never become an unrelated default route.
@@ -1948,6 +2176,8 @@ def main():
                 original_mode_hint = a.capability_mode
                 if a.capability is not None:
                     capability_source = "explicit"
+                elif a.field is not None:
+                    pass  # a named field opens its own default recipe in compose; nothing to classify
                 else:
                     classified = _classify_non_git_task(compose_task)
                     if classified is None:
@@ -1967,13 +2197,17 @@ def main():
                 a.intensity = a.intensity or "direct"
                 a._non_git_mode_hint = (original_mode_hint if capability_unresolved else None)
                 non_git_decision["capability_unresolved"] = capability_unresolved
+        if not slug_named:
+            a.slug=compose_default_slug(compose_task,field=_compose_slug_field(a, shape, route_plan_binding),
+                                        shape=shape)
         pins,pin_warnings=_filter_top_pins(pins)
         owner_pin=(pins.get("owner") or {}).get("harness")
         compose_args=dict(
-            capability=a.capability,
+            capability=a.capability,field=a.field,unit=a.unit,
             capability_mode=a.capability_mode,shape=shape,graph=a.graph,
             slug=a.slug,cwd=cwd,artifact_root=artifact_root,intensity=a.intensity,signals=a.signal,
             campaign_key=a.campaign_key,parent_cycle_id=a.parent_cycle,unassigned=a.unassigned,
+            campaign_default=campaign_default,
             spec_read=a.spec_read,drift_verdict=a.drift_verdict,tracking=a.tracking,
             artifact_guard=a.artifact_guard,
             children=[c.strip() for c in a.children.split(",") if c.strip()] if a.children else None,
@@ -2052,6 +2286,9 @@ def main():
                 raise ValueError(f"{non_git_decision['cause']}; source-mutating worker route; "
                                  f"{non_git_decision['next']}")
             import work_intent
+            _advice = frame_advice(route)
+            if _advice:
+                print("frame_advice=" + frame_advice_reason(_advice), file=sys.stderr)
             print(compose_card(route, _plan_for_card, _plan_source_for_card, owner_harness=owner_pin,
                                campaign_selection=_campaign_for_card,
                                intent_original=(None if route.get("route_plan") else
@@ -2086,6 +2323,8 @@ def main():
             access_change=_record_access_change(route,jobs)
             print("\n".join(compose_decision_lines(route, non_git_decision)), file=sys.stderr, flush=True)
             started=start_work(route,path,jobs)
+            if a.ephemeral:
+                _close_unstarted_record_free(route,path,started)
             if access_change is not None:
                 started={**started,"access_change":access_change}
             if worktree is not None and worktree.get("cwd"):
@@ -2101,9 +2340,13 @@ def main():
         # Bookkeeping runs after the work has started: the start does not depend on it (the sweep
         # never closes this route, and a cycle it seals is never the one this route begins or continues).
         _route_autoclose(artifact_root,"compose",route)
+        _advice = frame_advice(route)
+        if _advice:  # one machine-readable line beside the card's own; the route is already open
+            print("frame_advice=" + frame_advice_reason(_advice), file=sys.stderr)
         print(compose_card(route, _plan_for_card, _plan_source_for_card, owner_harness=owner_pin,
                            campaign_selection=_campaign_for_card, include_decisions=not a.start,
-                           non_git_decision=non_git_decision),file=sys.stderr)
+                           non_git_decision=non_git_decision,
+                           launches=started.get("launches") if a.start else None),file=sys.stderr)
         if a.start:
             from start_receipt import print_next_line
             print_next_line(started)
@@ -2111,6 +2354,8 @@ def main():
     if a.command=="correct":
         from dispatch_owner_input import submit, inspect, InputError
         jobs=Path(a.jobs or _compose_default_jobs())
+        # Read once: the message may be a pipe (`--message-file /dev/stdin`) that every path below shares.
+        message=a.message_file.read_text() if a.message_file else None
         given=a.attempt_id or a.correct_route
         if given is None:
             found,source,rows=caller_open_route(os.getcwd())
@@ -2124,6 +2369,31 @@ def main():
             given=found
         frame_path = resolve_route_argument(given, jobs)
         frame_raw = json.loads(frame_path.read_text()) if Path(frame_path).is_file() else None
+        if isinstance(frame_raw,dict) and frame_raw.get("capability")=="unit":
+            # A unit route has no owner to answer: the text is the route's next turn (work_start.correct_unit_route).
+            from work_start import correct_unit_route
+            code,result=correct_unit_route(verify_route(frame_raw),frame_path,jobs,
+                                           message,a.request_id)
+            print(json.dumps(result,ensure_ascii=False))
+            from start_receipt import print_next_line
+            print_next_line(result)
+            return code
+        if isinstance(frame_raw,dict) and a.message_file and not ROUTE_PLAN.is_framed_route(frame_raw):
+            # A closed one-shot route its owner finished PASS takes the text as its next owner turn
+            # (work_start.correct_owner_route); any other state keeps the owner input path below.
+            from work_start import correct_owner_route
+            try:
+                verified=verify_route(frame_raw)
+            except (ValueError, KeyError, TypeError, OSError):
+                verified=None   # an unverifiable record keeps the owner input path, which reports it
+            taken=(correct_owner_route(verified,frame_path,jobs,message,a.request_id)
+                   if verified is not None else None)
+            if taken is not None:
+                code,result=taken
+                print(json.dumps(result,ensure_ascii=False))
+                from start_receipt import print_next_line
+                print_next_line(result)
+                return code
         if ROUTE_PLAN.is_framed_route(frame_raw):
             from work_start import _framed_cycle
             _first = {}
@@ -2139,7 +2409,7 @@ def main():
                 given = _leg_owner
             else:
                 from dispatch_owner_input import frame_input
-                result = frame_input(verify_route(frame_raw), a.message_file.read_text() if a.message_file else None,
+                result = frame_input(verify_route(frame_raw), message,
                                      a.request_id, jobs=jobs)
                 if result.get("redirect_owner"):
                     given = result["redirect_owner"]
@@ -2159,7 +2429,12 @@ def main():
                               "next_step":"Retain the correction. Inspect the exact owner; do not restart it or treat a file edit as delivery."}))
             return 69
         try:
-            result=(submit(jobs,attempt,a.message_file.read_text(),a.request_id)
+            import memory_work_labels
+            stage_unit=memory_work_labels.stage_unit_label(jobs,given,_find_attempt_row_metadata)
+        except Exception:
+            stage_unit=None  # a label that cannot be read is no label
+        try:
+            result=(submit(jobs,attempt,message,a.request_id,unit=stage_unit)
                     if a.message_file else inspect(jobs,attempt))
         except InputError as exc:
             refusal={"state":"not-admitted","reason":str(exc),
@@ -2172,6 +2447,14 @@ def main():
             return 69
         if attempt!=a.attempt_id:
             result["redirected_from"]=a.attempt_id
+        if a.message_file:
+            # A value for the main session: the labels it can leave on a "my way" record. Nothing is written.
+            try:
+                labels=memory_work_labels.correction_labels(frame_path,stage_unit)
+            except Exception:
+                labels=[]
+            if labels:
+                result["memory_labels"]=labels
         from dispatch_owner_input import blocked_owner_answers
         if (a.message_file and not result.get("consumer_recovery")
                 and (result.get("retained") or blocked_owner_answers(jobs,attempt))):
@@ -2525,6 +2808,11 @@ def main():
                                             summary=a.summary, commit=a.commit)
             if outcome is None:
                 outcome,created=close_route(route,a.route,a.commit,a.summary,allow_unproven=True)
+                if outcome.get("terminal_gate_proven") is not True:
+                    # No running owner to stop: the owner had ended without a PASS. The unproven closure
+                    # ends the ledger and the cycle as stopping a running owner does; the same close run
+                    # again finishes a cycle a busy lock left open (a sealed one is left as it is).
+                    route_parent_close.finish_ended_owner_close(route, outcome)
             else:
                 created=True
                 if outcome.get("state")=="cancelled" and outcome.get("owner_attempt_id"):

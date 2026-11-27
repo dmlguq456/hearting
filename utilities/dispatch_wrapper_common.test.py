@@ -22,6 +22,8 @@ from shutil import copy2 as shutil_copy
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
+sys.path.insert(0, str(ROOT / "tools"))
+from fixture_processes import unique_attempt_id  # noqa: E402
 import dispatch_wrapper_common as C  # noqa: E402
 import dispatch_resource_wait as WAIT  # noqa: E402
 from dispatch_contract import resolve_agent_home  # noqa: E402
@@ -1048,7 +1050,7 @@ class WatcherRealCleanupTest(unittest.TestCase):
         temporary._finalizer.detach()
         base = Path(temporary.name)
         jobs = base / "jobs.log"
-        attempt = "att-real-watcher-cleanup"
+        attempt = unique_attempt_id("att-real-watcher-cleanup")
         children = []
 
         def finish():
@@ -1155,6 +1157,7 @@ class AttachSummaryOwnerTest(unittest.TestCase):
             attempt_id=attempt_id,
             worktree="/worktree",
             worker_runtime_env={"CLAUDE_CONFIG_DIR": "/prepared/home"},
+            jobs_path=Path("/state/jobs.log"),
             review_output_binding=review,
             review_governed_lease_nonce="n" * 8,
         )
@@ -1173,6 +1176,7 @@ class AttachSummaryOwnerTest(unittest.TestCase):
         self.assertIsNone(kwargs["review_artifact_root"])
         self.assertEqual((kwargs["runtime_home"], kwargs["attempt_cwd"]),
                          ("/prepared/home", "/worktree"))
+        self.assertEqual(kwargs["jobs"], Path("/state/jobs.log"))
         review = {"artifact_root": "/a", "cycle_id": "cyc", "producer_id": "p"}
         C.attach_summary_owner(
             self.args(review=review), Path("/t.jsonl"), Path("/p.txt"), identity,
@@ -1192,6 +1196,8 @@ class AttachSummaryOwnerTest(unittest.TestCase):
                     wrapper.attach_summary_owner(self.args(), Path("/t"), Path("/p"), identity)
                 self.assertEqual(launch.call_args.kwargs["harness"], harness)
                 self.assertEqual(launch.call_args.kwargs["attempt_id"], "att-1")
+                # Every harness's supervisor gets the registry its worker gets.
+                self.assertEqual(launch.call_args.kwargs["jobs"], Path("/state/jobs.log"))
 class ValidateRouteRecordTest(unittest.TestCase):
     def args(self, tmp, **overrides):
         values = dict(

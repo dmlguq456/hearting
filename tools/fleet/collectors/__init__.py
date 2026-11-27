@@ -35,8 +35,11 @@ def _copy_job_observation_fallback(jobs, node_evidence, degradations,
     )
 
 
-def _observation_health(key, source, error=None):
-    """The same health vocabulary as RefreshPump, bound to this publication."""
+def _observation_health(key, source, error=None, cause=None):
+    """The same health vocabulary as RefreshPump, bound to this publication.
+
+    ``error`` is the short text shown on screen; ``cause`` (default: the same text) is the more
+    specific stage and reason the persisted observation record keeps."""
     now = _time.monotonic()
     cache_key = (key, source)
     if error is None:
@@ -45,18 +48,69 @@ def _observation_health(key, source, error=None):
             _OBSERVATION_SUCCESSES.pop(next(iter(_OBSERVATION_SUCCESSES)))
     success = _OBSERVATION_SUCCESSES.get(cache_key)
     return {"state": "failed" if error else "idle", "last_error": error,
+            # The persisted observation record carries ``reason``, not ``last_error``.
+            **({"reason": str(cause or error)[:160]} if error else {}),
             "last_success_at": success, "age": None if success is None else now - success}
 
 
-def _enrich_steward(sessions, *, fast_first=False):
+def _enrich_steward(sessions, *, fast_first=False, record_supervision=True):
     """Keep the optional steward badge out of the fast required observation."""
     if fast_first:
         return
     try:
         from . import steward
-        steward.enrich(sessions)
+        steward.enrich(sessions, **({} if record_supervision else {"record_supervision": False}))
     except Exception:
         pass
+
+
+def _route_stem(path):
+    return os.path.splitext(os.path.basename(path))[0] if isinstance(path, str) and path else None
+
+
+def _scoped_resource_keep(sessions, jobs):
+    """Which experiment runs a scoped (one-session) pass can show: the runs of a kept
+    job's attempt (`projection._attach_resource_children`), of a kept route
+    (`explorer.live` run children by route id / route file stem), and of a kept
+    session's project (the STATUS popup's `changed:` line, `explorer.live._repo_results`).
+    Any other run is not read. Fail-open: a run the test cannot judge is read, and an
+    unbuildable test reads all."""
+    try:
+        from .. import route_chain
+        from ..model import project_of
+        projects = {project_of(getattr(session, "cwd", None)) for session in sessions}
+        attempts, routes = set(), set()
+        for job in jobs:
+            attempt = getattr(job, "attempt_id", None)
+            if attempt and attempt != "-":
+                attempts.add(attempt)
+            for name in ("route_id", "owner_route_id"):
+                value = getattr(job, name, None)
+                if value:
+                    routes.add(value)
+        for session in sessions:
+            for line in route_chain.session_lines(session):
+                if line.get("route_id"):
+                    routes.add(line["route_id"])
+    except Exception:
+        return None
+
+    run_projects = {}
+
+    def keep(run):
+        try:
+            if (run.get("parent_attempt_id") in attempts
+                    or run.get("route_id") in routes
+                    or _route_stem(run.get("route")) in routes
+                    or _route_stem(run.get("route_file")) in routes):
+                return True
+            cwd = run.get("cwd") if isinstance(run.get("cwd"), str) else ""
+            if cwd not in run_projects:
+                run_projects[cwd] = project_of(cwd)
+            return run_projects[cwd] in projects
+        except Exception:
+            return True
+    return keep
 
 
 def _usage_cache_observation(snapshot, *, refresh_pending=False):
@@ -372,19 +426,102 @@ def _adopt_child_titles(sessions, jobs):
             job._dispatch_context_owned = True
 
 
+def answer_wait_view(answer_waits, sessions):
+    """Fleet's view of the shared answer board, each sent message answer marked with what it waits for.
+
+    Read live here (rule 5): a window's shell and release are not part of the shared answer record,
+    and only a session whose state says it rests waits on the person (a working one takes the
+    answer when its turn ends). Run once each session's liveness is classified.
+    """
+    import session_shell
+    from ..refresh import fleet_answer_wait_view
+    states = {(session.harness, sid): session.liveness for session in sessions
+              for sid in (session.session_id, *(getattr(session, "session_aliases", None) or ())) if sid}
+    session_shell.mark_answer_waits(answer_waits.get("items", ()), states)
+    return fleet_answer_wait_view(answer_waits)
+
+
+# Where a row's window is, display only: what a viewer hands to the session it holds.
+_WINDOW_FIELDS = ("herdr_attached", "pane_location", "multiplexer", "pane_corner",
+                  "tmux_pane", "tmux_server", "detached", "_herdr_name")
+
+
+def merge_parked_viewers(sessions, *, links=None):
+    """One row for a conversation sent to the background: the held session's, in the viewer's window.
+
+    Claude's `/bg` leaves the window's process as a viewer of the old session id while the
+    conversation goes on as another session in another process, so two live processes would draw
+    two rows: the window under the old id, and the held session with no window. When
+    ``session_registry.steady_parked_links`` (the one judgment, read live once for the pass) links
+    them, the viewer's row goes and its window placement and its waits for the person move to the
+    held session's row, which also answers to the old id (a display join, like a resume alias).
+    No link, a missing or second row on either side, or a row whose process start is not the
+    link's keeps both rows: two rows are better than one wrong one.
+
+    This is the pass's decision: each merged row carries ``_parked_viewer`` (the old id), and the
+    number assignment and the pane header read that, never a second judgment. ``sessions`` is
+    changed in place; the merged ``{viewer id: held id}`` is returned.
+    """
+    from .. import session_registry
+    from . import interaction as interaction_collector
+    if links is None:
+        if not any(getattr(s, "harness", None) == "claude" for s in sessions):
+            return {}
+        links = session_registry.steady_parked_links("claude")
+    gone, merged = set(), {}
+    for viewer_sid, link in (links.get("successor") or {}).items():
+        def rows(sid, pid):
+            return [s for s in sessions if getattr(s, "harness", None) == "claude"
+                    and getattr(s, "session_id", None) == sid and getattr(s, "pid", None) == pid]
+        viewers, held = rows(viewer_sid, link.get("viewer_pid")), rows(link.get("session_id"), link.get("pid"))
+        if len(viewers) != 1 or len(held) != 1 or id(viewers[0]) in gone:
+            continue
+        viewer, row = viewers[0], held[0]
+        if getattr(row, "proc_start", None) not in (None, link.get("proc_start")):
+            continue
+        for name in _WINDOW_FIELDS:
+            if hasattr(viewer, name):
+                setattr(row, name, getattr(viewer, name))
+        # The old id still owns its waits for the person (ownership does not move): the row the
+        # window now shows carries them, as the window's row did.
+        row.interaction_state = interaction_collector.prefer(
+            getattr(row, "interaction_state", None), getattr(viewer, "interaction_state", None))
+        seen = {item.get("item_id") for item in (row.interaction_observations or []) if isinstance(item, dict)}
+        row.interaction_observations = list(row.interaction_observations or []) + [
+            item for item in (getattr(viewer, "interaction_observations", None) or [])
+            if not (isinstance(item, dict) and item.get("item_id") in seen)]
+        row.session_aliases = list(dict.fromkeys(
+            [*(getattr(row, "session_aliases", None) or []), viewer_sid,
+             *(getattr(viewer, "session_aliases", None) or [])]))
+        row._parked_viewer = viewer_sid
+        merged[viewer_sid] = row.session_id
+        gone.add(id(viewer))
+    if gone:
+        sessions[:] = [s for s in sessions if id(s) not in gone]
+    return merged
+
+
 def apply_session_aliases(sessions):
     """Attach each row's prior session ids (resume/fork), display-join use only.
 
     Must run before the peer and steward joins — both key on `(harness, session_id)` and
-    both can be addressed by an id the session no longer uses.
+    both can be addressed by an id the session no longer uses. A window whose conversation was
+    sent to the background becomes the held session's row first (``merge_parked_viewers``).
     """
     from .. import session_registry
-    live_ids = {(str(getattr(s, "harness", "") or "").lower(), s.session_id)
-                for s in sessions if getattr(s, "session_id", None)}
+    try:
+        merge_parked_viewers(sessions)
+    except Exception:
+        pass
+    # A merged window's old id is still a live process's identity: only its own merged row
+    # answers to it.
+    live_ids = {(str(getattr(s, "harness", "") or "").lower(), sid) for s in sessions
+                for sid in (getattr(s, "session_id", None), getattr(s, "_parked_viewer", None)) if sid}
     for s in sessions:
         harness = str(getattr(s, "harness", "") or "").lower()
         if not getattr(s, "pid", None) or harness not in session_registry.HARNESSES:
             continue
+        own = getattr(s, "_parked_viewer", None)
         try:
             aliases = session_registry.session_aliases(harness, s.pid)
         except Exception:
@@ -392,10 +529,10 @@ def apply_session_aliases(sessions):
         # A `--fork-session` parent can still be running under its own row. Adopting its
         # id here would make two rows answer to one key and hand the parent's messages to
         # the child, so an id that is still someone's current identity is never an alias.
-        aliases = [a for a in aliases if (harness, a) not in live_ids]
+        aliases = [a for a in aliases if a == own or (harness, a) not in live_ids]
         existing = getattr(s, "session_aliases", None) or []
         merged = list(dict.fromkeys(
-            alias for alias in (*existing, *aliases) if (harness, alias) not in live_ids
+            alias for alias in (*existing, *aliases) if alias == own or (harness, alias) not in live_ids
         ))
         if merged:
             s.session_aliases = merged
@@ -472,7 +609,7 @@ def _session_census_observation(sessions, herdr_observed):
 
 
 def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_first=False, *,
-                 include_report_verification=True, route_sessions=None):
+                 include_report_verification=True, route_sessions=None, route_view=None):
     """Return (sessions, jobs).
 
     harness_filter: optional iterable of harness names (fleet + dispatch both honor it).
@@ -482,6 +619,11 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     fast_first:     internal basic-live observation hint. Exact classification,
                     NOW and resource inputs stay attached; display details fill
                     independently. ``--once``/JSON keep the full pass.
+    route_sessions: collect only what a display of these native sessions draws; the
+                    peer-message ledger, prompt display, event times, location,
+                    campaign label and pending-delivery count are left out.
+    route_view:     ``"routes"`` (with ``route_sessions``): the routes popup, which
+                    also draws no steward badge. Any other value is ignored.
     """
     job_key = (str(jobs_path or os.environ.get("AGENT_DISPATCH_JOBS") or ""),
                tuple(sorted(harness_filter or ())))
@@ -557,8 +699,10 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
         observed = _herdr.enrich(sessions, wait_timeout=0.0 if fast_first else 0.2)
         if isinstance(observed, dict):
             herdr_observed = observed
+            incomplete = not observed.get("complete")
             observations["herdr"] = _observation_health(
-                job_key, "herdr", observed.get("last_error") if not observed.get("complete") else None)
+                job_key, "herdr", observed.get("last_error") if incomplete else None,
+                observed.get("cause") if incomplete else None)
     except Exception as exc:
         observations["herdr"] = _observation_health(job_key, "herdr", "%s: %s" % (type(exc).__name__, exc))
     if not fast_first:
@@ -571,7 +715,8 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     for s in sessions:
         if s.harness == "claude" and enrichers.get("claude"):
             try:
-                enrichers["claude"](s, tick={s.pid: getattr(s, "_pane_session_claim", None)})
+                enrichers["claude"](s, tick={s.pid: getattr(s, "_pane_session_claim", None)},
+                                    **({"defer_subagents": True} if route_sessions is not None else {}))
             except Exception:
                 pass
     # Session directories describe work; the foreground observation above used
@@ -632,11 +777,20 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
                                 {"source": "cache", "state": "unknown"}]}
         from ..refresh import fleet_answer_wait_view
         fleet_answer_waits = fleet_answer_wait_view(answer_waits)
+        # A row answers for its own id and its resume/fork aliases (a merged window's old id
+        # among them); an id more than one row answers to belongs to none of them here.
+        from .. import session_registry
+        answering = {}
         for session in sessions:
-            key = (getattr(session, "harness", None), getattr(session, "session_id", None))
+            for key in session_registry.session_join_keys(session):
+                answering.setdefault(key, set()).add(id(session))
+        for session in sessions:
+            own = {key[1] for key in session_registry.session_join_keys(session)
+                   if answering.get(key) == {id(session)}}
+            harness = getattr(session, "harness", None)
             ids = {item.get("id") for item in answer_waits.get("items", ())
-                   if item.get("session_id") == key[1] and item.get("harness") == key[0]
-                   and item.get("stale") == "current"}
+                   if item.get("session_id") in own and item.get("harness") == harness
+                   and item.get("stale") == "current" and item.get("answer") != "sent"}
             if ids:
                 session.interaction_observations.extend(
                     {"kind": {"human gate": "decision", "blocked owner": "decision",
@@ -671,7 +825,9 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
 
     # F-100c: the badge is optional for first-screen readiness. The detail
     # worker attaches it after the required screen has completed.
-    _enrich_steward(sessions, fast_first=fast_first)
+    if not (route_sessions is not None and route_view == "routes"):
+        _enrich_steward(sessions, fast_first=fast_first,
+                        record_supervision=route_sessions is None)
 
     # F-51d: JSON telemetry projection — cache-only lookup (never schedules a background
     # `git rev-list`; the live render path's own ahead_behind() calls are what populate the
@@ -879,6 +1035,12 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     except Exception:
         pass
 
+    if answer_waits is not None:
+        try:
+            fleet_answer_waits = answer_wait_view(answer_waits, sessions)
+        except Exception:
+            pass
+
     # A session display asks the existing collector/projector for only its
     # native identities. No display request is evidence of existence/liveness.
     if route_sessions is not None:
@@ -889,6 +1051,14 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
         if not sessions:
             return LiveSnapshot(sessions=[], jobs=[], resources=[],
                                 observations={"basic": {"all_new": True}})
+        # The sub-agent tail was deferred for every Claude row; read it for the ones kept.
+        fill = getattr(modules.get("claude"), "fill_subagents", None)
+        for session in sessions:
+            if fill is not None and session.harness == "claude":
+                try:
+                    fill(session)
+                except Exception:
+                    pass
 
     # --- dispatch section ---
     herdr_session_observation = _session_census_observation(sessions, herdr_observed)
@@ -907,7 +1077,8 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
             by_attempt = {}
             for item in answer_waits.get("items", ()):
                 attempt = item.get("attempt_id")
-                if attempt and item.get("stale") == "current":
+                # An answer the person already sent waits on no one (rule 5, 11-14).
+                if attempt and item.get("stale") == "current" and item.get("answer") != "sent":
                     by_attempt.setdefault(attempt, []).append(
                         {"kind": {"human gate": "decision", "blocked owner": "decision",
                                   "marker": "decision"}.get(item.get("kind"), item.get("kind")),
@@ -984,7 +1155,7 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
         # This joins already observed exact child fields without further IO.
         # NOW/context/exec must be available in the basic snapshot too.
         _adopt_child_titles(sessions, jobs)
-        if not fast_first:
+        if not fast_first and route_sessions is None:
             from .. import titles
             titles.annotate(sessions + jobs)
     except Exception:
@@ -1006,7 +1177,9 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     resource_collection_error = None
     try:
         from . import resource_runs as resource_collector
-        resource_jobs = resource_collector.collect()
+        resource_keep = _scoped_resource_keep(sessions, jobs) if route_sessions is not None else None
+        resource_jobs = resource_collector.collect(
+            **({"keep": resource_keep} if resource_keep is not None else {}))
     except Exception as exc:
         resource_collection_error = "%s: %s" % (type(exc).__name__, str(exc)[:160])
     collect_all.last_resource_jobs = resource_jobs
@@ -1049,13 +1222,14 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     peer = None
     try:
         from . import peer_messages
-        peer = None if fast_first else peer_messages.collect()
+        peer = None if fast_first or route_sessions is not None else peer_messages.collect()
         apply_peer_rows(sessions, (peer or {}).get("by_session") or {})
     except Exception:
         peer = None
-    collect_all.last_peer_messages = peer
+    if route_sessions is None:   # only the full pass reads the ledger (`fleet --json`); a display's pass leaves it be
+        collect_all.last_peer_messages = peer
 
-    if not fast_first:
+    if not fast_first and route_sessions is None:
         try:
             from . import prompt_inputs
             prompt_inputs.enrich(sessions)
@@ -1076,6 +1250,9 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     display_snapshot = build_display_snapshot(sessions, jobs, resource_jobs)
     basic_identity = "fleet:%d:%d" % (os.getpid(), _time.time_ns())
     basic_observed_at = _time.time()
+    resource_skipped = (getattr(resource_collector.collect, "last_skipped", 0)
+                        if route_sessions is not None and resource_collector is not None else 0)
+    resource_skipped = resource_skipped if isinstance(resource_skipped, int) else 0
     resource_source_failed = (resource_collection_error is not None or any(
         not (isinstance(item, dict)
              and item.get("kind") == "missing-registry"
@@ -1085,7 +1262,7 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     ))
     observations["resource-runs"] = {
         "state": ("failed" if resource_source_failed else
-                  "ok" if resource_jobs else "absent"),
+                  "ok" if resource_jobs or resource_skipped else "absent"),
         "attempted": True,
         "all_new": not resource_source_failed,
         "generation_identity": basic_identity,
@@ -1134,7 +1311,7 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
 
 
 def collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_first=False, *,
-                include_report_verification=True, route_sessions=None):
+                include_report_verification=True, route_sessions=None, route_view=None):
     """Run one Fleet observation with shared artifact, admission and registry inputs."""
     from contextlib import ExitStack
     from . import dispatch
@@ -1155,7 +1332,7 @@ def collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_fi
         return _collect_all(
             harness_filter, jobs_path, usage, fast_first,
             include_report_verification=include_report_verification,
-            route_sessions=route_sessions)
+            route_sessions=route_sessions, route_view=route_view)
 
 
 collect_all.last_resource_jobs = []

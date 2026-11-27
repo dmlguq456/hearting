@@ -5,7 +5,7 @@
 `deep maker`, `deep reviewer`, `deep editor`, and `deep orchestrator` map to
 `opus`/xhigh (the shipped deep tier equals the user's runtime mapping, 2026-09-09;
 `fable` is main-session-only — reachable from registered dispatch only through a
-route that sealed the `top` exception profile for its dispatch-depth-1 owner — and
+route that sealed the `top` exception profile for its dispatch-depth-1 owner (or, at `strong`+, for a depth-2 stage worker or review/verification leg the person named) — and
 the capacity cascade is `opus -> sonnet`, which `top` never enters). Retained `orchestrator` is the balanced mechanical role and maps to
 `sonnet`/medium; it is not an alias for the standard+ dispatch-depth-1 conductor. Fast
 portable roles map to `sonnet`/medium. (Both follow `CFG_TIER_LIGHT_EFFORT`; the
@@ -94,25 +94,13 @@ runtime path, and any Claude-specific preview/screenshot/console wiring.
 
 Claude `UserPromptSubmit` first runs the portable `mem-recall-inject.sh` bridge.
 It emits `hookSpecificOutput.additionalContext` only for bounded active
-current-project/global capsule headline-and-ID candidates (maximum six and
-1,200 UTF-8 bytes), never record bodies. The bridge is fail-open but publishes
+current-project/global capsule headline-and-ID candidates (maximum three and
+600 UTF-8 bytes), never record bodies. The bridge is fail-open but publishes
 a same-turn recall-opportunity receipt on a successful probe, including a valid
 zero-hit probe. Main-session material mutation requires that receipt; the
 explicit `recall-gate` path recovers a missing or failed hook. Registered
 workers stay silent. Candidate relevance and full-record adoption remain model
 judgments.
-
-`SessionStart` runs the portable `local-evidence-inject.sh` presence probe for
-the session cwd: research/documents/analysis bucket counts plus at most nine
-newest entry paths from the canonical artifact root, taken a bucket at a time
-and at most once per artifact (2,400-UTF-8-byte bound, no body reads, no prompt
-classifier, silent when the root holds no such artifacts, worker-exempt,
-fail-open). It realizes `roles/response-policy.md` "Local
-evidence before recall" deterministically. It is registered matcher-less, so it
-fires for `startup`, `resume`, `clear`, and `compact` alike — the compaction
-case is why a per-prompt registration was defensible, and it is the one thing
-the start event already covers. Off the prompt path the block costs ~360 tokens
-once per session instead of once per turn.
 
 There is no automatic distiller (D-78). Claude's built-in file memory is
 disabled via the top-level `"autoMemoryEnabled": false` setting in
@@ -198,10 +186,14 @@ main/orchestrator chooses per job and the wrapper only reflects that choice:
   before rendering, the hook re-reads the exact row and its sealed completion
   evidence: every terminal receipt, success or attention, exits two — Claude
   Code wakes an idle session for an `asyncRewake` hook only on exit code 2 and
-  holds exit-0 output until the next user interaction (corrected 2026-08-29;
-  success still carries its structured notification on stdout). The
-  SessionStart/UserPromptSubmit sweep re-delivers any SD-111 pending record at
-  the next prompt as the durable backstop. Registered Claude
+  holds exit-0 output until the next user interaction (success
+  still carries its structured notification on stdout). The
+  `PostToolUse` carries no completion; the turn's `Stop` carries any the transcript
+  does not show received, and the SessionStart/UserPromptSubmit sweep re-delivers any
+  SD-111 pending record at the next prompt as the durable backstop (the one way a turn
+  Esc cut or an API error ended is made up). The runner holds a completion only for a Hearting
+  shell resting with an empty input, which injects it; anywhere else the record stays
+  pending for `Stop` and the next prompt. Registered Claude
   owners keep one `--input-format stream-json` process for the route and submit
   each non-terminal joined receipt immediately. When the current rows and exact
   sealed markers prove every declared terminal node complete, the supervisor
@@ -316,16 +308,25 @@ on 2026-07-22, and dispatch reads unit bodies from the portable catalog
 `roles/units/` directly. `roles/MODES.md` classifies which units are portable,
 tool-contract-bound, or adapter-coupled.
 
-Write-denying hook gates are retired; no write preflight or core-read marker is required.
-
 `fleet-interaction-state.py` is the Claude-native payload wrapper for the
-portable interaction-wait invariant. `PreToolUse(AskUserQuestion)` publishes a
-decision marker and `PermissionRequest(*)` publishes a permission marker;
+portable interaction-wait invariant. `PermissionRequest(*)` publishes a permission marker, and `PreToolUse(AskUserQuestion)`
+publishes a decision marker only when the native question goes through (see below);
 `PostToolUse(*)`, `PostToolUseFailure(*)`, `UserPromptSubmit`, `Stop`, and
 `SessionEnd` clear only the exact session. The hook stores no question,
 choices, command, arguments, reason, model output, or tool payload, emits no
 stdout, and is a no-op for registered workers and native subagents. Herdr's
-separate hook remains optional corroboration and is not edited. Codex has no
+separate hook remains optional corroboration and is not edited.
+
+`native-question-redirect.py` is `PreToolUse(AskUserQuestion)` (it replaces the plain
+decision-marker entry). It registers the question (text, choices, a label ending
+`(권장)`/`(Recommended)` as the recommendation) as this session's Hearting question through
+`utilities/native_question_redirect.py` and refuses the native call with one short line
+(the question id, "end your turn"). Several questions, `multiSelect` and `preview` are
+written as one text question listing the options. When registration fails, times out
+(5 s inside the hook's 10 s) or the caller is a registered worker or native subagent, the
+native question runs as before and only then does the decision marker above apply. The
+frame-answer `PostToolUse(AskUserQuestion)` bridge is retired: a registered frame question
+is answered on the question board. Codex has no
 `PostToolUseFailure` event; its `PostToolUse` also runs after a Bash command that
 exits non-zero (https://learn.chatgpt.com/docs/hooks#posttooluse) and carries the
 same wait clear and index-lock hint there, so the adaptation boundary keeps the
@@ -407,7 +408,7 @@ Claude Code maps portable roles as follows:
 | `fast implementer` | `sonnet` |
 | `deep reviewer` | `opus` |
 | `deep maker` | `opus` |
-| `external adversary` | Codex CLI via `codex-review-team` when available |
+| `external adversary` | a different reviewer, engine or harness, proven by the adapter (`CONVENTIONS §1`) |
 | `orchestrator` | `sonnet` unless a task explicitly requires deep judgment |
 
 Concrete model names belong here and in Claude-native files only.
@@ -445,6 +446,20 @@ definition whose model is main-session-only in that config is not projected. The
 hook still decides unpinned spawns and denies main-only models. Keep your own
 agents under other names.
 
+A registered worker's config home (`tools/profile/build-home.py`) gets the
+`light`, `balanced` and `deep` definitions as regular files under its
+`agents/`, rendered by the same renderer from the `models.conf` the user's home
+selects, so a worker that names one of them runs that tier (a main-session-only
+model gets no file). `general-purpose` and `memory-scout` are not placed: a
+worker spawn that names no agent keeps the built-in, and the spawn hook still
+sends such a spawn from a worker to `light` (see above). A definition that cannot
+be placed (an existing file, link or folder on its path, an unwritable `agents/`)
+is skipped without touching what is there; the worker still starts. A profile declaration's
+`expose.agents` picks a subset of the three. Measured with
+`utilities/harness_behavior_scenarios.py --scenario subagent-model`: the worker
+session's start record lists the three, and each named spawn asks for its
+definition's model.
+
 An explicit eligible per-invocation model or eligible agent-definition pin is
 preserved. A config-declared interactive-main-only model, explicit `inherit`,
 fork inheritance, or a missing eligibility policy returns a typed PreToolUse
@@ -452,17 +467,26 @@ deny before spawn. Malformed or non-Agent payloads remain silent because they
 do not identify an actionable native-worker launch.
 
 Rejected realization — global `CLAUDE_CODE_SUBAGENT_MODEL` env: the official
-subagent model precedence is env > per-invocation `model` param > definition
-frontmatter > session model (official subagents doc, "Choose a model"; since
-v2.1.196 an `inherit` value is treated as unset). The env level is therefore a
-hard override that would kill the `memory-scout` frontmatter pin and per-call
-escalation. The PreToolUse injection sits at the per-invocation level instead
-and yields to frontmatter pins through its own skip logic.
+subagent model precedence is per-invocation `model` param > definition
+frontmatter > `CLAUDE_CODE_SUBAGENT_MODEL` > session model (official subagents
+doc, "Choose a model", rechecked 2026-11-15 against the docs and an installed
+2.1.325). Before v2.1.251 the env var overrode the other two; since then it is
+only a default for subagents nothing else names, and it forces a model only
+together with `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` (v2.1.257+), which also drops
+definition pins and per-call models. A frontmatter `inherit` value is treated as
+unset (v2.1.196). The original rejection reason (the env hard-overrides the
+`memory-scout` pin) therefore no longer holds for the plain variable. The
+rejection stands anyway: one global model cannot give each call its own tier, and
+the PreToolUse injection sits at the per-invocation level, yielding to
+frontmatter pins through its own skip logic.
 
-Runtime limits: Claude Code exposes no global subagent
-reasoning-effort knob and the Agent tool input has no effort field, so this
-realization controls the model tier only; per-agent effort remains a
-custom-agent frontmatter concern. `CLAUDE_NATIVE_SUBAGENT_MODEL=<eligible-alias>`
+Runtime limits: the Agent tool input has an optional per-invocation `effort`
+field (v2.1.292+; not for forks; it overrides the definition's `effort`, and
+`CLAUDE_CODE_EFFORT_LEVEL` overrides both), and a global default exists too
+(`CLAUDE_CODE_SUBAGENT_EFFORT`, seen in the installed 2.1.325). Both were
+rechecked 2026-11-15. This hook still controls the model tier only; it injects
+no effort, and a definition pin remains how a named type fixes its effort.
+`CLAUDE_NATIVE_SUBAGENT_MODEL=<eligible-alias>`
 forces a different injected model at runtime; `inherit` and main-only aliases
 are rejected without touching config.
 

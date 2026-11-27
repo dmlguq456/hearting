@@ -3,15 +3,30 @@
 The managed install merges only hooks, statusLine, env, autoMemoryEnabled and idleCompaction
 into the user's file and never writes `permissions`, so Hearting does not read
 or judge permission settings (`harness config status` has no row for them).
-This module only removes retired harness hook registrations, preserving the
-user's own settings.
+This module removes retired harness hook registrations, preserving the user's
+own settings, and carries the one default Claude reads from its global config
+file instead of settings.json (the empty-prompt left arrow).
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import re
+import signal
+import threading
+import time
 from pathlib import Path
+
+# Claude reads this key only from its global config file (`~/.claude.json`, or
+# `$CLAUDE_CONFIG_DIR/.claude.json`); it ignores it in settings.json. `false`
+# turns off the empty-prompt left arrow that backgrounds a foreground session
+# (a fork under a new session id). `/bg`, `/background`, `claude agents` and
+# the other ways to open the list stay available.
+LEFT_ARROW_KEY = "leftArrowOpensAgents"
+_LOCK_WAIT_SECONDS = 2.0
+_PAYLOAD_LIMIT = 64 * 1024 * 1024
 
 
 # Exact retired harness entrypoints. Keep this migration list after source removal
@@ -108,3 +123,152 @@ def remove_retired_hooks(data: dict) -> bool:
         elif groups:
             del events[event]
     return changed
+
+
+class _ConfigLockBusy(OSError):
+    """Claude (or another install) still holds the config lock after the short wait."""
+
+
+@contextlib.contextmanager
+def _claude_config_lock(path: Path, *, wait: float | None = None):
+    """Hold the same lock Claude holds around every save of its global config file.
+
+    Claude (2.1.327, a ``proper-lockfile`` mkdir lock) takes ``<realpath>.lock`` with
+    ``mkdir`` before each read-modify-write and removes it with ``rmdir`` afterwards;
+    the directory holds nothing, and a holder older than 10 s without an mtime refresh
+    (it refreshes every 5 s) is treated as dead and taken over by the next claimant.
+    Match that: ``mkdir``, wait briefly while it exists, never break an existing lock,
+    release on every exit path. The held section is a few milliseconds, far below the
+    stale limit, so no refresh loop is kept.
+    """
+    lock = os.path.realpath(path) + ".lock"
+    deadline = time.monotonic() + (_LOCK_WAIT_SECONDS if wait is None else wait)
+    delay = 0.005
+    while True:
+        try:
+            os.mkdir(lock)
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise _ConfigLockBusy(f"{lock} is held; Claude is saving") from None
+            time.sleep(delay)
+            delay = min(delay * 2, 0.1)
+    held_signals = {}
+    if threading.current_thread() is threading.main_thread():
+        def _terminate(signum, _frame):
+            raise SystemExit(128 + signum)
+        for name in ("SIGTERM", "SIGHUP"):
+            if (sig := getattr(signal, name, None)) is not None:
+                try:
+                    held_signals[sig] = signal.signal(sig, _terminate)
+                except (ValueError, OSError):
+                    pass
+    try:
+        yield
+    finally:
+        try:
+            # destructive-ok: reason=release the mkdir lock this call took; boundary=the empty `<config>.lock` directory created by this call's own os.mkdir
+            os.rmdir(lock)
+        except OSError:
+            pass
+        for sig, previous in held_signals.items():
+            try:
+                signal.signal(sig, previous)
+            except (ValueError, OSError):
+                pass
+
+
+def _dump_config(data: dict) -> bytes:
+    # allow_nan=False: a hand-written 1e400 loads as inf, and "Infinity" is not JSON.
+    return (json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode()
+
+
+def _read_config(path: Path):
+    """Read the file once; return ``(state, data)`` or raise ValueError/OSError/SafetyError."""
+    import safe_fs
+
+    state = safe_fs.capture_state(path, include_payload=True, payload_limit=_PAYLOAD_LIMIT)
+    if state.kind != "file":
+        raise ValueError(f"{path} is not a regular file")
+    return state, json.loads(state.payload.decode("utf-8"))
+
+
+def _require_own_file(path: Path) -> None:
+    """Replacing the file makes it ours; for another user's file (e.g. a root install) skip."""
+    if hasattr(os, "geteuid") and os.stat(path).st_uid != os.geteuid():
+        raise ValueError(f"{path} belongs to another user")
+
+
+def apply_left_arrow_default(path: Path, *, owned: bool) -> tuple[bool, str | None]:
+    """Write the left-arrow default only when the global config lacks the key.
+
+    Returns ``(owned_now, notice)``. A key the user already set (either value)
+    is never touched; ownership then carries only while the value is still the
+    ``false`` Hearting wrote. A file Hearting cannot read or replace safely, one
+    that does not exist yet (Claude creates it; the next install adds the key),
+    or one Claude is saving at this moment is left alone and reported, never an
+    install failure. The read, compare and replace run under Claude's own lock.
+    """
+    import safe_fs
+
+    try:
+        if path.is_symlink():
+            return owned, f"left-arrow default skipped: {path} is a symlink"
+        if not path.exists():
+            return owned, (f"left-arrow default skipped: {path} does not exist yet; "
+                           "the next install adds it once Claude has created the file")
+        _, data = _read_config(path)
+        if not isinstance(data, dict):
+            return owned, f"left-arrow default skipped: {path} is not a JSON object"
+        if LEFT_ARROW_KEY in data:
+            return owned and data[LEFT_ARROW_KEY] is False, None
+        with _claude_config_lock(path):
+            before, data = _read_config(path)
+            if not isinstance(data, dict):
+                return owned, f"left-arrow default skipped: {path} is not a JSON object"
+            if LEFT_ARROW_KEY in data:
+                return owned and data[LEFT_ARROW_KEY] is False, None
+            _require_own_file(path)
+            data[LEFT_ARROW_KEY] = False
+            payload = _dump_config(data)
+            auth = safe_fs.authority(path, owner="hearting-claude-left-arrow-default",
+                                     allowed_paths=(path,), allow_leaf_symlink=False, expected=before)
+            safe_fs.atomic_write_bytes(auth, payload, before.mode)
+        return True, ("claude: left arrow on an empty prompt no longer sends the conversation to the "
+                      f"background ({LEFT_ARROW_KEY}=false in {path}; set it to true in /config to undo)")
+    except _ConfigLockBusy:
+        return owned, (f"left-arrow default skipped: {path} was being saved by Claude; "
+                       "the next install tries again")
+    except (OSError, ValueError, safe_fs.SafetyError) as exc:
+        return owned, f"left-arrow default skipped: {str(exc).splitlines()[0][:160]}"
+
+
+def release_left_arrow_default(path: Path, *, dry_run: bool = False) -> bool:
+    """Remove the key at uninstall only while it is still the value Hearting wrote.
+
+    Runs under Claude's own lock; a file that is being saved, unreadable, or not
+    plain JSON is left as it is (the key then stays, harmlessly).
+    """
+    import safe_fs
+
+    try:
+        if path.is_symlink() or not path.exists():
+            return False
+        _, data = _read_config(path)
+        if not isinstance(data, dict) or data.get(LEFT_ARROW_KEY, None) is not False:
+            return False
+        if dry_run:
+            return True
+        with _claude_config_lock(path):
+            before, data = _read_config(path)
+            if not isinstance(data, dict) or data.get(LEFT_ARROW_KEY, None) is not False:
+                return False
+            _require_own_file(path)
+            del data[LEFT_ARROW_KEY]
+            payload = _dump_config(data)
+            auth = safe_fs.authority(path, owner="hearting-claude-left-arrow-default",
+                                     allowed_paths=(path,), allow_leaf_symlink=False, expected=before)
+            safe_fs.atomic_write_bytes(auth, payload, before.mode)
+        return True
+    except (OSError, ValueError, safe_fs.SafetyError):
+        return False
