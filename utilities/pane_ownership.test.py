@@ -914,37 +914,54 @@ class TerminalCallerTest(unittest.TestCase):
         env = {k: v for k, v in os.environ.items() if k not in
                (*po._WORKER_ENV, "AGENT_SESSION_ROLE") and not k.startswith("OPENCODE_DISPATCH")}
         script = '''
-import os, subprocess, sys, json, signal, time
+import os, subprocess, sys, json, signal
 signal.signal(signal.SIGTTOU, signal.SIG_IGN)
-def stop(*_): raise SystemExit(0)
-signal.signal(signal.SIGTERM, stop)
-child = subprocess.Popen([sys.executable, '-u', '-c', "import time; print('ready', flush=True); time.sleep(60)"],
+stop_fd = int(sys.argv[2])
+job = "import os, sys; print('ready', flush=True); os.read(int(sys.argv[1]), 1)"
+with subprocess.Popen([sys.executable, '-u', '-c', job, str(stop_fd)],
     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-    preexec_fn=lambda: os.setpgid(0, 0))
-try:
-    assert child.stdout.readline() == b'ready\\n'
-    os.tcsetpgrp(0, child.pid if sys.argv[1] == '1' else os.getpgrp())
-    print(json.dumps({'shell_pid':os.getpid(), 'pid':child.pid, 'tty':os.ttyname(0),
-        'foreground_process_group_id':os.tcgetpgrp(0),
-        'foreground_processes':[{'pid':os.tcgetpgrp(0)}]}), flush=True)
-    time.sleep(60)
-finally:
-    child.terminate()
-    child.wait(timeout=5)
-    child.stdout.close()
+    pass_fds=(stop_fd,), preexec_fn=lambda: os.setpgid(0, 0)) as child:
+    try:
+        assert child.stdout.readline() == b'ready\\n'
+        os.tcsetpgrp(0, child.pid if sys.argv[1] == '1' else os.getpgrp())
+        print(json.dumps({'shell_pid':os.getpid(), 'pid':child.pid, 'tty':os.ttyname(0),
+            'foreground_process_group_id':os.tcgetpgrp(0),
+            'foreground_processes':[{'pid':os.tcgetpgrp(0)}]}), flush=True)
+        os.read(stop_fd, 1)
+    except BaseException:
+        child.kill()
+        raise
 '''
         def terminal():
             os.setsid()
             fcntl.ioctl(0, termios.TIOCSCTTY, 0)
-        proc = subprocess.Popen([sys.executable, "-u", "-c", script, "1" if foreground else "0"],
-                                stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                preexec_fn=terminal, env=env)
-        os.close(slave)
+        # EOF ends both processes even if teardown begins before either read.
+        # SIGTERM could arrive between the driver's ready line and its sleep.
+        stop_read, stop_write = os.pipe()
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-u", "-c", script, "1" if foreground else "0", str(stop_read)],
+                stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+                pass_fds=(stop_read,), preexec_fn=terminal)
+        except BaseException:
+            os.close(stop_write)
+            raise
+        finally:
+            os.close(stop_read)
+            os.close(slave)
+
         def settle():
-            proc.terminate()
-            _out, err = proc.communicate(timeout=5)
+            os.close(stop_write)
+            try:
+                _out, err = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate(timeout=5)
+                raise
             self.assertEqual(proc.returncode, 0, err.decode())
         self.addCleanup(settle)
+        self.assertTrue(select.select([proc.stdout], [], [], 5)[0],
+                        "private PTY driver did not report readiness")
         line = proc.stdout.readline()
         self.assertTrue(line, "private PTY driver did not report readiness")
         info = json.loads(line)
