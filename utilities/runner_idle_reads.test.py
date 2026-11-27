@@ -47,13 +47,12 @@ def write_revision(root: Path, files: dict[str, bytes]) -> Path:
 
 class SharedRevisionReads(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = fixture_processes.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         spec._VERIFIED_REVISIONS.clear()
         self.files = {"a/prd.md": b"# A\n", "b/prd.md": b"# B\n", "b/notes.md": b"n\n"}
         self.directory = write_revision(self.root, self.files)
         self.addCleanup(self.tmp.cleanup)
-        self.addCleanup(fixture_processes.reap, self.tmp.name)
         self.addCleanup(spec._VERIFIED_REVISIONS.clear)
 
     def count_tree_reads(self):
@@ -161,9 +160,8 @@ class SharedRevisionReads(unittest.TestCase):
 
 class SeatLedgerReads(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = fixture_processes.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.addCleanup(fixture_processes.reap, self.tmp.name)
         patcher = mock.patch.dict(os.environ, {"XDG_STATE_HOME": self.tmp.name})
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -235,9 +233,8 @@ class UntrustedReadersStayFresh(unittest.TestCase):
 
 class ActiveIndexReads(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = fixture_processes.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.addCleanup(fixture_processes.reap, self.tmp.name)
         self.store = peer_obligations.ObligationStore(Path(self.tmp.name) / "state")
 
     def test_unchanged_active_records_cost_one_stat_each(self):
