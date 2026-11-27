@@ -4847,6 +4847,13 @@ def cmd_status(args):
             degradations=degradation_rows(route["route_id"], jobs=registry_path))
     if tier_notes:
         payload["tier_notes"] = tier_notes
+    try:  # what the owner types for a next step it runs itself, or what that command still lacks
+        import worker_bootstrap as WB
+        steps = {node["id"]: WB.human_run_step(route, route_file, node)
+                 for node in route.get("nodes") or () if node.get("id") in next_stage}
+    except Exception:
+        steps = {}
+    payload["next_steps"] = {node: line for node, line in steps.items() if line}
     if args.json:
         print(json.dumps(payload, sort_keys=True, indent=2))
     else:
@@ -4858,6 +4865,8 @@ def cmd_status(args):
         print(f"owner      {owner.get('attempt_id') or '-'} {owner.get('liveness')} reason={owner.get('reason')}")
         print(f"stage      current={payload['current_stage'] or '-'} "
               f"next={payload['next_stage'] or '-'}")
+        for line in payload["next_steps"].values():
+            print(f"next step  {line}")
         print(f"terminal   {terminal_nodes} gates="
               f"{ {k: v['passed'] for k, v in gates.items()} }")
         for child in payload["resource_children"]:

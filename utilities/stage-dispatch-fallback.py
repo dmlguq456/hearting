@@ -546,6 +546,13 @@ def load_node(route_path: Path, node_id: str, launch_phase: str) -> tuple[dict, 
         if _owner_executed_node(node):
             raise ValueError(f"route node {node_id} is run by the route owner itself (dispatch depth 1) and has "
                              "no stage fallback chain; follow your Route steps")
+        try:
+            import worker_bootstrap as wb
+            step = wb.human_run_step(route, route_path, node)
+        except Exception:  # the refusal stands without its advisory command
+            step = ""
+        if step:
+            raise ValueError(f"route node {node_id} is not a dispatched stage; {step}")
         raise ValueError("route node lacks checked ordered fallback")
     return route, node
 

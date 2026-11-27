@@ -2947,8 +2947,13 @@ def main():
                                   "route_id": route["route_id"], "node_id": a.node,
                                   "reason": "owner-closure-review-nodes-only"}
                         if node.get("kind") == "resource-runner":
+                            try:
+                                import worker_bootstrap as _wb
+                                step = _wb.human_run_step(route, Path(a.route).resolve(), node)
+                            except Exception:  # the read-only answer stands without its command
+                                step = ""
                             result["next_action"] = (
-                                "use the resource node's existing start path; a completed compute-hosts "
+                                (step or "use the resource node's existing start path") + "; a completed compute-hosts "
                                 "candidate may be supplied with --compute-run <run-id>; a route-bound "
                                 "exit-0 run whose receipt names only a leftover `running` row is adopted "
                                 "and that row is settled; a finished run this route's owner launched "
