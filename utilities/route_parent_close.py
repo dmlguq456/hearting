@@ -19,6 +19,7 @@ from datetime import datetime
 import dispatch_contract as DC
 import workflow_state as WS
 from dispatch_registry_cache import registry_view
+from runtime_observation import file_generation
 
 NOTE = "cancelled-by-parent"
 OPEN = {"open", "running"}
@@ -88,6 +89,60 @@ def cancellation_settled(metadata, jobs):
     route = value["route"]
     result = settled_result(route, WS.WorkflowLedger(route["route_id"], route["route_hash"], jobs=jobs))
     return bool(result and result.get("state") == "cancelled")
+
+
+# A parent close normally marks the watched row, which changes jobs.log. This
+# finite backstop keeps a close intent recorded only outside the registry
+# (attachments and adopted advances) visible to an otherwise idle watcher.
+CLOSE_INTENT_BACKSTOP_SECONDS = 30.0
+
+
+class RegistryObservation:
+    """Re-run registry judgments only when their inputs can have changed.
+
+    The governed PID stays a per-interval ``/proc`` check. The watched row is
+    re-read when the ``watched`` file's generation changes (jobs.log unless the
+    caller names its route's ledger journal); the parent-close judgment re-runs
+    when that row changes, when a watched journal changes (a close records its
+    intent there before it marks any row), or when the close-intent backstop elapses.
+    """
+
+    def __init__(self, jobs: Path, attempt_id: str, read_attempt, *,
+                 backstop: float = CLOSE_INTENT_BACKSTOP_SECONDS, watched: Path | None = None):
+        self.jobs, self.attempt_id, self.backstop = jobs, attempt_id, backstop
+        self.watched = jobs if watched is None else watched
+        self.read_attempt = read_attempt
+        self.generation = None
+        self.status: str | None = None
+        self.metadata: dict[str, str] = {}
+        self.close_requested = False
+        self.judged_at: float | None = None
+
+    def refresh(self, *, force: bool = False):
+        import dispatch_registry_cache
+        with dispatch_registry_cache.registry_read_scope():
+            return self._refresh_scoped(force=force)
+
+    def _refresh_scoped(self, *, force: bool):
+        try:
+            generation = file_generation(self.watched)
+        except FileNotFoundError:
+            generation = "absent"   # nothing recorded yet; its creation is a change
+        except OSError:
+            generation = None
+        row_changed = False
+        intent_changed = self.watched != self.jobs and generation != self.generation
+        if force or generation is None or generation != self.generation:
+            self.generation = generation
+            status, metadata = self.read_attempt(self.jobs, self.attempt_id)
+            row_changed = (status, metadata) != (self.status, self.metadata)
+            self.status, self.metadata = status, metadata
+        now = time.monotonic()
+        if (force or row_changed or intent_changed or self.judged_at is None
+                or now - self.judged_at >= self.backstop):
+            self.close_requested = row_requested(self.metadata, self.jobs)
+            self.judged_at = now
+        return self.status, self.metadata, self.close_requested
 
 
 def _current_owner_intent(metadata, jobs, *, registry_rows=None):
@@ -462,6 +517,13 @@ def explain_stop(receipt, translate):
     return receipt
 
 
+def explain_pending(receipt, translate):
+    """Add the way on to a parent close that is still terminating; it names existing commands only."""
+    if receipt.get("state") == "termination-pending" and receipt.get("reason") == NOTE:
+        receipt["next_step"] = translate("route.close.pending_next")
+    return receipt
+
+
 def stop_route_legs(route, *, jobs=None, grace=0.3, kill_wait=0.5):
     """Route close of a route whose running work is its frame legs: stop those legs first.
 
@@ -509,9 +571,30 @@ def request(route, path, *, jobs=None, stop_resources=False, summary=None, commi
             fcntl.flock(lock, fcntl.LOCK_EX)
             rows = _rows(jobs)
             owner, succeeded = _owner(route, path, jobs, rows)
-            if succeeded or not owner:
+            if succeeded:
                 return None
-            attempts = _owned_attempts(route, rows, owner)
+            roots = [owner] if owner else []
+            if not roots and stop_resources:
+                # Frame and unit routes have no owner yet (or at all). A full
+                # stop claims their legs in the same journal before any signal.
+                identity = route["route_id"], route["route_hash"]
+                worktree = Path(route["cwd"]).resolve()
+                for aid, (fields, meta) in rows.items():
+                    is_leg = meta.get("worker_type") == "frame" or (
+                        route.get("capability") == "unit" and DC.finishes_route(meta)
+                        and meta.get("worker_type") != "owner")
+                    if (is_leg and (fields[1] in OPEN or _user_stopped(meta))
+                            and meta.get("dispatch_depth") == "1"
+                            and (meta.get("route_id"), meta.get("route_hash")) == identity
+                            and Path(fields[3]).resolve() == worktree):
+                        # A full stop also ends what a stopped leg left (its summary owner,
+                        # linked resources), so every leg needs its parent. Without the flag,
+                        # `stop_route_legs` closes stopped legs from any session.
+                        _require_stopper(rows, aid, jobs)
+                        roots.append(aid)
+            if not roots:
+                return None
+            attempts = set().union(*(_owned_attempts(route, rows, aid) for aid in roots))
             value = {"route": route, "route_file": str(path.resolve()),
                      "owner_attempt_id": owner, "attempts": sorted(attempts),
                      "stop_resources": bool(stop_resources), "at": WS.now_iso(),
@@ -768,8 +851,13 @@ def _workflow_processes(route, ledger, seeds=()):
 
 
 def _drain_workflow(value, ledger, resources, grace, kill_wait):
-    if value.get("observer_namespace", DC.process_namespace_identity()) != DC.process_namespace_identity():
-        return False
+    namespace = DC.process_namespace_identity()
+    if value.get("observer_namespace", namespace) != namespace:
+        # The launching reaper may resume a close from another namespace.
+        # With no workflow launch claims or saved PIDs, it has no separate
+        # workflow processes to prove gone.
+        return not value.get("workflow_processes") and not any(
+            claim.get("route_id") == value["route"]["route_id"] for claim in ledger.claims().values())
     deadline, sent = time.monotonic() + grace + kill_wait, set()
     while True:
         processes, observed = _workflow_processes(value["route"], ledger, value.get("workflow_processes", []))
@@ -821,13 +909,15 @@ def _classify_agent_processes(meta, resources, *, terminal=False):
     run_ids = {r["run_id"] for r in resources}
     compute_records = {r["run_id"]: r for r in resources if r["kind"] == "compute"}
     agents = []
+    observed = group.state != "unverifiable" and tagged.state != "unverifiable"
     for pid, start in sorted(members, reverse=True):
         try:
             env = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
         except FileNotFoundError:
             continue
         except OSError:
-            return [], False, {}
+            observed = False
+            continue
         matches = sorted(rid for rid in run_ids
                          if b"HEARTING_COMPUTE_RUN_ID=" + rid.encode() in env)
         if matches:
@@ -839,12 +929,28 @@ def _classify_agent_processes(meta, resources, *, terminal=False):
                     break
             continue
         agents.append((pid, start))
-    return agents, group.state != "unverifiable" and tagged.state != "unverifiable", preserved
+    return agents, observed, preserved
 
 
 def _agent_processes(meta, resources, *, terminal=False):
     agents, observed, _ = _classify_agent_processes(meta, resources, terminal=terminal)
     return agents, observed
+
+
+def _close_attempt_processes(meta, resources, *, terminal, stop_resources):
+    if not stop_resources:
+        return _agent_processes(meta, resources, terminal=terminal)
+    # Each signal and absence check needs a fresh /proc observation, even
+    # when recovery is driven by a batch observer holding a shared snapshot.
+    with DC.process_table_scan_scope(fresh=True):
+        agents, observed = _agent_processes(meta, resources, terminal=terminal)
+    # The detached summary owner is outside ordinary worker completion. Its
+    # separate process identity is recorded by the same launch transaction.
+    from dispatch_summary import owner_process_observation
+    summary_state, summary = owner_process_observation(meta)
+    if summary is not None and summary not in agents:
+        agents.insert(0, summary)
+    return agents, observed and summary_state != "unknown"
 
 
 def owner_resources(meta, jobs):
@@ -1208,15 +1314,18 @@ def _stop_resources(value, resources, protected_resources, ledger):
     return pending
 
 
-def continue_close(value, *, jobs=None, grace=0.3, kill_wait=0.5):
-    """Same controller for close, join and post-exit recovery; bounded per pass."""
+def continue_close(value, *, jobs=None, grace=0.3, kill_wait=0.5, attempt_id=None):
+    """Same controller for close, join and post-exit recovery; bounded per pass.
+
+    ``attempt_id``: the one attempt a recovery asks about. Once the close has
+    settled, only that attempt's delivery is replayed; the close itself replays all."""
     jobs = jobs_path(jobs)
     route, path = value["route"], Path(value["route_file"])
     ledger = WS.WorkflowLedger(route["route_id"], route["route_hash"], jobs=jobs)
     prior = settled_result(route, ledger)
     if prior:
-        _finish_existing_cycle(route, jobs=jobs)
-        return prior
+        return _finish_close(value, prior, jobs, only=attempt_id)
+    stop_resources = value["stop_resources"]
     resources = _resources_for_close(value, jobs)
     protected = {(r["kind"], r["run_id"], r.get("registry")): r
                  for r in value.get("protected_resources", [])}
@@ -1246,11 +1355,14 @@ def continue_close(value, *, jobs=None, grace=0.3, kill_wait=0.5):
         settled = False
         while True:
             try:
-                processes, observed = _agent_processes(
-                    meta, protected_resources, terminal=fields[1] not in OPEN)
+                processes, observed = _close_attempt_processes(
+                    meta, protected_resources, terminal=fields[1] not in OPEN,
+                    stop_resources=stop_resources)
             except OSError:
                 processes, observed = [], False
-            if not observed:
+            # An unreadable process can defer the proof of absence. Exact
+            # targets already identified can still be stopped.
+            if not observed and (not stop_resources or not processes):
                 if time.monotonic() >= deadline:
                     break
                 time.sleep(0.02)
@@ -1265,7 +1377,8 @@ def continue_close(value, *, jobs=None, grace=0.3, kill_wait=0.5):
                     never = DC.attempt_row_never_started(fields)
                     settled = DC.close_attempt_row_if(jobs, aid, NOTE,
                         lambda fresh: requested(DC.parse_registry_metadata(fresh[5])) and
-                            _agent_processes(DC.parse_registry_metadata(fresh[5]), protected_resources) == ([], True),
+                            _close_attempt_processes(DC.parse_registry_metadata(fresh[5]), protected_resources,
+                                terminal=False, stop_resources=stop_resources) == ([], True),
                         evidence={"failure_class": "cancelled", "parent_close_settled": "1",
                                   **({"launch_outcome": "never-launched"} if never else {})})
                     if not settled:
@@ -1289,8 +1402,7 @@ def continue_close(value, *, jobs=None, grace=0.3, kill_wait=0.5):
             pending.append(aid)
     if not _drain_workflow(value, ledger, protected_resources, grace, kill_wait):
         pending.append("workflow:" + route["route_id"])
-    resource_pending = (_stop_resources(value, resources, protected_resources, ledger)
-                        if value["stop_resources"] else set())
+    resource_pending = (_stop_resources(value, resources, protected_resources, ledger) if stop_resources else set())
     resources = _resources_for_close(value, jobs)
     resource_states = []
     import resource_run_registry as RR
@@ -1313,33 +1425,38 @@ def continue_close(value, *, jobs=None, grace=0.3, kill_wait=0.5):
     with ledger.lock():
         prior = settled_result(route, ledger)
         if prior:
-            return prior
-        _cancel_ledger(route, ledger)
-        target = path.with_suffix(".outcome.json")
-        if target.exists():
-            existing = json.loads(target.read_text())
+            outcome = prior
+        else:
+            target = path.with_suffix(".outcome.json")
+            existing = json.loads(target.read_text()) if target.exists() else {}
             if existing.get("terminal_gate_proven") is True:
                 return existing
-            if existing.get("reason") == NOTE:
-                outcome = existing
-            else:
-                outcome = None
-        else:
-            outcome = None
-        outcome = outcome or {"schema_version": 4, "route_id": route["route_id"], "route_hash": route["route_hash"],
-                   "route_file": str(path), "cwd": route["cwd"], "capability": route["capability"],
-                   "effective_intensity": route["effective_intensity"], "closed_at": WS.now_iso(),
-                   "terminal_gate_proven": False, "state": "cancelled", "reason": NOTE,
-                   "disposition": "cancelled", "summary": value.get("summary"), "head_commit": value.get("head_commit"),
-                   "owner_attempt_id": value["owner_attempt_id"], "resources": resource_states,
-                   # The closing reader's own catalog verdict (`verify_route`), kept in the close intent.
-                   **({"registry_current": route["_registry_current"] is True}
-                      if "_registry_current" in route else {})}
-        ledger._append({"at": WS.now_iso(), "route_id": route["route_id"],
-                        "route_hash": route["route_hash"], "actor": "parent-close",
-                        "evidence": {"parent_close_result": outcome}})
-        WS._atomic_write(target, json.dumps(outcome, indent=2) + "\n")
-    _finish_existing_cycle(route, jobs=jobs)
+            _cancel_ledger(route, ledger)
+            outcome = existing if existing.get("reason") == NOTE else {
+                "schema_version": 4, "route_id": route["route_id"], "route_hash": route["route_hash"],
+                "route_file": str(path), "cwd": route["cwd"], "capability": route["capability"],
+                "effective_intensity": route["effective_intensity"], "closed_at": WS.now_iso(),
+                "terminal_gate_proven": False, "state": "cancelled", "reason": NOTE,
+                "disposition": "cancelled", "summary": value.get("summary"), "head_commit": value.get("head_commit"),
+                "owner_attempt_id": value["owner_attempt_id"], "resources": resource_states,
+                # The closing reader's own catalog verdict (`verify_route`), kept in the close intent.
+                **({"registry_current": route["_registry_current"] is True}
+                   if "_registry_current" in route else {})}
+            WS._atomic_write(target, json.dumps(outcome, indent=2) + "\n")
+            ledger._append({"at": WS.now_iso(), "route_id": route["route_id"],
+                            "route_hash": route["route_hash"], "actor": "parent-close",
+                            "evidence": {"parent_close_result": outcome}})
+    return _finish_close(value, outcome, jobs)
+
+
+def _finish_close(value, outcome, jobs, *, only=None):
+    _finish_existing_cycle(value["route"], jobs=jobs)
+    if value["stop_resources"]:
+        from dispatch_completion_join import materialize_after_terminal_close
+        attempts = set(value["attempts"]) if only is None else {only} & set(value["attempts"])
+        for aid, (_fields, meta) in _rows(jobs, attempts).items():
+            if aid in attempts and (meta.get("note") == NOTE or _user_stopped(meta)):
+                materialize_after_terminal_close(jobs, aid)
     return outcome
 
 
@@ -1708,7 +1825,7 @@ def recover_attempt(jobs, metadata):
     route = {"route_id": metadata.get("parent_close_route_id") or metadata.get("owner_route_id") or metadata.get("route_id"),
              "route_hash": metadata.get("parent_close_route_hash") or metadata.get("owner_route_hash") or metadata.get("route_hash")}
     value = intent(route, jobs) or _current_owner_intent(metadata, jobs)
-    return continue_close(value, jobs=jobs) if value else None
+    return continue_close(value, jobs=jobs, attempt_id=metadata.get("attempt_id")) if value else None
 
 
 def _resources_for_close(value, jobs):

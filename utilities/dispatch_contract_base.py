@@ -1595,16 +1595,18 @@ _SD105_CANCELLED_NOTE = "cancelled-receipt-unavailable"
 def _terminal_delivery_receipt(metadata: dict[str, str]) -> dict:
     """The terminal writer and every carrier use this same semantic result."""
     outcome = committed_outcome("done", metadata)
-    is_success = outcome in {"succeeded", "cancelled"}
+    settled = outcome in {"succeeded", "cancelled"}
+    classification = ("cancelled" if metadata.get("note") == "cancelled-by-parent" and outcome == "cancelled"
+                      else "success" if settled else "attention")
     child = {
         "attempt_id": metadata.get("attempt_id", ""),
         "status": "done",
         "readiness": "ready",
         "harness": metadata.get("harness", ""),
-        "required_action": "advance-completed" if is_success else "inspect-done-failure",
-        "delivery_classification": "success" if is_success else "attention",
+        "required_action": "advance-completed" if settled else "inspect-done-failure",
+        "delivery_classification": classification,
     }
-    if not is_success:
+    if not settled:
         child["reason"] = "terminal-failure-or-unclosed"
     elif outcome == "cancelled":
         child["reason"] = "cancelled-by-parent"
