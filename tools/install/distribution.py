@@ -3882,9 +3882,12 @@ def _open_route_launch_homes(
     for root in roots:
         routes_dir = Path(root) / ".runtime" / "routes"
         _watch_discovery_path(inventory, routes_dir, directory=True)
+        listed_at = _path_fingerprint(routes_dir)
+        # Recorded even while absent: a route published there later is read
+        # under the writer boundary once the directory appears.
+        index["dirs"][routes_dir] = {"fingerprint": listed_at, "entries": {}}
         if not routes_dir.is_dir():
             continue
-        listed_at = _path_fingerprint(routes_dir)
         try:
             with os.scandir(routes_dir) as stream:
                 entries = [

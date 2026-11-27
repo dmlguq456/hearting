@@ -1877,17 +1877,25 @@ class OpenAttemptSealedReleasePruneTest(unittest.TestCase):
         ), contextlib.redirect_stderr(stderr):
             DISTRIBUTION._cleanup_releases(keep=set())
 
-        self.assertEqual(discoveries, 2, "new route input should trigger one bounded refresh")
+        # One global discovery: the new artifact root and its route are read
+        # while the candidate's writer boundary is held (`_settle_route_evidence`).
+        self.assertEqual(discoveries, 1, "a new route is settled under the boundary, not rediscovered")
         self.assertTrue(n.is_dir())
         self.assertIn("open-route:rt-95e2db8fa2b8e5f5", stderr.getvalue())
 
-    def test_exhausted_unstable_route_refresh_never_prunes_from_partial_inventory(self):
+    def test_unstable_route_scan_never_prunes_from_partial_inventory(self):
+        # An unstable scan used to keep every release (three refreshes, then
+        # `route-discovery-unstable`); on a busy host that was every update.
+        # Now what it missed is read under each candidate's writer boundary:
+        # routes published after the listing still protect their targets, and
+        # only a release nothing names goes.
         releases = [self._make_release(f"v-unstable-{index}", 1000 + index)
                     for index in range(5)]
         self._seal_current(releases[-1])
         self._write_registry_row(
             "done", "att-unstable-index", f"artifact_root={self.artifact_root}"
         )
+        (self.artifact_root / ".runtime" / "routes").mkdir(parents=True)
         real_discovery = DISTRIBUTION._open_route_launch_homes
         published_targets = [releases[4], releases[3], releases[2], releases[0]]
         discoveries = 0
@@ -1895,11 +1903,11 @@ class OpenAttemptSealedReleasePruneTest(unittest.TestCase):
         def publish_after_partial_scan(environ, *, inventory=None, **kwargs):
             nonlocal discoveries
             observed = real_discovery(environ, inventory=inventory, **kwargs)
-            if discoveries < len(published_targets):
+            for index, target in enumerate(published_targets):
                 route_id = "rt-" + hashlib.sha256(
-                    f"unstable-{discoveries}".encode()
+                    f"unstable-{discoveries}-{index}".encode()
                 ).hexdigest()[:16]
-                self._write_route_record(route_id, published_targets[discoveries])
+                self._write_route_record(route_id, target)
             discoveries += 1
             # Model the reader contract directly: it returns what it observed,
             # while declaring that the inventory changed during discovery.
@@ -1907,15 +1915,18 @@ class OpenAttemptSealedReleasePruneTest(unittest.TestCase):
             inventory["fingerprints"]["unstable"] = True
             return observed
 
+        stderr = io.StringIO()
         with mock.patch.object(
             DISTRIBUTION, "_open_route_launch_homes",
             side_effect=publish_after_partial_scan,
-        ):
+        ), contextlib.redirect_stderr(stderr):
             DISTRIBUTION._cleanup_releases(keep=set())
 
-        self.assertEqual(discoveries, 4, "initial discovery plus three bounded refreshes")
-        self.assertTrue(all(release.is_dir() for release in releases))
-        self.assertTrue(releases[0].is_dir(), "the last undiscovered route target was pruned")
+        self.assertEqual(discoveries, 1)
+        self.assertNotIn("route-discovery-unstable", stderr.getvalue())
+        self.assertTrue(releases[0].is_dir(), "a route the scan missed was ignored")
+        self.assertTrue(releases[2].is_dir(), "a route the scan missed was ignored")
+        self.assertFalse(releases[1].exists(), "a release nothing names was kept")
 
     def test_route_published_after_later_prune_protects_oldest_candidate(self):
         releases = [self._make_release(f"v-later-route-{index}", 1000 + index)
@@ -1951,7 +1962,7 @@ class OpenAttemptSealedReleasePruneTest(unittest.TestCase):
             DISTRIBUTION._cleanup_releases(keep=set())
 
         self.assertTrue(published)
-        self.assertEqual(discoveries, 2, "later publication should trigger one outside-epoch refresh")
+        self.assertEqual(discoveries, 1, "a later publication is settled under the next boundary")
         self.assertFalse(releases[2].exists(), "the first eligible release should be reclaimed")
         self.assertTrue(releases[0].is_dir(), "the later route reference was ignored")
 
@@ -1999,7 +2010,7 @@ class OpenAttemptSealedReleasePruneTest(unittest.TestCase):
             DISTRIBUTION._cleanup_releases(keep=set())
 
         self.assertTrue(changed)
-        self.assertEqual(discoveries, 2, "atomic replacement of an existing reference must refresh")
+        self.assertEqual(discoveries, 1, "an existing reference replaced later is read again under the boundary")
         self.assertFalse(releases[2].exists(), "the first eligible release should be reclaimed")
         self.assertTrue(releases[0].is_dir(), "the changed existing reference was ignored")
 
@@ -3030,9 +3041,11 @@ with open(str(jobs) + '.lock', 'a+b') as lock:
              mock.patch.object(DISTRIBUTION.shutil, "rmtree", side_effect=remove_in_boundary):
             DISTRIBUTION._cleanup_releases(keep=set())
 
+        # The late writer and the carry-forward's own registry write are read
+        # again under the boundary (`_settle_route_evidence`), not rediscovered.
         self.assertEqual(
-            route_discoveries, 3,
-            "cleanup must refresh external publication and the monotonic carry-forward",
+            route_discoveries, 1,
+            "cleanup must settle external publication and the monotonic carry-forward",
         )
         self.assertFalse(v1.exists())
         self.assertEqual(

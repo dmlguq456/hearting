@@ -182,9 +182,10 @@ class PerReleaseRetentionTest(unittest.TestCase):
         self.assertIn(f"open-route:{ROUTE_B}", output)
         self.assertFalse(unrelated.exists(), output)
 
-    def test_a_route_published_after_the_scan_keeps_its_release(self):
+    def _late_route(self, *, routes_existed: bool) -> None:
         late, unrelated, newer, newest = self._family("v4.1.0", "v4.2.0", "v4.3.0", "v4.4.0")
-        self._routes(self.project)
+        if routes_existed:
+            self._routes(self.project)
         real_paths = distribution._dispatch_cleanup_boundary_paths
         published = []
 
@@ -200,6 +201,12 @@ class PerReleaseRetentionTest(unittest.TestCase):
         self.assertTrue(late.is_dir(), output)
         self.assertIn(f"open-route:{ROUTE_C}", output)
         self.assertFalse(unrelated.exists(), output)
+
+    def test_a_route_published_after_the_scan_keeps_its_release(self):
+        self._late_route(routes_existed=True)
+
+    def test_a_route_published_in_a_routes_directory_made_after_the_scan(self):
+        self._late_route(routes_existed=False)
 
     # -- (나′) a process that holds a release only through its environment --
     def test_a_process_holding_a_release_only_in_its_environment_keeps_it(self):
