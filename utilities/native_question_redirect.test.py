@@ -544,6 +544,17 @@ class PassThroughTest(Base):
             self.assertIsNone(redirect.redirect("claude", claude_payload(), seconds=1))
             self.assertLess(time.monotonic() - started, 1.35)
         self.assertEqual(redirect.redirect("claude", claude_payload()), redirect.reason_already(earlier["id"]))
+        # The seat resolution swallows the expiry and the state is read at once after it (review 2): no refusal
+        # decided past the budget, and no registration started past it either.
+        with mock.patch.object(tidy, "resolve_seat", side_effect=swallowing_seat):
+            started = time.monotonic()
+            self.assertIsNone(redirect.redirect("claude", claude_payload(), seconds=1))
+            self.assertLess(time.monotonic() - started, 1.35)
+        self.answered("claude")
+        with mock.patch.object(tidy, "resolve_seat", side_effect=swallowing_seat), \
+             mock.patch.object(state, "register_message", wraps=state.register_message) as register:
+            self.assertIsNone(redirect.redirect("claude", claude_payload(), seconds=1))
+        register.assert_not_called()
 
     def test_the_budget_is_inside_every_hook_timeout(self):
         claude = json.loads((ROOT / "adapters/claude/settings.json").read_text())

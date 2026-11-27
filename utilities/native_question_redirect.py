@@ -36,6 +36,7 @@ import re
 import signal
 import sys
 import threading
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -219,7 +220,8 @@ def same_question(signal: dict, rows: list) -> bool:
         return False
 
 
-def register(harness: str, session_id: str, rows: list, *, cwd: str | None = None) -> str:
+def register(harness: str, session_id: str, rows: list, *, cwd: str | None = None,
+             deadline: float | None = None) -> str:
     """Register the question on this session's seat; the id, or an error that means pass-through.
 
     `Waiting` when this session already has this question open (checked first, so a seat or
@@ -242,6 +244,8 @@ def register(harness: str, session_id: str, rows: list, *, cwd: str | None = Non
     launch = current_launch_context(harness, session_id)
     incarnation = {key: launch[key] for key in ("pid", "proc_start")} if launch else None
     for detail in (True, False):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise _Late("native-question-redirect-timeout")   # spent where a handler swallowed it: no registration
         built = build(rows, detail=detail)
         try:
             value = HWS.register_message(
@@ -291,6 +295,7 @@ def redirect(harness: str, payload: dict, *, seconds: int = BUDGET_SECONDS) -> s
             raise _Late("native-question-redirect-timeout")
 
     timed = hasattr(signal, "setitimer") and threading.current_thread() is threading.main_thread()
+    deadline = time.monotonic() + seconds if timed else None
     previous = None
     try:
         try:
@@ -300,7 +305,7 @@ def redirect(harness: str, payload: dict, *, seconds: int = BUDGET_SECONDS) -> s
                 # Seat resolution, the state reads and the registration all run inside one budget; a
                 # handler on the way that swallows the expiry is rung out of again at once.
                 signal.setitimer(signal.ITIMER_REAL, seconds, _REFIRE_SECONDS)
-            decided = ("registered", register(harness, session_id, rows, cwd=cwd))
+            decided = ("registered", register(harness, session_id, rows, cwd=cwd, deadline=deadline))
         except Waiting as held:
             decided = ("already", held.signal["id"])
         finally:
@@ -310,7 +315,11 @@ def redirect(harness: str, payload: dict, *, seconds: int = BUDGET_SECONDS) -> s
                 signal.signal(signal.SIGALRM, previous)
     except BaseException:  # noqa: BLE001 -- registration failed or ran late: show the native question
         return None
-    return reason_for(decided[1]) if decided[0] == "registered" else reason_already(decided[1])
+    if decided[0] == "already":
+        # A refusal is decided within the budget or not at all, even where a handler on the way swallowed
+        # the expiry: the native question shows, as on main. (A registration finished is on the board.)
+        return reason_already(decided[1]) if deadline is None or time.monotonic() < deadline else None
+    return reason_for(decided[1])
 
 
 def main(argv=None, stdin=None) -> int:
