@@ -459,7 +459,8 @@ class FrameAlternativeSelectionTest(unittest.TestCase):
                      mock.patch.object(OWNER._allocation, "attempt_counts", return_value={
                          "claude": 0, "codex": 0, "opencode": 0}), \
                      mock.patch.object(OWNER._capacity, "capacity_report", return_value={
-                         "scores": {"claude": 80, "codex": 70, "opencode": 0}, "sources": {}}), \
+                         "scores": {"claude": 80.0, "codex": 70, "opencode": 0}, "sources": {},
+                         "freshness": {"claude": {"raw_headroom": 10.0}}}), \
                      mock.patch.object(OWNER, "derive_frame_route_binding", return_value=binding), \
                      mock.patch.object(artifact_producer, "prepare_route_artifact_env", return_value={}), \
                      mock.patch.object(OWNER.os, "access", return_value=True), \
@@ -468,13 +469,20 @@ class FrameAlternativeSelectionTest(unittest.TestCase):
                      mock.patch.object(OWNER, "record_frame_launch_degradation") as record, \
                      contextlib.redirect_stdout(out):
                     self.assertEqual(OWNER.main([]), launch_result)
-                self.assertIn("reason=frame-other-harness-unusable", out.getvalue())
+                lines = out.getvalue().splitlines()
+                self.assertIn("reason=frame-other-harness-unusable", lines)
+                self.assertIn("capacity_headroom.claude=80.0", lines)
+                self.assertEqual([line for line in lines if line.startswith("capacity_raw_headroom.")],
+                                 ["capacity_raw_headroom.claude=10.0"])
                 self.assertEqual(Path(launch.call_args.args[0][0]).parts[-3], "codex")
                 self.assertEqual(record.called, should_record)
                 if should_record:
                     record.assert_called_once()
                     self.assertEqual(record.call_args.kwargs["reason"], "frame-other-harness-unusable")
-                    self.assertIn("limited(usage-gate)", record.call_args.kwargs["detail"])
+                    detail = json.loads(record.call_args.kwargs["detail"])
+                    self.assertEqual(detail["states"]["claude"], "limited(usage-gate)")
+                    self.assertEqual(detail["capacity"], {"claude": 80.0})
+                    self.assertEqual(detail["capacity_raw_headroom"], {"claude": 10.0})
 
 class FrameTopDeclarationTest(unittest.TestCase):
     """Automatic frame-leg assignment chooses only harnesses whose runtime config declares `top`."""
@@ -1467,6 +1475,7 @@ class DispatchOwnerTests(unittest.TestCase):
             stdout,
         )
         self.assertIn("reason=no-eligible-candidate", stdout)
+        self.assertIn("actual quota from capacity_raw_headroom.* when shown", stdout)
         self.assertIn("child_spawned=0", stdout)
         self.assertEqual(wrapper_calls, [])
 

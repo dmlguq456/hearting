@@ -21,6 +21,8 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+from tools import fixture_processes
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 
@@ -620,7 +622,7 @@ class OwnerPinChangeTest(unittest.TestCase):
     with only Codex-parent tuples -- moves its next owner to Claude; the sealed route stays."""
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = fixture_processes.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         tuples = [_tuple("codex", "codex"), _tuple("codex", "claude"), _tuple("codex", "opencode", status="unsupported")]
         self.route = {"route_id": "rt-96bab699717dba8f", "route_hash": "sha256:sealed",
