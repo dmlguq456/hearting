@@ -4017,17 +4017,6 @@ def cmd_watch_run(args):
                     identity_reason or "target-identity-unverified")
                 os._exit(0)
 
-        if ((wait_record or {}).get("state") == "result"
-                and (wait_record or {}).get("agent_state") in {"idle", "done"}
-                and _watch_readiness_identity(
-                    arm, (wait_record or {}).get("agent_state")) is not None):
-            try:
-                readiness_store = peer_obligations.ObligationStore()
-                shared_readiness.wake_runner(readiness_store.root)
-                peer_obligations.ensure_normal_runner(reconciliation_required=True)
-            except Exception:
-                pass
-
         if isinstance(wait_record, dict):
             if wait_record.get("state") == "result":
                 state = wait_record.get("agent_state", "unknown")
@@ -4188,7 +4177,8 @@ def cmd_watch_run(args):
                     os._exit(0)
 
         if not terminal_reason:
-            awaiting_readiness = False
+            check_readiness = True
+            checked_readiness = False
             receipt = None
             receipt_published = False
             receipt_rejected = False
@@ -4197,7 +4187,6 @@ def cmd_watch_run(args):
             def publish_ready_result(result_state, result_agent):
                 nonlocal state, agent, receipt, receipt_published
                 nonlocal receipt_rejected, readiness_transition_pending, terminal_reason
-                nonlocal awaiting_readiness
                 state, agent = result_state, result_agent
                 pid = os.getpid()
                 receipt = {
@@ -4236,7 +4225,6 @@ def cmd_watch_run(args):
                     return "expired"
                 readiness_transition_pending = True
                 if result in {_WATCH_RECEIPT_CONTENDED, _WATCH_RECEIPT_PENDING}:
-                    awaiting_readiness = True
                     return "retry"
                 receipt_rejected = True
                 return "rejected"
@@ -4264,28 +4252,32 @@ def cmd_watch_run(args):
                         terminal_reason = "session-replaced"
                         state, agent = "session-replaced", wait_record.get("agent") or expected_agent
                         break
-                    if result_state in {"idle", "done"}:
-                        if not awaiting_readiness:
-                            readiness = _watch_transition_readiness(
-                                args.target, result_state, arm, expected, server,
-                                args.watch_id, paths, deadline=deadline)
-                            if readiness.state == _WATCH_RECEIPT_EXPIRED:
-                                terminal_reason = "watch-deadline"
-                                state, agent = "timeout", expected_agent
-                                break
-                            if readiness.state == "ready":
-                                action = publish_ready_result(
-                                    result_state, wait_record.get("agent") or expected_agent)
-                                if action == "retry":
-                                    continue
-                                break
-                            observation = {**observation, "state": "pending",
-                                           "reason": readiness.reason or result_state,
-                                           "native_wait": wait_record, "observed_ts": _utc_now()}
-                            _write_watch_observation(paths, observation)
-                            awaiting_readiness = True
-                            if readiness.reason != "shared-readiness-revalidating":
-                                _wake_shared_runner(peer_obligations.ObligationStore().root)
+                    if result_state in {"idle", "done"} and check_readiness:
+                        check_readiness = False
+                        first_check = not checked_readiness
+                        checked_readiness = True
+                        readiness = _watch_transition_readiness(
+                            args.target, result_state, arm, expected, server,
+                            args.watch_id, paths, deadline=deadline)
+                        if readiness.state == _WATCH_RECEIPT_EXPIRED:
+                            terminal_reason = "watch-deadline"
+                            state, agent = "timeout", expected_agent
+                            break
+                        if readiness.state == "ready":
+                            action = publish_ready_result(
+                                result_state, wait_record.get("agent") or expected_agent)
+                            if action == "retry":
+                                continue
+                            break
+                        observation = {**observation, "state": "pending",
+                                       "reason": readiness.reason or result_state,
+                                       "native_wait": wait_record, "observed_ts": _utc_now()}
+                        _write_watch_observation(paths, observation)
+                        # A pending cached result needs one runner wake when no
+                        # refresh already sent one. Startup and signal delivery
+                        # both take this path.
+                        if first_check and readiness.reason != "shared-readiness-revalidating":
+                            _wake_shared_runner(peer_obligations.ObligationStore().root)
                     elif result_state == "blocked":
                         action = publish_ready_result(
                             result_state, wait_record.get("agent") or expected_agent)
@@ -4319,27 +4311,7 @@ def cmd_watch_run(args):
                         identity, _sid, _why = _watch_native_result_identity(arm, latest_wait)
                         if identity in {"match", "terminal", "unbound", "sidless"}:
                             observation, wait_record = latest, latest_wait
-                    if (wait_record or {}).get("state") == "result" and (
-                            wait_record.get("agent_state") in {"idle", "done"}):
-                        readiness = _watch_transition_readiness(
-                            args.target, wait_record.get("agent_state"), arm, expected, server,
-                            args.watch_id, paths, deadline=deadline)
-                        if readiness.state == _WATCH_RECEIPT_EXPIRED:
-                            terminal_reason = "watch-deadline"
-                            state, agent = "timeout", expected_agent
-                            break
-                        if readiness.state == "ready":
-                            action = publish_ready_result(
-                                wait_record.get("agent_state"),
-                                wait_record.get("agent") or expected_agent)
-                            if action == "retry":
-                                continue
-                            break
-                        observation = {**observation, "state": "pending",
-                                       "reason": readiness.reason or "shared-readiness-pending",
-                                       "native_wait": wait_record, "observed_ts": _utc_now()}
-                        _write_watch_observation(paths, observation)
-                        awaiting_readiness = True
+                    check_readiness = True
                 if steward_pidfd is not None and steward_pidfd in ready:
                     terminal_reason = "steward-exited"
                     break
