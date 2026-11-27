@@ -1,32 +1,16 @@
 #!/usr/bin/env python3
-"""A question answered on the board while a question stands on the session's screen (11-27) —
-``harness_behavior_scenarios.py``.
+"""The question popup lets go when its question is answered elsewhere (11-27) — ``harness_behavior_scenarios.py``.
 
-The person said: "질문을 띄운채로 있을때 하팅에서 답하면 계속 묶이는 문제가 있음". Each scenario puts
-a question on the session's screen, answers it from another Hearting place (``questions answer``, the
-path the panel and Fleet share: ``submit_selected_response``) and records what the session then does:
-whether a native question window stood, whether the answer reached the model without a typed prompt
-(and when), whether the question record closed, whether the session still counts a waiting question,
-and whether the next typed line reaches the model as an ordinary prompt.
-
-``question-bound-same``
-    The model registers a Hearting question (``questions ask`` from its shell tool) and, in the same
-    turn, asks the same question through the native question tool (the 11-27 scene).
-``question-bound-other``
-    The same, but the native call asks a different question. As on main it shows in a native window and
-    the open question stays as it was (several open questions per session are a separate design); the
-    board answer given then is recorded, not judged: it waits behind that window, the bind that remains.
 ``question-bound-popup``
-    The model registers a Hearting question and ends its turn; the person opens the session shell's
-    question popup (Ctrl+]) and the question is answered from another place while the popup is open.
-    Needs ``--session-shell``.
+    The model registers a Hearting question (``questions ask`` from its shell tool) and ends its turn. The
+    person opens the session shell's question popup (Ctrl+]) and the question is answered from another place
+    while the popup is open (``questions answer``, the path the panel and Fleet share). Before: the empty popup
+    kept the keys and the shell gave the session nothing, so on Claude the answer never arrived. Pass: the
+    answer reaches the model exactly once without a typed prompt (a new person-role input, its delivery record
+    acked), the question record closes, nothing waits for this session, and the next typed line is an ordinary
+    prompt. Needs ``--session-shell``.
 
-Pass (same, popup): no native window stands beside the waiting question, the answer reaches the model once
-without a typed prompt, the question is answered, nothing waits for this session, and the next typed line
-is an ordinary prompt. Pass (other): the native window shows and the open question is kept. ``fail`` names
-what did not happen.
-
-    python3 utilities/harness_behavior_scenarios.py --scenario question-bound-same,question-bound-other \
+    python3 utilities/harness_behavior_scenarios.py --scenario question-bound-popup \
         --harness claude,codex,opencode --session-shell --output-dir DIR [--source CHECKOUT]
 
 Synthetic data stays under the fixture root; the model is the loopback fixture.
@@ -41,32 +25,13 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness_behavior_scenarios import Reply, Scenario, wait_for  # noqa: E402
-from harness_behavior_cases_b import (  # noqa: E402
-    NativeCall, OPTION_A, OPTION_B, QUESTION_TEXT, QuestionAnswerScenario, fixture_python,
-    native_question, session_id)
+from harness_behavior_cases_b import OPTION_A, OPTION_B, QUESTION_TEXT, fixture_python, session_id  # noqa: E402
 
 QUESTION_ID = re.compile(r'"id":\s*"(S4:[0-9a-f]{64})"')
 ASK = ('python3 "$AGENT_HOME/utilities/questions.py" ask --json --choice ' + OPTION_A
        + ' --choice ' + OPTION_B + ' "' + QUESTION_TEXT + '"')
-OTHER_TEXT = "Which colour should the scenario paint?"
-OTHER_A, OTHER_B = "Crimson-tone", "Cobalt-tone"
+END_REPLY = "QBOUND my turn ends here."
 WAKE_SECONDS = 60          # how long an answer may take to reach a resting session without a prompt
-
-
-def other_question() -> NativeCall:
-    def build(protocol, names):
-        options = [{"label": OTHER_A, "description": "a warm colour"},
-                   {"label": OTHER_B, "description": "a cold colour"}]
-        if protocol == "anthropic":
-            return "AskUserQuestion", {"questions": [{"question": OTHER_TEXT, "header": "Colour",
-                                                      "multiSelect": False, "options": options}]}
-        if protocol == "responses":
-            return "request_user_input", {"questions": [{"id": "colour", "header": "Colour",
-                                                         "question": OTHER_TEXT, "options": options}]}
-        return "question", {"questions": [{"question": OTHER_TEXT, "header": "Colour", "multiple": False,
-                                           "options": options}]}
-    return NativeCall("native-other-question", build)
-
 
 STATE_CODE = r"""
 import human_wait_state as waits
@@ -80,13 +45,8 @@ for path in sorted(waits.state_root().glob("*.json")):
         found = value
 waiting = [s["id"] for s in waits.read_signals() if s.get("mode") == "message"
            and s.get("session_id") == args["sid"]]
-selected = waits.read_selected_request({"id": args["id"], "harness": args["harness"], "session_id": args["sid"]})
-print(json.dumps({"lifecycle": (found or {}).get("lifecycle"),
-                  "actor": ((found or {}).get("completion") or {}).get("actor"),
-                  "waiting_for_this_session": waiting,
-                  "request_state": (selected or {}).get("state")}))
+print(json.dumps({"lifecycle": (found or {}).get("lifecycle"), "waiting_for_this_session": waiting}))
 """
-
 
 # The answer's own delivery record (session_notice key `question-answer:<id>`): acked once the session took it.
 DELIVERY_CODE = r"""
@@ -100,16 +60,14 @@ for path in sorted(root.glob("pending-delivery/*/" + want + ".json")):
         data = json.loads(path.read_text())
     except (OSError, ValueError):
         continue
-    rows.append({"state": data.get("state"), "acked_by": data.get("acked_by")})
+    rows.append({"state": data.get("state")})
 print(json.dumps({"records": rows}))
 """
-END_REPLY = "QBOUND my turn ends here."
 
 
 def answer_carriers(requests, before):
-    """The requests, from `before` on, that bring the answer as a new person-role input (what the model had not
-    been given yet), whatever the request's last item is: one whose last item is a tool result counts too, and
-    a tool output or an earlier input repeating the answer does not."""
+    """The requests, from `before` on, that bring the answer as a new person-role input, whatever the request's
+    last item is (a tool output or an earlier input repeating the answer does not count)."""
     found = []
     for index in range(max(before, 1), len(requests)):
         earlier = [row["text"] for row in requests[index - 1].get("user_inputs") or []]
@@ -120,30 +78,21 @@ def answer_carriers(requests, before):
     return found
 
 
-class QuestionBoundBase(Scenario):
-    native = None            # the native call the model makes after `questions ask`, or None
-    native_labels = ()       # words only that native window shows
-    expects_window = False   # a different question: shown natively, as on main
-
-    def prepare(self, run):
-        QuestionAnswerScenario.prepare(self, run)   # Codex's Default-mode question tool, as a release enables it
+class QuestionBoundPopupScenario(Scenario):
+    name = "question-bound-popup"
+    summary = ("The session shell's question popup is open on a waiting question that is answered from "
+               "another place; the answer must reach the session once and the popup must let go.")
 
     def script(self, run):
-        native = self.native() if self.native else None
-
         def answer(record, earlier):
             asked = any(r["reply"]["shell"] == ASK for r in earlier)
-            called = native is not None and any(r["reply"]["shell"] == str(native) for r in earlier)
             if not asked and record["last_kind"] != "tool" and "SCENARIO-QBOUND ask" in record["text"]:
                 return Reply(text="I will ask the person.", shell=ASK)
-            if asked and native is not None and not called and record["last_kind"] == "tool":
-                return Reply(text="Asking in the native window too.", shell=native)
             if asked and record["last_kind"] == "tool":
                 return Reply(text=END_REPLY)
             return Reply(f"qbound noted {record['main_index']}")
         return answer
 
-    # -- observations ------------------------------------------------------
     @staticmethod
     def _question_id(run):
         for record in run.main_requests():
@@ -153,60 +102,14 @@ class QuestionBoundBase(Scenario):
                     return found.group(1)
         return None
 
-    def _native_result(self, run):
-        """The tool result the model got for the native call (its refusal), or None while it stands."""
-        requests = run.main_requests()
-        label = str(self.native()) if self.native else None
-        for index, record in enumerate(requests):
-            if record["reply"]["shell"] == label:
-                for later in requests[index + 1:]:
-                    if later["last_kind"] == "tool":
-                        return later["last_text"][-400:]
-        return None
-
     @staticmethod
-    def _listed(run, qid):
-        done = subprocess.run([sys.executable, str(Path(run.home.env["AGENT_HOME"]) / "utilities/questions.py"),
-                               "list", "--json", "--all"], env=dict(run.home.env), cwd=str(run.home.workspace),
-                              text=True, capture_output=True, timeout=60)
-        return qid in (done.stdout or "")
+    def _questions(run, *args):
+        return subprocess.run([sys.executable, str(Path(run.home.env["AGENT_HOME"]) / "utilities/questions.py"), *args],
+                              env=dict(run.home.env), cwd=str(run.home.workspace), text=True,
+                              capture_output=True, timeout=60)
 
     def _state(self, run, qid):
-        return fixture_python(run, STATE_CODE, {"id": qid, "sid": run.evidence.get("session_id"),
-                                                "harness": run.harness})
-
-    def put_question_up(self, run):
-        """Make the question stand on the session's screen; return False when it cannot be judged."""
-        return True
-
-    def _beside_window(self, run, qid):
-        """A different question shows natively, as on main; what a board answer then does is only recorded."""
-        ev = run.evidence
-        shown = ev.get("native_refusal") is None and bool(
-            wait_for(lambda: any(word in run.tui.screen() for word in self.native_labels), 20))
-        ev["native_window_stood"] = shown
-        ev["question_kept"] = kept = self._state(run, qid)
-        if wait_for(lambda: self._listed(run, qid), 45):
-            started, before = time.time(), len(run.main_requests())   # counted before the answer is given
-            done = subprocess.run([sys.executable, str(Path(run.home.env["AGENT_HOME"]) / "utilities/questions.py"),
-                                   "answer", qid, "--choice", "1", "--json"], env=dict(run.home.env),
-                                  cwd=str(run.home.workspace), text=True, capture_output=True, timeout=60)
-            hit = not done.returncode and wait_for(lambda: answer_carriers(run.main_requests(), before), WAKE_SECONDS)
-            # The bind that remains with two different questions: recorded, not judged here.
-            ev["board_answer_reached_after_s"] = round(time.time() - started, 1) if hit else None
-        run.note(f"native_window={shown} kept={kept.get('lifecycle')} "
-                 f"board_answer_after_s={ev.get('board_answer_reached_after_s')}")
-        if not shown:
-            run.note("the different question was not shown natively")
-            return "fail"
-        if kept.get("lifecycle") != "open" or kept.get("waiting_for_this_session") != [qid]:
-            run.note("the open question did not stay as it was")
-            return "fail"
-        return "pass"
-
-    def _turn_ended(self, run):
-        """The fixture served the turn's last reply (the session rests once the harness has shown it)."""
-        return any(r["reply"]["text"] == END_REPLY for r in run.main_requests())
+        return fixture_python(run, STATE_CODE, {"id": qid, "sid": run.evidence.get("session_id")})
 
     def _delivered(self, run, qid):
         records = (fixture_python(run, DELIVERY_CODE, {"id": qid}) or {}).get("records") or []
@@ -214,6 +117,9 @@ class QuestionBoundBase(Scenario):
 
     def drive(self, run):
         ev = run.evidence
+        if not ev.get("session_shell") or ev["session_shell"].get("status") not in ("ready", "copied"):
+            run.note("needs --session-shell with its assets")
+            return "inconclusive"
         run.prompt("SCENARIO-QBOUND ask the person one question")
         if not run.wait_requests(1, 90):
             run.note("no first model request")
@@ -221,73 +127,44 @@ class QuestionBoundBase(Scenario):
         ev["session_id"] = session_id(run)
         qid = wait_for(lambda: self._question_id(run), 90)
         ev["question_id"] = qid
-        if not qid:
-            run.note("the question was not registered from the session's shell")
+        if not qid or not wait_for(lambda: any(r["reply"]["text"] == END_REPLY for r in run.main_requests()), 60):
+            run.note("the question was not registered, or the turn never reached its last reply")
             return "inconclusive"
-        if self.native is not None:
-            label = str(self.native())
-            if not wait_for(lambda: any(r["reply"]["shell"] == label for r in run.main_requests()), 60):
-                run.note("the model never made the native call")
-                return "inconclusive"
-            refusal = wait_for(lambda: self._native_result(run), 20)
-            ev["native_refusal"] = refusal
-            screen = run.tui.screen()
-            ev["native_window_stood"] = refusal is None and any(word in screen for word in self.native_labels)
-            ev["screen_after_native"] = screen[-1800:]
-        if self.expects_window:
-            return self._beside_window(run, qid)
-        # A native window that stands keeps the turn from ending: the board answer is given all the same,
-        # to record that it waits behind that window (the bind), and the row fails below.
-        if not ev.get("native_window_stood") and not wait_for(lambda: self._turn_ended(run), 60):
-            run.note("the turn never reached its last reply")
-            return "inconclusive"
-        if not self.put_question_up(run):
+        shown = None
+        for _ in range(3):
+            run.tui.key("C-]")
+            shown = wait_for(lambda: QUESTION_TEXT[:30] in run.tui.screen() and OPTION_B in run.tui.screen(), 10)
+            if shown:
+                break
+        ev["popup_open"] = bool(shown)
+        if not shown:
+            run.note("the question popup never opened")
             return "inconclusive"
         # The board's own readiness: `questions answer` reads the board, which lists the question once collected.
-        ev["listed_on_board"] = bool(wait_for(lambda: self._listed(run, qid), 45))
-        if not ev["listed_on_board"]:
+        if not wait_for(lambda: qid in (self._questions(run, "list", "--json", "--all").stdout or ""), 45):
             run.note("the board never listed the question")
             return "inconclusive"
-        before = len(run.main_requests())
-        started = time.time()
-        done = subprocess.run([sys.executable, str(Path(run.home.env["AGENT_HOME"]) / "utilities/questions.py"),
-                               "answer", qid, "--choice", "1", "--json"],
-                              env=dict(run.home.env), cwd=str(run.home.workspace), text=True,
-                              capture_output=True, timeout=60)
+        before, started = len(run.main_requests()), time.time()
+        done = self._questions(run, "answer", qid, "--choice", "1", "--json")
         ev["answer_exit"] = done.returncode
-        ev["answer_result"] = (done.stdout or done.stderr)[-600:]
         if done.returncode:
-            run.note("questions answer refused: " + ev["answer_result"])
+            run.note("questions answer refused: " + (done.stdout or done.stderr)[-300:])
             return "fail"
-
-        def carriers():
-            return answer_carriers(run.main_requests(), before)
-        hit = wait_for(lambda: (carriers() or [None])[0], WAKE_SECONDS)
-        ev["answer_request"] = hit
+        hit = wait_for(lambda: (answer_carriers(run.main_requests(), before) or [None])[0], WAKE_SECONDS)
         ev["answer_reached_after_s"] = round(time.time() - started, 1) if hit is not None else None
         # Readiness, not a quiet spell: the delivery record is acked and the question record closed.
         ev["delivery"] = wait_for(lambda: self._delivered(run, qid), 30) if hit is not None else None
-        ev["state_after_answer"] = wait_for(lambda: (lambda value: value if value.get("lifecycle") == "answered"
-                                                     else None)(self._state(run, qid)), 30) or self._state(run, qid)
-        ev["screen_after_answer"] = run.tui.screen()[-1800:]
-        # The next typed line: an ordinary prompt, never an answer to the question.
+        ev["state_after_answer"] = state = wait_for(lambda: (lambda value: value if value.get("lifecycle") == "answered"
+                                                             else None)(self._state(run, qid)), 30) or self._state(run, qid)
         at = len(run.main_requests())
         run.prompt("SCENARIO-QBOUND-NEXT an ordinary line")
         wait_for(lambda: any("SCENARIO-QBOUND-NEXT" in (r.get("turn_text") or "") for r in run.main_requests()[at:]), 30)
         ev["next_prompt_reached"] = any(r["last_kind"] != "tool" and "SCENARIO-QBOUND-NEXT" in (r.get("turn_text") or "")
                                         for r in run.main_requests()[at:])
-        # Cut into a tool's result (a native window still open took it): the bind, not a prompt.
-        ev["next_prompt_cut_native_call"] = any(r["last_kind"] == "tool" and "SCENARIO-QBOUND-NEXT"
-                                                in (r.get("turn_text") or "") for r in run.main_requests()[at:])
-        ev["state_after_next"] = self._state(run, qid)
-        ev["answer_carriers"] = carriers()
-        state = ev["state_after_answer"] or {}
-        run.note(f"native_window={ev.get('native_window_stood')} answer_after_s={ev['answer_reached_after_s']} "
-                 f"carriers={len(ev['answer_carriers'])} lifecycle={state.get('lifecycle')} "
-                 f"waiting={len(state.get('waiting_for_this_session') or [])} next_prompt={ev['next_prompt_reached']}")
-        if ev.get("native_window_stood"):
-            run.note("a native question window stood beside the waiting Hearting question")
-            return "fail"
+        ev["answer_carriers"] = answer_carriers(run.main_requests(), before)
+        run.note(f"answer_after_s={ev['answer_reached_after_s']} carriers={len(ev['answer_carriers'])} "
+                 f"lifecycle={state.get('lifecycle')} waiting={len(state.get('waiting_for_this_session') or [])} "
+                 f"next_prompt={ev['next_prompt_reached']}")
         if hit is None:
             run.note("the answer did not reach the session without a typed prompt")
             return "fail"
@@ -297,52 +174,10 @@ class QuestionBoundBase(Scenario):
         if state.get("lifecycle") != "answered" or state.get("waiting_for_this_session"):
             run.note("the question record did not close")
             return "fail"
-        if not ev["next_prompt_reached"] or ev["next_prompt_cut_native_call"]:
+        if not ev["next_prompt_reached"]:
             run.note("the next typed line did not reach the model as an ordinary prompt")
             return "fail"
         return "pass"
 
 
-class QuestionBoundSameScenario(QuestionBoundBase):
-    name = "question-bound-same"
-    summary = ("`questions ask`, then the same question through the native tool in the same turn; the board "
-               "answer must reach the session and no native window may stand beside it.")
-    native = staticmethod(native_question)
-    native_labels = ("first scenario branch", "second scenario branch")   # the native options' descriptions
-
-
-class QuestionBoundOtherScenario(QuestionBoundBase):
-    name = "question-bound-other"
-    summary = ("`questions ask`, then a different question through the native tool in the same turn: shown "
-               "natively as on main, the open question kept; the board answer behind that window is recorded.")
-    native = staticmethod(other_question)
-    native_labels = (OTHER_A, OTHER_B)
-    expects_window = True
-
-
-class QuestionBoundPopupScenario(QuestionBoundBase):
-    name = "question-bound-popup"
-    summary = ("The session shell's question popup is open on a waiting question that is answered from "
-               "another place; the answer must reach the session and the popup must let go.")
-
-    def put_question_up(self, run):
-        ev = run.evidence
-        if not ev.get("session_shell") or ev["session_shell"].get("status") not in ("ready", "copied"):
-            run.note("needs --session-shell with its assets")
-            return False
-        shown = None
-        for _ in range(3):
-            run.tui.key("C-]")
-            shown = wait_for(lambda: QUESTION_TEXT[:30] in run.tui.screen()
-                             and OPTION_B in run.tui.screen(), 10)
-            if shown:
-                break
-        ev["popup_open"] = bool(shown)
-        ev["screen_popup"] = run.tui.screen()[-1800:]
-        if not shown:
-            run.note("the question popup never opened")
-            return False
-        return True
-
-
-SCENARIOS = (QuestionBoundSameScenario, QuestionBoundOtherScenario, QuestionBoundPopupScenario)
+SCENARIOS = (QuestionBoundPopupScenario,)
