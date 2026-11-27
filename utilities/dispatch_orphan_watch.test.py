@@ -324,7 +324,7 @@ class IdleOwnerWatchTest(unittest.TestCase):
     def test_registry_refresh_keeps_the_passive_judgment_inside_one_read_scope(self):
         import dispatch_registry_cache
         import route_parent_close
-        registry = self.watch.RegistryObservation(self.jobs, "att-idle")
+        registry = self.watch.RegistryObservation(self.jobs, "att-idle", self.watch.attempt_record)
         observed = []
         with mock.patch.object(
                 route_parent_close, "row_requested",
@@ -334,7 +334,7 @@ class IdleOwnerWatchTest(unittest.TestCase):
         self.assertEqual(observed, [True])
 
     def test_unchanged_registry_is_not_reparsed_and_close_intent_has_a_backstop(self):
-        registry = self.watch.RegistryObservation(self.jobs, "att-idle")
+        registry = self.watch.RegistryObservation(self.jobs, "att-idle", self.watch.attempt_record)
         for _ in range(10):
             self.assertEqual(registry.refresh()[0], "open")
             self.now[0] += 2.0

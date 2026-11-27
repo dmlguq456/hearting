@@ -616,6 +616,7 @@ def close_one(root: Path, path: Path, raw: Mapping[str, Any], reason: str, api, 
     route = api.verify_route(dict(raw), None, allow_stale_registry=True)
     outcome, _created = api.close_route(
         route, path, None, _summary_text(raw), allow_unproven=True,
+        registry_current=route["_registry_current"],
         autoclose={"reason": reason, "trigger": trigger, "closed_by": "runtime",
                    "proof": "not-claimed", "at": _iso(now)})
     proven = outcome.get("terminal_gate_proven")

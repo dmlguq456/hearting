@@ -1152,6 +1152,8 @@ def _observe_session(observe, harness, sid, pid, start):
 PANEL_STYLE_KEYS = ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked", "lvl_g", "lvl_y", "lvl_r",
                     "g_spin", "g_work_off", "tag_steward", "tag_steward_dim",
                     "zone_direct", "zone_dispatch", "zone_request",
+                    # 11-27: a zone rule's line, the zone's hue dimmed.
+                    "zoned_direct", "zoned_dispatch", "zoned_request",
                     # 11-18: the five fields' hues for a route's kind word (`kind_`) and its bracket (dim, plain, bold).
                     *("kind%s_%s" % (weight, field) for field in ("code", "lab", "design", "docs", "research")
                       for weight in ("", "q", "s", "b")),
@@ -1190,7 +1192,7 @@ def block_labels(editor: int) -> dict:
     labels = {key: ui_text("fleet.session_block." + key) for key in (
         *states, "choose", "choose_write", "writing", "writing_choices", "send", "navigate", "navigate_write",
         "text", "changed", "complete", "busy", "empty", "full", "more", "more_choose", "more_down",
-        "more_page", "more_choices", "sent", "questions", "paste_stalled")}
+        "more_page", "more_choices", "sent", "questions", "paste_stalled", "pasting")}
     if editor < 64:
         # 11-26: a narrow popup keeps `Enter send` and the line-break key while an answer is written: its
         # closing key's word is short enough that the key packing leaves out `Tab next` (then `↑ choices`)

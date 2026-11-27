@@ -274,8 +274,8 @@ def _owner_live(metadata: dict[str, str]) -> bool:
     return False
 
 
-def owner_process_state(metadata: dict[str, str]) -> str:
-    """Three-way view of the same owner evidence `_owner_live` reads.
+def owner_process_observation(metadata: dict[str, str]) -> tuple[str, tuple[int, str] | None]:
+    """The summary owner state and, when live, the exact signal target.
 
     ``live``    the declared owner is provably running;
     ``dead``    the declared owner is provably gone (absent, a reused pid or a zombie);
@@ -289,17 +289,15 @@ def owner_process_state(metadata: dict[str, str]) -> str:
     declared = ("summary_owner_pid", "summary_owner_pid_start",
                 "summary_state_file", "summary_owner_pid_observer_ns")
     if not any(metadata.get(key) for key in declared):
-        return "absent"
-    if _owner_live(metadata):
-        return "live"
+        return "absent", None
     raw_pid = metadata.get("summary_owner_pid", "")
     expected = metadata.get("summary_owner_pid_start", "")
     observer_namespace = metadata.get("summary_owner_pid_observer_ns", "")
     if not raw_pid.isdigit() or not expected or not observer_namespace:
-        return "unknown"
+        return "unknown", None
     current_namespace = process_namespace_identity()
     if current_namespace is None:
-        return "unknown"
+        return "unknown", None
     if current_namespace == observer_namespace:
         pid, start = int(raw_pid), expected
     elif (
@@ -312,18 +310,19 @@ def owner_process_state(metadata: dict[str, str]) -> str:
     elif recorded_pid_namespace_state(observer_namespace) == "extinct":
         # A process never leaves its PID namespace: once that namespace has left the
         # host, the owner cannot be running anywhere.
-        return "dead"
+        return "dead", None
     else:
-        return "unknown"
+        return "unknown", None
     visibility, actual_start, state = process_observation(pid)
-    if visibility == "missing":
-        return "dead"
-    if visibility != "present":
-        return "unknown"
-    if actual_start != start or state == "Z":
-        return "dead"
-    # The exact process is alive although its state file no longer vouches for it.
-    return "unknown"
+    if visibility == "missing" or (visibility == "present" and (actual_start != start or state == "Z")):
+        return "dead", None
+    if visibility == "present" and _owner_live(metadata):
+        return "live", (pid, start)
+    return "unknown", None
+
+
+def owner_process_state(metadata: dict[str, str]) -> str:
+    return owner_process_observation(metadata)[0]
 
 
 def _read_owner_state(path: Path) -> tuple[dict[str, Any] | None, str]:
@@ -1372,6 +1371,9 @@ def ensure_attempt_owner(jobs: str | Path, attempt_id: str) -> dict[str, Any]:
             return {"state": "skipped", "reason": "attempt-terminal"}
         if _owner_live(metadata):
             return {"state": "existing", "reason": "owner-live"}
+        from route_parent_close import row_requested
+        if row_requested(metadata, jobs_path):
+            return {"state": "skipped", "reason": "cancelled-by-parent"}
         raw_pid, target_start = metadata.get("pid", ""), metadata.get("pid_start", "")
         transcript = metadata.get("log_file", "")
         if not raw_pid.isdigit() or not target_start or not transcript:

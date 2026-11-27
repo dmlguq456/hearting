@@ -215,8 +215,9 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
       // On a shade nothing is dimmed on top: secondary text and lines take their own color.
       if(LINES.has(role)){foreground=F[role];dim=false;}
       else if(role==='title'){foreground=F.title;dim=false;}
-      // A kind word's bracket keeps its field's hue and its weight step (quick dim) on a shade too.
-      else if(role==='kind'&&foreground!==null){/* kept as it is */}
+      // A kind word's bracket keeps its field's hue and its weight step (quick dim) on a shade too, as a zone rule's line does
+      // its zone's (11-27).
+      else if((role==='kind'||role==='zone-rule')&&foreground!==null){/* kept as it is */}
       else if(foreground===null||dim||role==='secondary'){foreground=foreground===null&&!dim&&role!=='secondary'?F.body:F.secondary;dim=false;}
       return {...part,foreground,dim,bold,background:F[shade]};
     }
@@ -1127,7 +1128,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // row; a count the producer did not send rows for shows only in the box's lower border.
     const total=Number.isInteger(model.route_total)&&model.route_total>=countedRoutes.length?model.route_total:countedRoutes.length;
     const listed=shown,unsent=countedRoutes.length?total-countedRoutes.length:0;
-    // Requests this session sent (→) or received (◂): lines in the route box after the routes
+    // Requests this session sent (→) or received (←): lines in the route box after the routes
     // (R27); each opens in place by its own key and reads whole on its own page.
     const requestList=Array.isArray(model.requests)?model.requests.filter(q=>q&&typeof q.id==='string'):[];
     // Under the route (`side:false`) a unit a worker called is a row of its own under its caller's, in the same columns: it is a
@@ -1817,9 +1818,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     let keepRouteRule=true;
     const routeRule=()=>keepRouteRule&&routeRows.length>0;
     const routeBox=()=>kept.ROUTE?2+(routeRows.length?routeWindows():routeChecking.length):0;
+    // 11-27 (the person: "dispatch랑 request 구분줄에 은은하게 동일 컬러로 해주라. 서로 구분이 약간 잘 안되고 있어서"): the rule's
+    // line (the `─` before the name and the run after it; the blanks keep their dim) is the zone's hue one rung down (`zoned_<zone>`, dim), the name the lit
+    // hue it was, so two zones' rules no longer read as one gray line; where no hue is shown (mono, NO_COLOR, under 256 colors)
+    // the line is the dim line it was. Only the color changes: the same words, cells and rows.
+    const zoneHue=model.no_color!==true&&cfg.theme!=='mono'&&(model.colors??256)>=256;
+    const zoneLine=(value,zone)=>zoneHue&&styles['zoned_'+zone]?{...text(value,'zoned_'+zone),role:'zone-rule'}:{...text(value,'dim'),role:'messages'};
     const zoneRow=(zone,key)=>{
-      const room=Math.max(0,inner-box),head=[{...text('─ ','dim'),role:'messages'},{...text(zone,'zone_'+zone),role:'zone'},text(' ')];
-      return boxRow({parts:[...head,{...text('─'.repeat(Math.max(0,room-size(head))),'dim'),role:'messages'}]},key);
+      const room=Math.max(0,inner-box),head=[zoneLine('─',zone),{...text(' ','dim'),role:'messages'},{...text(zone,'zone_'+zone),role:'zone'},text(' ')];
+      return boxRow({parts:[...head,zoneLine('─'.repeat(Math.max(0,room-size(head))),zone)]},key);
     };
     const routeBlockOf=()=>{
       const key=tone.route;
@@ -2626,7 +2633,7 @@ function veil(configuration={},{colors=256,noColor=false,background=''}={}){
 }
 // 11-16 (the person: "블록 안에서 구분선을 하나 긋고, 양식을 맞추자. [6c] claude opus 5.5 xhigh 이런식으로"): one peer request's
 // rows, drawn here alone for the route box (beside the native area and under it) and the MESSAGES popup. Its head reads
-// as a route's doer row: the mark (→ sent, ◂ received, ✓/✕ closed), the other session's Fleet number, then its harness,
+// as a route's doer row: the mark (→ sent, ← received, ✓/✕ closed), the other session's Fleet number, then its harness,
 // model and effort in the colors a route's doer takes (the backend's `paint`), and the age at the right edge, where a
 // route keeps its time. Two cells in, the title where a route's title stands, then the status, dim, where a route's kind
 // row stands. `titled` is the title and the status on one row (the kind rows gone), `one` the one-row form. Short of

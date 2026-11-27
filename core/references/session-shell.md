@@ -548,7 +548,7 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   `질문 변경됨`.
 - The route box (spec rules 23-25, 34, 36, 38, 43, 48, 57): the routes the statusline
   counts, then the recent results the producer keeps after them, then the requests
-  this session sent (→) or received (◂, `✓` closed) with their status and age, every
+  this session sent (→) or received (←, `✓` closed) with their status and age, every
   one of them shown (no `+N more`); laid out at the box's inner width. 11-17: the box is one box
   of three zones, each under a named rule drawn inside it (`─ direct ───`, `─ dispatch ───`,
   `─ request ───`, in this order; the names are English in every language; it replaces the one
@@ -559,10 +559,13 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   color: direct orange (208), dispatch violet, request aqua, none a harness color (the harnesses' own are Claude's softer clay orange 173, 13 apart
   by CIEDE2000, its light-face pair 166; Codex's lavender 147, light-face pair 25, the Sonnet family's own step on purpose; OpenCode's pale sky 153, light-face pair 31), a status color of the box (working green,
   idle yellow, failure coral, the spinner's vanilla) or the steward pink (an 8-color terminal has none left over: the zones read in
-  the default color and the white there). A
+  the default color and the white there). 11-27 (the person: "dispatch랑 request 구분줄에 은은하게 동일 컬러로 해주라"): a
+  rule's line (the `─` before the name and the run after it; the blanks keep their dim) is its zone's color one step down (dim), the name the lit color,
+  so the zones' rules no longer read as one gray line; where no hue is shown (mono, `NO_COLOR`, fewer than 256 colors) it is
+  the dim line it was. Only the color: the words, cells and rows are the same. A
   zone with no rows has no rule, no rows at all is the empty box; a route a request opened stands in
   direct or dispatch like any other. Fleet's session page lists its routes in the same zones and order
-  (` ─ direct ─`, ` ─ dispatch ─`, ` ─ request ─`; its section head counts routes alone), has the PEERS
+  (` ─ direct ─`, ` ─ dispatch ─`, ` ─ request ─`, each line in its zone's color dimmed; its section head counts routes alone), has the PEERS
   line directly under its title row, before MODEL (the numbers of other sessions open that session's page;
   the panel's are plain text), keeps its older bottom row (`PEERS  [e4] · [a3]   PEERS tab ›`: the sessions a link joins to
   this one, messages too, and the way to their tab) whole where the window has no supervision and, where it has, leaves off the
@@ -630,9 +633,10 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   `CTX` row (its number joins the session's first row at the right edge, the one-row fold), each NOW's first row, then the stage line
   goes (the workers' count, `· worker 2`, ends it), then the workers go, then every route takes one row.
   A request (11-16, the person: "양식을 맞추자. [6c] claude opus 5.5 xhigh 이런식으로") reads as a
-  route's doer: beside the native area its first row is its mark (→ sent, ◂ received, `✓`/`✕`
-  closed), the other session's Fleet number, then that session's harness, model and effort in
-  a route row's colors (`◂ [6c] claude Opus 5.5 xhigh`; the model and effort only as far as the
+  route's doer: beside the native area its first row is its mark (→ sent, ← received, `✓`/`✕`
+  closed; 11-27, the person: "방향만 다르면 화살표 방향만 반대로 하면 되는걸 왜 삼각형을써? 메시지는 안그러잖아":
+  a received request wears the received message's `←`, no longer the small triangle), the other session's Fleet number, then that session's harness, model and effort in
+  a route row's colors (`← [6c] claude Opus 5.5 xhigh`; the model and effort only as far as the
   session values Fleet's shared producer already read for the session displays know them, so
   `[6c] claude` where they are unknown, and a session that is gone keeps its name alone; 11-18, the person: "세션 id 외에도 repo
   위치까지 request는 표시를 해주는게 좋겠네": the other session's repository name, dim, right after its number
@@ -956,7 +960,10 @@ ends, by `q` or by SIGTERM or SIGHUP. In both a paste whose bytes stop for a sec
 mark not come) has stalled, not ended (review 1861: one paste can come in reads seconds apart
 over a slow link): what came stays in (Fleet puts it in then), and what comes after is still
 its text, a line break, a tab or an Esc of it no key. The popup's key row then reads
-`paste stalled · Enter send · Esc/Ctrl+] back` (its closing key as narrowed above). While a
+`paste stalled · Enter send · Esc/Ctrl+] back` (its closing key as narrowed above); while the
+paste still comes in it reads `pasting · Enter sends once it stops` (its Enter and Esc are its
+bytes until then, so an Enter read a frame before the row changes does what it says; PR 1871).
+While a
 paste is open one rule tells the person's key from its bytes: a read holding one key (one byte,
 one character, or one whole escape sequence such as an arrow or a mouse or focus report), with
 nothing after it for 0.15 s (Fleet: nothing more to read within them). Such an Enter or Esc
@@ -970,10 +977,14 @@ holding one key and a new paste go on their way (to the popup, the native, the p
 The dropping ends at the paste's end mark, at a new paste, or a second after the last read it
 dropped (only those count the second again). A read of the person's that holds several keys
 (an input method's word, keys a slow link brings together, two wheel reports) is the bulk too:
-it is dropped and counts the second again. A paste that never ends holds nothing. Two gaps
+it is dropped and counts the second again. A paste that never ends holds nothing. Three gaps
 remain: a paste that stalls and brings its next CR alone with more than 0.15 s before the rest
-sends what came (the rest is then dropped), and a rest that comes one key per read goes on as
-keys (its CR an Enter there: the native's, or a second sending of an answer not confirmed). One
+sends what came (the rest is then dropped); a rest that comes one key per read goes on as
+keys (its CR an Enter there: the native's, or a second sending of an answer not confirmed); and
+a terminal's report (focus, mouse) within 0.15 s of an Enter pressed in a stalled paste makes
+that Enter its line break and the paste go on, every Enter within the next second a line break
+too, the row reading `pasting · Enter sends once it stops` until a quiet second stalls it (PR 1871: the
+same CR byte comes from a paste and from Enter, so no wait tells them apart). One
 past the limit goes in as far as it fits, with the limit's notice.
 The answer grows a row per line (and per wrap) within the popup or the page while the
 question's first words (and their `more` line), its choices and the key line keep their
@@ -1046,7 +1057,8 @@ frame 244/243 while idle or unknown, messages rules 242/245; the question's bord
 Neither recolors native space: the native area and Claude's status row keep
 their colors (Claude's own statusline row, where the panel is not painted, takes the theme, not the shade). An unknown position, theme or shade falls back to its own
 default without disabling the shell, and so does an unknown `route line`, `worker box` or
-`rule motion`. On a shade a kind word's bracket keeps its field's hue and its weight step (11-18).
+`rule motion`. On a shade a kind word's bracket keeps its field's hue and its weight step (11-18), and a zone rule's line its
+zone's hue dimmed (11-27).
 The same side width changes by dragging its boundary or by value controls.
 Apply saves after backing up the existing file; Cancel discards the preview;
 Defaults previews the defaults. Never edit native model or permission config.
