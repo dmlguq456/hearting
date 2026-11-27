@@ -965,19 +965,22 @@ def _seat_transition_rows(st, path: str, key: str, *, strict=False):
         if strict:
             raise OSError("steward-ledger-unsafe")
         return None
-    if before is None:
-        return ()
     use_cache = st._LEDGER_READ_SCOPE.get() is None and _TRUST_LEDGER_GENERATIONS.get()
-    with _TRANSITION_ROWS_LOCK:
-        held = _TRANSITION_ROWS.get(path) if use_cache else None
-    if held is not None and held[0] == before:
-        rows, usable = held[1]
+    if use_cache:
+        with _TRANSITION_ROWS_LOCK:
+            held = _TRANSITION_ROWS.get(path)
+        if held is not None and before is not None and held[0] == before:
+            rows, usable = held[1]
+        else:
+            rows, usable = read()
+            with _TRANSITION_ROWS_LOCK:
+                if before is not None and before == _ledger_generation(path)[1]:
+                    _TRANSITION_ROWS[path] = (before, (rows, usable))
+                else:
+                    _TRANSITION_ROWS.pop(path, None)
     else:
         rows, usable = read()
-        if use_cache and before == _ledger_generation(path)[1]:
-            with _TRANSITION_ROWS_LOCK:
-                _TRANSITION_ROWS[path] = (before, (rows, usable))
-    if strict and not usable:
+    if strict and before is not None and not usable:
         raise OSError("steward-ledger-unreadable")
     return rows
 
