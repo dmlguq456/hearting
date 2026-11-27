@@ -130,13 +130,13 @@ def _trusts_unchanged_ledgers():
 
 
 def read_relations(*, seat_keys=None, markers=None):
-    """Every confirmed role relation, or only those of ``seat_keys`` from ``markers``,
-    whose unreadable own seat ledger then raises instead of reading as no role."""
+    """Every confirmed role relation (from already read ``markers``), or only those of
+    ``seat_keys``, whose unreadable own seat ledger then raises instead of reading as no role."""
     if seat_keys is not None:
         return _read_relations_uncached(seat_keys=seat_keys, markers=markers)
     from . import dispatch
     if dispatch._COLLECTION_INPUTS.get() is None and not _trusts_unchanged_ledgers():
-        return _read_relations_uncached()
+        return _read_relations_uncached(markers=markers)
     global _RELATIONS_OBSERVATION
     try:
         before = _relations_generation()
@@ -145,8 +145,8 @@ def read_relations(*, seat_keys=None, markers=None):
             if held is not None and held[0] == before:
                 return copy.deepcopy(held[1])
     except (ImportError, OSError, TypeError, ValueError):
-        return _read_relations_uncached()
-    value = _read_relations_uncached()
+        return _read_relations_uncached(markers=markers)
+    value = _read_relations_uncached(markers=markers)
     try:
         if value and before == _relations_generation():
             with _RELATIONS_LOCK:
@@ -168,7 +168,7 @@ def _read_relations_uncached(*, seat_keys=None, markers=None):
             return [relation for key in sorted(seat_keys)
                     for relation in dispatch_seat_handover.resolved_steward_relations(
                         seat_key=key, include_released=True, strict=True, markers=markers)]
-        return dispatch_seat_handover.resolved_steward_relations(include_released=True)
+        return dispatch_seat_handover.resolved_steward_relations(include_released=True, markers=markers)
     except Exception:
         if seat_keys is not None:
             raise

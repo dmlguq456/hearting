@@ -181,7 +181,8 @@ def scoped_owners(harness, sid, collector, *, cwd=None, seat=None):
         if seat is None:
             # A check labels targets against every competing claim, as Fleet does, and
             # reads the same seat chain a tidy reads, from the seat of each role it holds.
-            markers, relations = collector.read_markers(), collector.read_relations()
+            markers = collector.read_markers()
+            relations = collector.read_relations(markers=markers)
             cwds = {row.cwd for row in rows if caller in collector._session_keys(row)}
             home = cwd or (next(iter(cwds)) if len(cwds) == 1 else None)
             for key in {str(relation["seat_key"]) for relation in relations if relation.get("seat_key")
