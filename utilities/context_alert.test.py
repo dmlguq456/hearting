@@ -9,10 +9,11 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 from unittest.mock import patch
+
+from tools import fixture_processes
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import context_alert as alert
@@ -22,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class ContextAlertTest(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
+        temporary = fixture_processes.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.temp = Path(temporary.name)
         self.state = self.temp / "state"
