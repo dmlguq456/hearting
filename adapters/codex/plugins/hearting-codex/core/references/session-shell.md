@@ -967,7 +967,10 @@ ends, by `q` or by SIGTERM or SIGHUP. In both a paste whose bytes stop for a sec
 mark not come) has stalled, not ended (review 1861: one paste can come in reads seconds apart
 over a slow link): what came stays in (Fleet puts it in then), and what comes after is still
 its text, a line break, a tab or an Esc of it no key. The popup's key row then reads
-`paste stalled · Enter send · Esc/Ctrl+] back` (its closing key as narrowed above). While a
+`paste stalled · Enter send · Esc/Ctrl+] back` (its closing key as narrowed above); while the
+paste still comes in it reads `pasting · Enter sends once it stops` (its Enter and Esc are its
+bytes until then, so an Enter read a frame before the row changes does what it says; PR 1871).
+While a
 paste is open one rule tells the person's key from its bytes: a read holding one key (one byte,
 one character, or one whole escape sequence such as an arrow or a mouse or focus report), with
 nothing after it for 0.15 s (Fleet: nothing more to read within them). Such an Enter or Esc
@@ -981,10 +984,14 @@ holding one key and a new paste go on their way (to the popup, the native, the p
 The dropping ends at the paste's end mark, at a new paste, or a second after the last read it
 dropped (only those count the second again). A read of the person's that holds several keys
 (an input method's word, keys a slow link brings together, two wheel reports) is the bulk too:
-it is dropped and counts the second again. A paste that never ends holds nothing. Two gaps
+it is dropped and counts the second again. A paste that never ends holds nothing. Three gaps
 remain: a paste that stalls and brings its next CR alone with more than 0.15 s before the rest
-sends what came (the rest is then dropped), and a rest that comes one key per read goes on as
-keys (its CR an Enter there: the native's, or a second sending of an answer not confirmed). One
+sends what came (the rest is then dropped); a rest that comes one key per read goes on as
+keys (its CR an Enter there: the native's, or a second sending of an answer not confirmed); and
+a terminal's report (focus, mouse) within 0.15 s of an Enter pressed in a stalled paste makes
+that Enter its line break and the paste go on, every Enter within the next second a line break
+too, the row reading `pasting · Enter sends once it stops` until a quiet second stalls it (PR 1871: the
+same CR byte comes from a paste and from Enter, so no wait tells them apart). One
 past the limit goes in as far as it fits, with the limit's notice.
 The answer grows a row per line (and per wrap) within the popup or the page while the
 question's first words (and their `more` line), its choices and the key line keep their
