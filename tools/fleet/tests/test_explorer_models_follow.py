@@ -496,12 +496,30 @@ class Drafts(unittest.TestCase):
         self.assertIn("then Keep", frame.text_rows()[follow_row])       # at the end of the follow row
         self.assertEqual(len(undo_rows), 1)
 
-    def test_the_draft_keeps_its_command_whole_and_its_buttons_at_width_100(self):
-        _m, _vm, _state, frame = self._draft("followed", "deep/codex", "undo", width=100)
+    def test_the_draft_wraps_inside_its_box_at_width_80(self):
+        _m, _vm, _state, frame = self._draft("followed", "deep/codex", "undo", width=80)
         rows = frame.text_rows()
         command = next(i for i, row in enumerate(rows) if "$ hearting" in row)
-        self.assertIn("$ hearting model set codex profile/deep gpt-6-astra@high", rows[command])
+        preview = [row[picture.LEFT:].split("│")[1].strip() for row in rows[command:command + 2]]
+        self.assertEqual(preview, ["$ hearting model set codex profile/deep", "gpt-6-astra@high"])
+        start = rows[command].index("hearting")
+        self.assertEqual(frame.cells[command + 1][start][1:], frame.cells[command][start][1:])
         self.assertIn("[ dry-run ]  [ apply ]", rows[command - 1])
+        self.assertIn("│  pool", rows[command + 2])
+        self.assertIn("└─ models.conf", rows[command + 3])
+        self.assertIn("DISPATCH ALLOCATION", rows[command + 5])
+        self.assertIn("CONTEXT & TIDY", rows[command + 8])
+
+    def test_a_draft_that_fits_stays_on_one_line_with_its_buttons_in_place(self):
+        for width in (100, 132):
+            with self.subTest(width=width):
+                _m, _vm, _state, frame = self._draft("followed", "deep/codex", "undo", width=width)
+                rows = frame.text_rows()
+                command = next(i for i, row in enumerate(rows) if "$ hearting" in row)
+                self.assertIn("$ hearting model set codex profile/deep gpt-6-astra@high", rows[command])
+                button_row = command - 1 if width == 100 else command
+                self.assertIn("[ dry-run ]  [ apply ]", rows[button_row])
+                self.assertIn("│  pool", rows[command + 1])
 
     def test_a_cell_in_a_tier_names_the_tier_in_the_command(self):
         answer = [samples.item("codex", [samples.followed("tier/deep", "gpt-6.1-sol", "gpt-6.2-sol", "xhigh")])]
@@ -1225,11 +1243,16 @@ class TheLinesDoNotRunIntoEachOther(unittest.TestCase):
             if harness == "opencode":
                 models["model_choices"]["opencode"] = [f"opencode-go/m{index}" for index in range(5)] \
                     + ["openai/a", "openai/b", "opencode-go/glm-5.3-flash"]
-            box = _box_rows(models, 100, {"ui:fol": "undo"}, select=f"deep/{harness}")
             with self.subTest(harness=harness):
+                before = _box_rows(models, 100, select=f"deep/{harness}")
+                box = _box_rows(models, 100, {"ui:fol": "undo"}, select=f"deep/{harness}")
                 rows = [row.strip("│ ").rstrip(" │┐┘") for row in box]
-                self.assertEqual(len([row for row in rows if "then Keep" in row]), 1)
-                self.assertTrue(next(row for row in rows if "then Keep" in row).startswith("follow   [ Follow ]   Keep"))
+                follow_row = next(i for i, row in enumerate(before) if "follow   [ Follow ]   Keep" in row)
+                effort_row = next(i for i, row in enumerate(rows) if row.startswith("effort "))
+                self.assertEqual([i for i, row in enumerate(rows) if "then Keep" in row], [follow_row])
+                self.assertTrue(rows[follow_row].startswith("follow   [ Follow ]   Keep"))
+                self.assertTrue(rows[follow_row].endswith("then Keep"))
+                self.assertEqual(box[follow_row + 1:effort_row + 1], before[follow_row + 1:effort_row + 1])
                 note = next(row for row in rows if row.startswith(("from cache", "opencode-go 6")))
                 self.assertNotIn("Keep", note)
                 self.assertTrue(note.startswith("from cache, callabil") or note.startswith("opencode-go 6 · openai 2  · from cache"),
@@ -1237,7 +1260,15 @@ class TheLinesDoNotRunIntoEachOther(unittest.TestCase):
                 for row in rows:
                     for broken in ("Keepe", "Keepgo", "Keep,", "Keepfrom"):
                         self.assertNotIn(broken, row)
-                self.assertEqual(len(box), len(_box_rows(models, 100, {}, select=f"deep/{harness}")) + 0)
+                command = next(i for i, row in enumerate(rows) if row.startswith("$ hearting"))
+                expected = {
+                    "codex": ["$ hearting model set codex profile/deep gpt-6-astra@high"],
+                    "opencode": ["$ hearting model set opencode profile/deep", "opencode-go/glm-5.2-flash@max"],
+                }[harness]
+                pool = command + len(expected)
+                self.assertEqual(rows[command:pool], expected)
+                self.assertEqual(box[pool:], before[-2:])
+                self.assertEqual(len(box), len(before) + len(expected) - 1)
 
     def test_the_words_about_lines_that_moved_with_the_follow(self):
         for moved, said in (((), "then Keep"), (("CFG_TIER_DEEP_FAILOVER_CASCADE",), "then Keep · linked line stays"),

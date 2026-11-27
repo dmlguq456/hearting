@@ -118,6 +118,91 @@ class CampaignInputSnapshotTest(unittest.TestCase):
                     self.assertEqual(scan.call_count, 1)
 
 
+    def test_terminal_session_campaign_falls_through_to_the_only_open_folder_stream(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            routes = Path(R.canonical_routes_dir(root))
+            routes.mkdir(parents=True)
+            for index, key in enumerate(("demo-previous", "demo-open", "demo-other")):
+                (routes / f"rt-{index:016x}.json").write_text(json.dumps({"cwd": temp, "campaign_key": key}))
+            for state in ("satisfied", "abandoned", "superseded"):
+                with self.subTest(state=state):
+                    rows = [{"key": "demo-previous", "state": state}, {"key": "demo-open", "state": "active"}]
+                    with patch_split(R, "compose_campaign_summaries", return_value=rows):
+                        pick = R.compose_campaign_default(root, root, "demo-previous")
+                        self.assertEqual((pick.key, pick.source), ("demo-open", "this-folder-only-active-stream"))
+                        self.assertEqual(pick.skipped, ("demo-previous", f"campaign-closed:{state}"))
+                        rows.append({"key": "demo-other", "state": "active"})
+                        pick = R.compose_campaign_default(root, root, "demo-previous")
+                        self.assertEqual((pick.key, pick.source), (None, "unassigned"))
+
+
+class CampaignComposeStartTest(unittest.TestCase):
+    def test_keyless_start_keeps_closed_campaign_and_explicit_key_reopens_it(self):
+        import fcntl
+
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        project = Path(scratch.name) / "demo-project"
+        project.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+        subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                        "commit", "--allow-empty", "-qm", "fixture"], cwd=project, check=True)
+        root = project / ".agent_reports"
+        task = project / "task.md"
+        task.write_text("Prepare the demo refinement report.\n")
+        jobs = Path(scratch.name) / "jobs.log"
+        env = {**_cli_env(), "CODEX_THREAD_ID": "demo-compose-session", "AGENT_ARTIFACT_CHECKPOINT": "off"}
+
+        def cli(script, *args):
+            result = subprocess.run([sys.executable, str(ROOT / "utilities" / script), *map(str, args)],
+                                    cwd=project, env=env, capture_output=True, text=True, timeout=60)
+            entrance = root / ".runtime" / "artifact-entrance-refresh.lock"
+            if entrance.is_file():
+                with entrance.open("rb") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_SH)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return json.loads(result.stdout), result.stderr
+
+        def compose(slug, *args):
+            # This inline route exercises normal cycle allocation without launching a model.
+            return cli("capability-route.py", "compose", "--shape", "direct", "--capability", "autopilot-refine",
+                       "--execution-scope", "report", "--slug", slug, "--cwd", project, "--artifact-root", root,
+                       "--jobs", jobs, "--start", "--prompt-file", task, *args)
+
+        def campaign_row(campaign_id):
+            result, _ = cli("artifact_producer.py", "campaign-list", "--artifact-root", root, "--all-states")
+            return next(row for row in result["campaigns"] if row["campaign_id"] == campaign_id)
+
+        key = "demo-revision-r1"
+        first, _ = compose("initial", "--campaign-key", key)
+        campaign_id = first["artifact_env"]["AGENT_ARTIFACT_CAMPAIGN_ID"]
+        campaign_dir = Path(first["artifact_env"]["AGENT_ARTIFACT_CYCLE_DIR"]).parent
+        preview = Path(first["artifact_env"]["AGENT_ARTIFACT_OUTPUT_DIR"]) / "reviews/refine/preview.md"
+        preview.parent.mkdir(parents=True)
+        preview.write_text("The demo refinement report is complete.\n")
+        cli("capability-route.py", "finish", "--route", first["route_file"], "--evidence", preview,
+            "--summary-file", preview)
+        cli("artifact_producer.py", "campaign-close", "--artifact-root", root, "--campaign", campaign_id)
+        closed = campaign_row(campaign_id)
+        self.assertEqual((closed["state"], closed["cycle_count"]), ("satisfied", 1))
+
+        second, diagnostic = compose("new-task")
+        self.assertEqual(second["state"], "inline")
+        still_closed = campaign_row(campaign_id)
+        self.assertEqual((still_closed["state"], still_closed["cycle_count"]), ("satisfied", 1))
+        self.assertNotEqual(Path(second["artifact_env"]["AGENT_ARTIFACT_CYCLE_DIR"]).parent, campaign_dir)
+        self.assertNotIn("campaign_key", json.loads(Path(second["route_file"]).read_text()))
+        self.assertIn(f"campaign_key_default=none source=unassigned skipped={key} reason=campaign-closed:satisfied",
+                      diagnostic.splitlines())
+
+        explicit, diagnostic = compose("continue-old-task", "--campaign-key", key)
+        self.assertEqual(explicit["artifact_env"]["AGENT_ARTIFACT_CAMPAIGN_ID"], campaign_id)
+        reopened = campaign_row(campaign_id)
+        self.assertEqual((reopened["state"], reopened["cycle_count"]), ("active", 2))
+        self.assertIn(f"campaign_key_default={key} source=explicit action=reopen", diagnostic.splitlines())
+
+
 class TestComposeRoute(unittest.TestCase):
     def _gate_index(self):
         return C.unit_io_gate_index(C._load_topology().load_registry())
