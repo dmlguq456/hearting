@@ -854,22 +854,18 @@ def route_scope_note(interview: dict, question_id, label) -> str:
 def pending_question_block(interview: dict) -> str:
     """The registered words and choices the parent leaves in ordinary conversation.
 
-    Each option is its own bullet with what choosing it does on the next line, two cells in (11-27,
-    design 가: the board draws the same words under the choice's name, read by the one rule
-    `human_wait_state.choice_descriptions`: a non-empty `description` first, else `means`); an
-    option saying nothing has its name alone."""
+    Each option is its own bullet, its words (`human_wait_state.choice_descriptions`, as the board reads them) on
+    the next lines, two cells in (11-27, design 가)."""
     from human_wait_state import choice_descriptions
     lines = [_text(interview.get("understanding"))]
     for question in interview.get("questions") or []:
         lines.extend(["", _text(question.get("question"))])
         for option in question.get("options") or []:
             lines.append(f"- {_text(option.get('label'))}")
-            words = choice_descriptions({"choices": [{"description": option.get("description"),
-                                                      "means": option.get("means")}]})
+            words = choice_descriptions({"choices": [{
+                "description": option.get("description"), "means": option.get("means"),
+                "scope_note": route_scope_note(interview, question.get("id"), option.get("label"))}]})
             lines.extend(f"  {said}" for said in words[0].splitlines())
-            note = route_scope_note(interview, question.get("id"), option.get("label"))
-            if note:
-                lines.append(f"  {note}")
     return "\n".join(lines)
 
 

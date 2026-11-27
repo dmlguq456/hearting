@@ -565,11 +565,9 @@ def _prune_selected(overlay, needed=1):
 def choice_descriptions(question):
     """Each choice's own words under its name, in choice order (`""` for none): what the board draws.
 
-    11-27 (the person: "답변 선지가 클로드 네이티브 질문창이 좀 더 상세하네?", design 가): a choice given as an
-    object says it in its `description` (a native question), else in its `means` (a frame question,
-    with its scope line already joined); a registered question's plain choices say it in its optional
-    `choice_descriptions` (`{choice value: words}`, written by `register_message`). Display only: no answer
-    value carries these words."""
+    11-27 (the person: "답변 선지가 클로드 네이티브 질문창이 좀 더 상세하네?", design 가): an object choice's
+    `description`, else its `means`, then its `scope_note` on its own line unless already said; a registered
+    question's plain choices, its optional `choice_descriptions` (`{choice value: words}`). Display only."""
     if not isinstance(question, dict):
         return []
     choices = question.get("choices") if isinstance(question.get("choices"), list) else []
@@ -582,10 +580,14 @@ def choice_descriptions(question):
                           if isinstance(value, str) and value.strip()), "")
         else:
             words = given.get(choice) if isinstance(choice, str) else None
-        # The lines the asker wrote stay (each line's own spaces made one, an empty line left out); the board
-        # wraps each line.
-        out.append("\n".join(" ".join(line.split()) for line in words.splitlines() if line.strip())
-                   if isinstance(words, str) else "")
+        # The asker's lines stay (spaces made one, an empty line left out).
+        said = ("\n".join(" ".join(line.split()) for line in words.splitlines() if line.strip())
+                if isinstance(words, str) else "")
+        note = " ".join(choice.get("scope_note").split()) if (
+            isinstance(choice, dict) and isinstance(choice.get("scope_note"), str)) else ""
+        if note and note not in " ".join(said.split()):
+            said = said + "\n" + note if said else note
+        out.append(said)
     return out
 
 
@@ -3366,10 +3368,8 @@ def _workflow_gate_interview(binding, item):
 
 
 def _frame_gate_choice(interview, question, option):
-    """One frame interview option as the board's choice: its label is the value; its words are its `means`
-    (with the one scope line the runtime reads from the proposal's structure) and, where it has one, its own
-    non-empty `description` with the same line (11-27, review of #1908: `choice_descriptions` draws that
-    first, once)."""
+    """One frame interview option as the board's choice (label as value; `means` with the scope line as ever; its
+    own `description`; the scope line as `scope_note`, drawn once by `choice_descriptions`)."""
     import frame_interview as FI
     choice = {"value": option["label"], "label": option["label"]}
     note = FI.route_scope_note(interview, question.get("id"), option["label"])
@@ -3378,7 +3378,9 @@ def _frame_gate_choice(interview, question, option):
     if means or isinstance(option.get("means"), str):
         choice["means"] = means
     if isinstance(option.get("description"), str) and option["description"].strip():
-        choice["description"] = " ".join(part for part in (option["description"].strip(), note) if part)
+        choice["description"] = option["description"].strip()
+    if note:
+        choice["scope_note"] = note
     return choice
 
 
