@@ -212,14 +212,10 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
   // 11-27 (review of #1889): what the popup is still taking stays its own: a send under way, a paste, the
   // first bytes of a character or of a key, or a read being worked through. Only once that is all in does it
   // look again whether to let go, so no byte meant for the answer ever reaches the native input.
-  let letGoAfter=null,reading=false,leaveAfterSend=false;
-  // (Not the bulk of a paste a key ended: the host drops it whatever has the keys, and the keys after it are the person's.)
-  const receiving=()=>busy||reading||pasting||held>=0||!!escape||skipTail||
+  let letGoAfter=null,reading=false;
+  const receiving=()=>busy||reading||pasting||held>=0||discarding||!!escape||skipTail||
     (typeof decoder.lastNeed==='number'&&decoder.lastNeed>0);
-  // Rule 5: the answered question folds and the person is back at the native input (Ctrl+] opens on the first one).
-  function afterAnswer(){leaveAfterSend=false;index=Math.max(0,flat().findIndex(r=>active(r)));answeredAt=Date.now();leave();}
   function settle(){
-    if(leaveAfterSend&&focused&&!receiving()){afterAnswer();return true;}
     const row=letGoAfter;if(!row||receiving())return false;
     letGoAfter=null;
     // It came back meanwhile, or another one now stands to be answered here: the popup stays, as before.
@@ -235,13 +231,13 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
   // Ctrl+] opens on a question the person can answer now (11-14): when the one shown is not
   // (a receipt, a changed one), the first answerable one comes up instead.
   function enter(){
-    letGoAfter=null;leaveAfterSend=false;focused=true;scroll=0;follow=true;answeredAt=0;escapedAt=0;changeArmed=false;
+    letGoAfter=null;focused=true;scroll=0;follow=true;answeredAt=0;escapedAt=0;changeArmed=false;
     const row=current();
     if(!frozen&&(!row||!active(row))){const open=flat().findIndex(r=>active(r));if(open>=0)index=open;}
     changed();
   }
   function forgetPlaces(){for(const entry of entries.values())entry.caret={};}
-  function leave(){letGoAfter=null;leaveAfterSend=false;forgetPlaces();clearFullNotice(current());focused=false;escapedAt=0;changeArmed=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
+  function leave(){letGoAfter=null;forgetPlaces();clearFullNotice(current());focused=false;escapedAt=0;changeArmed=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
   const seatOf=row=>row?key(row.item)+'\0'+row.question.id:null;
   function move(delta){
     const count=flat().length;index=(index+delta+count+1)%(count+1);
@@ -486,9 +482,7 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
       // Enter never answers it unseen. Had the person moved to another question while this
       // one was sent, they stay there. A refused answer stays in sight with its word.
       const at=sent&&moves!==started&&seat?flat().findIndex(r=>seatOf(r)===seat):-1;
-      // 11-27 (review 2 of #1889): what the popup is still taking (a paste, a character's first bytes) is its own
-      // first; it lets go once that is in (`settle`).
-      if(sent&&at<0&&focused){if(receiving()){leaveAfterSend=true;changed();return;}afterAnswer();return;}
+      if(sent&&at<0&&focused){index=Math.max(0,flat().findIndex(r=>active(r)));answeredAt=Date.now();leave();return;}
       if(at>=0)index=at;
       else if(!sent&&moves===started){const back=flat().findIndex(r=>seatOf(r)===seatOf(row));if(back>=0)index=back;}
       changed();
