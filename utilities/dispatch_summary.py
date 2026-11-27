@@ -35,6 +35,7 @@ if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from claude_project_dir import resolve_session_transcript  # noqa: E402
+from environment_inheritance import inherited_environment  # noqa: E402
 try:  # ends a detached child with the test that started it; no-op outside tests
     from detached_lifetime import bind as end_with_test  # noqa: E402
 except ImportError:  # a partial tree without it (e.g. a fixture release): no record
@@ -730,7 +731,9 @@ def home_consumer_for_identity(attempt_id: str, harness: str,
 
 
 def _owner_env(jobs: str | Path | None = None) -> dict[str, str]:
-    env = dict(os.environ)
+    # The supervisor's title refresh runs a model; like a worker, it takes over
+    # nothing of the window that started this attempt (`inherited_environment`).
+    env = inherited_environment()
     if jobs is not None:
         # Only a worker's own environment carries the registry path. An owner is
         # launched from the depth-0 session that has none, and without it the
