@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """A step the owner runs itself is printed with its exact command only in the simplest settled case; otherwise one
 line says what is missing. A resource start is printed only when the route's own cycle is bound, its declared smoke
-attestation passes the runner's `verify` and records its execution environment, the cycle is read to its end and
-holds no sealed config manifest, and the registry holds no run of that route node (the runner's route file and node
-match). A GPU-free host payload node keeps main's wording. An owner-run stage's completion runs as printed in the
+attestation passes the runner's `verify` and records its execution environment, nothing is at a fixed seal path (the
+cycle's `experiments`, or where `config-seal` writes for a node of the route), and the registry holds no run of that
+route node (the runner's route file and node match); a sealed config that may exist is named in the order the runner
+accepts. A GPU-free host payload node keeps main's wording. An owner-run stage's completion runs as printed in the
 owner's environment; the parent session still passes `--attempt-id` and a route file, as before.
 
 Fabricated staged routes of the real recipes, no model: a measurement route (`smoke` then a `resource-runner`
@@ -15,6 +16,7 @@ import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import contextlib
+import errno
 import hashlib
 import importlib.util
 import io
@@ -22,6 +24,7 @@ import json
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 import time
@@ -53,6 +56,8 @@ import worker_bootstrap as W  # noqa: E402
 
 PAYLOAD = [sys.executable, "-c", "print('fixture payload')"]
 REPLACE = "replace only `<approved command>` with the approved payload command"
+MAYBE_SEALED = ("full-run has no start command yet: if a sealed config manifest exists, make the smoke again bound "
+                "to that manifest, then start with its run id as `--run-id` and `--config-manifest <that manifest>`")
 ROUTE_TOOL = str(ROOT / "utilities/capability-route.py")
 
 
@@ -365,20 +370,8 @@ class HumanRunStepCommandTest(unittest.TestCase):
                          f"eval-run has no start command yet: it needs a verified smoke attestation — "
                          f"{Path(argv[argv.index('--smoke-attestation') + 1])}")
 
-    def test_a_sealed_config_manifest_in_the_cycle_or_an_unread_cycle_prints_one_line_and_no_run_id(self):
-        route, path = self.compose("autopilot-lab", "setup")
-        out, node = self.cycle_output(route), self.node(route, "full-run")
-        maybe = ("full-run has no start command yet: a sealed config manifest may exist — if so, pass its run id as "
-                 "`--run-id` and add `--config-manifest <that manifest>`")
-        self.attest(out / "reviews" / "smoke-attestation.json")
-        self.command_in(W.human_run_step(route, path, node))
-        if os.geteuid() != 0:  # a directory of the cycle that cannot be read leaves the manifest unknown
-            locked = out / "locked"
-            locked.mkdir()
-            locked.chmod(0)
-            self.addCleanup(locked.chmod, 0o755)
-            self.assertEqual(W.human_run_step(route, path, node), maybe)
-            locked.chmod(0o755)
+    def seal(self, route, path):
+        """The existing `config-seal` run from this route's smoke node; returns the manifest and its path."""
         sealed = subprocess.run([sys.executable, str(ROOT / "tools/lab-config-provenance.py"), "seal", "--repo",
                                  str(self.repo), "--config", "configs/train.yaml", "--slug", "fixture-run", "--artifact-root",
                                  str(self.art)], text=True, capture_output=True, cwd=self.repo,
@@ -386,18 +379,90 @@ class HumanRunStepCommandTest(unittest.TestCase):
                                      "AGENT_ROUTE_ID": route["route_id"], "AGENT_ROUTE_NODE": "smoke"})
         self.assertEqual(sealed.returncode, 0, sealed.stderr)
         manifest = json.loads(sealed.stdout)
-        manifest_path = Path(manifest["snapshot_path"]).parent / f"{manifest['run_id']}.manifest.json"
-        # The source and snapshot passed as plain inputs: the attestation carries no `config_sha256`, yet the
-        # cycle holds the manifest.
+        return manifest, Path(manifest["snapshot_path"]).parent / f"{manifest['run_id']}.manifest.json"
+
+    def attested_setup(self):
+        """A setup route whose smoke attestation passes and binds no config; its full-run start is printed."""
+        route, path = self.compose("autopilot-lab", "setup")
+        out, node = self.cycle_output(route), self.node(route, "full-run")
+        self.attest(out / "reviews" / "smoke-attestation.json")
+        return route, path, out, node
+
+    def test_with_nothing_at_a_fixed_seal_path_the_exact_start_is_printed(self):
+        route, path, out, node = self.attested_setup()
+        # Where `config-seal` writes for smoke (`reviews/smoke/**`) and scaffold (`config/**`), and the cycle's
+        # `experiments`: nothing is there.
+        for seal in (out / "reviews" / "smoke" / "experiments", out / "config" / "experiments", out / "experiments"):
+            self.assertFalse(os.path.lexists(seal), seal)
+        self.assert_argv(self.command_in(W.human_run_step(route, path, node)), self.expected_argv(
+            route, path, out, f"{route['route_id']}-full-run", out / "reviews" / "smoke-attestation.json"))
+
+    def test_a_metadata_read_error_at_a_seal_path_prints_one_line(self):
+        route, path, out, node = self.attested_setup()
+        real_lstat = os.lstat
+
+        def failing_lstat(target, *args, **kwargs):
+            if Path(target).name == "experiments":
+                raise OSError(errno.EIO, "fixture I/O error", str(target))
+            return real_lstat(target, *args, **kwargs)
+        with mock.patch.object(W.os, "lstat", failing_lstat):
+            self.assertEqual(W.human_run_step(route, path, node), MAYBE_SEALED)
+        self.command_in(W.human_run_step(route, path, node))
+
+    def test_a_linked_seal_path_prints_one_line(self):
+        route, path, out, node = self.attested_setup()
+        # A linked `_internal/configs` holding a manifest under the cycle's `experiments`.
+        held = self.base / "linked-configs"
+        held.mkdir()
+        (held / "fixture-run.manifest.json").write_text("{}\n")
+        (out / "experiments" / "fixture-run" / "_internal").mkdir(parents=True)
+        (out / "experiments" / "fixture-run" / "_internal" / "configs").symlink_to(held, target_is_directory=True)
+        self.assertEqual(W.human_run_step(route, path, node), MAYBE_SEALED)
+        shutil.rmtree(out / "experiments")
+        # The smoke node's seal path is itself a link whose target cannot be followed (an unmounted share).
+        seal = out / "reviews" / "smoke" / "experiments"
+        seal.parent.mkdir(parents=True)
+        seal.symlink_to(self.base / "unmounted", target_is_directory=True)
+        self.assertEqual(W.human_run_step(route, path, node), MAYBE_SEALED)
+        seal.unlink()
+        self.command_in(W.human_run_step(route, path, node))
+
+    def test_the_ordinary_seal_prints_one_line_and_no_run_id(self):
+        route, path, out, node = self.attested_setup()
+        manifest, _ = self.seal(route, path)
+        # The source and snapshot passed as plain inputs: the attestation carries no `config_sha256`.
         attestation = out / "reviews" / "smoke-attestation.json"
         self.attest(attestation, inputs=(self.repo / "configs" / "train.yaml", manifest["snapshot_path"]))
         self.assertNotIn("config_sha256", json.loads(attestation.read_text()))
-        self.assertEqual(W.human_run_step(route, path, node), maybe)
-        self.attest(attestation, manifest_path)
         line = W.human_run_step(route, path, node)
-        self.assertEqual(line, maybe)
+        self.assertEqual(line, MAYBE_SEALED)
         self.assertNotIn(manifest["run_id"], line)
-        self.assertNotIn("payload", line)
+
+    def test_the_line_for_a_possible_sealed_config_follows_the_order_the_runner_accepts(self):
+        route, path = self.compose("autopilot-lab", "setup")
+        out, node = self.cycle_output(route), self.node(route, "full-run")
+        manifest, manifest_path = self.seal(route, path)
+        run_id, registry, attestation = manifest["run_id"], out / "resource-runs.json", out / "reviews" / "smoke-attestation.json"
+        log = out / "logs" / f"{run_id}.log"
+        start = shlex.join([sys.executable, str(ROOT / "utilities/resource-runner.py"), "--registry", str(registry),
+                            "start", "--run-id", run_id, "--cwd", str(self.repo.resolve()), "--log", str(log), "--route",
+                            str(path), "--node", "full-run", "--smoke-attestation", str(attestation),
+                            "--config-manifest", str(manifest_path)]) + " -- <approved command>"
+        # The smoke made before the manifest is bound: the runner refuses the manifest's run id with it.
+        self.attest(attestation, inputs=(self.repo / "configs" / "train.yaml", manifest["snapshot_path"]))
+        self.assertEqual(W.human_run_step(route, path, node), MAYBE_SEALED)
+        refused = self.run_printed(start, self.owner_env(route, path), **{"<approved command>": shlex.join(PAYLOAD)})
+        self.assertEqual(refused.returncode, 65, refused.stdout + refused.stderr)
+        self.assertIn("config provenance does not match smoke attestation", refused.stderr)
+        # In the line's order: the smoke again bound to the manifest, then its run id and `--config-manifest`.
+        self.attest(attestation, manifest_path)
+        self.assertEqual(json.loads(attestation.read_text())["config_sha256"], manifest["snapshot_sha256"])
+        self.assertEqual(W.human_run_step(route, path, node),
+                         "full-run has no start command yet: a sealed config manifest may exist — if so, pass its run id "
+                         "as `--run-id` and add `--config-manifest <that manifest>`")
+        row = self.run_to_end(start, self.owner_env(route, path), registry, run_id, log)
+        self.assertEqual((row["config_sha256"], row["config_ref"], row["source_commit"]),
+                         (manifest["snapshot_sha256"], manifest["config_ref"], manifest["source_commit"]))
 
     def test_a_host_payload_node_keeps_main_wording(self):
         route, path = self.compose_graph("host-run,metrics,report", "host-eval")

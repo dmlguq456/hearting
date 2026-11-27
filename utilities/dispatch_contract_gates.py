@@ -1486,8 +1486,7 @@ RESOURCE_STAGE_UNOBSERVABLE = "resource-stage-unobservable"
 
 
 def _resource_predecessor_action(route, dep: str, actions: dict, route_file=None) -> None:
-    """A resource predecessor with no current marker is continued, never waited on. Given the route file (no
-    marker at all), a step the owner runs itself adds its one line (`worker_bootstrap.human_run_step`)."""
+    """A resource predecessor with no current marker is continued, never waited on."""
     node = next((row for row in route.get("nodes", []) if row.get("id") == dep), None)
     try:
         import worker_bootstrap as wb

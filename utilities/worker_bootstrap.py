@@ -1390,8 +1390,7 @@ def continuation_followup_for_row(metadata, jobs, *, return_fields=False):
 
 
 def inline_complete_command(node_id: str, evidence: str | None = None, route_file=None) -> str:
-    """The exact command that publishes the completion marker of a stage the owner ran itself, run in the owner's
-    own environment; `route_file` names the route it closes."""
+    """The exact command that publishes the completion marker of a stage the owner ran itself."""
     script = entrypoint(_REPO_ROOT, "utilities/capability-route.py")
     return (f"python3 {shlex.quote(str(script))} complete"
             + (f" --route {shlex.quote(str(route_file))}" if route_file else "")
@@ -1400,32 +1399,35 @@ def inline_complete_command(node_id: str, evidence: str | None = None, route_fil
 
 
 def owner_run_stage(node) -> bool:
-    """A non-terminal stage the route owner runs itself (dispatch depth 1, `_kernel/owner`): nothing dispatches
-    it, and its successors start once its marker is published with `inline_complete_command`. A ship deploy
-    is not one: its parent deploy handback and deploy record keep their own path."""
+    """A non-terminal stage the route owner runs itself and closes with `inline_complete_command`; a ship deploy
+    keeps its own deploy handback."""
     return (isinstance(node, dict) and node.get("kind") == "capability-owner" and node.get("unit") == "_kernel/owner"
             and node.get("dispatch_depth") == 1 and node.get("terminal") is not True
             and node.get("completion_gate") != "ship-deploy")
 
 
-def route_cycle_output_dir(route, route_file) -> str | None:
-    """This route's own bound cycle output directory, from `artifact_context`'s cycle authority without the
-    inherited environment: another route's cycle variables never fill a path. None when unbound or unreadable."""
+def sealed_config_may_exist(route, route_file, output_dir) -> bool:
+    """False only when nothing (file, directory or link) is at the cycle's `experiments` or at the `experiments` the
+    existing `config-seal` computes for a node of this route; any other error while checking means it may."""
     try:
-        import artifact_context
-        output = artifact_context.resolve_context(environ={}, route=route, route_file=route_file).output_dir
-        return str(output) if output else None
+        import artifact_context, contextlib, dataclasses  # noqa: E401
+        context = artifact_context.resolve_context(environ={}, route=route, route_file=route_file)
+        paths = [Path(output_dir) / "experiments"]
+        for item in route["nodes"]:
+            with contextlib.suppress(artifact_context.ArtifactContextError):
+                paths.append(dataclasses.replace(context, node=item).resolve_output("config-seal", leaf="experiments").path)
+        for path in paths:
+            with contextlib.suppress(FileNotFoundError):
+                return os.lstat(path) is not None  # anything there, a link not followed
+        return False
     except Exception:
-        return None
+        return True
 
 
 def resource_start_command(route, route_file, node, output_dir) -> tuple[str, str]:
-    """`(command, note)`: the exact `resource-runner.py start` of a sealed resource node, only `<approved command>`
-    left, when all four hold: this route's own cycle is bound; its declared smoke attestation input passes the
-    `verify` the runner applies and records the execution environment it requires; the attestation binds no config
-    manifest and the cycle, read to its end, holds none (`config-seal` writes `_internal/configs/*.manifest.json`);
-    the cycle's run registry holds no run of this route node (the runner's route file and node match, or its id).
-    Otherwise `("", what is missing)`."""
+    """`(command, note)`: the exact `resource-runner.py start`, only `<approved command>` left, when this route's
+    cycle is bound, its declared smoke attestation passes the runner's `verify` with an execution environment, no
+    sealed config may exist, and the registry holds no run of this node as the runner matches it; else `("", why)`."""
     import importlib.util
     from resource_run_registry import route_registry_path
     if not output_dir or not route.get("cwd"):
@@ -1439,8 +1441,7 @@ def resource_start_command(route, route_file, node, output_dir) -> tuple[str, st
         return "", "it needs a smoke attestation this route does not produce — pass it as `--smoke-attestation <file>`"
     try:
         data = json.loads(attestation.read_text(encoding="utf-8"))
-        spec = importlib.util.spec_from_file_location("worker_smoke_attestation",
-                                                      _REPO_ROOT / "tools" / "smoke-attestation.py")
+        spec = importlib.util.spec_from_file_location("worker_smoke_attestation", _REPO_ROOT / "tools/smoke-attestation.py")
         smoke = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(smoke)
         smoke.verify(data)
@@ -1448,12 +1449,12 @@ def resource_start_command(route, route_file, node, output_dir) -> tuple[str, st
             return "", f"it needs a new smoke — {attestation} records no execution environment"
     except Exception:
         return "", f"it needs a verified smoke attestation — {attestation}"
-    unread = []  # a directory that cannot be read leaves the manifest's presence unknown
-    if "config_sha256" in data or any(name.endswith(".manifest.json") and Path(top).match("_internal/configs")
-                                      for top, _d, names in os.walk(output_dir, onerror=unread.append)
-                                      for name in names) or unread:
+    if "config_sha256" in data:
         return "", ("a sealed config manifest may exist — if so, pass its run id as `--run-id` and add "
                     "`--config-manifest <that manifest>`")
+    if sealed_config_may_exist(route, route_file, output_dir):
+        return "", ("if a sealed config manifest exists, make the smoke again bound to that manifest, then start "
+                    "with its run id as `--run-id` and `--config-manifest <that manifest>`")
     registry, run_id = route_registry_path(output_dir), f"{route['route_id']}-{node['id']}"
     runner = ["python3", entrypoint(_REPO_ROOT, "utilities/resource-runner.py"), "--registry", str(registry)]
     try:
@@ -1475,15 +1476,15 @@ def resource_start_command(route, route_file, node, output_dir) -> tuple[str, st
 
 
 def human_run_step(route, route_file, node) -> str:
-    """One line for a step the owner runs itself (a resource node it starts, a stage it closes): its exact command
-    when this route's own sealed context fixes every argument, else what is missing. "" for any other node, a
-    GPU-free host payload node (`host-run`) included: the runner starts it without a smoke attestation."""
+    """One line for a step the owner runs itself (a resource start, a stage it closes): its exact command when this
+    route's own context fixes every argument, else what is missing; "" for any other node and a GPU-free host node."""
     try:
         from gpu_execution_sandbox import host_payload_nodes
         node_id, resource = node["id"], node.get("kind") == "resource-runner"
         if not resource and not owner_run_stage(node) or resource and node_id in host_payload_nodes(route):
             return ""
-        output_dir = route_cycle_output_dir(route, route_file)
+        import artifact_context  # this route's own bound cycle: another route's inherited cycle never fills a path
+        output_dir = artifact_context.resolve_context(environ={}, route=route, route_file=route_file).output_dir
         if resource:
             command, note = resource_start_command(route, route_file, node, output_dir)
             return f"start {node_id} yourself: `{command}` ({note})" if command else f"{node_id} has no start command yet: {note}"
