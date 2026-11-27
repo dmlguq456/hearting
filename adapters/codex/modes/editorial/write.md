@@ -81,8 +81,9 @@ the defaults below.
 
 - Read the outline and the evidence before writing; keep the outline's order and headings.
 - Per `roles/units/_shared/profile-preload.md`, read `02_paper_writing_style` (tone, argument,
-  citation), `05_domain_expertise` (terms, abbreviations), `01_paper_figure_style` for captions
-  and `03_presentation_strategy` for slides. The outline, Style Guide, form and apply-list
+  citation), `05_domain_expertise` (terms, abbreviations), `04_analysis_methodology` (how
+  results and analysis paragraphs are built), `01_paper_figure_style` for captions and
+  `03_presentation_strategy` for slides. The outline, Style Guide, form and apply-list
   wording prevail.
 - Write in the audience's language (`roles/units/editorial/_voice.md`, "Audience language").
 - This unit drafts and applies. Sentence-level polish of a finished text is

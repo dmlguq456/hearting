@@ -5,6 +5,7 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import os
 import json
+import shutil
 import signal
 import subprocess
 import sys
@@ -260,6 +261,34 @@ class ReapTest(unittest.TestCase):
         proc.wait(timeout=5)
         tmp.cleanup()  # raises OSError(ENOTEMPTY) if a writer were still alive
         self.assertFalse(root.exists())
+
+    def test_temporary_directory_settles_writer_before_removal(self):
+        temporary = fixture_processes.TemporaryDirectory()
+        root = Path(temporary.name)
+        proc = self._spawn(root)
+        rmtree = shutil.rmtree
+
+        def remove(directory):
+            self.assertIsNotNone(proc.poll(), "fixture writer is live at directory removal")
+            rmtree(directory)
+
+        try:
+            with mock.patch.object(fixture_processes.shutil, "rmtree", side_effect=remove):
+                temporary.cleanup()
+            self.assertFalse(root.exists())
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+            temporary.cleanup()
+
+    def test_temporary_directory_preserves_root_if_writers_do_not_settle(self):
+        with tempfile.TemporaryDirectory() as parent:
+            temporary = fixture_processes.TemporaryDirectory(dir=parent)
+            with mock.patch.object(fixture_processes, "reap", side_effect=TimeoutError):
+                with self.assertRaises(TimeoutError):
+                    temporary.cleanup()
+            self.assertTrue(Path(temporary.name).is_dir())
 
     def test_a_marked_child_in_the_callers_group_is_killed_without_killing_the_caller(self):
         with tempfile.TemporaryDirectory() as name:
