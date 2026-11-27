@@ -490,6 +490,33 @@ kept.update([written('A','submitted')],'',{});take(kept,'\x1b[201~');assert.equa
 })().catch(e=>{console.error(e);process.exit(1);});
 """)
 
+    def test_a_send_that_ends_while_the_popup_is_still_taking_input_lets_go_only_after_it(self):
+        # Review 2 of #1889: A is being sent; Tab reads B; a paste begins (or a Hangul character's first byte
+        # comes); B closes elsewhere; then A's send ends. The rest of what was being typed is still the popup's:
+        # no byte goes back to the native input, and the popup lets go once it is in (rule 5).
+        self.node(r"""
+const assert=require('node:assert/strict'),path=require('node:path'),create=require(path.join(process.argv[1],'block-input.cjs'));
+const written=(id,state)=>({id,revision:id,answerable:state?false:true,...(state?{request_state:state}:{}),
+                            questions:[{id:'q'+id,question:'Question '+id+'?'}]});
+const chosen=(id,state)=>({...written(id,state),questions:[{id:'q'+id,question:'Question '+id+'?',choices:['one','two']}]});
+const take=(b,bytes,why)=>assert.equal(b.input(Buffer.from(bytes)).length,0,why);
+(async()=>{
+ for(const [first,rest,why] of [[['\x1b[200~'],['the rest of a paste','\x1b[201~'],'a paste'],
+                                [[[0xea]],[[0xb0,0x80]],'a character’s first byte']]){
+  let release,watch=()=>{};const sent=new Promise(r=>{release=r;});
+  const b=create({changed(){watch();},answer:()=>sent,action(){}});
+  b.update([chosen('A'),written('B')],'',{});b.enter();take(b,'1');take(b,'\r');take(b,'\t');
+  for(const bytes of first)take(b,bytes,why);
+  b.update([chosen('A','submitted')],'',{});                 // B closes elsewhere while A is sent
+  const ended=new Promise(r=>{watch=r;});
+  release({state:'submitted'});await ended;                    // the send has ended
+  assert.equal(b.focused,true,why+': still taking it');
+  for(const bytes of rest)take(b,bytes,why+': the rest is the popup’s');
+  assert.equal(b.focused,false,why+': then it lets go');
+ }
+})().catch(e=>{console.error(e);process.exit(1);});
+""")
+
     def test_no_guidance_the_question_popup_draws_names_the_arrows_as_sections(self):
         # 11-22: in the question popup ←→ only move the place in the typed text, so none of its guidance
         # (the keys rows `navigate`, `navigate_write`, the writing hints, and `editor_help`, which a popup with no
