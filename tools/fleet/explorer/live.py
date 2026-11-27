@@ -4074,8 +4074,9 @@ def _panel_bands(groups):
         detail = group.get("detail") if isinstance(group.get("detail"), (list, tuple)) else ()
         if detail and all(isinstance(item, Mapping) for item in detail):
             at, stage, done, total = current_leg_values(detail)
-            # (Fleet's own words for it: `str(n or name)`, its state)
-            band["stage"] = {"n": str(stage.get("n") or stage.get("name"))[:64],
+            # (Fleet's own words for it, `str(n or name)` (`None` for a parallel pair, as Fleet writes it); a value of another shape is none)
+            name = stage.get("n") or stage.get("name")
+            band["stage"] = {"n": (str(name) if name is None or isinstance(name, (str, int, float)) else "")[:64],
                              "st": stage.get("st") if isinstance(stage.get("st"), str) else "", "at": at, "done": done, "of": total}
         bands.append(band)
     return bands

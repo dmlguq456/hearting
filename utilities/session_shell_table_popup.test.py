@@ -203,10 +203,7 @@ class TablePopupTest(unittest.TestCase):
                  for height in (24, 40, 54)]
         self.assertGreater(len(views[0]['rows']), 33)
         for view in views:
-            # (11-27: the popup's page is the frame first, its route row and lines under it)
-            rows = self.text(view['rows'])
-            self.assertTrue(rows[0].startswith('╔═'), rows[0])
-            self.assertTrue(any(row.startswith('╚═') for row in rows))
+            self.assertTrue(self.text(view['rows'])[-1].startswith('╚═'))
             self.assertEqual(view['rows'], views[0]['rows'])
 
     def test_short_routes_fit_their_stage_rows(self):
@@ -234,10 +231,8 @@ class TablePopupTest(unittest.TestCase):
                     left = rows[top].index(label)
                     self.assertEqual([rows[top + offset][left:left + 1] for offset in range(1, 5)],
                                      ['│', '│', '│', '└'])
-                # (the frame stands first and closes under its last box; the route row and the lines follow it)
-                self.assertTrue(rows[0].startswith('╔═'), rows[0])
-                bottom = next(i for i, text in enumerate(rows) if text.startswith('╚═'))
-                self.assertIn('└', rows[bottom - 1])
+                self.assertIn('└', rows[-2])
+                self.assertTrue(rows[-1].startswith('╚═'))
 
     def test_fitted_boxes_with_different_heights_keep_straight_stage_links(self):
         from dataclasses import replace
@@ -298,7 +293,7 @@ class TablePopupTest(unittest.TestCase):
                     self.assertIn('second', rows[start + 2])
                     self.assertIn('third', rows[start + 3])
                     self.assertIn('last 3 rows', rows[start + 4])
-                    self.assertEqual(start + 5, next(i for i, text in enumerate(rows) if text.startswith('╚═')))
+                    self.assertEqual(start + 5, len(rows) - 1)
                 else:
                     self.assertNotIn('owner raw', '\n'.join(rows))
 

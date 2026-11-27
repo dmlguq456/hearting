@@ -517,8 +517,9 @@ reading comes, Fleet's page frame drawn from the panel's values in the cells the
 the head, the legs' band with the producer's own count of its stage line, the picked leg's stage boxes in the colors this screen drew them in, the frame
 closed under them; no word of Fleet's frame changes, a team route's head keeps the form word `team`, never `staged`; what only the reading has, a parallel
 pair, a loop, the owner's raw strip, stages past the sixteen the panel holds, moves the rows under the band's panel title down, never the head, the band or
-the top edge), and a route the panel holds no leg band for (an older backend's record, more than six legs, a projection that had to shed these values to
-keep every session's route details), or a first screen that cannot be drawn, its panel box; the
+the top edge). A route the panel holds no leg band for (an older backend's record, more than six legs, a projection that had to shed these values to
+keep every session's route details) is drawn as before 11-27: its stage boxes for a staged route, else its panel box (as is a first screen that cannot be
+drawn); the
 box's top line the routes popup, the table; a request row the MESSAGES popup).
 
 - QUESTIONS (11-16, the person: "질문은 이전처럼 그냥 붉은색 블록으로 감싸는게 모양은 제일 나아" / "붉은 바운더리
@@ -1259,8 +1260,8 @@ C1) as a space. In a table ↑↓, Tab and Shift+Tab unfold the next or
 previous route (Fleet's `▶`) or read on a row; Enter opens the
 unfolded route's page (Fleet's route page, `_route_page(whole=True)`: the stage frame first, then the route row,
 then what is to do and the verification lines with the route's paths, so the frame stands on the rows its first
-screen drew it on; every line under the frame stays in the answer: a frame that would push them past its rows or
-bytes closes early with `+N more`; Fleet's own screen keeps its order) and again goes back to the table. A route's page keeps its
+screen drew it on, where that first screen was the frame and the whole page fits the answer's rows and bytes; else, a long
+route's page, the page as before 11-27: the lines first, the frame under them; Fleet's own screen keeps its order) and again goes back to the table. A route's page keeps its
 top edge at the upper edge of the popup area while the reading comes in. The stage frame and the
 popup grow down to fit their content. PgUp/PgDn and the wheel read a longer page or table on (its place,
 `3/20`, leads the keys row; ↑↓ and Tab keep the unfolded row in view, and a table longer than the rows the popup carries, or than the answer the host reads, shows the rows that fit and ends with one dim line for the rest in the entrance's words, `외 N개`); `p` folds or opens the panel (the popup closes so

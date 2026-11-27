@@ -12,9 +12,10 @@ The two that remained of #1760 (closed; built again on today's main, the person'
   * A first screen that cannot be drawn (it throws) falls back to the panel's route box: the picture is one the popup can do without.
   * No word changes: the head, the stage boxes' titles and every value are Fleet's own (a team route's first screen keeps the form word `team`
     it has always said where the reading's head says `staged`), and the stage boxes keep the colors the first screen drew them in.
-  * Review of #1900 (11-27): a long frame closes early with `+N more` so every line under it stays within the answer's rows and bytes; the band's
-    stage line is the producer's count over the whole leg (a running stage past the sixteen the panel holds, a parallel pair); a long repository
-    name stands the tag where the reading does; a value not of its shape is no value; more than six legs is the panel's box.
+  * Reviews of #1900 (11-27): the frame stands first only where it all fits: the first screen holds the frame's values (a band of six legs at
+    most) and the whole page fits the answer's rows and bytes. Else both screens are drawn as before 11-27, cell for cell (a long route, seven
+    legs, a cache that kept the route without these values), the page cut only to the bytes the host reads. The band's stage line is the
+    producer's count over the whole leg; a long repository name stands the tag where the reading does; a value not of its shape is no value.
   * What this does not hold equal, by design: what only the reading knows lengthens the frame under the band's panel title, never above it — a
     parallel pair (`∥ 2-way`, measured 28 → 35 rows to the frame's bottom at 132×46), a loop (`↺ N back`, 21 → 24), the owner's raw strip (28 → 34),
     more than sixteen stages (50 → 56, the first screen's `+N` under the sixteen). The comparison here covers chains of one, three and six stages.
@@ -42,6 +43,12 @@ KEYS = ("dim", "loc_repo", "g_idle", "g_work", "g_dead", "g_blocked", "lvl_g", "
 FORMS = ("unit", "solo", "staged", "team")
 # The rows' width the route popup gives a window of 80, 120 or 132 columns (`popupWidth`: cols-4, the popup's own sides less 4).
 COLUMNS = {80: 72, 120: 112, 132: 124}
+
+# The first screen main (815746a78) draws for `build(form, 3, lack=True)` at 72 columns without the frame's values, read from main's own
+# `routePageFirst`: the stage boxes of a staged route; none (the route list) for a unit's or a solo's.
+_BOXES = ["", "    ┌─ plan ────── ✓ ┐    ┌─ plan-che… ─ ✓ ┐    ┌─ execute ─── ● ┐", "    │ by     claude  │    │ by     claude  │    │ by     claude  │", "    │ time   30m     │    │ time   20m     │    │ time   10m     │", "    │ out    ·       │ ▶  │ out    ·       │ ▶  │ out    ·       │", "    │ unit   ·       │    │ unit   ·       │    │ unit   ·       │", "    └────────────────┘    └────────────────┘    └────────────────┘"]
+BEFORE = {"staged": ["╔═ 그림 시험 route  1 leg · team ══════════════════════════════════════╗", "┌─ code ──────────────────────────────── ● ┐", "│                                          │", "└──────────────────────────────────────────┘"] + _BOXES,
+          "team": ["╔═ 그림 시험 route  2 legs · team ═════════════════════════════════════╗", "┌─ frame ───────────────────── ✓ ┐    ┌─ code ────────────────────── ● ┐", "│                                │ ▶  │                                │", "└────────────────────────────────┘    └────────────────────────────────┘"] + _BOXES}
 
 NODE = r"""
 const fs=require('node:fs'),path=require('node:path');
@@ -143,19 +150,14 @@ def panel_of(record):
     return session_panel.presentation({}, {"route_panels": {"claude\0sid": [record]}}, "claude", "sid", 40)["routes"]
 
 
-def read_page(vm, columns):
+def read_page(vm, columns, framed=True):
     """The backend's reading of the route's page (`_panel_popup`) over the given collection: its rows as text."""
-    import session_shell
-    from fleet import session_tags
-    from fleet.explorer.view_model import ExplorerViewModel
-    held = ExplorerViewModel.from_mapping(vm)
-    with mock.patch.object(session_tags, "assigned_tag", lambda harness, sid: "e9"), \
-            mock.patch.object(session_shell, "registry_root", lambda: None), \
-            mock.patch.object(session_shell, "_popup_view_model", lambda harness, sid, kind: held), \
-            mock.patch.object(session_shell, "_paint_mode", lambda: (256, False)), \
-            mock.patch.dict(session_shell._HELD_VIEW, clear=True):
-        result = session_shell._panel_popup({"harness": "claude", "sid": "sid"}, {"kind": "routes", "columns": columns, "open": RID, "page": True, "rows": 40})
+    result = page_answer(vm, columns, framed)
     assert result.get("ok") and result.get("page"), result
+    return text_of(result)
+
+
+def text_of(result):
     return ["".join(text for text, _style in row) for row in result["rows"]]
 
 
@@ -253,15 +255,24 @@ class RoutePageFrameFirst(unittest.TestCase):
                         self.assertTrue(any("┌─ %s " % title in row for row in rows), rows)
                         self.assertRegex(rows[1], r"^║  ┌─ leg ")       # (the band follows the head at once)
 
-    def test_the_panel_without_a_band_keeps_its_box(self):
-        # (an older backend's record has no band: the first screen is the panel's route box, `null` here)
+    def test_without_the_frames_values_both_screens_are_as_before(self):
+        # (review 2 of #1900, red 2: seven legs, or a cache that kept the route without its band, opened on the route list and turned into the frame
+        # once read; main draws that route's stage boxes from the first moment. An older backend's record is the same case.)
         for form in FORMS:
-            with self.subTest(form=form):
-                _vm, record = build(form, 3)
-                record.pop("bands")
-                got = self.draw([{"model": {"routes": panel_of(record), "styles": self.styles}, "id": RID, "columns": 112, "cols": 120,
-                                  "windowRows": [46], "read": ["x"]}])
-                self.assertIsNone(got[0]["first"])
+            for how in ("no band", "seven legs"):
+                with self.subTest(form=form, how=how):
+                    vm, record = build(form, 3, lack=True)
+                    if how == "no band":
+                        record.pop("bands")
+                    panel = panel_of(record)
+                    if how == "seven legs":
+                        panel[0]["bands"] = [dict(record["bands"][0], n="leg %d" % i) for i in range(7)]
+                    got = self.draw([{"model": {"routes": panel, "styles": self.styles}, "id": RID, "columns": 72, "cols": 80, "windowRows": [24],
+                                      "read": ["x"]}])[0]["first"]
+                    # (as main's `routePageFirst` draws it, cell for cell: the stage boxes of a staged route, the route list for a unit's or a solo's)
+                    self.assertEqual(got, BEFORE.get(form))
+                    # (the reading for a first screen that was not the frame: the page as before, the lines first)
+                    self.assertEqual(read_page(vm, 72, framed=False), text_of(drawn(vm, 72, False)[0]))
 
     def test_the_page_order_is_the_frame_then_the_route_row_then_the_lines_for_a_popup_only(self):
         from fleet.explorer import pages
@@ -318,6 +329,9 @@ console.log('ok');
         odd = live._panel_bands([{"kind": "leg", "n": {"bad": 1}, "st": "active", "lines": 6, "title": [[{"bad": "value"}, "head"], ["t", ("d", 0, 1)]],
                                   "detail": "not a list"}])
         self.assertEqual(odd, [{"n": "", "st": "active", "verdict": "", "kind": "leg", "lines": [], "title": [["t", ""]]}])
+        staged = live._panel_bands([{"kind": "leg", "n": "leg 1", "st": "active", "detail": [{"n": {"bad": 1}, "st": "active"}, {"n": "b", "st": "todo"}]},
+                                    {"kind": "leg", "n": "leg 2", "st": "todo", "detail": [{"group": (), "members": ("x", "y")}]}])
+        self.assertEqual([band["stage"]["n"] for band in staged], ["", "None"])      # (an object is no name; a parallel pair is Fleet's own `None`)
         # (the panel's side: control characters are spaces, a piece keeps its own spaces, a value of another shape is no value)
         shown = session_panel.route_bands([{"n": "a\x1b[31mb", "st": "active", "lines": "not a list", "title": {"x": 1}},
                                            {"n": "c", "lines": [[["owner  ", "dim"], [{"bad": "value"}, "soft"], ["d\x07e", "dim"], "junk"]],
@@ -341,30 +355,68 @@ console.log('ok');
         self.assertNotIn("bad", owner)
         self.assertRegex(owner, r"│ owner +│")
 
-    def test_a_long_frame_closes_early_and_keeps_every_line_under_it(self):
-        # (review of #1900, red 1: at 80×24 a route of 39, 42 and 45 stages with a gate, rounds and words, and 20 visibility lines, lost `next:`,
-        # then `why:`, then the route row, its kind, its worker and the summary out of the 160 rows the answer carries)
+    def test_a_page_that_does_not_fit_the_answer_is_the_page_as_before(self):
+        # (review 2 of #1900, red 1 and 3: the frame closed early lost `next:` where the lines alone filled the answer, an answer past the bytes the host
+        # reads never came, and a closed-early frame hid the running stages. A page that does not fit is the page as main draws it, cut to the host's bytes.)
         import session_shell
         path = "/very/long/fixture/path/" + "segment-name/" * 12 + "artifact.md"
-        lines = [["why", "the person asked for it", "info"]] + [["path", path, "info"]] * 18 + [["next", "wait for the stage", "info"]]
-        for n, columns in ((39, 72), (42, 72), (45, 72), (45, 196)):
-            with self.subTest(stages=n, columns=columns):
-                vm, _record = build_long(n, lines)
+        twenty = [["why", "the person asked for it", "info"]] + [["path", path, "info"]] * 18 + [["next", "wait for the stage", "info"]]
+        short = [["why", "the person asked for it", "info"]] + [["path", "p%03d" % i, "info"] for i in range(148)] + [["next", "wait for the stage", "info"]]
+        wide = [["why", "the person asked for it", "info"]] + [["path", "ก" * 165 + "%03d" % i, "info"] for i in range(18)] + [["next", "wait for the stage", "info"]]
+        folded = [["why", "the person asked for it", "info"]] + [["path", "/" + "a" * 129, "info"]] * 13 + [["next", "wait for the stage", "info"]]
+        cases = (("150 short lines, 39 stages, 80×24", 39, short, 72, {}), ("15 lines folded at 30 cells", 6, folded, 30, {}),
+                 ("wide letters filling the answer, 45 stages", 45, wide, 192, {}), ("39 stages, the last two parallel, step-39 running", 39, twenty, 72,
+                                                                                    {"running": 38, "parallel": ((37, 38),)}))
+        for label, n, lines, columns, extra in cases:
+            with self.subTest(label):
+                vm, _record = build_long(n, lines, **extra)
+                fitted, end = drawn(vm, columns, True)
+                self.assertTrue(end > session_shell.POPUP_ROWS or weight(fitted) > session_shell.POPUP_ANSWER_BYTES, (end, weight(fitted)))
                 result = page_answer(vm, columns)
-                rows = ["".join(text for text, _style in row) for row in result["rows"]]
+                rows, before = text_of(result), text_of(drawn(vm, columns, False)[0])
+                self.assertFalse(rows[0].startswith("╔═"), rows[0])
+                self.assertEqual(rows, before[:len(rows)])                           # (main's page, cut only where the bytes end)
+                self.assertTrue(any(row.strip().startswith("next:") for row in rows))
+                self.assertLessEqual(weight(result), session_shell.POPUP_ANSWER_BYTES)
                 self.assertLessEqual(len(rows), session_shell.POPUP_ROWS)
-                self.assertLessEqual(len(json.dumps({"id": 0, **result}, ensure_ascii=False).encode()), session_shell.POPUP_ANSWER_BYTES)
-                self.assertTrue(rows[0].startswith("╔═"), rows[0])
-                bottom = next(i for i, row in enumerate(rows) if row.startswith("╚═"))
-                self.assertRegex(rows[bottom - 1], r"^║ │ \+\d+ more +│ ║$")            # (the frame closes, saying what it left out)
-                below = "\n".join(rows[bottom + 1:])
-                for word in ("PROGRESS", "└ kind", "└ worker", "todo:", "doing:", "done:", "why:", "next:"):
-                    self.assertIn(word, below)
-                self.assertEqual(sum(row.strip().startswith("path:") for row in rows), 18)
-                self.assertTrue(rows[-1].strip().startswith("next:"), rows[-1])        # (the last page a reader reaches with PgDn ends with `next`)
-        # (a route that fits is drawn whole, as before: no `more`)
-        vm, _record = build_long(6, lines[:2])
-        self.assertNotIn("more", "\n".join("".join(text for text, _s in row) for row in page_answer(vm, 72)["rows"]))
+                if weight({**result, "rows": drawn(vm, columns, False)[0]["rows"]}) <= session_shell.POPUP_ANSWER_BYTES:
+                    self.assertEqual(rows, before)
+
+    def test_the_frame_stands_first_up_to_the_answers_rows_and_bytes(self):
+        # (the edge: a page whose last row is the answer's last stands its frame first; one row more, or one line past the bytes, is the page as before)
+        import session_shell
+        line = lambda i: ["path", "p%03d" % i, "info"]
+        lines = lambda k: [line(i) for i in range(k)]
+        vm, _record = build_long(6, lines(1))
+        k = session_shell.POPUP_ROWS - drawn(vm, 72, True)[1] + 1               # (a short line is one row)
+        for count, framed in ((k, True), (k + 1, False)):
+            with self.subTest(rows=count):
+                vm, _record = build_long(6, lines(count))
+                self.assertEqual(drawn(vm, 72, True)[1], session_shell.POPUP_ROWS + (0 if framed else 1))
+                rows = read_page(vm, 72)
+                self.assertEqual(rows[0].startswith("╔═"), framed)
+                self.assertEqual(rows, text_of(drawn(vm, 72, framed)[0]))
+                self.assertIn("path:        p%03d" % (count - 1), [row.strip() for row in rows])
+                if framed:
+                    self.assertEqual(rows[-1].strip(), "path:        p%03d" % (count - 1))      # (the whole page: its last line is the last row)
+        wide = lambda i: ["path", "ก" * 165 + "%03d" % i, "info"]
+        sized = lambda k: build_long(6, [wide(i) for i in range(k)])[0]
+        low, high = 1, 120                     # (the most wide lines whose framed page weighs what the host reads)
+        self.assertLessEqual(weight(drawn(sized(low), 192, True)[0]), session_shell.POPUP_ANSWER_BYTES)
+        self.assertGreater(weight(drawn(sized(high), 192, True)[0]), session_shell.POPUP_ANSWER_BYTES)
+        while high - low > 1:
+            middle = (low + high) // 2
+            low, high = (middle, high) if weight(drawn(sized(middle), 192, True)[0]) <= session_shell.POPUP_ANSWER_BYTES else (low, middle)
+        for count, framed in ((low, True), (high, False)):
+            with self.subTest(wide_lines=count):
+                vm = sized(count)
+                self.assertLess(drawn(vm, 192, True)[1], session_shell.POPUP_ROWS)       # (the rows fit: the bytes decide)
+                result = page_answer(vm, 192)
+                rows = text_of(result)
+                self.assertEqual(rows[0].startswith("╔═"), framed)
+                drawn_rows = text_of(drawn(vm, 192, framed)[0])
+                self.assertEqual(rows, drawn_rows if framed else drawn_rows[:len(rows)])     # (the page as before, cut where the bytes end)
+                self.assertLessEqual(weight(result), session_shell.POPUP_ANSWER_BYTES)
 
     def test_the_bands_stage_line_is_the_producers_count(self):
         # (review of #1900, red 2: the first screen counted again from the sixteen stages the panel holds, and stacked parallel pairs flat)
@@ -377,12 +429,7 @@ console.log('ok');
                 line = lambda rows: next(row for row in rows if "│ stage  " in row)
                 self.assertEqual(line(first), line(read))
                 self.assertEqual(mask(first[:4]), mask(read[:4]))          # (the head and the band: every cell but the head's last word)
-        # (seven legs handed to the drawing: no band of six with another one picked, the panel's box)
-        _vm, record = build("staged", 3)
-        seven = [dict(record["bands"][0], n="leg %d" % i) for i in range(7)]
-        got = self.draw([{"model": {"routes": [dict(panel_of(record)[0], bands=seven)], "styles": self.styles}, "id": RID, "columns": 124, "cols": 132,
-                          "windowRows": [46], "read": ["x"]}])
-        self.assertIsNone(got[0]["first"])
+        # (seven legs handed to the drawing: no band of six with another one picked; the first screen as before, see the test above)
 
     def test_a_long_repository_name_stands_the_tag_where_the_reading_does(self):
         # (review of #1900, red 3: a 95-character repository name moved the tag 87 → 103 cells and lost its `/` on the first screen)
@@ -460,8 +507,8 @@ def build_long(n, lines, *, running=None, parallel=(), repo="project"):
     return vm, live._panel_route_record(route, {RID: groups})
 
 
-def page_answer(vm, columns):
-    """The backend's whole answer for the route's page (`_panel_popup`), as the host reads it."""
+def page_answer(vm, columns, framed=True):
+    """The backend's whole answer for the route's page (`_panel_popup`), as the host reads it (``framed``: its first screen was the frame)."""
     import session_shell
     from fleet import session_tags
     from fleet.explorer.view_model import ExplorerViewModel
@@ -471,7 +518,32 @@ def page_answer(vm, columns):
             mock.patch.object(session_shell, "_popup_view_model", lambda harness, sid, kind: held), \
             mock.patch.object(session_shell, "_paint_mode", lambda: (256, False)), \
             mock.patch.dict(session_shell._HELD_VIEW, clear=True):
-        return session_shell._panel_popup({"harness": "claude", "sid": "sid"}, {"kind": "routes", "columns": columns, "open": RID, "page": True, "rows": 24})
+        return session_shell._panel_popup({"harness": "claude", "sid": "sid"}, {"kind": "routes", "columns": columns, "open": RID, "page": True, "rows": 24,
+                                                                       **({"framed": True} if framed else {})})
+
+
+def drawn(vm, columns, frame_first):
+    """``(answer, end)``: the route's page as `_route_page` draws it in either order into the popup's grid (`popup_rows`, its empty head gone),
+    uncut by bytes, and the row under what it drew: what the backend's answer is compared with."""
+    import session_shell
+    from fleet.explorer import pages
+    from fleet.explorer.grid import CellGrid
+    from fleet.explorer.view_model import ExplorerViewModel
+    from dataclasses import replace
+    held = ExplorerViewModel.from_mapping(vm)
+    grid = CellGrid(columns, session_shell.POPUP_ROWS + 8)
+    end = pages._route_page(grid, replace(held, routes=tuple(held.routes)), RID, 0, columns - 1, grid.rows,
+                            pages._SubsetState(None, "route:" + RID, RID, True), whole=True, frame_first=frame_first)
+    rows, styles, hits = session_shell.popup_rows(grid, colors=256, no_color=False)
+    while rows and not rows[0]:
+        rows.pop(0)
+        hits = [{**hit, "row": hit["row"] - 1} for hit in hits if hit["row"] > 0]
+    # (the answer the backend writes, its time as wide as the backend's)
+    return {"ok": True, "kind": "routes", "rows": rows, "styles": styles, "hits": hits, "routes": [RID], "page": True, "read_at": int(time.time())}, end
+
+
+def weight(result):
+    return len(json.dumps({"id": 0, **result}, ensure_ascii=False).encode())
 
 
 if __name__ == "__main__":

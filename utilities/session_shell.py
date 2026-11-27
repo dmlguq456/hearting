@@ -2033,7 +2033,8 @@ def _panel_popup(binding, request):
     ids = [str(route.get("id") or "") for route in routes]
     page = request.get("page") is True and opened in ids
     if page:
-        return _route_page_answer(replace(vm, routes=routes), opened, columns, kind, ids, read_at, colors, no_color)
+        return _route_page_answer(replace(vm, routes=routes), opened, columns, kind, ids, read_at, colors, no_color,
+                                  request.get("framed") is True)
     if routes:
         pages._draw_route_subset(grid, vm, routes, 0, 0, grid.rows - 4, opened=opened, no_repo_group=True)
     rows, styles, hits = popup_rows(grid, colors=colors, no_color=no_color)
@@ -2041,40 +2042,37 @@ def _panel_popup(binding, request):
                         read_at=int(read_at))
 
 
-def _route_page_answer(subset, opened, columns, kind, ids, read_at, colors, no_color):
-    """A route's page as the host reads it: Fleet's page drawn once (the host fits it to the window and reads the rest
-    with PgUp/PgDn), every line under its frame kept within ``POPUP_ROWS`` rows and ``POPUP_ANSWER_BYTES``: a page that
-    would outrun either closes its frame earlier (`_route_page`'s ``+N more``), never losing the route row or its lines."""
+def _route_page_answer(subset, opened, columns, kind, ids, read_at, colors, no_color, framed):
+    """A route's page as the host reads it (the host fits it to the window and reads the rest with PgUp/PgDn). Its frame stands first
+    where the host's first screen drew that frame (``framed``) and the whole page then fits the answer (``POPUP_ROWS`` rows and
+    ``POPUP_ANSWER_BYTES``); else it is the page as it was before 11-27 (the lines first, the frame under them), as many of its rows
+    as the answer carries. Drawn twice at most."""
     from fleet.explorer.grid import CellGrid
     from fleet.explorer import pages
 
-    def draw(limit=None):
-        # (the page starts on row 3, under Fleet's page head: those three empty rows go after `popup_rows` cut it to its rows)
-        grid = CellGrid(columns, POPUP_ROWS)
-        last = pages._route_page(grid, subset, opened, 0, columns - 1, grid.rows,
-                                 pages._SubsetState(None, "route:" + opened, opened, True), whole=True, frame_limit=limit)
+    def draw(frame_first):
+        grid = CellGrid(columns, POPUP_ROWS + 8)
+        end = pages._route_page(grid, subset, opened, 0, columns - 1, grid.rows,
+                                pages._SubsetState(None, "route:" + opened, opened, True), whole=True, frame_first=frame_first)
         rows, styles, hits = popup_rows(grid, colors=colors, no_color=no_color)
+        # The route page starts under Fleet's page head: its empty rows above the content go.
         while rows and not rows[0]:
             rows.pop(0)
             hits = [{**hit, "row": hit["row"] - 1} for hit in hits if hit["row"] > 0]
         return {"ok": True, "kind": kind, "rows": rows, "styles": styles, "hits": hits, "routes": ids[:64], "page": True,
-                "read_at": int(read_at)}, last
+                "read_at": int(read_at)}, end
 
     def weight(result):
         return len(json.dumps({"id": 0, **result}, ensure_ascii=False).encode())
-    answer, last = draw()
-    if weight(answer) <= POPUP_ANSWER_BYTES or last is None:
-        return answer
-    low, high = 3, last          # the frame's last row: `low` is the least it can be, `high` does not fit
-    best = None
-    while high - low > 1:
-        middle = (low + high) // 2
-        trial, _last = draw(middle)
-        if weight(trial) <= POPUP_ANSWER_BYTES:
-            low, best = middle, trial
-        else:
-            high = middle
-    return best or draw(low)[0]
+    if framed:
+        answer, end = draw(True)
+        if end is not None and end <= POPUP_ROWS and weight(answer) <= POPUP_ANSWER_BYTES:
+            return answer
+    answer, _end = draw(False)
+    count = len(answer["rows"])           # (the most rows that weigh what the host reads: the lines come first, the frame's last rows go)
+    while count and weight({**answer, "rows": answer["rows"][:count]}) > POPUP_ANSWER_BYTES:
+        count -= max(1, count // 16)
+    return {**answer, "rows": answer["rows"][:count], "hits": [hit for hit in answer["hits"] if hit["row"] < count]}
 
 
 def _input_readiness(binding, request):

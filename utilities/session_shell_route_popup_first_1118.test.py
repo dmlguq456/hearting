@@ -1089,8 +1089,7 @@ const stage=(n,i)=>({name:n,state:i<2?'done':i===2?'active':'pending',mark:i<2?'
   ...(i<2?{verdict:'PASS',when:'30m',out:'artifacts/'+n+'.md',unit:'qa/'+n,gate:true}:{}),...(i===2?{harness:'claude',model:'Opus 5.5',unit:'dev/backend',when:'4m',gate:true}:{}),
   ...(i===3?{gate:'code-plan'}:{})});
 const route=(id,extra={})=>({id,title:'제목 '+id,kind:'working',state:'working',elapsed:'23m',shape:'staged',kind_form:'team',stages:names.map(stage),
-  chain:[{name:'frame',state:'done'},{name:'code',state:'active'}],age:'23m',legs:2,
-  bands:[{n:'leg 2 · code dev',st:'active',verdict:'2/6',kind:'leg',lines:[[['owner  ','dim'],['claude','hb_claude']]],title:[['leg 2 · code dev','head']]}],...extra});
+  chain:[{name:'frame',state:'done'},{name:'code',state:'active'}],...extra});
 const model={styles:{dim:{dim:true},stg2_on:{foreground:150,bold:true}},routes:[route('r1'),route('r2',{shape:'one-shot-owner',stages:[{name:'one-shot',mark:'●'}]})]};
 const text=r=>r.map(p=>p.text).join('');
 function measure(s){return [...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);}
@@ -1112,9 +1111,9 @@ for(const columns of [192,116,76]){
   const vroom=w-4-7;
   const shown=(n,i)=>clip(n,Math.max(0,w-6-rightOf(w,stage(n,i))));
   // (i) every stage box once, at most `per` boxes to a row, arrows between boxes and rows.
-  const found=lines.flatMap(l=>[...l.matchAll(/┌─ (\S+) /g)].map(m=>m[1])).filter(n=>!/^(frame|code|leg)$/.test(n));
+  const found=lines.flatMap(l=>[...l.matchAll(/┌─ (\S+) /g)].map(m=>m[1])).filter(n=>n!=='frame'&&n!=='code');
   assert.deepEqual([...found].sort(),names.map(shown).sort(),'six stages at '+columns);   // (a snake: an odd row reads leftward)
-  for(const l of lines.filter(l=>/┌─ \S+ /.test(l)&&!/┌─ (frame|code|leg) /.test(l)))assert([...l.matchAll(/┌─ \S+ /g)].length<=per,'row of '+l);
+  for(const l of lines.filter(l=>/┌─ \S+ /.test(l)&&!/┌─ (frame|code) /.test(l)))assert([...l.matchAll(/┌─ \S+ /g)].length<=per,'row of '+l);
   assert(lines.some(l=>l.includes('▶')),'▶');assert(lines.some(l=>l.includes('▼')),'▼');assert(lines.some(l=>l.includes('◀')),'◀');
   // (ii) a value is in its own stage's box; a stage with none has an empty place (`·`, as Fleet's `out`/`unit`).
   const at=(n,i)=>lines.findIndex(l=>l.includes('┌─ '+shown(n,i)+' '));
@@ -1134,8 +1133,8 @@ for(const columns of [192,116,76]){
   assert(done.includes(v1)&&done.includes(v2)&&done.includes('30m'),done);
   if(vroom<'artifacts/plan-check.md'.length)assert(v1.endsWith('…')&&done.includes(v1+' │'),'a cut value: '+done);
   assert(running.includes('claude')&&running.includes(clip('dev/backend',vroom))&&running.includes('4m'),running);
-  // (a value fills at most up to one cell before the right edge: no line of a box that has a value touches it; the `by` line is Fleet's, cut at the edge where harness and model overrun)
-  for(const l of [...boxOf('plan',0),...boxOf('plan-check',1),...boxOf('execute',2)].slice(1,-1))assert(/^│ by /.test(l)||!/[^ ]│$/.test(l),'a value on the edge: '+l);
+  // (a value fills at most up to one cell before the right edge: no line of a box that has a value touches it)
+  for(const l of [...boxOf('plan',0),...boxOf('plan-check',1),...boxOf('execute',2)].slice(1,-1))assert(!/[^ ]│$/.test(l),'a value on the edge: '+l);
   const outLine=boxOf('test',4).find(l=>l.includes('out')),unitLine=boxOf('test',4).find(l=>l.includes('unit')),timeLine=boxOf('test',4).find(l=>l.includes('time'));
   // (an empty `out`/`unit` is `·`, as Fleet fills it)
   assert(/^│ out +· +│$/.test(outLine)&&/^│ unit +· +│$/.test(unitLine),outLine+unitLine);
@@ -1173,23 +1172,20 @@ for(const columns of [40,46,47,50,55]){
   const ls=view.routePageFirst({model,id:'r1',columns}).rows.map(text);
   let tops=0;
   ls.forEach((l,i)=>{for(const m of l.matchAll(/┌─/g)){const left=m.index,right=l.indexOf('┐',left);if(right<0)continue;tops++;
-    for(let j=i+1;j<ls.length&&!/└/.test(ls[j].slice(left,left+1));j++)assert(ls[j][right]==='│'||ls[j][right]==='╧','the right rail at '+columns+' row '+j+': '+ls[j]);}});   // (the frame's own panel ends in `╧` on the bottom rule)
+    for(let j=i+1;j<ls.length&&!/└/.test(ls[j].slice(left,left+1));j++)assert.equal(ls[j][right],'│','the right rail at '+columns+' row '+j+': '+ls[j]);}});
   assert(tops>0,'a box at '+columns);
 }
-// (viii) 11-27: every form draws the frame (the owner alone, a unit's route, no stages: the band and an empty panel); only a route the panel holds
-// no leg band for (an older backend's record), or an unknown route, is `null`.
-assert(view.routePageFirst({model,id:'r2',columns:100}));
-assert(view.routePageFirst({model:{routes:[route('u',{unit_route:true})]},id:'u',columns:100}));
-assert(view.routePageFirst({model:{routes:[route('z',{stages:[]})]},id:'z',columns:100}));
-assert.equal(view.routePageFirst({model:{routes:[route('n',{bands:[]})]},id:'n',columns:100}),null);
-assert.equal(view.routePageFirst({model:{routes:[route('n',{bands:undefined})]},id:'n',columns:100}),null);
+// (viii) no stage line: the owner alone, a unit's route, no stages, an unknown route.
+assert.equal(view.routePageFirst({model,id:'r2',columns:100}),null);
+assert.equal(view.routePageFirst({model:{routes:[route('u',{unit_route:true})]},id:'u',columns:100}),null);
+assert.equal(view.routePageFirst({model:{routes:[route('z',{stages:[]})]},id:'z',columns:100}),null);
 assert.equal(view.routePageFirst({model,id:'nope',columns:100}),null);
 // (ix) a name with control characters is cleaned.
 const dirty=view.routePageFirst({model:{routes:[route('d',{title:'a\x1b[31mb',stages:names.map((n,i)=>stage(n+'\x07',i))})]},id:'d',columns:100});
 assert(dirty.rows.every(r=>!/[\x00-\x1f\x7f-\x9f]/.test(text(r))));
 // stages beyond the sixteen the panel carries: `+N`, at the boxes' left cell.
 const more=view.routePageFirst({model:{routes:[route('m',{stage_more:3})]},id:'m',columns:100});
-assert(more.rows.map(text).some(l=>/│ +\+3 +│/.test(l)));     // (11-27: in a row of its own under the boxes, inside the frame)
+assert(more.rows.map(text).some(l=>l.trim()==='+3'));
 console.log('ok');
 """
         result = subprocess.run(['node', '-e', script, str(ROOT / 'utilities/session-shell')], capture_output=True, text=True, timeout=120)

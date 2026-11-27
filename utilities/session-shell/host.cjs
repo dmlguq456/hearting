@@ -927,7 +927,8 @@ function askTable(){
   const collect=!!t.collect;t.collect=false;
   const reuse=routeTable&&!collect&&t.readKey!==undefined&&t.readKey===(popupKeys.ROUTE??null);
   const ask=extra=>{
-    const asked={kind:POPUP_KIND[t.kind],columns,open:now?t.sel||'':t.open||'',page:!!t.page,rows:room,
+    // (`framed`: the first screen of this route's page is its frame, so the reading stands that frame first where the page fits)
+    const asked={kind:POPUP_KIND[t.kind],columns,open:now?t.sel||'':t.open||'',page:!!t.page,rows:room,...(routeTable&&t.page&&panelView.routeFramed({model:panelModel,id:t.open})?{framed:true}:{}),
       ...(status?{cwd:process.cwd(),routes:statusRoutes(),status:statusHeld(),own:ownFolder(),...extra}:{}),...(reuse?{reuse:true}:{})};
     if(!(now||routeTable)||t.noWorker)return readAction(asked,'popup',true);
     // The popup's own backend answers. A read it did not answer is made the one-shot way (and the popup reads
