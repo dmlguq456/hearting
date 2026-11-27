@@ -747,69 +747,93 @@ class AdapterV11Test(unittest.TestCase):
     for item in reversed(patches): item.stop()
     fixture_processes.reap(td)
 
+ RUNTIME_HOME_KEY={"codex":"CODEX_HOME","claude":"CLAUDE_CONFIG_DIR","opencode":"OPENCODE_CONFIG_DIR"}
+
+ def start_stage_recording_child_env(self,harness,td,caller):
+  """Start one stage through `harness`'s real wrapper; its fake native records its whole environment.
+
+  `caller` adds to the launching process's environment. Returns the native's
+  environment, the launching process's environment after the start, and the
+  caller's runtime home.
+  """
+  root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"; logs=root/"logs"
+  home=root/"user-home"; home.mkdir()
+  capture=root/"native-child-env.json"; fakebin=root/"bin"; fakebin.mkdir()
+  fake=fakebin/harness
+  runtime_key=self.RUNTIME_HOME_KEY[harness]
+  source_home=root/"user-runtime-home"; source_home.mkdir()
+  fake.write_text(
+   "#!/usr/bin/python3\nimport json,os,sys\n"
+   f"if {harness == 'opencode'!r} and sys.argv[1:] == ['--version']:\n"
+   " print('1.19.0'); raise SystemExit(0)\n"
+   f"open({str(capture)!r},'w',encoding='utf-8').write(json.dumps(dict(os.environ)))\n",
+   encoding="utf-8")
+  fake.chmod(0o755)
+  self.seed_parent(jobs,repo,harness=harness)
+  wrapper=self.load_wrapper(harness)
+  command=self.command(harness,"start",repo,jobs,logs)+["--foreground-timeout","5"]
+  argv=["dispatch-headless.py",*command[2:]]
+  env={"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),
+       "HOME":str(home),"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),
+       "AGENT_DISPATCH_JOBS":str(jobs),"AGENT_DISPATCH_CHILD":"1",
+       "AGENT_DISPATCH_ATTEMPT_ID":PARENT_FIXTURE,"XDG_STATE_HOME":str(root/"state"),
+       "OPENCODE_CONFIG_CONTENT":"{}",runtime_key:str(source_home),**caller}
+  resolution=wrapper.reconcile_launch_lifecycle(
+   wrapper.DETACHED,{},evidence={
+    "lifecycle_selector_source":"nspid-vector",
+    "lifecycle_nspid_width":"2",
+    "lifecycle_pid1_class":"non-system-init",
+   })
+  patches=[mock.patch.dict(os.environ,env,clear=True),
+           mock.patch.object(wrapper,"reconcile_launch_lifecycle",return_value=resolution)]
+  if hasattr(wrapper,"check_runtime_projection"):
+   patches.append(mock.patch.object(wrapper,"check_runtime_projection",return_value=0))
+  if hasattr(wrapper,"ensure_runtime_home_projection"):
+   patches.append(mock.patch.object(wrapper,"ensure_runtime_home_projection",return_value=None))
+  if harness=="codex":
+   patches.append(mock.patch.object(wrapper,"codex_app_server_available",return_value=False))
+  if hasattr(wrapper,"launch_summary_owner"):
+   patches.append(mock.patch.object(wrapper,"launch_summary_owner",
+                                    return_value={"summary_owner":"test-fixture"}))
+  output=io.StringIO()
+  for item in patches: item.start()
+  try:
+   with redirect_stdout(output): code=wrapper.main(argv)
+   after=dict(os.environ)
+  finally:
+   for item in reversed(patches): item.stop()
+   fixture_processes.reap(td)
+  self.assertEqual(code,0,output.getvalue())
+  self.assertTrue(capture.is_file(),output.getvalue())
+  return json.loads(capture.read_text(encoding="utf-8")),after,source_home
+
  def test_all_masked_stage_children_receive_git_optional_locks_zero(self):
   for harness in ADAPTERS:
    with self.subTest(harness=harness), tempfile.TemporaryDirectory() as td:
-    root=Path(td); repo,art=self.fixture(root); jobs=root/"jobs.log"; logs=root/"logs"
-    home=root/"user-home"; home.mkdir()
-    capture=root/"native-child-env.json"; fakebin=root/"bin"; fakebin.mkdir()
-    fake=fakebin/harness
-    runtime_key={"codex":"CODEX_HOME","claude":"CLAUDE_CONFIG_DIR",
-                 "opencode":"OPENCODE_CONFIG_DIR"}[harness]
-    source_home=root/"user-runtime-home"; source_home.mkdir()
-    runtime_expression=f"os.environ.get({runtime_key!r}, '')"
-    fake.write_text(
-     "#!/usr/bin/python3\nimport json,os,sys\n"
-     f"if {harness == 'opencode'!r} and sys.argv[1:] == ['--version']:\n"
-     " print('1.19.0'); raise SystemExit(0)\n"
-     f"open({str(capture)!r},'w',encoding='utf-8').write(json.dumps({{"
-     f"'git_optional_locks':os.environ.get('GIT_OPTIONAL_LOCKS'),"
-     f"'worker_home':os.environ.get('HEARTING_WORKER_HOME'),"
-     f"'runtime_home':{runtime_expression}}}))\n",
-     encoding="utf-8")
-    fake.chmod(0o755)
-    self.seed_parent(jobs,repo,harness=harness)
-    wrapper=self.load_wrapper(harness)
-    command=self.command(harness,"start",repo,jobs,logs)+["--foreground-timeout","5"]
-    argv=["dispatch-headless.py",*command[2:]]
-    env={"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),
-         "HOME":str(home),"AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),
-         "AGENT_DISPATCH_JOBS":str(jobs),"AGENT_DISPATCH_CHILD":"1",
-         "AGENT_DISPATCH_ATTEMPT_ID":PARENT_FIXTURE,
-         "GIT_OPTIONAL_LOCKS":"1","XDG_STATE_HOME":str(root/"state"),
-         "OPENCODE_CONFIG_CONTENT":"{}",runtime_key:str(source_home)}
-    resolution=wrapper.reconcile_launch_lifecycle(
-     wrapper.DETACHED,{},evidence={
-      "lifecycle_selector_source":"nspid-vector",
-      "lifecycle_nspid_width":"2",
-      "lifecycle_pid1_class":"non-system-init",
-     })
-    patches=[mock.patch.dict(os.environ,env,clear=True),
-             mock.patch.object(wrapper,"reconcile_launch_lifecycle",return_value=resolution)]
-    if hasattr(wrapper,"check_runtime_projection"):
-     patches.append(mock.patch.object(wrapper,"check_runtime_projection",return_value=0))
-    if hasattr(wrapper,"ensure_runtime_home_projection"):
-     patches.append(mock.patch.object(wrapper,"ensure_runtime_home_projection",return_value=None))
-    if harness=="codex":
-     patches.append(mock.patch.object(wrapper,"codex_app_server_available",return_value=False))
-    if hasattr(wrapper,"launch_summary_owner"):
-     patches.append(mock.patch.object(wrapper,"launch_summary_owner",
-                                      return_value={"summary_owner":"test-fixture"}))
-    output=io.StringIO()
-    for item in patches: item.start()
-    try:
-     with redirect_stdout(output): code=wrapper.main(argv)
-    finally:
-     for item in reversed(patches): item.stop()
-     fixture_processes.reap(td)
-    self.assertEqual(code,0,output.getvalue())
-    self.assertTrue(capture.is_file(),output.getvalue())
-    child=json.loads(capture.read_text(encoding="utf-8"))
-    self.assertEqual(child["git_optional_locks"],"0")
-    self.assertTrue(child["worker_home"])
-    self.assertNotEqual(Path(child["runtime_home"]).resolve(),source_home.resolve())
-    self.assertTrue(Path(child["runtime_home"]).is_dir())
-    self.assertEqual(env["GIT_OPTIONAL_LOCKS"],"1")
+    child,caller,source_home=self.start_stage_recording_child_env(harness,td,{"GIT_OPTIONAL_LOCKS":"1"})
+    runtime_home=child.get(self.RUNTIME_HOME_KEY[harness],"")
+    self.assertEqual(child.get("GIT_OPTIONAL_LOCKS"),"0")
+    self.assertTrue(child.get("HEARTING_WORKER_HOME"))
+    self.assertNotEqual(Path(runtime_home).resolve(),source_home.resolve())
+    self.assertTrue(Path(runtime_home).is_dir())
+    self.assertEqual(caller["GIT_OPTIONAL_LOCKS"],"1")
+
+ def test_registered_children_never_inherit_the_callers_session_shell(self):
+  # The launching session may be a person's session-shell window. Its host socket,
+  # token and display state (`HEARTING_SHELL_*`) stay with that window: no worker
+  # of any harness carries them, and the launching process keeps them. Made-up values.
+  window={"HEARTING_SHELL_SOCKET":"/nonexistent/fixture-shell/control.sock",
+          "HEARTING_SHELL_TOKEN":"f"*64,
+          "HEARTING_SHELL_DIRECTORY":"/nonexistent/fixture-shell",
+          "HEARTING_SHELL_NATIVE_MODEL":"fixture-model",
+          "HEARTING_SHELL_INITIAL_REFRESH":"1",
+          "HEARTING_SHELL_PYTHON":"/nonexistent/python3"}
+  for harness in ADAPTERS:
+   with self.subTest(harness=harness), tempfile.TemporaryDirectory() as td:
+    child,caller,_home=self.start_stage_recording_child_env(harness,td,{**window,"FIXTURE_CARRIED":"1"})
+    self.assertEqual(child.get("FIXTURE_CARRIED"),"1")  # the record holds what the worker inherits
+    self.assertEqual(sorted(key for key in child if key.startswith("HEARTING_SHELL_")),[])
+    self.assertEqual({key:caller.get(key) for key in window},window)
 
  def test_launch_home_row_field_is_the_resolved_release_never_the_current_symlink(self):
   # SD-115 axis 4 (a): a wrapper launched under a mutable pointer (the real
