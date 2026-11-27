@@ -119,11 +119,14 @@ _popup=m._panel_popup
 def popup(binding,request):
     if not SERVED:
         SERVED.append(1);open(C+'/backends','a').write('%d\n'%os.getpid())      # one line for each process that serves a popup (held or one-shot, any kind)
+    n=0
     if request.get('kind')=='routes' and request.get('page'):
         open(C+'/framed','a').write(('1' if request.get('framed') is True else '0')+'\n')   # (11-27: what the page request says its first screen was)
+        n=len(open(C+'/framed').read().split())                                          # (this page request's number)
     if request.get('kind')=='routes' and request.get('page') and os.path.exists(C+'/hold-page'):
-        open(C+'/page-asked','w').close()
-        while os.path.exists(C+'/hold-page'):time.sleep(0.01)
+        open(C+'/page-asked','w').close();open(C+'/page-asked-%d'%n,'w').close()
+        # (held while `hold-page` stands, unless this very request is let go: `release-<n>`)
+        while os.path.exists(C+'/hold-page') and not os.path.exists(C+'/release-%d'%n):time.sleep(0.01)
     return _popup(binding,request)
 m._panel_popup=popup
 m.session_questions=lambda harness,sid,**_kw:[]
@@ -322,7 +325,7 @@ const measure=async(label,press_=opened)=>{
       checks.collections=lines('collections').length;
     }
   }
-  if(sc==='reopen_shed'||sc==='late_band'||sc==='long_page'){
+  if(sc==='reopen_shed'||sc==='late_band'||sc==='long_page'||sc==='stale_answer'){
     // 11-27 (review 3 of #1900): the page request says what its first screen was (`framed`), whatever the panel's values are by the time it goes.
     const framedLog=()=>fs.existsSync(cfg.control+'/framed')?fs.readFileSync(cfg.control+'/framed','utf8').split('\n').filter(Boolean):[];
     // (the page's frame first: its second content row is the frame's rail; the first screen as before 11-27 has the legs' short box there)
@@ -334,6 +337,44 @@ const measure=async(label,press_=opened)=>{
       if(!target){const fold=await at('▴');if(fold){await press(fold.x,fold.y,0);await until(s=>s.some(l=>l.includes('PANEL_R1')),'the opened panel');await sleep(300);target=await at('PANEL_R1');}}
       await press(target.x+2,target.y,0);};
     const sample=s=>({framed:frameFirst(s),rule:ruleRow(s)});
+    if(sc==='stale_answer'){
+      // 11-28 (review 4 of #1900): an answer asked for a first screen this popup no longer shows is not this screen's. At 80×24: read and closed; the
+      // projection keeps the route without its band; opened again on the page read last (its frame), that request held; the title changes (the
+      // page read last is no longer reused); Enter twice opens the page again on the stage boxes as before; only the held request is let go.
+      await resize(80,24);
+      await pressRow();
+      await until(s=>pageKeys(s)&&popupHas('FLEET_R1')(s)&&!staleWords(s),'the page read');
+      await close();
+      setRows(r=>{const {bands,head_repo,session_tag,...rest}=r;return rest;});
+      await sleep(2000);
+      control('hold-page');
+      await pressRow();
+      const again=await until(pageKeys,'the page read last, again');
+      await settle(()=>fs.existsSync(cfg.control+'/page-asked'),'the request held');
+      const held=framedLog().length;
+      checks.again=sample(again.s);
+      setRows(r=>({...r,title:'PANEL_R1 바뀐 제목'}));
+      await sleep(2000);
+      await key('\r',150);await key('\r',400);
+      checks.short=sample(await screen());frames.stale_short=plain(await screen());
+      fs.writeFileSync(cfg.control+'/release-'+held,'');
+      await settle(()=>fs.existsSync(cfg.control+'/page-asked-'+(held+1)),'the next page request',10000);
+      await sleep(600);
+      const between=await screen();checks.between={...sample(between),stale:staleWords(between)};frames.stale_between=plain(between);
+      checks.log=framedLog();
+      fs.unlinkSync(cfg.control+'/hold-page');
+      const read=await until(s=>pageKeys(s)&&!staleWords(s),'the page read anew',20000);
+      await sleep(400);checks.read=sample(await screen());
+      // (opened again quickly on the same first screen: the answer asked for it is used, no page read more than the one asked)
+      const before=framedLog().length;
+      control('hold-page');
+      await key('\r',100);await key('\r',300);
+      await settle(()=>framedLog().length>before,'the page asked again',10000);
+      fs.unlinkSync(cfg.control+'/hold-page');
+      await until(s=>pageKeys(s)&&!staleWords(s),'the page read again',20000);
+      await sleep(1500);
+      checks.fast={added:framedLog().length-before,read:sample(await screen())};
+    }
     if(sc==='reopen_shed'){
       // (가) Read and closed; the projection then keeps the route without its picture values (the reading's key unchanged); opened again.
       await pressRow();
@@ -342,7 +383,8 @@ const measure=async(label,press_=opened)=>{
       setRows(r=>{const {bands,head_repo,session_tag,...rest}=r;return {...rest,model:'Opus 9.9',owner_model:'Opus 9.9'};});
       await until(has('9.9'),'the panel holding the route without its band');await sleep(300);
     }
-    if(sc==='late_band'){
+    if(sc==='stale_answer'){}
+    else if(sc==='late_band'){
       // (나) Enter on the table while its reading waits; the band comes before the page is asked for.
       fs.writeFileSync(cfg.vm+'.hang','');
       await opened();await until(either,'the route table');
@@ -364,6 +406,7 @@ const measure=async(label,press_=opened)=>{
       fs.unlinkSync(cfg.control+'/hold-page');
     }
     // (a long page reads its lines first: at 80×24 its first screenful names no route)
+    if(sc!=='stale_answer'){
     const read=await until(s=>pageKeys(s)&&(sc==='long_page'||popupHas('FLEET_R1')(s))&&!staleWords(s),'the page read',cfg.delay*1000+30000);
     await sleep(600);
     const s1=await screen(),p1=plain(s1);frames[sc+'_read']=p1;
@@ -373,6 +416,7 @@ const measure=async(label,press_=opened)=>{
       residue:p1.slice(1,top>=0?top:p1.length).filter(l=>/║/.test(l)).length};
     if(sc==='long_page'){for(let i=0;i<60;i++)await key('\x1b[6~',40);await sleep(400);const end=plain(await screen());frames.long_end=end;checks.end_bottom=end.some(l=>/╚═/.test(l));}
     checks.log=framedLog();
+    }
   }
   if(sc==='hang'){
     // The collection does not come in 12 s: what stood first stays, the words say the reading failed; a later
@@ -1160,6 +1204,20 @@ class RoutePopupFirstTest(unittest.TestCase):
         self.assertEqual(c['log'][-1], '1', c)
         self.assertTrue(c['read']['framed'], c)
         self.assertEqual(c['first']['rule'], c['read']['rule'], c)
+
+    def test_an_answer_asked_for_another_first_screen_is_not_drawn_on_this_one(self):
+        # 11-28 (review 4 of #1900): the page opened again on the stage boxes as before keeps them while the answer asked for the frame of an earlier
+        # opening comes and goes; only the answer asked for this first screen changes it (as main's would). Opened again quickly on the same first
+        # screen, the answer asked for it is used: one page read, no more.
+        c = self.run_case('claude', 'stale_answer', 1, delay=1, staged=True)['checks']
+        self.assertTrue(c['again']['framed'], c)
+        self.assertFalse(c['short']['framed'], c)
+        self.assertEqual(c['log'][-2:], ['1', '0'], c)            # (the held request asked for the frame; the one after it, for this screen)
+        self.assertFalse(c['between']['framed'], c)               # (the old answer drew nothing: no band on row 3, the stage boxes stay)
+        self.assertTrue(c['between']['stale'], c)                 # (nor did it end the reading)
+        self.assertFalse(c['read']['framed'], c)
+        self.assertEqual(c['fast']['added'], 1, c)
+        self.assertFalse(c['fast']['read']['framed'], c)
 
     def test_a_band_that_comes_after_the_first_screen_leaves_the_page_as_it_was(self):
         # 11-27 (review 3 of #1900, (나)): Enter while the table's reading waits draws the stage boxes as before (no band yet); the band arrives before the

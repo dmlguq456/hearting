@@ -921,14 +921,14 @@ function askTable(){
   // The NOW list folds to the lines the popup has: its rows less the key line and the place (3).
   const room=now?Math.max(3,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-3)):Math.max(6,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-2));
   const status=listed(t.kind);
-  const routeTable=t.kind==='ROUTE',pageAsked=!!t.page;
+  // (`framedAsked`: the first screen this route's page showed was its frame (`routeFirst` noted it), so the reading stands that frame first where it fits)
+  const routeTable=t.kind==='ROUTE',pageAsked=!!t.page,framedAsked=routeTable&&!!t.page&&!!t.framed;
   // The routes popup's held backend draws a route unfolded or its page from the collection it already made while the
   // panel's route rows are the ones that collection was read for (`reuse`); else it collects (a first read, a changed key).
   const collect=!!t.collect;t.collect=false;
   const reuse=routeTable&&!collect&&t.readKey!==undefined&&t.readKey===(popupKeys.ROUTE??null);
   const ask=extra=>{
-    // (`framed`: the first screen this route's page showed was its frame (`routeFirst` noted it), so the reading stands that frame first where the page fits)
-    const asked={kind:POPUP_KIND[t.kind],columns,open:now?t.sel||'':t.open||'',page:!!t.page,rows:room,...(routeTable&&t.page&&t.framed?{framed:true}:{}),
+    const asked={kind:POPUP_KIND[t.kind],columns,open:now?t.sel||'':t.open||'',page:!!t.page,rows:room,...(framedAsked?{framed:true}:{}),
       ...(status?{cwd:process.cwd(),routes:statusRoutes(),status:statusHeld(),own:ownFolder(),...extra}:{}),...(reuse?{reuse:true}:{})};
     if(!(now||routeTable)||t.noWorker)return readAction(asked,'popup',true);
     // The popup's own backend answers. A read it did not answer is made the one-shot way (and the popup reads
@@ -952,7 +952,8 @@ function askTable(){
     if(routeTable){
       // A collected view is reusable on either screen, even if its rows are for the screen just left.
       if(result?.ok){t.readKey=keyAsked??null;t.readAt=Number(result.read_at)||atAsked;}
-      if(pageAsked!==t.page){tableAgain=true;return;}
+      // (and one asked for a first screen this popup no longer shows: a page opened again since on another first screen)
+      if(pageAsked!==t.page||framedAsked!==(!!t.page&&!!t.framed)){tableAgain=true;return;}
     }
     if(now){
       // A part that could not be asked for goes back to the list; a list that could not be read says so.
