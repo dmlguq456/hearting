@@ -11,6 +11,7 @@ import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
+import re
 import subprocess
 import unittest
 from pathlib import Path
@@ -208,55 +209,46 @@ class UsageFix1Test(unittest.TestCase):
                                       "│ codex    5h 100%(↻ 1h 40m) │ 7d 12%                      │",
                                       "│ opencode 7d 8%(↻ 1d 0h)                            ⚙   ▾ │"])
 
-    def test_the_buttons_row_of_its_own_costs_no_other_part_a_row(self):
-        from fleet import palette, session_panel
+    def test_a_taller_panel_never_hides_a_usage_value_or_moves_the_buttons(self):
+        # Fix 2 (11-28, review of #1911): the buttons stand beside the last row where it fits there as it is, else on a row of their own,
+        # whatever the height. Rows from 16 to 64, one at a time: a value USAGE showed once stays, the buttons keep their place.
+        # (The review's case: 44 x 45, 46, 47 and 60 x 43, 44, 45 with two servers lost and found `opus 86%`.)
         from tools.fleet.tests import readme_captures, readme_demo, readme_panel
         with mock.patch.dict(os.environ):
             readme_captures.isolate()
             snapshot, hosts = readme_demo.snapshot()
             world = readme_panel.World(snapshot, readme_demo.NOW, hosts)
             panel = readme_panel.projection(world, "claude", readme_panel.API, columns=44, rows=46, side=True)["panel"]
-        st = lambda parts: [{"text": t, **palette.style_components(k)} for t, k in parts]  # noqa: E731
-        six = [{"name": n, "self": False, "cpu": 30, "mem": 40,
-                "gpus": [{"i": 0, "busy": True, "util": 50, "used": 21, "total": 24, "users": ["4f"]}]} for n in "abcdef"]
-        six = [{"host": st(r["host"]), "stats": [st(i) for i in r["stats"]], "gpus": [{k: st(v) for k, v in g.items()} for g in r["gpus"]],
-                "brief": [st(i) for i in r["brief"]]} for r in session_panel.resource_rows({"observed_at": 1.0, "hosts": six}, 1.0)]
-        ours = usage()["usage"]
-        # What USAGE cost before the shared columns: the same rows, the last beside the buttons (no model window to make it longer).
-        same = usage({**SOURCES, "claude": {**SOURCES["claude"], "model_quotas": []}})["usage"]
+        rows = usage()["usage"]
         jobs, keys = [], []
-        for servers, resources in (("0", []), ("1", panel["resources"][:1]), ("2", panel["resources"][:2]), ("6", six)):
+        for servers, resources in (("0", []), ("2", panel["resources"][:2])):
             for width in (44, 60):
                 for height in range(16, 65):
-                    for which, rows in (("ours", ours), ("before", same)):
-                        jobs.append({"model": {**panel, "usage": rows, "quota": rows[0]["parts"], "resources": resources},
-                                     "width": width, "height": height})
-                        keys.append((servers, width, height, which))
+                    jobs.append({"model": {**panel, "usage": rows, "quota": rows[0]["parts"], "resources": resources},
+                                 "width": width, "height": height})
+                    keys.append((servers, width, height))
         drawn = dict(zip(keys, paint(jobs)))
-        own_row = set()
-        for servers, width, height, which in keys:
-            if which != "ours":
-                continue
-            ours_d, before_d = drawn[(servers, width, height, "ours")], drawn[(servers, width, height, "before")]
-
-            def rest(d):
-                lines = [text(row) for row in d["rows"]]
-                at = next((i for i, line in enumerate(lines) if line.startswith("│ USAGE")), len(lines) - 1)
-                return [line for line in lines[1:at] if line[1:-1].strip(" ─")]
-            self.assertGreaterEqual(len(rest(ours_d)), len(rest(before_d)), (servers, width, height))
-            # The gear and the fold button: on the panel's last row inside, their cells as before, in either form.
-            last = len(ours_d["rows"]) - 2
-            self.assertEqual(sorted((h["action"], h["left"], h["right"]) for h in ours_d["hits"] if h["row"] == last),
-                             [("fold", width - 4, width - 2), ("settings", width - 8, width - 6)], (servers, width, height))
-            line = text(ours_d["rows"][last])
-            self.assertTrue(line.endswith("⚙   ▾ │"), line)
-            if not line.startswith("│ opencode"):
-                own_row.add((width, height))
-        # Tall enough, the buttons have their own row (the person's form at 44 and 60); short of rows, they share the last.
-        self.assertIn((44, 64), own_row)
-        self.assertIn((60, 64), own_row)
-        self.assertNotIn((44, 16), own_row)
-
+        for servers in ("0", "2"):
+            for width in (44, 60):
+                seen, places = set(), set()
+                for height in range(16, 65):
+                    d = drawn[(servers, width, height)]
+                    lines = [text(row) for row in d["rows"]]
+                    at = next((i for i, line in enumerate(lines) if line.startswith("│ USAGE")), None)
+                    shown = lines[at + 1:-1] if at is not None else []
+                    values = {(line.split()[1], label, value) for line in shown if line.split()[1:2] != ["⚙"]
+                              for label, value in re.findall(r"(\S+) +(\d+%|\?)", line[10:])}
+                    self.assertLessEqual(seen, values, (servers, width, height, "\n".join(shown)))
+                    seen |= values
+                    last = len(d["rows"]) - 2
+                    self.assertEqual(sorted((h["action"], h["left"], h["right"]) for h in d["hits"] if h["row"] == last),
+                                     [("fold", width - 4, width - 2), ("settings", width - 8, width - 6)], (servers, width, height))
+                    if shown:
+                        places.add("beside" if lines[last].startswith("│ opencode") else "own row")
+                        if (width, height) in ((44, 45), (44, 46), (44, 47), (60, 43), (60, 44), (60, 45)):
+                            self.assertTrue(any("opus  86%" in line for line in shown), (servers, width, height, shown))
+                # The person's form at 44 and 60: the buttons on a row of their own, at every height USAGE stands.
+                self.assertEqual(places, {"own row"}, (servers, width))
 
 if __name__ == "__main__":
     unittest.main()

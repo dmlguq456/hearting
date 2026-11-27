@@ -2018,8 +2018,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // column (`(↻ ?)` where the row has a value and no time), two cells between columns, the names one column. Short of cells the time columns
     // go in every row together, then the model windows from the last; a window of time never goes: where those cannot all stand (or the backend
     // sent no kinds) each row is fitted on its own. The last row is not laid out again beside the buttons: it shares their row where it fits
-    // there as it is, else the buttons stand on a row of their own, only while that row costs nothing else (`usageRoomy`, below): short of rows,
-    // the columns are chosen to fit beside the buttons (the 36-cell form), so no other part shows less for that row.
+    // there as it is, else the buttons stand on a row of their own.
     const usageKindsOf=(u,count)=>{const k=Array.isArray(u.columns)?u.columns:null;return k&&k.length===count&&k.every(x=>x==='period'||x==='model')?k:null;};
     const usageGroupsOf=u=>{
       const groups=[];let current=[];
@@ -2034,13 +2033,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         return {label:clean(String(g[at].text)).trim(),kind:kinds[i],labelPart:g[at],pct:g.filter((part,j)=>j>at&&part!==reset),reset};
       }).filter(g=>g&&g.label);
     };
-    let usageRoomy=false;
-    const usageLaid={};
+    let usageLaid;
     const usageLayout=()=>{
-      const room=usageRoomy?inner:quotaRoom;
-      if(room in usageLaid)return usageLaid[room];
+      if(usageLaid!==undefined)return usageLaid;
       const list=usageData,rows=list.map(usageGroupsOf),periods=[],models=[];
-      usageLaid[room]=null;
+      usageLaid=null;
       if(rows.some(r=>!r))return null;
       for(const groups of rows){
         let prev=-1;
@@ -2060,9 +2057,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       let kept=cols.map(c=>({...c,time:false}));tries.push(kept);
       while(kept.some(c=>c.model)){const at=kept.map(c=>c.model).lastIndexOf(true);kept=kept.filter((_,i)=>i!==at);tries.push(kept);}
       const wide=cs=>usageWide+1+cs.reduce((n,c,i)=>n+(i?2:0)+c.nameW+1+c.pctW+(c.time?c.timeW:0),0);
-      const chosen=tries.find(cs=>cs.length&&wide(cs)<=room);
+      const chosen=tries.find(cs=>cs.length&&wide(cs)<=inner);
       if(!chosen)return null;
-      return usageLaid[room]=new Map(list.map((u,i)=>{
+      return usageLaid=new Map(list.map((u,i)=>{
         const name=usageName(u),out=[{...text(name,'dim'),role:'harness-name',harness:u.harness},pad(usageWide+1-measure(name))];
         chosen.forEach((c,k)=>{
           const g=c.cells[i];
@@ -2322,10 +2319,6 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       // A fold can free several rows at once and leave empty ones: the BACKLOG items stand on them again (up to what they were, and the STATUS items stand already).
       else while(need()<budget&&take.BACKLOG_ITEMS<backlogFull)take.BACKLOG_ITEMS++;
     }
-    // 11-28 (review of #1911: "단추 줄 때문에 다른 칸이 main보다 먼저 빠지지 않는다"): every part above was laid out with USAGE in its form beside
-    // the buttons (as many rows as before the shared columns); its own row for the buttons (the person's form at 44 and 60 cells) stands only
-    // on a row that is left over.
-    if(usageOn){usageRoomy=true;if(need()>budget)usageRoomy=false;}
     // 11-26 (panel B; the person: "나머지는 일단 그대로"): beside the native area every row above is allotted as it was before B (the GIT row's place,
     // STATUS's and BACKLOG's first items and each message's second row counted, `heldRows`), so no other part of the panel stands elsewhere or shows
     // less or more. B's rows use fewer of them; what they leave (`pool`) goes, in this order, to the messages (one row each, as many as stood before:

@@ -742,10 +742,9 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   on its own: the reset times, then its model windows from the last, then, only where its own windows of time cannot all stand on one
   row, those from the last (a backend without kinds: the order before, the reset times, 5h, the model windows from the last, 7d). The
   last row is not laid out again beside the buttons (its columns would move): it shares their row only where it fits there as it is (at
-  36), else the buttons stand on a row of their own (at 44 and 60), and only on a row nothing else needs: the panel is laid out with
-  the columns chosen to fit beside the buttons (the 36-cell form, as many rows as before), and the buttons take their own row only where
-  one is left over, so no other part shows a row less for it. Values keep their colors. Under the native area it stands as beside it,
-  as rows are left. The folded strip is unchanged.
+  36), else the buttons stand on a row of their own (at 44 and 60: one row more than before, whatever the height; short of rows the
+  sections above give way for it as for any USAGE row). Values keep their colors. Under the native area it stands as beside it, as rows
+  are left. The folded strip is unchanged.
 - RESOURCES (11-18, the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"): beside the
   native area, the section right above USAGE, its name row `RESOURCES` (no rule since 11-22, no `›`: it opens no popup; 11-26, panel B: one still rule
   without a word stands right above the name, above `USAGE` where every equipment row is folded, and short of rows it goes first), then for each host (this
