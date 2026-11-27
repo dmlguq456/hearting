@@ -22,7 +22,6 @@ import re
 import sqlite3
 import sys
 import unittest
-from types import SimpleNamespace
 from unittest import mock
 
 HERE = Path(__file__).resolve().parent
@@ -209,29 +208,26 @@ class ClosedSetTest(TidyApplyCase):
 
 
 class ObligationOwnerScenesTest(TidyApplyCase):
-    """An open obligation belongs to a session this batch read; the check names only owners."""
+    """An open obligation belongs to a session this batch read, all of one project."""
 
     def setUp(self):
         super().setUp()
         import session_tidy as tidy
         import session_tidy_runner as runner
-        import steward_check as check
         from fleet.collectors import steward
 
-        self.tidy, self.runner, self.check, self.steward = tidy, runner, check, steward
+        self.tidy, self.runner, self.steward = tidy, runner, steward
         self.own = {"harness": "claude", "session_id": "captain"}
         self.prior = {"harness": "claude", "session_id": "earlier-captain"}
         self.sparrow = {"harness": "opencode", "session_id": "sparrow"}
         self.wren = {"harness": "codex", "session_id": "wren"}
-        self.other = self.iso.root / "other"
-        self.other.mkdir()
-        for repo in (self.proj, self.other):
+        self.other = self.iso.root / "other" / "proj"   # the same folder name, another origin
+        self.other.mkdir(parents=True)
+        for repo, origin in ((self.proj, "team/proj"), (self.other, "elsewhere/proj")):
             for command in (["git", "init", "-q"],
-                            ["git", "remote", "add", "origin", f"https://example.invalid/team/{repo.name}"]):
+                            ["git", "remote", "add", "origin", f"https://example.invalid/{origin}"]):
                 result = self.iso.run(command, cwd=repo)
                 self.assertEqual(result.returncode, 0, result.stderr)
-        self.census = [SimpleNamespace(**who, cwd=str(repo)) for who, repo in
-                       ((self.own, self.proj), (self.sparrow, self.proj), (self.wren, self.other))]
 
     def transcript(self, sid, text):
         path = self.work / f"{sid}.jsonl"
@@ -244,39 +240,18 @@ class ObligationOwnerScenesTest(TidyApplyCase):
         bundle = self.runner.assemble(item, "owner-scene", self.tidy.ensure_dir(self.state / "runs" / "owner-scene"))
         return json.loads(bundle.path.read_text(encoding="utf-8"))
 
+    def project_seat(self):
+        return self.tidy.seat_for_project("claude", self.tidy.project_key_for(self.proj))
+
     def promise(self, n, body, owner=None):
         return self.add_action(n, type="unresolved-obligation", tier="working", body=body,
                                **({"owner": owner} if owner else {}))
 
-    def seed_owned(self, body, owner):
-        from memory_open_work import owner_link
-        return self.seed("working", "unresolved-obligation", body, "--links",
-                         owner_link((owner["harness"], owner["session_id"])))
-
-    def check_actions(self, census=None):
-        target = dict(self.sparrow, name="Sparrow")
-        with self.iso.patched_environ(), contextlib.ExitStack() as stack:
-            for patch in (
-                    mock.patch.object(self.steward, "_registry_sessions", return_value=census or self.census),
-                    mock.patch.object(self.steward, "role_targets", return_value=[target]),
-                    mock.patch.object(self.steward, "unresolved_role_targets", return_value=[]),
-                    mock.patch.object(self.check, "_end_observation", return_value=None),
-                    mock.patch.object(self.check, "_pending_count", return_value=0),
-                    mock.patch.object(self.check, "_observe_lab", return_value={}),
-                    mock.patch.object(self.check, "_session_liveness", return_value="live"),
-                    mock.patch("peer_steward_native.native_agent",
-                               return_value={"result": {"agent": {"agent_status": "idle"}}})):
-                stack.enter_context(patch)
-            return self.check.next_actions(self.check._observe_role("claude", "captain"))
-
-    def test_another_projects_promise_is_never_this_projects_open_work(self):
-        self.seed("working", "unresolved-obligation", "Old project plan mentions Sparrow")
-        self.seed_owned("Older promise owned by Wren", self.wren)
+    def test_another_projects_quoted_promise_is_never_this_projects_open_work(self):
         current = self.transcript("captain", "I will check the sample. Sparrow agreed to trace the fixture. "
                                              "Quoted from Wren in the other project: I will package the release.")
         with self.iso.patched_environ():
-            data = self.tidy_input(self.tidy.seat_for_project("claude", self.tidy.project_key_for(self.proj)),
-                                   current)
+            data = self.tidy_input(self.project_seat(), current)
             self.assertEqual([(row["harness"], row["sid"]) for row in data["sessions"]], [("claude", "captain")])
             actions = [self.promise(1, "Check the new sample", self.own),
                        self.promise(2, "Package the other release", self.wren),
@@ -285,42 +260,36 @@ class ObligationOwnerScenesTest(TidyApplyCase):
                        self.add_action(5, type="observation", tier="working", body="Wren will package a release")]
             result, batch = self.apply(actions, input_doc=data)
             self.assertEqual(result.returncode, 0, result.stderr)
-            again, repeat = self.apply(actions[:1], input_doc=data)
+            # Replaying an applied proposal without its owner is still the existing record first.
+            again, repeat = self.apply([{k: v for k, v in actions[0].items() if k != "owner"}], input_doc=data)
             self.assertEqual(again.returncode, 0, again.stderr)
-            # Sparrow's own tidy reads Sparrow's conversation, so it may open Sparrow's promise.
-            own_tidy = {"cwd": str(self.proj), "sessions": [{"harness": "opencode", "sid": "sparrow"}]}
-            self.assertEqual(self.apply([self.promise(6, "Trace the fixture", self.sparrow)],
-                                        input_doc=own_tidy)[0].returncode, 0)
         report = self.result_json(batch)
         self.assertEqual(len(report["added"]), 2)  # Captain's promise and the observation
         self.assertEqual([row["reason"] for row in report["skipped"]], ["obligation-owner-unconfirmed"] * 3)
         self.assertEqual([row["reason"] for row in self.result_json(repeat)["skipped"]], ["source-exists"])
-        self.assertCountEqual(self.check_actions(), [
-            "[Sparrow] waiting · Trace the fixture → assign now",
-            "open: Check the new sample → assign or do now",
-            "open: Old project plan mentions Sparrow → assign or do now",  # no owner: no name
-        ])
 
-    def test_inherited_promise_stays_open_until_its_owner_runs_in_another_repository(self):
+    def test_same_seat_owners_are_only_this_projects_sessions(self):
         import time
 
         seat = self.tidy._pane_seat_of("fixture:pane")
-        current = self.transcript("captain", "The samples already came in.")
-        old = self.transcript("earlier-captain", "I owe the measurements for the samples.")
+        texts = {"harbor": (self.other, "I owe the release notes for the other project."),
+                 "earlier-captain": (self.proj, "I owe the measurements for the samples."),
+                 "captain": (self.proj, "The samples already came in.")}
         with self.iso.patched_environ():
-            for sid, path, source, at in (("earlier-captain", old, "startup", time.time() - 5),
-                                          ("captain", current, "clear", time.time())):
+            for at, (sid, (cwd, text)) in enumerate(texts.items()):
                 self.tidy._append_ledger_entry(seat, {"event": "start", "harness": "claude", "sid": sid,
-                    "source": source, "cwd": str(self.proj), "transcript": str(path), "ts": at})
-            data = self.tidy_input(seat, current)
-            self.assertIn(("claude", "earlier-captain"), {(row["harness"], row["sid"]) for row in data["sessions"]})
-            result, batch = self.apply([self.promise(1, "Check the earlier measurements", self.prior)],
+                    "source": "clear" if sid == "captain" else "startup", "cwd": str(cwd),
+                    "transcript": str(self.transcript(sid, text)), "ts": time.time() - 9 + at})
+            data = self.tidy_input(seat, self.work / "captain.jsonl")
+            result, batch = self.apply([self.promise(1, "Check the earlier measurements", self.prior),
+                                        self.promise(2, "Write the other release notes",
+                                                     {"harness": "claude", "session_id": "harbor"})],
                                        input_doc=data)
+        self.assertEqual({row["sid"] for row in data["sessions"]}, {"captain", "earlier-captain"})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(self.result_json(batch)["added"]), 1)
-        self.assertEqual(self.check_actions(), ["open: Check the earlier measurements → assign or do now"])
-        moved = [*self.census, SimpleNamespace(**self.prior, cwd=str(self.other))]
-        self.assertEqual(self.check_actions(moved), [])
+        report = self.result_json(batch)
+        self.assertEqual((len(report["added"]), [row["reason"] for row in report["skipped"]]),
+                         (1, ["obligation-owner-unconfirmed"]))
 
     def test_damaged_or_resumed_role_records_cannot_change_a_tidy(self):
         current = self.transcript("captain", "I will check the sample. Sparrow will trace the fixture.")
@@ -328,13 +297,11 @@ class ObligationOwnerScenesTest(TidyApplyCase):
         with self.iso.patched_environ(), contextlib.ExitStack() as stack:
             for name in ("read_markers", "read_relations", "_registry_sessions", "role_targets"):
                 stack.enter_context(mock.patch.object(self.steward, name, unreadable))
-            data = self.tidy_input(self.tidy.seat_for_project("claude", self.tidy.project_key_for(self.proj)),
-                                   current)
+            data = self.tidy_input(self.project_seat(), current)
             result, batch = self.apply([self.promise(1, "Check the sample", self.own),
                                         self.promise(2, "Trace the fixture", self.sparrow)], input_doc=data)
         self.assertEqual(result.returncode, 0, result.stderr)
         unreadable.assert_not_called()
-        self.assertNotIn("obligation_owners", data)
         report = self.result_json(batch)
         self.assertEqual((len(report["added"]), [row["reason"] for row in report["skipped"]]),
                          (1, ["obligation-owner-unconfirmed"]))

@@ -1644,15 +1644,19 @@ def _discover(harness: str, horizon: float) -> Iterator[dict]:
 def select_recent_sessions(seat, cwd=None, now: Optional[float] = None, days: int = RECENT_DAYS) -> list:
     """Sessions of ``seat`` active within ``days`` days, newest first.
 
-    The seat ledger decides.  A past record the ledger never saw is added only when
-    it is confirmed to belong to the seat: the seat has no pane (harness + project
-    key) and the record's own cwd resolves to the same project key.  Nothing is
-    guessed from a path alone, and a pane seat gets no unledgered record at all.
+    The seat ledger decides, without a ledger session whose cwd resolves to another
+    project key than the seat's (or ``cwd``'s).  A past record the ledger never saw is
+    added only when it is confirmed to belong to the seat: the seat has no pane
+    (harness + project key) and the record's own cwd resolves to the same project key.
+    Nothing is guessed from a path alone, and a pane seat gets no unledgered record at all.
     """
     now = now_epoch() if now is None else now
     horizon = now - days * 86400
+    project = seat.project_key or (session_tidy.project_key_for(cwd) if cwd else "")
     found: dict = {}
     for row in session_tidy.session_summary(seat).values():
+        if project and row["cwd"] and session_tidy.project_key_for(row["cwd"]) != project:
+            continue
         transcript = row["transcript"] or ""
         located = locate_transcript(row["harness"], row["sid"], transcript or None)
         info = _stat(located) if located and row["harness"] != "opencode" else None

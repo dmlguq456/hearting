@@ -94,7 +94,6 @@ shared-utility-deferred	human_wait_state.py
 shared-utility-deferred	interactive-main-recovery.py
 shared-utility-deferred	memory-store.sh
 shared-utility-deferred	merge-line.py
-shared-utility-deferred	memory_open_work.py
 shared-utility-deferred	memory_work_labels.py
 shared-utility-deferred	opencode_context_window.py
 shared-utility-deferred	opencode_session_runtime.py

@@ -2901,8 +2901,7 @@ remaining work from existing sources only — the holder repository's open recor
 `memory.open_stage` classification calls them open; a record awaiting a user decision is
 shown as one to raise with the user, not one to assign), peer requests still queued for
 delivery to the holder or a live target (an ended target's undeliverable rows are left
-out). A waiting target is named only on a record it owns (the record's owner link), and a
-record whose owner now runs in another repository is left out. It prints each as a `next=` action (for example
+out) — and prints each as a `next=` action (for example
 `next=[e7] waiting 42 min · #1425 review → assign now`); the wait time comes from the
 duty's own earlier observations. `changes=none` does not mean nothing remains: while
 any next action exists the request names those actions (`assign-next`) and leaves release

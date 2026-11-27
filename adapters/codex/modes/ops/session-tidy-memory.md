@@ -105,13 +105,12 @@ only — no Markdown fence, no prose:
   and declare exactly one purpose per new record through `type`: `decision` (a choice
   with its reason, including durable preferences and lessons that changed what to do),
   `user-correction` (the user corrected the agent's understanding or behavior),
-  `unresolved-obligation` (something promised or left open), `artifact-pointer`
-  (where the real content lives and why to look), or `observation` for the reference below.
-  Never copy a summary of a document, plan or report that already exists — point to it.
-- An open obligation belongs to the session in `sessions[]` whose conversation owes the
-  next action: copy its `harness` and `sid` as `owner` when adding or replacing an open
-  record. Another session's quoted, relayed or mentioned promise is not open work here;
-  save a useful fact from it as an `observation` if it meets the memory criteria.
+  `unresolved-obligation` (something promised or left open), or `artifact-pointer`
+  (where the real content lives and why to look). Never copy a summary of a document,
+  plan or report that already exists — point to it.
+- An open obligation needs an `owner`: the `harness` and `sid` of the session in `sessions[]`
+  that owes it. Another session's quoted or relayed promise is not open work here; keep a
+  useful fact from it as an `observation`.
 - Skip chatter, status narration, progress, anything already in `existing_records`,
   anything the user did not decide or correct, and anything that will not matter after
   three weeks. Empty `actions` is a correct answer.

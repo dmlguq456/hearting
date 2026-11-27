@@ -29,7 +29,6 @@ import dispatch_session_sweep as sweep  # noqa: E402
 import peer_obligations  # noqa: E402
 import session_notice  # noqa: E402
 import steward_check as SC  # noqa: E402
-from memory_open_work import owner_link  # noqa: E402
 
 REAL_OBSERVE = SC._observe_role
 REAL_ROLE_HELD = SC._role_held
@@ -47,10 +46,6 @@ CARRIER = "claude-parent-runtime"
 def target(name="worker", state="working", liveness="live", harness="claude", sid=None):
     return {"name": name, "harness": harness, "session_id": sid or f"sid-{name}",
             "state": state, "liveness": liveness}
-
-
-def work_item(headline, owner=None):
-    return SC.OpenWork(headline, owner_link(owner))
 
 
 class CheckBase(unittest.TestCase):
@@ -741,19 +736,9 @@ class StewardCheckRemainingWorkTest(CheckBase):
         for phrase in ("start no new work", "Start no new work", "steward off"):
             self.assertNotIn(phrase, text)
 
-    def test_waiting_target_leaves_the_holders_first_row_unassigned(self):
-        seen = {"targets": [target("e7", state="idle")], "pending_messages": 0,
-                "open_work": [work_item("holder note", (HARNESS, SID)), work_item("legacy row"),
-                              work_item("#1425 review", (HARNESS, "sid-e7"))]}
-        self.assertEqual(SC.next_actions(seen), [
-            "[e7] waiting · #1425 review → assign now",
-            "open: holder note → assign or do now",
-            "open: legacy row → assign or do now",
-        ])
-
     def test_waiting_target_is_paired_with_open_work_and_its_wait_time(self):
         self.seen = {"targets": [target("e7", state="working")], "pending_messages": 0,
-                     "open_work": [work_item("#1425 review", (HARNESS, "sid-e7"))]}
+                     "open_work": ["#1425 review"]}
         self.register()
         self.check(T0)  # e7 still working: nothing waits yet
         self.seen["targets"] = [target("e7", state="idle")]
@@ -776,7 +761,7 @@ class StewardCheckRemainingWorkTest(CheckBase):
 
     def test_finished_targets_with_open_work_get_the_work_not_a_tidy(self):
         self.seen = {"targets": [target("a", state="done"), target("b", liveness="ended")],
-                     "pending_messages": 0, "open_work": [work_item("next slice", (HARNESS, "sid-a"))]}
+                     "pending_messages": 0, "open_work": ["next slice"]}
         self.register()
         self.step(T0 + INTERVAL)
         sent = self.notice()
@@ -808,8 +793,7 @@ class StewardCheckRemainingWorkTest(CheckBase):
 
     def test_many_actions_stay_within_the_notice_limit(self):
         self.seen = {"targets": [target(f"t{i}", state="idle") for i in range(8)],
-                     "pending_messages": 0, "open_work": [work_item("x" * 200 + str(i), (HARNESS, f"sid-t{i}"))
-                                   for i in range(10)]}
+                     "pending_messages": 0, "open_work": ["x" * 200 + str(i) for i in range(10)]}
         self.register()
         self.step(T0 + INTERVAL)
         text = self.notice()["text"]
@@ -819,7 +803,7 @@ class StewardCheckRemainingWorkTest(CheckBase):
 
     def test_cmd_check_prints_next_actions_and_no_release_hint(self):
         self.seen = {"targets": [target("e7", state="idle")], "pending_messages": 0,
-                     "open_work": [work_item("#1425 review", (HARNESS, "sid-e7"))]}
+                     "open_work": ["#1425 review"]}
         self.register()
         out = self.check(T0 + 10)
         self.assertIn("next=[e7] waiting · #1425 review → assign now", out)

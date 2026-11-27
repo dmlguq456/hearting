@@ -55,7 +55,11 @@ if str(UTILITIES) not in sys.path:
 
 import session_tidy as st  # noqa: E402
 import tidy_decisions as td  # noqa: E402
-from memory_open_work import open_stage, owner_identity, owner_key, owner_link  # noqa: E402
+
+TOOLS = HERE.parent
+if str(TOOLS) not in sys.path:
+    sys.path.insert(0, str(TOOLS))
+from fleet.collectors.memory import open_stage  # noqa: E402  (the repo page's open-work classifier)
 
 SCHEMA = 1
 ACTOR = td.DECISION_ACTOR
@@ -348,29 +352,26 @@ class Batch:
 
     def _new_record(self, action: dict, tier: str, rtype: str, source: str, label: str):
         mem = self.mem
-        body = action["body"]
-        headline = action.get("headline") if isinstance(action.get("headline"), str) else None
-        stored_body = mem.sanitize(body)[0]
-        stored_headline = mem._normalize_headline(headline, stored_body)
-        links = []
-        if open_stage({"type": rtype, "headline": stored_headline}) is not None:
-            owner = owner_identity(action.get("owner"))
-            if owner not in self.obligation_owners:
-                return None, "obligation-owner-unconfirmed"
-            links.append(owner_link(owner))
         con = mem.get_con()
         try:
             if mem.find_by_source(tier, "project", rtype, source, self.pkey, con):
                 return None, "source-exists"
-            if mem.find_dup(tier, "project", stored_body, self.pkey, con=con):
+            body = action["body"]
+            if mem.find_dup(tier, "project", mem.sanitize(body)[0], self.pkey, con=con):
                 return None, "duplicate"
         finally:
             con.close()
+        # An open record needs an owner among the sessions this batch read.
+        headline = action.get("headline") if isinstance(action.get("headline"), str) else None
+        owner = action.get("owner") if isinstance(action.get("owner"), dict) else {}
+        if (open_stage({"type": rtype, "headline": mem._normalize_headline(headline, mem.sanitize(body)[0])})
+                is not None and (owner.get("harness"), owner.get("session_id")) not in self.obligation_owners):
+            return None, "obligation-owner-unconfirmed"
         op = self.journal.intent(op="add", source=source, tier=tier, type=rtype, via=label)
         rid = mem.write_record(
-            tier, "project", rtype, body, cwd_origin=self.pkey, source=source, quiet=True, links=links,
+            tier, "project", rtype, body, cwd_origin=self.pkey, source=source, quiet=True,
             journal_action="tidy-" + label, journal_insert_only=True, journal_actor=ACTOR,
-            journal_cwd=self.cwd, headline=headline)
+            journal_cwd=self.cwd, headline=action.get("headline") if isinstance(action.get("headline"), str) else None)
         if not rid:
             self.journal.drop(op)
             return None, "quality"
@@ -564,8 +565,7 @@ def apply_batch(mem, doc: dict, input_doc: Optional[dict], cwd: str, input_diges
     owners = set()
     if (isinstance(read, list) and isinstance(input_cwd, str) and input_cwd
             and os.path.realpath(input_cwd) == cwd):
-        owners = {owner for row in read if isinstance(row, dict)
-                  and (owner := owner_key(row.get("harness"), row.get("sid")))}
+        owners = {(row.get("harness"), row.get("sid")) for row in read if isinstance(row, dict) and row.get("sid")}
     batch = Batch(mem, batch_id, cwd, pkey, directory, owners)
     batch.result["before"] = _counts(mem)
     block_reason = None

@@ -3101,6 +3101,27 @@ class RecentSessionsTest(TidyCase):
             got = tt.select_recent_sessions(seat, now=now)
         self.assertEqual([(r["sid"], r["source"]) for r in got], [("both", "ledger")])
 
+    def test_ledger_sessions_of_another_project_are_left_out(self):
+        now = 1_800_000_000.0
+        other = self.iso.root / "elsewhere" / "proj"                      # the same folder name, another origin
+        other.mkdir(parents=True)
+        tree, link = self.iso.root / "proj-tree", self.iso.root / "proj-link"
+        for repo, origin in ((self.cwd, "team/proj"), (other, "elsewhere/proj")):
+            for command in (["git", "init", "-q"], ["git", "remote", "add", "origin", f"https://example.invalid/{origin}"]):
+                self.assertEqual(self.iso.run(command, cwd=repo).returncode, 0)
+        for command in (["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q",
+                         "--allow-empty", "-m", "base"], ["git", "worktree", "add", "-q", str(tree)]):
+            result = self.iso.run(command, cwd=self.cwd)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        link.symlink_to(self.cwd)
+        with self.iso.patched_environ():
+            seat = st.resolve_seat("claude", str(self.cwd))
+            for sid, cwd in (("ended-here", self.cwd), ("via-link", link), ("via-worktree", tree),
+                             ("harbor", other), ("no-cwd", "")):
+                st.record_event(seat, "claude", sid, "start", cwd=str(cwd), now=now - 60)
+            got = {r["sid"] for r in tt.select_recent_sessions(seat, now=now)}
+        self.assertEqual(got, {"ended-here", "via-link", "via-worktree", "no-cwd"})
+
     def test_codex_and_opencode_records_are_found_by_their_own_project_marker(self):
         now = FIXTURE_NOW
         rollout = self.iso.codex_home / "sessions" / "2026" / "09" / "30" / \

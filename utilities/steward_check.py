@@ -31,8 +31,6 @@ _UTILITIES = Path(__file__).resolve().parent
 if str(_UTILITIES) not in sys.path:
     sys.path.insert(0, str(_UTILITIES))
 
-from memory_open_work import owner_identity, owner_link, record_owner
-
 DUTY_KIND = "steward-check"
 NOTICE_KEY_PREFIX = "steward-check:"
 NOTIFIED_RECHECK_SECONDS = 60.0
@@ -413,7 +411,7 @@ def _human_wait_open(harness: str, session_id: str, now: float) -> bool:
         return False
 
 
-def _holder_cwd(harness: str, session_id: str, sessions=None):
+def _holder_cwd(harness: str, session_id: str):
     """The holder's own single cwd from the collector's session rows, or None."""
     collector = _collector()
     # Native registry rows: the holder's cwd never needs a Herdr agent list.
@@ -422,7 +420,7 @@ def _holder_cwd(harness: str, session_id: str, sessions=None):
     if rows_of is None or keys_of is None:
         return None
     try:
-        cwds = {row.cwd for row in (rows_of() or () if sessions is None else sessions)
+        cwds = {row.cwd for row in rows_of() or ()
                 if getattr(row, "cwd", None) and (harness, session_id) in keys_of(row)}
     except Exception:  # noqa: BLE001
         return None
@@ -438,26 +436,6 @@ def _is_open_work(memory, row: dict) -> bool:
     return str(row.get("type") or "").casefold() in getattr(memory, "_OPEN_TYPES", ())
 
 
-class OpenWork(str):
-    """An open record's headline with its single owner link, or None."""
-    def __new__(cls, headline: str, owner=None):
-        item = super().__new__(cls, headline)
-        item.owner = owner
-        return item
-
-
-def _foreign_owners(collector, sessions, cwd) -> set:
-    """Owner links whose native rows all sit in another known repository now."""
-    try:
-        here = collector._repository_key(cwd)
-        found = {}
-        for row in sessions:
-            found.setdefault((row.harness, row.session_id), set()).add(collector._repository_key(row.cwd))
-    except Exception:  # noqa: BLE001 - an unknown repository hides nothing
-        return set()
-    return {owner_link(key) for key, repos in found.items() if here and None not in repos and here not in repos}
-
-
 def _is_user_decision(row: dict, headline: str) -> bool:
     tags = {str(tag).strip("[]\"' ").casefold() for tag in row.get("tags") or ()}
     text = headline.casefold()
@@ -466,14 +444,8 @@ def _is_user_decision(row: dict, headline: str) -> bool:
 
 def _open_work(harness: str, session_id: str) -> tuple[list[str], list[str]]:
     """``(open work, awaiting the user)`` headlines for the holder's repository from the
-    existing Fleet work source (``fleet.session_work.observe``); ([], []) when unknown.
-    A record whose owner now runs in another repository is not this holder's work."""
-    collector = _collector()
-    try:
-        sessions = tuple(collector._registry_sessions() or ())
-    except Exception:  # noqa: BLE001
-        sessions = None
-    cwd = _holder_cwd(harness, session_id, sessions)
+    existing Fleet work source (``fleet.session_work.observe``); ([], []) when unknown."""
+    cwd = _holder_cwd(harness, session_id)
     if not cwd:
         return [], []
     try:
@@ -485,12 +457,11 @@ def _open_work(harness: str, session_id: str) -> tuple[list[str], list[str]]:
         rows, _watched = observe(cwd)
     except Exception:  # noqa: BLE001 - backlog is optional evidence
         return [], []
-    foreign = _foreign_owners(collector, sessions or (), cwd)
     open_rows = []
     for row in rows or ():
         row = row if isinstance(row, dict) else {}
-        headline = OpenWork(" ".join(str(row.get("headline") or "").split()), record_owner(row))
-        if not headline or headline.owner in foreign:
+        headline = " ".join(str(row.get("headline") or "").split())
+        if not headline:
             continue
         try:
             if not _is_open_work(memory, row):
@@ -752,14 +723,13 @@ def _label(name: str) -> str:
 
 
 def next_actions(observation: dict, waiting_since=None, now: float | None = None) -> list[str]:
-    """Concrete next steps: queued peer requests, waiting targets with the open work they own,
-    other open work, then decisions awaiting the user. Empty when nothing remains."""
+    """Concrete next steps: queued peer requests, waiting targets paired with open work,
+    unassigned open work, then decisions awaiting the user. Empty when nothing remains."""
     now = _now() if now is None else now
     waiting_since = waiting_since or {}
     targets = observation["targets"]
-    items = list(observation.get("open_work") or ())
-    owners = [getattr(h, "owner", None) for h in items]
-    work = [h if len(h) <= _MAX_HEADLINE else h[:_MAX_HEADLINE - 1] + "…" for h in items]
+    work = [h if len(h) <= _MAX_HEADLINE else h[:_MAX_HEADLINE - 1] + "…"
+            for h in observation.get("open_work") or ()]
     waiting = sorted((t for t in targets if _waiting(t) and not _queued_for(t)),
                      key=lambda t: waiting_since.get(str(t.get("session_id")), now))
     actions = []
@@ -768,16 +738,14 @@ def next_actions(observation: dict, waiting_since=None, now: float | None = None
         if owed:
             actions.append(f"{_label(target['name'])} {owed} peer request(s) queued, not yet "
                            "delivered → do not resend")
-    named = set()
     for target in waiting:
-        owner = owner_link(owner_identity(target))
-        mine = [i for i, link in enumerate(owners) if owner and link == owner]
         minutes = int(max(0.0, now - float(waiting_since.get(str(target.get("session_id")), now))) // 60)
         since = f" {minutes} min" if minutes else ""
-        actions.extend(f"{_label(target['name'])} waiting{since} · {work[i]} → assign now" for i in mine)
-        named.update(mine)
-    actions.extend(f"open: {headline} → assign or do now"
-                   for i, headline in enumerate(work) if i not in named)
+        if not work:
+            break
+        actions.append(f"{_label(target['name'])} waiting{since} · {work.pop(0)} → assign now")
+    for headline in work:
+        actions.append(f"open: {headline} → assign or do now")
     for headline in observation.get("user_decisions") or ():
         short = headline if len(headline) <= _MAX_HEADLINE else headline[:_MAX_HEADLINE - 1] + "…"
         actions.append(f"awaiting user decision: {short} → raise it to the user")
