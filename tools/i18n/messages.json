@@ -146,6 +146,18 @@
    "en": "Finished with failures or unfinished work (below)",
    "ko": "끝남 — 실패·못 한 것 있음(아래)"
   },
+  "completion.tier_note": {
+   "en": "Ran below the selected tier: {items}",
+   "ko": "고른 등급보다 낮게 돈 단계: {items}"
+  },
+  "completion.tier_note_item": {
+   "en": "{node} (selected {selected}, ran {ran})",
+   "ko": "{node} (고른 등급 {selected} · 실제 {ran})"
+  },
+  "completion.tier_note_more": {
+   "en": "+{count} more",
+   "ko": "외 {count}"
+  },
   "completion.unreadable": {
    "en": "Checks / remaining: the report's format differs, so no machine summary — read the report itself",
    "ko": "검증·남은 것: 보고서 형식이 달라 기계 요약 안 함 — 보고서 본문을 그대로 볼 것"
@@ -2430,9 +2442,17 @@
    "en": "a menu or question is open · it goes in once that closes",
    "ko": "메뉴·질문 창 열림 · 닫으면 받음"
   },
+  "peer.delivery.hold_old_shell_large": {
+   "en": "this window's older shell cannot read so large a screen · it goes in once the window is made smaller once or reopened",
+   "ko": "이 창의 옛 셸이 큰 화면을 읽지 못함 · 창을 한 번 줄이거나 다시 띄우면 받음"
+  },
   "peer.delivery.hold_paste": {
    "en": "a paste is under way",
    "ko": "붙여 넣는 중"
+  },
+  "peer.delivery.hold_screen_large": {
+   "en": "its screen is too large for its input box to be read · it goes in once the window is smaller",
+   "ko": "화면이 너무 커서 입력창을 읽지 못함 · 창을 줄이면 받음"
   },
   "peer.delivery.hold_unobserved": {
    "en": "its rest is not confirmed",
@@ -3281,6 +3301,10 @@
   "tidy.hold.shell-no-answer": {
    "en": "the Hearting shell did not answer the screen request",
    "ko": "하팅 셸이 화면 요청에 답하지 않았습니다"
+  },
+  "tidy.hold.shell-screen-large": {
+   "en": "the window's screen was too large for its input box to be read",
+   "ko": "화면이 너무 커서 입력창을 읽지 못했습니다"
   },
   "tidy.hold.target-changed": {
    "en": "the session in that seat changed",

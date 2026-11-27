@@ -24,6 +24,7 @@ import pty
 import re
 import time
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('shell_succession_fixture', ROOT/'utilities/session_shell_pty.test.py')
@@ -52,6 +53,12 @@ def composer():
     if harness=='codex':return '\x1b[2m›\x1b[0m \r\n\r\n'
     if harness=='opencode':return '┃\r\n┃  \r\n┃\r\n'
     return '❯ \r\n'+'─'*18+'\r\n'
+def fill():
+    # SUCC_FILL=dense: the rows above filled to the width (rules, Hangul, dim text), as a busy wide window.
+    if os.environ.get('SUCC_FILL')!='dense':return ''
+    size=os.get_terminal_size(0)
+    return ''.join(('─'*size.columns if n%3==0 else '한글'*(size.columns//4) if n%3==1
+                    else '\x1b[2m'+('dim '*size.columns)[:size.columns]+'\x1b[22m')+'\r\n' for n in range(size.lines-6))
 tty.setraw(0)
 exit_fd=os.open(os.environ['LOOP_NATIVE_EXIT'],os.O_RDWR|os.O_NONBLOCK)
 # OpenCode's plugin reports a selected session as select + idle; a window with no selected
@@ -85,7 +92,7 @@ while True:
         if bound:event('stop')
         if line=='flood':
             print(''.join('FLOOD_%03d \x1b[3%dmcolor\x1b[0m wide 한글\r\n'%(i,i%8) for i in range(120)),end='',flush=True)
-        else:print('\x1b[2J\x1b[HDONE_'+line+'\r\n'+composer()+pending,end='',flush=True)
+        else:print('\x1b[2J\x1b[H'+fill()+'DONE_'+line+'\r\n'+composer()+pending,end='',flush=True)
         if line=='form':print('Do you want to proceed?\r\n1. Yes\r\n2. No\r\n',end='',flush=True)
         if line=='alt':print('\x1b[?1049h\x1b[2J\x1b[HALT_SCREEN\r\n'+composer()+'\x1b[1;5r\x1b[3;1H',end='',flush=True)
         if line=='leave':print('\x1b[?1049l',end='',flush=True)
@@ -216,7 +223,7 @@ class Window:
     """One launched window: an outer PTY, the entry launcher and its synthetic native."""
     count = 0
 
-    def __init__(self, case, harness, *, sid, extra=None, gate=False):
+    def __init__(self, case, harness, *, sid, extra=None, gate=False, size=(30, 130), old=None):
         self.case, self.harness, self.sid = case, harness, sid
         Window.count += 1
         self.root = case.root/('win-%d-%s' % (Window.count, harness))
@@ -237,6 +244,9 @@ class Window:
             # Another real path for each release; the code under it is the same.
             (utilities/'session-shell'/'RELEASE').write_text(name)
             self.releases[name] = self.root/name
+        if old is not None:
+            # A released tree as it was installed (`old_release`): its host, backend and modules.
+            self.releases['rel-a'] = old
         self.link = self.root/'link'
         self.point('rel-a')
         native = self.root/'native.py'; native.write_text(NATIVE)
@@ -279,7 +289,7 @@ class Window:
             entry = str(bootstrap)
         self.master, slave = pty.openpty()
         self.attrs = termios.tcgetattr(slave)
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 130, 0, 0))
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', *size, 0, 0))
         self.entry = subprocess.Popen(
             [sys.executable, entry, harness, sys.executable, str(native), sid],
             env=env, cwd=case.project, stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
@@ -524,6 +534,68 @@ class SessionShellSuccessionTest(unittest.TestCase):
                 self.assertNotIn(b'\x1b[?1049h', bytes(window.raw[before_raw:]))
                 self.assert_keeps_native(window, native)
                 self.assertEqual(len(window.spawns()), 1)
+
+    def test_a_wide_window_full_of_text_moves_to_the_new_release(self):
+        # 11-27: a wide window's whole screen did not fit one readiness request, so its composer never
+        # read empty and it stayed on its old release; now it reads empty and hands over like any other.
+        for harness in ('claude', 'codex', 'opencode'):
+            with self.subTest(harness=harness):
+                window = self.window(harness, size=(121, 579), extra={'SUCC_FILL': 'dense'})
+                first = window.wait_binding()
+                self.settle(window)
+                window.point('rel-b')
+                second = self.switched(window, first['host_pid'])
+                self.assertEqual(second['native_pid'], first['native_pid'])
+                window.close()
+
+    OLD_RELEASE = 'v4.78.4'
+
+    @classmethod
+    def old_release(cls):
+        """The last release before review 1127's fix, from git (its host refuses a screen past 64 KiB)."""
+        if getattr(cls, '_old', None) is None:
+            target = cls.root/('old-'+cls.OLD_RELEASE)
+            try:
+                archive = subprocess.run(['git', '-C', str(ROOT), 'archive', cls.OLD_RELEASE, 'utilities', 'tools', 'hooks',
+                                          'core', 'profiles', 'harness-manifest.json', 'manifest.json'],
+                                         capture_output=True, timeout=120, check=True).stdout
+            except (OSError, subprocess.SubprocessError):
+                raise unittest.SkipTest(cls.OLD_RELEASE + ' is not in this checkout') from None
+            target.mkdir()
+            subprocess.run(['tar', '-x', '-C', str(target)], input=archive, check=True, timeout=120)
+            cls._old = target
+        return cls._old
+
+    def resize(self, window, rows, cols):
+        fcntl.ioctl(window.master, termios.TIOCSWINSZ, struct.pack('HHHH', rows, cols, 0, 0))
+
+    def test_an_old_release_window_too_large_moves_once_made_smaller(self):
+        # Review 1127 🔴6: a window opened on the release before the fix refuses its own screen request
+        # past 64 KiB, so it never reads empty and an install alone does not move it. This release says
+        # why (`old-shell-large`); made smaller once, the old host reads, hands over, and the new one
+        # reads the same window at its full size.
+        import session_shell
+        window = self.window('claude', size=(121, 579), extra={'SUCC_FILL': 'dense'}, old=self.old_release())
+        first = window.wait_binding()
+        window.type('warm\r'); window.until('DONE_warm')
+        window.point('rel-b')
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            status = window.status(first)
+            self.assertEqual((status.get('empty'), status.get('hold')), (False, 'unobserved'), status)
+            # This fixture's backend wrapper hides the running release from /proc, where release_behind
+            # reads it (session_shell_answer_idle covers that reading): here the window is known behind.
+            with mock.patch.object(session_shell, 'release_behind', return_value=True):
+                self.assertEqual(session_shell._hold(first, status), session_shell.HOLD_OLD_SHELL_LARGE)
+                self.assertTrue(session_shell._old_host_screen_large(first))
+        self.assertEqual(window.binding()['host_pid'], first['host_pid'])
+        self.resize(window, 30, 130)
+        window.wait_empty()
+        second = self.switched(window, first['host_pid'])
+        self.assertEqual(second['native_pid'], first['native_pid'])
+        self.resize(window, 121, 579)
+        window.type('again\r'); window.until('DONE_again')
+        status = window.wait_empty()
+        self.assertEqual(status.get('hold'), '', status)
 
     def test_a_hand_fold_carries_over_to_the_new_host(self):
         # #1586 review follow-up 7: the person's fold choice rides the hand-over seed. Folded by
