@@ -75,9 +75,9 @@ only — no Markdown fence, no prose:
   `unresolved-obligation` (something promised or left open), or `artifact-pointer`
   (where the real content lives and why to look). Never copy a summary of a document,
   plan or report that already exists — point to it.
-- An `unresolved-obligation` is a promise a session in `sessions[]` made itself; a promise
-  of another session (another project's included) that the conversation only quotes or
-  relays is not this project's open work, so keep a useful fact from it as an `observation`.
+- An `unresolved-obligation` is a promise a session in `sessions[]` made itself. A promise of
+  another session (another project's included) that the conversation only quotes or relays is
+  not this project's open work: do not record it, except what is itself a `decision` or an `artifact-pointer`.
 - Skip chatter, status narration, progress, anything already in `existing_records`,
   anything the user did not decide or correct, and anything that will not matter after
   three weeks. Empty `actions` is a correct answer.
