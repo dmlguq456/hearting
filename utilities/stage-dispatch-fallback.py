@@ -2562,6 +2562,13 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
         prior_rows, jobs=args.jobs, task=request_task)
     if semantic_predecessor:
         args.automatic_retry_of = ""
+    refused_harness = None
+    if args.automatic_retry_of:
+        from dispatch_replacement import SAME_PROVIDER_REFUSAL, refused_profile_harness
+        predecessor = next((row for row in prior_rows if row.get("attempt_id") == args.automatic_retry_of), {})
+        pin = (route.get("selection_pins") or {}).get("worker")
+        refused_harness = refused_profile_harness(
+            predecessor, launch_node.get("model_profile"), pin=pin, source_root=ROOT)
     failed_tuples = set(args.failed_tuple) | set(prior_failures)
     attempts: list[str] = []
     direct_failures: list[dict[str, str]] = []
@@ -2618,7 +2625,7 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                 _candidate_outcome(candidate_outcomes, int(ordered_hop['ordinal']), key,
                                   attempted=False, reason="prior-unchanged-failure")
                 recorded_prior_skips.add(key)
-    pin_skipped = False
+    pin_skipped = refusal_noted = False
     for hop in fallback_hops:
         ordinal = int(hop["ordinal"])
         if hop.get("_worker_pin_skip"):
@@ -2634,6 +2641,14 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                     _candidate_outcome(candidate_outcomes, ordinal, key, attempted=False,
                                       reason="worker-pin")
                     pin_skipped = True
+                    continue
+                if refused_harness and row.get("child_harness") == refused_harness:
+                    if not refusal_noted:
+                        print(f"retry_note={SAME_PROVIDER_REFUSAL}")
+                        refusal_noted = True
+                    attempts.append(f"{ordinal}:{key}:skipped-provider-refusal")
+                    _candidate_outcome(candidate_outcomes, ordinal, key, attempted=False,
+                                       reason="provider-refusal")
                     continue
                 # Re-read after an early failure too: a whole-account quota
                 # cannot be cured by changing models later in this same chain.

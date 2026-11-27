@@ -88,7 +88,7 @@
    "requires": {
     "capabilities": [],
     "units": [
-     "dev/refactor",
+     "editorial/write",
      "qa/code-review"
     ]
    }
@@ -182,6 +182,7 @@
     "units": [
      "editorial/report",
      "editorial/review",
+     "editorial/write",
      "research/claim-verify",
      "research/fact-check",
      "research/research-survey"
@@ -685,6 +686,12 @@
    "worker_type": "stage",
    "floor": "low"
   },
+  "editorial/write": {
+   "family": "editorial",
+   "role": "deep editor",
+   "worker_type": "stage",
+   "floor": "low"
+  },
   "general/explore": {
    "family": "general",
    "role": "fast tool worker",
@@ -881,6 +888,10 @@
   },
   "editorial/translate": {
    "unit": "editorial/translate",
+   "status": "portable-persona"
+  },
+  "editorial/write": {
+   "unit": "editorial/write",
    "status": "portable-persona"
   },
   "general/explore": {

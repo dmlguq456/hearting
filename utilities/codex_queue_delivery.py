@@ -504,12 +504,14 @@ def native_completion_body(storage_key: str, records: list[dict], receipt: dict,
     return envelope + followup + markers
 
 
-def native_batch_unit_body(root: Path, storage_key: str, records: list[dict]) -> str:
+def native_batch_unit_body(root: Path, storage_key: str, records: list[dict], *,
+                           include_provider_failure: bool = True) -> str:
     """Render one producer-identical sibling batch unit."""
     import dispatch_session_sweep as sweep
     members = sorted(records, key=lambda record: record["delivery_id"])
     return sweep.delivery_context([(root, [
-        {**record, "attempts": 0, sweep.STORAGE_KEY: storage_key} for record in members])])
+        {**record, "attempts": 0, sweep.STORAGE_KEY: storage_key} for record in members])],
+        include_provider_failure=include_provider_failure)
 
 
 def prior_followup_text(current: str) -> str | None:
@@ -525,6 +527,14 @@ def prior_followup_text(current: str) -> str | None:
     from dispatch_completion_join import previous_harvest_wording
     previous = previous_harvest_wording(current)
     return previous if previous != current else None
+
+
+def native_completion_bodies(storage_key: str, records: list[dict], receipt: dict,
+                             current: str, legacy: str) -> list[str]:
+    """Render the current body first, followed by exact previously shipped forms."""
+    followups = dict.fromkeys((current, legacy, prior_followup_text(current), prior_followup_text(legacy)))
+    return [native_completion_body(storage_key, records, receipt, followup)
+            for followup in followups if followup is not None]
 
 
 def retire_acked_completion(root: Path, path: Path, thread_id: str, seed: dict | list[dict],
@@ -574,11 +584,9 @@ def retire_acked_completion(root: Path, path: Path, thread_id: str, seed: dict |
                 jobs = receipt.get("job_registry") if isinstance(receipt, dict) else None
                 if not isinstance(jobs, str) or not jobs:
                     continue
-                followup = completion_followup_text(receipt, jobs=jobs)
-                bodies = [native_completion_body(storage_key, [fresh], receipt, followup)]
-                prior_followup = prior_followup_text(followup)
-                if prior_followup is not None:
-                    bodies.append(native_completion_body(storage_key, [fresh], receipt, prior_followup))
+                current = completion_followup_text(receipt, jobs=jobs)
+                previous = completion_followup_text(receipt, jobs=jobs, include_provider_failure=False)
+                bodies = native_completion_bodies(storage_key, [fresh], receipt, current, previous)
                 candidates.append((
                     [fresh], native_client_message_id(storage_key, [fresh["delivery_id"]]), bodies))
         if not candidates:
@@ -632,9 +640,11 @@ def retire_acked_completion(root: Path, path: Path, thread_id: str, seed: dict |
                 continue
             try:
                 rendered = native_batch_unit_body(root, storage_key, members)
+                if not _peer_text_input(content, rendered):
+                    rendered = native_batch_unit_body(root, storage_key, members, include_provider_failure=False)
             except Exception:
                 continue
-            if not _peer_text_input(item.get("input"), rendered):
+            if not _peer_text_input(content, rendered):
                 continue
             candidates.append((members, client_id, [rendered]))
         deleted = 0

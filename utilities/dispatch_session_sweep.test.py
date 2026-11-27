@@ -476,6 +476,11 @@ class IsolatedRootMixin:
         super().tearDown()
 
 
+def _provider_failure_row(attempt):
+    return (f"now\tdone\t/r\t/w\ttask\tattempt_id={attempt},attempt_schema_version=2,"
+            "harness=codex,note=dead-runtime-error,failure_class=runtime")
+
+
 def _receipt(**overrides):
     base = {
         "schema_version": 2,
@@ -904,7 +909,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
         self.assertEqual(PD.read(
             self.root, "sess-owner", claimed[0]["delivery_id"])["state"], "acked")
 
-    def _native_batch_records(self, count=2):
+    def _native_batch_records(self, count=2, *, failed=False):
         serial = getattr(self, "_native_batch_serial", 0) + 1
         self._native_batch_serial = serial
         records = []
@@ -916,6 +921,10 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
                 "required_action": "advance-completed",
                 "delivery_classification": "success",
             }], "job_registry": str(self.root / "jobs.log")}
+            if failed:
+                receipt["children"][0].update(
+                    reason="terminal-failure-or-unclosed", required_action="inspect-done-failure",
+                    delivery_classification="attention")
             record = PD.create(
                 root=self.root, recipient_kind="codex-native-queue", recipient_key="sess-owner",
                 delivery_id=delivery_id, session_generation="",
@@ -989,6 +998,41 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(queue, [])
         self.assertEqual(calls[-1][1]["threadId"], "sess-owner")
+
+    def test_ack_retires_old_completion_body_for_single_and_sibling_items(self):
+        import codex_queue_delivery as delivery
+        from dispatch_completion_join import completion_followup_text
+
+        self.root.mkdir(parents=True, exist_ok=True)
+        jobs = self.root / "jobs.log"
+        jobs.touch()
+        for batch in (False, True):
+            with self.subTest(batch=batch):
+                records = self._native_batch_records(count=2 if batch else 1, failed=True)
+                attempts = [row["attempt_ids"][0] for row in records]
+                rows = [_provider_failure_row(attempt) for attempt in attempts]
+
+                def body():
+                    if batch:
+                        return delivery.native_batch_unit_body(self.root, "sess-owner", records)
+                    receipt = records[0]["receipt"]
+                    return delivery.native_completion_body("sess-owner", records, receipt,
+                        completion_followup_text(receipt, jobs=str(jobs)))
+
+                jobs.write_text("\n".join(rows) + "\n")
+                shipped = body()
+                jobs.write_text("".join(row + ",provider_failure_kind=cyberPolicy\n" for row in rows))
+                self.assertNotIn("Provider failure for", shipped)
+                self.assertIn("Provider failure for", body())
+                client_id = delivery.native_client_message_id(
+                    "sess-owner", [row["delivery_id"] for row in records], batch=batch)
+                queue = [{"id": "old-body", "clientUserMessageId": client_id,
+                          "input": [{"type": "text", "text": shipped}]}]
+                count, calls = self._ack_native_with_fake_queue(records, queue)
+                self.assertEqual(count, len(records))
+                self.assertEqual(queue, [])
+                self.assertEqual(calls[-1], ("thread/queue/delete", {
+                    "threadId": "sess-owner", "queuedSubmissionId": "old-body"}))
 
     def test_ack_retirement_failures_preserve_ack_count_state_and_acknowledger(self):
         import codex_queue_delivery as delivery
@@ -3131,6 +3175,49 @@ console.log(JSON.stringify({prompts, logs}));
         self.assertEqual(result["prompts"], [])
         self.assertEqual(self.state(), "acked")
         self.assertEqual(PD.read(self.root, self.SID, did)["attempts"], 1)
+
+    def test_old_completion_body_is_acked_before_an_expired_claim_can_be_reused(self):
+        receipt = _receipt()
+        child = receipt["children"][0]
+        child.update(status="done", reason="terminal-failure-or-unclosed",
+                     required_action="inspect-done-failure", delivery_classification="attention")
+        self.seed_turn(receipt=receipt)
+        did = "delivery-" + "a" * 32
+        record = self._mark_sent_ambiguous(did)
+        batch = [(self.root, [{**record, SWEEP.STORAGE_KEY: self.SID}])]
+        jobs = self.root / "jobs.log"
+        row = (_provider_failure_row(child["attempt_id"]) + f",parent_sid={self.SID},"
+               f"parent_harness=opencode,parent_completion_delivery=opencode-turn,delivery_id={did}")
+        jobs.write_text(row + "\n")
+        shipped = SWEEP.delivery_context(batch)
+        jobs.write_text(row + ",provider_failure_kind=cyberPolicy\n")
+        first = SWEEP.delivery_context(batch)
+        self.assertIn("was cyberPolicy.", first)
+        jobs.write_text(row + ",provider_failure_kind=serverOverloaded\n")
+        current = SWEEP.delivery_context(batch)
+        self.assertIn("was serverOverloaded.", current)
+        marker = next(line for line in shipped.splitlines() if line.startswith("HEARTING_RECEIPT_V1 "))
+        self.assertIn(marker, first)
+        self.assertIn(marker, current)
+
+        def native(text, session=self.SID):
+            return [{"info": {"sessionID": session, "role": "user"},
+                     "parts": [{"type": "text", "text": text}]}]
+
+        for bad in (native(first), native(shipped + " edited"), native(shipped, "wrong-session"),
+                    native(shipped.replace(marker, marker.rsplit(" ", 1)[0] + " " + "0" * 64))):
+            self.assertEqual(SWEEP._opencode_delivery_expectations(
+                [self.root], "opencode-turn", self.SID, bad), [])
+        for text in (shipped, current):
+            matches = SWEEP._opencode_delivery_expectations(
+                [self.root], "opencode-turn", self.SID, native(text))
+            self.assertEqual([match["text"] for match in matches], [text])
+
+        self._expire_ambiguous([did])
+        result = self.deliver_in_process(messages=native(shipped))
+        self.assertEqual((result["text"], result["records"]), ("", []))
+        final = PD.read(self.root, self.SID, did)
+        self.assertEqual((final["state"], final["attempts"]), ("acked", 1))
 
     def test_claim_change_between_deliver_and_settle_without_receipt_never_sends(self):
         self.seed_turn()

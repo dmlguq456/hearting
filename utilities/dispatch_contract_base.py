@@ -220,6 +220,7 @@ ATTEMPT_TERMINAL_EVIDENCE_KEYS = {
     "detected_by",
     "failure_class",
     "process_exit",
+    "provider_failure_kind",
     "quota_model_scope",
     "quota_window",
     "reconcile_reason",

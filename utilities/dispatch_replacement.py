@@ -23,6 +23,7 @@ from typing import Callable
 
 import dispatch_contract as DC
 from artifact_receipt import _write_once
+from dispatch_attempt_policy import SAME_PROVIDER_REFUSAL, content_refusal
 from dispatch_registry_cache import demand_replacement_rows, registry_lines, registry_view
 import route_authority
 
@@ -1370,6 +1371,76 @@ def _budget_exhausted(jobs, source, *, lines=None, route=None, capacity=False):
     return legacy_budget_exhausted(jobs, lines, source, route=route)
 
 
+def refused_candidate(source):
+    """The selected harness and model of an observed content refusal."""
+    if source.get("note") == "dead-capacity" or source.get("failure_class") == "capacity":
+        return None
+    if not content_refusal(source.get("provider_failure_kind")):
+        return None
+    harness = source.get("harness")
+    model = source.get("model")
+    if model in {None, "", "inherit", "unknown", "-"}:
+        model = source.get("resolved_model")
+    if harness in {"claude", "codex", "opencode"} and model not in {None, "", "inherit", "unknown", "-"}:
+        return harness, model
+    return None
+
+
+def refused_profile_harness(source, profile, *, pin=None, source_root=ROOT):
+    """Identify an unchanged pair in the ordinary selector's current profile."""
+    pair = refused_candidate(source)
+    if pair is None:
+        return None
+    harness, model = pair
+    from model_profile import ModelProfileError, resolve_runtime_profile
+    chosen = (pin or {}).get("model") if (pin or {}).get("harness") == harness else None
+    if not chosen:
+        try:
+            chosen = resolve_runtime_profile(harness, profile, source_root=source_root)[0]["model"]
+        except ModelProfileError:
+            return None
+    if chosen in {model, source.get("resolved_model")}:
+        return harness
+    return None
+
+
+def replacement_source(jobs, prior, successor):
+    """Find the exact claim's predecessor for the ordinary owner selector."""
+    if not prior or not successor:
+        return {}
+    try:
+        record, error = registry_view(Path(jobs)).completion_attempt(prior)
+    except FileNotFoundError:
+        return {}
+    if error or record is None or record.status != "done":
+        return {}
+    source = record.completion_metadata()
+    if not refused_candidate(source):
+        return {}
+    binding = source_binding(jobs, source)
+    if not binding or binding[1] != successor:
+        return {}
+    claim = _read(_record_path(jobs, binding[0])) or {}
+    if (claim.get("original_attempt_id") == prior and claim.get("replacement_attempt_id") == successor
+            and (claim.get("proof") or {}).get("death_kind") in {"silent", "runtime"}):
+        return source
+    return {}
+
+
+PROVIDER_REFUSAL_NO_ALTERNATIVE = "provider-refusal-no-alternative"
+
+
+def _fixed_provider_refusal(kind, source):
+    return (kind in {"silent", "runtime"} and source.get("worker_type") != "owner"
+            and refused_candidate(source) is not None)
+
+
+def _provider_refusal_attention(source):
+    return {"state": "needs-attention", "reason": PROVIDER_REFUSAL_NO_ALTERNATIVE,
+            "source_attempt_id": source["attempt_id"], "node": source.get("route_node") or "__owner__",
+            "failure": source["provider_failure_kind"], "detail": SAME_PROVIDER_REFUSAL}
+
+
 def _same_runtime_end(jobs, rows, source, *, explicit=False):
     """Whether `source` is itself a `runtime` replacement that ended on the same observed columns.
 
@@ -1389,6 +1460,11 @@ def _same_runtime_end(jobs, rows, source, *, explicit=False):
     if (record or {}).get('proof', {}).get('death_kind') != 'runtime':
         return False
     prior = rows[prior_id][1]
+    failed_pair, prior_pair = refused_candidate(source), refused_candidate(prior)
+    if failed_pair or prior_pair:
+        # The selector leaves out a refused pair, so a repeated pair cannot stop
+        # a refusal chain. A second refusal in a row returns to the parent.
+        return bool(failed_pair and prior_pair)
     return all(source.get(key, '') == prior.get(key, '')
                for key in ('failure_class', 'terminal_event', 'harness', 'model_profile'))
 
@@ -1607,8 +1683,9 @@ def accept_terminal_delivery_duty(jobs, aid):
         # only defer the notice: the parent gets the death notice and its `start`.
         return None
     try:
-        kind = death_kind(row[0], row[1], jobs=jobs)
-        if kind is None or kind in PAUSE_KINDS:
+        fields, source = row
+        kind = death_kind(fields, source, jobs=jobs)
+        if kind is None or kind in PAUSE_KINDS or _fixed_provider_refusal(kind, source):
             return None
         return claim(jobs, aid)
     except DC.DispatchContractError:
@@ -2975,11 +3052,15 @@ def _advance(jobs, aid, *, run=subprocess.run, authority_check=None, resume_capa
     rows = _rows(lines)
     if aid not in rows:
         return {'state':'unavailable','reason':'replacement-source-missing'}
-    if (recovery_delivery_state(jobs, aid) == 'settled'
-            and not (resume_capacity and _identity_refusal_reentry(
-                jobs, lines, aid, allow_registered=True))):
-        return {'state': 'not-applicable'}
     fields, source = rows[aid]
+    if recovery_delivery_state(jobs, aid) == "settled":
+        if not resume_capacity:
+            return {"state": "not-applicable"}
+        attention = _read(_directory(jobs) / "attention/by-source" / (_id(aid) + ".json")) or {}
+        can_reselect = (refused_candidate(source) is not None
+                        and (attention.get("attention") or {}).get("reason") == PROVIDER_REFUSAL_NO_ALTERNATIVE)
+        if not can_reselect and not _identity_refusal_reentry(jobs, lines, aid, allow_registered=True):
+            return {"state": "not-applicable"}
     unit = source.get('capability') == 'unit'
     if unit and not resume_capacity:
         # Unit carriers deliver the pause. Only the route's normal start can advance it.
@@ -3009,6 +3090,11 @@ def _advance(jobs, aid, *, run=subprocess.run, authority_check=None, resume_capa
                 or rows[binding[1]][1].get('launch_claimed') == '1')):
             # Nothing is launched yet: limit, drift and cleanup are judged before anything durable is written.
             _, current_route = _route(jobs, aid, source)
+            refused = refused_candidate(source) if kind in {"silent", "runtime"} else None
+            if not resume_capacity and _fixed_provider_refusal(kind, source):
+                # A direct or batch replay has fixed launch inputs. Let the
+                # caller see the failed pair before it chooses a new placement.
+                return _provider_refusal_attention(source)
             try:
                 restore = DC._route_module().restore_consumed_tombstones(current_route, jobs=Path(jobs))
                 if restore.get("errors"):
@@ -3020,9 +3106,9 @@ def _advance(jobs, aid, *, run=subprocess.run, authority_check=None, resume_capa
             moved = (route_authority.moved_owner_harness(current_route, launch_input(jobs, aid, source).get('harness'))
                      if source.get('worker_type') == 'owner' else None)
             hold_source = {**source, 'harness': moved, 'model': None} if moved else source
-            hold = _capacity_hold(jobs, hold_source, None if moved else _retry_model(source, kind),
-                                  allow_frame_peer=(kind == 'capacity'
-                                      and source.get('worker_type') == 'frame'))
+            hold = None if refused and source.get("worker_type") == "owner" else _capacity_hold(
+                jobs, hold_source, None if moved else _retry_model(source, kind),
+                allow_frame_peer=(kind == "capacity" and source.get("worker_type") == "frame"))
             if unit:
                 _settle_terminal_cleanup(jobs, rows, aid, source)
                 fields, source = _rows(registry_text(jobs))[aid]
@@ -3118,6 +3204,8 @@ def _advance(jobs, aid, *, run=subprocess.run, authority_check=None, resume_capa
             return {'state':'running','attempt_id':replacement,'record':record}
         output = '\n'.join(str(getattr(completed, name, '') or '') for name in ('stdout', 'stderr'))
         diagnostic = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
+        if diagnostic.get("reason") == PROVIDER_REFUSAL_NO_ALTERNATIVE and refused_candidate(source):
+            return _provider_refusal_attention(source)
         if (source.get('worker_type') == 'owner' or unit) and diagnostic.get('reason') in {
                 'no-eligible-candidate', 'no-eligible-route-evidence-candidate'}:
             # Use the ordinary selector's candidates. Only real limits on all of
@@ -3205,6 +3293,7 @@ def advance(jobs, aid, *, run=subprocess.run, authority_check=None, resume_capac
                 'replacement-human-gate-pending',
                 'replacement-workflow-not-open',
                 'pin-ignored-for-replacement',
+                PROVIDER_REFUSAL_NO_ALTERNATIVE,
             }
             or diagnostic.get('reason') in {
                 'replacement-registration-refused',
