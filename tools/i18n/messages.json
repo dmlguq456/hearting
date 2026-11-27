@@ -154,6 +154,10 @@
    "en": "{node} (selected {selected}, ran {ran})",
    "ko": "{node} (고른 등급 {selected} · 실제 {ran})"
   },
+  "completion.tier_note_more": {
+   "en": "+{count} more",
+   "ko": "외 {count}"
+  },
   "completion.unreadable": {
    "en": "Checks / remaining: the report's format differs, so no machine summary — read the report itself",
    "ko": "검증·남은 것: 보고서 형식이 달라 기계 요약 안 함 — 보고서 본문을 그대로 볼 것"

@@ -73,9 +73,12 @@ def top_stage_node(node) -> bool:
 # (2026-11-27 maintainer decision): the existing result lines -- the stage receipt, the degradation
 # ledger, the batch leg, the completion summary and `workflow-supervisor status` -- carry one
 # `tier_note`, `selected top, ran <what ran>`. Nothing is added where the stage was not a selected top
-# or ran a top model, so those lines stay byte for byte as they were.
+# or ran a top model, so those lines stay byte for byte as they were. The note is an observation and
+# never a step of the work: whatever cannot be read leaves it out (or says `tier unknown`).
 TIER_NOTE_KEY = "tier_note"
 _TIER_NOTE_HEAD = f"selected {TOP_PROFILE}, ran "
+_COLLAPSED = "collapsed-"
+UNKNOWN_TIER = "tier unknown"
 
 
 def top_stage_selected(node) -> bool:
@@ -83,33 +86,50 @@ def top_stage_selected(node) -> bool:
     return top_stage_node(node) and node.get("model_profile") == TOP_PROFILE
 
 
-def _ran_top(tier) -> bool:
-    # A `model/<name>` tier is a model the selected config names for `top` itself.
-    return tier == TOP_PROFILE or str(tier or "").startswith("model/")
+def ran_tier(observed) -> str | None:
+    """The tier a launch resolved for a selected `top`: "" when it kept top, None when unobserved.
+
+    ``observed`` is what the launch resolved -- a wrapper receipt's or a registry row's
+    `model_profile`, `model_tier` and `profile_granularity`. A `collapsed-<profile>-to-<tier>`
+    granularity names the tier the config folded the profile onto (OpenCode's top is its
+    balanced-deep), whatever model that tier names. Otherwise `top`, and a `model/<name>` the config
+    names for `top` itself, keep the selected tier; another profile ran that profile."""
+    observed = observed if isinstance(observed, Mapping) else {}
+    granularity = str(observed.get("profile_granularity") or "")
+    if granularity.startswith(_COLLAPSED) and "-to-" in granularity:
+        return granularity.split("-to-", 1)[1] or None
+    profile, tier = observed.get("model_profile"), str(observed.get("model_tier") or "")
+    if not tier:
+        return None
+    named = tier.startswith("model/")
+    if profile and profile != TOP_PROFILE:
+        return str(profile) if named else tier
+    return "" if tier == TOP_PROFILE or named else tier
 
 
-def tier_note(node, *, harness=None, tier=None, surface="registered", owner_harness=None,
-              owner_tier=None) -> str:
+def tier_note(node, *, surface="registered", harness=None, observed=None) -> str:
     """`selected top, ran <what ran>` for a selected-top stage that ran below top; "" otherwise.
 
-    ``surface`` is what ran it: ``registered`` (a registered worker: ``<harness> <tier>``, the
-    resolved `model_tier`), ``native`` (``<harness> native-subagent``: the native catalog has no top)
-    or ``inline`` (``inline (owner <harness> <tier>)``: the owner's own tier, so an owner running a
-    top model adds no note)."""
-    if not top_stage_selected(node):
+    ``surface`` is what ran it: ``registered`` (``<harness> <tier>`` from the worker's own
+    ``observed`` launch), ``native`` (``<harness> native-subagent``: the native catalog has no top) or
+    ``inline`` (``inline (owner <harness> <tier>)`` from the owner's ``observed`` launch, so an owner
+    running a top model adds no note, and an owner whose tier was not recorded reads `tier unknown`).
+    Nothing is read for a stage that was not selected at top, and nothing raises."""
+    try:
+        if not top_stage_selected(node):
+            return ""
+        if surface == "native":
+            return f"{_TIER_NOTE_HEAD}{harness or '-'} native-subagent"
+        tier = ran_tier(observed)
+        if tier == "":
+            return ""
+        if surface == "inline":
+            owner = f"{harness} {tier}" if harness and tier else (tier or (
+                f"{harness}, {UNKNOWN_TIER}" if harness else UNKNOWN_TIER))
+            return f"{_TIER_NOTE_HEAD}inline (owner {owner})"
+        return f"{_TIER_NOTE_HEAD}{harness} {tier}" if harness and tier else ""
+    except Exception:  # noqa: BLE001 -- an observation never stops or changes the work
         return ""
-    if surface == "native":
-        ran = f"{harness or '-'} native-subagent"
-    elif surface == "inline":
-        if _ran_top(owner_tier):
-            return ""
-        owner = " ".join(str(word) for word in (owner_harness, owner_tier) if word)
-        ran = f"inline (owner {owner})" if owner else "inline"
-    else:
-        if not harness or not tier or _ran_top(tier):
-            return ""
-        ran = f"{harness} {tier}"
-    return _TIER_NOTE_HEAD + ran
 
 
 def tier_note_ran(note) -> str:
@@ -120,36 +140,41 @@ def tier_note_ran(note) -> str:
 def top_stage_tier_notes(route, *, rows=(), degradations=()) -> list[dict]:
     """Every attempt or hop where a selected-top stage of ``route`` ran below top, in record order.
 
-    ``rows`` are registry metadata dicts (a registered worker's `harness` and `model_tier`);
-    ``degradations`` are degradation-ledger rows, whose `tier_note` the stage launcher wrote for a
-    native-subagent or inline hop. Each result is ``{"node", "attempt_id" | "fallback_hop",
-    "tier_note"}``; an empty list for a route with no selected-top stage."""
+    ``rows`` are registry metadata dicts: each registered attempt counts once, by its attempt id, from
+    its latest row. ``degradations`` are degradation-ledger rows; only a hop no registered worker ran
+    (`registered_worker=0`: native-subagent, inline) is read from there, since a registered launch's
+    own ledger row repeats what its registry row says. Each result is ``{"node", "attempt_id" |
+    "fallback_hop", "tier_note"}``; an empty list for a route with no selected-top stage."""
     nodes = {node["id"]: node for node in (route or {}).get("nodes") or ()
              if isinstance(node, dict) and top_stage_selected(node)}
     if not nodes:
         return []
     identity = (route.get("route_id"), route.get("route_hash"))
-    notes = []
+    latest, started = {}, set()
     for meta in rows:
-        node = nodes.get(meta.get("route_node")) if isinstance(meta, Mapping) else None
-        if (node is None or (meta.get("route_id"), meta.get("route_hash")) != identity
-                or meta.get("launch_started") != "1"):
+        if (not isinstance(meta, Mapping) or meta.get("route_node") not in nodes or not meta.get("attempt_id")
+                or (meta.get("route_id"), meta.get("route_hash")) != identity):
             continue
-        note = tier_note(node, harness=meta.get("harness"), tier=meta.get("model_tier"))
+        latest[meta["attempt_id"]] = meta
+        if meta.get("launch_started") == "1":
+            started.add(meta["attempt_id"])
+    notes = []
+    for attempt, meta in latest.items():
+        note = tier_note(nodes[meta["route_node"]], harness=meta.get("harness"), observed=meta) \
+            if attempt in started else ""
         if note:
-            notes.append({"node": node["id"], "attempt_id": meta.get("attempt_id") or "-", TIER_NOTE_KEY: note})
+            notes.append({"node": meta["route_node"], "attempt_id": attempt, TIER_NOTE_KEY: note})
+    events = set()
     for row in degradations:
         if (not isinstance(row, Mapping) or row.get("route_node") not in nodes
                 or (row.get("route_id"), row.get("route_hash")) != identity
-                or not tier_note_ran(row.get(TIER_NOTE_KEY))):
+                or str(row.get("registered_worker")) != "0" or not tier_note_ran(row.get(TIER_NOTE_KEY))
+                or (row.get("event_id") and row["event_id"] in events)):
             continue
+        events.add(row.get("event_id"))
         notes.append({"node": row["route_node"], "fallback_hop": row.get("fallback_hop") or "-",
                       TIER_NOTE_KEY: row[TIER_NOTE_KEY]})
-    unique = []
-    for note in notes:
-        if note not in unique:
-            unique.append(note)
-    return unique
+    return notes
 RESOLVER_VERSION = "profile-demand/v1"
 DEMAND_SCHEMA_VERSION = 1
 DEMAND_JUDGMENTS = ("predetermined", "important", "difficult-uncertain")

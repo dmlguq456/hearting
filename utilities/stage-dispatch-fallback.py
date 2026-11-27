@@ -90,7 +90,7 @@ from dispatch_attempt_policy import decide_attempt, committed_outcome, readable_
 from codex_dispatch_terminal import REVIEW_BLOCKING_NOTE  # noqa: E402
 from review_round_cap import classify_round_row  # noqa: E402
 from dispatch_degradation import record_degradation  # noqa: E402
-from model_profile import tier_note  # noqa: E402
+from model_profile import tier_note, top_stage_selected  # noqa: E402
 from dispatch_allocation_receipt import (  # noqa: E402
     changed_raw_headroom, raw_headroom_lines, record_allocation_receipt,
 )
@@ -1146,21 +1146,6 @@ def registry_has_attempt(jobs: Path, attempt_id: str) -> bool:
     return False
 
 
-def attempt_metadata(jobs: Path, attempt_id) -> dict[str, str]:
-    """The latest registry metadata of one attempt; {} when it has none (or no ID is given)."""
-    found: dict[str, str] = {}
-    if not attempt_id or not jobs.is_file():
-        return found
-    for line in jobs.read_text(encoding="utf-8", errors="replace").splitlines():
-        fields = line.split("\t")
-        if len(fields) != 6:
-            continue
-        metadata = dict(part.split("=", 1) for part in fields[5].split(",") if "=" in part)
-        if metadata.get("attempt_id") == attempt_id:
-            found = metadata
-    return found
-
-
 def settle_direct_timeout_attempt(jobs: Path, route: dict, node: dict, attempt_id: str) -> str:
     """Return absent, unstarted, or unknown for one exact timed-out launch row.
 
@@ -1220,7 +1205,8 @@ def _report_launched(args, route, node, allocation_context, row, hop, ordinal, a
     worker that already finished with a verdict."""
     watch_fields = watch_fields or {}
     # A selected-top stage the launched worker resolved below top (OpenCode's balanced-deep top).
-    note = tier_note(node, harness=row.get("child_harness"), tier=output_fields(output or "").get("model_tier"))
+    note = (tier_note(node, harness=row.get("child_harness"), observed=output_fields(output or ""))
+            if top_stage_selected(node) else "")
     print("check=ok")
     _emit_child_success(
         args, route, node, allocation_context, row,
@@ -1625,6 +1611,15 @@ def parent_attempt_generation(
     jobs: Path, parent_slug: str, route: dict
 ) -> str:
     """Resolve only the exact parent generation; candidate axes stay separate."""
+    return parent_attempt_row(jobs, parent_slug, route)[0]
+
+
+def parent_attempt_row(
+    jobs: Path, parent_slug: str, route: dict
+) -> tuple[str, dict[str, str]]:
+    """The exact parent generation and its latest registry metadata, from one read.
+
+    An inline hop later names the owner's own tier from this same row: it reads nothing again."""
 
     expected = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", "")
     latest: dict[str, tuple[str, str, str, dict[str, str]]] = {}
@@ -1656,7 +1651,7 @@ def parent_attempt_generation(
             "parent-attempt-not-found" if not candidates else "parent-attempt-ambiguous",
             parent_slug,
         )
-    return candidates[0]
+    return candidates[0], latest[candidates[0]][3]
 
 
 def _adapter_models_conf(harness: str) -> dict[str, str]:
@@ -2471,7 +2466,7 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
     except DISPATCH_NODE.DispatchNodeError as exc:
         return fail(exc.reason, 73, child_spawned="0", **exc.fields)
     try:
-        args.parent_attempt_id = parent_attempt_generation(
+        args.parent_attempt_id, args.parent_attempt_row = parent_attempt_row(
             args.jobs, args.parent, route
         )
     except DispatchContractError as exc:
@@ -3114,10 +3109,11 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                     return 78
                 attempts.append(f"{ordinal}:native-subagent:skipped-child-proof-missing")
         else:
-            owner_row = attempt_metadata(args.jobs, args.parent_attempt_id)
-            note = tier_note(node, surface="inline",
-                             owner_harness=owner_row.get("harness") or _owner_harness(fallback_hops, parent_identity),
-                             owner_tier=owner_row.get("model_tier") or route.get("owner_model_profile"))
+            # The owner's own tier, from the parent row resolved at the start (never re-read here).
+            note = (tier_note(node, surface="inline", observed=args.parent_attempt_row,
+                              harness=(args.parent_attempt_row.get("harness")
+                                       or _owner_harness(fallback_hops, parent_identity)))
+                    if top_stage_selected(node) else "")
             print("check=degraded")
             if note:
                 print(f"tier_note={note}")
