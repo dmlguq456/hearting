@@ -67,6 +67,89 @@ def top_stage_node(node) -> bool:
     is not one)."""
     return (isinstance(node, dict) and node.get("dispatch_depth") == 2
             and top_stage_node_type(node) in TOP_STAGE_WORKER_TYPES)
+
+
+# A stage the person sealed at `top` that runs on something other than a top model keeps going
+# (2026-11-27 maintainer decision): the existing result lines -- the stage receipt, the degradation
+# ledger, the batch leg, the completion summary and `workflow-supervisor status` -- carry one
+# `tier_note`, `selected top, ran <what ran>`. Nothing is added where the stage was not a selected top
+# or ran a top model, so those lines stay byte for byte as they were.
+TIER_NOTE_KEY = "tier_note"
+_TIER_NOTE_HEAD = f"selected {TOP_PROFILE}, ran "
+
+
+def top_stage_selected(node) -> bool:
+    """Whether the route sealed `top` for this person-named depth-2 stage or review node."""
+    return top_stage_node(node) and node.get("model_profile") == TOP_PROFILE
+
+
+def _ran_top(tier) -> bool:
+    # A `model/<name>` tier is a model the selected config names for `top` itself.
+    return tier == TOP_PROFILE or str(tier or "").startswith("model/")
+
+
+def tier_note(node, *, harness=None, tier=None, surface="registered", owner_harness=None,
+              owner_tier=None) -> str:
+    """`selected top, ran <what ran>` for a selected-top stage that ran below top; "" otherwise.
+
+    ``surface`` is what ran it: ``registered`` (a registered worker: ``<harness> <tier>``, the
+    resolved `model_tier`), ``native`` (``<harness> native-subagent``: the native catalog has no top)
+    or ``inline`` (``inline (owner <harness> <tier>)``: the owner's own tier, so an owner running a
+    top model adds no note)."""
+    if not top_stage_selected(node):
+        return ""
+    if surface == "native":
+        ran = f"{harness or '-'} native-subagent"
+    elif surface == "inline":
+        if _ran_top(owner_tier):
+            return ""
+        owner = " ".join(str(word) for word in (owner_harness, owner_tier) if word)
+        ran = f"inline (owner {owner})" if owner else "inline"
+    else:
+        if not harness or not tier or _ran_top(tier):
+            return ""
+        ran = f"{harness} {tier}"
+    return _TIER_NOTE_HEAD + ran
+
+
+def tier_note_ran(note) -> str:
+    """What ran, read back from a `tier_note`; "" for anything else."""
+    return note[len(_TIER_NOTE_HEAD):] if isinstance(note, str) and note.startswith(_TIER_NOTE_HEAD) else ""
+
+
+def top_stage_tier_notes(route, *, rows=(), degradations=()) -> list[dict]:
+    """Every attempt or hop where a selected-top stage of ``route`` ran below top, in record order.
+
+    ``rows`` are registry metadata dicts (a registered worker's `harness` and `model_tier`);
+    ``degradations`` are degradation-ledger rows, whose `tier_note` the stage launcher wrote for a
+    native-subagent or inline hop. Each result is ``{"node", "attempt_id" | "fallback_hop",
+    "tier_note"}``; an empty list for a route with no selected-top stage."""
+    nodes = {node["id"]: node for node in (route or {}).get("nodes") or ()
+             if isinstance(node, dict) and top_stage_selected(node)}
+    if not nodes:
+        return []
+    identity = (route.get("route_id"), route.get("route_hash"))
+    notes = []
+    for meta in rows:
+        node = nodes.get(meta.get("route_node")) if isinstance(meta, Mapping) else None
+        if (node is None or (meta.get("route_id"), meta.get("route_hash")) != identity
+                or meta.get("launch_started") != "1"):
+            continue
+        note = tier_note(node, harness=meta.get("harness"), tier=meta.get("model_tier"))
+        if note:
+            notes.append({"node": node["id"], "attempt_id": meta.get("attempt_id") or "-", TIER_NOTE_KEY: note})
+    for row in degradations:
+        if (not isinstance(row, Mapping) or row.get("route_node") not in nodes
+                or (row.get("route_id"), row.get("route_hash")) != identity
+                or not tier_note_ran(row.get(TIER_NOTE_KEY))):
+            continue
+        notes.append({"node": row["route_node"], "fallback_hop": row.get("fallback_hop") or "-",
+                      TIER_NOTE_KEY: row[TIER_NOTE_KEY]})
+    unique = []
+    for note in notes:
+        if note not in unique:
+            unique.append(note)
+    return unique
 RESOLVER_VERSION = "profile-demand/v1"
 DEMAND_SCHEMA_VERSION = 1
 DEMAND_JUDGMENTS = ("predetermined", "important", "difficult-uncertain")

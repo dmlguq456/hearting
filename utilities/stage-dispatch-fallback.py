@@ -90,6 +90,7 @@ from dispatch_attempt_policy import decide_attempt, committed_outcome, readable_
 from codex_dispatch_terminal import REVIEW_BLOCKING_NOTE  # noqa: E402
 from review_round_cap import classify_round_row  # noqa: E402
 from dispatch_degradation import record_degradation  # noqa: E402
+from model_profile import tier_note  # noqa: E402
 from dispatch_allocation_receipt import record_allocation_receipt  # noqa: E402
 from dispatch_allocation import effective_harness_weights, inert_allocation_keys  # noqa: E402
 import dispatch_launch_tuple as LAUNCH_TUPLE  # noqa: E402
@@ -925,7 +926,8 @@ def _recompute_verdicts_for_child(context, child_harness):
     return updated
 
 
-def _emit_child_success(args, route, node, context, row, *, attempt_id=None, fallback_hop=None):
+def _emit_child_success(args, route, node, context, row, *, attempt_id=None, fallback_hop=None,
+                        note=""):
     """Emit the allocation receipt and persist degradations for the actual child.
 
     Recomputes `parent_cross`/`sole_gate` from the launched
@@ -942,7 +944,7 @@ def _emit_child_success(args, route, node, context, row, *, attempt_id=None, fal
             context.get("sole_gate") or "ok"
         )
     emit_allocation(context)
-    _persist_parent_cross_ledger(args, route, node, context)
+    _persist_parent_cross_ledger(args, route, node, context, note=note)
     receipt = _persist_allocation_receipt(
         args, route, node, context, row, attempt_id=attempt_id, fallback_hop=fallback_hop,
     )
@@ -1007,7 +1009,7 @@ def emit_allocation(context: dict | None) -> None:
 TUPLE_FAILURE_CLASS = "launch-tuple"
 
 
-def _persist_parent_cross_ledger(args, route, node, context):
+def _persist_parent_cross_ledger(args, route, node, context, *, note=""):
     """Record SD-100 quality degradation after a realized child start.
 
     Best-effort (record_degradation swallows failures by design); the stdout
@@ -1030,6 +1032,7 @@ def _persist_parent_cross_ledger(args, route, node, context):
             reason="sole-gate-non-peer-harness",
             sole_gate="degraded",
             leg_class="peer",
+            tier_note=note or None,
         )
 
 
@@ -1139,6 +1142,21 @@ def registry_has_attempt(jobs: Path, attempt_id: str) -> bool:
     return False
 
 
+def attempt_metadata(jobs: Path, attempt_id) -> dict[str, str]:
+    """The latest registry metadata of one attempt; {} when it has none (or no ID is given)."""
+    found: dict[str, str] = {}
+    if not attempt_id or not jobs.is_file():
+        return found
+    for line in jobs.read_text(encoding="utf-8", errors="replace").splitlines():
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        metadata = dict(part.split("=", 1) for part in fields[5].split(",") if "=" in part)
+        if metadata.get("attempt_id") == attempt_id:
+            found = metadata
+    return found
+
+
 def settle_direct_timeout_attempt(jobs: Path, route: dict, node: dict, attempt_id: str) -> str:
     """Return absent, unstarted, or unknown for one exact timed-out launch row.
 
@@ -1197,14 +1215,18 @@ def _report_launched(args, route, node, allocation_context, row, hop, ordinal, a
     """The one success receipt of a launched attempt -- a plain start, or a
     worker that already finished with a verdict."""
     watch_fields = watch_fields or {}
+    # A selected-top stage the launched worker resolved below top (OpenCode's balanced-deep top).
+    note = tier_note(node, harness=row.get("child_harness"), tier=output_fields(output or "").get("model_tier"))
     print("check=ok")
     _emit_child_success(
         args, route, node, allocation_context, row,
-        attempt_id=attempt_id, fallback_hop=hop["fallback_hop"],
+        attempt_id=attempt_id, fallback_hop=hop["fallback_hop"], note=note,
     )
     print(f"selected_hop={hop['fallback_hop']}")
     print(f"fallback_ordinal={ordinal}")
     print(f"child_harness={row['child_harness']}")
+    if note:
+        print(f"tier_note={note}")
     print("launch_authority=conductor")
     print("broker_lifecycle=retired")
     print(f"attempt_id={attempt_id}")
@@ -3046,7 +3068,10 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                     continue
                 proof = native_child_proof(args, route, node)
                 if proof:
+                    note = tier_note(node, harness=candidate.get("harness"), surface="native")
                     print("check=degraded")
+                    if note:
+                        print(f"tier_note={note}")
                     print("selected_hop=native-subagent")
                     surface={"codex":"codex-native-subagent","claude":"claude-subagent"}.get(candidate["harness"])
                     if not surface:
@@ -3079,13 +3104,19 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                         ),
                         fallback_ordinal=ordinal, fleet_visibility="degraded",
                         registered_worker=0, route_file=str(args.route),
-                        completion_gate=node.get("completion_gate"),
+                        completion_gate=node.get("completion_gate"), tier_note=note or None,
                     )
                     print("degradation_ledger=" + (str(ledger) if ledger else "-"))
                     return 78
                 attempts.append(f"{ordinal}:native-subagent:skipped-child-proof-missing")
         else:
+            owner_row = attempt_metadata(args.jobs, args.parent_attempt_id)
+            note = tier_note(node, surface="inline",
+                             owner_harness=owner_row.get("harness") or _owner_harness(fallback_hops, parent_identity),
+                             owner_tier=owner_row.get("model_tier") or route.get("owner_model_profile"))
             print("check=degraded")
+            if note:
+                print(f"tier_note={note}")
             print("selected_hop=inline")
             print("execution_surface=inline")
             print("registered_worker=0")
@@ -3126,6 +3157,7 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                     f"{direct_failures[-1]['reason']}:exit-{direct_failures[-1]['exit']}"
                     if direct_failures else None
                 ),
+                tier_note=note or None,
             )
             print("degradation_ledger=" + (str(ledger) if ledger else "-"))
             next_line = inline_owner_next_line(route, node, args.route)

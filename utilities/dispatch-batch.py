@@ -2059,7 +2059,7 @@ def collect_wrapper(
 
 def wrapper_result(
     leg: dict[str, object], proc: subprocess.Popen, stdout: str, stderr: str,
-    *, completed_review: dict[str, object] | None = None,
+    *, completed_review: dict[str, object] | None = None, node: dict[str, object] | None = None,
 ) -> dict[str, object]:
     fields = output_fields(stdout + stderr)
     registered = fields.get("registered", "unknown")
@@ -2112,7 +2112,17 @@ def wrapper_result(
         **{key: fields[key] for key in
            ("model_profile", "model", "model_source", "model_diversity", "model_diversity_from")
            if fields.get(key)},
+        **_leg_tier_note(node, leg, fields, receipt_valid),
     }
+
+
+def _leg_tier_note(node, leg, fields, receipt_valid) -> dict[str, str]:
+    """`tier_note` for a selected-top leg whose worker resolved below top (an OpenCode top, a rotated pair)."""
+    if not receipt_valid or node is None:
+        return {}
+    from model_profile import TIER_NOTE_KEY, tier_note
+    note = tier_note(node, harness=fields.get("adapter") or leg.get("adapter"), tier=fields.get("model_tier"))
+    return {TIER_NOTE_KEY: note} if note else {}
 
 
 def existing_leg_result(
@@ -3991,7 +4001,10 @@ def main(argv: list[str] | None = None) -> int:
                                 replaced_attempt_id=str(partial["failed_source_attempt_id"]) if partial else "")
                             if checked and checked.get("review_verdict") == "FAIL":
                                 completed_review = checked
-                        result = wrapper_result(leg, proc, stdout, stderr, completed_review=completed_review)
+                        result = wrapper_result(
+                            leg, proc, stdout, stderr, completed_review=completed_review,
+                            node=next((item for item in route.get("nodes") or ()
+                                       if isinstance(item, dict) and item.get("id") == leg["node"]), None))
                         if result["launch_state"] == "existing":
                             checked = existing_leg_result(
                                 jobs,

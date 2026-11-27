@@ -1184,7 +1184,7 @@ def _entrance_line(route, primary, t):
 
 
 def completion_summary(route, primary, *, route_file=None, t=None, cost=None, corrections=None, assessment=None,
-                       publication=None, owner=None) -> str:
+                       publication=None, owner=None, tier_notes=None) -> str:
     """The runtime's close text for one completed owner: intent, result, cost, changes, checks, the rest.
 
     Every value comes from the sealed route, the route outcome, the registered
@@ -1194,6 +1194,8 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
     come from the shared UI-text catalog (`t`; English unless Korean is declared).
     A shared-spec `publication` the settlement observed as pending is named on
     one line right after the result: it does not hold the completion back.
+    `tier_notes` (`model_profile.top_stage_tier_notes`) name each stage the person selected at `top`
+    that ran below it, on one line beside the review-independence one.
     """
     t = t or ui_translator()
     request = route.get("work_request") if isinstance(route.get("work_request"), dict) else {}
@@ -1247,6 +1249,9 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
         lines.append(t("completion.unreadable"))
     if degraded:
         lines.append(t("completion.degraded", nodes=", ".join(degraded)))
+    tier_line = _tier_note_line(tier_notes, t)
+    if tier_line:
+        lines.append(tier_line)
     asked = request.get("text")
     published = report_publication(text, asked)
     if published:
@@ -1259,6 +1264,18 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
     lines.append(artifact + (" · PR " + " ".join(prs) if prs else ""))
     rendered = "\n".join(line for line in lines if line.strip())
     return rendered[:MAX_SUMMARY_CHARS].rstrip() + "\n" + _results_tables(text)
+
+
+def _tier_note_line(tier_notes, t) -> str:
+    """`Ran below the selected tier: <node> (selected top, ran <what ran>); ...`, or ""."""
+    from model_profile import TIER_NOTE_KEY, TOP_PROFILE, tier_note_ran
+    items = []
+    for item in tier_notes or ():
+        ran = tier_note_ran(item.get(TIER_NOTE_KEY)) if isinstance(item, dict) else ""
+        text = t("completion.tier_note_item", node=item.get("node") or "-", selected=TOP_PROFILE, ran=ran) if ran else ""
+        if text and text not in items:
+            items.append(text)
+    return t("completion.tier_note", items="; ".join(items)) if items else ""
 
 
 def completion_line(summary: str, t=None) -> str | None:
