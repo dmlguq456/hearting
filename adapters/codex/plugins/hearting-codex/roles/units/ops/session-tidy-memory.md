@@ -75,9 +75,9 @@ only — no Markdown fence, no prose:
   and declare exactly one purpose per new record through `type`: `decision` (a choice
   with its reason, including durable preferences and lessons that changed what to do),
   `user-correction` (the user corrected the agent's understanding or behavior),
-  `unresolved-obligation` (something promised or left open), or `artifact-pointer`
-  (where the real content lives and why to look). Never copy a summary of a document,
-  plan or report that already exists — point to it.
+  `unresolved-obligation` (something promised or left open), `artifact-pointer`
+  (where the real content lives and why to look), or `observation` for the reference below.
+  Never copy a summary of a document, plan or report that already exists — point to it.
 - For an open obligation, use the conversation to identify the session that owes the
   next action. Copy that session's `owner` from `obligation_owners` when adding or
   replacing an open record. The session whose transcript contains a quote, the

@@ -703,6 +703,8 @@ def _steward(scenario: Scenario) -> dict:
     ledger.mkdir()
     os.environ["AGENT_PEER_LEDGER_ROOT"] = str(ledger)
     store = peer_obligations.ObligationStore(ledger)
+    # Measure the frozen base as well as trees that carry the owner with each record.
+    open_work_item = getattr(SC, "OpenWork", str)
     seen = {"targets": [], "pending_messages": 0, "open_work": []}
     patches = [mock.patch.object(SC, "_role_held", return_value={"held": True, "reason": None, "successor": None}),
                mock.patch.object(SC, "_role_flagged", return_value=True),
@@ -722,7 +724,7 @@ def _steward(scenario: Scenario) -> dict:
         interval = SC.interval_seconds()
         SC.register(harness, sid, now=start, store=store, ensure_runner=False)
         for index, (label, targets, records) in enumerate(STEWARD_STEPS, start=1):
-            seen.update(targets=targets, open_work=records)
+            seen.update(targets=targets, open_work=[open_work_item(headline) for headline in records])
             before = notify.call_count
             duty = store.get(SC.duty_id(harness, sid))
             # Each check runs one interval after the previous one settled (the ack restarts it).
