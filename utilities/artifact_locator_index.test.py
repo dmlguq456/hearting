@@ -1603,13 +1603,17 @@ class BeginBesideARequestTest(Q.S.SourceRepoStartBase):
 
             def scene(journal, then, tag, here=here, away=away):
                 here.rename(away)
-                self._locked(lambda: loc.rebuild_indexes(self.root))
-                self.assertNotIn(execution["cycle_id"], self._rows())
-                self._hand_write_begin(frame, lambda: away.rename(here), journal=journal)
-                self.assertEqual(self.update_scans, [[camp_dir.name]])
-                self.assertEqual(self._rows()[execution["cycle_id"]]["path"],
-                                 folder.relative_to(self.root).as_posix())   # walked again, as main
-                self._then(frame, then)
+                try:
+                    self._locked(lambda: loc.rebuild_indexes(self.root))
+                    self.assertNotIn(execution["cycle_id"], self._rows())
+                    self._hand_write_begin(frame, lambda: away.rename(here), journal=journal)
+                    self.assertEqual(self.update_scans, [[camp_dir.name]])
+                    self.assertEqual(self._rows()[execution["cycle_id"]]["path"],
+                                     folder.relative_to(self.root).as_posix())   # walked again, as main
+                    self._then(frame, then)
+                finally:   # each round starts from the request as it was, whatever this one did
+                    if not here.exists():
+                        away.rename(here)
             with self.subTest(away=away.name):
                 self._each_scene(scene)
 
@@ -1622,12 +1626,15 @@ class BeginBesideARequestTest(Q.S.SourceRepoStartBase):
             def link_it():
                 internal.rename(away)
                 internal.symlink_to(away.name)
-            self._hand_write_begin(frame, link_it, journal=journal, refused="request-members-unreadable")
-            self.assertEqual(self.update_scans, [[camp_dir.name]])   # not `begun`
-            self._then(frame, then, refused="request-members-unreadable")
-            internal.unlink()   # the next round starts clean
-            away.rename(internal)
-            self._locked(lambda: loc.rebuild_indexes(self.root))
+            try:
+                self._hand_write_begin(frame, link_it, journal=journal, refused="request-members-unreadable")
+                self.assertEqual(self.update_scans, [[camp_dir.name]])   # not `begun`
+                self._then(frame, then, refused="request-members-unreadable")
+            finally:   # each round starts from the request as it was, whatever this one did
+                if internal.is_symlink():
+                    internal.unlink()
+                    away.rename(internal)
+                self._locked(lambda: loc.rebuild_indexes(self.root))
         self._each_scene(scene)
 
 
