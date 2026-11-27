@@ -11,8 +11,12 @@
     names NEW's number and context while the link holds, and the original's again when the viewer's
     record no longer holds the job; a row still addressed to the old id that was made after the
     stand-in started is delivered to NEW through the installed hook boundary, once, and one made
-    before it is not.  Claude's own agent view that keeps a viewer needs a subscription login and
-    is not started: the stand-in carries the two facts the link reads, nothing else of it.
+    before it is not.  Ownership (11-27): the stand-in runs the installed SessionStart hook
+    (``source=fork``) as its own child, as the background process would; afterwards a request
+    addressed to the old id, the old id's steward marker and its watch answer for NEW, and the
+    transition row is written once.  Claude's own agent view that keeps a viewer needs a
+    subscription login and is not started: the stand-in carries the two facts the link reads,
+    nothing else of it.
 
     python3 utilities/harness_behavior_scenarios.py --scenario parked-panel --harness claude \
         --session-shell --output-dir DIR
@@ -34,7 +38,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness_behavior_scenarios import Reply, Scenario, wait_for  # noqa: E402
 from harness_behavior_cases_b import fixture_python, session_id  # noqa: E402
 
-SLEEP = "import time; time.sleep(900)"
+# The background stand-in: it runs what it is handed as its own child (a hook of the session it
+# stands for), so the hook finds this process as its runtime, as under the real daemon.
+STANDIN = r"""
+import json, os, subprocess, sys, time
+inbox = os.environ.get("PARKED_STANDIN_INBOX", "")
+deadline = time.time() + 900
+while time.time() < deadline:
+    for name in sorted(os.listdir(inbox)) if inbox and os.path.isdir(inbox) else ():
+        if not name.endswith(".job"):
+            continue
+        path = os.path.join(inbox, name)
+        job = json.load(open(path))
+        os.unlink(path)
+        done = subprocess.run(job["argv"], input=job.get("stdin", ""), text=True, capture_output=True,
+                              env=job["env"], cwd=job["cwd"], timeout=60)
+        out = path[:-4] + ".out"
+        with open(out + ".tmp", "w") as handle:
+            json.dump({"rc": done.returncode, "stdout": done.stdout[-4000:], "stderr": done.stderr[-4000:]}, handle)
+        os.replace(out + ".tmp", out)
+    time.sleep(0.1)
+"""
 JOB = "e675a253"
 
 SEED_CODE = r"""
@@ -74,6 +98,57 @@ for _ in range(2):
 print(json.dumps({"first": out[0][:60], "second": out[1],
                   "states": {"after": pm._read_pending(after)["state"],
                              "before": [pm._read_pending(r)["state"] for r in before]}}))
+"""
+
+
+OWN_CODE = r"""
+import json, uuid
+import peer_request as pr
+import session_tidy as tidy
+pm = load("_peer_message_parked_own", "utilities/peer-message.py")
+old = args["old"]
+native = tidy._native_session_key("claude", old)
+seat = ""
+for path in sorted((tidy.state_root() / "sessions").glob("*.jsonl")):
+    if path.stem != native and any(old in line for line in path.read_text().splitlines()):
+        seat = path.stem
+        break
+worker = str(uuid.uuid4())
+marker = pm.steward_marker_path("claude", old)
+marker.parent.mkdir(parents=True, exist_ok=True)
+marker.write_text(json.dumps({"schema_version": 1, "harness": "claude", "session_id": old,
+    "since": "2026-11-27T00:00:00Z", "generation": "parked-own-1127", "seat_key": seat,
+    "targets": {worker: {"harness": "codex", "session_id": worker, "source": "explicit",
+                         "kind": "explicit", "ts": "2026-11-27T00:00:00Z"}}}))
+watches = pm.peer_state_root() / "peer-watches"
+watches.mkdir(parents=True, exist_ok=True)
+(watches / "parked-own-watch.json").write_text(json.dumps({"watch_id": "parked-own-watch",
+    "steward": {"harness": "claude", "session_id": old}, "steward_seat": {"key": seat},
+    "server": "default", "target": "w9:p9", "agent": {"harness": "codex", "session_id": worker},
+    "until": ["done"], "armed_ts": "2026-11-27T00:00:00Z", "deadline": None}))
+record, _entry = pr.open_request({"harness": "claude", "session_id": str(uuid.uuid4()), "name": None},
+                                 {"harness": "claude", "session_id": old, "name": None}, title="PARKED-REQUEST")
+print(json.dumps({"seat": seat, "request": record["id"]}))
+"""
+
+OWNED_CODE = r"""
+import json
+import peer_request as pr
+import dispatch_seat_handover as handover
+import session_tidy as tidy
+old, new, request = args["old"], args["new"], args["request"]
+rows = set()
+for path in (tidy.state_root() / "sessions").glob("*.jsonl"):
+    for line in path.read_text().splitlines():
+        if '"parked-fork"' in line:
+            rows.add(json.loads(line).get("snapshot_id"))
+watch = handover.resolve_watch("parked-own-watch") or {}
+print(json.dumps({"rows": len(rows),
+                  "request_follows": pr.follow({"harness": "claude", "session_id": old})["session_id"] == new,
+                  "request_listed_for_new": request in [r["id"] for r in pr.session_requests("claude", new)["in"]],
+                  "steward_new": bool(handover.resolved_steward_relations("claude", new)),
+                  "steward_old": bool(handover.resolved_steward_relations("claude", old)),
+                  "watch_holder_new": (watch.get("holder") or {}).get("sid") == new}))
 """
 
 
@@ -124,10 +199,12 @@ class ParkedPanel(Scenario):
             link.symlink_to(sys.executable)
         config = Path(run.home.env["CLAUDE_CONFIG_DIR"])
         transcript = config / "projects" / "fixture" / (old + ".jsonl")
+        inbox = Path(run.home.root) / "standin" / "inbox"
+        inbox.mkdir(exist_ok=True)
         child = subprocess.Popen(
-            [str(link), "-c", SLEEP, "--session-id", new, "--fork-session", "--resume", str(transcript)],
-            env=run.home.env, cwd=str(run.home.workspace), stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            [str(link), "-c", STANDIN, "--session-id", new, "--fork-session", "--resume", str(transcript)],
+            env={**run.home.env, "PARKED_STANDIN_INBOX": str(inbox)}, cwd=str(run.home.workspace),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         run.standins = [child]
         stat = Path("/proc/%d/stat" % child.pid).read_text().rsplit(")", 1)[1].split()
         start = stat[19]
@@ -174,10 +251,41 @@ class ParkedPanel(Scenario):
         run.evidence["delivered_once_after_start_only"] = bool(delivered)
         changed = before != after
         run.evidence["screen_changed_by_link"] = changed
-        ok = bool(followed and back and delivered and changed)
+        # Ownership: the old id's request, steward marker and watch; then NEW's own start hook.
+        own = fixture_python(run, OWN_CODE, {"old": old})
+        run.evidence["owned_by_old"] = own
+        hooked = self._standin_hook(run, inbox, {"session_id": new, "hook_event_name": "SessionStart",
+                                                 "source": "fork", "cwd": str(run.home.workspace)})
+        again = self._standin_hook(run, inbox, {"session_id": new, "hook_event_name": "UserPromptSubmit",
+                                                "prompt": "PARKED-NEXT", "cwd": str(run.home.workspace)})
+        run.evidence["standin_hooks"] = [hooked, again]
+        owned = fixture_python(run, OWNED_CODE, {"old": old, "new": new,
+                                                 "request": str((own or {}).get("request") or "")})
+        run.evidence["owned_after_new_hook"] = owned
+        moved = bool(owned and owned.get("rows") == 1 and owned.get("request_follows")
+                     and owned.get("request_listed_for_new") and owned.get("steward_new")
+                     and not owned.get("steward_old") and owned.get("watch_holder_new"))
+        run.evidence["ownership_followed"] = moved
+        ok = bool(followed and back and delivered and changed and moved)
         if not ok:
-            run.note("followed=%s returned=%s delivered=%s" % (followed, back, delivered))
+            run.note("followed=%s returned=%s delivered=%s ownership=%s" % (followed, back, delivered, moved))
         return "pass" if ok else "fail"
+
+    def _standin_hook(self, run, inbox, payload):
+        """Run the installed Claude hook for ``payload`` as a child of the background stand-in."""
+        config = Path(run.home.env["CLAUDE_CONFIG_DIR"])
+        env = {key: value for key, value in run.home.env.items()
+               if not key.startswith(("HEARTING_SHELL_", "HERDR_"))}
+        name = "%d-%s" % (time.time_ns(), uuid.uuid4().hex[:6])
+        job = {"argv": ["sh", str(config / "hooks" / "run-hook.sh"), "bash", "session-card-inject.sh"],
+               "stdin": json.dumps(payload), "env": env, "cwd": str(run.home.workspace)}
+        tmp = inbox / (name + ".tmp")
+        tmp.write_text(json.dumps(job))
+        os.replace(tmp, inbox / (name + ".job"))
+        out = inbox / (name + ".out")
+        if not wait_for(out.exists, 60):
+            return {"rc": None, "reason": "the stand-in did not run the hook"}
+        return json.loads(out.read_text())
 
 
 SCENARIOS = (ParkedPanel,)

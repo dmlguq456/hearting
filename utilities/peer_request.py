@@ -359,7 +359,7 @@ def _predecessors(harness, sid):
         context = PeerReadContext(compact_lineage=True)
         graph = handover.lineage_graph(read_context=context)
         reverse = {}
-        for edge_harness, origin, target in graph.edges:
+        for edge_harness, origin, target in handover.lineage_edges(graph):
             if edge_harness == harness:
                 reverse.setdefault(target, set()).add(origin)
         found, pending = [], list(reverse.get(sid, ()))

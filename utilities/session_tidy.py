@@ -1742,7 +1742,9 @@ def confirmed_predecessor_identity(seat: Seat, harness: str, sid: str) -> Option
     predecessors = set()
     for row in _read_ledger_lines(seat):
         if (row.get("event") not in {"handover", "succession"}
-                or (row.get("harness"), row.get("sid")) != (harness, sid)):
+                or (row.get("harness"), row.get("sid")) != (harness, sid)
+                or row.get("source") == "parked-fork"):
+            # A parked fork carries the whole conversation; no predecessor card is owed to it.
             continue
         old = row.get("from")
         if isinstance(old, dict):
@@ -4070,6 +4072,18 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                     # Keep the shared writer's confirmed edge in this exact native ledger
                     # as well as its physical seat ledger for current seat-scoped readers.
                     _append_ledger_entry(physical_seat(seat), handed)
+        if handed is None and harness == "claude" and seat.kind in ("pane", "native") \
+                and event in ("start", "prompt"):
+            # A window's conversation sent to the background continues here under this new id:
+            # its one transition row, written only when both live facts say so (the shared
+            # writer re-reads them). It is not a clear: no card, number or release follows it.
+            with contextlib.suppress(BaseException):    # a hook never fails for the parked link
+                import dispatch_seat_handover as handover
+                held = {key for item in state_seats for key in (seat_state_key(item), item.key) if key}
+                parked = handover.record_parked_fork(seat, harness, sid, event, source, now,
+                                                     held_keys=held)
+                if parked:
+                    _append_ledger_entry(physical_seat(seat), parked)
         if (seat.kind in ("pane", "native")
                 and ((event == "start" and source == "clear") or handed or appended)):
             with contextlib.suppress(BaseException):    # a hook never fails for the seat number

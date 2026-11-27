@@ -248,7 +248,23 @@ substitutes for the current per-record recipient judgment. Derived recipient inb
 previous authority semantics are rebuilt through normal reconciliation.
 Only tidy-created succession and handover rows are lineage edges; manual
 `/clear`, chronological neighbors, pane aliases, and card text do not create
-edges. Unclear liveness or lineage remains unresolved. Existing activation,
+edges. Unclear liveness or lineage remains unresolved.
+
+One fork is recorded. Claude's send-to-background (`/bg`) continues the
+conversation under a new session id in a daemon-run process and leaves the
+window's process as a viewer. When the new session's own start, or its first
+prompt, sees both live facts (the viewer's record holds the background job,
+and that background process resumes the viewer's session), it writes one
+`parked-fork` handover row. The row binds what the original session answered
+for at that moment: its depth-1 jobs and its steward roles and watches. Other
+records addressed to the original session follow the row only while that same
+link is live, so they stay with the original once the window takes its
+conversation back or the background process ends, and they stay unresolved
+while the viewer holds a different background session. A deliberate
+`--fork-session`, a background session started elsewhere, a second background
+fork of the same session, an original that already has a successor, a reused
+process or an unreadable record writes nothing. The row grants no card, seat
+number or release; a message question keeps its exact original recipient. Existing activation,
 prompt, and runner sweeps discover open records that have no retained duty.
 New notices retain a duty when written so an idle recipient can be woken.
 
