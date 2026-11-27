@@ -44,10 +44,9 @@ _CONTENT_REFUSALS = frozenset({
 _PROVIDER_FAILURE_KINDS = frozenset({
     # Codex app-server CodexErrorInfo, including the keys of structured variants.
     "contextWindowExceeded", "sessionBudgetExceeded", "usageLimitExceeded",
-    "apiKeySpendLimitExceeded", "projectSpendLimitExceeded", "organizationSpendLimitExceeded",
     "rateLimitExceeded", "flexUnavailable", "serverOverloaded", "modelNotFound",
     "policyCapacityUnavailable", "inferenceHookDenied", "tooManyDenials",
-    "internalServerError", "unauthorized", "badRequest", "invalidPrompt",
+    "internalServerError", "unauthorized", "badRequest",
     "threadRollbackFailed", "sandboxError", "other", "httpConnectionFailed",
     "responseStreamConnectionFailed", "responseStreamDisconnected",
     "responseTooManyFailedAttempts", "activeTurnNotSteerable",

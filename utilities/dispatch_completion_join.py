@@ -120,7 +120,6 @@ from dispatch_contract import (  # noqa: E402
 import dispatch_pending_delivery as pending_delivery  # noqa: E402
 import dispatch_subsession_advance as subsession_advance  # noqa: E402
 from codex_dispatch_terminal import (  # noqa: E402
-    ARTIFACT_HINT_KEYS,
     REVIEW_BLOCKING_NOTE,
     review_blocking_handoff,
     inspect_terminal_attempt,
@@ -131,7 +130,7 @@ from dispatch_attempt_policy import (  # noqa: E402
     SAME_PROVIDER_REFUSAL, content_refusal, provider_failure_kind,
 )
 from dispatch_supervisor_terminal import (  # noqa: E402
-    classify_supervisor_log, logged_provider_failure_kind, missing_result_terminal,
+    classify_supervisor_log, missing_result_terminal,
 )
 from dispatch_registry_cache import registry_lines, registry_snapshot, registry_view  # noqa: E402
 
@@ -1259,7 +1258,6 @@ class CurrentDeliveryState:
     cancellation_requested: bool = False
     workflow_state: str = "complete"
     workflow_reason: str = ""
-    provider_failure_kind: str = ""
 
 
 def _delivery_choice(state, *, blocked_reason=""):
@@ -1318,10 +1316,10 @@ def previous_harvest_wording(text: str) -> str:
     return text.replace(current, previous)
 
 
-def _child_note(jobs: str, child) -> str | None:
-    """The registry note of one receipt child (None when the row cannot be read)."""
+def _child_note(jobs: str, child, key: str = "note") -> str | None:
+    """One registry value of a receipt child, its note by default (None when the row cannot be read)."""
     try:
-        return exact_attempt_row(Path(jobs), child["attempt_id"]).metadata.get("note")
+        return exact_attempt_row(Path(jobs), child["attempt_id"]).metadata.get(key)
     except (OSError, ValueError, KeyError, JoinContractError):
         return None
 
@@ -1460,14 +1458,17 @@ def unit_leg_reason_line(metadata) -> str:
     return f"Reason: {reason}"
 
 
-def completion_followup_text(receipt: dict, *, jobs: str) -> str:
+def completion_followup_text(receipt: dict, *, jobs: str, include_provider_failure: bool = True) -> str:
+    if not include_provider_failure:
+        return _completion_work_followup(receipt, jobs=jobs)
     lines = []
     refused = False
     for child in receipt.get("children") or ():
-        kind = provider_failure_kind(child.get("provider_failure_kind"))
-        if child.get("required_action") == "inspect-done-failure" and kind:
-            lines.append(f"Provider failure for {child['attempt_id']} was {kind}.")
-            refused = refused or content_refusal(kind)
+        # The receipt keeps its delivery identity; the closed row holds the kind.
+        if child.get("required_action") == "inspect-done-failure" and jobs:
+            if kind := provider_failure_kind(_child_note(jobs, child, "provider_failure_kind")):
+                lines.append(f"Provider failure for {child['attempt_id']} was {kind}.")
+                refused = refused or content_refusal(kind)
     if refused:
         lines.append(SAME_PROVIDER_REFUSAL)
     lines.append(_completion_work_followup(receipt, jobs=jobs))
@@ -2066,11 +2067,8 @@ def receipt_with_delivery_observability(
         child["status"] = state.status
         child["delivery_classification"] = classification
         child["required_action"] = choice.next_action
-        child.pop("provider_failure_kind", None)
         if classification == "attention":
             child["reason"] = choice.reason or "terminal-failure-or-unclosed"
-            if choice.next_action == "inspect-done-failure" and state.provider_failure_kind:
-                child["provider_failure_kind"] = state.provider_failure_kind
         elif state.advanced:
             child["reason"] = "row-advanced"
         # Information only: the approved route plan's next leg, never a launch or an action.
@@ -4081,8 +4079,6 @@ def current_delivery_state(
         workflow_complete=completion.settled,
         workflow_state=completion.state,
         workflow_reason=completion.reason,
-        provider_failure_kind=(provider_failure_kind(current.metadata.get("provider_failure_kind"))
-                               if current is not None else ""),
     )
 
 
@@ -4654,9 +4650,6 @@ def _join_snapshot(
                     "readiness": readiness,
                     "reason": reason,
                     "required_action": choice.next_action,
-                    **({"provider_failure_kind": kind}
-                       if choice.next_action == "inspect-done-failure"
-                       and (kind := provider_failure_kind(row.metadata.get("provider_failure_kind"))) else {}),
                 }
             )
         current_attempt_ids = {child["attempt_id"] for child in children}
@@ -5182,7 +5175,7 @@ def classify_exact_route_free_support_outcome(
     if terminal.reconcile_reason in {
         "terminal-log-missing", "terminal-log-unreadable", "terminal-event-missing",
     }:
-        terminal = missing_result_terminal(row.metadata)
+        terminal = missing_result_terminal(row.metadata, provider_kind=terminal.provider_failure_kind)
     if terminal.note == "completed-supervisor" and terminal.failure_class == "pass":
         return ExactReviewClassification("done", "support-supervisor-pass", terminal.note,
                                          "typed-close", terminal.evidence())
@@ -5346,11 +5339,9 @@ def classify_exact_route_free_review_outcome(
         )
     if sealed is not None and sealed["foreground_process_failure"] != "none":
         failure = sealed["foreground_process_failure"]
-        reason, note = f"foreground-process-{failure}", f"dead-{failure}"
-        evidence = review_terminal_evidence(note, reason)
-        if failure.startswith("exit-") and (kind := logged_provider_failure_kind(row.metadata)):
-            evidence["provider_failure_kind"] = kind
-        return ExactReviewClassification("terminal-handoff", reason, note, "typed-close", evidence)
+        return ExactReviewClassification(
+            "terminal-handoff", f"foreground-process-{failure}", f"dead-{failure}", "typed-close"
+        )
     metadata = row.metadata
     terminal = inspect_terminal_attempt(
         metadata.get("log_file"),
@@ -5365,11 +5356,13 @@ def classify_exact_route_free_review_outcome(
         note, evidence = choice.detail, choice.census
         reason = choice.reason
         if choice.state == "absent":
-            result = missing_result_terminal({**metadata, "worktree": _row_worktree(row), "started_at": raw_fields[0]})
+            result = missing_result_terminal(
+                {**metadata, "worktree": _row_worktree(row), "started_at": raw_fields[0]},
+                provider_kind=str(terminal.get("provider_failure_kind") or ""))
             note, evidence = result.note, result.evidence()
         if choice.state in {"absent", "invalid"} and terminal.get("state") != "valid":
             reason = str(terminal.get("reason") or "terminal-" + str(terminal.get("state") or "absent"))
-        if kind := provider_failure_kind(terminal.get("provider_failure_kind")):
+        if choice.state != "absent" and (kind := terminal.get("provider_failure_kind")):
             evidence = {**(evidence or review_terminal_evidence(note, reason)), "provider_failure_kind": kind}
         return ExactReviewClassification("terminal-handoff", reason, note, "typed-close", evidence)
     artifact, evidence_reason = route_completion_evidence(
@@ -5576,8 +5569,15 @@ def close_finished_child(
         if choice.next_action != "typed-close":
             return choice.reason
         note, evidence, reason = choice.detail, choice.census, choice.reason
-        if choice.state == "typed":
-            from foreground_terminal import terminal_evidence
+        from foreground_terminal import capacity_evidence, terminal_evidence, terminal_log_evidence
+        classifier_source = INVALID_ENVELOPE_CLASSIFIER_SOURCE
+        if choice.state == "typed" and note == "dead-capacity":
+            reason = f"terminal-invalid:{terminal.get('reason') or 'claude-result-capacity'}"
+            classifier_source = "completion-join-native-capacity-v1"
+            evidence = capacity_evidence(terminal, metadata.get("log_file"))
+            evidence.update(terminal_log_evidence(terminal))
+        elif choice.state == "typed":
+            classifier_source = "completion-join-terminal-verdict-v1"
             evidence = {**terminal_evidence(terminal, note, metadata.get("log_file")),
                         **(evidence or {})}
             # SD-124 preserves the foreground wrapper's fail axis, but the
@@ -5585,32 +5585,17 @@ def close_finished_child(
             # note and exact artifact, without a failure_class annotation.
             if note == REVIEW_BLOCKING_NOTE:
                 evidence.pop("failure_class", None)
-        if choice.state == "absent":
-            missing = missing_result_terminal({**metadata, "worktree": _row_worktree(row),
-                                              "started_at": row.raw.split("\t")[0]})
+        elif choice.state == "absent":
+            classifier_source = "completion-join-missing-result-v1"
+            missing = missing_result_terminal(
+                {**metadata, "worktree": _row_worktree(row), "started_at": row.raw.split("\t")[0]},
+                provider_kind=str(terminal.get("provider_failure_kind") or ""))
             note, evidence, reason = missing.note, missing.evidence(), "terminal-envelope-absent"
         elif choice.state in {"invalid", "evidence"}:
-            evidence = {key: str(terminal.get(key) or "") for key in ARTIFACT_HINT_KEYS}
-        kind = provider_failure_kind(terminal.get("provider_failure_kind"))
-        if kind:
-            evidence = {**(evidence or {}), "provider_failure_kind": kind}
-        if choice.state == "typed" and note == "dead-capacity":
-            from foreground_terminal import capacity_evidence
-            reason = f"terminal-invalid:{terminal.get('reason') or 'claude-result-capacity'}"
-            if _close_invalid_envelope_child(
-                    row, jobs=jobs, reason=reason, note="dead-capacity",
-                    classifier_source="completion-join-native-capacity-v1",
-                    terminal_envelope=True, extra_evidence={
-                        **capacity_evidence(terminal, metadata.get("log_file")),
-                        **({"provider_failure_kind": kind} if kind else {}),
-                    }):
-                return ""
-            return choice.reason
+            evidence = terminal_log_evidence(terminal)
         if _close_invalid_envelope_child(row, jobs=jobs, reason=reason, note=note,
-            classifier_source="completion-join-terminal-verdict-v1" if choice.state == "typed"
-                              else "completion-join-missing-result-v1" if choice.state == "absent"
-                              else "completion-join-invalid-envelope-v1",
-            terminal_envelope=choice.state != "absent", extra_evidence=evidence):
+            classifier_source=classifier_source, terminal_envelope=choice.state != "absent",
+            extra_evidence=evidence):
             return ""
         return choice.reason
     artifact, evidence_reason = route_completion_evidence(

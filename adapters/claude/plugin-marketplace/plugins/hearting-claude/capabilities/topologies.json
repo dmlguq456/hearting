@@ -161,7 +161,7 @@
             "id": "apply",
             "kind": "pipeline-stage",
             "depends_on": [],
-            "role": "fast implementer",
+            "role": "deep editor",
             "inputs": [
               "cheatsheet",
               "target-artifact"
@@ -182,7 +182,7 @@
               "cross-harness-headless",
               "inline"
             ],
-            "unit": "dev/refactor",
+            "unit": "editorial/write",
             "model_profile": "light",
             "continuation": {
               "kind": "inline-next"
@@ -1462,7 +1462,7 @@
             "depends_on": [
               "strategy-review"
             ],
-            "role": "deep maker",
+            "role": "deep editor",
             "inputs": [
               "evidence-map",
               "strategy"
@@ -1482,7 +1482,7 @@
               "cross-harness-headless",
               "inline"
             ],
-            "unit": "research/research-survey",
+            "unit": "editorial/write",
             "model_profile": "balanced-deep",
             "continuation": {
               "kind": "inline-next"
@@ -4448,7 +4448,7 @@
     },
     "draft-production": {
       "kind": "unit-io",
-      "unit": "research/research-survey"
+      "unit": "editorial/write"
     },
     "draft-quality-review": {
       "kind": "unit-io",

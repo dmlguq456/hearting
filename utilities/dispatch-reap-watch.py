@@ -430,8 +430,10 @@ def watch(args: argparse.Namespace) -> int:
             ).deferred
         )
 
-    # One classifier closes a missing result and retains any provider kind
-    # observed in this exact attempt's terminal log.
+    # One classifier decides what "no result" means: a plain dead-missing-
+    # result for every harness but OpenCode, or -- when the attempt's exact
+    # session binds to one session-scoped ERROR line in the OpenCode server
+    # log -- a typed capacity/auth close with capacity_log evidence attached.
     terminal = missing_result_terminal(
         {**metadata, "worktree": fields[3], "started_at": fields[0]}
     )
