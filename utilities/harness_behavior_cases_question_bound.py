@@ -224,7 +224,9 @@ class QuestionBoundBase(Scenario):
             ev["screen_after_native"] = screen[-1800:]
         if self.expects_window:
             return self._beside_window(run, qid)
-        if not wait_for(lambda: self._turn_ended(run), 60):
+        # A native window that stands keeps the turn from ending: the board answer is given all the same,
+        # to record that it waits behind that window (the bind), and the row fails below.
+        if not ev.get("native_window_stood") and not wait_for(lambda: self._turn_ended(run), 60):
             run.note("the turn never reached its last reply")
             return "inconclusive"
         if not self.put_question_up(run):
