@@ -18,9 +18,7 @@ class WorkRows(list):
 
 
 def shown_records(rows, work):
-    """The saved journal rows as the panel shows them: each with the stored headline and (11-27) the stored type and
-    topics (``record``, None where the read has none) of the record it shows (its ``headline_id``: the replacement of
-    a superseded one)."""
+    """The saved rows with the stored headline, type and topics (``record``) of the record each shows (its ``headline_id``)."""
     return [{**row, "headline": work.headlines.get(str(row.get("headline_id")), ""),
              "record": work.stored.get(str(row.get("headline_id")))} for row in rows]
 

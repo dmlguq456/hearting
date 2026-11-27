@@ -754,8 +754,7 @@ def memory_kind(kind):
 # kind word's color says what that kind of record can be for a worker. ``work``: a preference carrying a ``unit:`` or ``field:`` label
 # (the work-style records a worker's prompt is given by its labels); ``guide``: another type the worker bootstrap's own type fence
 # takes (``mem_base.BOOTSTRAP_TYPE_FENCE``: read from that file and evaluated as it is, never copied); ``""``: every other type, and
-# any type where the fence cannot be read. It is the kind's qualification, not whether a worker was given the record. The type and the
-# topics are the shown record's own, as stored now (the read that gives its headline, ``session_work.shown_records``), the type whole.
+# any type where the fence cannot be read. It is the kind's qualification, not whether a worker was given the record, as stored now.
 MEMORY_LABEL_KINDS = ("unit:", "field:")
 _MEM_BASE = Path(__file__).resolve().parents[1] / "memory" / "mem_base.py"
 
@@ -821,18 +820,15 @@ def session_memory_items(values, now=None):
     for row in values.get("memory_recent") or ():
         if not isinstance(row, dict):
             continue
-        text, age, kind = _memory_values(row, now)
+        text, age, _kind = _memory_values(row, now)
         if text:
-            # 11-27: the shown record's stored type and topics where the read has them (else the journal row's type, no topics).
+            # 11-27: the shown record's stored type (whole) and topics where the read has them, else the journal row's type.
             record = row.get("record") if isinstance(row.get("record"), dict) else {}
-            stored = record.get("type") if isinstance(record.get("type"), str) and record.get("type") else None
-            if stored is not None:
-                kind = sanitize_title(stored).strip()[:32]
-            items.append({"kind": memory_kind(kind), "age": age, "text": text,
+            kind = record["type"] if isinstance(record.get("type"), str) and record["type"] else row.get("type")
+            items.append({"kind": memory_kind(sanitize_title(str(kind or "")).strip()[:32]), "age": age, "text": text,
                           "tier": row.get("tier") if row.get("tier") in MEMORY_TIERS else "",
                           "scope": row.get("scope") if row.get("scope") in MEMORY_SCOPES else "",
-                          "body": _memory_body(row, text),
-                          "group": memory_group(stored if stored is not None else row.get("type"), record.get("topics"))})
+                          "body": _memory_body(row, text), "group": memory_group(kind, record.get("topics"))})
         if len(items) >= MEMORY_ITEMS:
             break
     return items

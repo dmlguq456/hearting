@@ -432,8 +432,7 @@ def _read_project_memory(today, journal_ids=(), decisions=DECISIONS_PER_PROJECT,
                 (today, *_OPEN_TYPES, *scope_params, max(0, int(decisions))),
             ).fetchall()
             ids = [str(item) for item in journal_ids if item][:256]
-            # 11-27: the same read also gives each record's stored type and capsule topics, as they are now (the
-            # session panel's MEM colors a record's kind by them; ``stored``).
+            # 11-27: the same read gives each record's stored type and topics too (the session panel's MEM colors).
             topics = "topics" if "topics" in columns else "NULL AS topics"
             found = con.execute(
                 f"SELECT id, headline, type, {topics} FROM records WHERE id IN ({', '.join('?' for _ in ids)})",
