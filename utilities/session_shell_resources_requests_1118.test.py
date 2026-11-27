@@ -414,21 +414,21 @@ class RequestRepoPanelTest(unittest.TestCase):
     def test_a_request_line_carries_the_repository_after_the_number_and_the_title_goes_before_it(self):
         node = FIXTURE + r'''
 const reqs=[{id:'q1',kind:'request-out',way:'→',who:'[c2]',repo:'other-repo',title:'현황 문서 만들기',status:'open',paint:{harness:P('claude'),model_text:P('Opus 5.5')},age:'2m'},
- {id:'q2',kind:'request-in',way:'◂',who:'[6c]',repo:'data-tools',title:'원시 데이터 옮기기',status:'partial'},
+ {id:'q2',kind:'request-in',way:'←',who:'[6c]',repo:'data-tools',title:'원시 데이터 옮기기',status:'partial'},
  {id:'q3',kind:'request-out',way:'→',who:'[7d]',title:'같은 저장소의 요청',status:'open'}];
 const r=(w,h,o)=>plain(render(w,h,{requests:reqs,...o},o?.opts));
 const side=r(44,40).map(s=>s.slice(2,-2).trimEnd());
 assert(side.some(s=>/│ → \[c2\] other-repo claude Opus 5\.5 +2m/.test(s)),side.join('\n'));
-assert(side.some(s=>/│ ◂ \[6c\] data-tools\s*│?$/.test(s)||/◂ \[6c\] data-tools/.test(s)),side.join('\n'));
+assert(side.some(s=>/│ ← \[6c\] data-tools\s*│?$/.test(s)||/← \[6c\] data-tools/.test(s)),side.join('\n'));
 assert(side.some(s=>/→ \[7d\]\s*│?$/.test(s)||/→ \[7d\]$/.test(s.trim())),'a request with no repository name reads as before\n'+side.join('\n'));
 // The bottom layout's one row: with no harness or model between them the repository and the title read `[c2] other-repo · title`.
 const bottom=plain(view.render({width:60,height:20,side:false,fill:false,harness:'claude',frame:0,model:{repo:[P('hearting/')],git:[P('main')],tag:'[c7]',messages:[],styles:STYLES,routes:[],requests:reqs,route_count:0,route_total:0},state:'working',configuration:{},questions:()=>[]}));
 assert(bottom.some(s=>/→ \[c2\] other-repo/.test(s)),bottom.join('\n'));
-assert(bottom.some(s=>/◂ \[6c\] data-tools · 원시 데이터 옮기기/.test(s)),bottom.join('\n'));
+assert(bottom.some(s=>/← \[6c\] data-tools · 원시 데이터 옮기기/.test(s)),bottom.join('\n'));
 // Short of cells the title goes first, the repository name stays (down to the narrowest panel, where the number and the title are left).
 for(const w of [60,50,44,40,36,32]){   // (at 32 the box holds no more than the number, a short title and the status: the repository name is the last to go and goes there)
  const rows=plain(view.render({width:w,height:20,side:false,fill:false,harness:'claude',frame:0,model:{repo:[P('hearting/')],git:[P('main')],tag:'[c7]',messages:[],styles:STYLES,routes:[],requests:[reqs[1]],route_count:0,route_total:0},state:'working',configuration:{},questions:()=>[]}));
- const line=rows.find(s=>/◂ \[6c\]/.test(s));
+ const line=rows.find(s=>/← \[6c\]/.test(s));
  assert(line&&(line.includes('data-tools')||w<36),w+'\n'+rows.join('\n'));
  assert(w<36||line.includes('partial'),w+' the status is not cut off by the box\n'+rows.join('\n'));
  assert(rows.every(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0)<=w),w+' no row is wider than the panel\n'+rows.join('\n'));
