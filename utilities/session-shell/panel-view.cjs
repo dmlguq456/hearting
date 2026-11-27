@@ -322,7 +322,7 @@ function change(value,key,step){
   const bounds={side_width:[32,80,1],bottom_rows:[8,20,1],side_min_columns:[80,1000,10]},[lo,hi,n]=bounds[key];
   return {...value,[key]:Math.max(lo,Math.min(hi,value[key]+step*n))};
 }
-function render({frame=0,since,width,height,side,fill=side,model={},native={},state,sid,brief,sent,sections,configuration,settings,routeScroll=0,focused=false,cwd='',harness='',cellWidth,background='',folded=false}){
+function render({frame=0,since,width,height,side,fill=side,model={},native={},state,sid,brief,sent,sections,configuration,settings,routeScroll=0,focused=false,cwd='',harness='',cellWidth,background='',folded=false,resourcesOpen=false}){
   // Spec rule 49 (c): a folded panel is the strip under the native area, in every placement.
   folded=folded===true&&!settings;
   width=Math.max(folded?1:12,width);height=Math.max(folded?1:4,height);
@@ -2098,7 +2098,24 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
       return rows.map(r=>cut(r,inner));
     };
+    // 11-27 (the person: "RESOURCES는 기본값을 접은것으로 두고 그때는 서버별로 1줄로만 뜨는 형식으로 좀 고쳐보자"; of the design's two, "세션 먼저"): the
+    // section stands folded unless the person opened it: one row a host, its name then the fields the backend summed up (`brief`: `GPU 2/4`,
+    // the sessions that hold them, `max 92%`, `CPU 34%`, `MEM 61%`), as many as fit from the first, one cell apart (`atlas GPU 2/4 [4f][b2]
+    // max 92%`). A press on the RESOURCES head opens the rows above as they stood and folds them again (`resources`; the host keeps which, for
+    // this window only: a new panel stands folded). A backend that sends no summary draws the open rows.
+    const resourceFolded=!resourcesOpen&&resourceData.length>0&&resourceData.every(h=>Array.isArray(h.brief));
+    const resourceBriefRow=h=>{
+      const name=painted(h.host);
+      if(size(name)>inner)return cut(name,inner);
+      const out=[...name];
+      for(const field of painted(h.brief).filter(x=>Array.isArray(x)&&x.length).map(painted).filter(f=>f.length)){
+        if(size(out)+1+size(field)>inner)break;
+        out.push(text(' '),...field);
+      }
+      return out;
+    };
     const resourceLines=()=>{
+      if(resourceFolded)return resourceData.slice(0,resHosts).map(resourceBriefRow);
       const out=[];let room=resGpus;
       resourceData.slice(0,resHosts).forEach(h=>{
         out.push(resourceHostRow(h));
@@ -2108,7 +2125,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     };
     const resourceHead=()=>sectionHead([],'RESOURCES',[],[[]],false);
     const resourceCount=()=>side&&resHosts>0?1+resourceLines().length:0;
-    const resourceGpuTotal=()=>resourceData.reduce((n,h)=>n+resourceGpuRows(h).length,0);
+    const resourceGpuTotal=()=>resourceFolded?0:resourceData.reduce((n,h)=>n+resourceGpuRows(h).length,0);
     // The last row beside the buttons: that harness's row when its values fit there.
     const usageShared=u=>u&&usageFit(u,quotaRoom).values;
     const footBase=()=>{
@@ -2335,7 +2352,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // 11-26 (panel B; the person: "RESOURCES이나 USAGE에 구분선도 없어" / "패널네서 RESOURCES랑 USAGES 글자는 원래 위치로 두지?"): one still rule without
     // a word right above RESOURCES (above USAGE where the equipment is folded); the names stand where and as they stood.
     const bottomRuleRow=()=>({parts:[{...text('─'.repeat(inner),'dim'),role:'messages'}]});
-    if(resourceCount()){if(bottomRule)lower.push(bottomRuleRow());lower.push({parts:resourceHead()});for(const line of resourceLines())lower.push({parts:line});}
+    if(resourceCount()){if(bottomRule)lower.push(bottomRuleRow());lower.push({parts:resourceHead(),action:'resources'});for(const line of resourceLines())lower.push({parts:line});}
     let lastUsage=[];
     if(usageOn&&usageLines().length){
       const list=usageLines(),own=u=>u.harness===harness?['quota']:[];

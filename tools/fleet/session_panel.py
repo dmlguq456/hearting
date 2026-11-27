@@ -934,8 +934,33 @@ def resource_rows(value, now):
             if number is not None:
                 stats.append([(word + " ", "dim"), (percent(number), "loc_repo")])
         row["stats"] = stats
+        row["brief"] = resource_brief(host, stats)
         rows.append(row)
     return rows
+
+
+def resource_brief(host, stats):
+    """11-27 (the person: "RESOURCES는 기본값을 접은것으로 두고 그때는 서버별로 1줄로만 뜨는 형식으로"; of the design's two, "세션 먼저"): the host's
+    folded row after its name, its fields in the order the panel lets them in from the first: ``GPU 2/4`` (the GPUs a process runs on, of
+    all), the sessions that hold them (each once, in GPU order; ``[?]`` for a busy GPU whose holder is not known), ``max 92%`` (the highest
+    use the sample observed; ``max ?`` where it observed none), then ``CPU`` and ``MEM`` as the host row has them. A host with no GPU has
+    ``GPU 0/0`` and no use; no value is made up."""
+    gpus = host["gpus"]
+    fields = [[("GPU ", "dim"), ("%d/%d" % (sum(1 for gpu in gpus if gpu["busy"]), len(gpus)), "loc_repo")]]
+    users = []
+    for gpu in gpus:
+        if not gpu["busy"]:
+            continue
+        for tag in gpu["users"] or ["?"]:
+            mark = "[" + str(tag).strip("[]") + "]"
+            if mark not in users:
+                users.append(mark)
+    if users:
+        fields.append([("".join(users), "loc_repo")])
+    if gpus:
+        known = [gpu["util"] for gpu in gpus if gpu["util"] is not None]
+        fields.append([("max ", "dim"), ("%d%%" % round(max(known)), "loc_repo")] if known else [("max ?", "dim")])
+    return fields + [list(stat) for stat in stats]
 
 
 # A finished route's result row (the producer keeps the two most recent after the current

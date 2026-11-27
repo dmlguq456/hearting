@@ -486,7 +486,7 @@ person chose the one-cell indent over the two-cell draft; 11-26, panel B):**
 | Dependent row | one cell in | PEERS, STATUS, BACKLOG (under REPO); MODEL, CTX, TITLE, NOW (under SESSION) |
 | Dependent's item | one cell more (two in all) | the BACKLOG items |
 | Activity | rounded box, `›` at the right end of its top line (`╭─ 3 QUESTIONS ───── ›─╮`) | QUESTIONS, ROUTE |
-| Lower section | the name alone (no rule) and `›` at the right end; an item one cell in, one row | MESSAGES, MEM (RESOURCES and USAGE: the name alone, no `›`, their rows as they were; one rule over them) |
+| Lower section | the name alone (no rule) and `›` at the right end; an item one cell in, one row | MESSAGES, MEM (RESOURCES and USAGE: the name alone, no `›`, their rows as they were, RESOURCES folded to one row a host until its head is pressed; one rule over them) |
 | Opens on a press | the one `›` at the right end of the row | STATUS, BACKLOG, NOW, QUESTIONS, ROUTE, MESSAGES, MEM |
 
 The SESSION rule and the rule over the equipment are the panel's only lines but the boxes'; the light of `rule motion` runs over the SESSION rule
@@ -725,7 +725,7 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   gives way short of cells in the last row's order (the reset times, 5h, the model windows from the last, 7d), each value
   whole. Under the native area it stands as beside it, as rows are left. The folded strip is unchanged.
 - RESOURCES (11-18, the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"): beside the
-  native area, the section right above USAGE, its name row `RESOURCES` (no rule since 11-22, no `›`: it opens nothing; 11-26, panel B: one still rule
+  native area, the section right above USAGE, its name row `RESOURCES` (no rule since 11-22, no `›`: it opens no popup; 11-26, panel B: one still rule
   without a word stands right above the name, above `USAGE` where every equipment row is folded, and short of rows it goes first), then for each host (this
   machine first, then the configured hosts, eight at most) one row, its name and `CPU 34%  MEM 61%`, and under it every GPU of the host in its number's order side by side (`  GPU0 92% 21/24G [3b]  GPU1 0% 0/24G  GPU3 58%
   14/24G [c7]`: no gauge of the use since 11-18 ("게이지는 없애자 ... 가로로 나열"); the use is its number, in Fleet's level color (green, yellow from 50, red
@@ -753,6 +753,18 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   no producer, no configured host and no local sample has no section. The existing `MEM` section is the saved memory records, not
   the machine's memory, so nothing is merged with it. Short of rows it gives way before any other part of the panel (its GPU rows,
   then its host rows, the name row with the last of them), so the sections above and USAGE stand as they do without it.
+  11-27 (the person: "RESOURCES는 기본값을 접은것으로 두고 그때는 서버별로 1줄로만 뜨는 형식으로 좀 고쳐보자"; of the design's two, "세션 먼저"): the
+  rows above are the section opened. It stands folded: one row a host, its name and then, as many as fit from the first and one cell apart,
+  `GPU 2/4` (the GPUs a process runs on, of all of them; a host with no GPU `GPU 0/0`), the sessions that hold them (each once in the host, in
+  GPU order, `[4f][b2]`; `[?]` for a busy GPU whose holder is not known), `max 92%` (the highest use the sample observed, `max ?` where it
+  observed none: no 0 is made up; none for a host with no GPU), `CPU 34%`, `MEM 61%` (`atlas GPU 2/4 [4f][b2] max 92%` at 36 cells, `CPU` from
+  44, `MEM` from 60); the words dim, the values in the body color; which GPU a session holds is read open. The backend sums the sample up
+  (`session_panel.resource_brief`, the host's `brief`); a backend that sends none draws the section open. A press on the `RESOURCES` head opens
+  the section (the same cells as the open rows above) and another folds it again: the window holds which while it is up (`host.cjs`
+  `resourcesOpen`, as it holds the route box's scroll; no setting, nothing saved, not carried to a successor host), so a new panel stands
+  folded. The head's words are unchanged and no key is bound (the panel has no focus on its heads). Folded, the section counts one row a host
+  (`resourceLines`, `resourceGpuTotal` 0); short of rows it gives up its hosts from the last, then its name, as before, and the sample's age
+  bounds it as before.
 - The window's last line (spec rule 60, 11-16, the person: "맨 아래줄이 비면이 아니고 항상 비우라고 그냥" / "디렉토리 경로가 뜨던데,
   그걸 모든 셸에서 통일해도 좋겠네. 대신 hearting version은 우측으로 붙이고"): in every harness the row at the bottom of the
   native screen where the harness drew its own line (Claude's statusline rows, Codex's footer row with its thread id and
