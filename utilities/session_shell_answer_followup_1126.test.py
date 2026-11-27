@@ -568,28 +568,40 @@ class PrivateTmuxEdgesTest(unittest.TestCase):
                 self.assertLessEqual(len(answers()[count:]), 1)
                 self.assertEqual(received()[native:], b"")
                 closed()
-                # Round 3 (🟡1): Enter pressed in a stalled paste, then a focus report of the terminal 50 ms on (within
-                # the key's wait, a read holding one key): Enter sends what came, once; no line break goes in.
-                count, native = ask("enter_focus")
+                # Round 3, in one question (a backend that does not confirm, so the popup stays on it; each part
+                # starts once the dropping after the last key is over, the draft wiped).
+                # 🟡1: Enter pressed in a stalled paste, then a focus report of the terminal 50 ms on (within the key's
+                # wait, a read holding one key): Enter sends what came, once; no line break goes in.
+                count, native = ask("round3")
                 send(P + "첫 줄", delay=.1)
                 waitfor(stalled, "the stall")
                 send("\r", delay=.05)
                 send("\x1b[I", delay=.6)
                 results.append(dict(scene="enter_focus", sent=answers()[count:], native=received()[native:].decode(), popup=shown(screen())))
                 self.assertEqual(answers()[count:], [["첫 줄"]], "the pressed Enter sends what came")
-                self.assertEqual(received()[native:], b"")
-                closed()
-                # Round 2 (🟡2): once stalled, a key typed (a read holding one key) is the paste's text and leaves it
+                time.sleep(1.0)
+                send("\x7f" * 150, delay=.4)
+                # Round 2 🟡2: once stalled, a key typed (a read holding one key) is the paste's text and leaves it
                 # stalled, its key row too; the Enter after it sends.
-                count, native = ask("never_enter_typed")
                 send(P + "시작만", delay=.1)
                 waitfor(stalled, "the stall")
                 send("z", delay=.3)
                 self.assertTrue(stalled(screen()), "still stalled after a typed key")
                 send("\r", delay=.6)
                 results.append(dict(scene="never_enter_typed", sent=answers()[count:], native=received()[native:].decode()))
-                self.assertEqual(answers()[count:], [["시작만z"]])
-                self.assertEqual(received()[native:], b"")
+                self.assertEqual(answers()[count:], [["첫 줄"], ["시작만z"]])
+                time.sleep(1.0)
+                send("\x7f" * 150, delay=.4)
+                # Ctrl+] pressed in a paste, then a wheel report 50 ms on: Ctrl+] closes first, and the report goes to
+                # the mouse (the host asks before the panel's mouse reader), never as bytes to the native.
+                send(P + "앞 글", delay=.3)
+                send("\x1d", delay=.05)
+                send("\x1b[<65;35;12M", delay=.5)
+                results.append(dict(scene="ctrl_wheel", sent=answers()[count:], native=received()[native:].decode(), popup=shown(screen())))
+                self.assertFalse(shown(screen()), "Ctrl+] closed the popup")
+                send("뒤" + E, delay=.5)
+                self.assertEqual(received()[native:], b"", "no report and no rest of a paste reached the native")
+                self.assertEqual(len(answers()[count:]), 2)
                 closed()
                 # B: a key ends a stalled paste; the person types to the native at once: every key reaches it.
                 for name, key, submitted in (("type_after_esc", "\x1b", False), ("type_after_enter", "\r", True),
