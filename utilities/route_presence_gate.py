@@ -159,10 +159,14 @@ def _select_artifact_root():
     return select_artifact_root
 
 
-# How ``artifact-root.sh`` fails when its interpreter could not choose: python3 exits 1 on
-# an import or syntax error and 2 on a missing script. The shell's own refusals (64 relative
-# override, 66 missing folder, 67 installed tree, also after a choice) involve no module.
-_INTERPRETER_FAILED = (1, 2)
+# The refusals ``artifact-root.sh`` states itself, for which no choice is missing. Any other
+# failure without a path (python3's 1 or 2, exit 0 with no answer, a signal) may come from a
+# choice that failed on the selection module, so that module is probed once.
+_SHELL_REFUSALS = (
+    64,  # AGENT_ARTIFACT_ROOT is not an absolute path
+    66,  # a path the shell needs is missing (override parent, start folder, resolver link)
+    67,  # an installed source tree, refused by ``emit`` alone or after python3 chose it
+)
 
 
 def artifact_root(top: Path, env) -> str:
@@ -182,7 +186,7 @@ def artifact_root(top: Path, env) -> str:
                             env=dict(env))
     lines = (result.stdout or "").strip().splitlines()
     if result.returncode != 0 or not lines:
-        if result.returncode in _INTERPRETER_FAILED:
+        if result.returncode not in _SHELL_REFUSALS:
             _select_artifact_root()  # the resolver's choice may have failed on the same module
         return ""
     return os.path.realpath(lines[-1])

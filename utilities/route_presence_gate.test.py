@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -466,6 +467,8 @@ class SelectionImportTest(Fixture):
                    "    def exec_module(self, module):\n"
                    "        raise SyntaxError('invalid syntax (artifact_root_selection.py)')\n"
                    "sys.meta_path.insert(0, Broken())\n"),
+        "empty": ("import sys, types\n"
+                  "sys.modules['artifact_root_selection'] = types.ModuleType('artifact_root_selection')\n"),
     }
 
     def unloadable(self, how):
@@ -476,8 +479,9 @@ class SelectionImportTest(Fixture):
         return {"PYTHONPATH": str(site)}
 
     def stripped(self, how):
-        """Hook entries whose own ``artifact_root_selection.py`` is missing or broken, so the
-        shell resolver's interpreter fails on it (exit 2 / 1) as such an install would."""
+        """Hook entries whose own ``artifact_root_selection.py`` is missing, broken or empty, so
+        the shell resolver's interpreter fails on it (exit 2 / 1 / 0 with no answer) as such an
+        install would."""
         tree = self.tmp / f"tree-{how}"
         for relative in ("utilities/route_presence_gate.py", "utilities/artifact-root.sh",
                          "hooks/route-presence-gate.py",
@@ -485,10 +489,21 @@ class SelectionImportTest(Fixture):
             (tree / relative).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(HERE.parent / relative, tree / relative)
         (tree / "tools").symlink_to(HERE.parent / "tools")
-        if how == "broken":
+        if how in ("broken", "empty"):
             (tree / "utilities" / "artifact_root_selection.py").write_text(
-                "def select_artifact_root(:\n", encoding="utf-8")
+                "def select_artifact_root(:\n" if how == "broken" else "", encoding="utf-8")
         return tree
+
+    def signalling_python(self):
+        """``PATH`` whose ``python3`` ends the shell resolver that started it with SIGTERM."""
+        bin_dir = self.tmp / "bin-signal"
+        bin_dir.mkdir(exist_ok=True)
+        python = bin_dir / "python3"
+        python.write_text('#!/bin/sh\ncase "$(ps -o args= -p "$PPID")" in\n'
+                          '  *artifact-root.sh*) kill -TERM "$PPID" ;;\nesac\nexit 97\n',
+                          encoding="utf-8")
+        python.chmod(0o755)
+        return {"PATH": f"{bin_dir}{os.pathsep}{self.env['PATH']}"}
 
     def shell_project(self, name):
         """A separate-git-dir checkout (the shell resolver answers) and the folder it looks in."""
@@ -566,6 +581,16 @@ class SelectionImportTest(Fixture):
         mine, other, two_root = str(self.root), self.resolve(separate), self.resolve(two)
         missing, broken = self.unloadable("missing"), self.unloadable("broken")
         gone, unparsable = self.stripped("missing"), self.stripped("broken")
+        empty, emptied = self.unloadable("empty"), self.stripped("empty")
+        killed = self.signalling_python()
+        # The shell's own answers for the last two rows: exit 0 without a path, and a signal.
+        shell = [str(emptied / "utilities" / "artifact-root.sh"), str(two)]
+        answer = subprocess.run(["sh", *shell], capture_output=True, text=True, env=self.env)
+        self.assertEqual((answer.returncode, answer.stdout), (0, "\n"))
+        shell = [str(gone / "utilities" / "artifact-root.sh"), str(two)]
+        answer = subprocess.run(["sh", *shell], capture_output=True, text=True,
+                                env={**self.env, **killed})
+        self.assertEqual(answer.returncode, -signal.SIGTERM)
         safe = {"PYTHONSAFEPATH": "1", "AGENT_DISPATCH_DEPTH": "-1"}
         relative, parentless = "relative", str(self.tmp / "absent" / "root")
         rows = [
@@ -603,6 +628,11 @@ class SelectionImportTest(Fixture):
              missing, gone, "surfaced"),
             ("selection file broken, two folders (1)", two / "src" / "engine.py", self.tmp,
              broken, unparsable, "surfaced"),
+            # No path and no refusal from the shell: the module is probed as well.
+            ("selection file empty, two folders (0, no path)", two / "src" / "engine.py",
+             self.tmp, empty, emptied, "surfaced"),
+            ("selection file gone, two folders, shell ended by SIGTERM", two / "src" / "engine.py",
+             self.tmp, {**missing, **killed}, gone, "surfaced"),
         ]
         for harness in HOOK_ENTRIES:
             for label, path, cwd, extra, tree, expected in rows:
@@ -628,6 +658,19 @@ class SelectionImportTest(Fixture):
         self.assertEqual(self.judge(payload, AGENT_ARTIFACT_ROOT="relative"), "")
         with mock.patch.object(G, "_route_chain", side_effect=ImportError("gone")):
             self.assertEqual(self.judge(payload), "")
+
+    def test_only_the_shells_refusals_skip_the_probe(self):
+        env = {**self.env, "AGENT_ARTIFACT_ROOT": "/answered/by/the/shell"}
+        answers = {64: "", 66: "", 67: "", 1: "", 2: "", 0: "\n", -signal.SIGTERM: ""}
+        with mock.patch.dict(sys.modules, {"artifact_root_selection": None}):
+            for code, stdout in answers.items():
+                answer = subprocess.CompletedProcess([], code, stdout=stdout, stderr="")
+                with self.subTest(returncode=code), \
+                        mock.patch.object(G.subprocess, "run", return_value=answer):
+                    if code in (64, 66, 67):
+                        self.assertEqual(G.artifact_root(self.repo, env), "")
+                    else:
+                        self.assertRaises(G.SelectionUnavailable, G.artifact_root, self.repo, env)
 
 
 class ModeTest(Fixture):
