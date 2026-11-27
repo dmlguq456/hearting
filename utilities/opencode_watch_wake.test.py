@@ -9,12 +9,11 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
 import shutil
-import signal
 import subprocess
-import time
-import tempfile
 import unittest
 from pathlib import Path
+
+from tools import fixture_processes
 
 ROOT = Path(__file__).resolve().parents[1]
 SID = "ses-oc-steward"
@@ -78,14 +77,13 @@ console.log(JSON.stringify({prompts}));
 
 class OpenCodeWatchWakeTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.tmp = fixture_processes.TemporaryDirectory(dir="/tmp")
         self.addCleanup(self.tmp.cleanup)
         base = Path(self.tmp.name)
         self.rt, self.state = base / "rt", base / "state"
         (self.state / "peer-watches").mkdir(parents=True)
         (self.state / "jobs.log").touch()
         self.late_files = []
-        self.addCleanup(self.reap_helpers)
         plugins = self.rt / "adapters/opencode/plugins"
         plugins.mkdir(parents=True)
         shutil.copy2(ROOT / "adapters/opencode/plugins/hearting-guards.js", plugins)
@@ -100,28 +98,6 @@ class OpenCodeWatchWakeTest(unittest.TestCase):
         stub = self.rt / "utilities/peer-steward.py"
         stub.write_text(STUB)
         stub.chmod(0o755)
-
-    def reap_helpers(self):
-        """The plugin starts detached helpers (summary trigger, tidy) from its idle events; they
-        outlive the node process. Stop the ones that run from this test's private runtime copy."""
-        marker = str(self.rt).encode()
-        for _ in range(3):
-            mine = []
-            for entry in Path("/proc").iterdir():
-                if entry.name.isdigit() and int(entry.name) != os.getpid():
-                    try:
-                        if marker in (entry / "cmdline").read_bytes():
-                            mine.append(int(entry.name))
-                    except OSError:
-                        pass
-            if not mine:
-                return
-            for pid in mine:
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except OSError:
-                    pass
-            time.sleep(0.2)
 
     def arm_receipt(self, steward_sid=SID, harness="opencode", after_idle=False):
         watches = self.state / "peer-watches"

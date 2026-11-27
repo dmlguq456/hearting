@@ -20,6 +20,8 @@ import termios
 import unittest
 from unittest import mock
 
+from tools import fixture_processes
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 sys.path.insert(0, str(ROOT / "tools"))
@@ -140,7 +142,7 @@ class PaneOwnershipTest(unittest.TestCase):
             successor: {"pid": 1234, "pid_start": "77", "session_id": successor,
                         "pane": "w:p1", "socket_path": "/run/herdr/actual.sock"},
         }
-        with tempfile.TemporaryDirectory() as temp, \
+        with fixture_processes.TemporaryDirectory() as temp, \
                 mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(Path(temp) / "state"),
                                              "XDG_CONFIG_HOME": str(Path(temp) / "config"),
                                              "CODEX_THREAD_ID": current, "HERDR_PANE_ID": "foreign-pane",
@@ -194,7 +196,7 @@ class PaneOwnershipTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="pane-ownership-")
+        self.temp = fixture_processes.TemporaryDirectory(prefix="pane-ownership-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.info = self.root / "process-info.json"
