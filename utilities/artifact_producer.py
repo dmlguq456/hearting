@@ -1520,8 +1520,11 @@ def _begin_cycle_record(
                    if campaign_reopen_event_id else {}),
                 **_campaign_degradation(bound_campaign),
             }
+        # The precheck refuses a duplicate copy before the first write; its
+        # campaign scan is handed to this begin's own index update below.
+        prepared_index = None
         if campaign is not None:
-            artifact_locator.prepare_index_update(root, [campaign["campaign_id"]])
+            prepared_index = artifact_locator.prepare_index_update(root, [campaign["campaign_id"]])
         head = artifact_admission.load_index_head(root)
         index = artifact_admission.load_index(root) if head is None else None
         if campaign is None and campaign_key is None:
@@ -1563,7 +1566,7 @@ def _begin_cycle_record(
             import artifact_journal
             binding = artifact_journal.prepare_locked(root, route, campaign,
                 campaign_dir(root, campaign["campaign_id"], campaign), at=started_on)
-            artifact_locator.update_indexes(root, [campaign["campaign_id"]])
+            artifact_locator.update_indexes(root, [campaign["campaign_id"]], prepared=prepared_index)
             return {"status": "prepared", "layout": "journal", "campaign_id": campaign["campaign_id"],
                     "env": artifact_journal.environment(root, binding), "journal_target": binding,
                     _ROOT_ALIAS_BINDING: alias_binding}
@@ -1633,7 +1636,7 @@ def _begin_cycle_record(
                     owner_begin=owner_begin, owner=owner_binding)
             except dispatch_terminal_commit.TerminalCommitError as exc:
                 raise ProducerError(exc.code, exc.detail) from exc
-        artifact_locator.update_indexes(root, [campaign["campaign_id"]])
+        artifact_locator.update_indexes(root, [campaign["campaign_id"]], prepared=prepared_index, added=target)
         if selected_group_id and owner_begin:
             stage_label = workflow_stage_label or artifact_workflow_groups.stage_label_from_title(display_title)
             try:

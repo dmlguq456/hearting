@@ -931,6 +931,345 @@ class ScanCountTest(F.ProducerTestBase, IndexEquivalenceMixin):
                     self.assertEqual(P.read_cycle_record(self.root, cid)["state"], "dropped")
 
 
+class BeginScansItsCampaignOnceTest(F.ProducerTestBase, IndexEquivalenceMixin):
+    """A begin that opens a cycle in an existing campaign scans that campaign
+    once: its read-only index precheck hands its scan to the same begin's index
+    update, which adds only the cycle folder the begin itself created.
+
+    `_against_main` checks every precheck and update inside a begin against
+    main's computation of the same call on the same disk state
+    (`_plan_update` with nothing handed over): the same index bytes, status,
+    rescanned and skipped campaigns, and the same refusal. Whenever the
+    handed-over scan cannot be shown equal, the update scans again.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.activate()
+        self.n = 0
+        self.scans = []          # campaign folder names, counted outside the oracle
+        self.update_scans = []   # scans made by each real update_indexes call
+        self.prepared = []       # each real prepare_index_update result
+        self.pre_update = None   # optional hand change between the begin's writes and its update
+        self.pre_prepare = None  # optional hand change just before the begin's precheck
+        self._counting = True
+        real_scan = loc.scan_campaign
+
+        def counted(*args, **kwargs):
+            if self._counting:
+                self.scans.append(Path(args[1]).name)
+            return real_scan(*args, **kwargs)
+
+        patcher = mock.patch.object(loc, "scan_campaign", side_effect=counted)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _begin(self, **kwargs):
+        self.n += 1
+        slug = f"once-{self.n}"
+        route, route_file = self.route(slug=slug, gate_source=slug)
+        result = P.begin(self.root, route_file=route_file, capability="autopilot-code",
+                         intensity="direct", **kwargs)
+        return route, route_file, result
+
+    def _sealed(self, **kwargs):
+        route, route_file, result = self._begin(**kwargs)
+        self.write_output(result)
+        self.close(route, route_file)
+        P.finalize(self.root, cycle_id=result["cycle_id"])
+        return route, route_file, result
+
+    def assert_index_matches_full_rebuild(self, note=""):
+        self._counting = False   # the full-rebuild oracle scans every campaign; it is not the begin's cost
+        try:
+            super().assert_index_matches_full_rebuild(note)
+        finally:
+            self._counting = True
+
+    def _index_bytes(self):
+        base = self.root / "campaigns"
+        return ((base / "INDEX.json").read_bytes() if (base / "INDEX.json").is_file() else None,
+                (base / "INDEX.md").read_bytes() if (base / "INDEX.md").is_file() else None)
+
+    def _main_answer(self, root, ids):
+        self._counting = False
+        try:
+            rows, mapping, status, rescanned, skipped, _ = loc._plan_update(root, ids)
+        except loc.LocatorError as exc:
+            return ("refused", exc.code, exc.detail)
+        finally:
+            self._counting = True
+        return ("ok", status, rescanned, skipped, *loc.render_indexes(mapping, rows))
+
+    @contextlib.contextmanager
+    def _against_main(self):
+        real_prepare, real_update = loc.prepare_index_update, loc.update_indexes
+
+        def prepare(root, ids):
+            if self.pre_prepare is not None:
+                self.pre_prepare()
+            ids = list(ids)
+            want = self._main_answer(root, ids)
+            try:
+                got = real_prepare(root, ids)
+            except loc.LocatorError as exc:
+                self.assertEqual(("refused", exc.code, exc.detail), want)
+                raise
+            self.assertEqual(("ok", got.status, got.rescanned, got.skipped), want[:4])
+            self.prepared.append(got)
+            return got
+
+        def update(root, ids, **kwargs):
+            if self.pre_update is not None:
+                self.pre_update(kwargs)
+            ids = list(ids)
+            want = self._main_answer(root, ids)
+            before = self._index_bytes()
+            start = len(self.scans)
+            try:
+                got = real_update(root, ids, **kwargs)
+            except loc.LocatorError as exc:
+                self.assertEqual(("refused", exc.code, exc.detail), want)
+                raise
+            finally:
+                self.update_scans.append(self.scans[start:])
+            self.assertEqual(want[0], "ok", want)
+            status = "unchanged" if before == tuple(want[4:6]) else want[1]
+            self.assertEqual((got.status, got.rescanned, got.skipped), (status, want[2], want[3]))
+            self.assertEqual(self._index_bytes(), tuple(want[4:6]))
+            return got
+
+        with mock.patch.object(loc, "prepare_index_update", side_effect=prepare), \
+                mock.patch.object(loc, "update_indexes", side_effect=update):
+            yield
+
+    def _counted_begin(self, **kwargs):
+        self.scans.clear()
+        self.update_scans.clear()
+        with self._against_main():
+            result = self._begin(**kwargs)[2]
+        self.assert_index_matches_full_rebuild(str(kwargs))
+        return result
+
+    def _campaign_rel(self, result):
+        return Path(result["cycle_dir"]).parent.name
+
+    # -- the scenes ---------------------------------------------------------------------
+    def test_new_cycle_in_an_existing_campaign_scans_it_once(self):
+        first = self._begin(campaign_key="once-stream")[2]
+        result = self._counted_begin(campaign_id=first["campaign_id"])
+        self.assertEqual(result["status"], "begun")
+        self.assertEqual(self.scans, [self._campaign_rel(first)])   # was 2 on main
+        self.assertEqual(self.update_scans, [[]])
+
+    def test_new_campaign_still_scans_once(self):
+        result = self._counted_begin(campaign_key="once-new-stream")
+        self.assertEqual((result["status"], result["campaign_created"]), ("begun", True))
+        self.assertEqual(self.scans, [self._campaign_rel(result)])
+
+    def test_unit_turn_continuation_scans_once(self):
+        route, route_file, first = self._sealed(campaign_key="once-turns")
+        R = F.R
+        R.retire_stale_closure(route_file)
+        self.scans.clear()
+        self.update_scans.clear()
+        with self._against_main():
+            second = P.begin(self.root, route_file=route_file, capability="autopilot-code",
+                             intensity="direct", fresh_cycle="att-once-turn-2")
+        self.assertEqual((second["status"], second["campaign_id"]), ("begun", first["campaign_id"]))
+        self.assertEqual(self.scans, [self._campaign_rel(first)])
+        self.assert_index_matches_full_rebuild("continuation")
+        with self._against_main():   # asking again resumes it without any index work
+            again = P.begin(self.root, route_file=route_file, capability="autopilot-code",
+                            intensity="direct", fresh_cycle="att-once-turn-2")
+        self.assertEqual((again["status"], again["cycle_id"]), ("resumed", second["cycle_id"]))
+        self.assertEqual(self.scans, [self._campaign_rel(first)])
+
+    def test_journal_begin_scans_once(self):
+        first = self._begin(campaign_key="once-journal")[2]
+        result = self._counted_begin(campaign_key="once-journal", journal_target=True)
+        self.assertEqual(result["layout"], "journal")
+        self.assertEqual(self.scans, [self._campaign_rel(first)])
+
+    def test_other_changed_campaigns_are_handed_over_too(self):
+        target = self._sealed(campaign_key="once-target")[2]
+        other = self._sealed(campaign_key="once-other")[2]
+        moved = self._sealed(campaign_key="once-moved")[2]
+        other_dir = Path(other["cycle_dir"]).parent
+        shutil.copytree(other_dir, other_dir.with_name(other_dir.name + "-copy"))   # skipped, as on main
+        moved_dir = Path(moved["cycle_dir"]).parent
+        moved_dir.rename(moved_dir.with_name(moved_dir.name + "-renamed"))         # rescanned, as on main
+        self.scans.clear()
+        with self._against_main():
+            result = self._begin(campaign_id=target["campaign_id"], _reconcile=False)[2]
+        self.assertEqual(result["status"], "begun")
+        self.assertEqual(sorted(self.scans), sorted([self._campaign_rel(target), other_dir.name + "-copy",
+                                                     moved_dir.name + "-renamed"]))
+        self.assertEqual(self.update_scans, [[]])
+
+    def test_duplicate_copy_is_refused_before_the_first_write(self):
+        target = self._sealed(campaign_key="once-dup")[2]
+        camp_dir = Path(target["cycle_dir"]).parent
+        shutil.copytree(camp_dir, camp_dir.with_name(camp_dir.name + "-copy"))
+
+        def state():   # every campaign folder file and cycle record
+            files = {}
+            for base, pattern in ((self.root / "campaigns", "*"), (P.producer_dir(self.root) / "cycles", "cyc_*.json")):
+                for path in sorted(base.rglob(pattern)):
+                    files[path.relative_to(self.root).as_posix()] = path.read_bytes() if path.is_file() else None
+            return files
+
+        before = state()
+        with self.assertRaises(loc.LocatorError) as caught:
+            with self._against_main():
+                self._begin(campaign_id=target["campaign_id"])
+        self.assertEqual(caught.exception.code, "locator-index-duplicate-id")
+        self.assertEqual(state(), before)
+        self.assertEqual(self.update_scans, [])
+
+    def test_missing_index_is_rebuilt_leniently_as_on_main(self):
+        first = self._sealed(campaign_key="once-lenient")[2]
+        self._sealed(campaign_key="once-lenient-other")
+        # The begin's own lookups heal a missing index before its precheck; drop it right there.
+        self.pre_prepare = lambda: (self.root / "campaigns" / "INDEX.json").unlink()
+        try:
+            with self._against_main():
+                self._begin(campaign_id=first["campaign_id"], _reconcile=False)
+        finally:
+            self.pre_prepare = None
+        self.assertEqual((self.prepared[0].status, self.prepared[0].scans), ("rebuilt", None))   # nothing handed over
+        self.assertTrue(self.update_scans and all(self.update_scans))   # every update scanned, as on main
+        self.assert_index_matches_full_rebuild("lenient")
+
+    # -- when the handed-over scan cannot be used, the update scans again -----------------
+    def _rescans(self, first, change):
+        self.pre_update = change
+        try:
+            with self._against_main():
+                result = self._begin(campaign_id=first["campaign_id"], _reconcile=False)[2]
+        finally:
+            self.pre_update = None
+        self.assertEqual(self.update_scans[-1], [self._campaign_rel(first)])
+        self.assert_index_matches_full_rebuild("rescanned")
+        return result
+
+    def test_begin_that_fills_campaign_display_fields_rescans(self):
+        first = self._sealed(campaign_key="once-fill")[2]
+        path = Path(first["cycle_dir"]).parent / "campaign.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for key in ("slug", "title", "slug_source", "slug_truncated"):
+            data.pop(key, None)
+        path.write_text(json.dumps(data), encoding="utf-8")
+        fd = adm._acquire_lock(self.root, timeout=5.0)
+        try:
+            loc.rebuild_indexes(self.root)
+        finally:
+            adm._release_lock(self.root, fd)
+        self._rescans(first, None)
+
+    def test_hand_edited_campaign_record_rescans(self):
+        first = self._sealed(campaign_key="once-title")[2]
+        record_path = P.cycle_record_path(self.root, first["cycle_id"])
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        record.pop("title"), record.pop("slug")   # its row now shows the campaign's title
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+        fd = adm._acquire_lock(self.root, timeout=5.0)
+        try:
+            loc.rebuild_indexes(self.root)
+        finally:
+            adm._release_lock(self.root, fd)
+        path = Path(first["cycle_dir"]).parent / "campaign.json"
+
+        def retitle(_kwargs):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["title"] = "retitled by hand"
+            path.write_text(json.dumps(data), encoding="utf-8")
+        self._rescans(first, retitle)
+        rows = loc.parse_index_markdown(self._index_bytes()[1])
+        self.assertEqual(rows[first["cycle_id"]]["title"], "retitled by hand")
+
+    def test_changed_published_index_rescans(self):
+        first = self._sealed(campaign_key="once-published")[2]
+        other = self._sealed(campaign_key="once-published-other")[2]
+        other_path = Path(other["cycle_dir"]).parent / "campaign.json"
+
+        def republish(_kwargs):
+            data = json.loads(other_path.read_text(encoding="utf-8"))
+            data["title"] = "other retitled"
+            other_path.write_text(json.dumps(data), encoding="utf-8")
+            loc.rebuild_indexes(self.root)   # the begin holds the admission lock
+        self._rescans(first, republish)
+
+    def test_new_campaign_folder_rescans(self):
+        first = self._sealed(campaign_key="once-entries")[2]
+        self._rescans(first, lambda _kwargs: (self.root / "campaigns" / "zz-hand-made").mkdir())
+
+    def test_new_cycle_not_named_as_added_rescans(self):
+        first = self._sealed(campaign_key="once-unnamed")[2]
+        self._rescans(first, lambda kwargs: kwargs.pop("added"))   # the cycle list grew by a folder not handed over
+
+    def test_legacy_folder_named_like_the_new_cycle_rescans_and_refuses_as_on_main(self):
+        first = self._sealed(campaign_key="once-legacy")[2]
+        camp_dir = Path(first["cycle_dir"]).parent
+
+        def twin(kwargs):
+            new_id = json.loads((camp_dir / "campaign.json").read_text(encoding="utf-8"))["cycles"][-1]
+            (camp_dir / "cycles" / new_id / "artifacts").mkdir(parents=True)
+        self.pre_update = twin
+        try:
+            with self.assertRaises(loc.LocatorError) as caught:
+                with self._against_main():
+                    self._begin(campaign_id=first["campaign_id"], _reconcile=False)
+        finally:
+            self.pre_update = None
+        self.assertEqual(caught.exception.code, "locator-index-duplicate-id")
+        self.assertEqual(self.update_scans[-1], [camp_dir.name])
+
+    def test_new_folder_bound_to_another_cycle_rescans_and_refuses_as_on_main(self):
+        first = self._sealed(campaign_key="once-binding")[2]
+
+        def rebind(kwargs):
+            marker = Path(kwargs["added"]) / loc.CYCLE_BINDING
+            marker.write_bytes(loc.cycle_binding_bytes(first["campaign_id"], first["cycle_id"]))
+        self.pre_update = rebind
+        try:
+            with self.assertRaises(loc.LocatorError):
+                with self._against_main():
+                    self._begin(campaign_id=first["campaign_id"], _reconcile=False)
+        finally:
+            self.pre_update = None
+        self.assertEqual(self.update_scans[-1], [Path(first["cycle_dir"]).parent.name])
+
+    def test_update_for_other_campaigns_or_without_the_folder_rescans(self):
+        first = self._sealed(campaign_key="once-direct")[2]
+        other = self._sealed(campaign_key="once-direct-other")[2]
+        rel = Path(first["cycle_dir"]).parent.name
+        fd = adm._acquire_lock(self.root, timeout=5.0)
+        try:
+            prepared = loc.prepare_index_update(self.root, [first["campaign_id"]])
+            self.assertIsNotNone(prepared.scans)
+            for ids in ([first["campaign_id"], other["campaign_id"]], [other["campaign_id"]]):
+                self.scans.clear()
+                loc.update_indexes(self.root, ids, prepared=prepared)
+                self.assertIn(Path(other["cycle_dir"]).parent.name, self.scans)
+            self.scans.clear()
+            loc.update_indexes(self.root, [first["campaign_id"]], prepared=prepared)
+            self.assertEqual(self.scans, [])   # nothing changed: the handed-over scan answers
+        finally:
+            adm._release_lock(self.root, fd)
+        # After another begin (published index and campaign record both changed) the old precheck is stale: rescan.
+        route, route_file, opened = self._begin(campaign_id=first["campaign_id"])
+        fd = adm._acquire_lock(self.root, timeout=5.0)
+        try:
+            self.scans.clear()
+            stale = loc.update_indexes(self.root, [first["campaign_id"]], prepared=prepared)
+            self.assertEqual(self.scans, [rel])
+            self.assertEqual(stale.status, "unchanged")
+        finally:
+            adm._release_lock(self.root, fd)
+        self.assert_index_matches_full_rebuild("direct calls")
+
+
 _WRITER_FUNCTIONS = ("_write_cycle_record", "_write_campaign", "_write_cycle_binding", "_publish_event")
 
 

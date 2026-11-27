@@ -12,7 +12,7 @@ import json
 import os
 import re
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional,
                      Sequence, Set, Tuple)
@@ -512,24 +512,8 @@ def _cycle_entry_id(root: Path, campaign: Mapping[str, Any], campaign_id: str,
     return cycle_id
 
 
-def scan_campaign(root: Path, campaign_path: Path) -> Optional[Rows]:
-    """Row computation for exactly one campaign directory.
-
-    This is the loop body a full `scan_index` merges over every campaign, and
-    the same function an incremental update calls for just the touched or
-    drifted ones. Sharing it is the whole equivalence proof: full and
-    incremental output cannot diverge in row *content* because both compute a
-    campaign's rows the same way; they can only diverge in which campaigns get
-    recomputed, and `_merge_rows` treats every recomputed campaign identically
-    regardless of who called it.
-    """
-
-    root = Path(root).resolve()
-    campaign = _campaign_view(root, campaign_path)
-    if campaign is None:
-        return None
-    campaign_id = campaign["campaign_id"]
-    rows: Rows = {}
+def _row_adder(root: Path, rows: Rows, campaign_id: str) -> Callable[..., None]:
+    """The one row writer `scan_campaign` and its reuse (`_rows_after_own_cycle`) share."""
 
     def add(identifier: str, path: Path, *, title: str, started: str, status: str) -> None:
         rel = path.resolve().relative_to(root).as_posix()
@@ -544,14 +528,71 @@ def scan_campaign(root: Path, campaign_path: Path) -> Optional[Rows]:
             "path": rel,
         }
 
-    campaign_title = str(campaign.get("title") or campaign.get("slug") or "unnamed")
+    return add
+
+
+def _campaign_title(campaign: Mapping[str, Any]) -> str:
+    return str(campaign.get("title") or campaign.get("slug") or "unnamed")
+
+
+def _add_campaign_row(add: Callable[..., None], campaign: Mapping[str, Any], campaign_path: Path) -> None:
     add(
-        campaign_id,
+        campaign["campaign_id"],
         campaign_path,
-        title=campaign_title,
+        title=_campaign_title(campaign),
         started=str(campaign.get("created_on") or ""),
         status=str(campaign.get("state") or "unknown"),
     )
+
+
+def _add_cycle_row(root: Path, add: Callable[..., None], campaign_path: Path, cycle_id: str,
+                   cycle_path: Path, campaign_title: str) -> None:
+    record = read_cycle_record(root, cycle_id) or {}
+    add(
+        cycle_id,
+        cycle_path,
+        title=str(record.get("title") or record.get("slug") or campaign_title),
+        started=display_started_on(record) or "",
+        status=str(record.get("state") or ("sealed" if _manifest_cycle_id(root, campaign_path, cycle_path) else "open")),
+    )
+
+
+def _settle_campaign_start(rows: Rows, campaign_id: str) -> None:
+    # A campaign begins with its first cycle. A producer-born campaign's
+    # `created_on` already is that; a W7G resplit campaign's is the resplit
+    # run, so the earliest cycle start (possibly recovered) is shown instead.
+    cycle_starts = [row["started"] for key, row in rows.items() if key != campaign_id and row.get("started")]
+    if cycle_starts and rows[campaign_id]["started"] and min(cycle_starts) < rows[campaign_id]["started"]:
+        rows[campaign_id]["started"] = min(cycle_starts)
+
+
+def scan_campaign(root: Path, campaign_path: Path, *,
+                  _view_into: Optional[List[Dict[str, Any]]] = None) -> Optional[Rows]:
+    """Row computation for exactly one campaign directory.
+
+    This is the loop body a full `scan_index` merges over every campaign, and
+    the same function an incremental update calls for just the touched or
+    drifted ones. Sharing it is the whole equivalence proof: full and
+    incremental output cannot diverge in row *content* because both compute a
+    campaign's rows the same way; they can only diverge in which campaigns get
+    recomputed, and `_merge_rows` treats every recomputed campaign identically
+    regardless of who called it.
+
+    ``_view_into`` (in-process only) receives the campaign view this scan
+    read, so a precheck can hand its scan to the same caller's update.
+    """
+
+    root = Path(root).resolve()
+    campaign = _campaign_view(root, campaign_path)
+    if _view_into is not None:
+        _view_into.append(campaign)
+    if campaign is None:
+        return None
+    campaign_id = campaign["campaign_id"]
+    rows: Rows = {}
+    add = _row_adder(root, rows, campaign_id)
+    campaign_title = _campaign_title(campaign)
+    _add_campaign_row(add, campaign, campaign_path)
     unresolved = []
     assigned_ids = set()
     for cycle_path, layout in iter_cycle_dirs(campaign_path):
@@ -561,14 +602,7 @@ def scan_campaign(root: Path, campaign_path: Path) -> Optional[Rows]:
                 unresolved.append(cycle_path)
             continue
         assigned_ids.add(cycle_id)
-        record = read_cycle_record(root, cycle_id) or {}
-        add(
-            cycle_id,
-            cycle_path,
-            title=str(record.get("title") or record.get("slug") or campaign_title),
-            started=display_started_on(record) or "",
-            status=str(record.get("state") or ("sealed" if _manifest_cycle_id(root, campaign_path, cycle_path) else "open")),
-        )
+        _add_cycle_row(root, add, campaign_path, cycle_id, cycle_path, campaign_title)
     # A manual rename changes only the display locator. For an open cycle
     # there is no manifest yet, so bind the sole remaining record to the
     # sole remaining direct cycle directory. Ambiguity stays unresolved;
@@ -595,13 +629,70 @@ def scan_campaign(root: Path, campaign_path: Path) -> Optional[Rows]:
             started=display_started_on(record) or "",
             status="open",
         )
-    # A campaign begins with its first cycle. A producer-born campaign's
-    # `created_on` already is that; a W7G resplit campaign's is the resplit
-    # run, so the earliest cycle start (possibly recovered) is shown instead.
-    cycle_starts = [row["started"] for key, row in rows.items() if key != campaign_id and row.get("started")]
-    if cycle_starts and rows[campaign_id]["started"] and min(cycle_starts) < rows[campaign_id]["started"]:
-        rows[campaign_id]["started"] = min(cycle_starts)
+    _settle_campaign_start(rows, campaign_id)
     return rows
+
+
+_NOT_CYCLE_DIRS = frozenset({"cycles", "journals", CAMPAIGN_EVENTS_DIR, CAMPAIGN_RECORDS_DIR})
+
+
+def _rows_after_own_cycle(root: Path, campaign_path: Path, prior_view: Optional[Mapping[str, Any]],
+                          prior_rows: Optional[Rows], added: Optional[Path]) -> Tuple[bool, Optional[Rows]]:
+    """``scan_campaign(root, campaign_path)``, answered from this process's
+    earlier scan of the same campaign plus the one cycle folder it added since.
+
+    Returns ``(True, rows)`` when the answer is shown to equal a fresh scan,
+    and ``(False, None)`` otherwise; the caller then scans as before. The
+    campaign record is read again every time. Reuse needs it unchanged, except
+    that the cycle list may have grown by exactly the cycle bound in
+    ``added``, a new direct cycle folder of this campaign. Any other
+    difference, a record that is not exactly that, or a lookup that raises
+    falls back to the scan, which then raises or answers exactly as before.
+    """
+
+    def without_cycles(view: Mapping[str, Any]) -> Dict[str, Any]:
+        return {key: value for key, value in view.items() if key != "cycles"}
+
+    campaign = _campaign_view(root, campaign_path)  # raises like scan_campaign's first read
+    if prior_view is None or prior_rows is None or campaign is None:
+        return (prior_view is None and prior_rows is None and campaign is None), None
+    prior_cycles = prior_view.get("cycles")
+    cycles = campaign.get("cycles")
+    if without_cycles(campaign) != without_cycles(prior_view) or not isinstance(prior_cycles, list):
+        return False, None
+    added_here = added is not None and added.parent == campaign_path
+    if cycles == prior_cycles and not added_here:
+        return True, {identifier: dict(row) for identifier, row in prior_rows.items()}
+    if (not added_here or not isinstance(cycles, list) or len(cycles) != len(prior_cycles) + 1
+            or cycles[:-1] != prior_cycles):
+        return False, None
+    new_id = cycles[-1]
+    campaign_id = campaign["campaign_id"]
+    if (not isinstance(new_id, str) or _CYCLE_ID.fullmatch(new_id) is None or new_id in prior_rows
+            or added.name.startswith(".") or added.name in _NOT_CYCLE_DIRS
+            or added.is_symlink() or not added.is_dir()
+            # The open-folder rule could also give the new record to a legacy
+            # `cycles/<id>` folder or a folder named like its locator.
+            or os.path.lexists(campaign_path / "cycles" / new_id)
+            or (read_cycle_record(root, new_id) or {}).get("locator") != added.name):
+        return False, None
+    try:
+        import artifact_request
+        if any(True for _member in artifact_request.members(campaign_path.parent.parent, added)):
+            return False, None
+        if _cycle_entry_id(root, campaign, campaign_id, added, "readable") != new_id:
+            return False, None
+        rows: Rows = {}
+        add = _row_adder(root, rows, campaign_id)
+        _add_campaign_row(add, campaign, campaign_path)
+        for identifier, row in prior_rows.items():
+            if identifier != campaign_id:
+                rows[identifier] = dict(row)
+        _add_cycle_row(root, add, campaign_path, new_id, added, _campaign_title(campaign))
+    except LocatorError:
+        return False, None
+    _settle_campaign_start(rows, campaign_id)
+    return True, rows
 
 
 def _merge_rows(into: Rows, part: Rows) -> None:
@@ -830,9 +921,16 @@ def _load_published_rows(root: Path) -> Optional[Rows]:
     from a partially-parsed file.
     """
 
+    return _published_rows(_published_bytes(root))
+
+
+def _published_bytes(root: Path) -> Tuple[Optional[bytes], Optional[bytes]]:
     root = Path(root).resolve()
-    json_bytes = _regular_bytes(campaigns_dir(root) / INDEX_JSON)
-    md_bytes = _regular_bytes(campaigns_dir(root) / INDEX_MD)
+    return _regular_bytes(campaigns_dir(root) / INDEX_JSON), _regular_bytes(campaigns_dir(root) / INDEX_MD)
+
+
+def _published_rows(published: Tuple[Optional[bytes], Optional[bytes]]) -> Optional[Rows]:
+    json_bytes, md_bytes = published
     if json_bytes is None or md_bytes is None:
         return None
     rows = parse_index_markdown(md_bytes)
@@ -919,10 +1017,23 @@ def rebuild_indexes(root: Path) -> Dict[str, str]:
 
 
 @dataclass(frozen=True)
+class _PlanScans:
+    """What one incremental plan read, kept in process for the same caller's
+    next `update_indexes` (never persisted). It is used only while the
+    touched campaigns, the published index bytes and the campaign folder
+    names are all exactly as they were; otherwise that update scans as before."""
+    touched: Tuple[str, ...]
+    published: Tuple[bytes, bytes]
+    entries: Tuple[str, ...]
+    parts: Mapping[str, Tuple[Optional[Dict[str, Any]], Optional[Rows]]]  # rel -> (campaign view, rows)
+
+
+@dataclass(frozen=True)
 class IndexUpdate:
     status: str                          # "unchanged" | "updated" | "rebuilt"
     rescanned: Tuple[str, ...]           # campaign rel paths recomputed
     skipped: Tuple[Dict[str, str], ...]  # unrelated problem campaigns: {"path", "code", "id"}
+    scans: Optional[_PlanScans] = field(default=None, compare=False, repr=False)  # precheck only
 
 
 def _rel_prefix_rows(rows: Rows, prefix: str) -> List[str]:
@@ -990,16 +1101,26 @@ def _lenient_rebuild(root: Path, touched: Sequence[str]) -> Tuple[Rows, Dict[str
     return rows, mapping, "rebuilt", tuple(), tuple(skipped)
 
 
-def _plan_update(root: Path, campaign_ids: Iterable[str]) -> Tuple[Rows, Dict[str, str], str,
-                                                                     Tuple[str, ...], Tuple[Dict[str, str], ...]]:
+def _plan_update(root: Path, campaign_ids: Iterable[str], *, prior: Optional[_PlanScans] = None,
+                 added: Optional[Path] = None, keep: bool = False,
+                 ) -> Tuple[Rows, Dict[str, str], str, Tuple[str, ...], Tuple[Dict[str, str], ...],
+                            Optional[_PlanScans]]:
     root = Path(root).resolve()
     touched = list(dict.fromkeys(campaign_ids))
-    published = _load_published_rows(root)
+    published_bytes = _published_bytes(root)
+    published = _published_rows(published_bytes)
     if published is None:
-        return _lenient_rebuild(root, touched)
+        return (*_lenient_rebuild(root, touched), None)
 
     touched_set = set(touched)
     on_disk = set(_campaign_entries(root))
+    entries = tuple(sorted(on_disk))
+    # The earlier plan of this same caller (`prepare_index_update`) is reused
+    # only for the exact same request against the exact same published index
+    # and campaign folders; a lenient plan never produces one.
+    reuse = (prior is not None and prior.touched == tuple(touched)
+             and prior.published == published_bytes and prior.entries == entries)
+    scanned: Dict[str, Tuple[Optional[Dict[str, Any]], Optional[Rows]]] = {}
     indexed: Set[str] = set()
     for identifier, row in published.items():
         if _CAMPAIGN_ID.fullmatch(identifier) is not None:
@@ -1034,7 +1155,14 @@ def _plan_update(root: Path, campaign_ids: Iterable[str]) -> Tuple[Rows, Dict[st
             rescanned.append(rel)
             continue
         try:
-            part = scan_campaign(root, campaign_path)
+            reused = False
+            if reuse and rel in prior.parts:
+                reused, part = _rows_after_own_cycle(root, campaign_path, *prior.parts[rel], added)
+            if not reused:
+                view: List[Dict[str, Any]] = []
+                part = scan_campaign(root, campaign_path, _view_into=view)
+                if keep:
+                    scanned[rel] = (view[0] if view else None, part)
         except LocatorError as exc:
             if touches_target:
                 raise
@@ -1064,24 +1192,36 @@ def _plan_update(root: Path, campaign_ids: Iterable[str]) -> Tuple[Rows, Dict[st
 
     mapping = {identifier: row["path"] for identifier, row in rows.items()}
     status = "updated" if rescanned or skipped else "unchanged"
-    return rows, mapping, status, tuple(rescanned), tuple(skipped)
+    scans = _PlanScans(tuple(touched), published_bytes, entries, scanned) if keep else None
+    return rows, mapping, status, tuple(rescanned), tuple(skipped), scans
 
 
 def prepare_index_update(root: Path, campaign_ids: Iterable[str]) -> IndexUpdate:
     """Read-only precheck: identical computation to `update_indexes`, no
     write. Callers run this before their own first write so a duplicate-copy
-    conflict on the touched campaign is refused before any byte changes."""
+    conflict on the touched campaign is refused before any byte changes.
 
-    _rows, _mapping, status, rescanned, skipped = _plan_update(root, campaign_ids)
-    return IndexUpdate(status=status, rescanned=rescanned, skipped=skipped)
+    The result also carries, in process only, the campaign scans it made; the
+    same caller may pass it to `update_indexes(prepared=...)` under the same
+    admission lock instead of scanning those campaigns twice."""
+
+    _rows, _mapping, status, rescanned, skipped, scans = _plan_update(root, campaign_ids, keep=True)
+    return IndexUpdate(status=status, rescanned=rescanned, skipped=skipped, scans=scans)
 
 
-def update_indexes(root: Path, campaign_ids: Iterable[str]) -> IndexUpdate:
+def update_indexes(root: Path, campaign_ids: Iterable[str], *, prepared: Optional[IndexUpdate] = None,
+                   added: Optional[Path] = None) -> IndexUpdate:
     """Recompute and persist just the touched campaigns' rows.
 
     Requires the caller to already hold the producer-admission flock for
     `root` -- this writes the shared index and must be serialized with every
     other writer, exactly like `rebuild_indexes`.
+
+    ``prepared`` is this caller's own `prepare_index_update` result for the
+    same campaigns, made under the same lock hold; ``added`` is the one cycle
+    folder the caller created since. Together they let a campaign scanned by
+    that precheck be answered from it; whenever that cannot be shown equal to
+    a fresh scan (`_rows_after_own_cycle`), the campaign is scanned again.
     """
 
     import artifact_admission
@@ -1091,7 +1231,10 @@ def update_indexes(root: Path, campaign_ids: Iterable[str]) -> IndexUpdate:
     if not artifact_admission.holds_lock(root):
         raise LocatorError("locator-index-lock-not-held")
     dispatch_lock_order.assert_held("producer-admission", "locator-update-indexes")
-    rows, mapping, status, rescanned, skipped = _plan_update(root, campaign_ids)
+    if added is not None:
+        added = Path(added).parent.resolve() / Path(added).name
+    rows, mapping, status, rescanned, skipped, _scans = _plan_update(
+        root, campaign_ids, prior=prepared.scans if prepared is not None else None, added=added)
     json_bytes, md_bytes = render_indexes(mapping, rows)
     wrote = _write_index_pair(root, json_bytes, md_bytes)
     if not wrote:
