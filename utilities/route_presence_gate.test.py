@@ -8,6 +8,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -474,7 +475,38 @@ class SelectionImportTest(Fixture):
         (site / "sitecustomize.py").write_text(self.UNLOADABLE[how], encoding="utf-8")
         return {"PYTHONPATH": str(site)}
 
-    def hook(self, harness, target, cwd, **extra):
+    def stripped(self, how):
+        """Hook entries whose own ``artifact_root_selection.py`` is missing or broken, so the
+        shell resolver's interpreter fails on it (exit 2 / 1) as such an install would."""
+        tree = self.tmp / f"tree-{how}"
+        for relative in ("utilities/route_presence_gate.py", "utilities/artifact-root.sh",
+                         "hooks/route-presence-gate.py",
+                         "adapters/codex/hooks/route-presence-gate.py"):
+            (tree / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(HERE.parent / relative, tree / relative)
+        (tree / "tools").symlink_to(HERE.parent / "tools")
+        if how == "broken":
+            (tree / "utilities" / "artifact_root_selection.py").write_text(
+                "def select_artifact_root(:\n", encoding="utf-8")
+        return tree
+
+    def shell_project(self, name):
+        """A separate-git-dir checkout (the shell resolver answers) and the folder it looks in."""
+        top = self.tmp / "work" / name
+        git(self.tmp, "init", "-q", f"--separate-git-dir={self.tmp / f'{name}.git'}", str(top))
+        (top / "src").mkdir()
+        (top / "src" / "engine.py").write_text("x = 1\n")
+        return top, Path(self.resolve(top)).parent
+
+    def resolve(self, top):
+        return os.path.realpath(subprocess.run(
+            ["sh", str(RESOLVER), str(top)], capture_output=True, text=True, check=True,
+            env=self.env).stdout.strip())
+
+    def hook(self, harness, target, cwd, tree=None, **extra):
+        entry = HOOK_ENTRIES[harness]
+        if tree is not None:
+            entry = [str(tree / Path(entry[0]).relative_to(HERE.parent)), *entry[1:]]
         sid = "ses_gate" if harness == "opencode" else SID
         if harness == "opencode":
             payload = {"tool": "write", "args": {"filePath": str(target)}, "sessionID": sid,
@@ -486,7 +518,7 @@ class SelectionImportTest(Fixture):
         else:
             payload = {"tool_name": "Edit", "session_id": sid, "cwd": str(cwd),
                        "tool_input": {"file_path": str(target)}}
-        result = subprocess.run([sys.executable, *HOOK_ENTRIES[harness]], input=json.dumps(payload),
+        result = subprocess.run([sys.executable, *entry], input=json.dumps(payload),
                                 capture_output=True, text=True, cwd=str(cwd),
                                 env={**self.env, "PYTHONDONTWRITEBYTECODE": "1", **extra})
         return self.outcome(harness, result)
@@ -519,33 +551,63 @@ class SelectionImportTest(Fixture):
         target = linked / "src" / "engine.py"
         override = self.tmp / "override"
         override.mkdir()
-        separate = self.tmp / "work" / "separate"  # no standard .git: the shell resolver answers
-        git(self.tmp, "init", "-q", f"--separate-git-dir={self.tmp / 'separate.git'}", str(separate))
-        (separate / "src").mkdir()
-        (separate / "src" / "engine.py").write_text("x = 1\n")
-        mine = str(self.root)
-        other = os.path.realpath(subprocess.run(  # whatever the resolver answers for this layout
-            ["sh", str(RESOLVER), str(separate)], capture_output=True, text=True, check=True,
-            env=self.env).stdout.strip())
+        release = self.tmp / "hearting" / "releases" / "v-fixture"
+        release.mkdir(parents=True)
+        # No standard .git: the shell resolver answers, in the folder it looks in (``base``).
+        separate, _ = self.shell_project("separate")
+        two, base = self.shell_project("separate-two")
+        (base / ".agent_reports").mkdir()
+        (base / ".claude_reports").mkdir()
+        single, base = self.shell_project("separate-single")
+        (base / ".agent_reports").symlink_to(release)  # refused at once (67)
+        chosen, base = self.shell_project("separate-chosen")
+        (base / ".agent_reports").symlink_to(release)  # chosen by python3, then refused (67)
+        (base / ".claude_reports").mkdir()
+        mine, other, two_root = str(self.root), self.resolve(separate), self.resolve(two)
         missing, broken = self.unloadable("missing"), self.unloadable("broken")
+        gone, unparsable = self.stripped("missing"), self.stripped("broken")
         safe = {"PYTHONSAFEPATH": "1", "AGENT_DISPATCH_DEPTH": "-1"}
+        relative, parentless = "relative", str(self.tmp / "absent" / "root")
         rows = [
-            ("needs a route", target, self.tmp, {}, f"refused:{mine}"),
-            ("current worktree", target, linked, {}, "passed"),
-            ("explicit root", target, self.tmp, {"AGENT_ARTIFACT_ROOT": str(override)},
+            ("needs a route", target, self.tmp, {}, None, f"refused:{mine}"),
+            ("current worktree", target, linked, {}, None, "passed"),
+            ("explicit root", target, self.tmp, {"AGENT_ARTIFACT_ROOT": str(override)}, None,
              f"refused:{override}"),
-            ("shell resolver", separate / "src" / "engine.py", self.tmp, {}, f"refused:{other}"),
-            ("PYTHONSAFEPATH=1, depth -1", target, self.tmp, safe, f"refused:{mine}"),
-            ("selection missing", target, self.tmp, missing, "surfaced"),
-            ("selection broken", target, self.tmp, broken, "surfaced"),
-            ("selection missing, current worktree", target, linked, missing, "passed"),
+            ("shell resolver", separate / "src" / "engine.py", self.tmp, {}, None,
+             f"refused:{other}"),
+            ("shell resolver, two folders", two / "src" / "engine.py", self.tmp, {}, None,
+             f"refused:{two_root}"),
+            ("PYTHONSAFEPATH=1, depth -1", target, self.tmp, safe, None, f"refused:{mine}"),
+            ("selection missing", target, self.tmp, missing, None, "surfaced"),
+            ("selection broken", target, self.tmp, broken, None, "surfaced"),
+            ("selection missing, current worktree", target, linked, missing, None, "passed"),
             ("selection missing, explicit root", target, self.tmp,
-             {**missing, "AGENT_ARTIFACT_ROOT": str(override)}, f"refused:{override}"),
+             {**missing, "AGENT_ARTIFACT_ROOT": str(override)}, None, f"refused:{override}"),
+            # The shell's own refusals need no choice: no module is asked for (64, 66, 67).
+            ("selection missing, relative root (64)", target, self.tmp,
+             {**missing, "AGENT_ARTIFACT_ROOT": relative}, None, "passed"),
+            ("selection missing, root without a parent (66)", target, self.tmp,
+             {**missing, "AGENT_ARTIFACT_ROOT": parentless}, None, "passed"),
+            ("selection missing, single link to a release (67)", single / "src" / "engine.py",
+             self.tmp, missing, None, "passed"),
+            ("selection missing, chosen link to a release (67)", chosen / "src" / "engine.py",
+             self.tmp, missing, None, "passed"),
+            # The same with the file itself gone, and where the shell's choice fails on it.
+            ("selection file gone, relative root (64)", target, self.tmp,
+             {**missing, "AGENT_ARTIFACT_ROOT": relative}, gone, "passed"),
+            ("selection file gone, root without a parent (66)", target, self.tmp,
+             {**missing, "AGENT_ARTIFACT_ROOT": parentless}, gone, "passed"),
+            ("selection file gone, single link to a release (67)", single / "src" / "engine.py",
+             self.tmp, missing, gone, "passed"),
+            ("selection file gone, two folders (2)", two / "src" / "engine.py", self.tmp,
+             missing, gone, "surfaced"),
+            ("selection file broken, two folders (1)", two / "src" / "engine.py", self.tmp,
+             broken, unparsable, "surfaced"),
         ]
         for harness in HOOK_ENTRIES:
-            for label, path, cwd, extra, expected in rows:
+            for label, path, cwd, extra, tree, expected in rows:
                 with self.subTest(harness=harness, row=label):
-                    self.assertEqual(self.hook(harness, path, cwd, **extra), expected)
+                    self.assertEqual(self.hook(harness, path, cwd, tree, **extra), expected)
         for harness in HOOK_ENTRIES:
             self.ledger_line(self.root, harness=harness,
                              sid="ses_gate" if harness == "opencode" else SID)
@@ -559,9 +621,9 @@ class SelectionImportTest(Fixture):
         with mock.patch.dict(sys.modules, {"artifact_root_selection": None}):
             with self.assertRaises(G.SelectionUnavailable):
                 self.judge(payload)
-            # A resolver failure may be the same module failing inside it.
-            with self.assertRaises(G.SelectionUnavailable):
-                self.judge(payload, AGENT_ARTIFACT_ROOT="relative")
+            # The shell's own refusals (64, 66) involve no choice, so no module is asked for.
+            self.assertEqual(self.judge(payload, AGENT_ARTIFACT_ROOT="relative"), "")
+            self.assertEqual(self.judge(payload, AGENT_ARTIFACT_ROOT=str(self.tmp / "a" / "b")), "")
             self.assertEqual(self.judge({**payload, "cwd": str(linked)}), "")
         self.assertEqual(self.judge(payload, AGENT_ARTIFACT_ROOT="relative"), "")
         with mock.patch.object(G, "_route_chain", side_effect=ImportError("gone")):

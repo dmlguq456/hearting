@@ -159,6 +159,12 @@ def _select_artifact_root():
     return select_artifact_root
 
 
+# How ``artifact-root.sh`` fails when its interpreter could not choose: python3 exits 1 on
+# an import or syntax error and 2 on a missing script. The shell's own refusals (64 relative
+# override, 66 missing folder, 67 installed tree, also after a choice) involve no module.
+_INTERPRETER_FAILED = (1, 2)
+
+
 def artifact_root(top: Path, env) -> str:
     """Canonical artifact root for the work tree ``top``.
 
@@ -176,7 +182,8 @@ def artifact_root(top: Path, env) -> str:
                             env=dict(env))
     lines = (result.stdout or "").strip().splitlines()
     if result.returncode != 0 or not lines:
-        _select_artifact_root()  # the resolver's own choice may have failed on the same module
+        if result.returncode in _INTERPRETER_FAILED:
+            _select_artifact_root()  # the resolver's choice may have failed on the same module
         return ""
     return os.path.realpath(lines[-1])
 
