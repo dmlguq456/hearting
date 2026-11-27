@@ -17,13 +17,15 @@ import threading
 import unittest
 from unittest import mock
 
+from tools import fixture_processes
+
 sys.path[:0] = [str(Path(__file__).resolve().parent)]
 import session_shell as shell
 
 
 class SessionShellTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="hearting-shell-", dir="/var/tmp")
+        self.tmp = fixture_processes.TemporaryDirectory(prefix="hearting-shell-")
         self.root = Path(self.tmp.name)
         self.addCleanup(self.tmp.cleanup)
         self.env = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.root / "config"),

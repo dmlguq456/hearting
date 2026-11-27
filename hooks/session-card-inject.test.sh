@@ -13,40 +13,27 @@ TMP_BASE=${TMP_BASE%/}
 if ! mkdir -p "$TMP_BASE" 2>/dev/null || [ ! -w "$TMP_BASE" ]; then
   TMP_BASE=/tmp
 fi
-TMP=$(mktemp -d "$TMP_BASE/session-card-test.XXXXXX")
-SHIM_TMP=$(mktemp -d "$ROOT/.session-card-shim.XXXXXX")
-unset FIXTURE_MARKER
+TMP=$(mktemp -d "$TMP_BASE/session-card-test.XXXXXX") || exit 1
+SHIM_TMP=
 FIXTURE_MARKER=
 cleanup_fixture() {
   local fixture_status=$? cleanup_status=0
   trap - EXIT INT TERM
-  # The fixture owns every detached helper it caused: the obligation runner (marker) and
-  # whatever the hooks/plugin spawned with this private root in their environment (the
-  # OpenCode plugin starts session_summary_trigger.py detached, and its --wait outlives
-  # the case). Reap both by marker or by the fixture root before the root is removed.
-  if [ -n "$FIXTURE_MARKER" ] || [ -n "$TMP" ]; then
-    if python3 - "$ROOT" "$FIXTURE_MARKER" "$TMP" <<'PY'
+  # The plugin's summary trigger and the obligation runner can outlive the
+  # hook. Settle the runner's explicit marker before removing its scratch.
+  python3 - "$ROOT" "$FIXTURE_MARKER" "$TMP" "$SHIM_TMP" <<'PYTHON' || cleanup_status=$?
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[1]) / "tools"))
-import fixture_processes
-markers = [m for m in sys.argv[2:4] if m]
-left = {}
-for marker in markers:
-    fixture_processes.reap(marker, timeout=10)
-    left.update(fixture_processes.marked_processes(marker))
-if left:
-    raise SystemExit("fixture helper survived cleanup: %s" % sorted(left))
-PY
-    then
-      :
-    else
-      cleanup_status=$?
-      echo "fixture runner cleanup failed" >&2
-    fi
-  fi
-  rm -rf "$TMP" "$SHIM_TMP" || cleanup_status=1
-  if [ "$fixture_status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
+from fixture_processes import reap, remove_temporary_directory
+
+marker, *directories = sys.argv[2:]
+if marker:
+    reap(marker)
+for directory in filter(None, directories):
+    remove_temporary_directory(directory)
+PYTHON
+  if [ "$fixture_status" -eq 0 ]; then
     exit "$cleanup_status"
   fi
   exit "$fixture_status"
@@ -54,6 +41,7 @@ PY
 trap cleanup_fixture EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+SHIM_TMP=$(mktemp -d "$ROOT/.session-card-shim.XXXXXX") || exit 1
 FAILS=0
 ok() { printf 'ok - %s\n' "$1"; }
 bad() { printf 'not ok - %s\n' "$1"; FAILS=$((FAILS + 1)); }
