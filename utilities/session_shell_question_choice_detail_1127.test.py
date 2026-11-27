@@ -176,13 +176,13 @@ def card(options, understanding="견본 도감의 첫 장을 정합니다.", tex
 
 # ---- what the product draws (the sketch's copies, with the product's rule where they differ) ----
 A_POPUP_60 = """\
-╭─ › ◑ 1 QUESTIONS · 1/1 · answer needed ────────────── ✕ ─╮
+╭─ ▶ ◑ 1 QUESTIONS · 1/1 · answer needed ────────────── ✕ ─╮
 │ 견본 도감의 첫 장을 어떻게 구성할까요?                   │
 │                                                          │
 │ ──────────────────────────────────────────────────────── │
 │   1  그림과 이름 (recommended)                           │
 │      그림 옆에 이름을 붙입니다.                          │
-│ ▸ 2  관찰 기록                                           │
+│ ▶ 2  관찰 기록                                           │
 │      잎의 색과 모양을 먼저 적습니다. 같은 종도 어디서 본 │
 │       것인지 구분할 수 있습니다.                         │
 │   3  이름만                                              │
@@ -192,13 +192,13 @@ A_POPUP_60 = """\
 │ ↑↓ choose · type to write · Enter send · Esc/Ctrl+] back │
 ╰─ NOW · QUESTIONS ────────────────────────────────────────╯"""
 A_POPUP_104 = """\
-╭─ › ◑ 1 QUESTIONS · 1/1 · answer needed ────────────────────────────────────────────────────────── ✕ ─╮
+╭─ ▶ ◑ 1 QUESTIONS · 1/1 · answer needed ────────────────────────────────────────────────────────── ✕ ─╮
 │ 견본 도감의 첫 장을 어떻게 구성할까요?                                                               │
 │                                                                                                      │
 │ ──────────────────────────────────────────────────────────────────────────────────────────────────── │
 │   1  그림과 이름 (recommended)                                                                       │
 │      그림 옆에 이름을 붙입니다.                                                                      │
-│ ▸ 2  관찰 기록                                                                                       │
+│ ▶ 2  관찰 기록                                                                                       │
 │      잎의 색과 모양을 먼저 적습니다. 같은 종도 어디서 본 것인지 구분할 수 있습니다.                  │
 │   3  이름만                                                                                          │
 │   4  수정                                                                                            │
@@ -209,7 +209,7 @@ A_POPUP_104 = """\
 # Main's popup for a record without the words (an older record, or one whose words were written into its text by
 # hand): the sketch's `current-popup`, unchanged.
 CURRENT_POPUP = """\
-╭─ › ◑ 1 QUESTIONS · 1/1 · answer needed ────────────── ✕ ─╮
+╭─ ▶ ◑ 1 QUESTIONS · 1/1 · answer needed ────────────── ✕ ─╮
 │ 견본 도감의 첫 장을 어떻게 구성할까요?                   │
 │ - 그림과 이름: 그림 옆에 이름을 붙입니다.                │
 │ - 관찰 기록: 잎의 색과 모양을 먼저 적습니다. 같은 종도   │
@@ -217,7 +217,7 @@ CURRENT_POPUP = """\
 │ - 수정: 원하는 배열을 답에 적습니다.                     │
 │                                                          │
 │ ──────────────────────────────────────────────────────── │
-│ ▸ 1  그림과 이름 (recommended)                           │
+│ ▶ 1  그림과 이름 (recommended)                           │
 │   2  관찰 기록                                           │
 │   3  이름만                                              │
 │   4  수정                                                │
@@ -225,11 +225,11 @@ CURRENT_POPUP = """\
 │ ↑↓ choose · type to write · Enter send · Esc/Ctrl+] back │
 ╰─ NOW · QUESTIONS ────────────────────────────────────────╯"""
 A_EIGHT_46 = """\
-╭─ › ◑ 1 QUESTIONS · 1/1 · answer needed ────────────── ✕ ─╮
+╭─ ▶ ◑ 1 QUESTIONS · 1/1 · answer needed ────────────── ✕ ─╮
 │ 견본 도감의 첫 장을 어떻게 구성할까요?                   │
 │                                                          │
 │ ──────────────────────────────────────────────────────── │
-│ ▸ 1  그림과 이름 (recommended)                           │
+│ ▶ 1  그림과 이름 (recommended)                           │
 │      그림 옆에 이름을 붙입니다.                          │
 │      표지는 한 장으로 둡니다.                            │
 │   2  관찰 기록                                           │
@@ -261,11 +261,11 @@ _EIGHT_ROWS = A_EIGHT_46.splitlines()
 # the keys fit), the rows left take the words: the highlighted choice's first, then the others from the top. The
 # sketch's `a-eight-30` (whole choices sliding, `+1`) was a different rule; the person's rule now is this one.
 A_EIGHT_30 = """\
-╭─ › ◑ 1 QUESTIONS · 1/1 · answer needed ────────────── ✕ ─╮
+╭─ ▶ ◑ 1 QUESTIONS · 1/1 · answer needed ────────────── ✕ ─╮
 │ 견본 도감의 첫 장을 어떻게 구성할까요?                   │
 │                                                          │
 │ ──────────────────────────────────────────────────────── │
-│ ▸ 1  그림과 이름 (recommended)                           │
+│ ▶ 1  그림과 이름 (recommended)                           │
 │      그림 옆에 이름을 붙입니다.                          │
 │      표지는 한 장으로 둡니다.                            │
 │   2  관찰 기록                                           │
@@ -289,7 +289,7 @@ A_EIGHT_30 = """\
 │ ↑↓ choose · type to write · Enter send · Esc/Ctrl+] back │
 ╰─ NOW · QUESTIONS ────────────────────────────────────────╯"""
 A_EIGHT_30_END = """\
-╭─ › ◑ 1 QUESTIONS · 1/1 · answer needed ────────────── ✕ ─╮
+╭─ ▶ ◑ 1 QUESTIONS · 1/1 · answer needed ────────────── ✕ ─╮
 │ 견본 도감의 첫 장을 어떻게 구성할까요?                   │
 │                                                          │
 │ ──────────────────────────────────────────────────────── │
@@ -310,7 +310,7 @@ A_EIGHT_30_END = """\
 │      각 장소의 이름을 적습니다.                          │
 │   6  계절순                                              │
 │   7  날짜순                                              │
-│ ▸ 8  수정                                                │
+│ ▶ 8  수정                                                │
 │      다른 배열을 적습니다.                               │
 │      답은 여러 줄로 쓸 수 있습니다.                      │
 │ ›                                                        │
@@ -319,7 +319,7 @@ A_EIGHT_30_END = """\
 # The sketch's `edit-popup` drew choices 1 and 2 without their words (sketch 나's form); under 가 every choice keeps
 # its words while an answer is written, so they stand here. The rest is the sketch's.
 EDIT_POPUP = """\
-╭─ › ◑ 1 QUESTIONS · 1/1 · answer needed ────────────── ✕ ─╮
+╭─ ▶ ◑ 1 QUESTIONS · 1/1 · answer needed ────────────── ✕ ─╮
 │ 견본 도감의 첫 장을 어떻게 구성할까요?                   │
 │                                                          │
 │ ──────────────────────────────────────────────────────── │
@@ -329,18 +329,18 @@ EDIT_POPUP = """\
 │      잎의 색과 모양을 먼저 적습니다. 같은 종도 어디서 본 │
 │       것인지 구분할 수 있습니다.                         │
 │   3  이름만                                              │
-│ ▸ 4  수정                                                │
+│ ▶ 4  수정                                                │
 │      원하는 배열을 답에 적습니다.                        │
 │ › 앞에는 이름만 두고                                     │
 │   그림은 뒷장에 모아 주세요.▏                            │
 │ Enter send · Ctrl+J newline · Esc/Ctrl+] back            │
 ╰─ NOW · QUESTIONS ────────────────────────────────────────╯"""
 FRAME_MEANS = """\
-╭─ › ◑ 1 QUESTIONS · 1/1 · answer needed ────────────── ✕ ─╮
+╭─ ▶ ◑ 1 QUESTIONS · 1/1 · answer needed ────────────── ✕ ─╮
 │ 다음 검토에서 어디까지 확인할까요?                       │
 │                                                          │
 │ ──────────────────────────────────────────────────────── │
-│ ▸ 1  첫 장만 (recommended)                               │
+│ ▶ 1  첫 장만 (recommended)                               │
 │      첫 장의 그림과 이름을 대조합니다.                   │
 │   2  도감 전체                                           │
 │      모든 장에서 같은 표기법을 확인합니다.               │
@@ -374,7 +374,7 @@ A_FLEET = {
 │     ─────────────────────────────────────────
 │     ○ 1  그림과 이름 (recommended)
 │          그림 옆에 이름을 붙입니다.
-│     ▸ 2  관찰 기록
+│     ▶ 2  관찰 기록
 │          잎의 색과 모양을 먼저 적습니다. 같은
 │           종도 어디서 본 것인지 구분할 수 있
 │          습니다.
@@ -392,7 +392,7 @@ A_FLEET = {
 │     ─────────────────────────────────────────────────────────────
 │     ○ 1  그림과 이름 (recommended)
 │          그림 옆에 이름을 붙입니다.
-│     ▸ 2  관찰 기록
+│     ▶ 2  관찰 기록
 │          잎의 색과 모양을 먼저 적습니다. 같은 종도 어디서 본 것인
 │          지 구분할 수 있습니다.
 │     ○ 3  이름만
@@ -409,7 +409,7 @@ A_FLEET = {
 │     ─────────────────────────────────────────────────────────────────────────────────────────────
 │     ○ 1  그림과 이름 (recommended)
 │          그림 옆에 이름을 붙입니다.
-│     ▸ 2  관찰 기록
+│     ▶ 2  관찰 기록
 │          잎의 색과 모양을 먼저 적습니다. 같은 종도 어디서 본 것인지 구분할 수 있습니다.
 │     ○ 3  이름만
 │     ○ 4  수정
@@ -622,7 +622,7 @@ class Drawn(Base):
         drawn = popup(self.native(), cols=64, keys=[DOWN])
         lines = drawn["lines"]
         hits = {hit["row"]: hit["action"] for hit in drawn["hits"]}
-        rows = {n: [i for i, line in enumerate(lines) if line.startswith(("│   " + n, "│ ▸ " + n))][0] for n in "1234"}
+        rows = {n: [i for i, line in enumerate(lines) if line.startswith(("│   " + n, "│ ▶ " + n))][0] for n in "1234"}
         self.assertEqual({row: hits.get(row) for row in range(rows["1"], rows["4"] + 2)},
                          {rows["1"]: "answer-choice:0", rows["1"] + 1: "answer-choice:0",
                           rows["2"]: "answer-choice:1", rows["2"] + 1: "answer-choice:1", rows["2"] + 2: "answer-choice:1",
@@ -644,7 +644,7 @@ class Drawn(Base):
             with self.subTest(step=step):
                 lines = popup(envelope, cols=64, rows=30, keys=[DOWN] * step)["lines"]
                 self.assertEqual(shown_choices(lines), list(range(1, 9)))
-                at = next(i for i, line in enumerate(lines) if line.startswith("│ ▸ %d  " % (step + 1)))
+                at = next(i for i, line in enumerate(lines) if line.startswith("│ ▶ %d  " % (step + 1)))
                 self.assertEqual(lines[at + 1][7:-1].strip(), EIGHT[step][1].split("\n")[0])
 
     def test_choosing_edit_and_writing(self):
@@ -723,7 +723,7 @@ class Edges(Base):
     def test_no_words_is_the_popup_main_draws(self):
         envelope = self.native(options=tuple((label, "") for label, _ in OPTIONS))
         lines = popup(envelope, cols=64)["lines"]
-        self.assertEqual(lines[4:8], ["│ ▸ 1  그림과 이름 (recommended)                           │",
+        self.assertEqual(lines[4:8], ["│ ▶ 1  그림과 이름 (recommended)                           │",
                                       "│   2  관찰 기록                                           │",
                                       "│   3  이름만                                              │",
                                       "│   4  수정                                                │"])
@@ -806,7 +806,8 @@ class Mutations(Base):
         self.assertTrue(any(p["role"] == "choice-detail" and p["bold"] for p in drawn["chosen"]))
 
 # ---- review of #1908 (head aa20fe83e), its five must-fix findings ----
-BASE = "b3f5a595a"          # main where #1908 branched: the panel editor before choice words
+# The panel editor without choice words: #1905's head (the eight marks, `▶`), merged here ahead of main.
+BASE = "c2e551f1e"
 
 
 _MAIN_EDITOR = []
@@ -821,7 +822,7 @@ def main_editor():
 
 
 def shown_choices(lines):
-    return [int(m.group(1)) for line in lines if (m := re.match(r"│ [▸ ] (\d)  ", line))]
+    return [int(m.group(1)) for line in lines if (m := re.match(r"│ [▶ ] (\d)  ", line))]
 
 
 def fleet_choice_rows(rows):
@@ -829,7 +830,7 @@ def fleet_choice_rows(rows):
     the name above them), from the first name to the answer row."""
     out, current = {}, None
     for at, line in enumerate(rows):
-        name = re.search(r"│     [○▸● ] (\d)  ", line)
+        name = re.search(r"│     [○▶● ] (\d)  ", line)
         if name:
             current = int(name.group(1))
         elif current is None:
@@ -879,8 +880,8 @@ class ReviewFix1(Base):
         rows, grid, *_ = fleet(envelope, cols=100, height=30, mark=(7, True))
         text = "\n".join(rows)
         for n, value in enumerate(values, 1):
-            self.assertRegex(text, r"[○▸] %d  %s" % (n, value))
-        self.assertIn("▸ 8  수정", text)
+            self.assertRegex(text, r"[○▶] %d  %s" % (n, value))
+        self.assertIn("▶ 8  수정", text)
         self.assertIn("│     > …", text)
         for said in EIGHT[7][1].split("\n"):                            # the chosen choice's words first
             self.assertIn("│          " + said, text)
@@ -890,7 +891,7 @@ class ReviewFix1(Base):
         self.fresh()
         plain = self.native(options=tuple((label, "") for label, _ in EIGHT))
         essential = lambda rows: [line[line.index("│"):].rstrip() for line in rows
-                                  if re.search(r"│     ([○▸] \d  |> |submit)", line)]
+                                  if re.search(r"│     ([○▶] \d  |> |submit)", line)]
         for height in range(14, 36, 2):
             with self.subTest(height=height):
                 kept = essential(fleet(plain, cols=100, height=height, mark=(7, True), whole=True)[0])
@@ -1117,7 +1118,7 @@ class ReviewFix2(Base):
                                 # Each row of words presses its own choice.
                                 for y in words_rows:
                                     name = next(int(m.group(1)) for line in rows[y::-1]
-                                                if (m := re.search(r"│     [○▸● ] (\d)  ", line)))
+                                                if (m := re.search(r"│     [○▶● ] (\d)  ", line)))
                                     self.assertEqual([hit.action for hit in grid.hits
                                                       if hit.y == y and hit.x1 > rows[3].index("┌")],
                                                      [("question.choice", "message-response",
