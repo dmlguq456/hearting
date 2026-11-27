@@ -4083,8 +4083,32 @@ class E1RecorderLinesTest(C1ChangesBase):
             self.assertEqual(P._history_by("human"), "human")
 
 
+class _IndexAgeClock:
+    """``time`` as `artifact_admission` sees it, with the index file's age fixed.
+
+    A head projection written in an earlier lock interval answers only once `index.json` is older
+    than `_INDEX_SETTLE_NS` (100 ms). Freezing the clock that judgment reads at the file's mtime plus
+    a chosen age picks the read path, so it never depends on how slow the machine is (on a slow CI
+    runner the index aged past the window and a full-read expectation failed). Everything else is
+    `time`.
+    """
+
+    def __init__(self, now_ns):
+        self._now_ns = now_ns
+
+    def time_ns(self):
+        return self._now_ns
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
 class E2BeginWaitsForAdmissionTest(B1RefreshBase):
-    """#89 waits for the admission lock by asking `begin` again; the §45 rules still hold on the way."""
+    """#89 waits for the admission lock by asking `begin` again; the §45 rules still hold on the way.
+
+    Under the lock `begin` reads the full index only when the head projection cannot answer; each
+    path has its own test with the index file's age fixed on the clock that decides it.
+    """
 
     def setUp(self):
         super().setUp()
@@ -4100,7 +4124,12 @@ class E2BeginWaitsForAdmissionTest(B1RefreshBase):
         self.popen = fake.start().Popen
         self.addCleanup(fake.stop)
 
-    def test_e2_busy_then_free_is_one_begin_with_one_locked_read_and_no_double_writes(self):
+    def busy_then_free(self, index_age_ns):
+        """Begin a child of a closed, edited parent while the first lock request is busy.
+
+        The admission clock is frozen at the index file's mtime plus `index_age_ns`. Checks what both
+        read paths share and returns (the head projection answered, full index reads under the lock).
+        """
         parent = self.closed("e2-parent", {"plans/cycle/plan.md": b"plan\n"})
         self.edit(parent, "plans/cycle/plan.md", b"plan, edited after the close\n")
         route, route_file = self.route(slug="e2-child", parent_cycle_id=parent["cycle_id"])
@@ -4119,14 +4148,25 @@ class E2BeginWaitsForAdmissionTest(B1RefreshBase):
                 locked_reads.append(1)
             return real_load(root)
 
+        begun, real_begin = [], P.begin
+
+        def counting_begin(*args, **kwargs):
+            result = real_begin(*args, **kwargs)
+            begun.append(result["status"])
+            return result
+
+        clock = _IndexAgeClock(adm._index_path(self.root).stat().st_mtime_ns + index_age_ns)
         before = (self.tree_state(parent), len(self.history.made))
-        with mock.patch.object(adm, "_acquire_lock", acquire), mock.patch.object(adm, "load_index", counting), \
+        with mock.patch.object(adm, "time", clock), mock.patch.object(adm, "_acquire_lock", acquire), \
+                mock.patch.object(adm, "load_index", counting), mock.patch.object(P, "begin", counting_begin), \
                 mock.patch.object(time, "sleep"):
+            # The parent's close wrote the head in an earlier lock interval: only its age decides it.
+            head_answers = adm.load_index_head(self.root) is not None
             result = P._begin_waiting_for_admission(
                 self.root, route_file=route_file, capability="autopilot-code", intensity="direct")
         self.assertEqual((result["status"], result["layout"]), ("begun", "cycle"))
         self.assertGreaterEqual(len(calls), 2)  # the first try was busy, a later one took the lock
-        self.assertEqual(len(locked_reads), 1, locked_reads)
+        self.assertEqual(begun, ["begun"])  # one begin got past the lock, and it began the cycle
         # The parent is looked at once, after the successful attempt and outside the lock; nothing is written twice.
         argvs = [" ".join(call.args[0]) for call in self.popen.call_args_list]
         self.assertEqual([a for a in argvs if parent["cycle_id"] in a and "checkpoint" in a].__len__(), 1, argvs)
@@ -4134,6 +4174,19 @@ class E2BeginWaitsForAdmissionTest(B1RefreshBase):
         self.assertEqual(len(self.history.made), before[1])
         self.assertEqual(len(P.list_cycle_records(self.root)), 2)
         self.assertFalse(P.read_cycle_record(self.root, result["cycle_id"]).get("history_pending"))
+        return head_answers, len(locked_reads)
+
+    def test_e2_busy_then_free_without_a_usable_head_is_one_begin_with_one_locked_read_and_no_double_writes(self):
+        # 35 ms: the index is not settled, so the head from the parent's lock interval cannot answer.
+        head_answers, locked_reads = self.busy_then_free(index_age_ns=35_000_000)
+        self.assertFalse(head_answers)
+        self.assertEqual(locked_reads, 1)
+
+    def test_e2_busy_then_free_with_a_settled_head_is_one_begin_with_no_locked_read_and_no_double_writes(self):
+        # 135 ms, past the window as on a slow CI runner (it reproduced that failure): the settled head answers.
+        head_answers, locked_reads = self.busy_then_free(index_age_ns=135_000_000)
+        self.assertTrue(head_answers)
+        self.assertEqual(locked_reads, 0)
 
     def test_e2_an_observation_that_fails_never_leaves_begin(self):
         parent = self.closed("e2-quiet", {"plans/cycle/plan.md": b"plan\n"})
