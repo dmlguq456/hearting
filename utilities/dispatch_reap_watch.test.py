@@ -1353,5 +1353,50 @@ class AttemptRecordIndexTest(unittest.TestCase):
         self._check(raw, "att-a", "two")
 
 
+class LegCloseObservationCostTest(unittest.TestCase):
+    """RV-PR1881 🟡4: a frame or unit leg's watcher reads a busy registry only when
+    its route ledger changes, and judges the close whenever that ledger changes."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.jobs = Path(self.tmp.name) / "jobs.log"
+        self.jobs.write_text("")
+        self.journal = Path(self.tmp.name) / "ledger" / "journal.jsonl"
+
+    def test_a_busy_registry_alone_does_not_reread_the_leg_row(self):
+        import route_parent_close as CLOSE
+        reads = []
+        observer = CLOSE.RegistryObservation(self.jobs, "att-leg", lambda jobs, aid: reads.append(aid) or (None, {}),
+                                             watched=self.journal)
+        with mock.patch.object(CLOSE, "row_requested", return_value=False):
+            observer.refresh()
+            for n in range(3):
+                with self.jobs.open("a") as handle:
+                    handle.write(f"t\tdone\t/r\t/w\tother\tattempt_id=att-other-{n}\n")
+                observer.refresh()
+            self.assertEqual(len(reads), 1)
+            self.journal.parent.mkdir()
+            self.journal.write_text('{"evidence": {}}\n')
+            observer.refresh()
+            observer.refresh()
+        self.assertEqual(len(reads), 2)
+
+    def test_a_ledger_change_is_judged_even_when_the_row_reads_the_same(self):
+        # RV-PR1881 2nd 🔴2: a close records its intent in the ledger before it marks any row,
+        # so the row can read the same when the ledger change is seen.
+        import route_parent_close as CLOSE
+        judged = []
+        observer = CLOSE.RegistryObservation(self.jobs, "att-leg", lambda jobs, aid: ("open", {"attempt_id": aid}),
+                                             watched=self.journal)
+        with mock.patch.object(CLOSE, "row_requested", side_effect=lambda meta, jobs: judged.append(1) or len(judged) > 1):
+            self.assertFalse(observer.refresh()[2])
+            self.assertFalse(observer.refresh()[2])   # nothing changed: nothing judged again
+            self.journal.parent.mkdir()
+            self.journal.write_text('{"evidence": {"parent_close": {}}}\n')
+            self.assertTrue(observer.refresh()[2])
+        self.assertEqual(len(judged), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
