@@ -71,16 +71,36 @@ def dialog_screen():
     path=os.path.join(root,'utilities','fixtures','opencode-2.0.32-dialogs',os.environ.get('ARI_DIALOG_SCREEN','models-120x50.txt'))
     rows=open(path,encoding='utf-8').read().rstrip('\n').split('\n')[-size.lines:]
     return '\r\n'.join(row[:size.columns-1] for row in rows)
+sized=None
+def fill():
+    # `ARI_NATIVE_FILL=dense`: every row above the composer filled to the width, as a busy transcript
+    # fills a wide window: width rules (three bytes a cell), Hangul (two cells, three bytes a letter)
+    # and dim text; `heavy`: rows of accented letters, too much for one request. The native's own
+    # size is noted once per size (`size`: rows, columns).
+    global sized
+    size=os.get_terminal_size(0)
+    if sized!=size:sized=size;note(size=[size.lines,size.columns])
+    fill=os.environ.get('ARI_NATIVE_FILL')
+    if fill=='heavy':
+        # Every cell a letter with twelve combining accents: a screen past what one request carries.
+        return ''.join(('e'+'\u0301'*12)*size.columns+'\r\n' for n in range(size.lines-5))
+    if fill!='dense':return ''
+    rows=['\u2500'*size.columns if n%3==0 else '\ud55c\uae00'*(size.columns//4) if n%3==1
+          else '\x1b[2m'+('dim transcript '*size.columns)[:size.columns]+'\x1b[22m' for n in range(size.lines-5)]
+    return ''.join(row+'\r\n' for row in rows)
 def paint(draft=''):
     if menu and harness=='opencode':
         print('\x1b[2J\x1b[H'+dialog_screen(),end='',flush=True);return
     if menu:
         # A local command's menu (`/model`): a form, never a composer.
         box='Select model\r\n  1. Default\r\n  2. Synthetic\r\nEnter to select \u00b7 Esc to cancel\r\n'
-    elif harness=='claude':box='\u276f '+draft+'\r\n'+'\u2500'*18+'\r\n'
+    elif harness=='claude':
+        # `ARI_NATIVE_SUGGEST`: Claude's dim suggestion in an empty composer (not a draft).
+        hint=os.environ.get('ARI_NATIVE_SUGGEST','') if not draft else ''
+        box='\u276f '+draft+('\x1b[2m'+hint+'\x1b[22m' if hint else '')+'\r\n'+'\u2500'*18+'\r\n'
     elif harness=='codex':box='\u203a '+draft+'\r\n\r\n'
     else:box='\u2503  '+draft+'\r\n\u2503  Build  synthetic-model\r\n'
-    print('\x1b[2J\x1b[H'+last+'\r\n'+box,end='',flush=True)
+    print('\x1b[2J\x1b[H'+fill()+last+'\r\n'+box,end='',flush=True)
 def run(argv,line,payload=None):
     done=subprocess.run([sys.executable,*argv],input=payload if payload is not None else line,
         capture_output=True,text=True,timeout=30,env=dict(os.environ,AGENT_HOME=root))
@@ -223,7 +243,8 @@ class ShellRig:
         self.master = None
         self.binding = None
 
-    def start(self):
+    def start(self, idle=True):
+        """Start the window and its warm-up turn; ``idle``: until it reads idle with an empty composer."""
         master, slave = os.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", self.rows, self.cols, 0, 0))
         command = [sys.executable, str(self.entry), self.harness, sys.executable, str(self.test.root / "native.py"),
@@ -239,7 +260,8 @@ class ShellRig:
                                  "the shell never published its attachment")
         self.type("warm\r")
         self.wait_for(b"DONE_warm", "the warm-up turn never ran")
-        self.wait(self.idle_empty, "the window never became idle with an empty composer")
+        if idle:
+            self.wait(self.idle_empty, "the window never became idle with an empty composer")
         return self
 
     @property

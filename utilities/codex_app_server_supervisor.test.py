@@ -1412,8 +1412,31 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
             recorded_release = base / "earlier-release"
             recorded_release.mkdir()
             for entry in ROOT.iterdir():
-                if entry.name != ".git":
+                if entry.name not in {".git", "utilities"}:
                     (recorded_release / entry.name).symlink_to(entry)
+            # Its shared modules are the ones that release shipped before the inheritance
+            # rule: no `environment_inheritance.py`, and a `worker_environment` that drops
+            # only the broker names. The respawn must not take its environment from them.
+            (recorded_release / "utilities").mkdir()
+            for entry in (ROOT / "utilities").iterdir():
+                if entry.name not in {"environment_inheritance.py", "dispatch_headless_main.py",
+                                      "__pycache__"}:
+                    (recorded_release / "utilities" / entry.name).symlink_to(entry)
+            shared = (ROOT / "utilities" / "dispatch_headless_main.py").read_text(encoding="utf-8")
+            lines = shared.splitlines(keepends=True)
+            rule = next(index for index, line in enumerate(lines)
+                        if line.startswith("from environment_inheritance import "))
+            earlier_shared = ("".join(lines[:rule - 2] + lines[rule + 1:])
+                .replace("    The inherited environment (`inherited_environment`), then",
+                         "    The inherited environment minus broker variables, then")
+                .replace("    env = inherited_environment()\n",
+                         '    env = {key: value for key, value in os.environ.items() '
+                         'if not key.startswith("AGENT_DISPATCH_BROKER_")}\n'))
+            self.assertNotIn("inherited_environment", earlier_shared)
+            self.assertNotIn("HEARTING_SHELL_", earlier_shared)
+            self.assertNotIn("environment_inheritance", earlier_shared)
+            (recorded_release / "utilities" / "dispatch_headless_main.py").write_text(
+                earlier_shared, encoding="utf-8")
         xdg_state = base / "xdg-state"
         xdg_state.mkdir(exist_ok=True)
         logs = jobs.parent / "logs"
@@ -1465,7 +1488,13 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
             "FAKE_SECOND_TURN_READY": str(second_turn_ready),
             "FAKE_SECOND_TURN_RELEASE": str(second_turn_release),
             "TMPDIR": str(base),
+            # The correcting parent may be a person's session-shell window (made-up values).
+            "HEARTING_SHELL_SOCKET": str(base / "fixture-shell" / "control.sock"),
+            "HEARTING_SHELL_TOKEN": "e" * 64,
+            # A made-up value of no window: the respawned owner still takes it over.
+            "FIXTURE_CARRIED": "kept-by-the-respawned-owner",
         }
+        caller_window = {key: value for key, value in env.items() if key.startswith("HEARTING_SHELL_")}
         def load_local(name, path):
             spec = importlib.util.spec_from_file_location(name, path)
             loaded = importlib.util.module_from_spec(spec)
@@ -1815,6 +1844,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
             output = io.StringIO()
             respawn_outcomes = []
             launch_environments = []
+            summary_environments = []
             prompt_temp_dirs = []
             rendered_commands = []
             original_recover_consumer = owner_input.recover_consumer
@@ -1835,6 +1865,9 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                 parts = [command] if isinstance(command, (str, bytes)) else list(command)
                 if any(str(part).endswith("launch-fence.py") for part in parts):
                     launch_environments.append(dict(popen_kwargs.get("env") or {}))
+                if (any(str(part).endswith("/utilities/dispatch_summary.py") for part in parts)
+                        and "supervise" in parts):
+                    summary_environments.append(dict(popen_kwargs.get("env") or {}))
                 return real_popen(*popen_args, **popen_kwargs)
 
             def capture_temporary_file(*file_args, **file_kwargs):
@@ -1865,6 +1898,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                      "correct", "--attempt-id", attempt, "--jobs", str(jobs),
                      "--message-file", str(correction_path)]):
                 public_status = cap.main()
+            caller_shell = {key: value for key, value in os.environ.items() if key.startswith("HEARTING_SHELL_")}
             receipt = json.loads(output.getvalue())
             if additional_grant and receipt.get("consumer_recovery") != "respawned":
                 pending = owner_input.inspect(jobs, attempt)["requests"]
@@ -1933,6 +1967,15 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                 self.assertEqual(launch_environments[0][key], worker_temp, key)
         else:
             self.assertNotIn("CLAUDE_CODE_TMPDIR", launch_environments[0])
+        # The respawned owner never carries the correcting window's session shell; the caller keeps it.
+        self.assertEqual(sorted(key for key in launch_environments[0] if key.startswith("HEARTING_SHELL_")), [])
+        self.assertEqual(launch_environments[0].get("FIXTURE_CARRIED"), "kept-by-the-respawned-owner")
+        self.assertEqual(sorted(caller_window), ["HEARTING_SHELL_SOCKET", "HEARTING_SHELL_TOKEN"])
+        self.assertEqual(caller_shell, caller_window)
+        # Nor does the summary owner the respawn attaches, whose title refresh runs a model.
+        self.assertEqual(len(summary_environments), 1)
+        self.assertEqual(sorted(key for key in summary_environments[0] if key.startswith("HEARTING_SHELL_")), [])
+        self.assertEqual(summary_environments[0].get("FIXTURE_CARRIED"), "kept-by-the-respawned-owner")
         self.assertEqual(respawn_outcomes[0]["respawn_release"], str(ROOT.resolve()))
         self.assertEqual(respawn_outcomes[0]["launch_home"],
                          str(recorded_release if earlier_launch_home else ROOT.resolve()))
