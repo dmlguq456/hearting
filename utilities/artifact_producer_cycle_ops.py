@@ -1248,7 +1248,12 @@ def _scan_layout(root: Path) -> _LayoutScan:
             if child == "cycles":
                 scan.block(root, path, "old-cycles-layout")  # moves are not judged from it
                 continue
-            cycle_id = _folder_cycle_id(path)
+            # The marker is read once here; `members` is handed the same reading (or its error).
+            try:
+                binding = artifact_locator.read_cycle_binding(path)
+            except artifact_locator.LocatorError as exc:
+                binding = exc
+            cycle_id = _folder_cycle_id(path, binding=binding)
             if cycle_id is None:
                 unknown.append((len(scan.blockers), campaign_id, child, path))
                 scan.block(root, path, "not-a-cycle")
@@ -1262,7 +1267,7 @@ def _scan_layout(root: Path) -> _LayoutScan:
             scan.cycles[cycle_id] = path
             scan.folder_campaign[cycle_id] = campaign_id
             import artifact_request
-            for member in artifact_request.members(root, path):
+            for member in artifact_request.members(root, path, binding=binding):
                 member_id = member.name
                 if member_id in scan.cycles or member_id in scan.duplicates:
                     scan.duplicates.add(member_id)

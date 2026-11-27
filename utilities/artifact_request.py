@@ -125,12 +125,23 @@ def execution_dir(root, record, *, anchor=None):
     return _safe(root, Path(anchor) / Path(*EXECUTIONS) / record["cycle_id"])
 
 
-def members(root, directory, *, strict=True, include_deleted=False):
-    """Only verified direct members of a request; unknown directories stay unknown."""
+_BINDING_UNREAD = object()
+
+
+def members(root, directory, *, strict=True, include_deleted=False, binding=_BINDING_UNREAD):
+    """Only verified direct members of a request; unknown directories stay unknown.
+
+    ``binding`` is ``directory``'s marker when the caller has just read it (the binding, None, or
+    the ``LocatorError`` that read raised, raised here as the read itself would have)."""
     directory = Path(directory)
     # Existing arbitrary internal support (including symlinks) is not a
     # request container. Do not add a grouping refusal to ordinary cycles.
-    marker = locator.read_cycle_binding(directory)
+    if binding is _BINDING_UNREAD:
+        marker = locator.read_cycle_binding(directory)
+    elif isinstance(binding, locator.LocatorError):
+        raise binding
+    else:
+        marker = binding
     identity = (marker or {}).get("cycle_id")
     if identity is None:
         cycle = (locator._read_json(directory / "manifest.json") or {}).get("cycle")

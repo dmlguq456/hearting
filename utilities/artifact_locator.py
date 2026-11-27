@@ -7,6 +7,7 @@ producer side record), never by parsing a locator name.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -377,11 +378,29 @@ def cycle_binding_bytes(campaign_id: str, cycle_id: str, *, started_on: Optional
     return (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
+_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
+
+
 def read_cycle_binding(path: Path) -> Optional[Dict[str, Any]]:
     marker = Path(path) / CYCLE_BINDING
-    if not marker.exists() and not marker.is_symlink():
+    # One lstat gives the answers `exists()`, `is_symlink()` and `_read_json`'s two checks asked
+    # for: no marker is None, anything but a regular file (a link, a folder) is an invalid marker.
+    # A begin's scan reads every cycle folder's marker, one network round trip each on NFS, not four.
+    try:
+        mode = os.lstat(marker).st_mode
+    except OSError as exc:
+        if exc.errno in _ABSENT_ERRNOS:
+            return None
+        raise
+    except ValueError:
         return None
-    binding = _read_json(marker)
+    binding = None
+    if stat.S_ISREG(mode):
+        try:
+            value = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError):
+            value = None
+        binding = value if isinstance(value, dict) else None
     if (binding is None or not _BINDING_REQUIRED <= set(binding)
             or set(binding) - _BINDING_REQUIRED - _BINDING_OPTIONAL):
         raise LocatorError("locator-cycle-binding-invalid", marker.as_posix())
