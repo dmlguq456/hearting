@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """A step the owner runs itself is printed with its exact command only in the simplest settled case; otherwise one
 line says what is missing. A resource start is printed only when the route's own cycle is bound, its declared smoke
-attestation passes the runner's `verify` and records its execution environment, nothing is at a fixed seal path (the
-cycle's `experiments`, or where `config-seal` writes for a node of the route), and the registry holds no run of that
+attestation passes the runner's `verify` and records its execution environment, no `<slug>/_internal/configs` is one
+level below a fixed seal path (the cycle's `experiments`, or where `config-seal` writes for a node of the route; smoke
+outputs beside it change nothing), and the registry holds no run of that
 route node (the runner's route file and node match); a sealed config that may exist is named in the order the runner
 accepts. A GPU-free host payload node keeps main's wording. An owner-run stage's completion runs as printed in the
 owner's environment; the parent session still passes `--attempt-id` and a route file, as before.
@@ -397,34 +398,58 @@ class HumanRunStepCommandTest(unittest.TestCase):
         self.assert_argv(self.command_in(W.human_run_step(route, path, node)), self.expected_argv(
             route, path, out, f"{route['route_id']}-full-run", out / "reviews" / "smoke-attestation.json"))
 
-    def test_a_metadata_read_error_at_a_seal_path_prints_one_line(self):
+    def test_with_smoke_outputs_but_no_sealed_configs_in_experiments_the_exact_start_runs_as_printed(self):
         route, path, out, node = self.attested_setup()
-        real_lstat = os.lstat
+        # The real form: smoke wrote its outputs under the cycle's `experiments/<slug>/` (an `_internal/` note, a file
+        # beside the slug such as `_RUNLOG.md`), and no `config-seal` ran, so no `_internal/configs` is there.
+        slug = out / "experiments" / "fixture-run"
+        (slug / "smoke").mkdir(parents=True)
+        (slug / "smoke" / "stdout.log").write_text("fixture smoke\n")
+        (slug / "run.json").write_text("{}\n")
+        (slug / "_internal").mkdir()
+        (slug / "_internal" / "inline-reason.md").write_text("fixture\n")
+        (out / "experiments" / "_RUNLOG.md").write_text("| fixture-run | pending |\n")
+        run_id, registry = f"{route['route_id']}-full-run", out / "resource-runs.json"
+        command = self.command_in(W.human_run_step(route, path, node))
+        self.assert_argv(command, self.expected_argv(route, path, out, run_id, out / "reviews" / "smoke-attestation.json"))
+        self.run_to_end(command, self.owner_env(route, path), registry, run_id, out / "logs" / f"{run_id}.log")
 
-        def failing_lstat(target, *args, **kwargs):
-            if Path(target).name == "experiments":
-                raise OSError(errno.EIO, "fixture I/O error", str(target))
-            return real_lstat(target, *args, **kwargs)
-        with mock.patch.object(W.os, "lstat", failing_lstat):
-            self.assertEqual(W.human_run_step(route, path, node), MAYBE_SEALED)
-        self.command_in(W.human_run_step(route, path, node))
-
-    def test_a_linked_seal_path_prints_one_line(self):
+    def test_a_sealed_configs_entry_prints_one_line(self):
         route, path, out, node = self.attested_setup()
-        # A linked `_internal/configs` holding a manifest under the cycle's `experiments`.
         held = self.base / "linked-configs"
         held.mkdir()
         (held / "fixture-run.manifest.json").write_text("{}\n")
-        (out / "experiments" / "fixture-run" / "_internal").mkdir(parents=True)
-        (out / "experiments" / "fixture-run" / "_internal" / "configs").symlink_to(held, target_is_directory=True)
-        self.assertEqual(W.human_run_step(route, path, node), MAYBE_SEALED)
-        shutil.rmtree(out / "experiments")
-        # The smoke node's seal path is itself a link whose target cannot be followed (an unmounted share).
-        seal = out / "reviews" / "smoke" / "experiments"
-        seal.parent.mkdir(parents=True)
-        seal.symlink_to(self.base / "unmounted", target_is_directory=True)
-        self.assertEqual(W.human_run_step(route, path, node), MAYBE_SEALED)
-        seal.unlink()
+        # Under the cycle's `experiments` and where `config-seal` writes for smoke, `_internal/configs` as a directory,
+        # a link (one whose target cannot be followed included) or a file.
+        for experiments in (out / "experiments", out / "reviews" / "smoke" / "experiments"):
+            configs = experiments / "fixture-run" / "_internal" / "configs"
+            for make in (lambda: configs.mkdir(), lambda: configs.symlink_to(held, target_is_directory=True),
+                         lambda: configs.symlink_to(self.base / "unmounted", target_is_directory=True),
+                         lambda: configs.write_text("fixture\n")):
+                configs.parent.mkdir(parents=True, exist_ok=True)
+                make()
+                self.assertEqual(W.human_run_step(route, path, node), MAYBE_SEALED, configs)
+                configs.rmdir() if configs.is_dir() and not configs.is_symlink() else configs.unlink()
+            shutil.rmtree(experiments)
+        self.command_in(W.human_run_step(route, path, node))
+
+    def test_an_error_while_listing_or_checking_experiments_prints_one_line(self):
+        route, path, out, node = self.attested_setup()
+        (out / "experiments" / "fixture-run").mkdir(parents=True)
+        real_listdir, real_lstat = os.listdir, os.lstat
+
+        def failing_listdir(target, *args, **kwargs):
+            if Path(target).name == "experiments":
+                raise OSError(errno.EIO, "fixture I/O error", str(target))
+            return real_listdir(target, *args, **kwargs)
+
+        def failing_lstat(target, *args, **kwargs):
+            if Path(target).name == "configs":
+                raise PermissionError(errno.EACCES, "fixture permission error", str(target))
+            return real_lstat(target, *args, **kwargs)
+        for name, failing in (("listdir", failing_listdir), ("lstat", failing_lstat)):
+            with self.subTest(name), mock.patch.object(W.os, name, failing):
+                self.assertEqual(W.human_run_step(route, path, node), MAYBE_SEALED)
         self.command_in(W.human_run_step(route, path, node))
 
     def test_the_ordinary_seal_prints_one_line_and_no_run_id(self):

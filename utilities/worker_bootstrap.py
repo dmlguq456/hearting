@@ -1407,8 +1407,9 @@ def owner_run_stage(node) -> bool:
 
 
 def sealed_config_may_exist(route, route_file, output_dir) -> bool:
-    """False only when nothing (file, directory or link) is at the cycle's `experiments` or at the `experiments` the
-    existing `config-seal` computes for a node of this route; any other error while checking means it may."""
+    """False only when no `<slug>/_internal/configs` (file, directory or link), where the existing `config-seal`
+    writes its manifests, is one level below the cycle's `experiments` or the `experiments` it computes for a node of
+    this route; a missing `experiments` holds none, and any other error while listing or checking means it may."""
     try:
         import artifact_context, contextlib, dataclasses  # noqa: E401
         context = artifact_context.resolve_context(environ={}, route=route, route_file=route_file)
@@ -1417,8 +1418,10 @@ def sealed_config_may_exist(route, route_file, output_dir) -> bool:
             with contextlib.suppress(artifact_context.ArtifactContextError):
                 paths.append(dataclasses.replace(context, node=item).resolve_output("config-seal", leaf="experiments").path)
         for path in paths:
-            with contextlib.suppress(FileNotFoundError):
-                return os.lstat(path) is not None  # anything there, a link not followed
+            with contextlib.suppress(FileNotFoundError):  # no `experiments` here
+                for slug in os.listdir(path):
+                    with contextlib.suppress(FileNotFoundError, NotADirectoryError):  # none, or a file (`_RUNLOG.md`)
+                        return os.lstat(os.path.join(path, slug, "_internal", "configs")) is not None  # link not followed
         return False
     except Exception:
         return True

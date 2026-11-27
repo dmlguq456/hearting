@@ -191,8 +191,9 @@ The owner's Route steps, the receipt after `smoke`, `complete --check`, the
 stage-start refusal and `workflow-supervisor status` print `full-run`'s exact
 `resource-runner.py start` only when this route's own cycle is bound, its
 declared smoke attestation passes the runner's `verify` and records its
-execution environment, nothing is at the cycle's `experiments` or where
-`config-seal` writes for this route (S3-2b), and the run registry holds no run
+execution environment, no `<slug>/_internal/configs` is one level below the
+cycle's `experiments` or the `experiments` where `config-seal` writes for this
+route (S3-2b), and the run registry holds no run
 of this route node (matched as the runner matches it). Otherwise one line names
 what is missing: the attestation path or a new smoke, a smoke bound to a sealed
 manifest that may exist and then its run id and `--config-manifest`, or the
