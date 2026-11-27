@@ -156,9 +156,15 @@ def _open_questions(harness: str, session_id: str) -> list:
 
 def _holds(signal: dict, sequence: int | None) -> bool:
     """Whether this open question still stands for the native call: the person can answer it, or
-    the answer given in the turn that asked it is on its way (it comes as the next prompt)."""
+    the answer given in the turn that asked it is on its way (it comes as the next prompt).
+
+    One whose board record was never written (its registration stopped after the source) stands for
+    nothing: the same registration writes it again, and when that fails too the native question shows."""
     import human_wait_state as HWS
-    if not HWS.message_answer_pending(signal):
+    entry, known = HWS._selected_lookup(HWS._message_envelope(signal))
+    if known and entry is None:
+        return False
+    if known and not (entry.get("action_id") and not entry.get("source_terminal")):
         return True
     return sequence is None or int(signal.get("sequence") or 0) >= sequence
 

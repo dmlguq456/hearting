@@ -291,6 +291,25 @@ class PassThroughTest(Base):
                                                                       redirect.reason_for(registered["id"])})
                 self.answered("claude")
 
+    def test_a_registration_that_stopped_after_its_source_is_written_again_by_the_same_call(self):
+        """Only the source was written (the board record failed): a retry repairs it, never refuses on it."""
+        payload = claude_payload()
+        with mock.patch.object(state, "_write_cache_value", return_value=False):
+            self.assertIsNone(redirect.redirect("claude", payload))          # the first try: shown natively
+        (source,) = [item for item in state.read_signals() if item["harness"] == "claude"]
+        self.assertIsNone(state._selected_entry(state._message_envelope(source)))
+        with mock.patch.object(state, "_write_cache_value", return_value=False):
+            self.assertIsNone(redirect.redirect("claude", payload))          # the repair fails too: shown natively
+        self.assertEqual(redirect.redirect("claude", payload), redirect.reason_for(source["id"]))  # repaired
+        self.assertEqual(state._selected_entry(state._message_envelope(source))["state"], "open")
+        envelope = state.read_selected_request({"id": source["id"], "harness": "claude", "session_id": SID})
+        result = state.submit_selected_response(envelope, {"answers": {"message-response": ["Proceed"]}},
+                                                action_id="after-repair")
+        self.assertEqual(result["state"], "submitted", result)
+        calls, _, pending = self.f.courier(source)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(pending["to"]["session_id"], SID)
+
     def test_an_old_question_or_one_in_another_pane_is_held_only_when_it_is_the_same(self):
         import session_tidy as tidy
         old, _ = self.f.ask("claude", SID, text="Start now?", choices=["Proceed", "Edit", "Stop"])
