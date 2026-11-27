@@ -97,7 +97,7 @@ class _TmpRootMixin:
         pin = mock.patch.object(peer_address, "_service_hosted", return_value=False)
         pin.start()
         self.addCleanup(pin.stop)
-        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp = fixture_processes.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.tmp_root = Path(self._tmp.name)
         self.jobs_path = self.tmp_root / "jobs.log"
