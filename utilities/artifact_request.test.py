@@ -443,6 +443,49 @@ class RequestFolderTest(S.SourceRepoStartBase):
     def test_request_delete_resumes_after_physical_removal(self):
         self.interrupted_delete(after_removal=True)
 
+    def test_scan_reads_a_request_anchor_again_for_each_execution_with_one_open_each(self):
+        # Unlike an ordinary cycle folder (two reads: its ID, then `members`), a request anchor is
+        # read once more for every execution it holds, so each one is checked against the anchor as it
+        # is now. The count of reads stays; each read is one open of the marker (no stat, lstat).
+        import io
+        import artifact_locator
+        import artifact_producer_cycle_ops as ops
+        leg, _path, _ = self.selected([S.CODE_STAGED, S.CODE_STAGED])
+        self.next_execution(1, self.cycle(leg))
+        frame = self.cycle(self.route)
+        anchor = P.cycle_dir(self.root, frame["campaign_id"], frame["cycle_id"]).resolve()
+        # The anchor's folder name is its own; an execution folder is named by its cycle ID.
+        anchor_marker = os.path.join(anchor.name, artifact_locator.CYCLE_BINDING)
+        real_read, reads, lookups = artifact_locator.read_cycle_binding, [], []
+
+        def read(folder):
+            reads.append(Path(folder).name)
+            return real_read(folder)
+
+        def looking(real, kind):
+            def lookup(path, *args, **kwargs):
+                if isinstance(path, (str, os.PathLike)) and os.fspath(path).endswith(os.sep + anchor_marker):
+                    lookups.append(kind)
+                return real(path, *args, **kwargs)
+            return lookup
+
+        patches = [mock.patch.object(artifact_locator, "read_cycle_binding", side_effect=read)]
+        patches += [mock.patch.object(module, name, looking(getattr(module, name), kind))
+                    for module, name, kind in ((os, "stat", "stat"), (os, "lstat", "lstat"),
+                                               (os, "open", "open"), (io, "open", "open"))]
+        for patcher in patches:
+            patcher.start()
+        try:
+            scan = ops._scan_layout(self.root)
+        finally:
+            for patcher in reversed(patches):
+                patcher.stop()
+        executions = [path for cycle_id, path in scan.cycles.items() if cycle_id != frame["cycle_id"]
+                      and Path(path).resolve().is_relative_to(anchor)]
+        self.assertEqual(len(executions), 2, scan.cycles)
+        self.assertEqual(reads.count(anchor.name), 4)
+        self.assertEqual(lookups, ["open"] * 4)
+
 
 if __name__ == "__main__":
     unittest.main()

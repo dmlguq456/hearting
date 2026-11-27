@@ -378,29 +378,58 @@ def cycle_binding_bytes(campaign_id: str, cycle_id: str, *, started_on: Optional
     return (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
-_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
+_MARKER_ABSENT = object()  # nothing at the path: no marker
+_MARKER_NOT_OPENED = object()  # not opened as a regular file: the path questions decide
+_MARKER_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR})
+
+
+def _read_opened_marker(marker: Path) -> Any:
+    """The marker's JSON object, or None when the regular file holds no JSON object.
+
+    The marker is opened once without following a link (`O_NOFOLLOW | O_NONBLOCK`, as
+    `read_sealed_head` opens it) and checked to be a regular file on that same descriptor, so the
+    file read is the file checked: a marker swapped for a link after the open is not followed.
+    Nothing at the path (`ENOENT`, `ENOTDIR`) is `_MARKER_ABSENT`.  Anything else that cannot be
+    opened as a regular file (a link, a folder, a refused or too long path) is `_MARKER_NOT_OPENED`."""
+    try:
+        fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        return _MARKER_ABSENT if exc.errno in _MARKER_ABSENT_ERRNOS else _MARKER_NOT_OPENED
+    except ValueError:
+        return _MARKER_NOT_OPENED
+    try:
+        try:
+            info = os.fstat(fd)
+        except OSError:
+            return _MARKER_NOT_OPENED
+        if not stat.S_ISREG(info.st_mode):
+            return _MARKER_NOT_OPENED
+        try:
+            data = os.read(fd, info.st_size + 1)
+            if len(data) > info.st_size:  # it grew after the fstat: the rest, as `read_text` reads it
+                data += b"".join(iter(lambda: os.read(fd, 1 << 16), b""))
+            # Decoded first, as `read_text` does: a UTF-8 BOM stays an invalid marker.
+            value = json.loads(data.decode("utf-8"))
+        except (OSError, ValueError, UnicodeError):
+            return None
+        return value if isinstance(value, dict) else None
+    finally:
+        os.close(fd)
 
 
 def read_cycle_binding(path: Path) -> Optional[Dict[str, Any]]:
     marker = Path(path) / CYCLE_BINDING
-    # One lstat gives the answers `exists()`, `is_symlink()` and `_read_json`'s two checks asked
-    # for: no marker is None, anything but a regular file (a link, a folder) is an invalid marker.
-    # A begin's scan reads every cycle folder's marker, one network round trip each on NFS, not four.
-    try:
-        mode = os.lstat(marker).st_mode
-    except OSError as exc:
-        if exc.errno in _ABSENT_ERRNOS:
-            return None
-        raise
-    except ValueError:
+    # A begin's scan reads every cycle folder's marker, one network round trip per path lookup on NFS:
+    # a regular marker takes one open here, not `exists()`, `is_symlink()`, `is_file()` and `read_text()`.
+    binding = _read_opened_marker(marker)
+    if binding is _MARKER_ABSENT:
         return None
-    binding = None
-    if stat.S_ISREG(mode):
-        try:
-            value = json.loads(marker.read_text(encoding="utf-8"))
-        except (OSError, ValueError, UnicodeError):
-            value = None
-        binding = value if isinstance(value, dict) else None
+    if binding is _MARKER_NOT_OPENED:
+        # A link, a folder or a refused path is answered by the questions asked before, so which of
+        # them is invalid and which error stops the caller stays what it was, on every Python.
+        if not marker.exists() and not marker.is_symlink():
+            return None
+        binding = _read_json(marker)
     if (binding is None or not _BINDING_REQUIRED <= set(binding)
             or set(binding) - _BINDING_REQUIRED - _BINDING_OPTIONAL):
         raise LocatorError("locator-cycle-binding-invalid", marker.as_posix())

@@ -1601,21 +1601,11 @@ class _LayoutScan:
         return found
 
 
-_BINDING_UNREAD = object()
-
-
-def _folder_cycle_id(folder: Path, manifest: Optional[Mapping[str, Any]] = None, *,
-                     binding: Any = _BINDING_UNREAD) -> Optional[str]:
-    """The surviving identity, shared by the scan and its locked confirmation.
-
-    ``binding`` is the folder's marker when the caller has read it already: the binding, None
-    (no marker) or the ``LocatorError`` the read raised (an invalid marker counts as none here)."""
-    if binding is _BINDING_UNREAD:
-        try:
-            binding = artifact_locator.read_cycle_binding(folder)
-        except artifact_locator.LocatorError:
-            binding = None
-    elif isinstance(binding, artifact_locator.LocatorError):
+def _folder_cycle_id(folder: Path, manifest: Optional[Mapping[str, Any]] = None) -> Optional[str]:
+    """The surviving identity, shared by the scan and its locked confirmation."""
+    try:
+        binding = artifact_locator.read_cycle_binding(folder)
+    except artifact_locator.LocatorError:
         binding = None
     if binding is not None:
         return binding["cycle_id"]
