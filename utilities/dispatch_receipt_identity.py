@@ -77,7 +77,8 @@ def legacy_parent_close_receipt(receipt: dict) -> dict | None:
     Those releases carried such a close as `success` with reason `cancelled-by-parent`, and
     render it as settled only when every child is one. A success committed before the close
     stays out of that form, as it is: the older receiver is told the close alone, once.
-    Only an ended receipt carrying `cancelled` has this form."""
+    Its replacement lineage and attention stay out with it: the form carries only what
+    belongs to the children it keeps. Only an ended receipt carrying `cancelled` has this form."""
     children = receipt.get("children")
     if (not isinstance(children, list) or not children
             or not all(isinstance(child, dict) and child.get("status") == "done" for child in children)
@@ -85,7 +86,12 @@ def legacy_parent_close_receipt(receipt: dict) -> dict | None:
             or not settled_parent_close(children)):
         return None
     closed = [dict(child, delivery_classification="success") for child in children if parent_close_child(child)]
-    return dict(receipt, children=closed, delivery_classification="success")
+    kept = {child.get("attempt_id") for child in closed}
+    lineage = [edge for edge in receipt.get("replacement_lineage") or [] if edge.get("replacement_attempt_id") in kept]
+    kept |= {edge.get("original_attempt_id") for edge in lineage}
+    attention = [item for item in receipt.get("replacement_attention") or [] if item.get("source_attempt_id") in kept]
+    return dict(receipt, children=closed, delivery_classification="success",
+                replacement_lineage=lineage, replacement_attention=attention)
 
 
 def unseal_receipt(encoded: str) -> dict:

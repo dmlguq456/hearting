@@ -1955,6 +1955,120 @@ class ManagedGatewayTest(unittest.TestCase):
         self.assertEqual(context.count("Parent-requested close has settled"), 1)
         self.assertNotIn("advance the route", context)
 
+    def test_a_close_after_a_replaced_pass_is_told_once_as_the_close_on_both_releases(self) -> None:
+        # RV-PR1881 3rd 🔴: the frame that passed was an automatic replacement. The older
+        # form leaves its lineage edge out with it; a closed child's own edge and attention stay.
+        import dispatch_replacement as replacement
+        from types import SimpleNamespace
+        spec = importlib.util.spec_from_file_location(
+            "codex_managed_completion_replaced_close", ROOT / "utilities" / "codex-managed-completion.py")
+        observer = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = observer
+        spec.loader.exec_module(observer)
+        args = SimpleNamespace(control_socket=self.control, delivery_retry_window=0,
+                               delivery_retry_interval=0.05)
+        jobs = self.root / "replaced-jobs.log"
+        edges: dict[str, dict[str, str]] = {}
+
+        def effective_attempts(_jobs, attempts):
+            # The registry's verified original-to-final projection; the real `adopt_receipt` checks it.
+            return ({edges[aid]["replacement_attempt_id"] if aid in edges else aid for aid in attempts},
+                    [edges[aid] for aid in sorted(attempts) if aid in edges])
+
+        def mixed(batch, *, closed_replaced=False):
+            request = self.parent_close_request(batch)
+            receipt = request["receipt"]
+            receipt["job_registry"] = str(jobs)
+            closed = receipt["children"][0]
+            passed = dict(receipt_request(batch)["receipt"]["children"][0], attempt_id=f"att-{batch}-passed")
+            receipt["children"].insert(0, passed)
+            slots = {f"att-{batch}-origin": passed["attempt_id"]}
+            if closed_replaced:
+                slots[f"att-{batch}-closed-origin"] = closed["attempt_id"]
+                receipt["replacement_attention"] = [
+                    {"source_attempt_id": source, "state": "needs-attention", "node": "__owner__",
+                     "reason": "replacement-input-unproven"} for source in sorted(slots)]
+            with jobs.open("a") as rows:
+                for aid in [*slots, passed["attempt_id"], closed["attempt_id"]]:
+                    rows.write(f"now\tdone\t/repo\t/wt\tfailed\tattempt_id={aid},dispatch_depth=2,"
+                               "parent_attempt_id=att-parent\n")
+            edges.update({original: {"original_attempt_id": original, "replacement_attempt_id": final,
+                                     "family_id": "f" * 64, "claim_digest": "d" * 64}
+                          for original, final in slots.items()})
+            receipt["replacement_lineage"] = effective_attempts(jobs, set(slots))[1]
+            return request
+
+        def sent():
+            return [value["params"]["additionalContext"]["hearting-completion"]["value"]
+                    for value in self.server.messages if value.get("method") in {"turn/start", "turn/steer"}]
+
+        def before_cancelled(children):
+            classes = {child["delivery_classification"] for child in children}
+            return "success" if classes == {"success"} else "attention"
+
+        followup = GATEWAY.completion_followup_text
+
+        def before_mixed_close(receipt, *, jobs):
+            if all(child.get("reason") == "cancelled-by-parent" for child in receipt["children"]):
+                return followup(receipt, jobs=jobs)
+            return "Completion bookkeeping for the listed attempts:\n(no harvest command; advance the route)"
+
+        seen = []
+        validate = self.gateway._validate_delivery
+        def observe(request):
+            seen.append(([child["delivery_classification"] for child in request["receipt"]["children"]],
+                         len(request["receipt"].get("replacement_lineage") or []),
+                         len(request["receipt"].get("replacement_attention") or [])))
+            return validate(request)
+        with mock.patch.object(self.gateway, "_validate_delivery", side_effect=observe), \
+             mock.patch.object(replacement, "effective_attempts", side_effect=effective_attempts):
+            # The current gateway takes the whole receipt, lineage and attention as they are.
+            full = mixed("batch-replaced-new", closed_replaced=True)
+            result = observer.deliver_receipt(args, full)
+            self.assertEqual((result["status"], seen), ("accepted", [(["success", "cancelled"], 2, 2)]), result)
+            (context,) = sent()
+            receipt = json.loads(context.split("\n")[1])
+            self.assertEqual(receipt["replacement_lineage"], full["receipt"]["replacement_lineage"])
+            self.assertEqual(len(receipt["replacement_attention"]), 2)
+            self.assertEqual(context.count("Parent-requested close has settled"), 1)
+            self.assertNotIn("advance the route", context)
+            with mock.patch.object(GATEWAY, "TERMINAL_CLASSIFICATIONS", frozenset({"success", "attention"})), \
+                 mock.patch.object(GATEWAY, "completion_classification", side_effect=before_cancelled), \
+                 mock.patch.object(GATEWAY, "completion_followup_text", side_effect=before_mixed_close):
+                # The review's case: only the passed child is a replacement. Sent once more, without it.
+                seen.clear()
+                only_pass = mixed("batch-replaced-old")
+                result = observer.deliver_receipt(args, only_pass)
+                self.assertEqual(result["status"], "accepted", result)
+                self.assertEqual(seen, [(["success", "cancelled"], 1, 0), (["success"], 0, 0)])
+                self.assertEqual(len(sent()), 2)
+                context = sent()[1]
+                receipt = json.loads(context.split("\n")[1])
+                self.assertEqual([(c["attempt_id"], c["reason"]) for c in receipt["children"]],
+                                 [("att-batch-replaced-old", "cancelled-by-parent")])
+                self.assertNotIn("replacement_lineage", receipt)
+                self.assertEqual(context.count("Parent-requested close has settled"), 1)
+                self.assertNotIn("advance the route", context)
+                # A repeated delivery is the gateway's replay of that one acceptance, never a second turn.
+                seen.clear()
+                self.assertEqual(observer.deliver_receipt(args, only_pass)["status"], "accepted")
+                self.assertEqual(seen, [(["success", "cancelled"], 1, 0), (["success"], 0, 0)])
+                self.assertEqual(len(sent()), 2)
+                # The closed child is a replacement itself: its edge and attention go with it.
+                seen.clear()
+                both = mixed("batch-replaced-both", closed_replaced=True)
+                result = observer.deliver_receipt(args, both)
+                self.assertEqual(result["status"], "accepted", result)
+                self.assertEqual(seen, [(["success", "cancelled"], 2, 2), (["success"], 1, 1)])
+                receipt = json.loads(sent()[2].split("\n")[1])
+                self.assertEqual(receipt["replacement_lineage"], [edges["att-batch-replaced-both-closed-origin"]])
+                self.assertEqual([item["source_attempt_id"] for item in receipt["replacement_attention"]],
+                                 ["att-batch-replaced-both-closed-origin"])
+                self.assertEqual(sent()[2].count("Parent-requested close has settled"), 1)
+        # The receipt the observer holds keeps every child and its lineage as written.
+        self.assertEqual(len(both["receipt"]["children"]), 2)
+        self.assertEqual(len(both["receipt"]["replacement_lineage"]), 2)
+
     def test_foreign_or_incomplete_receipt_never_reaches_upstream(self) -> None:
         before = self.server.counts()
         foreign = receipt_request()
