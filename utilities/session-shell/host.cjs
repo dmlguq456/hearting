@@ -167,7 +167,7 @@ let typed = 0;
 // Why the last reading kept the window from taking a message (`status().hold`): what this host
 // knows, for the sender's record (`peer-message` pending row `held`). Empty while it takes one.
 let lastHold = 'unsettled';
-const HOLD_OF={'form-open':'form','native-trust-wait':'form','draft':'draft','draft-unknown':'draft'};
+const HOLD_OF={'form-open':'form','native-trust-wait':'form','draft':'draft','draft-unknown':'draft','screen-large':'screen-large'};
 const QUIET_KEY=/^(?:\x1b|\x1b\[[\d;]*[DEGHPQRSZ]|\x1b\[(?:[1-3567]|1\d|2[0-689]|3[0-4])(?:;\d+)*~|\x1bO[DHP-S]|\x1b\[<[\d;]*[Mm]|\x1b\[[?>=][\d;:$ ]*[@-~]|\x1b\[[\d;]*[nt]|\x1b[\]P_][^\x07\x1b]*(?:\x07|\x1b\\))$/;
 // How long the keys must have been quiet before a screen read after them may stand for them: right
 // after a person's Enter the composer is empty before that turn's prompt callback comes, and a slow
@@ -217,8 +217,8 @@ function live() { const row = native && processRow(native.pid); return !!row && 
 function status() {
   const ready=empty && !keyTail && !paste && (!block.focused||block.waitingForReceipt) && !table && !settings && !fleetView;
   // `busy` a turn runs, `form` a native or shell menu/question is open, `draft` text stands in the
-  // composer, `paste` one is under way, `unsettled` keys are not settled yet, `unobserved` the
-  // native's rest is not confirmed.
+  // composer, `paste` one is under way, `unsettled` keys are not settled yet, `screen-large` the
+  // screen is too large for its input box to be read, `unobserved` the native's rest is not confirmed.
   const hold=ready&&state==='idle'?'':paste?'paste':state==='blocked'?'form':state!=='idle'?'busy'
     :table||settings||fleetView||block.focused&&!block.waitingForReceipt?'form':keyTail?'unsettled':lastHold||'unsettled';
   return {...identity(),epoch,state,empty:ready,hold,alive:live(),expanded,focused:block.focused||!!table||!!settings||!!fleetView,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"};
@@ -1361,7 +1361,10 @@ function observeSelectedModel(lines){
   const key=displayModelKey(lines);
   if(key===modelReadKey||!/\? for shortcuts/.test(key)||!/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/.test(key))return;
   modelReadKey=key;modelReading=true;const selected=selection,start=native.start;
-  source('display-model',{lines}).then(data=>{
+  // The reading (pane_ownership.codex_footer_threads) starts at the last composer row (`›`): only
+  // that row and the rows under it travel, so a wide or tall transcript never makes the request too large.
+  const prompt=lines.findLastIndex(line=>/^[ \u00a0]*›/.test(line));
+  source('display-model',{lines:prompt<0?lines:lines.slice(prompt)}).then(data=>{
     const now=Array.from({length:terminal.rows},(_,i)=>terminal.buffer.active.getLine(terminal.buffer.active.viewportY+i)?.translateToString(true)||'');
     if(data.ok&&!relay&&live()&&native.start===start&&selection===selected&&displayModelKey(now)===key){
       nativeSelected={...data.display};bootstrapModel=true;displayValues={...displayValues,...nativeSelected};publishNativeDisplay();queueDisplay();
@@ -1789,6 +1792,16 @@ async function releaseHeld(ref,cancel=false) {
   if(currentDelivery===ref){currentDelivery=undefined;heldBytes=0;if(state==='submitting'){state='unknown';eventMark=++clock;}queueProjection();}
   releasing=undefined;process.stdin.resume();rebuildDisplay();
 }
+// The native cells the form and draft judgments read (session_shell.screen_lines), as [text, dim]
+// runs per row. A row ends at its last cell that is not a blank: no judgment reads a blank at a
+// row's end (each strips it and reads no brightness of a space), and carrying them made every
+// request grow with the window (11-27: a 121 × 537 window's empty screen alone was 65 KB, past the
+// 64 KiB a request carries, and its idle session took no message for hours). A screen still past
+// SCREEN_BYTES carries its rows from the top through the first with text, then the bottom rows
+// that fit, and each row between them as null; the reader decides whether the judgment reads the
+// same on that (peer_steward_duties._screen_cut_reads_same). Either way the size of a request no
+// longer depends on the window's.
+const SCREEN_BYTES=48*1024;
 function screenSnapshot() {
   const lines=[],buffer=terminal.buffer.active;
   for(let y=0;y<terminal.rows;y++){
@@ -1798,9 +1811,17 @@ function screenSnapshot() {
       const dim=!!cell.isDim(),text=cell.getChars()||' ',previous=runs[runs.length-1];
       if(previous&&previous[1]===dim)previous[0]+=text;else runs.push([text,dim]);
     }
+    while(runs.length){const run=runs[runs.length-1];run[0]=run[0].replace(/ +$/,'');if(run[0])break;runs.pop();}
     lines.push(runs);
   }
-  return lines;
+  // A row's bytes with its comma; a row left off is `null,`.
+  const sizes=lines.map(row=>Buffer.byteLength(JSON.stringify(row))+1);
+  if(sizes.reduce((sum,size)=>sum+size,1)<=SCREEN_BYTES)return lines;
+  let head=lines.findIndex(row=>row.length)+1,headBytes=sizes.slice(0,head).reduce((sum,size)=>sum+size,0);
+  if(headBytes>SCREEN_BYTES/4){head=0;headBytes=0;}
+  let room=SCREEN_BYTES-1-headBytes-5*(lines.length-head),bottom=lines.length;
+  while(bottom>head&&sizes[bottom-1]-5<=room){bottom--;room-=sizes[bottom]-5;}
+  return lines.map((row,y)=>y<head||y>=bottom?row:null);
 }
 // Returns why the reading gave no answer for the screen it was asked about ('moved': the screen,
 // input or lifecycle changed meanwhile; 'unavailable': the backend did not answer), or '' when it did.

@@ -52,6 +52,12 @@ def composer():
     if harness=='codex':return '\x1b[2m›\x1b[0m \r\n\r\n'
     if harness=='opencode':return '┃\r\n┃  \r\n┃\r\n'
     return '❯ \r\n'+'─'*18+'\r\n'
+def fill():
+    # SUCC_FILL=dense: the rows above filled to the width (rules, Hangul, dim text), as a busy wide window.
+    if os.environ.get('SUCC_FILL')!='dense':return ''
+    size=os.get_terminal_size(0)
+    return ''.join(('─'*size.columns if n%3==0 else '한글'*(size.columns//4) if n%3==1
+                    else '\x1b[2m'+('dim '*size.columns)[:size.columns]+'\x1b[22m')+'\r\n' for n in range(size.lines-6))
 tty.setraw(0)
 exit_fd=os.open(os.environ['LOOP_NATIVE_EXIT'],os.O_RDWR|os.O_NONBLOCK)
 # OpenCode's plugin reports a selected session as select + idle; a window with no selected
@@ -85,7 +91,7 @@ while True:
         if bound:event('stop')
         if line=='flood':
             print(''.join('FLOOD_%03d \x1b[3%dmcolor\x1b[0m wide 한글\r\n'%(i,i%8) for i in range(120)),end='',flush=True)
-        else:print('\x1b[2J\x1b[HDONE_'+line+'\r\n'+composer()+pending,end='',flush=True)
+        else:print('\x1b[2J\x1b[H'+fill()+'DONE_'+line+'\r\n'+composer()+pending,end='',flush=True)
         if line=='form':print('Do you want to proceed?\r\n1. Yes\r\n2. No\r\n',end='',flush=True)
         if line=='alt':print('\x1b[?1049h\x1b[2J\x1b[HALT_SCREEN\r\n'+composer()+'\x1b[1;5r\x1b[3;1H',end='',flush=True)
         if line=='leave':print('\x1b[?1049l',end='',flush=True)
@@ -216,7 +222,7 @@ class Window:
     """One launched window: an outer PTY, the entry launcher and its synthetic native."""
     count = 0
 
-    def __init__(self, case, harness, *, sid, extra=None, gate=False):
+    def __init__(self, case, harness, *, sid, extra=None, gate=False, size=(30, 130)):
         self.case, self.harness, self.sid = case, harness, sid
         Window.count += 1
         self.root = case.root/('win-%d-%s' % (Window.count, harness))
@@ -279,7 +285,7 @@ class Window:
             entry = str(bootstrap)
         self.master, slave = pty.openpty()
         self.attrs = termios.tcgetattr(slave)
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 130, 0, 0))
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', *size, 0, 0))
         self.entry = subprocess.Popen(
             [sys.executable, entry, harness, sys.executable, str(native), sid],
             env=env, cwd=case.project, stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
@@ -524,6 +530,19 @@ class SessionShellSuccessionTest(unittest.TestCase):
                 self.assertNotIn(b'\x1b[?1049h', bytes(window.raw[before_raw:]))
                 self.assert_keeps_native(window, native)
                 self.assertEqual(len(window.spawns()), 1)
+
+    def test_a_wide_window_full_of_text_moves_to_the_new_release(self):
+        # 11-27: a wide window's whole screen did not fit one readiness request, so its composer never
+        # read empty and it stayed on its old release; now it reads empty and hands over like any other.
+        for harness in ('claude', 'codex', 'opencode'):
+            with self.subTest(harness=harness):
+                window = self.window(harness, size=(121, 579), extra={'SUCC_FILL': 'dense'})
+                first = window.wait_binding()
+                self.settle(window)
+                window.point('rel-b')
+                second = self.switched(window, first['host_pid'])
+                self.assertEqual(second['native_pid'], first['native_pid'])
+                window.close()
 
     def test_a_hand_fold_carries_over_to_the_new_host(self):
         # #1586 review follow-up 7: the person's fold choice rides the hand-over seed. Folded by

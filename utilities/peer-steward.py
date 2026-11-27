@@ -8824,7 +8824,7 @@ def cmd_idle_card_request(args):
 
 
 # Screen doubts that pass on their own; an older shell host does not, so it is not waited for.
-_SCREEN_WAIT = frozenset({"screen-unknown", "shell-editor-open", "shell-no-answer"})
+_SCREEN_WAIT = frozenset({"screen-unknown", "shell-editor-open", "shell-no-answer", "shell-screen-large"})
 
 
 def _look_outcome(reason):

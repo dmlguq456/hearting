@@ -1015,7 +1015,8 @@ def render_line(record, role, *, revision=None, label="", report=None, body_line
 # and a window outside the shell. The last two are the words a sent answer uses (session_block).
 _HOLD_WORDS = {"busy": ("peer.delivery.hold_busy",), "form": ("peer.delivery.hold_form",),
                "draft": ("peer.delivery.hold_draft",), "paste": ("peer.delivery.hold_paste",),
-               "unsettled": ("peer.delivery.hold_unsettled",), "unobserved": ("peer.delivery.hold_unobserved",),
+               "unsettled": ("peer.delivery.hold_unsettled",), "screen-large": ("peer.delivery.hold_screen_large",),
+               "unobserved": ("peer.delivery.hold_unobserved",),
                "old-shell": ("session_shell.upgrade_pending", "fleet.session_block.wait_old_shell"),
                "no-shell": ("fleet.session_block.wait_no_shell",)}
 

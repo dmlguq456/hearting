@@ -2430,6 +2430,10 @@
    "en": "a paste is under way",
    "ko": "붙여 넣는 중"
   },
+  "peer.delivery.hold_screen_large": {
+   "en": "its screen is too large for its input box to be read · it goes in once the window is smaller",
+   "ko": "화면이 너무 커서 입력창을 읽지 못함 · 창을 줄이면 받음"
+  },
   "peer.delivery.hold_unobserved": {
    "en": "its rest is not confirmed",
    "ko": "쉬는 것이 확인되지 않음"
@@ -3273,6 +3277,10 @@
   "tidy.hold.shell-no-answer": {
    "en": "the Hearting shell did not answer the screen request",
    "ko": "하팅 셸이 화면 요청에 답하지 않았습니다"
+  },
+  "tidy.hold.shell-screen-large": {
+   "en": "the window's screen was too large for its input box to be read",
+   "ko": "화면이 너무 커서 입력창을 읽지 못했습니다"
   },
   "tidy.hold.target-changed": {
    "en": "the session in that seat changed",

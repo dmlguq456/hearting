@@ -374,6 +374,40 @@ PASSTHROUGH = "passthrough"
 SCREEN_HOST_OUTDATED = "shell-host-outdated"   # a host started before it learned `screen`
 SCREEN_EDITOR_OPEN = "shell-editor-open"       # settings, the Fleet explorer or a question holds the keys
 SCREEN_NO_ANSWER = "shell-no-answer"           # no or no usable answer
+SCREEN_LARGE = "shell-screen-large"            # too large a screen for its input box to be read
+
+
+def screen_lines(harness: str, screen):
+    """``(lines, "")`` for a screen the host sent, as ``(char, faint)`` cell rows, else ``(None, why)``.
+
+    The host sends each native row up to its last non-blank cell. A screen past the host's size
+    sends its rows from the top through the first with text and the bottom rows that fit, and each
+    row between them as null. Those rows are read only when the form/draft judgment reads them as it
+    would read the whole screen (``peer_steward_duties._screen_cut_reads_same``); otherwise the screen
+    is ``screen-large``, never a guess over rows nobody saw."""
+    if not isinstance(screen, list):
+        return None, "screen-unavailable"
+    rows, gap = [], None
+    for runs in screen:
+        if runs is None:
+            if gap is not None and gap != len(rows):
+                return None, "screen-unavailable"       # rows left off in one run only
+            gap = len(rows)
+            continue
+        if not isinstance(runs, list):
+            return None, "screen-unavailable"
+        line = []
+        for run in runs:
+            if (not isinstance(run, list) or len(run) != 2 or not isinstance(run[0], str)
+                    or type(run[1]) is not bool):
+                return None, "screen-unavailable"
+            line.extend((char, run[1]) for char in run[0])
+        rows.append(line)
+    if gap is not None:
+        from peer_steward_duties import _screen_cut_reads_same
+        if not _screen_cut_reads_same(harness, rows[:gap], rows[gap:]):
+            return None, "screen-large"
+    return rows, ""
 
 
 def native_screen(binding: dict):
@@ -402,19 +436,9 @@ def native_screen_reason(binding: dict):
         return None, SCREEN_EDITOR_OPEN
     screen = (result.get("screen") if isinstance(result, dict) and result.get("ok")
               and result.get("focused") is False else None)
-    if not isinstance(screen, list) or len(screen) > 512:
-        return None, SCREEN_NO_ANSWER
-    lines = []
-    for runs in screen:
-        if not isinstance(runs, list):
-            return None, SCREEN_NO_ANSWER
-        line = []
-        for run in runs:
-            if (not isinstance(run, list) or len(run) != 2 or not isinstance(run[0], str)
-                    or type(run[1]) is not bool):
-                return None, SCREEN_NO_ANSWER
-            line.extend((char, run[1]) for char in run[0])
-        lines.append(line)
+    lines, why = screen_lines(binding.get("harness"), screen)
+    if lines is None:
+        return None, SCREEN_LARGE if why == "screen-large" else SCREEN_NO_ANSWER
     return lines, ""
 
 
@@ -2061,24 +2085,10 @@ def _panel_popup(binding, request):
 def _input_readiness(binding, request):
     """Use the ordinary form/draft judgment on this PTY's parsed native cells."""
     from peer_steward_duties import _screen_ready
-    screen = request.get("screen")
-    if not isinstance(screen, list) or len(screen) > 256:
-        return {"ok": False, "reason": "screen-unavailable"}
-    lines, count = [], 0
-    for runs in screen:
-        if not isinstance(runs, list):
-            return {"ok": False, "reason": "screen-unavailable"}
-        line = []
-        for run in runs:
-            if (not isinstance(run, list) or len(run) != 2 or not isinstance(run[0], str)
-                    or type(run[1]) is not bool):
-                return {"ok": False, "reason": "screen-unavailable"}
-            count += len(run[0])
-            if count > 64 * 1024:
-                return {"ok": False, "reason": "screen-unavailable"}
-            line.extend((char, run[1]) for char in run[0])
-        lines.append(line)
-    reason = _screen_ready(binding["harness"], lines)
+    lines, why = screen_lines(binding["harness"], request.get("screen"))
+    if lines is None and why != "screen-large":
+        return {"ok": False, "reason": why}
+    reason = why or _screen_ready(binding["harness"], lines)
     idle = request.get("state") == "idle"
     if binding["harness"] == "claude":
         from fleet import session_registry
