@@ -70,6 +70,9 @@ _LAUNCH_LAYERS = {"claude": {"--settings", "--agents", "--add-dir", "--plugin-di
                              "--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools",
                              "--permission-prompt-tool"},
                   "codex": {"-c", "--config", "-p", "--profile", "--enable", "--disable"}}
+# The managed (Claude) and system (Codex) configuration roots the harness reads before the user's.
+MANAGED = {"claude": (Path("/etc/claude-code"), Path("/Library/Application Support/ClaudeCode")),
+           "codex": (Path("/etc/codex"),)}
 # Where this release registers the hook, and the tool name its matcher names.
 _REGISTRATION = {"claude": ("settings.json", "Agent"), "codex": ("hooks/hooks.json", "spawn_agent")}
 
@@ -188,10 +191,9 @@ def _definitions(harness: str, cwd: str, name: str) -> tuple[list[Path], list[Pa
     harness reads (managed or system, projects, a Codex `[agents.*]` role or the `config_file` it names)."""
     home = _home(harness)
     if harness == "claude":
-        managed = [Path("/etc/claude-code"), Path("/Library/Application Support/ClaudeCode")]
-        folders = [root / sub for root in managed for sub in ("agents", ".claude/agents")]
+        folders = [root / sub for root in MANAGED[harness] for sub in ("agents", ".claude/agents")]
     else:
-        folders = [Path("/etc/codex/agents")]
+        folders = [root / "agents" for root in MANAGED[harness]]
     folders += [project / "agents" for project in _projects(harness, cwd)]
 
     def giving(folder):
@@ -199,7 +201,7 @@ def _definitions(harness: str, cwd: str, name: str) -> tuple[list[Path], list[Pa
                 if _gives(harness, path, name)] if folder.is_dir() else []
     user, others = giving(home / "agents"), [path for folder in folders for path in giving(folder)]
     if harness == "codex":
-        for config in (Path("/etc/codex"), home, *_projects(harness, cwd)):
+        for config in (*MANAGED[harness], home, *_projects(harness, cwd)):
             config = config / "config.toml"
             roles = tomllib.loads(config.read_text(encoding="utf-8")).get("agents") if config.is_file() else {}
             for key, role in (roles or {}).items():
@@ -264,14 +266,14 @@ def _decision_sources(harness: str, cwd: str) -> list:
     home = _home(harness)
     if harness == "claude":
         files = [home / "settings.json", home / "settings.local.json"]
-        for managed in (Path("/etc/claude-code"), Path("/Library/Application Support/ClaudeCode")):
+        for managed in MANAGED[harness]:
             files += [managed / "managed-settings.json", *sorted((managed / "managed-settings.d").glob("*.json"))]
         files += [folder / name for folder in _projects(harness, cwd) for name in ("settings.json", "settings.local.json")]
         sources = [(settings.get("hooks"), settings) for settings in (_json(path) for path in files if path.is_file())]
         plugins = sorted((home / "plugins" / "cache").glob("*/*/*"))
     else:
         sources = []
-        for layer in (Path("/etc/codex"), home, *_projects(harness, cwd)):
+        for layer in (*MANAGED[harness], home, *_projects(harness, cwd)):
             sources += [(_json(layer / "hooks.json").get("hooks"), {})] if (layer / "hooks.json").is_file() else []
             sources += [(tomllib.loads((layer / name).read_text(encoding="utf-8")).get("hooks"), {})
                         for name in ("config.toml", "requirements.toml") if (layer / name).is_file()]

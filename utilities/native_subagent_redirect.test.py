@@ -140,7 +140,9 @@ class Homes(Base):
             folder.mkdir(parents=True)
         for patcher in (mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.claude_home),
                                                      "CODEX_HOME": str(self.codex_home), "CLAUDE_PROJECT_DIR": ""}),
-                        mock.patch.object(redirect, "_harness_argv", return_value=["harness"])):
+                        mock.patch.object(redirect, "_harness_argv", return_value=["harness"]),
+                        mock.patch.dict(redirect.MANAGED, {"claude": (self.tmp / "managed",),
+                                                           "codex": (self.tmp / "system",)})):
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -273,6 +275,19 @@ class DefinitionTest(Homes):
                 self.assertFalse(self.check("claude", "light"))
                 (self.claude_home / "agents/mine.md").unlink()
         self.assertTrue(self.check("claude", "light"))
+
+    def test_a_managed_or_system_definition_comes_first(self):
+        self.ship("claude", "light")
+        self.ship("codex", "light")
+        self.write(self.tmp / "managed/.claude/agents/team.md", "---\nname: light\ndescription: managed\n---\nx\n")
+        self.assertFalse(self.check("claude", "light"))
+        self.write(self.tmp / "system/agents/team.toml", 'name = "light"\ndescription = "system"\n')
+        self.assertFalse(self.check("codex", "light"))
+        self.write(self.tmp / "managed/managed-settings.json", json.dumps({"permissions": {"deny": ["Agent"]}}))
+        self.register("claude")
+        with mock.patch.object(redirect, "start") as start:
+            self.assertFalse(OtherDecisionTest.sole(self, "claude", "Agent"))
+        start.assert_not_called()
 
     def test_claude_built_ins_unless_some_scope_defines_the_name(self):
         for name in ("Explore", "Plan", "general-purpose"):
