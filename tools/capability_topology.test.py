@@ -54,8 +54,9 @@ PRESERVED_FULL_FIELD_DIGESTS = {
         "c74333f3c0ee7b5a6ca929a15027d71f16bc54d1aa84eb0a47840925990fc365",
         "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     ),
+    # Routing piece 11 (writing half): the apply node runs editorial/write (was dev/refactor).
     ("autopilot-apply", ('default',)): (
-        "500c7944f76dfdd6f0199659b723308355767411f7af45d5d20a3880ba4ebad0",
+        "a4bd104ec88edb946d93712b6342d64892f45635e51dccaa4a2d2d385a746896",
         "a9b802f929cb1efdf839e4bae6f9f7c03bad3466d6193b9ff23d22a4ba9faaa9",
     ),
     ("autopilot-code", ('audit', 'debug', 'dev')): (
@@ -66,8 +67,9 @@ PRESERVED_FULL_FIELD_DIGESTS = {
         "ada624f2f8ce6303a9be8e064525353a7a3099037494118552b16868af067389",
         "535ac7afb655d7d8040841733ed2b46bb7cb7d467279b7ed83cf34496659fca5",
     ),
+    # Routing piece 11 (writing half): draft-production runs editorial/write (was research/research-survey).
     ("autopilot-draft", ('doc', 'paper', 'presentation')): (
-        "3e6b5882583b1a42d4608f7373fd051f584944947acbf0d191379e3609c288c6",
+        "4a0ae305c9cce4c3311535d945a8751833269952d81c81e3968898aeefbef522",
         "e51f3d86b5ead6ac1573610fe55fb0994de2b86658fb1ef09a6c227bc487b0cb",
     ),
     ("autopilot-lab", ('setup',)): (
@@ -991,6 +993,46 @@ class PartCatalogTest(unittest.TestCase):
         self.assertEqual(self.r["completion_gate_contracts"]["analysis-answer"],
                          {"kind": "unit-io", "unit": "analysis/analyze"})
         self.assertIn("analysis", self.r["unit_families"])
+    def test_the_write_unit_takes_the_draft_and_apply_nodes_only(self):
+        # Routing fragment 11 (writing half): editorial/write drafts the document and applies an
+        # approved revision. Every other node of the two units it replaced keeps its unit.
+        def users(unit):
+            found = set()
+            for r in self.r["recipes"]:
+                for n in r["standard_plus"]["nodes"]:
+                    if n.get("unit") == unit:
+                        found.add(f"{r['capability']}:{n['id']}")
+                    elif unit in (n.get("unit_choices") or []):
+                        found.add(f"{r['capability']}:{n['id']}:choice")
+            for part, row in self.parts.items():
+                if unit in (row.get("unit_choices") or []):
+                    found.add(f"{part}:choice")
+                if ((row.get("optional") or {}).get("node") or {}).get("unit") == unit:
+                    found.add(part)
+            return found
+        self.assertEqual(users("editorial/write"), {"autopilot-draft:draft-production", "autopilot-apply:apply"})
+        self.assertEqual(users("research/research-survey"), {
+            "autopilot-draft:material-strategy", "autopilot-research:retrieval", "autopilot-research:synthesis",
+            "autopilot-research:report", "autopilot-spec:research", "analyze-project:analyze",
+            "analyze-user:profile", "audit:report:choice"})
+        self.assertEqual(users("dev/refactor"), {"autopilot-code:execute:choice", "autopilot-lab:scaffold:choice"})
+        # Same model grade, write scope and gate as before; only the unit and the role it names moved.
+        draft = next(n for n in T.resolve_recipe(self.r, "autopilot-draft", "doc")["standard_plus"]["nodes"]
+                     if n["id"] == "draft-production")
+        apply = next(n for n in T.resolve_recipe(self.r, "autopilot-apply", "default")["standard_plus"]["nodes"]
+                     if n["id"] == "apply")
+        self.assertEqual((draft["role"], draft["model_profile"], draft["write_scope"], draft["completion_gate"]),
+                         ("deep editor", "balanced-deep", ["target-artifact", "draft/**"], "draft-production"))
+        self.assertEqual((apply["role"], apply["model_profile"], apply["write_scope"], apply["completion_gate"]),
+                         ("deep editor", "light", ["target-artifact", "apply-log/**"], "apply-hash"))
+        self.assertEqual(self.r["completion_gate_contracts"]["draft-production"],
+                         {"kind": "unit-io", "unit": "editorial/write"})
+        # A writing worker is not lent to another kind (user decision, 11-26).
+        for part in ("autopilot-draft:draft-production", "autopilot-apply:apply"):
+            self.assertNotIn("shareable", self.parts[part], part)
+            self.assertIsNone(T.resolve_shared_part(self.r, T.resolve_recipe(self.r, "autopilot-code", "dev"), part))
+        head = T._unit_frontmatter("editorial/write")
+        self.assertEqual((head["worker_type"], head["read_only"], head["field"]), ("stage", "false", None))
     def test_digest_ignores_the_catalog_until_a_recipe_uses_it(self):
         before = {c: T.capability_registry_digest(self.r, c) for c in ("audit", "autopilot-lab", "autopilot-code")}
         r = copy.deepcopy(self.r)
