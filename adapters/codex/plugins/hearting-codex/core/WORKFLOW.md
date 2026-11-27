@@ -292,10 +292,11 @@ Keep small document edits that fit this scope in the opening session's conversat
 When a separate reading or writing task becomes clear, delegate only that task. In a
 paper's results section, the opening session moves the conclusion to the front, puts the
 numbers in a figure, then adds the conditions for interpreting the results at the end. If
-the resulting version needs independent review, send it once with all three edits as one
-review request (below). For a small non-Git correction, the main session chooses the
-capability and uses the existing direct compose/finish in the document's folder, with no
-Git question, initialization, worktree or folder memory.
+the resulting version needs independent review, send it with all three edits in one
+separate request that keeps its report (a review unit without `--ephemeral`, or `audit`).
+For a small non-Git correction, the main session chooses the capability and uses the
+existing direct compose/finish in the document's folder, with no Git question,
+initialization, worktree or folder memory.
 
 Use the document frame to gather materials, make multiple drafts, connect claims and
 evidence across sections or integrate an external draft. Keep the capability, graph,
@@ -322,8 +323,9 @@ When the direction is clear, open `--shape solo|staged` (below). With no `--shap
 `compose --start --prompt-file <task>` lets the frame choose the capability, stages and
 shape, judging each leg's optional `size` (`one-change`, `one-pass`, `multi-stage`) first.
 Direct has no review-worker path of its own: work that
-needs an independent review is not direct. Where the kind declares a one-shot review,
-open `--shape solo --intensity standard` (one session, one independent review).
+needs an independent review is not direct. For one-pass work that needs independent
+review, open `--shape solo --intensity standard` if the kind declares a one-shot review
+(one session, one independent review).
 `strong` has two review legs, `thorough` and
 `adversarial` three. The owner starts them with the task's command and cannot close
 them itself. Use `staged` for work sized for stages, or for independent review where
