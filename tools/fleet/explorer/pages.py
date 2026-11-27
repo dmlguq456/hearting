@@ -1276,10 +1276,10 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None, *, fi
     panel_left, panel_right = x + 2, right - 2
     panel_y = y + _BAND_H + 2
     style = ("d", 0, 0)
-    if not fit:
-        _route_panel_edges(grid, panel_left, panel_right, panel_y, bottom, style, frame_key)
     grid.put(panel_left, panel_y, "┌", style)
     grid.put(panel_right, panel_y, "┐", style)
+    if not fit:
+        _route_panel_edges(grid, panel_left, panel_right, panel_y, bottom, style, frame_key)
     title = [(" ", None)] + [tuple(item) for item in (node.get("title") or ())] + [(" ", None)]
     tw = _width(title)
     tx = panel_left + 2 if panel_left + 2 + tw < centre - 1 else centre + 2
