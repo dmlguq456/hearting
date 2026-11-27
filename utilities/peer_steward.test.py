@@ -1822,6 +1822,38 @@ class _WatchMixin(_TmpRootMixin):
             time.sleep(0.02)
         self.fail(f"observation checkpoint never appeared for {watch_id}: {observation}")
 
+    def _observation_file(self, watch_id):
+        """The observation's file identity; each observer write puts a new file in place."""
+        status = (self.watch_root / f"{watch_id}.observation.json").stat()
+        return status.st_dev, status.st_ino
+
+    def _wait_for_observation_replaced(self, watch_id, before, seconds=10, *, watcher_pid=None):
+        """Wait for the observer's next write itself, not for a changed timestamp.
+
+        An atomic write creates its file while the old one is still in place, so
+        one write always changes the identity; an mtime can repeat on a coarse
+        clock. On failure the observer's scheduler state tells a missed wake-up
+        (asleep in select with nothing pending) from a slow write (disk wait).
+        """
+        path = self.watch_root / f"{watch_id}.observation.json"
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if self._observation_file(watch_id) != before:
+                return peer_steward._read_json(path)
+            time.sleep(0.02)
+        process = {}
+        if watcher_pid is not None:
+            for name in ("status", "wchan"):
+                try:
+                    text = Path(f"/proc/{watcher_pid}/{name}").read_text(errors="replace")
+                except OSError as exc:
+                    text = repr(exc)
+                process[name] = ([line for line in text.splitlines()
+                                  if line.startswith(("State:", "SigPnd:", "ShdPnd:"))]
+                                 if name == "status" else text)
+        self.fail(f"the observer did not handle its wake-up for {watch_id}: "
+                  f"observation={peer_steward._read_json(path)} watcher={process}")
+
 
 class WatchDeadlineTest(unittest.TestCase):
     def test_receipt_transition_reuses_the_arm_monotonic_deadline(self):
@@ -4153,7 +4185,8 @@ class NativeResultRunnerWakeTest(_WatchMixin, unittest.TestCase):
         paths = peer_steward._watch_paths(watch_id, self.watch_root)
         # The spawner's flock reaches the observer before its event loop does.
         # Wait for its armed checkpoint so the new result takes the signal path.
-        armed = self._wait_for_observation(watch_id)
+        # Each wait below is an event; its bound only has to outlast a slow disk.
+        armed = self._wait_for_observation(watch_id, seconds=30)
         self.assertEqual(armed["native_wait"]["state"], "armed", armed)
         arm = json.loads(paths.arm.read_text())
         if reattach:
@@ -4186,24 +4219,19 @@ class NativeResultRunnerWakeTest(_WatchMixin, unittest.TestCase):
             self.assertEqual(arm["observer_generation"], 2)
         reason = ("fixture-cached-pending" if cache == "pending"
                   else "shared-readiness-revalidating")
-        self._wait_for_observation(watch_id, predicate=lambda obs: obs.get("reason") == reason)
-        ready, _, _ = select.select([wake_fd], [], [], 10)
+        self._wait_for_observation(watch_id, seconds=30,
+                                   predicate=lambda obs: obs.get("reason") == reason)
+        ready, _, _ = select.select([wake_fd], [], [], 30)
         self.assertEqual(ready, [wake_fd], "the runner was not woken for the native result")
         self.assertEqual(os.read(wake_fd, 4096), b"\0", "the runner was woken more than once")
 
         # At most once per observer: later wake-ups re-read the same cached
         # projection without waking the runner again.
         watcher = arm["watcher"]
-        observation_path = paths.observation
         for _attempt in range(3):
-            before = observation_path.stat().st_mtime_ns
+            before = self._observation_file(watch_id)
             os.kill(watcher["pid"], signal.SIGUSR1)
-            deadline = time.monotonic() + 10
-            while (observation_path.stat().st_mtime_ns == before
-                   and time.monotonic() < deadline):
-                time.sleep(0.02)
-            self.assertNotEqual(observation_path.stat().st_mtime_ns, before,
-                                "the observer did not handle its wake-up")
+            self._wait_for_observation_replaced(watch_id, before, watcher_pid=watcher["pid"])
         self.assertTrue(peer_steward._pid_identity_ok(watcher["pid"], watcher["pid_start"]))
         self.assertEqual(select.select([wake_fd], [], [], 0)[0], [],
                          "a later wake-up woke the runner again")
@@ -4223,17 +4251,44 @@ class DefaultWatchBoundWorkTest(_WatchMixin, unittest.TestCase):
         armed = self._run("watch", self.target, env=self._env("held"))
         self.assertEqual(armed.returncode, 0, armed.stdout + armed.stderr)
         watch_id = self._fields(armed.stdout)["watch_id"]
-        observation = self._wait_for_observation(watch_id)
+        observation = self._wait_for_observation(watch_id, seconds=30)
         self.assertEqual(observation["native_wait"]["state"], "armed", observation)
 
         self._release()
         pending = self._wait_for_observation(
-            watch_id, predicate=lambda obs: obs.get("reason") == "bound-registered-work-unknown")
+            watch_id, seconds=30,
+            predicate=lambda obs: obs.get("reason") == "bound-registered-work-unknown")
         self.assertEqual(pending["state"], "pending", pending)
         self.assertEqual(pending["native_wait"]["agent_state"], "idle", pending)
         self.assertNotIn("readiness_transition", pending)
         paths = peer_steward._watch_paths(watch_id, self.watch_root)
         self.assertFalse(paths.receipt.exists(), "open work must keep the watch pending")
+
+        # The runner now rechecks this pending watch on its passes and wakes the
+        # watcher to judge again. Both must stay silent while the work is open,
+        # across two such rechecks. Each runner pass rewrites the target
+        # projection, and its `observed_at` names that one write.
+        identity = peer_steward._watch_readiness_identity(json.loads(paths.arm.read_text()), "idle")
+        projection = peer_steward.shared_readiness._target_path(
+            peer_steward.peer_obligations.ObligationStore().root, identity)
+
+        def runner_write():
+            return (peer_steward._read_json(projection) or {}).get("observed_at")
+
+        judged = runner_write()
+        self.assertIsNotNone(judged, "the pending judgment came without a runner projection")
+        rechecks = set()
+        deadline = time.monotonic() + 30
+        while len(rechecks) < 2 and not paths.receipt.exists() and time.monotonic() < deadline:
+            rechecks.add(runner_write())
+            rechecks -= {None, judged}
+            time.sleep(0.02)
+        self.assertFalse(paths.receipt.exists(),
+                         "open work must keep the watch pending across runner rechecks")
+        self.assertGreaterEqual(len(rechecks), 2, "the runner did not recheck the pending watch")
+        still = peer_steward._read_json(paths.observation)
+        self.assertEqual((still["state"], still["reason"]),
+                         ("pending", "bound-registered-work-unknown"), still)
 
         # The finished fixture work is no longer bound. Replace the registry
         # atomically and wake the same shared runner.
