@@ -100,7 +100,7 @@ API 시험을 다시 돌리고 보고해 달라고 해줘.” 상대 세션은 �
 승인이나 사용자의 답이 아닙니다.
 
 <p align="center">
-  <img src="docs/fleet/requests.png" alt="패널 둘이 나란히. 왼쪽은 맡긴 Claude Code 세션 [4f]: route 상자의 request 선 아래에 [b2]로 가는 화살표(상대의 하네스·모델·effort가 붙음)와 Test run, partial answer, 끝난 검토. 그 아래 MESSAGES에 [b2]의 답과 [9c]에 보낸 메모. 오른쪽은 맡은 Codex 세션 [b2]: route 상자의 request 선 아래에 [4f]에서 온 화살표(상대의 하네스·모델·effort가 붙음)와 Test run, partial answer, 그 아래 [4f]에 보낸 답." width="80%">
+  <img src="docs/fleet/requests.png" alt="패널 둘이 나란히. 왼쪽은 맡긴 Claude Code 세션 [4f]: route 상자의 request 선 아래에 [b2]로 가는 화살표(상대의 하네스·모델·effort가 붙음)와 Test run, partial answer, 확인 표시 뒤에 간 방향 화살표가 붙은 끝난 검토. 그 아래 MESSAGES에 [b2]의 답과 [9c]에 보낸 메모. 오른쪽은 맡은 Codex 세션 [b2]: route 상자의 request 선 아래에 [4f]에서 온 화살표(상대의 하네스·모델·effort가 붙음)와 Test run, partial answer, 그 아래 [4f]에 보낸 답." width="80%">
 </p>
 <p align="center"><sub>같은 요청이 맡긴 세션(<code>[4f]</code>)과 맡은 세션(<code>[b2]</code>)의 패널에 보입니다. 데모 데이터.</sub></p>
 

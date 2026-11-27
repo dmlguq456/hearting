@@ -1929,7 +1929,7 @@ def _question_records(snapshot, session_rows, session_index, now, routes=(), res
             "open_tag": session["tag"] if session else None,
             "pane": session["pane"] if session else None,
             "pane_server": session.get("pane_server") if session else None,
-            "marker": "◌" if owner_state == "none" else "◑" if source == "S2" else "●",
+            "marker": "◌" if owner_state == "none" else "◑",
             "node": _text(item.get("node")),
             "since_at": _clock_or_date(item.get("since"), now),
             "route_id": route_id,
@@ -1946,9 +1946,8 @@ def _question_records(snapshot, session_rows, session_index, now, routes=(), res
         questions.append(record)
         if session and not older and not record["sent"]:
             session["ask"] = "answer needed"
-            marker = "◑" if source == "S2" else "●"
-            if session.get("answer_wait_marker") != "●":
-                session["answer_wait_marker"] = marker
+            # 11-27 (the eight marks): every answer wait reads ``◑`` (an older record's ``●`` is read the same way).
+            session["answer_wait_marker"] = "◑"
 
     total = waits.get("total")
     if isinstance(total, bool) or not isinstance(total, int) or total < 0:
@@ -3903,7 +3902,7 @@ def _detail_sections(rows, session_index, accepted_detail, now, resolver=None):
 
 def route_marker_state(route):
     """The one route marker every Fleet route row draws: ``working`` (⠏), ``idle`` (● waits),
-    ``blocked`` (● answer), ``dead`` (✕), ``done`` (✓) or ``stale`` (◌ no response).
+    ``blocked`` (◑ answer), ``dead`` (✕), ``done`` (✓) or ``stale`` (◌ no response).
 
     Spec rule 27: while anything of the route runs, its owner or a worker, it reads as
     working. A route its reader found with nothing running reads as no response and never

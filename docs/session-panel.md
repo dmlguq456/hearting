@@ -66,7 +66,7 @@ machine's other sessions read in Fleet (LAB, SESSIONS), not in the panel. A
 40-row window keeps two or three rows per section; short of rows the other
 sections step down to one row first (`RESOURCES` before any of them), then the route box folds its routes
 (the closed workers' box becomes the open one, each NOW's second row goes, the `CTX` row folds into the first row, each NOW's first row goes, then the kind row, then one row each; a zone's rule stays while one row of the zone shows) and scrolls
-in place under the wheel, its border counting what it hides. A press on a
+in place under the wheel, its borders counting what they hide (`↑ 2 more`, `↓ 22 more`; the REPO row's `↑2 ↓5` is Git's own count). A press on a
 section's head or rows opens its popup (below); a press on any row of a route
 opens the routes popup on that route's page (Fleet's route page: the frame first, then the route row, then the lines about it). From the press on, the
 popup shows that frame at once for every form (unit, solo, team), drawn from the values the panel already holds, in the cells the reading fills (only values
@@ -92,14 +92,14 @@ Ordinary keys stay with the native CLI. A section opens in a popup in the
 middle of the window (the native area and the panel together), never by
 itself: the question editor for QUESTIONS (up to 132 cells wide; the window less 4 where that is narrower), Fleet's own table at the popup's
 width for ROUTE (up to 196 cells; the other table popups up to 116, text 76) (a route unfolded with its failure reason whole, Enter for its
-page with its paths), the status document for STATUS, this session's story for NOW, and the requests and
+page with its paths), the status document for STATUS (a campaign page Hearting generates opens on its list: a folded heading `▸`, an open one `▾`, the chosen line `▶`; BACKLOG's board groups the same way), this session's story for NOW, and the requests and
 messages whole for MESSAGES. A route's page starts at the upper edge of the popup area while it reads.
 It grows down to fit its content and scrolls when the page is taller than that area.
 While a popup stands every key and press is its own,
 everything behind it reads in one dark gray (the native's output keeps
 arriving, still gray, and the native is never told) while the popup stands on
 its own lighter ground with bright words; in the question popup a thin line under the question's words (with an empty row above it) parts them from the choices, whose numbers are bold in the question's rose, and the chosen
-choice stands on its own blue ground (reversed in mono, eight colors, or
+choice leads with `▶` (the place, as the question being answered and the setting being changed do) and stands on its own blue ground (reversed in mono, eight colors, or
 `NO_COLOR`). **Esc**, **Ctrl+]**, its `✕`, or a press outside it closes it.
 
 | Key | What it does |
@@ -164,7 +164,7 @@ auxiliary detail, route line, worker box (`closed`, the default, `open`, or
 `none`: how a stage's workers stand in the route box), rule motion (`rule`, the default: the lit frame
 and the light over the rule; `border`: one arc round the frame; `scanners`: a
 wide wave round it; `off`), theme (terminal, light terminal, or monochrome),
-and shade (none, light, or medium). Use the value arrows or keyboard arrows, then Apply; Cancel
+and shade (none, light, or medium); the line being changed leads with `▶`. Use the value arrows or keyboard arrows, then Apply; Cancel
 restores the previous view, and Defaults previews the defaults. Drag the side
 boundary to resize and save it. Only Hearting's own `session-shell.json` is
 saved, with a byte-for-byte backup; native model and permission settings are
@@ -195,13 +195,13 @@ In the panel, every open request has rows in the route box's `request` zone, und
 popup shows it whole, requests first: the
 parties and number, `REV`, `DELIVERY` (`sent`, `delivered`, `seen`; `awaiting delivery` and why while the other window has not taken it in, as `peer-steward show` says), `WORK`
 (`open`, `partial answer`, `final answer`, `rejected`, `cancelled`, with what is
-left), `LAST`, `REPORTS`, and the body. A closed request stays 15 minutes after it closed, sent or received (`✓` answered, `✕` rejected or cancelled); a sent one
+left), `LAST`, `REPORTS`, and the body; its arrow is the route box's request color. A closed request stays 15 minutes after it closed, sent or received, its result first and then the way it went (`✓ ←` answered, `✕ →` rejected or cancelled; the result green or red, the arrow the request color; at 36 cells its time gives way); a sent one
 stays longer until its last answer has been seen.
 
 A message you sent that has not gone into the other window reads the same in `MESSAGES` (`→ [b2] · awaiting delivery · text stands in its input …`): the first words always show, the reason as far as the row reaches, and the `MESSAGES` popup shows it whole.
 
 <p align="center">
-  <img src="fleet/requests.png" alt="Two panels: in its route box, under the request rule, the session that asked shows an arrow to [b2] with its harness, model, and effort, Test run, partial answer, and a finished review; in its route box, under the request rule, the session that was asked shows an arrow from [4f] with its harness, model, and effort, Test run, partial answer." width="80%">
+  <img src="fleet/requests.png" alt="Two panels: in its route box, under the request rule, the session that asked shows an arrow to [b2] with its harness, model, and effort, Test run, partial answer, and a finished review, its check mark followed by the arrow it went; in its route box, under the request rule, the session that was asked shows an arrow from [4f] with its harness, model, and effort, Test run, partial answer." width="80%">
 </p>
 
 **Messages** are short notes, sent with

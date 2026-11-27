@@ -904,7 +904,8 @@ function popupNow(){
   view.strings=view.rows.map(row=>'\x1b[0m'+row.map(part=>(part.margin?'\x1b[0m \x1b[D':'')+`\x1b[${cellAttr(part)}m${String(part.text).replace(/[\x00-\x1f\x7f-\x9f]/g,' ')}`).join('')+'\x1b[0m');
   if(table)return view;
   // The editor identifies the live draft, including its empty first cell.
-  // Question text and a picked answer can also start with `› `; neither is an editor.
+  // Question text can also start with `› `; it is not an editor. (11-27: the question this popup is on and a picked
+  // answer lead with `▶ `, the place's mark, so only the answer row's own `› ` lead is read here.)
   const edit=block.typing?part=>part.caret===true:part=>String(part.text).startsWith('› ')&&String(part.text).length>2;
   const at=body.slice(0,view.body).findIndex(row=>Array.isArray(row)&&row.some(edit));
   if(at>=0){const parts=body[at],upto=parts.slice(0,parts.findIndex(edit)+1).map(part=>part.text).join('');
@@ -1267,7 +1268,7 @@ function enterRow(){
     askTable();
   }
 }
-// 11-21: Enter or a press on a line of the status popup's list screen. A heading or `all N ›` opens or closes its group, an item
+// 11-21: Enter or a press on a line of the status popup's list screen. A heading or `all N ▸` opens or closes its group, an item
 // its whole text, and `full document ›` the document read whole (Fleet's lines are asked for then, not before); Esc or Enter there
 // goes back to the list, on the line it left.
 function statusActivate(t,key){
