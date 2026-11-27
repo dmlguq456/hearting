@@ -26,6 +26,7 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
 import copy
 import json
 from contextlib import ExitStack
+import subprocess
 from pathlib import Path
 import tempfile
 import time
@@ -33,7 +34,7 @@ import unittest
 from unittest import mock
 
 from tools.fleet import collectors, route
-from tools.fleet.collectors import claude, dispatch, herdr, liveness, steward, tmux
+from tools.fleet.collectors import claude, dispatch, herdr, liveness, procscan, steward, tmux
 from tools.fleet.explorer import live
 from tools.fleet.explorer.tables import route_is_history
 from tools.fleet.model import Session
@@ -70,17 +71,31 @@ class RunningRoutePanel(unittest.TestCase):
         self.stack.enter_context(mock.patch.object(
             dispatch, "_terminal_row_process_alive",
             side_effect=lambda meta, *a, **k: meta.get("attempt_id") in self.revived))
-        self.stack.enter_context(mock.patch.object(
-            dispatch, "_dispatch_liveness",
-            side_effect=lambda job, *a, **k: self.live.get(job.attempt_id, "done")))
+        self.stack.enter_context(mock.patch.object(dispatch, "_dispatch_liveness", side_effect=self.classify))
         self.stack.enter_context(mock.patch.object(liveness, "classify", return_value="idle"))
         # The panel producer runs in this process (``_refresh_cache``); no resident one is started.
         import human_wait_state
         self.stack.enter_context(mock.patch.object(human_wait_state, "_request_producer"))
 
+    def classify(self, job, *args, **kwargs):
+        """The held classifier: its answer for the row, and the process evidence Fleet's pass records
+        as ``_dispatch_liveness`` does (the row's PID and recorded start, and the start observed now)."""
+        observed = procscan.read_proc_start(job.pid) if job.pid and job.proc_start else None
+        job.state_evidence = {"inputs": {
+            "pid": job.pid, "proc_start": job.proc_start, "pid_alive": True if observed else None,
+            "proc_start_match": str(observed) == str(job.proc_start) if observed else None}}
+        return self.live.get(job.attempt_id, "done")
+
+    def process(self):
+        """``(pid, start)`` of a process this test starts and ends: an attempt's own process."""
+        child = subprocess.Popen(["sleep", "300"])
+        self.addCleanup(lambda: (child.kill(), child.wait()))
+        return str(child.pid), str(procscan.read_proc_start(child.pid))
+
     # -- the route and its registry -----------------------------------------------------------------
-    def seal(self, nodes):
-        """Write the sealed route record where the runtime keeps it (``<root>/.runtime/routes``)."""
+    def seal(self, nodes, folder=".runtime/routes"):
+        """Write the sealed route record where the runtime keeps it (``<root>/.runtime/routes``; an
+        older route sits in ``<root>/routes``)."""
         record = {"schema_version": 1, "cwd": str(self.root), "artifact_root": str(self.root / "artifacts"),
                   "capability": "autopilot-code", "capability_mode": "dev", "execution_topology": "staged",
                   "effective_intensity": "standard", "owner_attempt_id": "-", "slug": "fixture-route",
@@ -88,7 +103,7 @@ class RunningRoutePanel(unittest.TestCase):
         record["route_hash"] = route.route_hash(record)
         record["route_id"] = "rt-" + record["route_hash"].split(":")[1][:16]
         self.record = record
-        self.route_file = self.root / "artifacts" / ".runtime" / "routes" / (record["route_id"] + ".json")
+        self.route_file = self.root / "artifacts" / folder / (record["route_id"] + ".json")
         self.route_file.parent.mkdir(parents=True, exist_ok=True)
         self.route_file.write_text(json.dumps(record))
 
@@ -100,7 +115,9 @@ class RunningRoutePanel(unittest.TestCase):
             "closed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}))
 
     def row(self, attempt, status="running", *, owner=False, node=None, liveness_now="working",
-            harness="codex", age=0, **extra):
+            harness="codex", age=0, own="process", **extra):
+        """One registry row. An open owner row records its own process (``own="process"``), none
+        (``"none"``, a row with no PID) or a live PID with another start (``"other-start"``)."""
         rid, digest, path = self.record["route_id"], self.record["route_hash"], str(self.route_file)
         # The attempt axes the dispatch wrapper writes on a registered headless row.
         meta = {"attempt_schema_version": "2", "transport": "headless", "execution_surface": "registered-headless",
@@ -110,6 +127,9 @@ class RunningRoutePanel(unittest.TestCase):
         if owner:
             meta.update(worker_type="owner", dispatch_depth="1", owner_route_id=rid, owner_route_hash=digest,
                         owner_route_file=path)
+            if status != "done" and own != "none":
+                pid, start = self.process()
+                meta.update(pid=pid, pid_start=start if own == "process" else str(int(start) + 1))
         else:
             meta.update(worker_type="stage", dispatch_depth="2", route_node=node, parent_attempt_id="att-owner")
         meta.update(extra)
@@ -259,6 +279,33 @@ class RunningRoutePanel(unittest.TestCase):
                 seen = self.assert_over(routes_active=1)
                 self.assertIs(seen["route"]["closed"], True)
 
+    def test_an_older_route_closed_in_its_own_folder_is_over(self):
+        # An older route keeps its record under ``<root>/routes``, with a matching `closed_at` beside it
+        # (a success). Its owner row is still `open`: with no PID, read alive only by another session's
+        # record in the same folder (four days later), or with its own process still alive.
+        self.seal([{"id": node, "depends_on": [NODES[i - 1]] if i else []} for i, node in enumerate(NODES)],
+                  folder="routes")
+        for name, own in (("no PID, alive by another record", "none"), ("its own process lingers", "process")):
+            with self.subTest(name):
+                self.lines.clear()
+                self.row("att-owner", owner=True, own=own, age=4 * DAY)
+                for node in NODES:
+                    self.row("att-" + node, "done", node=node, age=4 * DAY)
+                self.close_route(True)
+                self.assert_over(routes_active=1)
+
+    def test_an_owner_alive_by_anything_but_its_own_process_keeps_the_stage_rule(self):
+        # No outcome: the owner row is open and reads alive, but not by its own process: it records no
+        # PID, or its PID now belongs to a process with another start. As before: no row after a
+        # BLOCKED stage while nothing runs.
+        for name, own in (("no PID", "none"), ("PID with another start", "other-start")):
+            with self.subTest(name):
+                self.lines.clear()
+                self.row("att-owner", owner=True, own=own)
+                self.row("att-plan", "done", node="plan")
+                self.row("att-execute", "done", node="execute", note="dead-worker-blocked", failure_class="blocked")
+                self.assert_over(routes_active=1)
+
     def test_a_cancelled_owner_row_a_live_process_contradicts_does_not_revive_the_route(self):
         # F-64: the replacement owner's row is `cancelled` but a live process carries its attempt, so it
         # reads `working`; beside it the earlier owner's `done` row. No open owner row runs the route.
@@ -289,6 +336,28 @@ class RunningRoutePanel(unittest.TestCase):
         self.assert_over(routes_active=0)
 
 
+class OwnProcessEvidence(unittest.TestCase):
+    """The evidence the new path trusts is what the real classifier records for the row (unheld)."""
+
+    def test_only_the_rows_own_process_with_its_start_counts(self):
+        from tools.fleet.model import DispatchJob
+        child = subprocess.Popen(["sleep", "120"])
+        self.addCleanup(lambda: (child.kill(), child.wait()))
+        start = str(procscan.read_proc_start(child.pid))
+        for name, pid, recorded, expected in (("its own process", child.pid, start, True),
+                                              ("another start", child.pid, str(int(start) + 1), False),
+                                              ("no PID", None, None, False)):
+            with self.subTest(name):
+                meta = {"attempt_id": "att-owner", "route_id": "rt-evidencefixture", "worker_type": "owner",
+                        **({"pid": str(pid), "pid_start": recorded} if pid else {})}
+                job = DispatchJob(key="owner", slug="owner", harness="codex", depth=1, worker_type="owner",
+                                  attempt_id="att-owner", route_id="rt-evidencefixture", status="open",
+                                  pid=pid, proc_start=recorded)
+                job._registry_metadata = meta
+                dispatch._dispatch_liveness(job, time.time(), track=False)
+                self.assertIs(live._own_pid_alive(job), expected)
+
+
 class FramedLegRoute(unittest.TestCase):
     """A staged leg its frame opened, after the frame closed: the leg runs as itself (11-27)."""
 
@@ -302,7 +371,11 @@ class FramedLegRoute(unittest.TestCase):
                   "execution_topology": "staged", "selection": {"shape": "staged"}, "owner_attempt_id": "-"}
         owner = {"key": "route-leg", "depth": 1, "dispatch_depth": 1, "route_node": None, "worker_type": "owner",
                  "harness": "codex", "route_id": rid, "attempt_id": "att-owner", "status": "open",
-                 "liveness": "working", "parent_sid": SID, "elapsed_min": 90}
+                 "liveness": "working", "parent_sid": SID, "elapsed_min": 90,
+                 # its own registered process, observed alive with its recorded start
+                 "_registry_metadata": {"pid": "4242", "pid_start": "777"},
+                 "state_evidence": {"inputs": {"pid": 4242, "proc_start": "777", "pid_alive": True,
+                                               "proc_start_match": True}}}
         chain = [{"route_id": "rt-frame", "capability": "route-frame", "state": "done"},
                  {"route_id": rid, "capability": "autopilot-code", "state": "active",
                   "route_plan": {"decision": "frame/route-decision.json", "digest": "sha256:" + "0" * 64, "index": 0}}]

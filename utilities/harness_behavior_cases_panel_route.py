@@ -27,32 +27,88 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import harness_behavior_scenarios as base  # noqa: E402
 from harness_behavior_scenarios import native_binary as base_native, wait_for  # noqa: E402
 from harness_behavior_cases_b import fixture_python, session_id  # noqa: E402
 from harness_behavior_cases_e import TERMINAL_STATES  # noqa: E402
 import harness_behavior_cases_solo_review as solo  # noqa: E402
 import harness_behavior_cases_unit_route as unit  # noqa: E402
 
-# Read in the fixture environment: the panel producer's exact read, then Fleet's.
-PROBE = r"""
-import time
+# Run first in the reading process: it sees only the processes this scenario started (``args["pids"]``).
+# The process list and every ``/proc`` listing are cut to them, and an audit hook counts and refuses any
+# ``/proc/<pid>/environ`` open of another process, so another session's process, its environment and the
+# registry it names on the same host are never read. Nothing of the shared readers is changed.
+GUARD = r"""
+import os, pathlib
 sys.path.insert(0, home)
-from tools.fleet.collectors import collect_all, procscan
-from tools.fleet.explorer import live
-from tools.fleet.session_line import session_route_status
-harness, sid, rid = args["harness"], args["sid"], args.get("route_id")
-key = harness + "\0" + sid
-# Only the processes this scenario started are listed (``args["pids"]``): another session's process, its
-# environment and the registry it names on the same host are never read.
+from tools.fleet.collectors import procscan
 launched = {str(pid) for pid in args["pids"]}
+foreign_environ = []
+
+def _refuse_foreign_environ(event, hook_args):
+    if event != "open" or not hook_args or not isinstance(hook_args[0], (str, bytes)):
+        return
+    path = os.fsdecode(hook_args[0])
+    parts = path.split("/")
+    if (len(parts) == 4 and parts[1] == "proc" and parts[3] == "environ" and parts[2].isdigit()
+            and parts[2] not in launched):
+        foreign_environ.append(parts[2])
+        raise PermissionError(13, "not a process of this scenario", path)
+sys.addaudithook(_refuse_foreign_environ)
+
+def _is_proc(path):
+    return isinstance(path, (str, bytes, os.PathLike)) and os.fsdecode(os.fspath(path)).rstrip("/") == "/proc"
+
+def _ours(name):
+    name = os.fsdecode(name)
+    return not name.isdigit() or name in launched
+
+_listdir, _scandir, _iterdir = os.listdir, os.scandir, pathlib.Path.iterdir
+
+def _listdir_ours(path="."):
+    names = _listdir(path)
+    return [name for name in names if _ours(name)] if _is_proc(path) else names
+
+class _Entries:
+    def __init__(self, inner):
+        self.inner = inner
+    def __enter__(self):
+        self.inner.__enter__()
+        return self
+    def __exit__(self, *exc):
+        return self.inner.__exit__(*exc)
+    def __iter__(self):
+        return (entry for entry in self.inner if _ours(entry.name))
+    def close(self):
+        self.inner.close()
+
+def _scandir_ours(path="."):
+    inner = _scandir(path)
+    return _Entries(inner) if _is_proc(path) else inner
+
+def _iterdir_ours(self):
+    items = _iterdir(self)
+    return (item for item in items if _ours(item.name)) if _is_proc(self) else items
+
+os.listdir, os.scandir, pathlib.Path.iterdir = _listdir_ours, _scandir_ours, _iterdir_ours
 listed = procscan._ps_lines
 
-def fixture_lines():
+def _ps_lines_ours():
     rows = listed()
     kept = [line for line in rows if line.split(None, 1)[:1] and line.split(None, 1)[0] in launched]
     return procscan._CensusRows(kept, complete=getattr(rows, "census_complete", False),
                                 reasons=getattr(rows, "census_reasons", ()))
-procscan._ps_lines = fixture_lines
+procscan._ps_lines = _ps_lines_ours
+"""
+
+# Read in the fixture environment: the panel producer's exact read, then Fleet's.
+PROBE = GUARD + r"""
+import time
+from tools.fleet.collectors import collect_all
+from tools.fleet.explorer import live
+from tools.fleet.session_line import session_route_status
+harness, sid, rid = args["harness"], args["sid"], args.get("route_id")
+key = harness + "\0" + sid
 
 def job(j):
     ev = getattr(j, "state_evidence", None) or {}
@@ -62,7 +118,7 @@ def job(j):
             "harness": getattr(j, "harness", None), "status": getattr(j, "status", None),
             "liveness": getattr(j, "liveness", None), "note": getattr(j, "note", None),
             "rule": (attempt or {}).get("rule"), "source": (attempt or {}).get("source"),
-            "route": getattr(j, "route_id", None)}
+            "route": getattr(j, "route_id", None), "own_pid": live._own_pid_alive(j)}
 
 def routes_of(snapshot, now):
     resolver = live._resolver(snapshot)
@@ -90,6 +146,7 @@ out["fleet_routes"] = [{k: r.get(k) for k in ("id", "state", "current", "worker_
                        for r in view.routes if not rid or r.get("id") == rid]
 out["fleet_overview"] = {"counts": counts, "opened": sorted(opened)}
 out["fleet_jobs"] = [job(j) for j in full.jobs if not rid or getattr(j, "route_id", None) == rid]
+out["foreign_environ_opens"] = len(foreign_environ)
 print(json.dumps(out, default=str))
 """
 
@@ -152,9 +209,14 @@ class PanelRouteRunning(solo.SoloReviewScenario):
         run.home.env["PATH"] = str(shims) + ":" + run.home.env.get("PATH", "")
 
     def launched_pids(self, run):
-        """The processes this scenario started: its private tmux server's tree, and the processes the
-        route's own registry rows name (a detached worker or supervisor) with theirs. Only parent links
-        (``/proc/<pid>/stat``) are read to follow them; no other process's environment is opened."""
+        """The processes this scenario started: its private tmux server's tree, and each process a
+        registry row of its route records as its own, only while that PID is valid in this namespace and
+        still carries the recorded start (``dispatch._authoritative_registry_pid``, the reading Fleet
+        uses; a reused PID is another process), with theirs. Only ``/proc/<pid>/stat`` (start, parent) is
+        read to follow them; no other process's environment is opened."""
+        if str(base.SOURCE) not in sys.path:
+            sys.path.insert(0, str(base.SOURCE))
+        from tools.fleet.collectors import dispatch, procscan
         roots = set()
         tmux = getattr(getattr(run, "tui", None), "_tmux", None)
         if tmux is not None:
@@ -162,7 +224,9 @@ class PanelRouteRunning(solo.SoloReviewScenario):
             if server.isdigit():
                 roots.add(int(server))
         for row in self.unit_rows():
-            roots.update(int(value) for key, value in row.items() if key.endswith("pid") and str(value).isdigit())
+            pid, start, _source = dispatch._authoritative_registry_pid(row)
+            if pid and start and str(procscan.read_proc_start(pid) or "") == str(start):
+                roots.add(int(pid))
         children = {}
         for entry in os.scandir("/proc"):
             if not entry.name.isdigit():
@@ -192,6 +256,8 @@ class PanelRouteRunning(solo.SoloReviewScenario):
                   "panel_state": panel[0].get("state") if panel else None,
                   "fleet_current": any(r.get("current") is True for r in fleet),
                   "fleet_state": fleet[0].get("state") if fleet else None,
+                  # another process's environment the reading tried to open (refused): must stay 0
+                  "foreign_environ_opens": value.get("foreign_environ_opens"),
                   "probe": value}
         self.samples.append(sample)
         return sample
@@ -255,13 +321,15 @@ class PanelRouteRunning(solo.SoloReviewScenario):
         closed = [s for s in self.samples if s["label"] == "closed"]
         missing = [s["label"] for s in running if not (s["panel_row"] and s["panel_stage"] not in (None, "", "·"))]
         fleet_missing = [s["label"] for s in running if not s["fleet_current"]]
+        foreign = sum(s["foreign_environ_opens"] if type(s["foreign_environ_opens"]) is int else 1
+                      for s in self.samples)
         run.note(f"panel rows missing at {missing or 'none'}; fleet current missing at {fleet_missing or 'none'}; "
-                 f"closed={ev['route_closed']}")
+                 f"closed={ev['route_closed']}; foreign environ opens={foreign}")
         if not done or len(running) < 3 * self.SAMPLES or not closed:
             return "inconclusive"
         ended = closed[0]
         ok = (not missing and not fleet_missing and ended["panel_row"] and ended["panel_state"] == "done"
-              and not ended["fleet_current"])
+              and not ended["fleet_current"] and foreign == 0)
         return "pass" if ok else "fail"
 
 
