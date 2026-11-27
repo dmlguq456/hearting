@@ -141,8 +141,9 @@ def build(rows: list, *, detail: bool = True) -> dict:
     return {"text": "\n\n".join(blocks), "choices": [], "recommend": None}
 
 
-def _words(text) -> str:
-    return " ".join(str(text or "").split()).casefold()
+def _body(text) -> str:
+    """A question's text as compared: its line endings made one and the whole stripped (case is kept)."""
+    return str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
 def _open_questions(harness: str, session_id: str) -> list:
@@ -181,15 +182,23 @@ def same_waiting(harness: str, session_id: str, rows: list, *, sequence: int | N
 
 
 def same_question(signal: dict, rows: list) -> bool:
-    """Whether the waiting question asks what this native call asks: its words and its choices."""
+    """Whether the open question asks what this native call asks (DESIGN-QUESTIONS-MULTI-1127 §3).
+
+    All of them must match: the text, the choice values in their order, the answer form and secrecy.
+    The text is compared with the forms this very call is registered in (`build`, with and without the
+    options' descriptions), so `questions ask` and the same question asked natively with descriptions
+    are one question; a recommendation and a description are no answer value and do not count. The
+    form is the one the board holds: one choice, or written. Several questions, a multi-select one or
+    a preview are held as one written listing, so they are the same only as that whole listing; a
+    written question with the same first line is another question. Nothing else is stripped or
+    compared by likeness."""
     try:
         asked = ((signal.get("detail") or {}).get("questions") or [{}])[0]
-        words = {_words(build(rows, detail=detail)["text"]) for detail in (True, False)}
-        if len(rows) == 1:
-            words.add(_words(rows[0]["question"]))
-        return (_words(signal.get("question")) in words
-                and list(asked.get("choices") or []) == build(rows)["choices"])
-    except Exception:  # noqa: BLE001 -- unsure is "not the same": the refusal then says it was not shown
+        forms = [build(rows, detail=detail) for detail in (True, False)]
+        return (_body(signal.get("question")) in {_body(form["text"]) for form in forms}
+                and list(asked.get("choices") or []) == forms[0]["choices"]
+                and bool(asked.get("is_secret")) == any(row["secret"] for row in rows))
+    except Exception:  # noqa: BLE001 -- unsure is another question: the native call goes through as before
         return False
 
 

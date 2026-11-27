@@ -220,7 +220,7 @@ class PassThroughTest(Base):
         """The 11-27 scene: `questions ask`, then the same question through the native tool in the same turn."""
         for harness, payload in (("claude", claude_payload()), ("codex", codex_payload()),
                                  ("opencode", opencode_payload())):
-            for text in ("Start now?", "  start NOW? ",
+            for text in ("Start now?", "  Start now?\r\n",
                          redirect.build(redirect._normalized(harness, payload)[1])["text"]):
                 with self.subTest(harness=harness, text=text[:20]):
                     earlier, envelope = self.f.ask(harness, SID, text=text,
@@ -233,11 +233,62 @@ class PassThroughTest(Base):
                                      [earlier["id"]])
                     self.assertEqual(state._selected_entry(envelope)["state"], "open")
                     self.answered(harness)
-        # Other choices, or other words, are another question: shown natively, as before.
-        for text, choices in (("Start now?", ["Proceed", "Stop"]), ("Start later?", ["Proceed", "Edit", "Stop"])):
+        # Other choices, other words or other case are another question: shown natively, as before.
+        for text, choices in (("Start now?", ["Proceed", "Stop"]), ("Start later?", ["Proceed", "Edit", "Stop"]),
+                              ("start now?", ["Proceed", "Edit", "Stop"])):
             with self.subTest(text=text, choices=choices):
                 self.f.ask("claude", SID, text=text, choices=choices)
                 self.assertIsNone(redirect.redirect("claude", claude_payload()))
+                self.answered("claude")
+
+    def test_same_means_the_same_text_choices_in_order_answer_form_and_secrecy(self):
+        """DESIGN-QUESTIONS-MULTI-1127 §3: every one of them must match; a recommendation or a description is no value."""
+        def single(question="Pick a size?", **option_extra):
+            return claude_payload([{"question": question, "multiSelect": False,
+                                    "options": [{"label": "Small", "description": "one file", **option_extra},
+                                                {"label": "Large", "description": "all files"}]}])
+        multi = claude_payload([{"question": "Pick a size?", "multiSelect": True,
+                                 "options": [{"label": "Small", "description": "one file"},
+                                             {"label": "Large", "description": "all files"}]}])
+        several = claude_payload([
+            {"question": "Pick a size?", "multiSelect": False,
+             "options": [{"label": "Small", "description": "one file"}, {"label": "Large", "description": "all"}]},
+            {"question": "Which checks?", "multiSelect": False,
+             "options": [{"label": "Unit", "description": "fast"}, {"label": "E2E", "description": "slow"}]}])
+        cases = [  # (what is open, the native call, held back?)
+            (dict(text="Pick a size?"), multi, False),                               # written vs several may be chosen
+            (dict(text="Pick a size?"), single(preview="a layout"), False),          # written vs a preview
+            (dict(text="Pick a size?", choices=["Large", "Small"]), single(), False),  # the order of the choices
+            (dict(text="Pick a size?", choices=["small", "Large"]), single(), False),  # a choice's case
+            (dict(text="Pick a size?", choices=["Small", "Large"], secret=True), single(), False),
+            (dict(text="Pick a size?", choices=["Small", "Large"]), several, False),   # one question of several
+            (dict(text="Pick a size?", choices=["Small", "Large"], recommended=1), single(), True),  # recommendation
+            (dict(text="Pick a size?", choices=["Small", "Large"]),                  # other descriptions
+             claude_payload([{"question": "Pick a size?", "multiSelect": False,
+                              "options": [{"label": "Small", "description": "does something else"},
+                                          {"label": "Large (Recommended)", "description": ""}]}]), True),
+            (dict(text=redirect.build(redirect._normalized("claude", multi)[1])["text"]), multi, True),
+            (dict(text=redirect.build(redirect._normalized("claude", several)[1])["text"]), several, True),
+        ]
+        for number, (asked, payload, held) in enumerate(cases):
+            with self.subTest(case=number):
+                earlier, _ = self.f.ask("claude", SID, **asked)
+                reason = redirect.redirect("claude", payload)
+                if held:
+                    self.assertEqual(reason, redirect.reason_already(earlier["id"]))
+                else:
+                    self.assertIsNone(reason)
+                    self.assertEqual([item["id"] for item in state.read_signals() if item["harness"] == "claude"],
+                                     [earlier["id"]])
+                self.answered("claude")
+        # A form the redirect itself registered is held back when it is asked again.
+        for payload in (multi, several, single(preview="a layout")):
+            with self.subTest(form=str(payload["tool_input"]["questions"])[:40]):
+                first = redirect.redirect("claude", payload)
+                self.assertTrue(first.startswith("Registered as Hearting question"), first)
+                (registered,) = [item for item in state.read_signals() if item["harness"] == "claude"]
+                self.assertIn(redirect.redirect("claude", payload), {redirect.reason_already(registered["id"]),
+                                                                      redirect.reason_for(registered["id"])})
                 self.answered("claude")
 
     def test_an_old_question_or_one_in_another_pane_is_held_only_when_it_is_the_same(self):
