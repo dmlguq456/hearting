@@ -215,6 +215,23 @@ class TablePopupTest(unittest.TestCase):
                 self.assertIn('└', rows[-2])
                 self.assertTrue(rows[-1].startswith('╚═'))
 
+    def test_fitted_boxes_with_different_heights_keep_straight_stage_links(self):
+        from dataclasses import replace
+
+        route = ROUTES[0]
+        ident = route['id']
+        stages = [
+            {'n': 'plan', 'st': 'done', 'graph_known': True, 'level': 0},
+            {'n': 'execute', 'st': 'active', 'graph_known': True, 'level': 1, 'depends_on': ['plan'],
+             'who': ('claude', 'fixture'), 'gate': 'ready', 'says': 'working'},
+            {'n': 'check', 'st': 'todo', 'graph_known': True, 'level': 2, 'depends_on': ['execute']},
+        ]
+        node = {'n': 'leg', 'kind': 'leg', 'st': 'active', 'detail': stages}
+        model = replace(view_model(), routes=(route,), nodes={ident: (node,)})
+        view = self.popup(model, kind='routes', columns=124, open=ident, page=True)
+        frame = [row for row in self.text(view['rows']) if row.startswith('║')]
+        self.assertEqual([row.count('▶') for row in frame if '▶' in row], [2])
+
     def test_route_raw_strip_requires_drawable_rows_and_fits_short_text(self):
         from dataclasses import replace
 

@@ -926,7 +926,9 @@ def _stage_grid(grid, x0, y, stages, room, bottom, loops=(), *, fit=False):
             for item in group:
                 height = sizes[slot]
                 _stage_box(grid, bx, tops[slot], w, height, index, item, lines[slot])
-                mids.append(tops[slot] + (height // 2 if height > 2 else 0))
+                # Keep straight links between fitted boxes that start together.
+                middle = height // 2 if height > 2 else 0
+                mids.append(tops[slot] + (2 if fit else middle))
                 slot += 1
             if "group" in stage:
                 grid.put(bx + 2, tops[slot - 2] + sizes[slot - 2], "∥ 2-way · %s" % (
