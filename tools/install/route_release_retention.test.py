@@ -217,10 +217,16 @@ class RouteReleaseRetentionConsumerTest(unittest.TestCase):
         return hashlib.sha256(module.read_bytes()).hexdigest()
 
     def _cache(self, version: str) -> Path:
-        cache = self._pycache_root(self._release_root(version)) / "tools/install/__pycache__"
+        # Real prefixed bytecode sits beside a real source; the update's sweep
+        # removes any whose source is gone.
+        release = self._release_root(version)
+        before = release.stat()
+        (release / "cache_probe.py").write_text("VALUE = 1\n", encoding="utf-8")
+        os.utime(release, ns=(before.st_atime_ns, before.st_mtime_ns))  # keep the release order
+        cache = self._pycache_root(release)
         cache.mkdir(parents=True)
-        (cache / "distribution.cpython-312.pyc").write_bytes(b"fixture cache\n")
-        return cache.parent
+        (cache / "cache_probe.cpython-312.pyc").write_bytes(b"fixture cache\n")
+        return cache
 
     def _route(
         self, route_id: str, release: Path, *, shape: str = "direct",

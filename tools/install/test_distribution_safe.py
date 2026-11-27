@@ -658,6 +658,8 @@ class ReleasePycachePruneTest(unittest.TestCase):
         sibling = self.pycache.joinpath(*self.releases.parts[1:-1])
         sibling = sibling / "releases-neighbor" / "v-unrelated"
         sibling.mkdir(parents=True)
+        # Its source exists, so the bytecode sweep leaves it to this assertion.
+        (self.releases.parent / "releases-neighbor" / "v-unrelated").mkdir(parents=True)
         (sibling / "unrelated.pyc").write_bytes(b"unrelated")
 
         with ExitStack() as stack:
@@ -959,7 +961,15 @@ class ReleasePycachePruneTest(unittest.TestCase):
                 self.assertFalse(any(".migrate-" in path.name
                                      for path in archive.parent.iterdir()))
 
-    def test_orphan_cache_waits_for_live_or_unresolved_release_evidence(self) -> None:
+    def test_bytecode_of_a_missing_release_goes_whatever_names_it(self) -> None:
+        # Python reads a prefixed .pyc only beside its source; a release that is
+        # gone has none, so route or attempt evidence naming it keeps nothing
+        # its bytecode could serve. A kept release keeps its cache.
+        kept = self._create_release("v-kept", 1)
+        (kept / "probe.py").write_text("VALUE = 1\n", encoding="utf-8")
+        kept_cache = self._cache_for(kept)
+        kept_cache.mkdir(parents=True)
+        (kept_cache / "probe.cpython-312.pyc").write_bytes(b"kept")
         cache = self._cache_for(self.releases / "gone")
         cache.mkdir(parents=True)
         (cache / "old.pyc").write_bytes(b"orphan")
@@ -972,17 +982,15 @@ class ReleasePycachePruneTest(unittest.TestCase):
 
         for route in (([], ""), ([], "route-discovery-unreliable:/fixture")):
             with self.subTest(route=route):
+                (cache / "old.pyc").parent.mkdir(parents=True, exist_ok=True)
+                (cache / "old.pyc").write_bytes(b"orphan")
                 with ExitStack() as stack:
                     self._patch_cleanup(stack, in_use=prove_use, route=route)
                     distribution._cleanup_releases(set())
-                self.assertTrue((cache / "old.pyc").is_file())
+                self.assertFalse(cache.exists())
+                self.assertTrue((kept_cache / "probe.cpython-312.pyc").is_file())
 
-        with ExitStack() as stack:
-            self._patch_cleanup(stack)
-            distribution._cleanup_releases(set())
-        self.assertFalse(cache.exists())
-
-    def test_failed_cache_removal_is_retried_on_the_next_cleanup(self) -> None:
+    def test_failed_cache_removal_is_finished_by_the_bytecode_sweep(self) -> None:
         old = self._create_release("v-old", 1)
         self._create_release("v-middle", 2)
         self._create_release("v-newest", 3)
@@ -1003,12 +1011,9 @@ class ReleasePycachePruneTest(unittest.TestCase):
             ))
             distribution._cleanup_releases(set())
         self.assertFalse(old.exists())
-        self.assertTrue((cache / "old.pyc").is_file())
-
-        with ExitStack() as stack:
-            self._patch_cleanup(stack)
-            distribution._cleanup_releases(set())
-        self.assertFalse(cache.exists())
+        # The release-specific removal failed; the sweep in the same pass
+        # still removes bytecode whose source tree is gone.
+        self.assertFalse((cache / "old.pyc").exists())
 
     def test_release_removal_failure_keeps_its_derived_cache(self) -> None:
         old = self._create_release("v-old", 1)

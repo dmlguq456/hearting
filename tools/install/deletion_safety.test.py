@@ -436,7 +436,9 @@ class ReleaseScanSelectsRouteRecordsTest(unittest.TestCase):
             self.assertEqual(reason, "", "one sidecar must not poison the scan")
             self.assertEqual([route_id for route_id, _ in results], [self.ROUTE_ID])
 
-    def test_paired_outcome_with_route_fields_still_fails_closed(self):
+    def test_paired_outcome_with_route_fields_keeps_what_it_names(self):
+        # The record is closed by its outcome; the route-shaped outcome itself
+        # is an open record under an unexpected name and keeps what it names.
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             routes = self._routes_dir(base)
@@ -445,8 +447,8 @@ class ReleaseScanSelectsRouteRecordsTest(unittest.TestCase):
             self._record(record, str(base / "release"))
             self._record(outcome, str(base / "other-release"))
             results, reason = self._scan(base)
-            self.assertEqual(results, [])
-            self.assertTrue(reason.startswith("route-record-unrecognised-name:"), reason)
+            self.assertEqual(reason, "")
+            self.assertEqual(results, [(outcome.stem, str(base / "other-release"))])
 
     def test_bad_canonical_base_cannot_hide_a_route_shaped_outcome(self):
         for base_kind in ("directory", "invalid-json"):
@@ -461,17 +463,17 @@ class ReleaseScanSelectsRouteRecordsTest(unittest.TestCase):
                     record.write_text("{ invalid", encoding="utf-8")
                 self._record(outcome, str(base / "release"))
                 results, reason = self._scan(base)
-                self.assertEqual(results, [])
-                self.assertTrue(reason.startswith("route-record-unrecognised-name:"), reason)
+                self.assertEqual(reason, "")
+                self.assertEqual(results, [(outcome.stem, str(base / "release"))])
 
-    def test_unpaired_outcome_shaped_route_still_fails_closed(self):
+    def test_unpaired_outcome_shaped_route_keeps_what_it_names(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             routes = self._routes_dir(base)
             self._record(routes / f"{self.ROUTE_ID}.outcome.json", str(base / "release"))
             results, reason = self._scan(base)
-            self.assertEqual(results, [])
-            self.assertTrue(reason.startswith("route-record-unrecognised-name:"), reason)
+            self.assertEqual(reason, "")
+            self.assertEqual(results, [(f"{self.ROUTE_ID}.outcome", str(base / "release"))])
 
     def test_every_sidecar_shape_beside_a_route_record_is_ignored(self):
         # Not a denylist of the shapes we happen to know: anything that is not
@@ -497,21 +499,48 @@ class ReleaseScanSelectsRouteRecordsTest(unittest.TestCase):
             self.assertEqual(reason, "")
             self.assertEqual([route_id for route_id, _ in results], [self.ROUTE_ID])
 
-    def test_a_genuinely_unparsable_route_record_still_fails_closed(self):
-        # The undecidable-is-in-use rule is the point of the scan and must
-        # survive: only the SELECTION narrowed, not the judgement.
+    def test_a_genuinely_unparsable_route_record_keeps_every_release_it_names(self):
+        # The undecidable-is-in-use rule survives per release: the bytes still
+        # name what the record holds, and only that is held.
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             routes = self._routes_dir(base)
-            (routes / f"{self.ROUTE_ID}.json").write_text("{ truncated", encoding="utf-8")
-            results, reason = self._scan(base)
-            self.assertTrue(reason.startswith("route-record-unparsable:"), reason)
-            self.assertEqual(results, [])
+            releases = base / "data" / "releases"
+            for name in ("v4.70.3", "v4.70.30", "v4.71.0"):
+                (releases / name).mkdir(parents=True)
+            (routes / f"{self.ROUTE_ID}.json").write_text(
+                '{ "launch_home": "' + str(releases) + '/v4.70.3", truncated',
+                encoding="utf-8")
+            with mock.patch.object(distribution, "data_root", return_value=base / "data"):
+                results, reason = self._scan(base)
+            self.assertEqual(reason, "")
+            self.assertEqual(results, [(self.ROUTE_ID, str(releases / "v4.70.3"))])
+
+    def test_an_unreadable_route_record_still_keeps_every_release(self):
+        # Bytes that cannot be read name nothing we can bound: the scan stays
+        # unreliable, which keeps every release.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            routes = self._routes_dir(base)
+            for name in (f"{self.ROUTE_ID}.json", "2026-08-13_wwd-eval-labels.json"):
+                with self.subTest(name=name):
+                    record = routes / name
+                    self._record(record, str(base / "release"))
+                    record.chmod(0)
+                    try:
+                        results, reason = self._scan(base)
+                    finally:
+                        record.chmod(0o600)
+                        # destructive-ok: reason=remove this subtest's own fixture record; boundary=one route file under this test's TemporaryDirectory
+                        record.unlink()
+                    self.assertEqual(results, [])
+                    self.assertTrue(reason.startswith("route-record-unreadable:"), reason)
 
     def test_an_unrecognised_open_route_record_is_never_skipped_silently(self):
         # Skipping a real route record removes a release's protection, and that
         # is the direction that deletes data. A name the reader does not know is
-        # adjudicated by content, not waved through.
+        # adjudicated by content, not waved through: it keeps what it names,
+        # and no longer fails the scan for every other release.
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             routes = self._routes_dir(base)
@@ -519,9 +548,11 @@ class ReleaseScanSelectsRouteRecordsTest(unittest.TestCase):
             legacy = routes / "2026-08-13_wwd-eval-labels.json"
             self._record(legacy, str(base / "other-release"))
             results, reason = self._scan(base)
-            self.assertTrue(
-                reason.startswith("route-record-unrecognised-name:"), reason)
-            self.assertEqual(results, [])
+            self.assertEqual(reason, "")
+            self.assertEqual(sorted(results), sorted([
+                (self.ROUTE_ID, str(base / "release")),
+                (legacy.stem, str(base / "other-release")),
+            ]))
 
     def test_a_closed_record_under_a_legacy_name_costs_nothing(self):
         # 79 such records exist on this machine, all closed. A closed record's
@@ -712,42 +743,105 @@ class ReleaseHeldByLiveProcessTest(unittest.TestCase):
                 config.write_text(json.dumps(["not", "an", "object"]))
                 self.assertEqual(distribution._release_external_pin(pinned), "")
 
-    def test_bytecode_of_a_removed_source_tree_goes_after_seven_quiet_days(self):
+    def test_bytecode_whose_source_is_gone_goes_and_nothing_else(self):
+        # 2026-11-27: 8.3 GB of shared-prefix bytecode, 1.0 GB of it for sources
+        # that no longer exist (deleted /dev/shm copies, removed worktrees and
+        # releases). Python never reads a prefixed .pyc without its source.
         import time
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp).resolve()
             state, data = base / "state", base / "data"
             cache = state / "pycache"
-            live_source = base / "src" / "live"
-            live_source.mkdir(parents=True)
 
-            def cache_of(source: Path) -> Path:
+            def mirror(source: Path) -> Path:
                 path = cache.joinpath(*source.parts[1:])
                 path.mkdir(parents=True, exist_ok=True)
-                (path / "mod.cpython-312.pyc").write_bytes(b"pyc")
                 return path
 
-            live = cache_of(live_source)
-            gone_old = cache_of(base / "src" / "removed-worktree")
-            gone_new = cache_of(base / "tmp-root-of-a-running-test")
-            release = cache_of(data / "releases" / "v-gone")
-            quiet = time.time() - distribution._ORPHAN_PYCACHE_QUIET_SECONDS - 3600
-            for path in (live, gone_old, release, *gone_old.iterdir(), *release.iterdir(),
-                         *live.iterdir()):
-                os.utime(path, (quiet, quiet))
-            # The fixture root itself may sit deeper than production's walk depth.
+            live = base / "src" / "live"
+            live.mkdir(parents=True)
+            for name in ("kept.py", "x.test.py"):
+                (live / name).write_text("VALUE = 1\n", encoding="utf-8")
+            live_cache = mirror(live)
+            names = {
+                "kept.cpython-312.pyc": True, "kept.cpython-312.opt-1.pyc": True,
+                "x.test.cpython-312.pyc": True, "gone.cpython-312.pyc": False,
+                "gone.cpython-312.opt-2.pyc": False, "odd.pyc": True,
+                "notes.txt": True,
+            }
+            for name in names:
+                (live_cache / name).write_bytes(b"pyc")
+            (live_cache / "link.cpython-312.pyc").symlink_to(live_cache / "odd.pyc")
+            removed_tree = mirror(base / "src" / "removed-worktree" / "pkg")
+            (removed_tree / "mod.cpython-312.pyc").write_bytes(b"pyc")
+            (removed_tree / "anything.pyc").write_bytes(b"pyc")
+            kept_foreign = mirror(base / "src" / "removed-with-a-note")
+            (kept_foreign / "mod.cpython-312.pyc").write_bytes(b"pyc")
+            (kept_foreign / "README").write_text("not bytecode", encoding="utf-8")
+            gone_release = mirror(data / "releases" / "v-gone" / "tools")
+            (gone_release / "probe.cpython-312.pyc").write_bytes(b"pyc")
+            fresh = time.time()
+            os.utime(removed_tree / "mod.cpython-312.pyc", (fresh, fresh))
+            hung = base / "src" / "hung"
+            (hung / "deeper").mkdir(parents=True)
+            hung_cache = mirror(hung / "deeper")
+            (hung_cache / "lost.cpython-312.pyc").write_bytes(b"pyc")
+            real_listing = distribution._list_source_directory
+
+            def listing(path):
+                if path.startswith(str(hung)):
+                    time.sleep(2)
+                return real_listing(path)
+
             with patch_split(distribution, "state_root", return_value=state), \
                     mock.patch.object(distribution, "data_root", return_value=data), \
-                    mock.patch.object(distribution, "_ORPHAN_PYCACHE_DEPTH",
-                                      len(base.parts) + 3):
+                    mock.patch.object(distribution, "_ORPHAN_PYCACHE_PROBE_SECONDS", 0.5), \
+                    mock.patch.object(distribution, "_mount_point", side_effect=lambda path: path), \
+                    mock.patch.object(distribution, "_list_source_directory", side_effect=listing):
                 removed = distribution._cleanup_orphan_source_pycache()
-            self.assertEqual(removed, [gone_old])
-            self.assertFalse(gone_old.exists())
-            # A live source, a recently used cache and release caches (their own
-            # pin rules) stay.
-            self.assertTrue(live.exists())
-            self.assertTrue(gone_new.exists())
-            self.assertTrue(release.exists())
+            for name, stays in names.items():
+                self.assertEqual((live_cache / name).exists(), stays, name)
+            self.assertTrue((live_cache / "link.cpython-312.pyc").is_symlink())
+            # A whole tree whose source directory is gone, however recent.
+            self.assertFalse(removed_tree.exists())
+            self.assertFalse(removed_tree.parent.exists())
+            self.assertFalse(gone_release.exists())
+            # Only .pyc files go; a directory still holding something else stays.
+            self.assertFalse((kept_foreign / "mod.cpython-312.pyc").exists())
+            self.assertTrue((kept_foreign / "README").is_file())
+            # A source directory that does not answer keeps its bytecode.
+            self.assertTrue((hung_cache / "lost.cpython-312.pyc").is_file())
+            self.assertTrue(cache.is_dir())
+            self.assertIn(removed_tree / "mod.cpython-312.pyc", removed)
+            self.assertTrue(all(path.name.endswith(".pyc") for path in removed))
+
+    def test_bytecode_sweep_keeps_an_unreadable_source_and_stays_inside_its_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            state = base / "state"
+            cache = state / "pycache"
+            source = base / "src" / "locked"
+            source.mkdir(parents=True)
+            mirror = cache.joinpath(*source.parts[1:])
+            mirror.mkdir(parents=True)
+            (mirror / "gone.cpython-312.pyc").write_bytes(b"pyc")
+            outside = base / "outside"
+            outside.mkdir()
+            (outside / "gone.cpython-312.pyc").write_bytes(b"pyc")
+            (mirror / "escape").symlink_to(outside, target_is_directory=True)
+            real_listing = distribution._list_source_directory
+
+            def listing(path):
+                if path == str(source):
+                    raise PermissionError("fixture: unreadable source directory")
+                return real_listing(path)
+
+            with patch_split(distribution, "state_root", return_value=state), \
+                    mock.patch.object(distribution, "_list_source_directory", side_effect=listing):
+                distribution._cleanup_orphan_source_pycache()
+            self.assertTrue((mirror / "gone.cpython-312.pyc").is_file())
+            self.assertTrue((outside / "gone.cpython-312.pyc").is_file())
+            self.assertTrue((mirror / "escape").is_symlink())
 
     def test_code_given_with_c_or_m_leaves_the_script_unknown(self):
         script = "/data/releases/v-new/utilities/runner.py"
@@ -1323,9 +1417,19 @@ class RouteStaleOpenMirrorTest(unittest.TestCase):
             },
         }), encoding="utf-8")
         self._registry(jobs_path, [("done", f"route_id={self.ROUTE_ID},attempt_id=att-1")])
-        results, reason = self._scan(base)
-        self.assertTrue(reason.startswith("route-record-unparsable:"), reason)
-        self.assertEqual(results, [])
+        # The record names a release only through its sealed registry path:
+        # that release stays, terminal rows or not.
+        release = base / "data" / "releases" / "v3.61.10"
+        release.mkdir(parents=True)
+        record = routes / f"{self.ROUTE_ID}.json"
+        record.write_text(record.read_text(encoding="utf-8").replace(
+            str(jobs_path), str(release / ".dispatch" / "jobs.log")), encoding="utf-8")
+        self._registry(release / ".dispatch" / "jobs.log",
+                       [("done", f"route_id={self.ROUTE_ID},attempt_id=att-1")])
+        with mock.patch.object(distribution, "data_root", return_value=base / "data"):
+            results, reason = self._scan(base)
+        self.assertEqual(reason, "")
+        self.assertEqual(results, [(self.ROUTE_ID, str(release))])
 
     def test_a_lineage_field_is_not_this_routes_row(self):
         # `source_route_id=rt-x` contains `route_id=rt-x` as a substring. The
@@ -1342,8 +1446,11 @@ class RouteStaleOpenMirrorTest(unittest.TestCase):
         base = Path(tmp.name)
         routes = self._routes_dir(base)
         (routes / f"{self.ROUTE_ID}.json").write_text("{ truncated", encoding="utf-8")
-        results, reason = self._scan(base)
-        self.assertTrue(reason.startswith("route-record-unparsable:"), reason)
+        (base / "data" / "releases" / "v-other").mkdir(parents=True)
+        with mock.patch.object(distribution, "data_root", return_value=base / "data"):
+            results, reason = self._scan(base)
+        # It names no release, so it can hold none -- nor release one.
+        self.assertEqual(reason, "")
         self.assertEqual(results, [])
 
 _MODULE_HOME = None
