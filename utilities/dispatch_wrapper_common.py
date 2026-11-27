@@ -19,6 +19,7 @@ import os
 import re
 import secrets
 import signal
+import stat
 import subprocess
 import sys
 import frame_repository
@@ -208,6 +209,56 @@ def prepare_runtime_root(artifact_root: str, environ=None, *, repository_kind=No
     candidate = worker_bootstrap.runtime_dir_candidate(
         artifact_root, values, repository_kind=repository_kind, source_root=source_root)
     return worker_bootstrap.prepare_runtime_dir(candidate)
+
+
+# Every temp variable a worker or its children read: POSIX tools and Bun/Python
+# (TMPDIR, TMP, TEMP) and Claude Code's per-uid folder (CLAUDE_CODE_TMPDIR).
+WORKER_TEMP_ENV_KEYS = ("TMPDIR", "TMP", "TEMP", "CLAUDE_CODE_TMPDIR")
+
+
+def prepare_worker_temp_dir(environ=None) -> str:
+    """The one temp folder a non-Git worker may write, or "" to keep the inherited temp.
+
+    A non-Git Codex worker runs under a read-only OS profile with exact write
+    roots, so `/tmp` is read-only inside it and for everything it starts (a
+    child wrapper's `mktemp`, a Claude child's `/tmp/claude-<uid>`). The launch
+    gives the worker `<TMPDIR or /tmp>/hearting-<uid>` instead and grants only
+    that folder. A nested launch already runs with it as TMPDIR and reuses it,
+    so the path stays short enough for AF_UNIX sockets. Never raises.
+    """
+    values = os.environ if environ is None else environ
+    name = f"hearting-{os.getuid()}"
+    inherited = values.get("TMPDIR", "")
+    base = Path(inherited) if os.path.isabs(inherited) else Path("/tmp")
+    candidate = base if base.name == name else base / name
+    try:
+        try:
+            os.mkdir(candidate, 0o700)
+        except FileExistsError:
+            pass
+        status = os.lstat(candidate)
+        # A symlink or another user's folder in a shared /tmp is never adopted.
+        if not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid():
+            return ""
+        if stat.S_IMODE(status.st_mode) != 0o700:
+            os.chmod(candidate, 0o700)
+        return str(candidate)
+    except OSError:
+        return ""
+
+
+def recorded_worker_temp_dir(roots) -> str:
+    """The worker temp folder an earlier launch recorded among its write roots, or ""."""
+    name = f"hearting-{os.getuid()}"
+    for root in roots:
+        if Path(str(root)).name == name:
+            return prepare_worker_temp_dir({"TMPDIR": str(root)})
+    return ""
+
+
+def worker_temp_environment(path: str) -> dict[str, str]:
+    """Point every temp variable at the worker's temp folder; empty keeps the inherited ones."""
+    return {key: path for key in WORKER_TEMP_ENV_KEYS} if path else {}
 
 
 def prepare_raw_data_root(artifact_root: str, runtime_dir: str, environ=None, *, source_root=None) -> str:

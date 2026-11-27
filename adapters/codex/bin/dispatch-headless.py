@@ -892,6 +892,8 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
             command += ["--writable-root", str(args.runtime_dir)]
         if WRAPPER_COMMON.raw_data_grant(args):
             command += ["--writable-root", WRAPPER_COMMON.raw_data_grant(args)]
+        if getattr(args, "worker_temp_dir", ""):
+            command += ["--writable-root", str(args.worker_temp_dir)]
         if getattr(args, "report_bundle_root", None) is not None:
             command += ["--writable-root", str(args.report_bundle_root)]
         if owner_supervised:
@@ -964,6 +966,8 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         cmd += ["--add-dir", str(args.runtime_dir)]
     if WRAPPER_COMMON.raw_data_grant(args):
         cmd += ["--add-dir", WRAPPER_COMMON.raw_data_grant(args)]
+    if getattr(args, "worker_temp_dir", ""):
+        cmd += ["--add-dir", str(args.worker_temp_dir)]
     cmd += codex_worker_arguments(getattr(args, "worker_runtime_env", None))
     if getattr(args, "report_bundle_root", None) is not None:
         cmd += ["--add-dir", str(args.report_bundle_root)]
@@ -1549,6 +1553,10 @@ def _respawn_supervised_owner(jobs, attempt_id, *, expected_identity, check_only
         "AGENT_OWNER_ROUTE_FILE": route_file,
         "AGENT_OWNER_ROUTE_ID": route_id,
         "AGENT_OWNER_ROUTE_HASH": route_hash,
+        # A non-Git owner's recorded grant holds its temp folder; point the temp
+        # variables back at it so a respawned owner can still write temp files.
+        **WRAPPER_COMMON.worker_temp_environment(
+            WRAPPER_COMMON.recorded_worker_temp_dir(effective["writable_roots"])),
     })
     if metadata.get("worker_role"):
         dispatch_env["AGENT_DISPATCH_WORKER_ROLE"] = metadata["worker_role"]

@@ -1370,8 +1370,13 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         # release); the respawned child's AGENT_HOME is the release that governs it now.
         self._public_correct_respawn_fixture(legacy_record=False, earlier_launch_home=True)
 
+    def test_respawned_non_git_owner_keeps_its_recorded_worker_temp(self):
+        # A non-Git owner's grant records its one temp folder; the respawned owner
+        # writes temp files there again instead of the read-only /tmp.
+        self._public_correct_respawn_fixture(legacy_record=False, worker_temp_dir=True)
+
     def _public_correct_respawn_fixture(self, *, legacy_record, additional_grant=False,
-                                        earlier_launch_home=False):
+                                        earlier_launch_home=False, worker_temp_dir=False):
         import contextlib
         import dispatch_completion_join as join
         import dispatch_budget_record as budget_record
@@ -1522,6 +1527,12 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
             binding = SimpleNamespace(route_file=str(route_path), route_id=route["route_id"],
                                       route_hash=route["route_hash"])
             default_writable_roots = (artifact_root, runtime_dir, jobs.parent)
+            worker_temp = ""
+            if worker_temp_dir:
+                import dispatch_wrapper_common as wrapper_common
+                worker_temp = wrapper_common.prepare_worker_temp_dir({"TMPDIR": str(base)})
+                self.assertTrue(worker_temp)
+                default_writable_roots += (Path(worker_temp),)
             access_grant = None
             access_argv = []
             if additional_grant:
@@ -1917,6 +1928,11 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         self.assertEqual(len(launch_environments), 1)
         self.assertEqual(launch_environments[0]["AGENT_RUNTIME_DIR"], str(runtime_dir))
         self.assertEqual(launch_environments[0]["AGENT_HOME"], str(ROOT.resolve()))
+        if worker_temp_dir:
+            for key in ("TMPDIR", "TMP", "TEMP", "CLAUDE_CODE_TMPDIR"):
+                self.assertEqual(launch_environments[0][key], worker_temp, key)
+        else:
+            self.assertNotIn("CLAUDE_CODE_TMPDIR", launch_environments[0])
         self.assertEqual(respawn_outcomes[0]["respawn_release"], str(ROOT.resolve()))
         self.assertEqual(respawn_outcomes[0]["launch_home"],
                          str(recorded_release if earlier_launch_home else ROOT.resolve()))
@@ -1964,7 +1980,13 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         self.assertNotIn("ORIGINAL_TASK_SENTINEL", turn["prompt"])
         self.assertEqual(hashlib.sha256(resource_registry.read_bytes()).hexdigest(), resource_registry_before)
         self.assertEqual(hashlib.sha256(resource_results.read_bytes()).hexdigest(), resource_results_before)
-        self.assertEqual(home_snapshot(), worker_home_before)
+        after = home_snapshot()
+        if worker_temp_dir:
+            # Codex keeps its arg0 helper links in CODEX_HOME/tmp unless CODEX_HOME
+            # lies under TMPDIR, which only this fixture's other variants arrange.
+            after = {key: value for key, value in after.items()
+                     if not key.startswith("tmp/arg0-linux/")}
+        self.assertEqual(after, worker_home_before)
 
     def test_runtime_wait_has_no_model_activity_until_exact_join_is_ready(self):
         self.jobs.write_text(

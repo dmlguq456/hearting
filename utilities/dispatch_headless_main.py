@@ -400,6 +400,10 @@ def bind_repository(h, args) -> int | None:
             h.frame_repository.execution_path(args.worktree), args.route_file or os.environ.get("AGENT_OWNER_ROUTE_FILE"))
     except h.DispatchContractError as exc:
         return h.fail(exc.reason, 65, detail=exc.detail, worktree=args.worktree, child_spawned="0")
+    # A Git worker keeps its inherited temp (Codex's workspace profile already
+    # writes /tmp); a non-Git worker gets its one private temp folder.
+    args.worker_temp_dir = (h.WRAPPER_COMMON.prepare_worker_temp_dir()
+                            if args.repository_kind == "non-git" else "")
     return None
 
 
@@ -803,6 +807,7 @@ def worker_environment(h, args, *, harness: str, jobs: Path, governor_root: Path
         "AGENT_DISPATCH_CURRENT_SANDBOX": current_sandbox,
         **h.stage_session_environment(args),
         "AGENT_DISPATCH_COMPLETION_MODE": "supervised" if supervised else "poll",
+        **h.WRAPPER_COMMON.worker_temp_environment(getattr(args, "worker_temp_dir", "")),
         **(extra or {}),
     })
     return env
