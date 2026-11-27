@@ -42,6 +42,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 
 BUDGET_SECONDS = 5          # hook timeouts are 10 s; the question must never wait on the board for long
+_REFIRE_SECONDS = 0.05      # once the budget is spent the alarm rings again until the decision has left
 MAX_CHOICES = 8
 _RECOMMENDED = re.compile(r"\s*[(（]\s*(?:권장|recommended)\s*[)）]\s*$", re.IGNORECASE)
 _PREVIEW_LIMIT = 240
@@ -51,6 +52,11 @@ _TOOLS = {"claude": {"AskUserQuestion"}, "codex": {"request_user_input", "reques
 
 class Skip(Exception):
     """Nothing to register: the native call goes through."""
+
+
+class _Late(BaseException):
+    """The budget is spent. Not an `Exception`, so no `except Exception`/`except OSError` on the way
+    (seat resolution, state reads) takes it for an ordinary failure and goes on."""
 
 
 class Waiting(Exception):
@@ -273,24 +279,33 @@ def redirect(harness: str, payload: dict, *, seconds: int = BUDGET_SECONDS) -> s
     except Exception:  # noqa: BLE001 -- any doubt leaves the native question alone
         return None
 
+    armed = [False]
+
     def _late(_signal, _frame):
-        raise TimeoutError("native-question-redirect-timeout")
+        if armed[0]:
+            raise _Late("native-question-redirect-timeout")
 
     timed = hasattr(signal, "setitimer") and threading.current_thread() is threading.main_thread()
     previous = None
     try:
-        if timed:
-            previous = signal.signal(signal.SIGALRM, _late)
-            signal.setitimer(signal.ITIMER_REAL, seconds)
-        return reason_for(register(harness, session_id, rows, cwd=cwd))
-    except Waiting as held:
-        return reason_already(held.signal["id"])
+        try:
+            if timed:
+                previous = signal.signal(signal.SIGALRM, _late)
+                armed[0] = True
+                # Seat resolution, the state reads and the registration all run inside one budget; a
+                # handler on the way that swallows the expiry is rung out of again at once.
+                signal.setitimer(signal.ITIMER_REAL, seconds, _REFIRE_SECONDS)
+            decided = ("registered", register(harness, session_id, rows, cwd=cwd))
+        except Waiting as held:
+            decided = ("already", held.signal["id"])
+        finally:
+            armed[0] = False
+            if timed:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, previous)
     except BaseException:  # noqa: BLE001 -- registration failed or ran late: show the native question
         return None
-    finally:
-        if timed:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(signal.SIGALRM, previous)
+    return reason_for(decided[1]) if decided[0] == "registered" else reason_already(decided[1])
 
 
 def main(argv=None, stdin=None) -> int:

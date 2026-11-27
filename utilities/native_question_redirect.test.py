@@ -464,6 +464,39 @@ class PassThroughTest(Base):
             elapsed = time.monotonic() - started
         self.assertLess(elapsed, 4)
 
+    def test_the_budget_covers_the_whole_decision_even_where_an_inner_handler_swallows_it(self):
+        """Seat resolution and the state reads run inside the one budget, as the registration does (main: 5.0 s)."""
+        import session_tidy as tidy
+        real_read = state.read_signals
+
+        def swallowing_seat(harness, *args, **kwargs):
+            try:
+                time.sleep(3)
+            except BaseException:  # noqa: BLE001 -- the shape of a seat helper that keeps a hook alive
+                pass
+            return self.f.seat(harness, SID)
+
+        def slow_read(seconds):
+            def read(*args, **kwargs):
+                time.sleep(seconds)
+                return real_read(*args, **kwargs)
+            return read
+        for name, seat, read in (("slow seat, then a slow read", swallowing_seat, slow_read(1.4)),
+                                 ("slow read", None, slow_read(3))):
+            with self.subTest(case=name), mock.patch.object(state, "read_signals", side_effect=read):
+                patches = [mock.patch.object(tidy, "resolve_seat", side_effect=seat)] if seat else []
+                for patch in patches:
+                    patch.start()
+                try:
+                    started = time.monotonic()
+                    self.assertIsNone(redirect.redirect("claude", claude_payload(), seconds=1))
+                    elapsed = time.monotonic() - started
+                finally:
+                    for patch in patches:
+                        patch.stop()
+                self.assertLess(elapsed, 1.35, name)                           # the budget, not budget + 1.4 s
+        self.assertEqual(state.read_signals(), [])                           # nothing was registered
+
     def test_the_budget_is_inside_every_hook_timeout(self):
         claude = json.loads((ROOT / "adapters/claude/settings.json").read_text())
         codex = json.loads((ROOT / "adapters/codex/hooks/hooks.json").read_text())
