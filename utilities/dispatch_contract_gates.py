@@ -576,7 +576,7 @@ def completion_marker_gate(
                     raise DispatchContractError("saved-resource-output-changed", dep)
                 continue
             missing.append(dep)
-            _resource_predecessor_action(route, dep, resource_actions)
+            _resource_predecessor_action(route, dep, resource_actions, route_file)
             continue
         try:
             marker = json.loads(marker_path.read_text(encoding="utf-8"))
@@ -617,7 +617,7 @@ def completion_marker_gate(
             if currency.state == "resource-stage-not-current":
                 resource_actions[dep] = resource_stage_next_action(currency, dep)
             else:
-                _resource_predecessor_action(route, dep, resource_actions)
+                _resource_predecessor_action(route, dep, resource_actions, route_file)
             continue
         markers[dep] = marker
         proceeding.append((dep_node, marker_path, marker))
@@ -1485,12 +1485,22 @@ RESOURCE_STAGE_UNSETTLED = "resource-stage-unsettled"
 RESOURCE_STAGE_UNOBSERVABLE = "resource-stage-unobservable"
 
 
-def _resource_predecessor_action(route, dep: str, actions: dict) -> None:
-    """A resource predecessor with no current marker is continued, never waited on."""
+def _resource_predecessor_action(route, dep: str, actions: dict, route_file=None) -> None:
+    """A resource predecessor with no current marker is continued, never waited on; a stage the owner
+    runs itself names its exact completion command (nothing else would publish its marker)."""
     node = next((row for row in route.get("nodes", []) if row.get("id") == dep), None)
     if node is not None and node.get("kind") == "resource-runner":
         actions[dep] = resource_stage_next_action(
             GateCurrency("resource-stage-not-current", RESOURCE_STAGE_UNSETTLED), dep)
+        return
+    try:
+        import worker_bootstrap as wb
+        step = wb.human_run_step(route, route_file, node, wb.cycle_output_dir(route, route_file)) \
+            if wb.owner_run_stage(node) and route_file else None
+    except Exception:  # advisory text only: the refusal itself is unchanged
+        step = None
+    if step:
+        actions[dep] = f"{dep} is run by the route owner itself: run `{step[1]}` ({step[2]}), then retry this launch"
 
 
 def resource_stage_unsettled(currency: GateCurrency) -> bool:

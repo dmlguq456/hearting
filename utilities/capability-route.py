@@ -2730,7 +2730,7 @@ def main():
             if not getattr(a, "route", None) or not getattr(a, "evidence", None):
                 print("capability-route: complete requires --route and --evidence (omit only with --inline)", file=sys.stderr)
                 raise SystemExit(2)
-        if a.command == "revise":
+        if a.command == "revise" or (a.command == "complete" and not Path(a.route).is_file()):
             a.route = resolve_route_argument(a.route, a.jobs)
         route=verify_route(
             json.loads(Path(a.route).read_text()), getattr(a,"cwd",None),
@@ -2858,9 +2858,11 @@ def main():
                     if a.fallback_hop is None:
                         a.fallback_hop = "inline"
                     if not a.attempt_id:
+                        # The owner's own attempt names the inline record; a parent session (no attempt of its
+                        # own) names it by the route, so the same printed command runs in both places.
                         owner_attempt = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID") or ""
-                        if owner_attempt:
-                            a.attempt_id = f"{owner_attempt}-{a.node}-inline"
+                        if owner_attempt or a.dispatch_depth != 0:
+                            a.attempt_id = f"{owner_attempt or route['route_id']}-{a.node}-inline"
                     if not getattr(a, "evidence", None) and getattr(a, "reason", None):
                         try:
                             import artifact_producer as _ap
@@ -2943,8 +2945,17 @@ def main():
                                   "route_id": route["route_id"], "node_id": a.node,
                                   "reason": "owner-closure-review-nodes-only"}
                         if node.get("kind") == "resource-runner":
+                            import worker_bootstrap as _wb
+                            try:
+                                _, start, note = _wb.human_run_step(route, Path(a.route).resolve(), node,
+                                                                    _wb.cycle_output_dir(route, a.route))
+                            except Exception:  # the read-only answer stands without its command
+                                start, note = "", ""
                             result["next_action"] = (
-                                "use the resource node's existing start path; a completed compute-hosts "
+                                (f"start it with `{start}` ({note})" if start else
+                                 f"use the resource node's existing start path ({note})" if note else
+                                 "use the resource node's existing start path")
+                                + "; a completed compute-hosts "
                                 "candidate may be supplied with --compute-run <run-id>; a route-bound "
                                 "exit-0 run whose receipt names only a leftover `running` row is adopted "
                                 "and that row is settled; a finished run this route's owner launched "

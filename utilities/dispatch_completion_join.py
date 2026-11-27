@@ -1327,8 +1327,8 @@ def _child_note(jobs: str, child, key: str = "note") -> str | None:
 def _next_ready_start_lines(receipt: dict, jobs: str) -> list[str]:
     """`Next ready:` lines for an owner's depth-2 stage/review row that just finished; [] when unsure.
 
-    Only names the exact start command (or "run it yourself"); nothing is started. Any unreadable or
-    mismatched route/row leaves the receipt exactly as it was.
+    Only names the exact start or completion command (or "run it yourself" for the owner's own end); nothing
+    is started. Any unreadable or mismatched route/row leaves the receipt exactly as it was.
     """
     if not jobs:
         return []
@@ -1368,6 +1368,11 @@ def _next_ready_start_lines(receipt: dict, jobs: str) -> list[str]:
                                          "Act on its verdict as your task describes, then return your final handoff.")
                     elif worker_bootstrap._dispatchable_stage(node):
                         lines.append("Next ready: " + worker_bootstrap.route_start_command(route_file, node["id"]))
+                    elif step := worker_bootstrap.human_run_step(
+                            route, route_file, node, worker_bootstrap.cycle_output_dir(route, route_file)):
+                        verb, command, note = step
+                        lines.append(f"Next ready: {command}  # {verb.lower()} {node['id']} yourself: {note}"
+                                     if command else f"Next ready: {verb.lower()} {node['id']} yourself; {note}.")
                     else:
                         lines.append(f"Next ready: run {node['id']} yourself (per your Route steps).")
                 lines += _owner_handed_over_lines(route, route_file, meta.get("route_node"))

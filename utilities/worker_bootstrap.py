@@ -1389,11 +1389,56 @@ def continuation_followup_for_row(metadata, jobs, *, return_fields=False):
         return {} if return_fields else ""
 
 
-def inline_complete_command(node_id: str, evidence: str | None = None) -> str:
-    """The exact command that publishes the completion marker of a stage the owner ran itself."""
+def inline_complete_command(node_id: str, evidence: str | None = None, route_file=None) -> str:
+    """The exact command that publishes the completion marker of a stage the owner ran itself. With the route
+    file named it runs unchanged in the owner's environment and in its parent session."""
     script = entrypoint(_REPO_ROOT, "utilities/capability-route.py")
-    return (f"python3 {shlex.quote(str(script))} complete --inline --node {shlex.quote(str(node_id))}"
+    return (f"python3 {shlex.quote(str(script))} complete"
+            + (f" --route {shlex.quote(str(route_file))}" if route_file else "")
+            + f" --inline --node {shlex.quote(str(node_id))}"
             + (f" --evidence {shlex.quote(str(evidence))}" if evidence else "") + ' --reason "<one line>"')
+
+
+def owner_run_stage(node) -> bool:
+    """A non-terminal stage the route owner runs itself (dispatch depth 1, `_kernel/owner`): nothing dispatches
+    it, and its successors start once its marker is published with `inline_complete_command`. A ship deploy
+    is not one: the parent deploy handback prints its completion with the deploy record it validates."""
+    return (isinstance(node, dict) and node.get("kind") == "capability-owner" and node.get("unit") == "_kernel/owner"
+            and node.get("dispatch_depth") == 1 and node.get("terminal") is not True
+            and node.get("completion_gate") != "ship-deploy")
+
+
+def resource_start_command(route, route_file, node, output_dir) -> str:
+    """The exact `resource-runner.py start` of a sealed resource node; only `<approved command>` is left.
+    "" when it cannot be named: the run registry and log live in the bound cycle's output directory."""
+    if not output_dir or not route.get("cwd") or not isinstance(node, dict) or node.get("kind") != "resource-runner":
+        return ""
+    import artifact_context
+    from resource_run_registry import route_registry_path
+    run_id = f"{route['route_id']}-{node['id']}"
+    argv = ["python3", entrypoint(_REPO_ROOT, "utilities/resource-runner.py"),
+            "--registry", str(route_registry_path(output_dir)), "start", "--run-id", run_id,
+            "--cwd", str(route["cwd"]), "--log", str(Path(output_dir) / "logs" / f"{run_id}.log"),
+            "--route", str(route_file), "--node", str(node["id"])]
+    attestation = [name for name in node.get("inputs") or ()
+                   if isinstance(name, str) and Path(name).name == "smoke-attestation.json"]
+    if attestation:
+        argv += ["--smoke-attestation", artifact_context.render_outputs(output_dir, attestation[:1])[0]]
+    return shlex.join(argv) + " -- <approved command>"
+
+
+def human_run_step(route, route_file, node, output_dir):
+    """`(verb, command, note)` for a step the owner runs itself (a resource node it starts, a stage it closes);
+    command is "" when it cannot be built and the note says why. None for any other node. Text only."""
+    if isinstance(node, dict) and node.get("kind") == "resource-runner":
+        command = resource_start_command(route, route_file, node, output_dir)
+        return ("Start", command, "replace only `<approved command>` with the approved payload command" if command
+                else "its exact resource-runner.py start needs this route's bound cycle (run registry and log path)")
+    if owner_run_stage(node):
+        evidence = node_first_evidence(route, node["id"], output_dir)
+        return ("Complete", inline_complete_command(node["id"], evidence, route_file),
+                "after you have done this stage's work" + (f" and written {evidence}" if evidence else ""))
+    return None
 
 
 def node_first_evidence(route, node_id: str, output_dir) -> str | None:
@@ -1492,7 +1537,7 @@ def owner_route_steps_prompt(args, environ) -> str:
         evidence = node_first_evidence(route, inline_node, output_dir)
         lines.append("Run a stage yourself only when the latest receipt authorizes inline execution: write its "
                      "outputs, then publish its marker with "
-                     f"`{inline_complete_command(inline_node, evidence)}`. "
+                     f"`{inline_complete_command(inline_node, evidence, route_file)}`. "
                      "Other stages have their own printed completion command below.")
     worktree = getattr(args, "worktree", None) or route.get("cwd")
     lines.append(f"Outputs under {str(output_dir).rstrip('/')}/:" if output_dir else
@@ -1504,6 +1549,9 @@ def owner_route_steps_prompt(args, environ) -> str:
         tags += "" if _dispatchable_stage(node) else " [you run it yourself]"
         outs = ", ".join(str(o) for o in node.get("outputs") or ()) or "-"
         lines.append(f"{number}. {node['id']}{tags} → {outs}")
+        step = human_run_step(route, route_file, node, output_dir)
+        if step:
+            lines.append(f"   {step[0]}: `{step[1]}` ({step[2]})" if step[1] else f"   {step[0]}: {step[2]}")
         if _owner_spec_transaction(node) and route.get("artifact_root") and worktree:
             lines.append(f"   Run: `{spec_transaction_command(route, route_file, node['id'], worktree)}`"
                          + (" once every node it runs after is finished" if after else "") + ". "
@@ -1515,7 +1563,7 @@ def owner_route_steps_prompt(args, environ) -> str:
                 lines.append(f"   Start: `{route_start_command(route_file, node['id'])}`")
             if node["id"] != inline_node:
                 evidence = node_first_evidence(route, node["id"], output_dir)
-                lines.append(f"   If run inline: `{inline_complete_command(node['id'], evidence)}`")
+                lines.append(f"   If run inline: `{inline_complete_command(node['id'], evidence, route_file)}`")
             plan_input = next((name for name in node.get("inputs") or []
                                if isinstance(name, str) and Path(name).name == "plan.md"), None)
             if node.get("subdivision") and plan_input and output_dir:

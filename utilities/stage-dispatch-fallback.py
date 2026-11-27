@@ -435,7 +435,7 @@ def inline_owner_next_line(route: dict, node: dict, route_file) -> str:
         if not output_dir:
             return ""
         evidence = wb.node_first_evidence(route, node["id"], output_dir)
-        lines = ["owner_next_command=" + wb.inline_complete_command(node["id"], evidence)
+        lines = ["owner_next_command=" + wb.inline_complete_command(node["id"], evidence, route_file)
                  + "  # run this stage yourself" + (f", write its output to {evidence} first" if evidence else "")
                  + ", then run this command"]
         try:
@@ -545,6 +545,15 @@ def load_node(route_path: Path, node_id: str, launch_phase: str) -> tuple[dict, 
         if _owner_executed_node(node):
             raise ValueError(f"route node {node_id} is run by the route owner itself (dispatch depth 1) and has "
                              "no stage fallback chain; follow your Route steps")
+        try:
+            import worker_bootstrap as wb
+            step = wb.human_run_step(route, route_path, node, _cycle_output_dir(route, route_path))
+        except Exception:  # the refusal stands without its advisory command
+            step = None
+        if step:
+            verb, command, note = step
+            raise ValueError(f"route node {node_id} is not a dispatched stage; {verb.lower()} it yourself"
+                             + (f": `{command}` ({note})" if command else f"; {note}"))
         raise ValueError("route node lacks checked ordered fallback")
     return route, node
 
