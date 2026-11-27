@@ -321,6 +321,102 @@ class RecordedLinkTest(_Boundary, unittest.TestCase):
                                       [str(self.artifact), str(self.link / NAME), self.other]), "")
 
 
+class OneResolutionTest(_Boundary, unittest.TestCase):
+    """The start resolves a candidate's parent once and uses that one string after it.
+
+    Regression (2026-11-28 review): the boundary judged `current-tmp -> a-worker`,
+    the parent link then moved to `z-output`, and a second `realpath` returned the
+    z-output folder the boundary never judged.
+    """
+
+    def setUp(self):
+        self.make_boundary()
+        for name in ("a-worker", "z-output"):
+            (self.base / name).mkdir()
+        self.link = self.base / "current-tmp"
+        self.link.symlink_to(self.base / "a-worker")
+        self.worker = os.path.join(os.path.realpath(self.base / "a-worker"), NAME)
+        self.other = self.base / "z-output" / NAME
+
+    def judge(self, relink_after, link=None):
+        """A boundary judge that records its argument and moves `link` to z-output
+        right after call `relink_after` (0: never)."""
+        link = link or self.link
+        judged = []
+        original = profiles.recordish_write_root
+
+        def judge(raw, cwd, artifact):
+            judged.append(raw)
+            kept = original(raw, cwd, artifact)
+            if len(judged) == relink_after:
+                link.unlink()
+                link.symlink_to(self.base / "z-output")
+            return kept
+
+        return mock.patch.object(profiles, "recordish_write_root", side_effect=judge), judged
+
+    def test_boundary_judges_the_string_that_is_returned(self):
+        resolved = []
+        real_realpath = os.path.realpath
+
+        def realpath(path, *args, **kwargs):
+            resolved.append(os.fspath(path))
+            return real_realpath(path, *args, **kwargs)
+
+        patch, judged = self.judge(relink_after=0)
+        with patch, mock.patch.object(os.path, "realpath", side_effect=realpath):
+            path = self.prepare(self.link)
+        self.assertEqual(path, self.worker)
+        self.assertEqual(judged, [path])
+        # The only resolution that passes through the link is the parent's, once.
+        self.assertEqual([item for item in resolved if "current-tmp" in item], [str(self.link)])
+
+    def test_parent_link_moved_after_the_boundary_check_is_not_followed(self):
+        # z-output holds a same-named 0700 folder of this uid (the review's case),
+        # no folder (a mkdir through the link would make one), or a 0755 folder
+        # (an lstat through the link would refuse it).
+        for other_mode in (0o700, None, 0o755):
+            for create, made in ((True, False), (True, True), (False, True)):
+                with self.subTest(other_mode=other_mode, create=create, made=made):
+                    for folder in (self.worker, self.other):
+                        if os.path.lexists(folder):
+                            os.rmdir(folder)
+                    self.link.unlink()
+                    self.link.symlink_to(self.base / "a-worker")
+                    if made:
+                        os.mkdir(self.worker, 0o700)
+                    if other_mode is not None:
+                        os.mkdir(self.other, 0o700)
+                        os.chmod(self.other, other_mode)
+                    patch, judged = self.judge(relink_after=1)
+                    with patch:
+                        path = self.prepare(self.link, create=create)
+                    self.assertEqual(os.path.realpath(self.link), os.path.realpath(self.base / "z-output"))
+                    self.assertEqual(path, self.worker)
+                    self.assertEqual(judged, [path])
+                    self.assertEqual(stat.S_IMODE(os.lstat(path).st_mode), 0o700)
+                    if other_mode is None:
+                        self.assertFalse(os.path.lexists(self.other))
+                    else:
+                        self.assertEqual(stat.S_IMODE(os.lstat(self.other).st_mode), other_mode)
+
+    def test_fallback_parent_is_resolved_once_too(self):
+        # The first candidate lies inside the source; the fallback base is a
+        # link that moves right after the fallback's boundary check.
+        os.mkdir(self.other, 0o700)
+        fallback_link = self.base / "fallback-link"
+        fallback_link.symlink_to(self.base / "a-worker")
+        self.enterContext(mock.patch.object(WRAPPER_COMMON, "WORKER_TEMP_FALLBACK_BASE", fallback_link))
+        patch, judged = self.judge(relink_after=2, link=fallback_link)
+        with patch:
+            path = self.prepare(self.source / "tmp")
+        self.assertEqual(os.path.realpath(fallback_link), os.path.realpath(self.base / "z-output"))
+        self.assertEqual(path, self.worker)
+        self.assertEqual(len(judged), 2)
+        self.assertEqual(judged[-1], path)
+        self.assertEqual(sorted(item.name for item in self.source.rglob("*")), [".agent_reports"])
+
+
 def launch_environment(wrapper, harness, args, base, artifact_root):
     """The worker environment the shared launch path builds for a bound launch."""
     args.__dict__.update(

@@ -241,9 +241,11 @@ def prepare_worker_temp_dir(environ=None, *, source_root, route_file, create=Tru
     refusal keeps the inherited temp. An existing folder is never changed;
     ``create=False`` (recovery) makes none either. Never raises.
 
-    The value returned is that real path (a link in a parent resolved), so the
-    temp variables, both Codex grants, the write roots and the launch record
-    carry the one folder this check judged.
+    Each candidate's parent is resolved once, to `<real parent>/hearting-<uid>`;
+    the boundary check, the mkdir, the link/owner/mode/write check and the
+    return all use that one string. So the temp variables, both Codex grants,
+    the write roots and the launch record carry the one folder this check
+    judged, even if a parent link changes during the launch.
     """
     from codex_permission_profile import recordish_write_root
     values = os.environ if environ is None else environ
@@ -257,33 +259,36 @@ def prepare_worker_temp_dir(environ=None, *, source_root, route_file, create=Tru
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return ""
 
-    def outside_boundary(path: Path) -> bool:
-        kept = recordish_write_root(path, cwd, artifact)
-        return kept is not None and not (Path(kept) == artifact or artifact in Path(kept).parents)
+    def judged(parent: Path) -> str:
+        # NOTE: The parent is resolved here and nowhere else. The boundary,
+        # mkdir, lstat, access and the return all use this one string, so a
+        # parent link changed after this line moves nothing.
+        resolved = os.path.join(os.path.realpath(parent), name)
+        kept = recordish_write_root(resolved, cwd, artifact)
+        inside = kept is None or Path(kept) == artifact or artifact in Path(kept).parents
+        return "" if inside else resolved
 
     inherited = values.get("TMPDIR", "")
     base = Path(inherited) if os.path.isabs(inherited) else WORKER_TEMP_FALLBACK_BASE
-    candidate = base if base.name == name else base / name
     try:
-        if not outside_boundary(candidate):
-            candidate = WORKER_TEMP_FALLBACK_BASE / name
-            if not outside_boundary(candidate):
-                return ""
+        resolved = (judged(base.parent if base.name == name else base)
+                    or judged(WORKER_TEMP_FALLBACK_BASE))
+        if not resolved:
+            return ""
         if create:
             try:
-                os.mkdir(candidate, 0o700)
+                os.mkdir(resolved, 0o700)
             except FileExistsError:
                 pass
-        status = os.lstat(candidate)
-        real = os.path.realpath(candidate)
+        status = os.lstat(resolved)
     except (OSError, RuntimeError, ValueError):
         return ""
     # A symlink, another user's folder in a shared /tmp, a looser mode, or a
     # read-only mount is never adopted or repaired: the inherited temp stays.
     if (not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid()
-            or stat.S_IMODE(status.st_mode) != 0o700 or not os.access(candidate, os.W_OK)):
+            or stat.S_IMODE(status.st_mode) != 0o700 or not os.access(resolved, os.W_OK)):
         return ""
-    return real
+    return resolved
 
 
 def recorded_worker_temp_dir(record, writable_roots, *, source_root, route_file) -> str:
