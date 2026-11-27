@@ -3168,6 +3168,41 @@ class FallbackTest(unittest.TestCase):
     self._depth_affinity_route(order,affinity=affinity),
     self._depth_affinity_node(depth),self.jobs)
   return context["rank"]
+ def test_balanced_hops_use_timed_capacity_for_peers_and_raw_usage_for_the_gate(self):
+  now=1_800_000_000
+  week=604800
+  node=self._depth_affinity_node(1)
+  route=self._depth_affinity_route(["claude","codex","opencode"],affinity=False)
+  route["dispatch_allocation"].update(
+    usage_gate_used_percent=85,usage_headroom_exponent=2,
+    harness_weights={"codex":0.5,"opencode":0.2},
+    field_weights={"claude":0.95,"codex":0.85,"opencode":1.0})
+  payloads={"claude":{"rl_7d":50},"codex":{"windows":[["7d",50,now+3600]]}}
+  cache=SimpleNamespace(read=lambda harness,**_: {
+    "payload":payloads[harness],"observed_at":now-1})
+  capacity_scores=F.CAPACITY.capacity_scores
+
+  def rank():
+   hops,context=F.ordered_fallback_hops(route,node,self.jobs)
+   self.assertEqual(hops[0]["candidates"][0]["child_harness"],context["rank"][0])
+   return context["rank"]
+
+  with mock.patch.dict(os.environ,{"HARNESS_CAPACITY_SCORES":"opencode:0",
+                                  "HARNESS_CAPACITY_BIAS":"","AGENT_DISPATCH_JOBS":""}), \
+       mock.patch.object(F,"_usage_states",return_value={h:"ok" for h in F.CAPACITY.HARNESSES}), \
+       mock.patch.object(F.CAPACITY,"_usage_cache",return_value=cache), \
+       mock.patch.object(F.CAPACITY,"_codex_api_score",return_value=None), \
+       mock.patch.object(F.CAPACITY,"capacity_scores",side_effect=lambda: capacity_scores(now=now)):
+   self.assertEqual(rank(),["claude","codex","opencode"])
+   payloads["claude"]["rs_7d"]=now+6*86400
+   payloads["codex"]["window_durations_seconds"]=[week]
+   self.assertEqual(rank(),["codex","claude","opencode"])
+   node["harness_policy"].update(primary=["claude"],last_resort=["codex","opencode"])
+   self.assertEqual(rank(),["claude","codex","opencode"])
+   node["harness_policy"].update(primary=["claude","codex"],last_resort=["opencode"])
+   payloads["codex"]={"windows":[["5h",90,now+600]],"window_durations_seconds":[18000]}
+   self.assertEqual(rank(),["claude","codex","opencode"])
+
  def test_depth_affinity_leads_at_its_own_depth_and_flips_at_the_other(self):
   # Equal headroom and an empty registry, so the neutral order is exactly the
   # declared one. The preference is read from the node's own dispatch_depth:

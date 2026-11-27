@@ -2900,7 +2900,8 @@ def _capacity_hold(jobs, source, model=None, *, allow_frame_peer=False):
     policy = DC._route_module().DEFAULTS.restrict_harness_policy(policy, enabled)
     capacity = _capacity_reader()
     report = capacity.capacity_report()
-    scores = report['scores']; score = scores.get(harness)
+    scores = report['scores']
+    score = capacity.raw_headroom(scores, harness)
     gate = allocation.get('usage_gate_used_percent', 90)
     if (allocation['strategy'] == 'balanced' and not capacity.is_gated(
             scores, harness, usage_gate_used_percent=gate)):

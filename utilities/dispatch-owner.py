@@ -824,7 +824,7 @@ def _explicit_capacity_warning(source, adapter, capacity, allocation):
     """Typed headroom caveat for an explicit owner choice; never a gate."""
     if source != "explicit" or not adapter or capacity is None:
         return None
-    value = capacity.get(adapter)
+    value = _capacity.raw_headroom(capacity, adapter)
     if value is None:
         return "headroom-unknown"
     if value <= 0:
@@ -997,7 +997,7 @@ def main(argv):
         capacity_freshness = capacity_report.get("freshness") or {}
 
         def automatically_available(harness):
-            score = capacity.get(harness)
+            score = _capacity.raw_headroom(capacity, harness)
             return (harness in enabled and harness not in top_excluded and _eligible(states[harness])
                     and score is not None and score > 0)
 
