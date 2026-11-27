@@ -77,7 +77,7 @@ SCREEN_DOUBT_LOOKS = 12
 # steward answers ``queued`` for them and the helper may ask again. An older shell host does not
 # pass on its own (``shell-host-outdated``), so it is not here.
 CONTINUE_INPUT_WAIT = frozenset({"draft", "draft-unknown", "form-open", "screen-unknown",
-                                 "shell-editor-open", "shell-no-answer", "pane-in-mode",
+                                 "shell-editor-open", "shell-no-answer", "shell-screen-large", "pane-in-mode",
                                  "pane-synchronized", "pane-input-off", "pane-state-unknown"})
 # Seconds between asks while the composer or pane holds the continue (each ask starts a steward).
 CONTINUE_INPUT_RETRY_SEC = 15.0
@@ -96,6 +96,7 @@ REASON_TEXT = {
     "shell-host-outdated": "이 창의 하팅 셸이 이전 판이라 입력창을 확인할 수 없고, 창을 다시 열면 새 판으로 바뀝니다",
     "shell-editor-open": "하팅 셸의 설정·Fleet 탐색기·질문 화면이 열려 있습니다",
     "shell-no-answer": "하팅 셸이 화면 요청에 답하지 않았습니다",
+    "shell-screen-large": "화면이 너무 커서 입력창을 읽지 못했습니다",
     "target-changed": "그 자리의 세션이 바뀌었습니다",
     "herdr-not-found": "herdr를 찾지 못했습니다",
     "pane-in-mode": "창이 tmux 복사·선택 모드에 있습니다",
@@ -2210,6 +2211,7 @@ _IDLE_WAIT_TEXT = {
     "shell-host-outdated": "이 창의 하팅 셸이 이전 판이라 입력창을 확인할 수 없었습니다",
     "shell-editor-open": "하팅 셸의 설정·Fleet 탐색기·질문 화면이 열려 있었습니다",
     "shell-no-answer": "하팅 셸이 화면 요청에 답하지 않았습니다",
+    "shell-screen-large": "화면이 너무 커서 입력창을 읽지 못했습니다",
     "expired": "보낼 수 있는 때가 예약 시간 안에 오지 않았습니다",
 }
 # Not-sent reasons the person caused (typing, a new card): no line for these.
