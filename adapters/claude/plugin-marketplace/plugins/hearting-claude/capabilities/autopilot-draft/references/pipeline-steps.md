@@ -12,7 +12,7 @@ placement; it does not widen a worker's declared write scope.
 | Step 1: Material Analysis | Orchestrator; candidate stage | Discovered reference and analysis materials | `analysis/material_index.md`, `analysis/{ref,reviewer}_analysis.md` | analysis |
 | Step 2: draft-strategy | `draft-strategy` subskill | `analysis/*`, discovered inputs | `strategy/strategy.md`, optional mirror | strategy |
 | Step 4.0b: On-demand Figure Extraction | `material/pdf-extract` unit; candidate stage | Paper-card PDF paths | `figures/figure_index.md` | figures |
-| Step 4.1: Draft Generation | `research/research-survey` unit | Strategy, Style Guide, analysis, discovered inputs | Project target document; `draft/` holds its path/version record | draft |
+| Step 4.1: Draft Generation | `editorial/write` unit | Strategy, Style Guide, analysis, discovered inputs | Project target document; `draft/` holds its path/version record | draft |
 | Step 5.5: Editorial Polish | finalize node (`editorial/report` unit), mode-B polish | Primary draft and optional mirror | Same files, polished in place | draft, sequential single writer |
 | Step 4b: Post-draft Factual Detector | Orchestrator | Primary draft and optional mirror | Decision Points row | inline micro-stage |
 | Step 4c: Report Figure Semantic Gate | Orchestrator/QA | Spectrogram report, JSON manifest, generated PNG | Fail-closed verifier result and visual-review evidence | inline micro-stage |
@@ -205,9 +205,9 @@ to research, paper-analysis and cycle-local figure files. Do not assume a draft
 inside the artifact tree. Apply the same calculation to `figure_index.md` and
 check that links resolve; users must not have to calculate these paths.
 
-#### Step 4.1: Dispatch the Survey Unit
+#### Step 4.1: Dispatch the Write Unit
 
-Require `strategy/strategy.md` and ensure any `## 미해결 이슈` section is resolved or explicitly accepted. Then dispatch the `research/research-survey` unit with the primary strategy, optional mirror, analysis directory, discovered inputs, figure map, and this contract:
+Require `strategy/strategy.md` and ensure any `## 미해결 이슈` section is resolved or explicitly accepted. Then dispatch the `editorial/write` unit with the primary strategy, optional mirror, analysis directory, discovered inputs, figure map, and this contract:
 
 ```text
 Generate a complete working draft from the finalized strategy.

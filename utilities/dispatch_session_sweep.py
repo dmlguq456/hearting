@@ -1189,7 +1189,7 @@ def _replace_runtime_v1_followups(text: str, roots: list[Path], records: list[di
     """Swap each record's exact current follow-up prefix for a frozen shipped one."""
     from dispatch_completion_join import RUNTIME_V1_FOLLOWUP_PREFIXES
     for root, record in zip(roots, records):
-        follow = _followup(root, record)
+        follow = _followup(root, record, include_provider_failure=False)
         for has_summary, prefix in RUNTIME_V1_FOLLOWUP_PREFIXES.items():
             if has_summary in frozen and follow.startswith(prefix):
                 text = text.replace(follow, frozen[has_summary] + follow[len(prefix):], 1)
@@ -1227,7 +1227,7 @@ def _legacy_opencode_completion_body(text: str, roots: list[Path], records: list
         {False: _LEGACY_RUNTIME_V1_FOLLOWUP})
 
 
-def _followup(root: Path, record: dict) -> str:
+def _followup(root: Path, record: dict, *, include_provider_failure: bool = True) -> str:
     """The exact next handle for one completion record (the queue carrier's text); never raises."""
     receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
     if receipt.get("kind") in {"supervision", "notice"} or not isinstance(receipt.get("children"), list):
@@ -1237,7 +1237,8 @@ def _followup(root: Path, record: dict) -> str:
         jobs = record_jobs(root, record)
         if jobs is None:
             return ""
-        return completion_followup_text(receipt, jobs=str(jobs))
+        return completion_followup_text(
+            receipt, jobs=str(jobs), include_provider_failure=include_provider_failure)
     except Exception:  # noqa: BLE001 -- the bounded receipt line still reaches the parent
         return ""
 
@@ -1538,7 +1539,7 @@ def _notice_layout(notice_records: list[tuple[Path, dict]]) -> dict:
     return {"places": places, "routine": folded, "routine_line": line, "attached": attached}
 
 
-def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
+def delivery_context(batches: list[tuple[Path, list[dict]]], *, include_provider_failure: bool = True) -> str:
     """The one text a parent receives for its delivered records, whichever runtime carries it.
 
     ``batches`` pairs each state root with the records claimed there. Gate notices are
@@ -1582,7 +1583,7 @@ def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
                 continue
             text = bound_text(root, record)
             lines.append((str(record.get("delivery_id", "")), text))
-            follow = _followup(root, record)
+            follow = _followup(root, record, include_provider_failure=include_provider_failure)
             if follow and follow not in followups:
                 followups.append(follow)
     blocks: list[str] = []
@@ -2142,6 +2143,32 @@ def _opencode_historical_attempts(native_text: str, record: dict) -> int | None:
     return historical
 
 
+def _opencode_prior_delivery_bodies(rendered: str, members: list[tuple[Path, dict]]) -> set[str]:
+    """Older shipped variants of the body without provider failure lines."""
+    roots, records = map(list, zip(*members))
+    from dispatch_completion_join import SHIPPED_RUNTIME_V1_FOLLOWUP_PREFIXES, previous_harvest_wording
+
+    previous = _previous_runtime_v1_completion_body(rendered, roots, records)
+    variants = {rendered, previous, _previous_opencode_delivery_body(previous),
+                _legacy_opencode_completion_body(rendered, roots, records)}
+    variants.update(_replace_runtime_v1_followups(rendered, roots, records, frozen)
+        for frozen in (_SHORT_RUNTIME_V1_FOLLOWUP_PREFIXES, _DECISION_RUNTIME_V1_FOLLOWUP_PREFIXES,
+                       SHIPPED_RUNTIME_V1_FOLLOWUP_PREFIXES))
+    # Everything shipped up to v4.32.4 went out under that release's block headers.
+    variants.update(_shipped_headers(text) for text in tuple(variants) if text)
+    if any((record.get("receipt") or {}).get("reason") == "workflow-completion-pending"
+           for record in records):
+        # Recover the previous wording from the same stored diagnosis.
+        # Receipt markers alone never authorize an arbitrary native body.
+        variants.update(text.replace("The last recorded closure refusal is ", "The latest closure refusal is ")
+            .replace("No recorded refusal is available.", "No current refusal record is available.")
+            .replace("The last recorded checkpoint is ", "The current checkpoint is ")
+            for text in tuple(variants))
+    # Each form as the previous release wrote an open-row harvest line (the Codex wrapper path).
+    variants.update(previous_harvest_wording(text) for text in tuple(variants) if text)
+    return variants
+
+
 def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
                                     session_id: str, messages=None, *, notice_context=None) -> list[dict]:
     """Rebuild only batches named by native markers and verify their exact body.
@@ -2239,39 +2266,16 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
         grouped_selected: dict[Path, list[dict]] = {}
         for root, record in selected:
             grouped_selected.setdefault(root, []).append(record)
-        rendered = delivery_context(list(grouped_selected.items()))
-        previous_rendered = _previous_runtime_v1_completion_body(
-            rendered, [root for root, _record in selected],
-            [record for _root, record in selected]) if rendered else ""
-        legacy_rendered = _legacy_opencode_completion_body(
-            rendered, [root for root, _record in selected],
-            [record for _root, record in selected]) if rendered else ""
-        # Shipped forms: current; the three previous follow-ups under current headers
-        # (the earliest one also under the older headers); and the legacy full body.
-        from dispatch_completion_join import SHIPPED_RUNTIME_V1_FOLLOWUP_PREFIXES
-        short_rendered, decision_rendered, shipped_rendered = (_replace_runtime_v1_followups(
-            rendered, [root for root, _record in selected],
-            [record for _root, record in selected], frozen) if rendered else ""
-            for frozen in (_SHORT_RUNTIME_V1_FOLLOWUP_PREFIXES, _DECISION_RUNTIME_V1_FOLLOWUP_PREFIXES,
-                           SHIPPED_RUNTIME_V1_FOLLOWUP_PREFIXES))
-        variants = {rendered, previous_rendered, legacy_rendered, short_rendered, decision_rendered,
-                    shipped_rendered,
-                    _previous_opencode_delivery_body(previous_rendered) if rendered else ""}
-        # Everything shipped up to v4.32.4 went out under that release's block headers.
-        variants.update(_shipped_headers(text) for text in tuple(variants) if text)
-        if any((record.get("receipt") or {}).get("reason") == "workflow-completion-pending"
-               for _root, record in selected):
-            # Recover the previous wording from the same stored diagnosis.
-            # Receipt markers alone never authorize an arbitrary native body.
-            variants.update(text.replace("The last recorded closure refusal is ", "The latest closure refusal is ")
-                .replace("No recorded refusal is available.", "No current refusal record is available.")
-                .replace("The last recorded checkpoint is ", "The current checkpoint is ")
-                for text in tuple(variants))
-        # Each form as the previous release wrote an open-row harvest line (the Codex wrapper path).
-        from dispatch_completion_join import previous_harvest_wording
-        variants.update(previous_harvest_wording(text) for text in tuple(variants) if text)
-        if not rendered or native_text not in variants:
+        batches = list(grouped_selected.items())
+        rendered = delivery_context(batches)
+        if not rendered:
             continue
+        if native_text != rendered:
+            # Before failure kinds were rendered, the same immutable receipt was sent
+            # with this exact body. Compare whole messages under the existing bindings.
+            previous = delivery_context(batches, include_provider_failure=False)
+            if native_text != previous and native_text not in _opencode_prior_delivery_bodies(previous, selected):
+                continue
         candidate = _opencode_expected_message(native_text, identities)
         key = (candidate["text"], tuple(candidate["bindings"]))
         if candidate["bindings"] and key not in seen:
