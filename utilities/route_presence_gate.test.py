@@ -7,6 +7,9 @@ import importlib.util
 import io
 import json
 import os
+import re
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -17,6 +20,11 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 GATE = HERE / "route_presence_gate.py"
 RESOLVER = HERE / "artifact-root.sh"
+HOOK_ENTRIES = {  # what each harness actually launches
+    "opencode": [str(GATE), "--opencode"],
+    "codex": [str(HERE.parent / "adapters" / "codex" / "hooks" / "route-presence-gate.py")],
+    "claude": [str(HERE.parent / "hooks" / "route-presence-gate.py")],
+}
 _spec = importlib.util.spec_from_file_location("route_presence_gate", GATE)
 G = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(G)
@@ -323,6 +331,13 @@ class ArtifactRootParityTest(Fixture):
         from artifact_producer import activate, classify_root, cutover_path
         from tools.fleet.collectors import project_status
 
+        python_bin = self.tmp / "bin"
+        python_bin.mkdir()
+        broken_python = python_bin / "python3"
+        broken_python.write_text("#!/bin/sh\nexit 97\n", encoding="utf-8")
+        broken_python.chmod(0o755)
+        broken_python_path = f"{python_bin}{os.pathsep}{self.env['PATH']}"
+
         choices = [
             ("absent", "absent", ".agent_reports"),
             ("inactive", "absent", ".agent_reports"),
@@ -373,12 +388,272 @@ class ArtifactRootParityTest(Fixture):
                     self.assertEqual(G.artifact_root(checkout, self.env), expected)
                     self.assertEqual(project_status.artifact_root(checkout),
                                      expected if Path(expected).is_dir() else None)
+                    with self.subTest(checkout=checkout.name, PYTHONSAFEPATH="1"):
+                        self.assertEqual(self.resolver(checkout, PYTHONSAFEPATH="1"), expected)
+                    if "absent" in (agent_state, claude_state):
+                        with self.subTest(checkout=checkout.name, python3="fails"):
+                            self.assertEqual(self.resolver(checkout, PATH=broken_python_path), expected)
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root enters a mode-600 folder")
+    def test_a_single_folder_the_shell_cannot_enter_answers_as_the_interpreter_does(self):
+        # The raw answer (stdout, exit status, stderr) before any realpath, as the
+        # interpreter-only resolver gave it: the physical target, refused when installed.
+        env = {**self.env, "GIT_CEILING_DIRECTORIES": str(self.tmp)}
+        layouts = []
+        for layout in ("git", "linked", "plain"):
+            project = self.tmp / f"single-{layout}"
+            project.mkdir()
+            start = project
+            if layout != "plain":
+                git(project, "init", "-q")
+                git(project, "commit", "--allow-empty", "-qm", "init")
+            if layout == "linked":
+                start = project.with_name(project.name + "-linked")
+                git(project, "worktree", "add", "-q", "-b", "topic", str(start))
+            layouts.append((layout, project, start))
+        refused = "artifact-root: refusing an immutable installed source tree as a writable root: {}\n"
+        for layout, project, start in layouts:
+            reports = project / "physical-folders" / "reports"
+            release = project / "hearting" / "releases" / "v-fixture"
+            cases = [("folder", None, (0, "{folder}\n", "")),
+                     ("absolute-link", reports, (0, f"{reports}\n", "")),
+                     ("relative-link", reports, (0, f"{reports}\n", "")),
+                     ("absolute-link", release, (67, "", refused.format(release))),
+                     ("relative-link", release, (67, "", refused.format(release)))]
+            for name in (".agent_reports", ".claude_reports"):
+                folder = project / name
+                for kind, target, (code, out, err) in cases:
+                    for enterable in (True, False):
+                        with self.subTest(layout=layout, name=name, kind=kind,
+                                          target=target and target.name, enterable=enterable):
+                            entered = target or folder
+                            entered.mkdir(parents=True)
+                            if target is not None:
+                                folder.symlink_to(target if kind == "absolute-link"
+                                                  else os.path.relpath(target, project))
+                            if not enterable:
+                                entered.chmod(0o600)
+                            try:
+                                result = subprocess.run(["sh", str(RESOLVER), str(start)],
+                                                        capture_output=True, text=True, env=env)
+                            finally:
+                                entered.chmod(0o755)
+                                if target is not None:
+                                    folder.unlink()
+                                entered.rmdir()
+                            self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                             (code, out.format(folder=folder), err))
 
     def test_linked_worktree_shares_the_primary_folder(self):
         linked = self.tmp / "work" / "proj-wt"
         git(self.repo, "worktree", "add", "-q", "-b", "feat", str(linked))
         self.ledger_line(self.root)
         self.assertEqual(self.judge(self.edit(linked / "src" / "engine.py")), "")
+
+
+class SelectionImportTest(Fixture):
+    """The selection module loads late, is found under PYTHONSAFEPATH=1, and an unloadable
+    one is surfaced (exit 1, as its old start-up import was) only where a choice needs it."""
+
+    UNLOADABLE = {
+        "missing": "import sys\nsys.modules['artifact_root_selection'] = None\n",
+        "broken": ("import importlib.abc, importlib.util, sys\n"
+                   "class Broken(importlib.abc.MetaPathFinder, importlib.abc.Loader):\n"
+                   "    def find_spec(self, name, path=None, target=None):\n"
+                   "        if name == 'artifact_root_selection':\n"
+                   "            return importlib.util.spec_from_loader(name, self)\n"
+                   "    def create_module(self, spec):\n"
+                   "        return None\n"
+                   "    def exec_module(self, module):\n"
+                   "        raise SyntaxError('invalid syntax (artifact_root_selection.py)')\n"
+                   "sys.meta_path.insert(0, Broken())\n"),
+        "empty": ("import sys, types\n"
+                  "sys.modules['artifact_root_selection'] = types.ModuleType('artifact_root_selection')\n"),
+    }
+
+    def unloadable(self, how):
+        """Environment whose Python processes cannot load the selection module."""
+        site = self.tmp / f"site-{how}"
+        site.mkdir(exist_ok=True)
+        (site / "sitecustomize.py").write_text(self.UNLOADABLE[how], encoding="utf-8")
+        return {"PYTHONPATH": str(site)}
+
+    def stripped(self, how):
+        """Hook entries whose own ``artifact_root_selection.py`` is missing, broken or empty, so
+        the shell resolver's interpreter fails on it (exit 2 / 1 / 0 with no answer) as such an
+        install would."""
+        tree = self.tmp / f"tree-{how}"
+        for relative in ("utilities/route_presence_gate.py", "utilities/artifact-root.sh",
+                         "hooks/route-presence-gate.py",
+                         "adapters/codex/hooks/route-presence-gate.py"):
+            (tree / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(HERE.parent / relative, tree / relative)
+        (tree / "tools").symlink_to(HERE.parent / "tools")
+        if how in ("broken", "empty"):
+            (tree / "utilities" / "artifact_root_selection.py").write_text(
+                "def select_artifact_root(:\n" if how == "broken" else "", encoding="utf-8")
+        return tree
+
+    def shell_project(self, name):
+        """A separate-git-dir checkout (the shell resolver answers) and the folder it looks in."""
+        top = self.tmp / "work" / name
+        git(self.tmp, "init", "-q", f"--separate-git-dir={self.tmp / f'{name}.git'}", str(top))
+        (top / "src").mkdir()
+        (top / "src" / "engine.py").write_text("x = 1\n")
+        return top, Path(self.resolve(top)).parent
+
+    def resolve(self, top):
+        return os.path.realpath(subprocess.run(
+            ["sh", str(RESOLVER), str(top)], capture_output=True, text=True, check=True,
+            env=self.env).stdout.strip())
+
+    def hook(self, harness, target, cwd, tree=None, **extra):
+        entry = HOOK_ENTRIES[harness]
+        if tree is not None:
+            entry = [str(tree / Path(entry[0]).relative_to(HERE.parent)), *entry[1:]]
+        sid = "ses_gate" if harness == "opencode" else SID
+        if harness == "opencode":
+            payload = {"tool": "write", "args": {"filePath": str(target)}, "sessionID": sid,
+                       "cwd": str(cwd)}
+        elif harness == "codex":
+            patch = f"*** Begin Patch\n*** Update File: {target}\n@@\n-x = 1\n+x = 2\n*** End Patch\n"
+            payload = {"tool_name": "apply_patch", "session_id": sid, "cwd": str(cwd),
+                       "tool_input": {"command": ["apply_patch", patch]}}
+        else:
+            payload = {"tool_name": "Edit", "session_id": sid, "cwd": str(cwd),
+                       "tool_input": {"file_path": str(target)}}
+        result = subprocess.run([sys.executable, *entry], input=json.dumps(payload),
+                                capture_output=True, text=True, cwd=str(cwd),
+                                env={**self.env, "PYTHONDONTWRITEBYTECODE": "1", **extra})
+        return self.outcome(harness, result)
+
+    @staticmethod
+    def outcome(harness, result):
+        code, out, err = result.returncode, result.stdout, result.stderr
+        if code == 1 and not out and "artifact_root_selection" in err:
+            return "surfaced"
+        if code == 0 and not out and not err:
+            return "passed"
+        reason = {"opencode": out if code == 1 else "", "claude": err if code == 2 else ""}.get(harness)
+        if harness == "codex" and code == 0 and out:
+            decision = json.loads(out)
+            reason = decision["reason"] if decision.get("decision") == "block" else ""
+        match = re.search(r"no route for (\S+) yet", reason or "")
+        return f"refused:{match.group(1)}" if match else f"other:{code}:{out!r}:{err[-300:]!r}"
+
+    def test_importing_the_gate_leaves_the_selection_module_unloaded(self):
+        probe = ("import sys; sys.path.insert(0, sys.argv[1]); import route_presence_gate; "
+                 "print('artifact_root_selection' in sys.modules)")
+        result = subprocess.run([sys.executable, "-c", probe, str(HERE)], capture_output=True,
+                                text=True, check=True,
+                                env={**self.env, "PYTHONDONTWRITEBYTECODE": "1"})
+        self.assertEqual(result.stdout.strip(), "False")
+
+    def test_hook_entries_against_the_start_up_import_they_replace(self):
+        linked = self.tmp / "work" / "proj-wt"
+        git(self.repo, "worktree", "add", "-q", "-b", "feat", str(linked))
+        target = linked / "src" / "engine.py"
+        override = self.tmp / "override"
+        override.mkdir()
+        release = self.tmp / "hearting" / "releases" / "v-fixture"
+        release.mkdir(parents=True)
+        # No standard .git: the shell resolver answers, in the folder it looks in (``base``).
+        separate, _ = self.shell_project("separate")
+        two, base = self.shell_project("separate-two")
+        (base / ".agent_reports").mkdir()
+        (base / ".claude_reports").mkdir()
+        single, base = self.shell_project("separate-single")
+        (base / ".agent_reports").symlink_to(release)  # refused at once (67)
+        chosen, base = self.shell_project("separate-chosen")
+        (base / ".agent_reports").symlink_to(release)  # chosen by python3, then refused (67)
+        (base / ".claude_reports").mkdir()
+        mine, other, two_root = str(self.root), self.resolve(separate), self.resolve(two)
+        missing, broken = self.unloadable("missing"), self.unloadable("broken")
+        gone, unparsable = self.stripped("missing"), self.stripped("broken")
+        empty, emptied = self.unloadable("empty"), self.stripped("empty")
+        # The shell's own answer for the last row: exit 0 without a path.
+        shell = [str(emptied / "utilities" / "artifact-root.sh"), str(two)]
+        answer = subprocess.run(["sh", *shell], capture_output=True, text=True, env=self.env)
+        self.assertEqual((answer.returncode, answer.stdout), (0, "\n"))
+        safe = {"PYTHONSAFEPATH": "1", "AGENT_DISPATCH_DEPTH": "-1"}
+        relative, parentless = "relative", str(self.tmp / "absent" / "root")
+        rows = [
+            ("needs a route", target, self.tmp, {}, None, f"refused:{mine}"),
+            ("current worktree", target, linked, {}, None, "passed"),
+            ("explicit root", target, self.tmp, {"AGENT_ARTIFACT_ROOT": str(override)}, None,
+             f"refused:{override}"),
+            ("shell resolver", separate / "src" / "engine.py", self.tmp, {}, None,
+             f"refused:{other}"),
+            ("shell resolver, two folders", two / "src" / "engine.py", self.tmp, {}, None,
+             f"refused:{two_root}"),
+            ("PYTHONSAFEPATH=1, depth -1", target, self.tmp, safe, None, f"refused:{mine}"),
+            ("selection missing", target, self.tmp, missing, None, "surfaced"),
+            ("selection broken", target, self.tmp, broken, None, "surfaced"),
+            ("selection missing, current worktree", target, linked, missing, None, "passed"),
+            ("selection missing, explicit root", target, self.tmp,
+             {**missing, "AGENT_ARTIFACT_ROOT": str(override)}, None, f"refused:{override}"),
+            # The shell's own refusals need no choice: no module is asked for (64, 66, 67).
+            ("selection missing, relative root (64)", target, self.tmp,
+             {**missing, "AGENT_ARTIFACT_ROOT": relative}, None, "passed"),
+            ("selection missing, root without a parent (66)", target, self.tmp,
+             {**missing, "AGENT_ARTIFACT_ROOT": parentless}, None, "passed"),
+            ("selection missing, single link to a release (67)", single / "src" / "engine.py",
+             self.tmp, missing, None, "passed"),
+            ("selection missing, chosen link to a release (67)", chosen / "src" / "engine.py",
+             self.tmp, missing, None, "passed"),
+            # The same with the file itself gone, and where the shell's choice fails on it.
+            ("selection file gone, relative root (64)", target, self.tmp,
+             {**missing, "AGENT_ARTIFACT_ROOT": relative}, gone, "passed"),
+            ("selection file gone, root without a parent (66)", target, self.tmp,
+             {**missing, "AGENT_ARTIFACT_ROOT": parentless}, gone, "passed"),
+            ("selection file gone, single link to a release (67)", single / "src" / "engine.py",
+             self.tmp, missing, gone, "passed"),
+            ("selection file gone, two folders (2)", two / "src" / "engine.py", self.tmp,
+             missing, gone, "surfaced"),
+            ("selection file broken, two folders (1)", two / "src" / "engine.py", self.tmp,
+             broken, unparsable, "surfaced"),
+            # No path and no refusal from the shell: the module is probed as well. A shell
+            # ended by a signal is test_only_the_shells_refusals_skip_the_probe's -15.
+            ("selection file empty, two folders (0, no path)", two / "src" / "engine.py",
+             self.tmp, empty, emptied, "surfaced"),
+        ]
+        for harness in HOOK_ENTRIES:
+            for label, path, cwd, extra, tree, expected in rows:
+                with self.subTest(harness=harness, row=label):
+                    self.assertEqual(self.hook(harness, path, cwd, tree, **extra), expected)
+        for harness in HOOK_ENTRIES:
+            self.ledger_line(self.root, harness=harness,
+                             sid="ses_gate" if harness == "opencode" else SID)
+            with self.subTest(harness=harness, row="route held"):
+                self.assertEqual(self.hook(harness, target, self.tmp), "passed")
+
+    def test_only_the_selection_import_escapes_the_fail_open_judgement(self):
+        linked = self.tmp / "work" / "proj-wt"
+        git(self.repo, "worktree", "add", "-q", "-b", "feat", str(linked))
+        payload = self.edit(linked / "src" / "engine.py")
+        with mock.patch.dict(sys.modules, {"artifact_root_selection": None}):
+            with self.assertRaises(G.SelectionUnavailable):
+                self.judge(payload)
+            # The shell's own refusals (64, 66) involve no choice, so no module is asked for.
+            self.assertEqual(self.judge(payload, AGENT_ARTIFACT_ROOT="relative"), "")
+            self.assertEqual(self.judge(payload, AGENT_ARTIFACT_ROOT=str(self.tmp / "a" / "b")), "")
+            self.assertEqual(self.judge({**payload, "cwd": str(linked)}), "")
+        self.assertEqual(self.judge(payload, AGENT_ARTIFACT_ROOT="relative"), "")
+        with mock.patch.object(G, "_route_chain", side_effect=ImportError("gone")):
+            self.assertEqual(self.judge(payload), "")
+
+    def test_only_the_shells_refusals_skip_the_probe(self):
+        env = {**self.env, "AGENT_ARTIFACT_ROOT": "/answered/by/the/shell"}
+        answers = {64: "", 66: "", 67: "", 1: "", 2: "", 0: "\n", -signal.SIGTERM: ""}
+        with mock.patch.dict(sys.modules, {"artifact_root_selection": None}):
+            for code, stdout in answers.items():
+                answer = subprocess.CompletedProcess([], code, stdout=stdout, stderr="")
+                with self.subTest(returncode=code), \
+                        mock.patch.object(G.subprocess, "run", return_value=answer):
+                    if code in (64, 66, 67):
+                        self.assertEqual(G.artifact_root(self.repo, env), "")
+                    else:
+                        self.assertRaises(G.SelectionUnavailable, G.artifact_root, self.repo, env)
 
 
 class ModeTest(Fixture):

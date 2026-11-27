@@ -50,6 +50,18 @@ emit() {
 }
 
 emit_project_root() {
+  # With one name (or none) there is nothing to choose, so no interpreter starts.
+  # A folder the shell cannot enter is left to the interpreter, whose realpath
+  # still names (and so lets `emit` judge) its physical target.
+  agent=${1%/}/.agent_reports
+  claude=${1%/}/.claude_reports
+  if [ ! -d "$claude" ]; then
+    [ -d "$agent" ] || emit "$agent"
+    root=$(physical_dir "$agent" 2>/dev/null) && emit "$root"
+  elif [ ! -d "$agent" ]; then
+    root=$(physical_dir "$claude" 2>/dev/null) && emit "$root"
+  fi
+
   resolver=$0
   while [ -L "$resolver" ]; do
     target=$(readlink "$resolver") || exit 66
@@ -58,7 +70,8 @@ emit_project_root() {
       *) resolver=$(dirname -- "$resolver")/$target ;;
     esac
   done
-  root=$(python3 -B "$(dirname -- "$resolver")/artifact_root_selection.py" "$1") || exit $?
+  # An inherited PYTHONSAFEPATH=1 would hide the script's sibling modules.
+  root=$(PYTHONSAFEPATH= python3 -B "$(dirname -- "$resolver")/artifact_root_selection.py" "$1") || exit $?
   emit "$root"
 }
 
