@@ -548,7 +548,7 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   `질문 변경됨`.
 - The route box (spec rules 23-25, 34, 36, 38, 43, 48, 57): the routes the statusline
   counts, then the recent results the producer keeps after them, then the requests
-  this session sent (→) or received (◂, `✓` closed) with their status and age, every
+  this session sent (→) or received (←, `✓` closed) with their status and age, every
   one of them shown (no `+N more`); laid out at the box's inner width. 11-17: the box is one box
   of three zones, each under a named rule drawn inside it (`─ direct ───`, `─ dispatch ───`,
   `─ request ───`, in this order; the names are English in every language; it replaces the one
@@ -633,9 +633,10 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   `CTX` row (its number joins the session's first row at the right edge, the one-row fold), each NOW's first row, then the stage line
   goes (the workers' count, `· worker 2`, ends it), then the workers go, then every route takes one row.
   A request (11-16, the person: "양식을 맞추자. [6c] claude opus 5.5 xhigh 이런식으로") reads as a
-  route's doer: beside the native area its first row is its mark (→ sent, ◂ received, `✓`/`✕`
-  closed), the other session's Fleet number, then that session's harness, model and effort in
-  a route row's colors (`◂ [6c] claude Opus 5.5 xhigh`; the model and effort only as far as the
+  route's doer: beside the native area its first row is its mark (→ sent, ← received, `✓`/`✕`
+  closed; 11-27, the person: "방향만 다르면 화살표 방향만 반대로 하면 되는걸 왜 삼각형을써? 메시지는 안그러잖아":
+  a received request wears the received message's `←`, no longer the small triangle), the other session's Fleet number, then that session's harness, model and effort in
+  a route row's colors (`← [6c] claude Opus 5.5 xhigh`; the model and effort only as far as the
   session values Fleet's shared producer already read for the session displays know them, so
   `[6c] claude` where they are unknown, and a session that is gone keeps its name alone; 11-18, the person: "세션 id 외에도 repo
   위치까지 request는 표시를 해주는게 좋겠네": the other session's repository name, dim, right after its number
