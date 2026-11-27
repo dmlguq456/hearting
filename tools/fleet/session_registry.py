@@ -133,7 +133,7 @@ def _proc_argv(pid):
     return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
 
 
-def session_aliases(harness, pid, *, argv=None, expected_sid=None):
+def session_aliases(harness, pid, *, argv=None):
     """Session ids this live process ALSO answers to, newest-known first, or ``[]``.
 
     A `/resume` or `--fork-session` mints a brand-new session id while the peer ledger,
@@ -143,7 +143,6 @@ def session_aliases(harness, pid, *, argv=None, expected_sid=None):
     That matters: an alias file would need a TTL, a PID-reuse guard, and a sweeper, and
     would go stale exactly when the session it describes exits.
 
-    An expected SID binds this lookup to the argv's exact current session ID.
     Display-join use only. An alias must never address a ledger write, a
     `report-agent-session` call, or a completion/wake recipient — those stay exact.
     """
@@ -168,8 +167,6 @@ def session_aliases(harness, pid, *, argv=None, expected_sid=None):
             match = _SID_RE.fullmatch(stem)
             if match:
                 aliases.append(match.group(0).lower())
-    if expected_sid is not None and (not isinstance(expected_sid, str) or current != expected_sid.lower()):
-        return []
     # The process's own current id is not an alias of itself.
     return [sid for sid in dict.fromkeys(aliases) if sid != current][:_MAX_ALIASES]
 

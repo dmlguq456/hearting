@@ -53,14 +53,6 @@ def work_item(headline, owner=None):
     return SC.OpenWork(headline, owner_link(owner))
 
 
-def role_collector(*, _registry_sessions, **methods):
-    from fleet.session_registry import session_join_keys
-    defaults = dict(read_markers=lambda **kw: {}, read_relations=lambda **kw: [],
-                    _session_keys=session_join_keys, unresolved_role_targets=lambda *a, **kw: [])
-    return SimpleNamespace(**{**defaults, **methods},
-                           _registry_sessions=lambda **kw: _registry_sessions())
-
-
 class CheckBase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -170,7 +162,7 @@ class StewardCheckLabTest(CheckBase):
         self.targets = [target("a", state="done"), target("b", state="done")]
         self.rows = [SimpleNamespace(harness=t["harness"], session_id=t["session_id"],
                                      cwd=str(self.root.parent)) for t in self.targets]
-        self.collector = role_collector(
+        self.collector = SimpleNamespace(
             _registry_sessions=lambda: self.rows, role_targets=lambda *a, **kw: self.targets,
             _peer_message_module=lambda: None)
         for patch in (
@@ -640,7 +632,7 @@ class StewardCheckIdleTest(CheckBase):
         # change between checks. Nobody is left to watch, so after the one release
         # reminder the check does not open another turn (BC-SUPERVISOR-CONTEXT-COST-1114).
         ended = [target(name, state="idle", liveness="ended") for name in ("a", "b", "c", "d")]
-        self.seen = {"targets": ended, "pending_messages": 0, "open_work": [work_item("#1 own record")]}
+        self.seen = {"targets": ended, "pending_messages": 0, "open_work": ["#1 own record"]}
         self.register()
         self.step(T0 + INTERVAL)
         self.assertEqual(self.notify.call_count, 1)
@@ -648,7 +640,7 @@ class StewardCheckIdleTest(CheckBase):
         self.step(T0 + INTERVAL + 100)
         for index, records in enumerate((["#1 own record", "#2 new record"], ["#2 new record"],
                                          ["#3 another"]), start=2):
-            self.seen = {"targets": ended, "pending_messages": index, "open_work": [work_item(record) for record in records],
+            self.seen = {"targets": ended, "pending_messages": index, "open_work": records,
                          "user_decisions": [f"decision {index}"]}
             self.step(T0 + index * INTERVAL + 100)
         self.assertEqual(self.notify.call_count, 1)
@@ -681,7 +673,7 @@ class StewardCheckUnresolvedTest(CheckBase):
     """RV-PR1593: retain unresolved targets without paying for unchanged dead work."""
 
     def observe(self, liveness, sid="target-unresolved"):
-        collector = role_collector(
+        collector = SimpleNamespace(
             _peer_message_module=lambda: None, _registry_sessions=lambda: [],
             role_targets=lambda *a, **k: [],
             unresolved_role_targets=lambda *a, **k: [{
@@ -774,7 +766,7 @@ class StewardCheckRemainingWorkTest(CheckBase):
         self.assertLessEqual(len(sent["text"]), session_notice.MAX_TEXT)
 
     def test_open_work_without_targets_is_not_a_release(self):
-        self.seen = {"targets": [], "pending_messages": 0, "open_work": [work_item("fix steward wording")]}
+        self.seen = {"targets": [], "pending_messages": 0, "open_work": ["fix steward wording"]}
         self.register()
         self.step(T0 + INTERVAL)
         sent = self.notice()
@@ -806,7 +798,7 @@ class StewardCheckRemainingWorkTest(CheckBase):
 
     def test_remaining_work_is_sent_again_every_interval(self):
         self.seen = {"targets": [target("e7", state="idle")], "pending_messages": 0,
-                     "open_work": [work_item("#1425 review")]}
+                     "open_work": ["#1425 review"]}
         self.register()
         self.step(T0 + INTERVAL)
         self.deliver_and_ack()
@@ -836,7 +828,7 @@ class StewardCheckRemainingWorkTest(CheckBase):
         self.assertNotIn("steward off", out)
 
     def test_cmd_check_without_targets_lists_open_work_instead_of_release(self):
-        self.seen = {"targets": [], "pending_messages": 0, "open_work": [work_item("#1425 review")]}
+        self.seen = {"targets": [], "pending_messages": 0, "open_work": ["#1425 review"]}
         self.register()
         out = self.check(T0 + 10)
         self.assertIn("next=open: #1425 review → assign or do now", out)
@@ -869,7 +861,7 @@ class StewardCheckOpenWorkSourceTest(unittest.TestCase):
                                             {"type": "backlog", "headline": ""}], []))
         with mock.patch.object(SC, "_collector", return_value=collector), \
                 mock.patch.object(session_work, "observe", observed):
-            self.assertEqual(SC._open_work("claude", SID), ([work_item("#1425 review")], []))
+            self.assertEqual(SC._open_work("claude", SID), (["#1425 review"], []))
         observed.assert_called_once_with("/repo/wt")
 
     def test_unknown_or_ambiguous_cwd_reads_no_backlog(self):
@@ -886,18 +878,18 @@ class StewardCheckOpenWorkSourceTest(unittest.TestCase):
     def test_observe_role_counts_peer_requests_owed_by_each_target(self):
         module = SimpleNamespace(pending_messages=lambda who: (
             [{"state": "pending"}, {"state": "acked"}] if who["session_id"] == "sid-e7" else []))
-        collector = role_collector(
+        collector = SimpleNamespace(
             role_targets=lambda h, s, **kw: [{"name": "e7", "harness": "codex", "session_id": "sid-e7"}],
             _registry_sessions=lambda: [], _peer_message_module=lambda: module)
         with mock.patch.object(SC, "_collector", return_value=collector), \
                 mock.patch.object(SC, "_agents", return_value=[]), \
                 mock.patch.object(SC, "_end_observation", return_value=None), \
                 mock.patch.object(SC, "_session_liveness", return_value="live"), \
-                mock.patch.object(SC, "_open_work", return_value=([work_item("w")], [])):
+                mock.patch.object(SC, "_open_work", return_value=(["w"], [])):
             seen = SC._observe_role("claude", SID)
         self.assertEqual(seen["targets"][0]["owed"], 1)
         self.assertEqual(seen["pending_messages"], 0)
-        self.assertEqual(seen["open_work"], [work_item("w")])
+        self.assertEqual(seen["open_work"], ["w"])
 
 
 class StewardCheckPeerRequestCountTest(CheckBase):
@@ -918,7 +910,7 @@ class StewardCheckPeerRequestCountTest(CheckBase):
         module = SimpleNamespace(pending_messages=lambda who: [
             row for row in self.rows
             if (row["to"]["harness"], row["to"]["session_id"]) == (who["harness"], who["session_id"])])
-        self.collector = role_collector(role_targets=lambda h, s, **kw: [],
+        self.collector = SimpleNamespace(role_targets=lambda h, s, **kw: [],
                                          _registry_sessions=lambda: [],
                                          _peer_message_module=lambda: module)
         for name, patch in (
@@ -1424,8 +1416,6 @@ class StewardCheckProcessProofTest(CheckBase):
         targets = [{"name": "cx", "harness": "codex", "session_id": self.CODEX_SID},
                    {"name": "oc", "harness": "opencode", "session_id": self.OPENCODE_SID}]
         with mock.patch.object(self.steward, "role_targets", return_value=targets), \
-                mock.patch.object(self.steward, "read_markers", return_value={}), \
-                mock.patch.object(self.steward, "read_relations", return_value=[]), \
                 mock.patch.object(self.steward, "_peer_message_module", return_value=None):
             seen = REAL_OBSERVE(HARNESS, SID)
         self.assertEqual({t["name"]: t["liveness"] for t in seen["targets"]},
@@ -2041,8 +2031,7 @@ class StewardCheckReviewCounterexampleTest(CheckBase):
             return {self.ROUTE_RUNNING} & set(ids)
         with mock.patch.object(SC, "_running_routes", live):
             work, decisions = self.real_open_work(rows=self.HANDED_ROWS)
-        self.assertEqual(sorted(item.headline for item in work),
-                         sorted([f"완료를 받지 못한 일 {self.ROUTE_FINISHED}", "주인 없이 열린 일"]))
+        self.assertEqual(sorted(work), sorted([f"완료를 받지 못한 일 {self.ROUTE_FINISHED}", "주인 없이 열린 일"]))
         self.assertEqual(decisions, [f"사용자 결정 대기: {self.ROUTE_RUNNING} 병합"])  # a person's decision stays
         self.assertEqual(asked, [({self.ROUTE_RUNNING, self.ROUTE_FINISHED}, SID)])
 
@@ -2052,7 +2041,7 @@ class StewardCheckReviewCounterexampleTest(CheckBase):
         with mock.patch.object(SC, "_running_routes",
                                lambda ids, sid: {self.ROUTE_RUNNING} & set(ids)):
             work, _ = self.real_open_work(rows=self.MIXED_ROWS)
-        self.assertEqual(sorted(item.headline for item in work), sorted(row[3] for row in self.MIXED_ROWS[:2]))
+        self.assertEqual(sorted(work), sorted(row[3] for row in self.MIXED_ROWS[:2]))
 
     def test_the_same_work_counts_again_once_its_routes_worker_is_gone(self):
         with mock.patch.object(SC, "_running_routes", lambda ids, sid: set()):
@@ -2096,7 +2085,7 @@ class StewardCheckReviewCounterexampleTest(CheckBase):
 
     def test_unchanged_open_records_send_no_further_turn(self):
         self.seen = {"targets": [target("e7", state="done")], "pending_messages": 0,
-                     "open_work": [work_item("next slice")]}
+                     "open_work": ["next slice"]}
         self.register()
         self.step(T0 + INTERVAL)
         self.assertEqual(self.notice()["required_action"], "assign-next")
@@ -2106,7 +2095,7 @@ class StewardCheckReviewCounterexampleTest(CheckBase):
         self.step(T0 + 3 * INTERVAL + 100)
         self.assertEqual(self.notify.call_count, 1)
         self.assertEqual(self.obs()["reason"], "quiet-no-change")
-        self.seen["open_work"] = [work_item("next slice"), work_item("new item")]
+        self.seen["open_work"] = ["next slice", "new item"]
         self.step(T0 + 4 * INTERVAL + 100)
         self.assertEqual(self.notify.call_count, 2)  # a changed record set is sent again
 
@@ -2161,11 +2150,11 @@ class LabRegressionTest(CheckBase):
 
     def test_korean_receipt_delivers_with_lab(self):
         self.seen["targets"] = [target()]
-        self.seen["open_work"] = [work_item(headline) for headline in (
+        self.seen["open_work"] = [
             "실험 보고 가독성 사단계로 카드와 주입에서 정본 이름을 쓰고 모든 세션이 시작할 때 정본을 발견하게 하며 남은 경고 문구도 함께 고치기",
             "셸 패널 실험 구획과 여덟 칸 띠를 설치 전 화면으로 확인하고 사용자에게 보여 줄 시안을 고른 뒤 접기와 펼치기 동작까지 맞추기",
             "자식 실패 알림이 쉬고 있는 감독을 깨우지 않는 문제의 세 번째 단계 정정과 수신처 인계를 마무리하고 재현 시험을 남기기",
-            "감독 정정 묶음에서 런타임 종료 처리와 남은 자식 정리 그리고 사용자 결정 대기 항목을 따로 나누어 보고서에 적어 두기")]
+            "감독 정정 묶음에서 런타임 종료 처리와 남은 자식 정리 그리고 사용자 결정 대기 항목을 따로 나누어 보고서에 적어 두기"]
         groups = [dict(name=name, headline_name=head, unknown=1, failed=0, stagnant=0)
                   for name, head in (("AMI 가변 화자 개선", "작은 모델"),
                                      ("VoxConverse 일반화 확인", "큰 모델 기준선 재현"))]
@@ -2180,7 +2169,7 @@ class LabRegressionTest(CheckBase):
         self.assertIn("`peer-steward steward check`", receipt["text"])
 
     def test_totals_and_one_new_unknown_name_pair_with_intact_advice(self):
-        self.seen["open_work"] = [work_item(f"task {i} " + "x" * 55) for i in range(4)]
+        self.seen["open_work"] = [f"task {i} " + "x" * 55 for i in range(4)]
         groups = [dict(name=f"healthy-{i}", headline_name="best-model-" + "x" * 20,
                        unknown=0, failed=0, stagnant=0) for i in range(4)]
         groups.append(dict(name="attention-group", headline_name="missing-condition",
@@ -2206,7 +2195,7 @@ class LabRegressionTest(CheckBase):
     def test_count_only_notice_and_failed_delivery_do_not_poison_retry(self):
         self.seen["lab"] = self.labs(groups=[dict(name="가" * 180, headline_name="나" * 80,
                                                 unknown=12, failed=0, stagnant=0)])
-        self.seen["open_work"] = [work_item("가" * 60 + str(i)) for i in range(4)]
+        self.seen["open_work"] = ["가" * 60 + str(i) for i in range(4)]
         with mock.patch.object(session_notice, "notify", return_value=None):
             self.step(T0 + INTERVAL)
         self.assertEqual(self.obs()["reason"], "notice-unavailable")
@@ -2229,7 +2218,7 @@ class LabRegressionTest(CheckBase):
         self.assertEqual(self.tick(lab), 0)
 
     def test_korean_actions_without_lab_fit_receipt(self):
-        self.seen["open_work"] = [work_item("한" * 69 + str(i)) for i in range(4)]
+        self.seen["open_work"] = ["한" * 69 + str(i) for i in range(4)]
         self.assertEqual(self.tick({}), 1)
         self.assertEqual(self.obs()["reason"], "notice-acked")
         self.assertIn("more", self.notice()["text"])
@@ -2239,7 +2228,7 @@ class LabRegressionTest(CheckBase):
     def test_receipt_size_sweep_with_and_without_lab(self):
         sizes = []
         for ko in range(20, 71, 5):
-            self.seen["open_work"] = [work_item(chr(ord("가") + i) * ko) for i in range(4)]
+            self.seen["open_work"] = [chr(ord("가") + i) * ko for i in range(4)]
             for count in (0, 2, 3, 5):
                 groups = [dict(name="묶음" + str(i), headline_name="모델" + str(i),
                                unknown=1, failed=0, stagnant=0) for i in range(count)]
@@ -2256,7 +2245,7 @@ class LabRegressionTest(CheckBase):
                 self.assertEqual(" | LAB: " in text, count > 0)
                 if count:
                     self.assertIn(f"미확인 {count}·이름 없음 0·실패 0·정체 0 (묶음 {count}개)", text)
-                omitted = sum(item.headline not in text for item in self.seen["open_work"])
+                omitted = sum(work not in text for work in self.seen["open_work"])
                 if omitted:
                     self.assertIn(f"+{omitted} more", text)
                 for fragment in text.split("Do these now: ")[1].split(". Then run")[0].split("; "):
@@ -2308,14 +2297,14 @@ class LabRegressionTest(CheckBase):
             self.assertEqual(self.tick(lab), 0)
 
     def test_healthy_name_does_not_displace_actions_but_counts_remain(self):
-        self.seen["open_work"] = [work_item(str(i) + "x" * 69) for i in range(4)]
+        self.seen["open_work"] = [str(i) + "x" * 69 for i in range(4)]
         self.tick(self.labs(groups=[dict(name="healthy" + "가" * 30, headline_name="best" + "나" * 20,
                                         unknown=0, failed=0, stagnant=0)]))
         text = self.notice()["text"]
         self.assertNotIn("more", text)
         self.assertIn("LAB: 미확인 0·이름 없음 0·실패 0·정체 0", text)
-        for item in self.seen["open_work"]:
-            self.assertIn(item.headline, text)
+        for work in self.seen["open_work"]:
+            self.assertIn(work, text)
 
     def test_new_run_same_condition_and_new_unlinked_run(self):
         lab = self.labs(unknown=1, unlinked=1)
@@ -2373,7 +2362,7 @@ class LabRegressionTest(CheckBase):
         self.assertEqual(self.tick(labs), 1)
         labs["/second"] = labs.pop("/synthetic")
         self.assertEqual(self.tick(labs), 1)
-        self.seen["open_work"] = [work_item("new work")]
+        self.seen["open_work"] = ["new work"]
         self.assertEqual(self.tick({}), 1)
         self.seen["targets"] = [target()]
         self.assertEqual(self.tick({}), 1)

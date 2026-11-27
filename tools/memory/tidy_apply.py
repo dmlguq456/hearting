@@ -55,7 +55,7 @@ if str(UTILITIES) not in sys.path:
 
 import session_tidy as st  # noqa: E402
 import tidy_decisions as td  # noqa: E402
-from memory_open_work import open_stage, owner_identity, owner_link  # noqa: E402
+from memory_open_work import open_stage, owner_identity, owner_key, owner_link  # noqa: E402
 
 SCHEMA = 1
 ACTOR = td.DECISION_ACTOR
@@ -558,12 +558,14 @@ def apply_batch(mem, doc: dict, input_doc: Optional[dict], cwd: str, input_diges
         return result
 
     pkey = td.project_origin(mem, cwd)
-    scope = (input_doc or {}).get("obligation_owners")
+    # An open obligation belongs to a session this batch read: the same project's sessions.
+    read = (input_doc or {}).get("sessions")
     input_cwd = (input_doc or {}).get("cwd")
     owners = set()
-    if (isinstance(scope, list) and isinstance(input_cwd, str) and input_cwd
+    if (isinstance(read, list) and isinstance(input_cwd, str) and input_cwd
             and os.path.realpath(input_cwd) == cwd):
-        owners = {owner for row in scope if (owner := owner_identity(row))}
+        owners = {owner for row in read if isinstance(row, dict)
+                  and (owner := owner_key(row.get("harness"), row.get("sid")))}
     batch = Batch(mem, batch_id, cwd, pkey, directory, owners)
     batch.result["before"] = _counts(mem)
     block_reason = None

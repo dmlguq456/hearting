@@ -75,7 +75,6 @@ if str(HERE) not in sys.path:
 
 import session_tidy as st  # noqa: E402
 import tidy_decisions as td  # noqa: E402
-from memory_open_work import scoped_owners  # noqa: E402
 try:  # ends a detached child with the test that started it; no-op outside tests
     from detached_lifetime import bind as end_with_test  # noqa: E402
 except ImportError:  # a partial tree without it (e.g. a fixture release): no record
@@ -508,7 +507,6 @@ class Bundle:
         self.unreadable: list = []      # sessions whose record could not be read (never "nothing new")
         self.idle_card_requested = False
         self.idle_card_body: Optional[str] = None
-        self.owner_scope_complete = True
 
 
 def _target_sessions(item: dict, seat) -> list:
@@ -537,18 +535,6 @@ def _unread_entry(target: dict, chunk) -> dict:
     import tidy_transcripts as tt
     return {"harness": target["harness"], "sid": target["sid"], "role": target["role"],
             "coverage": tt.describe_coverage(chunk), "blocked": chunk.blocked, "remaining": tt.unread_total(chunk)}
-
-
-def _obligation_scope(item: dict, seat):
-    """Resolve identities from metadata, independently of which conversations were read."""
-    tools = str(ROOT / "tools")
-    if tools not in sys.path:
-        sys.path.insert(0, tools)
-    try:
-        from fleet.collectors import steward
-    except ImportError:
-        steward = None
-    return scoped_owners(item["harness"], item["sid"], steward, cwd=item["cwd"], seat=seat)
 
 
 def assemble(item: dict, batch: str, run_dir: Path) -> Bundle:
@@ -613,9 +599,6 @@ def assemble(item: dict, batch: str, run_dir: Path) -> Bundle:
            "automatic_records": automatic_records,
            "pending_decisions": pending, "existing_records": records, "duplicate_groups": groups,
            "limits": {"max_new_records": 10, "max_duplicate_groups": DUPLICATE_SIGNAL_MAX}}
-    scope = _obligation_scope(item, seat) if sessions else None
-    if scope is not None:
-        doc["obligation_owners"] = [{"harness": h, "session_id": s} for h, s in sorted(scope.confirmed)]
     if item.get("idle_card"):
         import session_tidy_idle_card
         try:
@@ -631,7 +614,6 @@ def assemble(item: dict, batch: str, run_dir: Path) -> Bundle:
     empty = not (sessions or choices or pending or doc.get("idle_card"))
     bundle = Bundle(path, digest, cursors, empty, unread, {r["id"] for r in records})
     bundle.idle_card_requested = "idle_card" in doc
-    bundle.owner_scope_complete = scope is None or scope.complete
     bundle.unreadable = [s for s in skipped if str(s.get("reason", "")).startswith("unreadable")]
     return bundle
 
@@ -1171,19 +1153,6 @@ def end_batch_files(item: dict, run_dir: Path, clean: bool) -> None:
         _log(run_dir, "cleanup incomplete: a conversation copy could not be removed or reached")
 
 
-def _keep_for_owner_scope(item: dict, bundle: Bundle, result) -> bool:
-    """Keep the range for an open obligation skipped while this session's own role record
-    was unreadable, unless this session's last tidy already kept one."""
-    skipped = result.get("skipped") if isinstance(result, dict) else None
-    if getattr(bundle, "owner_scope_complete", True) or not any(
-            row.get("reason") == "obligation-owner-unconfirmed" for row in skipped or ()):
-        return False
-    earlier = [other.get("result") for other in list_items() if other.get("id") != item["id"]
-               and other.get("status") == "notified" and other.get("sid") == item["sid"]
-               and other.get("harness") == item["harness"]]
-    return not earlier or earlier[-1] != "partial"
-
-
 def process_item(item: dict) -> None:
     attempts = int(item.get("attempts", 0))
     # An interrupted operation keeps the same tidy-apply batch. The apply journal and
@@ -1229,28 +1198,20 @@ def process_item(item: dict) -> None:
         line = apply_actions(item, run_dir, bundle)
         result = st.read_json(run_dir / "result.json")
         over = int(result.get("discarded_over_budget") or 0) if isinstance(result, dict) else 0
-        reason = ""
-        scope_unavailable = _keep_for_owner_scope(item, bundle, result)
-        if scope_unavailable:
-            # An unreadable own role record skipped an open obligation: the next tidy
-            # reads this range once more (applied records are deduplicated), not forever.
-            reason = "obligation-owner-scope-unavailable"
-            line = failure_line(reason, batch, applied_writes(run_dir))
-        elif over:
+        if over:
             # Proposals beyond the batch's ten were dropped: that conversation is read again next time.
-            reason = "상한 초과 제안 폐기"
             line = _with_coverage(line, st._ui_translator()("tidy.runner.over_limit"))
         else:
             advance_watermarks(bundle)
             line = _with_coverage(line, coverage_note(bundle))
-        publish_memory(item, batch, run_dir, bundle, "partial" if reason else "applied", reason)
+        publish_memory(item, batch, run_dir, bundle, "applied" if not over else "partial",
+                       "상한 초과 제안 폐기" if over else "")
         # A partly applied batch or a failed deletion check is no quiet result.
         applied_status = result.get("status") if isinstance(result, dict) else ""
-        notify(item, line, level="" if scope_unavailable or applied_status in (
-            "partial", "integrity-violation") else "done")
+        notify(item, line, level="" if applied_status in ("partial", "integrity-violation") else "done")
         # A terminal status is written last: whoever reads it sees the folder as it stays.
         end_batch_files(item, run_dir, True)
-        set_status(item, "notified", result="partial" if scope_unavailable else "applied")
+        set_status(item, "notified", result="applied")
         finished = True
     except RunnerFailure as exc:
         _log(run_dir, f"failed: {exc}")

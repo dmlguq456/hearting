@@ -19,7 +19,6 @@ unknown targets remain communication only.
 """
 import os
 import copy
-import json
 import sqlite3
 import threading
 from contextlib import closing
@@ -38,47 +37,21 @@ def _utilities_dir():
     return Path(__file__).resolve().parents[3] / "utilities"
 
 
-def read_markers(*, only=None):
+def read_markers():
     """``{(harness, session_id): marker}`` over every ledger root the board reads (the
-    F-98d resolver chain plus each installed runtime's own root); empty on any failure.
-
-    ``only`` opens just those sessions' own marker files and raises when one exists but
-    cannot be read, so a caller can tell its own unreadable evidence from no role."""
+    F-98d resolver chain plus each installed runtime's own root); empty on any failure."""
     mod = _peer_message_module()
     if mod is None:
-        if only is not None:
-            raise OSError("steward-marker-reader-unavailable")
         return {}
     try:
         from . import peer_messages as _pm
         roots = _pm._state_roots()
     except Exception:
         roots = None
-    if only is not None:
-        return _own_markers(mod, roots or [mod.peer_state_root()], only)
     try:
         return mod.read_steward_markers(roots or None) or {}
     except Exception:
         return {}
-
-
-def _own_markers(mod, roots, keys):
-    out = {}
-    for root in roots:
-        for harness, sid in sorted(keys):
-            try:
-                with open(Path(root) / "peer-steward" / harness / f"{sid}.json", encoding="utf-8") as fh:
-                    data = json.load(fh)
-            except FileNotFoundError:
-                continue
-            if not isinstance(data, dict):
-                raise ValueError("steward-marker-unreadable")
-            if data.get("session_id") != sid or not mod.is_steward_marker(data):
-                continue
-            previous = out.get((harness, sid))
-            if previous is None or (data.get("updated") or "") > (previous.get("updated") or ""):
-                out[(harness, sid)] = data
-    return out
 
 
 _RELATIONS_OBSERVATION = None
@@ -129,14 +102,10 @@ def _trusts_unchanged_ledgers():
         return False
 
 
-def read_relations(*, seat_keys=None, markers=None):
-    """Every confirmed role relation (from already read ``markers``), or only those of
-    ``seat_keys``, whose unreadable own seat ledger then raises instead of reading as no role."""
-    if seat_keys is not None:
-        return _read_relations_uncached(seat_keys=seat_keys, markers=markers)
+def read_relations():
     from . import dispatch
     if dispatch._COLLECTION_INPUTS.get() is None and not _trusts_unchanged_ledgers():
-        return _read_relations_uncached(markers=markers)
+        return _read_relations_uncached()
     global _RELATIONS_OBSERVATION
     try:
         before = _relations_generation()
@@ -145,8 +114,8 @@ def read_relations(*, seat_keys=None, markers=None):
             if held is not None and held[0] == before:
                 return copy.deepcopy(held[1])
     except (ImportError, OSError, TypeError, ValueError):
-        return _read_relations_uncached(markers=markers)
-    value = _read_relations_uncached(markers=markers)
+        return _read_relations_uncached()
+    value = _read_relations_uncached()
     try:
         if value and before == _relations_generation():
             with _RELATIONS_LOCK:
@@ -156,7 +125,7 @@ def read_relations(*, seat_keys=None, markers=None):
     return value
 
 
-def _read_relations_uncached(*, seat_keys=None, markers=None):
+def _read_relations_uncached():
     """Read confirmed current holders without projecting a marker onto a successor SID."""
     try:
         import sys
@@ -164,14 +133,8 @@ def _read_relations_uncached(*, seat_keys=None, markers=None):
         if str(utilities) not in sys.path:
             sys.path.insert(0, str(utilities))
         import dispatch_seat_handover
-        if seat_keys is not None:
-            return [relation for key in sorted(seat_keys)
-                    for relation in dispatch_seat_handover.resolved_steward_relations(
-                        seat_key=key, include_released=True, strict=True, markers=markers)]
-        return dispatch_seat_handover.resolved_steward_relations(include_released=True, markers=markers)
+        return dispatch_seat_handover.resolved_steward_relations(include_released=True)
     except Exception:
-        if seat_keys is not None:
-            raise
         return []
 
 
@@ -239,32 +202,14 @@ def _observed_registry_records(harness, directory, reader):
     return tuple(records)
 
 
-def _registry_sessions(*, include_aliases=False):
-    """Reuse native metadata, optionally joining resume ids from the same live process."""
-    from .. import session_registry
-    from . import liveness
-
+def _registry_sessions():
+    """Reuse native session metadata; no process, herdr or role probe."""
     rows = []
     for harness in ('claude', 'codex', 'opencode'):
         for record in _registry_records(harness) or ():
-            if not record or not record.get("sessionId") or not record.get("cwd"):
-                continue
-            row = SimpleNamespace(harness=harness, session_id=record["sessionId"],
-                                  cwd=record["cwd"], runtime_name=record.get("name"))
-            pid = record.get("pid")
-            if (include_aliases and session_registry.ALIAS_SUPPORT[harness] == "proc-argv"
-                    and record.get("status") != "exited" and type(pid) is int and pid > 0):
-                alive, birth_matches = liveness._proc_evidence(pid, record.get("procStart"))
-                if alive and birth_matches is not False:
-                    row.session_aliases = session_registry.session_aliases(
-                        harness, pid, expected_sid=row.session_id)
-            rows.append(row)
-    if include_aliases:
-        # A prior id that is still someone's exact id cannot become another row's alias.
-        current = {(row.harness, row.session_id) for row in rows}
-        for row in rows:
-            row.session_aliases = [sid for sid in getattr(row, "session_aliases", ())
-                                   if (row.harness, sid) not in current]
+            if record and record.get("sessionId") and record.get("cwd"):
+                rows.append(SimpleNamespace(harness=harness, session_id=record["sessionId"],
+                                            cwd=record["cwd"], runtime_name=record.get("name")))
     return rows
 
 
@@ -582,15 +527,14 @@ def role_targets(harness, session_id, *, aliases=(), markers=None, cwd=None, ses
     return _owner_targets(winners, harness, session_id)
 
 
-def unresolved_role_targets(harness, session_id, *, sessions=None, _relations=None):
+def unresolved_role_targets(harness, session_id, *, sessions=None):
     """Keep the holder's unjoined evidence visible as uncertainty, never a winning edge."""
     rows = _registry_sessions() if sessions is None else list(sessions)
     keys = {key for row in rows for key in _session_keys(row)}
     names = {(row.harness, getattr(row, "runtime_name", None)) for row in rows}
     targets = []
     seen = set()
-    relations = read_relations() if _relations is None else _relations
-    for relation in relations:
+    for relation in read_relations():
         holder = relation.get("holder") or {}
         if relation.get("released") or (holder.get("harness"), holder.get("sid")) != (harness, session_id):
             continue
@@ -598,7 +542,7 @@ def unresolved_role_targets(harness, session_id, *, sessions=None, _relations=No
             h, sid, name = target.get("harness"), target.get("session_id"), target.get("name")
             if target.get("source") not in {"start", "watch"}:
                 continue
-            if (sid and (h, sid) in keys) or (not sid and name and (h, name) in names):
+            if (sid and (h, sid) in keys) or (name and (h, name) in names):
                 continue
             # Known native metadata may put it in a foreign repository: exclude
             # that communication edge rather than labelling it unresolved.
