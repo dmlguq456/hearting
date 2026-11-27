@@ -99,12 +99,12 @@ class RunningRoutePanel(unittest.TestCase):
         return str(child.pid), str(procscan.read_proc_start(child.pid))
 
     # -- the route and its registry -----------------------------------------------------------------
-    def seal(self, nodes, folder=".runtime/routes"):
+    def seal(self, nodes, folder=".runtime/routes", slug="fixture-route"):
         """Write the sealed route record where the runtime keeps it (``<root>/.runtime/routes``; an
         older route sits in ``<root>/routes``)."""
         record = {"schema_version": 1, "cwd": str(self.root), "artifact_root": str(self.root / "artifacts"),
                   "capability": "autopilot-code", "capability_mode": "dev", "execution_topology": "staged",
-                  "effective_intensity": "standard", "owner_attempt_id": "-", "slug": "fixture-route",
+                  "effective_intensity": "standard", "owner_attempt_id": "-", "slug": slug,
                   "nodes": nodes}
         record["route_hash"] = route.route_hash(record)
         record["route_id"] = "rt-" + record["route_hash"].split(":")[1][:16]
@@ -357,6 +357,74 @@ class RunningRoutePanel(unittest.TestCase):
         seen = self.assert_over(routes_active=1)
         self.assertEqual(seen["route"]["state"], "working")      # it is read alive, and still not the new path
 
+    def test_a_legacy_row_whose_ended_pid_is_refilled_keeps_the_stage_rule(self):
+        # The legacy open owner row (no attempt id, no harness) records the PID and start of an owner that
+        # has already ended, accepted as the row's own identity; a live `claude -p` runs in the same folder
+        # and the collector fills the row from it. A row with no attempt id never takes the new path.
+        ended_pid, ended_start = self.process()
+        os.kill(int(ended_pid), 9)
+        os.waitpid(int(ended_pid), 0)
+        launcher = self.root / "bin" / "claude"
+        launcher.parent.mkdir()
+        launcher.symlink_to(sys.executable)
+        self.process([str(launcher), "-c", "import time; time.sleep(300)", "-p"])
+        rid, digest, path = self.record["route_id"], self.record["route_hash"], self.route_file
+        self.live[None] = "working"
+        self.lines.append(
+            f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\trunning\trepo\t{self.root}\tlegacy-owner\t"
+            "attempt_schema_version=2,transport=headless,execution_surface=registered-headless,registered_worker=1,"
+            f"fallback_hop=same-harness-headless,parent_sid={SID},parent_harness=claude,capability=autopilot-code,"
+            f"route_id={rid},route_hash={digest},route_file={path},worker_type=owner,dispatch_depth=1,"
+            f"owner_route_id={rid},owner_route_file={path},pid={ended_pid},pid_start={ended_start}")
+        self.row("att-plan", "done", node="plan")
+        self.row("att-execute", "done", node="execute", note="dead-worker-blocked", failure_class="blocked")
+        self.assert_over(routes_active=1)
+
+    def test_a_route_file_that_cannot_be_read_back_keeps_the_stage_rule(self):
+        # Route B (an older layout) is open with its own live owner after a BLOCKED stage. Its file is a
+        # JSON array from the start, is replaced by one right after the projection validated it, or is
+        # removed then. Its closure cannot be read: B reads as before (no row); route A keeps its row.
+        record_a, file_a = self.record, self.route_file
+        self.row("att-owner", owner=True)
+        self.row("att-plan", node="plan")
+        a_lines = list(self.lines)
+        self.seal([{"id": node, "depends_on": [NODES[i - 1]] if i else []} for i, node in enumerate(NODES)],
+                  folder="routes", slug="fixture-route-b")
+        record_b, file_b = self.record, self.route_file
+        self.assertNotEqual(record_b["route_id"], record_a["route_id"])
+        sealed_b = file_b.read_text()
+        self.row("att-owner-b", owner=True)
+        self.row("att-plan-b", "done", node="plan", parent_attempt_id="att-owner-b")
+        self.row("att-execute-b", "done", node="execute", note="dead-worker-blocked", failure_class="blocked",
+                 parent_attempt_id="att-owner-b")
+        b_lines = self.lines[len(a_lines):]
+        self.record, self.route_file = record_a, file_a
+        interpret = live._route_records
+
+        def after_projection(change):
+            def read(*args, **kwargs):
+                change()
+                try:
+                    return interpret(*args, **kwargs)
+                finally:
+                    file_b.write_text(sealed_b)        # the next pass projects it validly again
+            return read
+        for name, change in (("a JSON array from the start", None),
+                             ("replaced by an array after the projection", lambda: file_b.write_text("[]")),
+                             ("removed after the projection", lambda: file_b.unlink())):
+            with self.subTest(name):
+                self.lines = a_lines + b_lines
+                file_b.write_text("[]" if change is None else sealed_b)
+                with mock.patch.object(live, "_route_records",
+                                       side_effect=after_projection(change) if change else interpret):
+                    self.assert_running("plan")
+                    view = __import__("human_wait_state").cached_view(request=False) or {}
+                    self.assertEqual([row for row in (view.get("route_panels") or {}).get(KEY, ())
+                                      if row.get("id") == record_b["route_id"]], [])
+                    fleet = live.build_view_model(collectors.collect_all(include_report_verification=False))
+                    b = next((r for r in fleet.routes if r.get("id") == record_b["route_id"]), None)
+                    self.assertTrue(b is None or b["current"] is False)
+
     def test_an_owner_alive_by_anything_but_its_own_process_keeps_the_stage_rule(self):
         # No outcome: the owner row is open and reads alive, but not by its own process: it records no
         # PID, or its PID now belongs to a process with another start. As before: no row after a
@@ -430,6 +498,8 @@ class OwnProcessEvidence(unittest.TestCase):
                 ("its start in proc_start", {**owner, "pid": str(pid), "proc_start": start}, None, True),
                 ("another start", {**owner, "pid": str(pid), "pid_start": str(int(start) + 1)}, None, False),
                 ("no PID", dict(owner), None, False),
+                ("a live row with no attempt id (start in proc_start): not counted, a known limit",
+                 {"harness": "codex", "pid": str(pid), "proc_start": start}, None, False),
                 ("a legacy row filled from a same-folder process",
                  {"pid": str(pid), "pid_start": start, "pid_scope": "host-visible",
                   "pid_observer_ns": "pid:[4026531999]"}, (pid, start), False)):
@@ -466,9 +536,12 @@ class FramedLegRoute(unittest.TestCase):
                    "liveness": "idle", "is_child": False, "title": "supervisor", "route_chain": {"nodes": chain}}
         slot = {"view": view, "record": record, "jobs": [owner], "sessions": [session]}
         now = time.time()
-        with mock.patch.object(live, "_collect_routes", return_value={rid: slot}):
-            rows, index = live._session_records({"sessions": [session]}, now, lambda _cwd: "repo")
-            routes, _nodes = live._route_records({"resources": []}, rows, index, lambda _cwd: "repo", now)
+        with tempfile.TemporaryDirectory(prefix="leg-") as tmp:
+            owner["owner_route_file"] = str(Path(tmp) / (rid + ".json"))      # the route file it records
+            Path(owner["owner_route_file"]).write_text(json.dumps(record))
+            with mock.patch.object(live, "_collect_routes", return_value={rid: slot}):
+                rows, index = live._session_records({"sessions": [session]}, now, lambda _cwd: "repo")
+                routes, _nodes = live._route_records({"resources": []}, rows, index, lambda _cwd: "repo", now)
         leg = next(r for r in routes if r["id"] == rid)
         self.assertEqual((leg["current"], leg["state"], leg["worker_stage"], leg["session_tag"]),
                          (True, "working", "execute", "s1"))

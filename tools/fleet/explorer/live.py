@@ -665,23 +665,28 @@ def _own_pid_alive(job):
     """True only when the collector accepted this registry row's own PID in this pass
     (``pid_identity_source``, from ``dispatch._authoritative_registry_pid``) and the classifier
     found that very process alive with its recorded start (``pid_alive``, ``proc_start_match``).
-    A borrowed PID or a row whose PID was not accepted is not this attempt alive (11-27)."""
+    A borrowed PID or a row whose PID was not accepted is not this attempt alive; a row with no
+    attempt id is never (the collector fills such a row's PID from a same-folder process) (11-27)."""
     evidence = _get(job, "state_evidence")
     seen = evidence.get("inputs") if isinstance(evidence, Mapping) else None
-    return (isinstance(seen, Mapping) and bool(seen.get("pid_identity_source"))
+    return (bool(_text(_get(job, "attempt_id"))) and isinstance(seen, Mapping)
+            and bool(seen.get("pid_identity_source"))
             and seen.get("pid_alive") is True and seen.get("proc_start_match") is True)
 
 
 def _closed_at_route_file(job, record):
     """Whether the outcome beside the route file this owner row records (an older route under
     ``artifacts/routes`` too) closed the projection-validated route ``record``, read by the route
-    reader the work projection uses for its result. A file changed meanwhile reads as not closed."""
+    reader the work projection uses for its result. A route file gone or changed meanwhile cannot
+    confirm the route open, so it reads as closed: that route keeps the earlier rule."""
     from .. import route as route_reader
     path = _text(_get(job, "owner_route_file")) or _text(_get(job, "route_file"))
+    if not path or not os.path.isfile(path):
+        return True
     try:
-        outcome = route_reader.load_outcome(path, record.get("route_id"), record.get("route_hash")) if path else {}
+        outcome = route_reader.load_outcome(path, record.get("route_id"), record.get("route_hash"))
     except (AttributeError, TypeError, ValueError, OSError):
-        return False
+        return True
     return bool(outcome.get("present") and outcome.get("match") and outcome.get("closed_at"))
 
 
@@ -1224,7 +1229,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         # it, unless the route is closed (its outcome's ``closed_at``): then everything reads as before.
         candidate = _running_owner(owner, _owner_jobs(owner_jobs))
         visibility, closed = _route_visibility_of(record, view, owner_jobs, owner, candidate)
-        # Closed where its own route file says so, too (an older route kept under ``artifacts/routes``).
+        # Closed where its own route file says so (an older route under ``artifacts/routes`` too), or unreadable.
         ended = closed or bool(record and candidate is not None and _closed_at_route_file(candidate, record))
         if ended and owner is None and candidate is not None:
             visibility, closed = _route_visibility_of(record, view, owner_jobs, owner, None)
