@@ -145,7 +145,7 @@ class AnswerRowWithoutObservationTest(unittest.TestCase):
         gap = self.project(retained)
         for rows in self.drawn(first, gap):
             self.assertTrue(any(row.startswith("› ") for row in rows), "\n".join(rows))
-            self.assertEqual(sum(1 for row in rows if "choice" in row and row.strip()[:1] in "▸123"), 3, "\n".join(rows))
+            self.assertEqual(sum(1 for row in rows if "choice" in row and row.strip()[:1] in "▶123"), 3, "\n".join(rows))
             self.assertFalse(any("closed" in row for row in rows), "\n".join(rows))
 
     def test_an_answer_before_the_next_observation_says_why_and_goes_after_it(self):

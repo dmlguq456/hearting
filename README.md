@@ -106,7 +106,7 @@ when Hearting confirms the handover. A report is not an approval or an answer
 from you.
 
 <p align="center">
-  <img src="docs/fleet/requests.png" alt="Two panels side by side. Left, the Claude Code session [4f] that asked: in its route box, under the request rule, an arrow to [b2] with its harness, model, and effort, Test run, partial answer, and a finished review; under it MESSAGES with a reply from [b2] and a note to [9c]. Right, the Codex session [b2] that was asked: in its route box, under the request rule, an arrow from [4f] with its harness, model, and effort, Test run, partial answer; under it its reply to [4f]." width="80%">
+  <img src="docs/fleet/requests.png" alt="Two panels side by side. Left, the Claude Code session [4f] that asked: in its route box, under the request rule, an arrow to [b2] with its harness, model, and effort, Test run, partial answer, and a finished review, its check mark followed by the arrow it went; under it MESSAGES with a reply from [b2] and a note to [9c]. Right, the Codex session [b2] that was asked: in its route box, under the request rule, an arrow from [4f] with its harness, model, and effort, Test run, partial answer; under it its reply to [4f]." width="80%">
 </p>
 <p align="center"><sub>The same request in the panel of the session that asked (<code>[4f]</code>) and the one asked (<code>[b2]</code>). Demo data.</sub></p>
 
