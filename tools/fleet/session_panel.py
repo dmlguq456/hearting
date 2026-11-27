@@ -291,13 +291,12 @@ ROLES = ("owner", "frame", "worker")
 
 
 def route_gauge_cells(columns):
-    """The folded route's context gauge width beside the native area (spec E9 rule 38):
-    about eight cells in a 40-cell panel, five to ten as the panel narrows or widens."""
+    """Gauge width for doers that use the older, separate context row."""
     return max(5, min(10, (int(columns or 40) - 8) // 4))
 
 
 def doer_paint(row, cells=None):
-    """A doer's painted harness, model, effort and context (gauge at ``cells`` for the folded row)."""
+    """Paint the doer's values. The side panel uses gauge5 on wide owner and worker rows."""
     from .session_line import effort_label, gauge_parts, token_text
     shown = {}
     harness = sanitize_title(str(row.get("harness") or ""))[:32]
@@ -318,8 +317,7 @@ def doer_paint(row, cells=None):
         shown.update(ctx=_percent(percent), ctx_key=_level(percent), gauge=[list(part) for part in gauge_parts(percent)],
                      gauge5=[list(part) for part in gauge_parts(percent, cells=5)])
         if cells:
-            # Spec E9 rule 38: the folded route's own context row: the head's context gauge
-            # (``gauge_parts``, its level colors) at the panel's width.
+            # Frame legs and legacy doers still use the panel-width gauge on a separate row.
             shown["gauge_row"] = [list(part) for part in gauge_parts(percent, cells=cells)]
     elif token_text(row.get("ctx_tokens")):
         # No window known: the exact token count, as Fleet writes it, never a made-up percent.
@@ -406,7 +404,8 @@ def route_row(row, now=None, *, cells=None):
                     shown["kind_field"] = field
                 else:
                     shown.pop("kind_field", None)
-    shown.update(doer_paint(row, cells))
+    aligned = shown.get("role") in ("owner", "worker") and not shown.get("unit_route")
+    shown.update(doer_paint(row, None if aligned else cells))
     minutes = None
     if _number(row.get("since")) is not None:
         minutes = max(0.0, (now - row["since"]) / 60)
@@ -418,7 +417,7 @@ def route_row(row, now=None, *, cells=None):
     # running now (its mark, role, stage, open tool and its own time); a row from an older
     # producer has neither and keeps its one doer.
     if isinstance(row.get("owner_doer"), dict):
-        shown["owner_paint"] = doer_paint(row["owner_doer"], cells)
+        shown["owner_paint"] = doer_paint(row["owner_doer"], cells if shown.get("unit_route") else None)
     if isinstance(row.get("workers_live"), list):
         shown["workers_live"] = []
         for item in row["workers_live"][:8]:
@@ -426,9 +425,10 @@ def route_row(row, now=None, *, cells=None):
                 continue
             marker = item.get("marker") if item.get("marker") in ("working", "idle", "blocked", "dead", "stale") else "idle"
             glyph, key = route_glyph(marker)
-            worker = {"glyph": glyph, "glyph_key": key, "kind": marker,
-                      "role": "frame" if item.get("role") == "frame" else "worker",
-                      "stage": sanitize_title(str(item.get("stage") or ""))[:64], **doer_paint(item, cells)}
+            role = "frame" if item.get("role") == "frame" else "worker"
+            worker = {"glyph": glyph, "glyph_key": key, "kind": marker, "role": role,
+                      "stage": sanitize_title(str(item.get("stage") or ""))[:64],
+                      **doer_paint(item, cells if role == "frame" or shown.get("unit_route") else None)}
             for name, limit in (("tool", 48), ("target", 120)):
                 value = sanitize_title(str(item.get(name) or ""))[:limit]
                 if value and (name == "tool" or worker.get("tool")):

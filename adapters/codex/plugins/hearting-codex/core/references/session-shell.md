@@ -594,29 +594,28 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   staying), the chain of kinds it
   continues leading it (`frame ✓ → code(team·standard)`: what is behind dim with `✓`, this one bold;
   `research ✓ → draft ✓ → code(team·standard)`), then its title two cells in on at most two rows
-  (the second ending in `…`), then the owner two cells in (the mark, the doer's recorded role as
-  a dim label in one column, then harness, model and effort, no tool: `● owner  claude Opus 5.5 xhigh`; 11-18, the person:
-  "CTX는 게이지를 포함해서 아래줄로 내리자. 그리고 NOW를 두줄까지는 허용치를 늘려주고 (owner, worker 둘다)": under it, four
-  cells in, its `CTX ━━━━━───── 41%` row (the gauge at the panel's width and its number, then ` · 12m` only where the time is that
-  session's own: a worker's, never the owner's, whose time is the route's and stands at the end of the route's first row; short of
-  cells the gauge narrows to the number, then the time, then the word `CTX` go), under that the session's NOW on at most two rows
+  (the second ending in `…`), then the owner two cells in (the mark, the doer's recorded role as a dim label, then harness,
+  model and effort). In the expanded side panel, the owner's and workers' CTX values end in one column at the right edge of
+  the workers' content, inside the border of a closed box. At 50 panel cells and wider the percent has a five-cell gauge.
+  Narrower panels show the percent alone. Short of cells, effort goes first, then the harness, then the model is shortened.
+  Under it the session's NOW stands on at most two rows
   four cells in (the value Fleet's session rows carry for that session, handed over by the cache producer from the job it already
   read: no read of its own; broken between words, a word wider than a row by cells so no row is wider than the box; the second row
-  ends in `…` where it runs over; none, no row, where the session has none; a session whose values are not known leads its `CTX`
-  row with its mark), and, for a route with a stage list, the stage line (`staged 3/7: execute`,
+  ends in `…` where it runs over, with no row where the session has no NOW), and, for a route with a stage list, the stage line (`staged 3/7: execute`,
   `map-reduce 2/3: analyze`: the route's own shape word, none when the record names none, then the
   position; a failed stage keeps `✕`, a done one `✓`; with no stage running the next stage and
   what it waits for). A route whose owner is not known keeps its `CTX` row; its time is on the first row.
   The owner's mark spins while it works alone and is a dim `●` while its workers run. A route its owner
   does alone has no stage line. An owner's live workers (`workers_live`) stand under it, each as a session of its own
-  (its first row with its mark, `worker`, harness, model and effort; its `CTX ━━──────── 22% · 12m` row; its NOW on up to two
-  rows; the stage name and the open tool are not drawn: the stage line has the stage, 11-16's stage color is that line's).
+  (its mark, `worker`, harness, model, effort and right-aligned context, then its NOW on up to two rows). The worker's time
+  ends the last NOW row. With no NOW it stands before the context on the first row. With no context the worker's time ends
+  the first row when it fits. The stage line carries the stage name and its color.
   11-18, the person: "worker 부를떄 stage ~ 부분을 블록의 상단에 그려서 그냥 worker는 박스에 넣어도 되겠는데?" / "박스 여부는 내가
   골라가면서 볼 수 있게 그냥 옵션에 좀 넣어줘": the setting `worker box` (`closed`, the default; `open`; `none`, in the settings editor
   and `session-shell.json` as `worker_box`, previewed at once and saved with Apply) puts the workers of the route's stage in one box
   under the owner, two cells in, the stage text (`staged 3/6: execute`, the current stage's name blinking as it did) on its top
   line and no stage row apart: `closed` has four dim borders (the right one in one column whatever the text's widths), `open`
-  only the top line and the left side, `none` the stage row and the workers hung by `↳` four cells in (their `CTX` and NOW eight
+  only the top line and the left side, `none` the stage row and the workers hung by `↳` four cells in (their NOW eight
   cells in), as before. A route with no workers has no box: its stage text is on its first line (`· 3/6: execute`) where the name has room there, and where it does not (the default width among them) its stage row `staged 3/6: execute` stands under the owner (11-18, round 5); a frame route's legs have none either. Where the closed
   box's text would be under 24 cells wide it is the open one; short of rows its closing line goes first. A frame route has no owner yet: `● frame → ??`, its two legs (`frame`,
   `frame-alt`) hung straight under it two cells in, and, once both are done and the direction
@@ -626,9 +625,9 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   stage line stands (so no `●` follows it), else the first row's mark. The role column is the
   route's own width. Short of cells the values go from the back, whole: the chain behind, then the
   intensity (`● code`), the stage line's word `staged` (`3/7: execute`), effort, the
-  harness; the role and the model stay. Short of rows, in this order: the closed box's closing line, each NOW's second row, each
-  `CTX` row (its number joins the session's first row at the right edge, the one-row fold), each NOW's first row, then the stage line
-  goes (the workers' count, `· worker 2`, ends it), then the workers go, then every route takes one row.
+  harness. Short of rows, the closed box's closing line goes first, then each NOW's second row, then any separate `CTX` rows.
+  When each NOW's first row goes, owner and worker lines take their existing one-row form with its percent and time columns.
+  Then the stage line goes (the workers' count, `· worker 2`, ends it), then the workers go, then every route takes one row.
   A request (11-16, the person: "양식을 맞추자. [6c] claude opus 5.5 xhigh 이런식으로") reads as a
   route's doer: beside the native area its first row is its mark (→ sent, ◂ received, `✓`/`✕`
   closed), the other session's Fleet number, then that session's harness, model and effort in
@@ -769,8 +768,8 @@ then the question's action row, its summary's second row and the guidance line;
 the structural rows (the SESSION head's own row, which then takes MODEL's value and row; 11-26, panel B: MODEL then stands on its own row and the rule over it on a row B's forms left; the question box's two border lines); then the
 route box's own steps (11-17: its zone rules are not among them, they stay while a row of the zone shows), every
 route at the same step (v4.36.4, spec rules 34 (b), 38,
-48 (c); 11-18): the workers' closed box becomes the open one, each NOW's second row goes, each `CTX` row goes (its number joins the first row at the right
-edge), each NOW's first row goes, the workers take one row each, the workers go (the kind row ends with
+48 (c); 11-18): the workers' closed box becomes the open one, each NOW's second row goes, any separate `CTX` row folds into the first row,
+then each NOW's first row goes and the workers take their compact one-row form. Next the workers go (the kind row ends with
 `· worker N`), the kind rows go, every route takes one row; then the box shows fewer
 routes and scrolls in place (the wheel over it), down to one, its border counting
 what it hides (`↑2`, `↓3`; it takes the rows of its tallest window, so the wheel moves

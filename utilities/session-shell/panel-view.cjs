@@ -1383,25 +1383,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const fit=clip(item.parts||[],Math.max(0,inner-box));
       return {...item,parts:[L('│ ',key),...fit.parts,pad(inner-box-fit.used),L(' │',key)]};
     };
-    // Spec rules 24, 36 and 38: beside the native area a folded route reads who / context
-    // and time / what / which kind. The first row is its glyph, the doer's recorded role
-    // (`owner`, `frame`, `worker`: a dim label in one column, none when unrecorded), then
-    // harness, model, effort and what a one-step route's doer is on now. The next, two cells
-    // in, the context gauge and percent with the elapsed time at the right edge, each in its
-    // own column (spec rule 30 (b)); an unknown context leaves its cells empty, and with
-    // neither the row is left out. Then the title, two cells in, on at most two rows (the
-    // second ending in `…`), and the kind row. Short of cells effort goes first, then the
-    // tool, then the harness; the role and the model stay, and a value shows whole or not at
-    // all. No value at all: the glyph and title share the first row. Short of rows the
-    // context row folds into the first row (its percent and time at the right, no gauge:
-    // short of cells there the `route line` choice keeps its value, time: elapsed, model:
-    // context), then the kind row goes, then the route takes one row.
-    // Spec rule 43: a backend that sends `workers_live` names the owner and each stage worker
-    // running now apart. The owner leads the route (its values in `owner_paint` while a worker
-    // leads the row). The context rows start with a dim `CTX` in the role column, the gauge
-    // under the harness, and (spec rule 57) the route's time follows the percent. Spec rule 48: the
-    // owner's live workers stand in one rounded box under it (below). An older backend's row
-    // keeps its one doer and the rows as they were.
+    // Beside the native area, known owners and workers share a right-aligned context column.
+    // Frame legs and older rows without a recorded doer keep their separate context row.
+    // The bottom layout and the compact form short of height keep their own columns.
     const treeOf=r=>side&&Array.isArray(r.workers_live);
     const leadPaint=r=>r.owner_paint&&typeof r.owner_paint==='object'?r.owner_paint:(r.paint||{});
     // A frame route has no owner yet: its two legs hang straight under the route (11-17, route row 5).
@@ -1413,7 +1397,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const workersOf=r=>treeOf(r)?r.workers_live.filter(w=>w&&typeof w==='object').slice(0,8):[];
     // The one-row form's percent and time columns, shared by owners and their workers (rule 48 (c)).
     const allWorkers=listed.flatMap(r=>workersOf(r));
-    const ctxWidth=Math.max(0,...listed.map(r=>leadPaint(r).ctx?size([leadPaint(r).ctx]):0),...allWorkers.map(w=>w.paint?.ctx?size([w.paint.ctx]):0));
+    const contexts=[...listed.map(r=>leadPaint(r).ctx),...allWorkers.map(w=>w.paint?.ctx)].filter(Boolean);
+    const ctxWidth=Math.max(0,...contexts.map(c=>size([c])));
+    const percentWidth=Math.max(3,...contexts.filter(c=>String(c.text).endsWith('%')).map(c=>size([c])));
     const timeWidth=Math.max(0,...allWorkers.map(w=>measure(w.elapsed||'')));   // (an owner has no time of its own: the route's stands on its first line)
     const ROLE=new Set(['owner','frame','frame-alt','worker']);
     let unitLabel='';      // the unit's short name on the route being drawn (a unit route's role word)
@@ -1450,20 +1436,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const ownerGlyph=(r,supervising)=>live(r)?(supervising?text('●','dim'):{...routeGlyph(r,leadPaint(r).harness)}):routeGlyph(r);
     const withBare=(lead,bare)=>{lead.bare=bare;return lead;};   // (`bare`: the same lead without its role word, for a unit's name that does not fit)
     const ownerLead=(r,supervising)=>{const mark=ownerGlyph(r,supervising);return withBare([text('  '),mark,text(' '),...rolePart(r)],[text('  '),mark,text(' ')]);};
-    // 11-17 (the person: "라우트 내부의 CTX는 하네스, 모델 옆에 붙이고 게이지는 없애자 ... 대신 NOW를 아래줄에"): a session's
-    // first line is its mark, role, harness, model, effort and, beside them, `CTX 40% · 42m` with no gauge. Short of cells the
-    // time goes first, then the word `CTX` (the number stays), then the effort, then the harness; the role and the model stay.
-    // 11-18 (the person: "CTX는 게이지를 포함해서 아래줄로 내리자 ... NOW를 두줄까지는 허용치를 늘려주고 (owner, worker 둘다)"): a session
-    // is three blocks. Its first row is its mark, role, harness, model and effort; under it, two cells in, `CTX ━━━━━───── 41%` (the
-    // gauge and its number, then ` · 12m` only when the time is that session's own: a worker's, never the owner's, which is the
-    // route's time and stands at the end of the route's first line); under that its NOW on at most two rows (the second ending in
-    // `…` where it goes on). A session with no NOW has no NOW rows. Short of cells the first row loses its effort, then its
-    // harness; the CTX row loses its gauge's width first (down to the number alone), then its time, then the word `CTX`.
-    const whoRow=(r,supervising)=>whoOf(ownerLead(r,supervising),leadPaint(r),leadRole(r));
-    function whoOf(lead,p,role,room=inner){
+    function whoOf(lead,p,role,room=inner,shortModel=false){
       const value=x=>x?[x]:[];
-      const H=value(p.harness),M=value(p.model_text),F=value(p.effort),C=value(p.ctx),keep=M.length?M:H;
-      if(!roled(role)&&!H.length&&!M.length&&!F.length)return null;   // (a session whose values are not known: its CTX row leads with its mark instead)
+      const H=value(p.harness),M=value(p.model_text),F=value(p.effort),keep=M.length?M:H;
+      if(!roled(role)&&!H.length&&!M.length&&!F.length)return null;
       // A unit's name (in the role word's place) is the last word to stay: the effort goes first, then the harness, then the model, and
       // the name stands alone. Only where the name itself has no room does it go, whole (never cut in the middle), and the row is drawn
       // as a row with no name is.
@@ -1474,7 +1450,20 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         // The name alone needs no space after it.
         if(named&&head===lead&&!parts.some(x=>x.length)&&size(row)-1<=room)return row.slice(0,-1);
       }
+      if(shortModel&&keep.length&&size(lead)<room)return [...lead,...cut(keep,room-size(lead))];
       return cut(leads.at(-1),room);
+    }
+    // Keep the right edge of the reading fixed before fitting the identity.
+    function alignedWhoRow(lead,p,role,elapsed){
+      const C=[p.ctx],gauge=p.gauge5;
+      const gaugeWidth=width>=50&&Array.isArray(gauge)?size(gauge)-size(C):0;
+      const reading=gaugeWidth>0?[...clip(gauge,gaugeWidth).parts,pad(percentWidth-size(C)),...C]:C;
+      const time=elapsed&&size(lead)+measure(elapsed)+size(reading)+2<=inner;
+      const right=time?[text(elapsed,'dim'),text(' '),...reading]:reading;
+      const room=inner-size(right)-1;
+      if(room<1)return cut(C,inner);
+      const who=whoOf(lead,p,role,room,true)||cut(lead,room);
+      return [...who,pad(inner-size(who)-size(right)),...right];
     }
     // The CTX row at `gap` cells in: the gauge (the backend's `gauge_row`, at the panel's width), else the five-cell one, else the
     // number alone; the session's own time after it when it has one.
@@ -1493,25 +1482,36 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
       return cut([...head,...C],inner);
     };
-    // The one-row form used short of rows is the older fold (who, then percent and time at the right edge in shared columns).
-    const leadRow=(r,supervising)=>foldRow(ownerLead(r,supervising),leadPaint(r),leadRole(r),[]);
     // The session's NOW at `gap` cells in, on at most `most` rows (the last ending in `…` where the value goes on; a word wider than a
     // row goes on by cells, so no row is wider than the box), none when the session has none (no empty row). Bright while the session
     // works or waits, as Fleet's NOW cell.
-    const nowRows=(p,kind,gap,most=2)=>{
+    const nowRows=(p,kind,gap,most=2,elapsed='')=>{
       const value=clean(p?.now||'').replace(/\s+/g,' ').trim();
       if(!value)return [];
-      const room=Math.max(1,inner-gap),rows=wrapAll([text(value,kind==='working'||kind==='blocked'?'loc_repo':'dim')],room);
-      const shown=rows.slice(0,most);
-      if(rows.length>most)shown[most-1]=ellipsis(shown[most-1],room);
+      const room=Math.max(1,inner-gap),body=[text(value,kind==='working'||kind==='blocked'?'loc_repo':'dim')];
+      const stampWidth=measure(elapsed),showTime=stampWidth>0&&room>stampWidth+1;
+      const lastRoom=showTime?room-stampWidth-1:room;
+      const rows=wrapAll(body,room),shown=rows.slice(0,most),last=shown.length-1;
+      if(rows.length>most||size(shown[last])>lastRoom)shown[last]=ellipsis(shown[last],lastRoom);
+      if(showTime)shown[last].push(pad(room-size(shown[last])-stampWidth),text(elapsed,'dim'));
       return shown.map(row=>[text(' '.repeat(gap)),...row]);
     };
     const nowRow=(p,kind,gap)=>nowRows(p,kind,gap,1)[0]||null;
-    // One session's blocks, as the route box draws them: `who` (or, with its CTX row folded in, `one`), `ctx`, and `now` in its two
-    // forms (`now2`, `now1`). The steps below (short of rows) drop the second NOW row, then the CTX row (its number goes into `one`),
-    // then the first NOW row.
+    // Frame legs and legacy doers can still have a CTX row. The other rows use the same height budget.
     const sessionOf=({who,one,p,kind,gap,time,lead,called=[]})=>({who,one,called,ctx:ctxRowOf(p,gap,time,who?null:lead),now2:nowRows(p,kind,gap,2),now1:nowRows(p,kind,gap,1)});
     const sessionRowsOf=u=>[...(keepCtxLine?(u.who?[u.who,...(u.ctx?[u.ctx]:[])]:[u.ctx||u.one]):[u.one||u.who]),...(keepNow?(nowTwo?u.now2:u.now1):[]),...(keepCalled&&u.called?u.called:[])];
+    function alignedSessionOf({lead,p,role,one,kind,gap,called,elapsed='',closed=false}){
+      const now1=nowRows(p,kind,gap,1,elapsed),now2=nowRows(p,kind,gap,2,elapsed);
+      const time=now1.length?'':elapsed,who=alignedWhoRow(lead,p,role,time);
+      // Reserve the two cells of the workers' right border on the owner's row too.
+      const closedWho=closed?narrower(2,()=>alignedWhoRow(lead,p,role,time)):null;
+      return {who,one,closedWho,now1,now2,called,aligned:true};
+    }
+    function doerRowsOf(session,closed=false){
+      if(!session.aligned)return sessionRowsOf(session);
+      const who=keepNow?(closed&&session.closedWho||session.who):session.one;
+      return sessionRowsOf({...session,who,one:who});
+    }
     // The one-row form (an owner's, and since spec rule 48 (c) its workers' too, two cells in):
     // who, then the percent and the time at the right in columns shared by every route and worker.
     function foldRow(lead0,p,role0,E){
@@ -1542,17 +1542,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
       return null;
     }
-    // 11-17 (route row 5; 11-18: CTX and NOW under the first row): a worker hangs under its owner by a `↳`, with no box: its who (its
-    // own mark, role, harness, model, effort), under it its CTX row (the gauge and number, then ` · 12m` when the worker has a time
-    // of its own) and under that its NOW on up to two rows (none: no row). Its stage name and open tool are not drawn (the owner's
-    // stage line has the stage). A frame leg (the route has no owner yet) hangs straight under the route the same way. Short of
-    // cells the who loses its effort, then its harness; short of rows (rule 48 (c)) the worker takes the owner's one-row form.
-    // In a box (`boxed`, below) the mark leads the row and the CTX and NOW rows stand two cells in.
+    // Workers keep the same indentation with their box or their hanging arrow.
     function workerBlock(w,base,boxed=false){
       const p=w.paint||{},role=workerRole(w),glyph=routeGlyph({paint:p,kind:w.kind},p.harness),E=w.elapsed?[text(w.elapsed)]:[];
       const gap=boxed?2:base+4;
       const bare=boxed?[glyph,text(' ')]:[text(' '.repeat(base)),text('↳ ','dim'),glyph,text(' ')];
       const lead=withBare([...bare,...roleCell(role)],bare);
+      const one=foldRow(lead,p,role,E)||cut(lead,inner),called=calledRows(w.called,gap);
+      if(p.ctx&&role==='worker'&&!unitLabel)
+        return alignedSessionOf({lead,p,role,one,kind:w.kind,gap,elapsed:clean(w.elapsed||''),called});
       // A model name longer than the line itself is cut with `…` rather than left out.
       let who=whoOf(lead,p,role)||cut(lead,inner);
       if(!unitLabel&&size(who)<=size(lead)&&(p.model_text||p.harness))who=cut([...lead,p.model_text||p.harness],inner);
@@ -1563,7 +1561,14 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const room=inner-1-measure(stamp),tight=whoOf(lead,p,role,room);
         if(tight&&size(tight)<=room&&size(tight)>size(lead))who=[...tight,pad(inner-size(tight)-measure(stamp)),text(stamp,'dim')];
       }
-      return sessionOf({who,one:foldRow(lead,p,role,E)||cut(lead,inner),p,kind:w.kind,gap,time:w.elapsed,called:calledRows(w.called,gap)});
+      return sessionOf({who,one,p,kind:w.kind,gap,time:w.elapsed,called});
+    }
+    function ownerSession(r,supervising,closed){
+      const lead=ownerLead(r,supervising),p=leadPaint(r),role=leadRole(r),gap=4;
+      const one=foldRow(lead,p,role,[]),who=whoOf(lead,p,role),called=calledRows(r.called,gap);
+      if(p.ctx&&(role==='owner'||role==='worker')&&!unitRoute(r))
+        return alignedSessionOf({lead,p,role,one:one||who,kind:r.kind,gap,called,closed});
+      return sessionOf({who,one,p,kind:r.kind,gap,time:'',lead,called});
     }
     // Spec rule 24 (11-12), 36 (b), 11-17: the stage line under the owner: `staged 3/6: execute`, the current stage's name
     // the one thing that blinks (a failed one keeps `✕`, a done one `✓`); with no stage running, the next stage and what it
@@ -1679,7 +1684,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         if(!boxes.length||boxes.some(box=>!box.title))return null;
         return {lines:()=>boxes.flatMap(({blocks,title})=>{
           const rows=[[text('  '),line('┌ '),...title,text(' '),line('─'.repeat(Math.max(0,W-4-size(title)-1-(closed?1:0)))+(closed?'┐':''))]];
-          for(const parts of blocks.flatMap(b=>sessionRowsOf(b).filter(Boolean))){
+          for(const parts of blocks.flatMap(b=>doerRowsOf(b).filter(Boolean))){
             const fit=clip(parts,W-by);
             rows.push(closed?[text('  '),line('│ '),...fit.parts,pad(W-by-fit.used),line(' │')]:[text('  '),line('│ '),...fit.parts]);
           }
@@ -1705,11 +1710,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const place=side?placeRow(r):null,stages=Array.isArray(r.stages)?r.stages:[];
         const boxed=!open&&place?boxedWorkers(r,workers.length):null;
         const running=stages.find(stage=>stage.current||stage.mark==='✕');
+        const session=side&&!open?ownerSession(r,supervising,!!boxed?.closed):null;
         routeRows.push({zone:r.zone==='direct'?'direct':'dispatch',parts:folded(r),two:side,bnow:side?null:nowRow(leadPaint(r),r.kind,2),first:side?headRow(r):null,
-          // The owner's blocks (11-18); its time is the route's own, which stands on the first line, so it has none here.
-          session:side&&!open?sessionOf({who:whoRow(r,supervising),one:leadRow(r,supervising),p:leadPaint(r),kind:r.kind,gap:4,time:'',lead:ownerLead(r,supervising),called:calledRows(r.called,4)}):null,
-          // A route with no session values and no kind word (no first line to end in its time) keeps its time alone on a row, at the right edge.
-          time:side&&!open&&r.elapsed&&!whoRow(r,supervising)&&!headRow(r)?[pad(inner-measure(r.elapsed)),text(r.elapsed)]:null,
+          session,
+          // A route with no doer values or kind word keeps its time alone at the right edge.
+          time:session&&r.elapsed&&!session.who&&!headRow(r)?[pad(inner-measure(r.elapsed)),text(r.elapsed)]:null,
           names,name:[cut(title,inner-2)],glyph,place,action:key,kind:r.kind,
           // The stage name blinks while the stage line stands and a stage runs; else the first line's dot does.
           stageBlinks:!!place&&live(r)&&running&&running.mark==='●',
@@ -1743,7 +1748,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // context rows (and the workers' box) fold into the first rows, the workers go, the kind rows go,
     // every route takes one row, then the box shows fewer routes and scrolls in place.
     let routeLimit=routeRows.length,keepPlace=true;
-    // Short of rows (below), in this order: the box's closing border, the NOW's second row, the CTX row (its number goes into the first row), the NOW's first row.
+    // Short of rows: open the workers' box, drop the second NOW row, fold any separate CTX row, then drop the first NOW row.
     let keepBoxEnd=true,nowTwo=true,keepCtxLine=true,keepNow=true;
     // Spec rule 48 (c): the workers stay (in their box while the owners keep their context row,
     // else one row each, as their owners) or go (the kind row counts them).
@@ -1783,18 +1788,17 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         out.push(head);out.push(...names.map(row=>[indent,...row]));
       }
       else out.push([...x.glyph,...names[0]],...names.slice(1).map(row=>[indent,...row]));
-      // A route whose owner is not known keeps its time and `CTX` row under the title all the same.
-      const owner=x.session?sessionRowsOf(x.session).filter(Boolean):[];
+      const owner=x.session?doerRowsOf(x.session,!!boxed&&boxed===x.boxed.closed).filter(Boolean):[];
       out.push(...owner);
       if(keepNow&&x.time)out.push(x.time);
       const standing=[text(owner.length?'    ':'  ')];
       if(boxed)out.push(...boxed.lines());
       else if(apart&&some&&keepWorkers&&x.groups.length>1)for(const g of x.groups){
         out.push([...standing,...g.place]);
-        for(const i of g.items)out.push(...sessionRowsOf(workers[i]).filter(Boolean));
+        for(const i of g.items)out.push(...doerRowsOf(workers[i]).filter(Boolean));
       }else{
         if(apart)out.push([...standing,...place]);
-        for(const w of workers)out.push(...sessionRowsOf(w).filter(Boolean));
+        for(const w of workers)out.push(...doerRowsOf(w).filter(Boolean));
       }
       return out;
     }
