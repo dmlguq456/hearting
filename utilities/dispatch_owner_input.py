@@ -229,14 +229,18 @@ def _owner_waits_on_review(metadata):
 def _public(value, *, live=False, reachable=None, owner_phase=None, metadata=None):
     reachable = live if reachable is None else reachable
     phase = owner_phase or _owner_phase(value["attempt_id"])
-    active = value["transport"] in {"codex-active-turn", "claude-active-turn"}
+    active = value["transport"] == "codex-active-turn"
     timing = ("active-turn" if active and phase == "running-turn"
               else "phase-unavailable" if active and phase == "unknown"
               else "next-owner-turn")
     lead = {"active-turn": ("A queued correction goes into the owner's running turn; if that turn "
-                            "cannot take it, it waits for the next owner turn."),
+                            "refuses it, it waits for the next owner turn."),
             "phase-unavailable": "Queued corrections may wait for the next owner turn."}.get(
                 timing, "Queued corrections are delayed until the next owner turn.")
+    if value["transport"] == "claude-active-turn":
+        # Whether the running Claude turn takes it is decided at send time (OPERATIONS §5.10).
+        lead = ("Queued corrections reach the owner by its next owner turn; a running Claude turn "
+                "may take a small one sooner, and the receipt's `mode` records which.")
     notice = (lead + " An owner parked on its children gets that turn at its next wait checkpoint, "
               "within about 30 seconds, and the children keep running; an owner waiting only on "
               "resources gets it within seconds. A serial sub-session chain starts no further "
@@ -770,9 +774,11 @@ class OwnerInput:
         with self.state() as (_, value):
             return any(item["state"] == "queued" for item in value["requests"])
 
-    def take(self, mode):
+    def take(self, mode, fits=None):
         with self.state() as (path, value):
             items = [item for item in value["requests"] if item["state"] == "queued"]
+            if items and fits is not None and not fits(items):
+                return []   # all of them, in order, wait for the next-turn prompt
             for item in items:
                 _transition(item, "sending", mode=mode, thread_id=self.thread_id)
             if items:
@@ -805,9 +811,13 @@ class OwnerInput:
         self.emit({"type": "dispatch.supervisor.input", "attempt_id": self.attempt,
                    "request_ids": ids, "state": state, **evidence})
 
-    def started(self, turn):
+    def started(self, turn, answered=True):
+        """Settle the prompt's corrections: accepted only when the turn answered."""
         self.active_turn = turn
-        self.record(self.prepared, "accepted", thread_id=self.thread_id, turn_id=turn)
+        if answered:
+            self.record(self.prepared, "accepted", thread_id=self.thread_id, turn_id=turn)
+        else:
+            self.record(self.prepared, "delivery-unknown", reason="owner-turn-unanswered", turn_id=turn)
         self.prepared = []
 
     def completed(self, turn):

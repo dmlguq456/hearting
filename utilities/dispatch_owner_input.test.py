@@ -886,11 +886,33 @@ class OwnerFinishCorrectionRegressionTest(OwnerInputTest):
         self.assertIn("goes into the owner's running turn", notice)
         self.assertNotIn('are delayed', notice)
 
-    def test_claude_stream_owner_reports_its_running_turn(self):
+    def test_claude_stream_owner_promises_the_next_turn_and_points_at_the_receipt_mode(self):
+        # Whether a running Claude turn takes it is decided at send time; the receipt's mode is the truth.
         value = json.loads(I._path(self.jobs, self.attempt).read_text())
         value['transport'] = 'claude-active-turn'
-        self.assertEqual(I._public(value, owner_phase='running-turn').get('delivery_timing'), 'active-turn')
-        self.assertEqual(I._public(value, owner_phase='unknown').get('delivery_timing'), 'phase-unavailable')
+        for phase in ('running-turn', 'unknown'):
+            result = I._public(value, owner_phase=phase)
+            self.assertEqual(result.get('delivery_timing'), 'next-owner-turn')
+            self.assertIn("by its next owner turn", result['delivery_notice'])
+            self.assertIn("receipt's `mode`", result['delivery_notice'])
+
+    def test_a_turn_that_did_not_answer_never_accepts_its_prompt_corrections(self):
+        control = I.OwnerInput(self.jobs, self.attempt, 'thread-1', 'claude-next-turn', self.events.append)
+        I.submit(self.jobs, self.attempt, 'blocked with the prompt', 'blocked')
+        self.assertIn('blocked with the prompt', control.prepare('continue'))
+        control.started('2', False)
+        self.assertEqual((self.state()[-1]['state'], self.state()[-1]['reason']),
+                         ('delivery-unknown', 'owner-turn-unanswered'))
+        self.assertEqual(control.prepare('next'), 'next')
+
+    def test_take_leaves_corrections_that_do_not_fit_queued_in_order(self):
+        control = I.OwnerInput(self.jobs, self.attempt, 'thread-1', 'claude-active-turn', self.events.append)
+        I.submit(self.jobs, self.attempt, 'first', 'one')
+        I.submit(self.jobs, self.attempt, 'second', 'two')
+        self.assertEqual(control.take('active-turn', fits=lambda items: False), [])
+        self.assertEqual([item['state'] for item in self.state()], ['queued', 'queued'])
+        self.assertEqual([item['id'] for item in control.take('active-turn', fits=lambda items: True)],
+                         ['one', 'two'])
 
     def test_queued_claude_and_opencode_remain_next_owner_turn(self):
         for transport in ('claude-next-turn', 'opencode-next-turn'):

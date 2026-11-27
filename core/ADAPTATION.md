@@ -467,11 +467,17 @@ adapter adds a cancellation command, reason requirement or approval step.
 
 Owner corrections are accepted independently of delivery. Codex active-turn
 steering is only accepted after a matching turn response. A Claude stream-json
-owner writes the correction into its running turn, which reads it once its
-current tool calls finish; a result naming the message uuid is the acceptance,
-and a turn that ends first is answered by Claude Code's own next turn. Claude
-resume-process and OpenCode next-turn transports deliver on a later owner
-turn. An owner parked on model
+owner writes a correction into its running turn only when all three hold: the
+same process has already listed `user_message_uuids` in a result, the turn is an
+ordinary owner turn (no sealed cleanup, reserve final turn or later turn), and
+the message fits one non-blocking `PIPE_BUF` write. Claude Code reads it once the
+current tool calls finish; a turn that ends first is answered by Claude Code's
+own next turn. Only a successful result with a model turn that names the message
+uuid accepts it; an error or `num_turns: 0` result does not. Otherwise the
+correction stays queued for the next-turn prompt, as for Claude resume-process
+and OpenCode. A correction a `UserPromptSubmit` hook drops at pickup gets no
+result: after a bounded wait it is `delivery-unknown` with the existing
+undelivered notice, never resent. An owner parked on model
 children receives a queued correction at the next checkpoint of the same
 30-second join pieces that carry resource attention
 (`join_with_resource_attention`): the children are not delivered, keep running

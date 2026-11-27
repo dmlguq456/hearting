@@ -3662,7 +3662,12 @@ class TurnTokenUsageTest(unittest.TestCase):
 
 
 class InTurnCorrectionTest(unittest.TestCase):
-    """A correction queued while a stream-json owner turn runs reaches that turn (OPERATIONS §5.10)."""
+    """A correction queued while a stream-json owner turn runs reaches that turn only when
+    that is certain; otherwise it keeps the next-turn path (OPERATIONS §5.10)."""
+
+    WARM = {"list": "emit(type='result', subtype='success', result='warm', user_message_uuids=[turn])\n",
+            "single": "emit(type='result', subtype='success', result='warm', user_message_uuid=turn)\n",
+            "none": "emit(type='result', subtype='success', result='warm')\n"}
 
     def setUp(self):
         import dispatch_owner_input as owner_input
@@ -3682,20 +3687,34 @@ class InTurnCorrectionTest(unittest.TestCase):
         self.args = SimpleNamespace(worktree=str(self.root), state_file=None, turn_timeout=5,
                                     owner_runtime_turn_ordinal=1)
 
-    def session(self, body):
+    def session(self, body, warm="list"):
+        """A scripted stream runtime that has answered one warm-up turn in the `warm` result form."""
         script = self.root / "live.py"
         script.write_text(
-            "import json,sys\n"
-            f"SEEN={str(self.seen)!r}\n"
-            "def read():\n"
-            "    line=sys.stdin.readline()\n"
-            "    if not line: sys.exit(0)\n"
-            "    value=json.loads(line)\n"
-            "    open(SEEN,'a').write(json.dumps(value)+'\\n')\n"
+            "import json,os,select,sys,time\n"
+            f"sys.path.insert(0, {str(ROOT / 'utilities')!r})\n"
+            f"SEEN, JOBS, PARENT = {str(self.seen)!r}, {str(self.jobs)!r}, {PARENT!r}\n"
+            "buf = b''\n"
+            "def read(timeout=None):\n"
+            "    global buf\n"
+            "    while b'\\n' not in buf:\n"
+            "        if timeout is not None and not select.select([0], [], [], timeout)[0]:\n"
+            "            return None\n"
+            "        chunk = os.read(0, 65536)\n"
+            "        if not chunk: sys.exit(0)\n"
+            "        buf += chunk\n"
+            "    line, buf = buf.split(b'\\n', 1)\n"
+            "    value = json.loads(line)\n"
+            "    open(SEEN, 'a').write(json.dumps(value) + '\\n')\n"
             "    return value\n"
+            "def wait():\n"
+            "    while True: read()\n"
             "def emit(**v):\n"
-            "    print(json.dumps(v),flush=True)\n"
-            "turn=read()['uuid']\n"
+            "    print(json.dumps(v), flush=True)\n"
+            "def submit(text, rid):\n"
+            "    import dispatch_owner_input\n"
+            "    dispatch_owner_input.submit(JOBS, PARENT, text, rid)\n"
+            "turn = read()['uuid']\n" + self.WARM[warm] + "turn = read()['uuid']\n"
             + textwrap.dedent(body))
         patch = mock.patch.object(supervisor, "claude_command", return_value=[sys.executable, str(script)])
         patch.start()
@@ -3703,6 +3722,8 @@ class InTurnCorrectionTest(unittest.TestCase):
         session = supervisor.ClaudeStreamSession(self.args, "sess")
         self.addCleanup(session.process.stdout.close)
         self.addCleanup(session.close)
+        session.own_turn_start_seconds = 0.5
+        self.assertEqual(session.run_turn("warm", 5)[0]["result"], "warm")
         return session
 
     def owner_turn(self, session):
@@ -3710,31 +3731,30 @@ class InTurnCorrectionTest(unittest.TestCase):
         from session_supervisor_decisions import OwnerTurnActivity
         session.owner_activity = OwnerTurnActivity(
             lambda: ActivityObservation(True, False, ("tool-running",)), window_seconds=5, sample_seconds=0.05)
-        session.owner_input, session.input_turn = self.control, "1"
+        session.owner_input, session.taking, session.input_turn = self.control, True, "1"
 
     def written(self):
         return [json.loads(line) for line in self.seen.read_text().splitlines()]
 
-    def receipt(self):
-        return self.I.inspect(self.jobs, PARENT)["requests"][0]
+    def texts(self):
+        return [line["message"]["content"][0]["text"] for line in self.written()]
+
+    def receipt(self, index=0):
+        return self.I.inspect(self.jobs, PARENT)["requests"][index]
 
     def test_a_correction_sent_during_the_turn_is_read_by_that_turn(self):
         session = self.session("""
             emit(type='assistant', n=1)
+            submit('lead with the result', 'fix-1')
             correction = read()                  # a tool call is running; the message waits for it
             emit(type='result', subtype='success', result='used it', user_message_uuids=[turn, correction['uuid']])
-            sys.stdin.read()
+            wait()
         """)
         self.owner_turn(session)
-        import threading
-        sender = threading.Timer(0.3, self.I.submit, (self.jobs, PARENT, "lead with the result", "fix-1"))
-        sender.start()
-        self.addCleanup(sender.cancel)
         result, rc = session.run_turn("work", 5)
         self.assertEqual((result["result"], rc), ("used it", 0))
-        lines = self.written()
-        self.assertEqual(len(lines), 2)
-        self.assertIn("lead with the result", lines[1]["message"]["content"][0]["text"])
+        self.assertEqual(len(self.written()), 3)
+        self.assertIn("lead with the result", self.texts()[2])
         receipt = self.receipt()
         self.assertEqual((receipt["state"], receipt["turn_id"]), ("accepted", "1"))
         self.assertEqual([e.get("mode") for e in receipt["events"] if e["state"] == "sending"], ["active-turn"])
@@ -3745,11 +3765,13 @@ class InTurnCorrectionTest(unittest.TestCase):
         session = self.session("""
             correction = read()
             emit(type='result', subtype='success', result='first answer', user_message_uuids=[turn])
+            emit(type='system', subtype='init')  # Claude Code starts the correction's own turn
+            time.sleep(1.0)                      # longer than the start bound: it has started
             emit(type='assistant', n=2)
             emit(type='result', subtype='success', result='after it', user_message_uuids=[correction['uuid']])
             following = read()
             emit(type='result', subtype='success', result='next turn', user_message_uuids=[following['uuid']])
-            sys.stdin.read()
+            wait()
         """)
         self.owner_turn(session)
         result, _ = session.run_turn("work", 5)
@@ -3758,8 +3780,7 @@ class InTurnCorrectionTest(unittest.TestCase):
         session.owner_input = None
         result, _ = session.run_turn(self.control.prepare("continue"), 5)
         self.assertEqual(result["result"], "next turn")
-        texts = [line["message"]["content"][0]["text"] for line in self.written()]
-        self.assertEqual(sum("lead with the result" in text for text in texts), 1)
+        self.assertEqual(sum("lead with the result" in text for text in self.texts()), 1)
 
     def test_a_written_correction_without_a_receipt_is_delivery_unknown_and_not_replayed(self):
         self.I.submit(self.jobs, PARENT, "lead with the result", "fix-1")
@@ -3771,25 +3792,322 @@ class InTurnCorrectionTest(unittest.TestCase):
         self.assertEqual((receipt["state"], receipt.get("reason")), ("delivery-unknown", "claude-turn-receipt-missing"))
         self.assertEqual(self.control.prepare("next"), "next")
 
-    def test_only_an_ordinary_owner_turn_writes_into_the_running_turn(self):
+    def test_a_correction_a_hook_drops_at_pickup_is_delivery_unknown_and_not_replayed(self):
+        # Agent SDK reference: a message a UserPromptSubmit hook blocks at pickup gets no
+        # result and is named by none (measured the same on Claude Code 2.1.332).
+        self.I.submit(self.jobs, PARENT, "BLOCKME word", "fix-1")
+        session = self.session("""
+            dropped = read()
+            emit(type='result', subtype='success', num_turns=2, result='answer', user_message_uuids=[turn])
+            emit(type='command_lifecycle')
+            wait()
+        """)
+        self.owner_turn(session)
+        result, _ = session.run_turn("work", 5)
+        self.assertEqual(result["result"], "answer")            # the turn's own answer stands
+        receipt = self.receipt()
+        self.assertEqual((receipt["state"], receipt["reason"]), ("delivery-unknown", "claude-turn-receipt-missing"))
+        self.assertTrue(self.I.unresolved(self.jobs, PARENT))   # the existing undelivered notice
+        self.assertEqual(self.control.prepare("next"), "next")
+
+    def test_an_old_cli_without_uuid_lists_keeps_the_next_turn_path(self):
+        for warm in ("single", "none"):
+            with self.subTest(warm=warm):
+                self.setUp()
+                self.I.submit(self.jobs, PARENT, "lead with the result", "fix-1")
+                session = self.session("""
+                    late = read(1.0)             # nothing is written into this turn
+                    emit(type='result', subtype='success', result='answer'%s)
+                    wait()
+                """ % (", user_message_uuid=turn" if warm == "single" else ""), warm=warm)
+                self.owner_turn(session)
+                result, _ = session.run_turn("work", 5)
+                self.assertEqual(result["result"], "answer")
+                self.assertEqual(self.receipt()["state"], "queued")
+                self.assertEqual(len(self.written()), 2)
+                self.assertIn("lead with the result", self.control.prepare("next"))
+
+    def test_an_error_or_model_free_result_does_not_accept_the_correction(self):
+        for shape in ({"subtype": "error_during_execution", "is_error": True},
+                      {"subtype": "success", "is_error": False, "num_turns": 0}):
+            with self.subTest(**shape):
+                self.setUp()
+                session = self.session("""
+                    submit('lead with the result', 'fix-1')
+                    correction = read()
+                    emit(type='result', result='failed', user_message_uuids=[turn, correction['uuid']], **%r)
+                    wait()
+                """ % shape)
+                self.owner_turn(session)
+                result, _ = session.run_turn("work", 5)
+                self.assertEqual(result["result"], "failed")
+                receipt = self.receipt()
+                self.assertEqual((receipt["state"], receipt["reason"]), ("delivery-unknown", "claude-turn-unsuccessful"))
+                self.assertNotIn("accepted", [event["state"] for event in receipt["events"]])
+
+    def test_each_correction_settles_on_its_own_result(self):
+        session = self.session("""
+            submit('first word', 'fix-1')
+            first = read()
+            submit('second word', 'fix-2')
+            second = read()
+            emit(type='result', subtype='success', result='answer', user_message_uuids=[turn, first['uuid']])
+            emit(type='system', subtype='init')
+            emit(type='result', subtype='error_during_execution', is_error=True, result='own turn failed',
+                 user_message_uuids=[second['uuid']])
+            wait()
+        """)
+        self.owner_turn(session)
+        result, _ = session.run_turn("work", 5)
+        self.assertEqual(result["result"], "own turn failed")
+        self.assertEqual((self.receipt(0)["state"], self.receipt(1)["state"]), ("accepted", "delivery-unknown"))
+
+    def test_an_unrelated_result_never_replaces_the_held_answer(self):
+        for own_turn in (True, False):
+            with self.subTest(own_turn=own_turn):
+                self.setUp()
+                self.I.submit(self.jobs, PARENT, "lead with the result", "fix-1")
+                session = self.session("""
+                    correction = read()
+                    emit(type='result', subtype='success', result='first answer', user_message_uuids=[turn])
+                    emit(type='result', subtype='error_during_execution', is_error=True, result='unrelated')
+                    if %r:
+                        emit(type='system', subtype='init')
+                        emit(type='result', subtype='success', result='after it',
+                             user_message_uuids=[correction['uuid']])
+                    wait()
+                """ % own_turn)
+                self.owner_turn(session)
+                result, _ = session.run_turn("work", 5)
+                self.assertEqual(result["result"], "after it" if own_turn else "first answer")
+                self.assertEqual(self.receipt()["state"], "accepted" if own_turn else "delivery-unknown")
+
+    def test_a_take_failure_still_records_the_written_correction(self):
+        session = self.session("""
+            submit('first word', 'fix-1')
+            first = read()
+            time.sleep(0.6)                      # the next take fails once
+            submit('later word', 'fix-2')
+            time.sleep(0.4)
+            emit(type='result', subtype='success', result='answer', user_message_uuids=[turn, first['uuid']])
+            wait()
+        """)
+        take, state = self.control.take, {"taken": False, "failed": False}
+        def flaky(mode, **kwargs):
+            if state["taken"] and not state["failed"]:
+                state["failed"] = True
+                raise OSError("receipt read failed once")
+            items = take(mode, **kwargs)
+            state["taken"] = state["taken"] or bool(items)
+            return items
+        self.control.take = flaky
+        self.owner_turn(session)
+        result, _ = session.run_turn("work", 5)
+        self.assertTrue(state["failed"])
+        self.assertEqual(result["result"], "answer")
+        self.assertEqual((self.receipt(0)["state"], self.receipt(1)["state"]), ("accepted", "queued"))
+        self.assertIn("later word", self.control.prepare("next"))
+
+    def test_a_large_correction_waits_for_the_next_turn_while_results_drain(self):
+        self.I.submit(self.jobs, PARENT, "x" * 65536, "big")
+        session = self.session("""
+            emit(type='assistant', text='y' * 180000)   # the result pipe fills before stdin is read
+            time.sleep(0.5)
+            emit(type='result', subtype='success', result='answer', user_message_uuids=[turn])
+            wait()
+        """)
+        self.owner_turn(session)
+        started = time.monotonic()
+        result, _ = session.run_turn("work", 5)
+        self.assertEqual(result["result"], "answer")
+        self.assertLess(time.monotonic() - started, 4)
+        self.assertEqual(self.receipt()["state"], "queued")
+        self.assertEqual(len(self.written()), 2)
+        self.assertEqual(self.control.prepare("next").count("x" * 65536), 1)
+
+    def test_a_full_input_pipe_leaves_the_correction_queued(self):
+        import threading
+        session = self.session("""
+            emit(type='assistant', n=1)
+            time.sleep(1.5)                      # stdin is not read while its pipe is full
+            emit(type='result', subtype='success', result='answer', user_message_uuids=[turn])
+            wait()
+        """)
+        descriptor = session.process.stdin.fileno()
+        def fill_then_submit():
+            os.set_blocking(descriptor, False)
+            try:
+                while True:
+                    os.write(descriptor, b" " * 4096)
+            except BlockingIOError:
+                pass
+            finally:
+                os.set_blocking(descriptor, True)
+            self.I.submit(self.jobs, PARENT, "lead with the result", "fix-1")
+        filler = threading.Timer(0.3, fill_then_submit)
+        filler.start()
+        self.addCleanup(filler.join)
+        self.owner_turn(session)
+        result, _ = session.run_turn("work", 5)
+        filler.join()
+        self.assertEqual(result["result"], "answer")
+        receipt = self.receipt()
+        self.assertEqual((receipt["state"], receipt["reason"]), ("queued", "claude-stream-not-written"))
+        self.assertIn("lead with the result", self.control.prepare("next"))
+
+    def test_only_a_turn_named_for_in_turn_input_writes_into_the_running_turn(self):
         self.I.submit(self.jobs, PARENT, "lead with the result", "fix-1")
         session = self.session("""
-            emit(type='result', subtype='success', result='ok', user_message_uuids=[turn])
-            correction = read()
-            emit(type='result', subtype='success', result='used it', user_message_uuids=[turn, correction['uuid']])
-            sys.stdin.read()
+            late = read(1.0)
+            emit(type='result', subtype='success', result='ok',
+                 user_message_uuids=[turn] + ([late['uuid']] if late else []))
+            wait()
         """)
         supervisor.run_turn(self.args, "sess", "cleanup", resume=False, stream_session=session,
-                            owner_input=self.control)
+                            owner_input=self.control, ordinary_owner_turn=True)
         self.assertEqual(self.receipt()["state"], "queued")       # left for the next owner turn
-        self.assertEqual(len(self.written()), 1)
+        self.assertEqual(len(self.written()), 2)
 
-    def test_a_result_for_another_written_message_does_not_answer_this_prompt(self):
+    def test_result_matching_and_success_rules(self):
         self.assertFalse(supervisor.result_answers_turn(
             {"type": "result", "user_message_uuids": ["correction"]}, "prompt"))
         self.assertTrue(supervisor.result_answers_turn({"type": "result"}, "prompt"))
         self.assertTrue(supervisor.result_answers_turn(
             {"type": "result", "user_message_uuids": ["correction", "prompt"]}, "prompt"))
+        self.assertTrue(supervisor.result_succeeded({"type": "result", "subtype": "success", "num_turns": 3}))
+        self.assertTrue(supervisor.result_succeeded({"type": "result", "is_error": False}))
+        self.assertFalse(supervisor.result_succeeded({"type": "result", "subtype": "success", "num_turns": 0}))
+        self.assertFalse(supervisor.result_succeeded({"type": "result", "subtype": "success", "is_error": True}))
+        self.assertFalse(supervisor.result_succeeded({"type": "result", "subtype": "error_during_execution"}))
+
+
+class InTurnCorrectionMainLoopTest(unittest.TestCase):
+    """The real main loop names only ordinary owner turns for in-turn input."""
+
+    setUp = ClaudeSessionSupervisorTest.setUp
+    command = ClaudeSessionSupervisorTest.command
+    child_env = ClaudeSessionSupervisorTest.child_env
+
+    def run_main(self, *extra, correct_on="never"):
+        """Run the supervisor on a stream runtime that submits a correction mid-turn when a
+        prompt contains `correct_on`, and blocks (as a UserPromptSubmit hook) any BLOCKME prompt."""
+        import dispatch_owner_input as owner_input
+        live = self.base / "live_main.py"
+        live.write_text(textwrap.dedent(f"""\
+            import json, os, select, sys
+            sys.path.insert(0, {str(ROOT / 'utilities')!r})
+            import dispatch_owner_input as I
+            buf = b''
+            def read(timeout=None):
+                global buf
+                while b'\\n' not in buf:
+                    if timeout is not None and not select.select([0], [], [], timeout)[0]:
+                        return None
+                    chunk = os.read(0, 65536)
+                    if not chunk: sys.exit(0)
+                    buf += chunk
+                line, buf = buf.split(b'\\n', 1)
+                return json.loads(line)
+            def log(**value):
+                open(os.environ['FAKE_TRACE'], 'a').write(json.dumps(value) + '\\n')
+            def emit(listed, text, turns=1):
+                print(json.dumps({{'type': 'result', 'subtype': 'success', 'is_error': False,
+                                   'num_turns': turns, 'result': text, 'user_message_uuids': listed}}), flush=True)
+            while True:
+                message = read()
+                text = message['message']['content'][0]['text']
+                log(event='turn', text=text)
+                listed = [message['uuid']]
+                if os.environ['FAKE_CORRECT_ON'] in text:
+                    I.submit(os.environ['FAKE_JOBS'], {PARENT!r}, 'MIDTURN-WORD', 'mid')
+                    late = read(3.0)
+                    if late is not None:
+                        log(event='in-turn', text=late['message']['content'][0]['text'])
+                        listed.append(late['uuid'])
+                if 'BLOCKME' in text:
+                    emit(listed, 'UserPromptSubmit operation blocked by hook', turns=0)
+                    continue
+                done = any(word in text for word in ('Runtime completion receipt', 'final continuation turn',
+                                                     'pending user correction'))
+                emit(listed, 'artifact: -\\nverdict: PASS\\nblocker: none' if done
+                     else 'runtime_wait: registered-children')
+            """), encoding="utf-8")
+        result = subprocess.run(
+            self.command(live) + ["--turn-transport", "stream-json", *extra],
+            input="initial assignment", text=True, capture_output=True, timeout=60,
+            env=self.child_env(FAKE_TRACE=str(self.trace), FAKE_JOBS=str(self.jobs), FAKE_CORRECT_ON=correct_on))
+        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        requests = json.loads(owner_input._path(self.jobs, PARENT).read_text())["requests"]
+        return result, trace, requests
+
+    @staticmethod
+    def modes(request):
+        return [event.get("mode") for event in request["events"] if event["state"] == "sending"]
+
+    def test_an_ordinary_owner_turn_takes_the_correction_into_the_running_turn(self):
+        self.jobs.write_text(owner_row(self.lease) + child_row(), encoding="utf-8")
+        result, trace, requests = self.run_main(correct_on="Runtime completion receipt")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual([row["event"] for row in trace if "turn" in row["event"]], ["turn", "turn", "in-turn"])
+        self.assertEqual((self.modes(requests[0]), requests[0]["state"]), (["active-turn"], "turn-completed"))
+
+    def test_the_reserve_final_turn_leaves_the_correction_to_the_next_turn(self):
+        self.jobs.write_text(owner_row(self.lease) + child_row(), encoding="utf-8")
+        result, trace, requests = self.run_main("--max-continuations", "1",
+                                                correct_on="final continuation turn")
+        self.assertNotIn("in-turn", [row["event"] for row in trace], result.stdout)
+        carried = [row["text"] for row in trace if "MIDTURN-WORD" in row.get("text", "")]
+        self.assertEqual(len(carried), 1, trace)
+        self.assertIn("pending user correction", carried[0])
+        self.assertEqual(self.modes(requests[0]), ["next-turn"])
+
+    def test_a_hook_blocked_next_turn_prompt_is_not_accepted(self):
+        import dispatch_owner_input as owner_input
+        self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
+        owner_input.initialize_owner_input(self.jobs, PARENT, "claude-next-turn")
+        owner_input.submit(self.jobs, PARENT, "BLOCKME word", "fix-1")
+        result, trace, requests = self.run_main()
+        self.assertIn("BLOCKME word", trace[0]["text"])          # carried by the first prompt
+        self.assertEqual((requests[0]["state"], requests[0]["reason"]),
+                         ("delivery-unknown", "owner-turn-unanswered"), result.stdout)
+        self.assertTrue(owner_input.unresolved(self.jobs, PARENT))
+
+    def test_a_sealed_cleanup_turn_is_not_named_for_in_turn_input(self):
+        import io
+        import dispatch_terminal_commit as terminal
+        route = self.base / "cleanup-route.json"
+        value = dict(cwd=str(self.base), artifact_root=str(self.artifact_root),
+                     nodes=[dict(id="report", terminal=True)],
+                     workflow_contract=dict(terminal_nodes=["report"]), runtime_support=dict(terminal_commit=True))
+        value["route_hash"] = supervisor.canonical_route_hash(value)
+        value["route_id"] = supervisor.route_id_from_hash(value["route_hash"])
+        route.write_text(json.dumps(value), encoding="utf-8")
+        self.jobs.write_text(owner_row(self.lease) + child_row(), encoding="utf-8")
+        final = "artifact: -\nverdict: PASS\nblocker: none"
+        answers = iter([({"type": "result", "subtype": "success", "result": "runtime_wait: registered-children"}, 0),
+                        ({"type": "result", "subtype": "success", "result": final}, 0)])
+        calls = []
+        def run_turn(args, session_id, prompt, *, resume, **kwargs):
+            calls.append(kwargs)
+            return next(answers)
+        settlements = iter([terminal.TerminalCommitResult("pending"),
+                            terminal.TerminalCommitResult("completed", envelope_text=final)])
+        args = self.command()[2:] + ["--route-file", str(route), "--route-id", value["route_id"],
+                                     "--route-hash", value["route_hash"], "--enable-terminal-commit",
+                                     "--max-continuations", "1"]
+        with mock.patch.dict(os.environ, self.child_env(FAKE_TRACE=str(self.trace))), \
+             mock.patch.object(supervisor.sys, "stdin", io.StringIO("initial assignment")), \
+             mock.patch.object(supervisor, "emit"), \
+             mock.patch.object(supervisor, "run_turn", side_effect=run_turn), \
+             mock.patch.object(supervisor, "terminal_commit_adapter", side_effect=lambda *a: next(settlements)), \
+             mock.patch.object(supervisor, "prepare_cleanup_handoff",
+                               return_value=("cleanup", {"intent_id": "i", "prompt_digest": "d"})), \
+             mock.patch.object(supervisor, "complete_handoff_after_reconcile"):
+            supervisor.main(args)
+        self.assertEqual(len(calls), 2, calls)
+        self.assertTrue(calls[0].get("in_turn_input"))
+        self.assertIn("handoff_intent", calls[1])
+        self.assertFalse(calls[1].get("in_turn_input"))
 
 
 if __name__ == "__main__":
