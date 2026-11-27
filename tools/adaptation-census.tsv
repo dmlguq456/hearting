@@ -182,6 +182,7 @@ utility-deferred	artifact_receipt.py
 utility-deferred	artifact_relayout.py
 utility-deferred	artifact_residue.py
 utility-deferred	artifact_resplit.py
+utility-deferred	artifact_root_selection.py
 utility-deferred	artifact_workflow_groups.py
 utility-deferred	attempt-view.py
 utility-deferred	attempt_view.py

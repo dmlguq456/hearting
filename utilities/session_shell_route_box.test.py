@@ -230,6 +230,8 @@ for(const [side,width,height] of [[true,40,60],[true,32,46],[false,120,20]]){
 const body=pv.messagesBody({model:scene,columns:72}).map(txt);
 const first=body.findIndex(s=>s.includes('검토 요청: 팝업 바탕')),msg=body.findIndex(s=>s.includes('[e1]'));
 assert(first===0&&body.some(s=>s.includes('본문 첫 줄'))&&msg>first,body.join('\n'));
+// 11-27: the popup's head of the received request leads with the received arrow, its title on the same row.
+assert(/^← \[e7\] /.test(body[first])&&body[first].includes('검토 요청: 팝업 바탕'),body.join('\n'));
 """)
 
     def test_every_height_and_width_keeps_its_rows_inside_the_panel(self):

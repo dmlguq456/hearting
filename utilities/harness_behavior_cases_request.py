@@ -68,12 +68,13 @@ def busy_step(seconds):
     return 'python3 -c "import time; time.sleep(%d); print(\'B-WORK-DONE\')"' % seconds
 
 
-# The panel's route box (`╭─ 2 ROUTE`, `╭─ ROUTE`, `╭─ route 2`) and its own bottom border (a box drawn inside
-# it, a worker's, closes after the route box's left border: `│ │   ╰─`). A request stands only in it: a
-# received message wears the same `←` in MESSAGES, under the box (11-27).
-ROUTE_BOX_TOP = re.compile(r"│ ╭─ (?:\d+ ROUTE|ROUTE|route)(?=[ ─])")
-ROUTE_BOX_BOTTOM = re.compile(r"(?<!│ )│ ╰[─╯]")
-ROUTE_BOX_ROW = re.compile(r"│ │ ([^│]*) │ │")
+# The panel's route box, read in the panel's own columns: its top border (`│ ╭─ 2 ROUTE`, `│ ╭─ ROUTE`, `│ ╭─ route 2`), rows
+# and bottom border stand right inside the panel's frame (the frame's `│`, one blank, then the box). A request stands only
+# in it: a received message wears the same `←` in MESSAGES, under the box (11-27), and the conversation beside the panel
+# is cut away before the box is looked for.
+ROUTE_BOX_TOP = re.compile(r"^│ ╭─ (?:\d+ ROUTE|ROUTE|route)(?=[ ─]).*╮ │$")
+ROUTE_BOX_ROW = re.compile(r"^│ │ (.*) │ │$")
+ROUTE_BOX_BOTTOM = re.compile(r"^│ ╰[─╯].*╯ │$")
 REQUEST_TAG = re.compile(r"\[[^\]│]+\]")
 REQUEST_RULE = re.compile(r"^─ request ─")
 
@@ -111,29 +112,48 @@ def _title_after(words, titles):
     return None
 
 
-def _route_box_rows(screen):
-    """Each route box's inner rows (between its borders, the panel's border cut off) in screen order,
-    one list per box. Beside the native area the panel's row is the last box row of a screen row, or
-    the first where the panel stands on the left."""
-    boxes, rows, last = [], None, True
+def _route_box_rows(screen, layout):
+    """Each route box's inner rows in screen order, one list per box: every row cut to the panel's cells where its host
+    placed them (``layout``), counted by the C library's width as the terminal places them, then the box right inside
+    the panel's last frame (`┌…┐` to `└…┘`)."""
+    tools = str(Path(__file__).resolve().parents[1] / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    from fleet.explorer.grid import _terminal_width
+    at, end = layout["panelColumn"], layout["panelColumn"] + layout["panelCols"]
+    strip = []
     for row in screen.splitlines():
-        top = ROUTE_BOX_TOP.search(row)
-        if rows is None:
-            if top:
-                rows, last = [], not row[top.end():].split("╮", 1)[-1].replace("│", "").strip()
+        kept, used, inside = [], 0, False
+        for char in row:
+            width = _terminal_width(char)
+            if width is None or width < 0:
+                raise ValueError(f"no terminal width for {char!r}")
+            if width:
+                inside, used = at <= used < end, used + width
+            if inside:
+                kept.append(char)
+        strip.append("".join(kept).rstrip())
+    tops = [i for i, row in enumerate(strip) if row.startswith("┌") and row.endswith("┐")]
+    boxes, inner = [], None
+    for row in strip[tops[-1] + 1:] if tops else ():
+        if row.startswith("└") and row.endswith("┘"):
+            break
+        if inner is None:
+            if ROUTE_BOX_TOP.match(row):
+                inner = []
             continue
-        if ROUTE_BOX_BOTTOM.search(row):
-            boxes.append(rows)
-            rows = None
+        if ROUTE_BOX_BOTTOM.match(row):
+            boxes.append(inner)
+            inner = None
             continue
-        found = ROUTE_BOX_ROW.findall(row)
-        rows.append((found[-1] if last else found[0]).rstrip() if found else "")
-    if rows is not None:
-        boxes.append(rows)
+        found = ROUTE_BOX_ROW.match(row)
+        inner.append(found.group(1).rstrip() if found else "")
+    if inner is not None:
+        boxes.append(inner)
     return boxes
 
 
-def panel_request_lines(screen, titles, marks):
+def panel_request_lines(screen, titles, marks, *, layout):
     """The route box's request lines of the given marks whose title is a recorded request title
     (whole, or cut with ``…``), each as ``mark [tag] title · state`` (a closed one ``✓ → [tag] title · state``, its
     direction after its result). ``titles`` is one title or several.
@@ -141,11 +161,13 @@ def panel_request_lines(screen, titles, marks):
     A request reads on one row (``← [b2] codex GPT 5.5 high 검토 제목 9c4f7d · open  2m``, the title cut on a
     narrow panel) or, beside the native area with rows to spare, as a route's doer: its head row (``← [b2]
     codex GPT 5.5 high  2m``), then two cells in its title and state on one row or two. Only rows inside
-    the route box count, so a MESSAGES row or the conversation never does. A head row with no title on it
+    the route box count, so a MESSAGES row or the conversation never does. ``layout`` is where the window's host placed
+    its panel (``native-display.cjs`` ``layout``: ``folded``, ``panelColumn``, ``panelCols``), never guessed from the
+    screen: a folded panel shows no box, and a missing value is an error. A head row with no title on it
     is the request's only with the other session's ``[tag]`` or under the box's ``request`` rule (a route's
     own first row, `✓ code(standard)`, has neither)."""
     found = []
-    for rows in _route_box_rows(screen):
+    for rows in [] if layout["folded"] else _route_box_rows(screen, layout):
         in_request_zone = False
         for at, row in enumerate(rows):
             if REQUEST_RULE.match(row):
@@ -364,9 +386,42 @@ class _RequestScenario(WatchWakeScenario):
             path = folder / f"panel-{tag}-{who}.txt"
             path.write_text(screen, encoding="utf-8")
             files[who + "_screen_file"] = str(path)
-        titles = [rec.get("title") or "" for rec in self.records(run).values()]
-        return {"requester": panel_request_lines(a, titles, "→✓✕"),
-                "receiver": panel_request_lines(b, titles, "←"), **files}
+        records = list(self.records(run).values())
+        if not records:   # no request was made: no request line to look for, and no placement to ask
+            return {"requester": [], "receiver": [], **files}
+        titles = [rec.get("title") or "" for rec in records]
+        a_sid, b_sid = records[0]["requester"]["session_id"], records[0]["recipient"]["session_id"]
+
+        placed = {}
+
+        def read(who, tui, screen, sid, marks):
+            # A window started without the session shell (its argv) has no panel and no host to ask.
+            if not any(Path(part).name == "entry.py" and Path(part).parent.name == "session-shell" for part in tui.argv):
+                return []
+            placed[who + "_layout"] = self.panel_layout(run, tui, sid)   # kept with the evidence
+            return panel_request_lines(screen, titles, marks, layout=placed[who + "_layout"])
+        return {"requester": read("requester", run.tui, a, a_sid, "→✓✕"),
+                "receiver": read("receiver", self.target_tui, b, b_sid, "←"), **placed, **files}
+
+    def panel_layout(self, run, tui, sid):
+        """Where ``tui``'s host placed its panel: the host's own ``layout`` (``native-display.cjs``) over the pane size
+        tmux gives the window this scenario made, the host's ``expanded`` (its ``status`` answer for session ``sid``) and
+        the display settings the host reads. A value it cannot get ends the read with an error, never a guess."""
+        import subprocess
+        import session_shell
+        from harness_behavior_cases_session_upgrade import bindings
+        binding = next(found for found in bindings(run.home.env, run.harness) if found.get("sid") == sid)
+        status = session_shell.control(binding, "status")
+        size = (tui._tmux("display", "-p", "-t", "scenario", "#{pane_width} #{pane_height}").stdout or "").split()
+        if not status.get("ok") or "expanded" not in status or len(size) != 2:
+            raise RuntimeError(f"no panel placement for {sid}: status={status} size={size}")
+        place = {"cols": int(size[0]), "rows": int(size[1]), "expanded": status["expanded"],
+                 "configuration": session_shell.display_policy(run.home.env)}
+        script = "console.log(JSON.stringify(require(process.argv[1]).layout(JSON.parse(process.argv[2]))))"
+        module = Path(sys.modules[type(run).__module__].SOURCE) / "utilities" / "session-shell" / "native-display.cjs"
+        done = subprocess.run(["node", "-e", script, str(module), json.dumps(place)],
+                              capture_output=True, text=True, timeout=30, check=True)
+        return json.loads(done.stdout)
 
     def start_a(self, run, text):
         return run.prompt(f"{A_MARK} {text}")
