@@ -383,11 +383,21 @@ class _RequestScenario(WatchWakeScenario):
             path.write_text(screen, encoding="utf-8")
             files[who + "_screen_file"] = str(path)
         records = list(self.records(run).values())
+        if not records:   # no request was made: no request line to look for, and no placement to ask
+            return {"requester": [], "receiver": [], **files}
         titles = [rec.get("title") or "" for rec in records]
         a_sid, b_sid = records[0]["requester"]["session_id"], records[0]["recipient"]["session_id"]
-        return {"requester": panel_request_lines(a, titles, "→✓✕", layout=self.panel_layout(run, run.tui, a_sid)),
-                "receiver": panel_request_lines(b, titles, "←", layout=self.panel_layout(run, self.target_tui, b_sid)),
-                **files}
+
+        placed = {}
+
+        def read(who, tui, screen, sid, marks):
+            # A window started without the session shell (its argv) has no panel and no host to ask.
+            if not any(Path(part).name == "entry.py" and Path(part).parent.name == "session-shell" for part in tui.argv):
+                return []
+            placed[who + "_layout"] = self.panel_layout(run, tui, sid)   # kept with the evidence
+            return panel_request_lines(screen, titles, marks, layout=placed[who + "_layout"])
+        return {"requester": read("requester", run.tui, a, a_sid, "→✓✕"),
+                "receiver": read("receiver", self.target_tui, b, b_sid, "←"), **placed, **files}
 
     def panel_layout(self, run, tui, sid):
         """Where ``tui``'s host placed its panel: the host's own ``layout`` (``native-display.cjs``) over the pane size

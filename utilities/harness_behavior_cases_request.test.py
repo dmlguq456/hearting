@@ -444,6 +444,30 @@ class PanelRequestLinesTest(unittest.TestCase):
         with self.assertRaises(KeyError):
             cases.panel_request_lines(quoted, [self.TITLE], "←", layout={"folded": False})
 
+    def test_with_no_request_record_no_line_is_read_and_no_placement_asked(self):
+        scenario = cases.RequestFlowScenario()
+        scenario.records = lambda run: {}
+        scenario.panel_layout = lambda *args: self.fail("asked the host for a placement with no request made")
+        scenario.target_tui = SimpleNamespace(screen=lambda: "receiver screen")
+        with tempfile.TemporaryDirectory() as out:
+            run = SimpleNamespace(tui=SimpleNamespace(screen=lambda: "requester screen"), output=out, harness="claude")
+            shown = scenario.panels(run, "open")
+        self.assertEqual((shown["requester"], shown["receiver"]), ([], []))
+        self.assertTrue(Path(shown["receiver_screen_file"]).name.startswith("panel-open-receiver"))
+
+    def test_a_window_started_without_the_session_shell_has_no_panel_to_read(self):
+        scenario = cases.RequestFlowScenario()
+        record = {"title": "t", "requester": {"session_id": "sid-a"}, "recipient": {"session_id": "sid-b"}}
+        scenario.records = lambda run: {"rq-aaaaaa": record}
+        asked = []
+        scenario.panel_layout = lambda run, tui, sid: asked.append(sid) or {"folded": True, "panelColumn": 0, "panelCols": 200}
+        shell = ["/usr/bin/python3", "/src/utilities/session-shell/entry.py", "--", "/bin/claude"]
+        scenario.target_tui = SimpleNamespace(screen=lambda: "native only", argv=["/bin/claude"])
+        with tempfile.TemporaryDirectory() as out:
+            run = SimpleNamespace(tui=SimpleNamespace(screen=lambda: "", argv=shell), output=out, harness="claude")
+            shown = scenario.panels(run, "open")
+        self.assertEqual((shown["requester"], shown["receiver"], asked), ([], [], ["sid-a"]))
+
     def test_the_scenario_passes_the_hosts_own_placement(self):
         """``panel_layout`` asks the window's host (its binding for the session, its ``status``) and tmux (the pane
         size), and hands them to the host's own ``native-display.cjs`` ``layout``; what it cannot get is an error."""
