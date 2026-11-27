@@ -578,7 +578,9 @@ def request_rows(views, now, tag_of, doer_of=None, own_repo=None):
         status = (delivery_text
                   if side == "out" and state in ("open", "partial") and delivery in ("waiting", "sent", "delivered")
                   else work)
-        glyph = {"final": "✓", "rejected": "✕", "cancelled": "✕"}.get(state, "→" if side == "out" else "◂")
+        # 11-27 (the person: "방향만 다르면 화살표 방향만 반대로 하면 되는걸 왜 삼각형을써? 메시지는 안그러잖아"): a received
+        # request is `←`, the arrow a received message wears; only the direction differs from a sent one's `→`.
+        glyph = {"final": "✓", "rejected": "✕", "cancelled": "✕"}.get(state, "→" if side == "out" else "←")
         kind = ("request-rejected" if state in ("rejected", "cancelled")
                 else "request-done" if closed else "request-in" if side == "in" else "request-out")
         title = " ".join(str(record.get("title") or "").split())
@@ -618,7 +620,7 @@ def request_rows(views, now, tag_of, doer_of=None, own_repo=None):
         body = str(view.get("body") or "")
         body_lines = body.splitlines()
         rows.append({
-            "id": record["id"], "way": "→" if side == "out" else "◂", "glyph": glyph,
+            "id": record["id"], "way": "→" if side == "out" else "←", "glyph": glyph,
             "who": who, "title": title, "status": status, "age": _request_age(now - (record.get("updated") or now)),
             "kind": kind, "state": state, "side": side, "delivery": delivery or "",
             **({"status_head": waiting[1]} if waiting and status == waiting[0] else {}),
