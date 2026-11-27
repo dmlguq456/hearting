@@ -645,7 +645,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const start=Math.max(0,settings.index-Math.max(0,height-7));
     for(let i=start;i<fields.length&&content.length<height-4;i++){
       const key=fields[i],value=settings.value[key],v=typeof value==='string'?t((APPEARANCE_KEYS.includes(key)?key+'_':'')+value,value):value;
-      const prefix=`${i===settings.index?'›':' '} ${t(names[i],names[i])}  `,left=2+measure(prefix);
+      // 11-27 (the eight marks): the setting this screen is on leads with `▶`, the place every list marks.
+      const prefix=`${i===settings.index?'▶':' '} ${t(names[i],names[i])}  `,left=2+measure(prefix);
       hits.push({row:content.length+1,left,right:left+1,action:'setting:'+i+':down'});
       hits.push({row:content.length+1,left:left+measure('‹ '+v+' '),right:left+measure('‹ '+v+' ›'),action:'setting:'+i+':up'});
       add(line(prefix+`‹ ${v} ›`,i===settings.index?'loc_repo':'dim'),'setting:'+i+':select');

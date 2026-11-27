@@ -467,7 +467,7 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
     if not state.usage_open:
         more_x = width - 9
         grid.put(more_x, 1, "u", "hearting", limit=width - 1)
-        grid.put(more_x + 1, 1, " more ▸", "dim", limit=width - 1)
+        grid.put(more_x + 1, 1, " more ›", "dim", limit=width - 1)
         x = 1
         limit = width - 12
         annotations = []

@@ -37,7 +37,7 @@ function layout(entries, state, { width = 0, measure = defaultMeasure } = {}) {
   const found = marks.find(m => m.key === state.sel), chosen = found || marks[0] || null;
   if (chosen) {
     for (let i = 0; i < chosen.rows; i++) {
-      rows[chosen.at + i] = rows[chosen.at + i].map((part, j) => ({ ...part, tint: true, ...(i === 0 && j === 0 ? { text: '> ', cells: 2 } : {}) }));
+      rows[chosen.at + i] = rows[chosen.at + i].map((part, j) => ({ ...part, tint: true, ...(i === 0 && j === 0 ? { text: '▶ ', cells: 2 } : {}) }));
     }
   }
   return { rows, marks, sel: chosen ? chosen.key : '', at: chosen ? chosen.at : 0, span: chosen ? chosen.rows : 0, fellBack: !found };
@@ -91,7 +91,7 @@ function neighbour(view, delta) {
   return view.marks[to].key;
 }
 
-// Enter, or a press, on a row: a heading or `all N ›` opens or closes its group; a cut item opens or closes its whole text in place
+// Enter, or a press, on a row: a heading or `all N ▸` opens or closes its group; a cut item opens or closes its whole text in place
 // of its row (an item that was not cut has nothing to open); `full document ›` is the document read whole. The row pressed is the
 // one chosen. Returns what happened: 'full', 'fold', 'item', 'choose' (only the choice moved) or ''.
 function press(state, view, key) {

@@ -336,7 +336,7 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
         y += 1
         cursor, field = _field(grid, x, y, "PANE", right), [(str(pane), "soft")]
         if cursor + _width(field) + cell_width(link) > right - 1:
-            link = " ⏎"
+            link = " ›"          # 11-27 (the eight marks): the narrow link reads as every other "opens elsewhere" mark
     cursor = _segs(grid, cursor, y, field, right)
     if pane:
         open_x = grid.put(cursor, y, link, "hearting", limit=right)

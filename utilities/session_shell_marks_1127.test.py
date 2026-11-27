@@ -139,6 +139,76 @@ class AnswerWaitRouteMarkTest(unittest.TestCase):
         self.assertEqual(dict(session_line._TALLY)["waiting"], "●")
 
 
+class FoldAndPlaceTest(unittest.TestCase):
+    def test_a_closed_group_is_a_right_triangle_and_the_chosen_row_leads_with_the_place(self):
+        node(self, r"""
+const list=require(path.join(dir,'status-list.cjs')),board=require(path.join(dir,'backlog-board.cjs'));
+const S=(text,dim)=>({text,...(dim?{dim:true}:{})});
+const entries=[{rows:[[S('  '),S('▸ '),S('FIX 1')]],key:'g:fix',group:'fix',alt:[[S('  '),S('▾ '),S('FIX 1')]]},
+  {rows:[[S('    '),S('item')]],key:'i:fix:1',group:'fix',when:'open'},{rows:[[S('  '),S('full document ›')]],key:'full'}];
+const st={sel:'g:fix',fold:new Set(),items:new Set()};
+let v=list.layout(entries,st,{width:40});
+const text=r=>r.map(p=>p.text).join('');
+assert.equal(text(v.rows[0]),'▶ ▸ FIX 1');
+// Enter opens it: the same row, `▾`, the place still `▶`, the same press cells.
+const hits=list.hits(v);list.press(st,v,'g:fix');v=list.layout(entries,st,{width:40});
+assert.equal(text(v.rows[0]),'▶ ▾ FIX 1');assert.equal(text(v.rows[1]),'    item');
+assert.deepEqual(list.hits(v).filter(h=>h.row===0),hits.filter(h=>h.row===0));
+// The backlog board writes a closed group `▸` and an open one `▾`.
+const answer={title:'B',updated:'',counts:{fix:1,task:1,tbd:0,note:0},total:2,sent:2,cut:false,campaigns:['c'],
+  items:[['i:k1','fix','2026-11-18','','','One',0],['i:k2','task','2026-11-20','','','Two',0]]};
+const b=board.fromAnswer({board:answer}),bs=board.newState(),tb={sel:'',fold:new Set(),items:new Set(),more:{}};board.prepare(b,bs,tb);
+const heads=board.entries(b,bs,{width:60}).filter(e=>e.key&&e.key.startsWith('g:')).map(e=>text((tb.fold.has(e.group)&&e.alt?e.alt:e.rows)[0]).trim());
+assert.deepEqual(heads,['▾ FIX 1','▸ TASK 1'],JSON.stringify(heads));
+// The settings screen: the setting being changed leads with `▶`, the others with a blank; the press cells are where they were.
+const s=view.render({width:36,height:30,side:true,model:{styles,labels:{layout:'Layout',side:'Side'}},state:'idle',settings:{index:0,value:view.defaults},configuration:{}});
+const rows=lines(s);assert(rows.includes('│ ▶ Layout  ‹ Side ›               │'),rows.join('\n'));
+assert(!rows.some(r=>/│ › \S/.test(r)),rows.join('\n'));
+assert(s.hits.some(h=>h.action==='setting:0:down'&&h.left===2+10));
+""")
+
+    def test_the_status_listing_folds_with_right_triangles(self):
+        from fleet import session_status
+        parsed = {"title": "T", "updated": "", "summary": "", "groups": [
+            {"name": "In progress", "kind": "running", "items": ["a", "b", "c", "d"], "notes": []},
+            {"name": "Planned", "kind": "other", "items": ["e"], "notes": []}]}
+        rows = ["".join(part for part, _ in entry["rows"][0]) for entry in session_status.listing_entries(parsed, 60) if entry["rows"]]
+        alts = ["".join(part for part, _ in entry["alt"][0]) for entry in session_status.listing_entries(parsed, 60) if entry.get("alt")]
+        self.assertIn("  all 4 ▸", rows)
+        self.assertIn("  ▸ Planned 1", rows)
+        self.assertEqual(alts, ["  all 4 ▾", "  ▾ Planned 1"])
+        self.assertIn("  full document ›", rows)                 # a press that opens another place keeps `›`
+
+    def test_the_question_popup_marks_its_place_and_keeps_the_answer_row_lead(self):
+        node(self, r"""
+const create=require(path.join(dir,'block-input.cjs'));
+const measure=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
+const make=(choices,free=false)=>{const b=create({cellWidth:measure,changed(){},action(){},answer:async()=>({state:'submitted'})});
+ b.update([{id:'q-1',revision:'r1',answerable:true,request_state:'open',questions:[{id:'q',question:'Which layout?',choices,free_text:free}]}],'',{});
+ b.enter();return b;};
+const words=rows=>rows.map(r=>r.map(p=>p.text).join(''));
+let b=make(['Per release','Per component','Keep']);
+b.input(Buffer.from('\x1b[B'));
+let rows=words(b.detail({budget:20,columns:40}));
+assert(rows[0].startsWith('▶ ◑ '),rows[0]);                         // the question this popup is on
+assert(rows.includes('▶ 2  Per component'),rows.join('\n'));       // the choice being chosen
+assert(!rows.some(r=>r.startsWith('› ')||r.startsWith('▸ ')),rows.join('\n'));
+// Many choices in few rows: the rows kept in sight follow the chosen one (`findIndex` reads the new mark).
+b=make(Array.from({length:12},(_,i)=>'choice '+(i+1)));
+for(let i=0;i<9;i++)b.input(Buffer.from('\x1b[B'));
+rows=words(b.detail({budget:7,columns:40}));
+assert(rows.some(r=>r.startsWith('▶ 10  choice 10')),rows.join('\n'));
+// A picked answer, then the question changed: the receipt leads with `▶`; the answer row being typed keeps `› `.
+b=make(['Per release','Per component']);
+b.input(Buffer.from('2'));
+b.update([{id:'q-1',revision:'r2',answerable:true,request_state:'open',questions:[{id:'q',question:'Which layout?',choices:['Per release','Per component']}]}],'',{});
+rows=words(b.detail({budget:20,columns:40}));
+assert(rows.some(r=>r.startsWith('▶ 2 · Per component')),rows.join('\n'));
+const w=make(['A','B'],true);w.input(Buffer.from('hello'));
+rows=words(w.detail({budget:20,columns:40}));
+assert(rows.some(r=>r.startsWith('› hello')),rows.join('\n'));
+""")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

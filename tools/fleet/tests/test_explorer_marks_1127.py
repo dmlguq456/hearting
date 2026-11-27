@@ -112,6 +112,68 @@ class EarlierGenerationTest(Base):
             self.assertNotIn("◂ gen", shown)
 
 
+class PlaceTest(Base):
+    def test_the_choice_being_chosen_and_the_model_being_picked_lead_with_the_place(self):
+        from tools.fleet.tests import test_explorer_question_choices_1122 as choices
+        for cols in WIDTHS:
+            state, vm, _ref = choices.board(lines=1, choices=3)
+            overlay = {**state.question_overlay, "choice_marks": {"q": [1, False]}}
+            shown = rows(vm, dataclasses.replace(state, question_overlay=overlay), cols)
+            self.assertTrue(any("│     ▶ 2  Choice 2 " in line for line in shown), "\n".join(shown))
+            self.assertTrue(any("│     ○ 1  Choice 1 " in line for line in shown))
+            state, vm, _ref = choices.board(lines=1, choices=3, is_other=False)
+            overlay = {**state.question_overlay, "draft": {"answers": {"q": ["v2"]}}}
+            shown = rows(vm, dataclasses.replace(state, question_overlay=overlay), cols)
+            self.assertTrue(any("│     ● 2  Choice 2 " in line for line in shown), "\n".join(shown))   # a settled answer keeps `●`
+
+        def many(values):
+            models = values["models"]
+            models["model_choices"] = {**models["model_choices"],
+                                       "claude": list(models["model_choices"]["claude"]) + ["claude-extra-%02d" % i for i in range(12)]}
+        vm = vm_of(many)
+        for cols in WIDTHS:
+            state = NavState(view="MODELS", title="MODELS", folds=(("ui:mfocus", "1"), ("ui:sel", "balanced/claude")))
+            shown = rows(vm, state, cols, 60)
+            self.assertTrue(any("▶ [ sonnet ]" in line for line in shown), "\n".join(shown))
+            self.assertFalse(any("▸ [ sonnet ]" in line for line in shown))
+
+
+class OpenLinkTest(Base):
+    def test_a_press_that_opens_another_place_ends_in_the_chevron_on_its_own_cells(self):
+        vm = vm_of()
+        state = NavState(opened="bb", folds=(("sopen:OVERVIEW", "bb"),))
+        for cols in WIDTHS:
+            frame = draw(vm, state, cols, 60, beat=1)
+            text = frame.text_rows()
+            for hit in frame.hits:
+                if hit.action[:1] == ("pane",) or hit.action[:2] == ("page", "session"):
+                    shown = text[hit.y][hit.x0:hit.x1].strip()
+                    self.assertIn(shown, ("(open ›)", "›"), (cols, shown))
+            self.assertTrue(any(h.action[:2] == ("page", "session") for h in frame.hits), cols)
+            self.assertIn("u more ›", text[1])
+            self.assertFalse(any("▸" in line for line in text if "(open" in line or "u more" in line))
+        narrow = draw(vm, state, 80, 60, beat=1)
+        ask = next(line for line in narrow.text_rows() if "ASK" in line)
+        self.assertTrue(ask.rstrip().endswith("›"), ask)
+
+    def test_the_page_route_link_and_the_narrow_pane_link(self):
+        vm = vm_of()
+        route = next(r for r in vm.routes if r.get("id") == "row1")
+        repo = route.get("repo")
+        for cols in WIDTHS:
+            frame = draw(vm, NavState(scope="repo:" + repo, folds=(("ropen:repo:" + repo, "row1"),)), cols, 45, beat=1)
+            link = next(h for h in frame.hits if h.action == ("route", "row1"))
+            self.assertEqual(frame.text_rows()[link.y][link.x0:link.x1].strip(), "open ›")
+
+        def long_pane(values):
+            session(values, "bb")["pane"] = "demo:" + "w" * 22
+        vm = vm_of(long_pane)
+        narrow = draw(vm, NavState(scope="session:bb", title="bb"), 80, 45, beat=1)
+        hit = next(h for h in narrow.hits if h.action[:1] == ("pane",))
+        self.assertEqual(narrow.text_rows()[hit.y][hit.x0:hit.x1].strip(), "›")
+        wide = draw(vm, NavState(scope="session:bb", title="bb"), 132, 45, beat=1)
+        self.assertTrue(any("⏎ go" in line for line in wide.text_rows()))     # the wide link is the key's whole name
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
