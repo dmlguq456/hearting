@@ -126,6 +126,8 @@ from dispatch_lifecycle import (
 )
 
 
+from artifact_root_selection import ARTIFACT_ROOT_NAMES, is_activated_root, select_artifact_root
+
 # Re-exported so every name this module defined before the split stays an
 # attribute of `artifact_producer` (callers, older releases and tests use them).
 from artifact_producer_store import (  # noqa: F401
@@ -1263,7 +1265,13 @@ def _begin_cycle_record(
                 raise ProducerError("cutover-inactive-fallback-denied",
                                     fallback["override"]["reason"] or "override-absent")
             if require_cycle:
-                raise ProducerError("cutover-inactive", "activation required before cycle issuance")
+                detail = "activation required before cycle issuance"
+                if root.name in ARTIFACT_ROOT_NAMES:
+                    selected = select_artifact_root(root.parent)
+                    if selected != root and is_activated_root(selected):
+                        active_path = os.path.realpath(selected).replace("\n", "\\n").replace("\r", "\\r")
+                        detail += f" (active artifact root: {active_path})"
+                raise ProducerError("cutover-inactive", detail)
             alias_binding = None
             if root.name == '.claude_reports':
                 try:
