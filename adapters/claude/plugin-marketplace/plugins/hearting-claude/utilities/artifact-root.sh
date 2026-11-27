@@ -49,6 +49,19 @@ emit() {
   exit 0
 }
 
+emit_project_root() {
+  resolver=$0
+  while [ -L "$resolver" ]; do
+    target=$(readlink "$resolver") || exit 66
+    case "$target" in
+      /*) resolver=$target ;;
+      *) resolver=$(dirname -- "$resolver")/$target ;;
+    esac
+  done
+  root=$(python3 -B "$(dirname -- "$resolver")/artifact_root_selection.py" "$1") || exit $?
+  emit "$root"
+}
+
 if [ -n "${AGENT_ARTIFACT_ROOT:-}" ]; then
   case "$AGENT_ARTIFACT_ROOT" in
     /*) ;;
@@ -100,13 +113,7 @@ if command -v git >/dev/null 2>&1 \
     | awk '$1=="worktree"{print substr($0,10); exit}')
   [ -n "$primary" ] || primary=$(git -C "$start" rev-parse --show-toplevel)
   primary=$(physical_dir "$primary")
-  if [ -d "$primary/.agent_reports" ]; then
-    emit "$(physical_dir "$primary/.agent_reports")"
-  elif [ -d "$primary/.claude_reports" ]; then
-    emit "$(physical_dir "$primary/.claude_reports")"
-  else
-    emit "$primary/.agent_reports"
-  fi
+  emit_project_root "$primary"
 fi
 
 # D-3: cwd's own root is used on discovery (self is not inheritance, no marker
@@ -122,15 +129,9 @@ fi
 d=$start
 self=1
 while :; do
-  root=""
-  if [ -d "$d/.agent_reports" ]; then
-    root="$d/.agent_reports"
-  elif [ -d "$d/.claude_reports" ]; then
-    root="$d/.claude_reports"
-  fi
-  if [ -n "$root" ] \
-    && { [ "$self" = 1 ] || [ -f "$d/.agent-workspace" ]; }; then
-    emit "$(physical_dir "$root")"
+  if { [ "$self" = 1 ] || [ -f "$d/.agent-workspace" ]; } \
+    && { [ -d "$d/.agent_reports" ] || [ -d "$d/.claude_reports" ]; }; then
+    emit_project_root "$d"
   fi
   self=0
   [ "$d" = "/" ] && break

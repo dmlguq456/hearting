@@ -176,6 +176,7 @@ utility-deferred	artifact_producer_shared.py
 utility-deferred	artifact_producer_spec.py
 utility-deferred	artifact_producer_store.py
 utility-deferred	artifact_reader.py
+utility-deferred	artifact_root_selection.py
 utility-deferred	artifact_reader.test.py
 utility-deferred	artifact_request.py
 utility-deferred	artifact_receipt.py
