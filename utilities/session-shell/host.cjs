@@ -948,6 +948,11 @@ function askTable(){
     if(stale())return;
     // Read at a width the popup no longer has: its rows are not this popup's; the read made for the new width stands.
     if(t.width!==width){tableAgain=true;return;}
+    if(routeTable){
+      // A collected view is reusable on either screen, even if its rows are for the screen just left.
+      if(result?.ok){t.readKey=keyAsked??null;t.readAt=Number(result.read_at)||atAsked;}
+      if(pageAsked!==t.page){tableAgain=true;return;}
+    }
     if(now){
       // A part that could not be asked for goes back to the list; a list that could not be read says so.
       if(!result?.ok){t.queued=[];if(t.page){t.page=false;t.scroll=t.listScroll||0;t.reveal=true;}else t.error=!t.list;queueDisplay();return;}
@@ -969,7 +974,7 @@ function askTable(){
     const anchor=route?routeAnchor(t):null;
     t.hits=Array.isArray(result.hits)?result.hits:[];t.loaded=true;t.error=false;loaded=true;
     if(t.kind==='ROUTE'){
-      t.stale=null;t.readKey=keyAsked??null;t.readAt=Number(result.read_at)||atAsked;
+      t.stale=null;
       // A held collection (`reuse`) that this answer says was made over a minute ago is drawn with the words (its time is when it was
       // collected) and collected again behind them. Judged by the answer's own `read_at`: a read made afresh (no held backend, the
       // 12 s cut, a backend that died) is new, and is not read a second time.
@@ -1232,7 +1237,14 @@ function enterRow(){
   if(t.kind==='NOW'){enterNow(t);return;}
   if(listed(t.kind)&&t.listing){if(t.screen==='full')statusBack(t);else statusActivate(t,statusList.layout(t.listing,t).sel);return;}
   // (A popup opened on a route's page has not followed the unfolded row yet: back at the table it does.)
-  if(t.kind==='ROUTE'&&t.open){t.page=!t.page;t.scroll=0;t.pageTop=t.page;if(!t.page)t.follow=true;askTable();}
+  if(t.kind==='ROUTE'&&t.open){
+    t.page=!t.page;t.scroll=0;t.pageTop=t.page;t.follow=!t.page;
+    if(t.page){
+      Object.assign(t,{rows:[],hits:[],routes:[],loaded:false,stale:null,error:false},routeFirst(t));
+      queueDisplay();
+    }
+    askTable();
+  }
 }
 // 11-21: Enter or a press on a line of the status popup's list screen. A heading or `all N ›` opens or closes its group, an item
 // its whole text, and `full document ›` the document read whole (Fleet's lines are asked for then, not before); Esc or Enter there

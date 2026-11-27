@@ -117,6 +117,9 @@ _popup=m._panel_popup
 def popup(binding,request):
     if not SERVED:
         SERVED.append(1);open(C+'/backends','a').write('%d\n'%os.getpid())      # one line for each process that serves a popup (held or one-shot, any kind)
+    if request.get('kind')=='routes' and request.get('page') and os.path.exists(C+'/hold-page'):
+        open(C+'/page-asked','w').close()
+        while os.path.exists(C+'/hold-page'):time.sleep(0.01)
     return _popup(binding,request)
 m._panel_popup=popup
 m.session_questions=lambda harness,sid,**_kw:[]
@@ -128,7 +131,8 @@ DRIVER = r"""
 const fs=require('node:fs');
 const pty=require('node-pty'),{Terminal}=require('@xterm/headless'),{Unicode11Addon}=require('@xterm/addon-unicode11');
 const cfg=JSON.parse(fs.readFileSync(process.env.LOOP_CONFIG,'utf8'));
-let cols=160,rows=40;
+const enterCase=cfg.scenario.startsWith('enter_');
+let cols=enterCase?132:160,rows=enterCase?46:40;
 const term=new Terminal({cols,rows,allowProposedApi:true,scrollback:0});
 term.loadAddon(new Unicode11Addon());term.unicode.activeVersion='11';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
@@ -177,8 +181,37 @@ const measure=async(label,press_=opened)=>{
   const full=await until(filled,'the filled table ('+label+')');m.full_ms=Date.now()-t0;m.full_title=title(full.s);frames[label+'_full']=plain(full.s);
   return m;};
 (async()=>{try{
-  await until(s=>has('READY_'+cfg.harness)(s)&&has(cfg.routes+' ROUTE')(s)&&has('PANEL_R1')(s),'the panel with its routes');await sleep(700);
+  await until(s=>has('READY_'+cfg.harness)(s)&&has(cfg.routes+' ROUTE')(s)&&has('PANEL_R1')(s),'the panel with its routes');
+  if(!enterCase)await sleep(700);
   const sc=cfg.scenario;
+  if(enterCase){
+    const pending=sc==='enter_pending';
+    const pageKeys=popupHas('Enter 표로 돌아가기');
+    const sample=(name,s)=>{
+      const b=box(s);
+      frames[name]=plain(s);
+      return {top:b.top+1,bottom:b.bottom+1,stage:popupHas('╔═')(s),fleet:popupHas('FLEET_R1')(s),reading:reading(s)};
+    };
+    if(pending)fs.writeFileSync(cfg.vm+'.hang','');
+    await opened();
+    const list=await until(pending?either:filled,'the route table');
+    checks.table=sample('table',list.s);
+    if(pending)await settle(()=>fs.existsSync(cfg.control+'/collections'),'the table collection is waiting');
+    control('hold-page');
+    const t0=Date.now();
+    child.write('\r');
+    const first=await until(pageKeys,'the page keys while the read is held');
+    checks.first_ms=Date.now()-t0;
+    checks.first=sample('first',first.s);
+    if(pending)fs.unlinkSync(cfg.vm+'.hang');
+    await settle(()=>fs.existsSync(cfg.control+'/page-asked'),'the page request is waiting');
+    checks.waiting=sample('waiting',(await until(pageKeys,'the page during its own read')).s);
+    fs.unlinkSync(cfg.control+'/hold-page');
+    const read=await until(s=>pageKeys(s)&&popupHas('║')(s)&&filled(s),'the read page');
+    checks.full_ms=Date.now()-t0;
+    checks.full=sample('full',read.s);
+    checks.collections=fs.readFileSync(cfg.control+'/collections','utf8').trim().split('\n').length;
+  }
   if(sc==='one'||sc==='many'){
     // First opening, the collection slow: the panel's own box stands under a second, Fleet's table after the delay.
     control('vm-delay',cfg.delay);
@@ -526,9 +559,8 @@ const measure=async(label,press_=opened)=>{
       await opened();await until(either,'a first content');
       for(let i=0;i<8;i++)await key('\x1b[B',60);await key('\r',100);
       const pageRead=s=>paged(s)&&!staleWords(s)&&plain(s).some(l=>/\d+\/\d+ ·/.test(l));
-      // While the collection is out, Enter changes nothing on screen (the first screen already carries a `1/N ·` place mark), so there is no
-      // mark to wait for: this only checks that a place mark stands. What is guaranteed is the order: the hold is let go after the keys
-      // were written, and the backend looks for `.hang` every 0.2 s, so the collection ends after them.
+      // The first page can also be longer than the low window. It shows a place mark before the
+      // held collection is released.
       await until(s=>plain(s).some(l=>/\d+\/\d+ ·/.test(l)),'a place mark on the first screen');
       fs.unlinkSync(cfg.vm+'.hang');
       // A frame is taken once the page has stopped changing (a frame drawn between two steps of the redraw is not the page).
@@ -959,6 +991,21 @@ class RoutePopupFirstTest(unittest.TestCase):
             # (f) The head: a table (never the page), with the table's key line.
             self.assertFalse(w['head']['paged'], w)
             self.assertFalse(w['head']['keys'], w)
+
+    def test_enter_draws_the_first_route_page_during_a_read(self):
+        for scenario in ('enter_ready', 'enter_pending'):
+            with self.subTest(scenario=scenario):
+                checks = self.run_case('claude', scenario, 1, staged=True)['checks']
+                self.assertFalse(checks['table']['stage'], checks)
+                self.assertGreater(checks['table']['top'], 2, checks)
+                for state in ('first', 'waiting'):
+                    frame = checks[state]
+                    self.assertTrue(frame['stage'] and frame['reading'], checks)
+                    self.assertFalse(frame['fleet'], checks)
+                    self.assertEqual(frame['top'], 2, checks)
+                self.assertTrue(checks['full']['stage'] and checks['full']['fleet'], checks)
+                self.assertEqual(checks['full']['top'], 2, checks)
+                self.assertEqual(checks['collections'], 1, checks)
 
     def test_a_route_with_no_stage_line_keeps_the_panels_box_first_and_opens_to_its_page(self):
         w = self.run_case('claude', 'row_page_unstaged', 3, delay=1)['checks']['widths']['160']
