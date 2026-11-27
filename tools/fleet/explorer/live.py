@@ -662,34 +662,26 @@ _LIVE_OWNER = ("working", "idle", "blocked")
 
 
 def _own_pid_alive(job):
-    """True only when the attempt's own registered process is alive: the registry row's ``pid`` with
-    its recorded start (``pid_start``, or the host pair), which Fleet's pass found alive with that
-    very start (``state_evidence["inputs"]``: ``pid_alive`` and ``proc_start_match``). A row without
-    a PID, a PID whose start differs, or a process borrowed from another session's record in the same
-    folder is not this attempt alive (11-27)."""
-    meta = _get(job, "_registry_metadata")
+    """True only when the collector accepted this registry row's own PID in this pass
+    (``pid_identity_source``, from ``dispatch._authoritative_registry_pid``) and the classifier
+    found that very process alive with its recorded start (``pid_alive``, ``proc_start_match``).
+    A borrowed PID or a row whose PID was not accepted is not this attempt alive (11-27)."""
     evidence = _get(job, "state_evidence")
     seen = evidence.get("inputs") if isinstance(evidence, Mapping) else None
-    if not isinstance(meta, Mapping) or not isinstance(seen, Mapping):
-        return False
-    if seen.get("pid_alive") is not True or seen.get("proc_start_match") is not True:
-        return False
-    pair = (_text(str(seen.get("pid") or "")), _text(str(seen.get("proc_start") or "")))
-    own = {(_text(str(meta.get("pid") or "")), _text(str(meta.get("pid_start") or ""))),
-           (_text(str(meta.get("pid_host") or "")),
-            _text(str(meta.get("pid_host_start") or meta.get("pid_start") or "")))}
-    return None not in pair and pair in own
+    return (isinstance(seen, Mapping) and bool(seen.get("pid_identity_source"))
+            and seen.get("pid_alive") is True and seen.get("proc_start_match") is True)
 
 
-def _closed_at_route_file(job, route_id, route_hash):
-    """Whether the outcome beside the route file this attempt's registry row records (the old
-    ``artifacts/routes/`` layout too) closed the route, read by the route reader the work
-    projection already uses for its result."""
+def _closed_at_route_file(job, record):
+    """Whether the outcome beside the route file this owner row records (an older route under
+    ``artifacts/routes`` too) closed the projection-validated route ``record``, read by the route
+    reader the work projection uses for its result. A file changed meanwhile reads as not closed."""
     from .. import route as route_reader
     path = _text(_get(job, "owner_route_file")) or _text(_get(job, "route_file"))
-    if not path:
+    try:
+        outcome = route_reader.load_outcome(path, record.get("route_id"), record.get("route_hash")) if path else {}
+    except (AttributeError, TypeError, ValueError, OSError):
         return False
-    outcome = route_reader.load_outcome(path, route_id, route_hash)
     return bool(outcome.get("present") and outcome.get("match") and outcome.get("closed_at"))
 
 
@@ -1233,8 +1225,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         candidate = _running_owner(owner, _owner_jobs(owner_jobs))
         visibility, closed = _route_visibility_of(record, view, owner_jobs, owner, candidate)
         # Closed where its own route file says so, too (an older route kept under ``artifacts/routes``).
-        ended = closed or (candidate is not None and _closed_at_route_file(
-            candidate, rid, _text(record.get("route_hash")) or _text(view.get("route_hash"))))
+        ended = closed or bool(record and candidate is not None and _closed_at_route_file(candidate, record))
         if ended and owner is None and candidate is not None:
             visibility, closed = _route_visibility_of(record, view, owner_jobs, owner, None)
         runner = owner if ended else candidate
@@ -1374,9 +1365,9 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         # The route runs while its owner or a worker of it does. An owner whose registry row is
         # still open and whose own registered process is alive (its PID with its recorded start) is
         # running the route however quiet it is, between stages, after a stage ended FAIL or BLOCKED,
-        # or after the last stage (11-27). A closed owner row, a closed route, or an owner alive by
-        # any other evidence keeps the stage rule, so a finished route does not stay.
-        owner_open = (not ended and runner is not None and _own_pid_alive(runner)
+        # or after the last stage (11-27). A closed owner row, a closed or unvalidated route, or an
+        # owner alive by any other evidence keeps the stage rule, so a finished route does not stay.
+        owner_open = (bool(record) and not ended and runner is not None and _own_pid_alive(runner)
                       and _text(_get(runner, "status")) in ("open", "running"))
         current = bool(run_children or worker_contexts
                        or owner_live in _LIVE_OWNER

@@ -91,6 +91,9 @@ def _iterdir_ours(self):
     return (item for item in items if _ours(item.name)) if _is_proc(self) else items
 
 os.listdir, os.scandir, pathlib.Path.iterdir = _listdir_ours, _scandir_ours, _iterdir_ours
+# The shared environment reader (a provenance walk up the parents calls it too) opens only these processes.
+_read_environ = procscan.read_environ
+procscan.read_environ = lambda pid: _read_environ(pid) if str(pid) in launched else {}
 listed = procscan._ps_lines
 
 def _ps_lines_ours():

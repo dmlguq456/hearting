@@ -11,6 +11,7 @@ import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -66,23 +67,52 @@ class ProcessScope(unittest.TestCase):
         self.assertIn(self.ours[0], pids)
         self.assertNotIn(self.foreign[0], pids)
 
+    def read(self, tmp, rows):
+        jobs = Path(tmp) / "jobs.log"
+        jobs.write_text("".join(
+            "2026-11-27T00:00:00Z\t%s\trepo\t%s\t%s\t%s\n" % (
+                row["status"], tmp, row["slug"],
+                ",".join(f"{k}={v}" for k, v in row.items() if k not in ("status", "slug")))
+            for row in rows))
+        scenario = cases.PanelRouteRunning()
+        scenario.unit_rows = lambda: rows
+        env = {**os.environ, "AGENT_HOME": str(ROOT), "AGENT_DISPATCH_JOBS": str(jobs)}
+        done = subprocess.run(
+            [sys.executable, "-B", "-c", cases_b._PRELUDE + cases.GUARD + READ,
+             json.dumps({"pids": scenario.launched_pids(SimpleNamespace()), "foreign": self.foreign[0]})],
+            env=env, cwd=tmp, text=True, capture_output=True, timeout=180)
+        self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+        return json.loads(done.stdout.strip().splitlines()[-1])
+
     def test_the_reading_opens_no_environment_outside_its_processes(self):
         with tempfile.TemporaryDirectory(prefix="pr-scope-") as tmp:
-            jobs = Path(tmp) / "jobs.log"
-            jobs.write_text("".join(
-                "2026-11-27T00:00:00Z\t%s\trepo\t%s\t%s\t%s\n" % (
-                    row["status"], tmp, row["slug"],
-                    ",".join(f"{k}={v}" for k, v in row.items() if k not in ("status", "slug")))
-                for row in self.rows()))
-            env = {**os.environ, "AGENT_HOME": str(ROOT), "AGENT_DISPATCH_JOBS": str(jobs)}
-            done = subprocess.run(
-                [sys.executable, "-B", "-c", cases_b._PRELUDE + cases.GUARD + READ,
-                 json.dumps({"pids": self.scope(), "foreign": self.foreign[0]})],
-                env=env, cwd=tmp, text=True, capture_output=True, timeout=180)
-        self.assertEqual(done.returncode, 0, done.stderr[-2000:])
-        seen = json.loads(done.stdout.strip().splitlines()[-1])
+            seen = self.read(tmp, self.rows())
         # The whole Fleet read opened no other process's environment; an explicit try is counted and refused.
         self.assertEqual(seen, {"during_read": 0, "refused": True, "counted": 1})
+
+    def test_a_walk_up_to_a_parent_outside_its_processes_opens_nothing(self):
+        # A title-less Claude whose parent is a `node` this scenario did not start: Fleet's provenance
+        # walk asks for that parent's environment, which the reading must not even try to open.
+        with tempfile.TemporaryDirectory(prefix="pr-scope-") as tmp:
+            launcher = Path(tmp) / "bin"
+            launcher.mkdir()
+            (launcher / "node").symlink_to("/bin/sh")
+            shutil.copy2("/bin/sleep", launcher / "claude")       # an executable named claude
+            parent = subprocess.Popen([str(launcher / "node"), "-c", f"'{launcher}/claude' 120 & wait"], cwd=tmp)
+            self.addCleanup(lambda: (parent.kill(), parent.wait()))
+            child = None
+            for _ in range(50):
+                kids = Path(f"/proc/{parent.pid}/task/{parent.pid}/children").read_text().split()
+                if kids:
+                    child = int(kids[0])
+                    break
+                __import__("time").sleep(0.1)
+            self.assertIsNotNone(child)
+            self.addCleanup(lambda: subprocess.run(["kill", str(child)], capture_output=True))
+            start = str(procscan.read_proc_start(child))
+            seen = self.read(tmp, [{"status": "running", "slug": "hb-solo-review-owner", "attempt_id": "att-ours",
+                                    "pid": str(child), "pid_start": start}])
+        self.assertEqual(seen["during_read"], 0)
 
 
 if __name__ == "__main__":

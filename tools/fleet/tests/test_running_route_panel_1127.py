@@ -58,6 +58,7 @@ class RunningRoutePanel(unittest.TestCase):
             "AGENT_DISPATCH_JOBS": str(self.jobs)}))
         self.seal([{"id": node, "depends_on": [NODES[i - 1]] if i else []} for i, node in enumerate(NODES)])
         self.lines = []
+        self.started = set()     # the processes this test starts: the only ones the process table lists
         self.live = {}           # attempt -> liveness the classifier answers for its row
         self.revived = set()     # closed rows a live process contradicts (F-64)
         session = Session(harness="claude", pid=os.getpid(), session_id=SID, session_tag="s1",
@@ -68,6 +69,9 @@ class RunningRoutePanel(unittest.TestCase):
             self.stack.enter_context(mock.patch.object(module, "enrich", return_value=None))
         self.stack.enter_context(mock.patch.object(herdr, "enrich", return_value={"complete": True, "agents": []}))
         self.stack.enter_context(mock.patch.object(dispatch, "_scan_processes", return_value=[]))
+        listed = procscan._ps_lines
+        self.stack.enter_context(mock.patch.object(procscan, "_ps_lines", side_effect=lambda: [
+            line for line in listed() if line.split(None, 1)[:1] and line.split(None, 1)[0] in self.started]))
         self.stack.enter_context(mock.patch.object(
             dispatch, "_terminal_row_process_alive",
             side_effect=lambda meta, *a, **k: meta.get("attempt_id") in self.revived))
@@ -79,17 +83,19 @@ class RunningRoutePanel(unittest.TestCase):
 
     def classify(self, job, *args, **kwargs):
         """The held classifier: its answer for the row, and the process evidence Fleet's pass records
-        as ``_dispatch_liveness`` does (the row's PID and recorded start, and the start observed now)."""
+        as ``_dispatch_liveness`` does (the row's accepted PID identity and its start observed now)."""
         observed = procscan.read_proc_start(job.pid) if job.pid and job.proc_start else None
         job.state_evidence = {"inputs": {
-            "pid": job.pid, "proc_start": job.proc_start, "pid_alive": True if observed else None,
+            "pid": job.pid, "proc_start": job.proc_start, "pid_identity_source": job.pid_identity_source,
+            "pid_alive": True if observed else None,
             "proc_start_match": str(observed) == str(job.proc_start) if observed else None}}
         return self.live.get(job.attempt_id, "done")
 
-    def process(self):
+    def process(self, argv=("sleep", "300")):
         """``(pid, start)`` of a process this test starts and ends: an attempt's own process."""
-        child = subprocess.Popen(["sleep", "300"])
+        child = subprocess.Popen(list(argv), cwd=str(self.root))
         self.addCleanup(lambda: (child.kill(), child.wait()))
+        self.started.add(str(child.pid))
         return str(child.pid), str(procscan.read_proc_start(child.pid))
 
     # -- the route and its registry -----------------------------------------------------------------
@@ -116,8 +122,9 @@ class RunningRoutePanel(unittest.TestCase):
 
     def row(self, attempt, status="running", *, owner=False, node=None, liveness_now="working",
             harness="codex", age=0, own="process", **extra):
-        """One registry row. An open owner row records its own process (``own="process"``), none
-        (``"none"``, a row with no PID) or a live PID with another start (``"other-start"``)."""
+        """One registry row. An open owner row records its own process (``own="process"``; its start in
+        the older ``proc_start`` field with ``"proc_start"``), none (``"none"``, a row with no PID) or a
+        live PID with another start (``"other-start"``)."""
         rid, digest, path = self.record["route_id"], self.record["route_hash"], str(self.route_file)
         # The attempt axes the dispatch wrapper writes on a registered headless row.
         meta = {"attempt_schema_version": "2", "transport": "headless", "execution_surface": "registered-headless",
@@ -129,7 +136,10 @@ class RunningRoutePanel(unittest.TestCase):
                         owner_route_file=path)
             if status != "done" and own != "none":
                 pid, start = self.process()
-                meta.update(pid=pid, pid_start=start if own == "process" else str(int(start) + 1))
+                if own == "proc_start":
+                    meta.update(pid=pid, proc_start=start)
+                else:
+                    meta.update(pid=pid, pid_start=start if own == "process" else str(int(start) + 1))
         else:
             meta.update(worker_type="stage", dispatch_depth="2", route_node=node, parent_attempt_id="att-owner")
         meta.update(extra)
@@ -222,6 +232,36 @@ class RunningRoutePanel(unittest.TestCase):
         # Which attempt is the owner is still not guessed for the row's own owner cell.
         self.assertIsNone(seen["route"]["harness"])
 
+    def test_an_owner_recording_its_start_in_proc_start_keeps_the_row(self):
+        # The older start field the collector still accepts (`proc_start`).
+        self.row("att-owner", owner=True, own="proc_start")
+        self.row("att-plan", "done", node="plan")
+        self.row("att-execute", "done", node="execute", note="dead-worker-blocked", failure_class="blocked")
+        self.assert_running("execute")
+
+    def test_an_unvalidated_route_file_beside_a_running_route_changes_nothing(self):
+        # Another route's file is a JSON array (the projection cannot validate it) with a matching
+        # `closed_at` beside it, and its owner row is open with its own process. No reading fails:
+        # the running route keeps its row, the other one reads as before (no row).
+        self.row("att-owner", owner=True)
+        self.row("att-plan", node="plan")
+        other = self.route_file.with_name("rt-arrayfixture01.json")
+        other.write_text("[]")
+        other.with_name(other.stem + ".outcome.json").write_text(json.dumps(
+            {"route_id": "rt-arrayfixture01", "closed_at": "2026-11-28T00:00:00Z", "terminal_gate_proven": True}))
+        pid, start = self.process()
+        self.live["att-owner-b"] = "working"
+        self.lines.append(
+            f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\trunning\trepo\t{self.root}\towner-b\t"
+            "attempt_schema_version=2,transport=headless,execution_surface=registered-headless,registered_worker=1,"
+            f"fallback_hop=same-harness-headless,attempt_id=att-owner-b,parent_sid={SID},parent_harness=claude,"
+            f"harness=codex,capability=autopilot-code,route_id=rt-arrayfixture01,route_file={other},"
+            f"worker_type=owner,dispatch_depth=1,owner_route_id=rt-arrayfixture01,owner_route_file={other},"
+            f"pid={pid},pid_start={start}")
+        self.assert_running("plan")
+        self.assertEqual([row for row in (__import__("human_wait_state").cached_view(request=False) or {})
+                          .get("route_panels", {}).get(KEY, ()) if row.get("id") == "rt-arrayfixture01"], [])
+
     def test_owner_finishing_after_the_last_stage_keeps_the_row(self):
         self.row("att-owner", owner=True)
         for node in NODES:
@@ -294,6 +334,29 @@ class RunningRoutePanel(unittest.TestCase):
                 self.close_route(True)
                 self.assert_over(routes_active=1)
 
+    def test_a_legacy_row_filled_from_a_same_folder_claude_keeps_the_stage_rule(self):
+        # A legacy open owner row (no attempt id, no harness) records a PID and start the collector does
+        # not accept (observed from another PID namespace); a live `claude -p` in the same folder has
+        # exactly that PID and start, so the collector fills the row from it and the classifier reads it
+        # alive. That is not the row's own accepted process: as before, no row after a BLOCKED stage.
+        launcher = self.root / "bin" / "claude"
+        launcher.parent.mkdir()
+        launcher.symlink_to(sys.executable)
+        pid, start = self.process([str(launcher), "-c", "import time; time.sleep(300)", "-p"])
+        rid, digest, path = self.record["route_id"], self.record["route_hash"], self.route_file
+        self.live[None] = "working"
+        self.lines.append(
+            f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\trunning\trepo\t{self.root}\tlegacy-owner\t"
+            "attempt_schema_version=2,transport=headless,execution_surface=registered-headless,registered_worker=1,"
+            f"fallback_hop=same-harness-headless,parent_sid={SID},parent_harness=claude,capability=autopilot-code,"
+            f"route_id={rid},route_hash={digest},route_file={path},worker_type=owner,dispatch_depth=1,"
+            f"owner_route_id={rid},owner_route_file={path},pid={pid},pid_start={start},pid_scope=host-visible,"
+            "pid_observer_ns=pid:[4026531999]")
+        self.row("att-plan", "done", node="plan")
+        self.row("att-execute", "done", node="execute", note="dead-worker-blocked", failure_class="blocked")
+        seen = self.assert_over(routes_active=1)
+        self.assertEqual(seen["route"]["state"], "working")      # it is read alive, and still not the new path
+
     def test_an_owner_alive_by_anything_but_its_own_process_keeps_the_stage_rule(self):
         # No outcome: the owner row is open and reads alive, but not by its own process: it records no
         # PID, or its PID now belongs to a process with another start. As before: no row after a
@@ -337,25 +400,46 @@ class RunningRoutePanel(unittest.TestCase):
 
 
 class OwnProcessEvidence(unittest.TestCase):
-    """The evidence the new path trusts is what the real classifier records for the row (unheld)."""
+    """What the new path trusts is the collector's own reading of the row (unheld): the PID identity it
+    accepted from the registry (``dispatch._authoritative_registry_pid``) and the real classifier's
+    evidence for that process."""
 
-    def test_only_the_rows_own_process_with_its_start_counts(self):
+    def job(self, meta, borrowed=None):
         from tools.fleet.model import DispatchJob
-        child = subprocess.Popen(["sleep", "120"])
-        self.addCleanup(lambda: (child.kill(), child.wait()))
-        start = str(procscan.read_proc_start(child.pid))
-        for name, pid, recorded, expected in (("its own process", child.pid, start, True),
-                                              ("another start", child.pid, str(int(start) + 1), False),
-                                              ("no PID", None, None, False)):
+        job = DispatchJob(key="owner", slug="owner", harness=meta.get("harness"), depth=1, worker_type="owner",
+                          attempt_id=meta.get("attempt_id"), route_id="rt-evidencefixture", status="open")
+        job.pid, job.proc_start, job.pid_identity_source = dispatch._authoritative_registry_pid(meta)
+        if borrowed is not None and job.pid is None:
+            # The collector's same-folder fill for a row with no attempt id and no harness (a live
+            # `claude -p` there): a PID and start, with no registry identity behind them.
+            job.pid, job.proc_start = borrowed
+        job._registry_metadata = meta
+        dispatch._dispatch_liveness(job, time.time(), track=False)
+        return job
+
+    def test_only_the_accepted_own_process_with_its_start_counts(self):
+        processes = []
+        for _ in range(2):
+            child = subprocess.Popen(["sleep", "120"])
+            self.addCleanup(lambda child=child: (child.kill(), child.wait()))
+            processes.append((child.pid, str(procscan.read_proc_start(child.pid))))
+        (pid, start), (other, other_start) = processes
+        owner = {"attempt_id": "att-owner", "harness": "codex"}
+        for name, meta, borrowed, expected in (
+                ("its own process", {**owner, "pid": str(pid), "pid_start": start}, None, True),
+                ("its start in proc_start", {**owner, "pid": str(pid), "proc_start": start}, None, True),
+                ("another start", {**owner, "pid": str(pid), "pid_start": str(int(start) + 1)}, None, False),
+                ("no PID", dict(owner), None, False),
+                ("a legacy row filled from a same-folder process",
+                 {"pid": str(pid), "pid_start": start, "pid_scope": "host-visible",
+                  "pid_observer_ns": "pid:[4026531999]"}, (pid, start), False)):
             with self.subTest(name):
-                meta = {"attempt_id": "att-owner", "route_id": "rt-evidencefixture", "worker_type": "owner",
-                        **({"pid": str(pid), "pid_start": recorded} if pid else {})}
-                job = DispatchJob(key="owner", slug="owner", harness="codex", depth=1, worker_type="owner",
-                                  attempt_id="att-owner", route_id="rt-evidencefixture", status="open",
-                                  pid=pid, proc_start=recorded)
-                job._registry_metadata = meta
-                dispatch._dispatch_liveness(job, time.time(), track=False)
-                self.assertIs(live._own_pid_alive(job), expected)
+                self.assertIs(live._own_pid_alive(self.job(meta, borrowed)), expected)
+        first = self.job({**owner, "pid": str(pid), "pid_start": start})
+        second = self.job({**owner, "attempt_id": "att-owner-2", "pid": str(other), "pid_start": other_start})
+        first.liveness = second.liveness = "working"
+        self.assertIs(live._running_owner(None, [first]), first)
+        self.assertIsNone(live._running_owner(None, [first, second]))     # two alive: not guessed
 
 
 class FramedLegRoute(unittest.TestCase):
@@ -373,9 +457,8 @@ class FramedLegRoute(unittest.TestCase):
                  "harness": "codex", "route_id": rid, "attempt_id": "att-owner", "status": "open",
                  "liveness": "working", "parent_sid": SID, "elapsed_min": 90,
                  # its own registered process, observed alive with its recorded start
-                 "_registry_metadata": {"pid": "4242", "pid_start": "777"},
-                 "state_evidence": {"inputs": {"pid": 4242, "proc_start": "777", "pid_alive": True,
-                                               "proc_start_match": True}}}
+                 "state_evidence": {"inputs": {"pid": 4242, "proc_start": "777", "pid_identity_source": "local",
+                                               "pid_alive": True, "proc_start_match": True}}}
         chain = [{"route_id": "rt-frame", "capability": "route-frame", "state": "done"},
                  {"route_id": rid, "capability": "autopilot-code", "state": "active",
                   "route_plan": {"decision": "frame/route-decision.json", "digest": "sha256:" + "0" * 64, "index": 0}}]
