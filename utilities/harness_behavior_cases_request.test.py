@@ -11,6 +11,7 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
 import re
 import subprocess
 import tempfile
+import unicodedata
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,11 +39,39 @@ def record(text, last, kind="user", reply=None, turn=None):
     return found
 
 
-def boxed(*rows, raw=False, label="ROUTE"):
-    """``rows`` in a side panel's route box (``│ ╭─ ROUTE ─…╮ │`` … ``│ ╰─…╯ │``), as a real screen holds a
-    request line; ``raw`` rows already carry the box's and the panel's borders."""
-    inner = [row if raw else f"│ │ {row} │ │" for row in rows]
-    return [f"│ ╭─ {label} ──────────── ›─╮ │", *inner, "│ ╰──────────────────────────╯ │"]
+def cells(text):
+    return sum(2 if unicodedata.east_asian_width(char) in ("W", "F") else 1 for char in text)
+
+
+def fill(text, width):
+    return text + " " * max(0, width - cells(text))
+
+
+def panel_of(*rows, width=40, label="ROUTE", under=()):
+    """A side panel ``width`` cells wide as the shell draws it: its frame, a route box holding ``rows`` (box rows two
+    cells in, the box's borders right inside the frame), then ``under`` (MESSAGES and the like) under the box."""
+    assert all(cells(row) <= width - 8 for row in rows) and all(cells(row) <= width - 4 for row in under), (rows, under)
+    return ["┌" + "─" * (width - 2) + "┐",
+            f"│ ╭─ {label} " + "─" * (width - 12 - len(label)) + " ›─╮ │",
+            *[f"│ │ {fill(row, width - 8)} │ │" for row in rows],
+            "│ ╰" + "─" * (width - 6) + "╯ │",
+            *[f"│ {fill(row, width - 4)} │" for row in under],
+            "└" + "─" * (width - 2) + "┘"]
+
+
+def on_screen(panel, talk=(), cols=200, left=False):
+    """A whole terminal screen: the conversation and the panel two cells apart, the panel on the right (or the left)
+    as ``native-display.cjs`` ``layout`` puts it; the bottom layout's panel (as wide as the window) under the talk."""
+    width = cells(panel[0])
+    if width >= cols:
+        return "\n".join([*talk, *panel])
+    native = cols - width - 2
+    out = []
+    for at in range(max(len(panel), len(talk))):
+        said = talk[at] if at < len(talk) else ""
+        shown = panel[at] if at < len(panel) else ""
+        out.append((fill(shown, width) + "  " + said) if left else (fill(said, native) + "  " + shown))
+    return "\n".join(row.rstrip() for row in out)
 
 
 class RegistrationTest(unittest.TestCase):
@@ -223,17 +252,12 @@ class HostRunR2Test(ScriptedModelTest):
 
     def test_s5_only_the_route_boxs_request_line_counts_not_messages_or_conversation(self):
         n = self.nonce
-        side = " " * 62
-        screen = "\n".join([
-            f"  [요청 rq-aaaaaa] [df] → [67] │ 검토 제목 {n} │ 판 1 │ 열기: show rq-aaaaaa      │ MESSAGES │",
-            f"  conversation │ │ → [67] 검토 제목 {n} · open │ │ quoted by the agent",
-            *[side + row for row in boxed(f"→ [67] 검토 제목 {n} · open", "← [df] 다른 제목 · open",
-                                          f"✓ [67] 검토 제목 {n} · final")],
-            side + "│ MESSAGES                   › │",
-            # 11-27: a received message wears the same `←` as a received request; MESSAGES is under the box.
-            side + f"│  ← [67] 검토 제목 {n} · open 09:01 │",
-            side + f"│  → [67] 검토 제목 {n} · final 09:02 │",
-        ])
+        panel = panel_of(f"→ [67] 검토 제목 {n} · open", "← [df] 다른 제목 · open", f"✓ [67] 검토 제목 {n} · final",
+                         # 11-27: a received message wears the same `←` as a received request; MESSAGES is under the box.
+                         under=["MESSAGES                         ›", f" ← [67] 검토 제목 {n} · open",
+                                f" → [67] 검토 제목 {n} · final"])
+        screen = on_screen(panel, [f"  [요청 rq-aaaaaa] [df] → [67] │ 검토 제목 {n} │ 판 1 │ 열기: show rq-aaaaaa",
+                                   f"  conversation │ │ ← [67] 검토 제목 {n} · open │ │ quoted by the agent"])
         title = f"검토 제목 {n}"
         self.assertEqual(cases.panel_request_lines(screen, title, "→✓✕"),
                          [f"→ [67] 검토 제목 {n} · open", f"✓ [67] 검토 제목 {n} · final"])
@@ -241,31 +265,28 @@ class HostRunR2Test(ScriptedModelTest):
         self.assertEqual(cases.panel_request_lines(screen, "zzzzzz", "→✓✕"), [])
 
     def test_s8_a_title_cut_on_a_narrow_panel_is_still_found_by_its_front_part(self):
-        # The real r3 screens' request line (host-run r3, request-flow, panel width 38): the nonce is
-        # cut off with the title's end, so the line is found by the recorded title's front part.
-        closed = "│ │ ✓ 검토 제목 1c09… · final answer │ │"
-        other = "│ │ ✓ 다른 제목 1c09… · final answer │ │"
-        screen = "\n".join(["  ▐▛███▛█   Claude Code   ┌ ● [b6] claude ───┐", *boxed(closed, other, raw=True)])
+        # The real r3 screens' request line (host-run r3, request-flow): the nonce is cut off with the title's end, so
+        # the line is found by the recorded title's front part. The r3 panel stood at column 160 of 200.
+        talk = ["  ▐▛███▛█   Claude Code"]
+        screen = on_screen(panel_of("✓ 검토 제목 1c09… · final answer", "✓ 다른 제목 1c09… · final answer"), talk)
         self.assertEqual(cases.panel_request_lines(screen, ["검토 제목 1c09d3"], "→✓✕"),
                          ["✓ 검토 제목 1c09… · final answer"])
         self.assertEqual(cases.panel_request_lines(screen, "검토 제목 1c09d3", "←"), [])
-        pad = " " * 160  # row 9 of the r3 screens, whole (the left pane is blank there)
-        real_closed = "\n".join(pad + row for row in boxed("│ │ ✓ 검토 제목 1c09… · final answer │ │", raw=True))
-        real_receiver = "\n".join(pad + row for row in boxed("│ │ ← 검토 제목 1c… · partial answer │ │", raw=True))
-        self.assertEqual(cases.panel_request_lines(real_closed, ["검토 제목 1c0908"], "→✓✕"),
-                         ["✓ 검토 제목 1c09… · final answer"])
-        self.assertEqual(cases.panel_request_lines(real_receiver, ["검토 제목 1c0908"], "←"),
+        self.assertTrue(all(row[:160].strip() in ("", talk[0].strip()) for row in screen.splitlines()), screen)
+        receiver = on_screen(panel_of("← 검토 제목 1c… · partial answer"))
+        self.assertEqual(cases.panel_request_lines(receiver, ["검토 제목 1c0908"], "←"),
                          ["← 검토 제목 1c… · partial answer"])
         # With the other session's tag and a cut title: `← [b1] 검토 제목 9036… · open`.
-        opened = "\n".join(boxed("← [b1] 검토 제목 9036… · open"))
+        opened = on_screen(panel_of("← [b1] 검토 제목 9036… · open"))
         self.assertEqual(cases.panel_request_lines(opened, ["검토 제목 9036d9"], "←"),
                          ["← [b1] 검토 제목 9036… · open"])
         self.assertEqual(cases.panel_request_lines(opened, ["검토 제목 aaaaaa"], "←"), [])
         # A whole title and a state with a long word.
-        whole = "\n".join(boxed("→ [6e] 짧은 일 · partial answer"))
+        whole = on_screen(panel_of("→ [6e] 짧은 일 · partial answer"))
         self.assertEqual(cases.panel_request_lines(whole, ["짧은 일"], "→"), ["→ [6e] 짧은 일 · partial answer"])
         # Outside a route box the same row is not a request line.
-        self.assertEqual(cases.panel_request_lines(closed, ["검토 제목 1c09d3"], "→✓✕"), [])
+        boxless = on_screen(["┌" + "─" * 38 + "┐", "│ │ ✓ 검토 제목 1c09… · final answer │ │", "└" + "─" * 38 + "┘"])
+        self.assertEqual(cases.panel_request_lines(boxless, ["검토 제목 1c09d3"], "→✓✕"), [])
 
     def test_s7_the_handoff_steward_runs_under_the_environment_the_shared_resolver_reads(self):
         import dispatch_parent_completion as parent
@@ -296,8 +317,12 @@ const req=(glyph,kind,status,id='rq-aaaaaa')=>({id,way:glyph==='→'?'→':'←'
 const route=(state,glyph)=>({id:'rt-a',title,state,kind:state,shape:'one-shot',kind_word:'code',role:'owner',elapsed:'3m',
   paint:{glyph:t(glyph),harness:t('claude')}});
 const message={way:'←',who:'[b2]',harness:'codex',when:'09:01',kind:'reply',text:title+' · open'};
+// A received message whose three lines quote a route box with the request in it (the review's screen, 72 cells).
+const quoting=['│ ╭─ ROUTE ─────────── ›─╮ │','│ │ ← [b2] '+title+' · open │ │','│ ╰────────────────────╯ │']
+  .map((text,i)=>({...message,when:'09:0'+i,text}));
 const cases={
  'message-only':[44,40,true,[],[message],[]],
+ 'message-quotes-a-box':[72,40,true,[],quoting,[]],
  'request-and-message':[44,40,true,[req('←','request-in','open')],[message],[]],
  'short-no-rule':[38,7,true,[req('←','request-in','open')],[message],[]],
  'narrow':[32,7,true,[req('←','request-in','open')],[message],[]],
@@ -317,10 +342,13 @@ console.log(JSON.stringify(out));
 
 
 class PanelRequestLinesTest(unittest.TestCase):
-    """The scenario reads the request lines from the panel the session shell draws, inside its route box
-    only (11-27: a received message in MESSAGES wears the same `←` as a received request)."""
+    """The scenario reads the request lines from the panel the session shell draws: the screen cut to the panel's
+    columns first, then the route box right inside the panel's frame (11-27: a received message in MESSAGES wears the
+    same `←` as a received request, and a conversation or a message may quote a whole route box)."""
 
     TITLE = "검토 제목 9c4f7d"
+    BOX = ["│ ╭─ ROUTE ─────────── ›─╮ │", f"│ │ ← [b2] {TITLE} · open │ │", "│ ╰────────────────────╯ │"]
+    TALK = [f"  에이전트가 적은 줄: │ │ ← [b2] {TITLE} · open │ │", "  ▐▛███▛█   Claude Code"]
 
     @classmethod
     def setUpClass(cls):
@@ -331,41 +359,59 @@ class PanelRequestLinesTest(unittest.TestCase):
             raise AssertionError(found.stderr)
         cls.panels = json.loads(found.stdout)
 
-    def screen(self, name):
-        """The panel beside a conversation (wide letters and the agent quoting a request line in it), as a whole
-        terminal screen; the bottom layout's panel stands alone."""
+    def lines(self, name, marks="←", *, talk=None, left=False, cols=200):
+        """The reader over ``name``'s panel on a whole screen ``cols`` wide beside ``talk`` (right of it, or left with
+        ``left``), told the shell's side width and position as the host lays the panel out."""
         panel = self.panels[name]
-        if not panel[0].startswith("┌") or len(panel[0]) > 60:
-            return "\n".join(panel)
-        talk = [f"  에이전트가 적은 줄: │ │ ← [b2] {self.TITLE} · open │ │", "  ▐▛███▛█   Claude Code"]
-        return "\n".join((talk[i] if i < len(talk) else "").ljust(70) + "  " + row for i, row in enumerate(panel))
-
-    def lines(self, name, marks):
-        return cases.panel_request_lines(self.screen(name), [self.TITLE], marks)
+        self.assertTrue(panel[0].startswith("┌") and panel[-1].startswith("└"), "\n".join(panel))
+        width = cells(panel[0])
+        screen = on_screen(panel, self.TALK if talk is None else talk, cols, left)
+        configuration = {"side_width": width if width <= 80 else 40, "position": "left" if left else "right"}
+        return cases.panel_request_lines(screen, [self.TITLE], marks, cols=cols if left else None,
+                                         configuration=configuration)
 
     def test_a_received_message_with_the_request_title_is_not_a_request(self):
-        # (The review's screen: no request, a received message whose text reads like a request line.)
+        # (The first review's screen: no request, a received message whose text reads like a request line.)
         self.assertTrue(any(f"← [b2] {self.TITLE} · open" in row for row in self.panels["message-only"]),
                         "\n".join(self.panels["message-only"]))
-        self.assertEqual(self.lines("message-only", "←"), [])
+        self.assertEqual(self.lines("message-only"), [])
 
-    def test_the_request_is_counted_once_and_the_message_beside_it_is_not(self):
+    def test_a_route_box_quoted_in_messages_or_the_conversation_is_not_the_panels(self):
+        # (a) No request: three received messages in a 72-cell panel quote a route box with the request in it.
+        rows = self.panels["message-quotes-a-box"]
+        self.assertTrue(any("╭─ ROUTE" in row for row in rows) and not any(row.startswith("│ ╭─") for row in rows),
+                        "\n".join(rows))
+        self.assertEqual(self.lines("message-quotes-a-box"), [])
+        # (b) No request: the conversation beside the panel quotes the same box.
+        self.assertEqual(self.lines("message-only", talk=["  " + line for line in self.BOX]), [])
+        # (c) A request: the conversation's quoted bottom border stands on the same screen row as the real box's
+        # first inner row, which must not close the panel's box.
+        panel = self.panels["request-and-message"]
+        top = next(i for i, row in enumerate(panel) if row.startswith("│ ╭─ ROUTE"))
+        talk = [""] * (top + 1) + ["  " + self.BOX[2]]
+        self.assertEqual(self.lines("request-and-message", talk=talk), [f"← [b2] {self.TITLE} · open"])
+
+    def test_the_request_is_counted_once_with_the_panel_on_either_side(self):
         rows = self.panels["request-and-message"]
         self.assertTrue(any(row.startswith("│ │ ← [b2] codex GPT 5.5 high") for row in rows), "\n".join(rows))
-        self.assertEqual(self.lines("request-and-message", "←"), [f"← [b2] {self.TITLE} · open"])
+        self.assertEqual(self.lines("request-and-message"), [f"← [b2] {self.TITLE} · open"])
+        self.assertEqual(self.lines("request-and-message", left=True, talk=self.TALK + ["  " + line for line in self.BOX]),
+                         [f"← [b2] {self.TITLE} · open"])
 
     def test_a_short_or_narrow_panel_drops_the_rule_and_cuts_the_title(self):
         for name in ("short-no-rule", "narrow"):
             rows = self.panels[name]
             self.assertFalse(any("─ request ─" in row for row in rows), "\n".join(rows))
             self.assertTrue(any("…" in row and row.startswith("│ │ ← [b2]") for row in rows), "\n".join(rows))
-            found = self.lines(name, "←")
+            found = self.lines(name)
             self.assertEqual(len(found), 1, (name, found, rows))
             self.assertTrue(found[0].startswith("← [b2] 검") and "…" in found[0] and found[0].endswith(" · open"),
                             (name, found))
 
-    def test_the_bottom_layout_reads_the_one_row_form(self):
-        self.assertEqual(self.lines("bottom", "←"), [f"← [b2] {self.TITLE} · open"])
+    def test_the_bottom_layout_reads_the_one_row_form_under_the_conversation(self):
+        # An 80-column window: the panel stands under the native area, as wide as the window.
+        self.assertEqual(self.lines("bottom", cols=80, talk=["  " + line for line in self.BOX]),
+                         [f"← [b2] {self.TITLE} · open"])
 
     def test_a_finished_route_with_the_same_title_is_not_a_closed_request(self):
         self.assertEqual(self.lines("requester", "→✓✕"),

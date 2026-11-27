@@ -44,6 +44,7 @@ import re
 import shlex
 import sys
 import time
+import unicodedata
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -68,12 +69,13 @@ def busy_step(seconds):
     return 'python3 -c "import time; time.sleep(%d); print(\'B-WORK-DONE\')"' % seconds
 
 
-# The panel's route box (`╭─ 2 ROUTE`, `╭─ ROUTE`, `╭─ route 2`) and its own bottom border (a box drawn inside
-# it, a worker's, closes after the route box's left border: `│ │   ╰─`). A request stands only in it: a
-# received message wears the same `←` in MESSAGES, under the box (11-27).
-ROUTE_BOX_TOP = re.compile(r"│ ╭─ (?:\d+ ROUTE|ROUTE|route)(?=[ ─])")
-ROUTE_BOX_BOTTOM = re.compile(r"(?<!│ )│ ╰[─╯]")
-ROUTE_BOX_ROW = re.compile(r"│ │ ([^│]*) │ │")
+# The panel's route box, read in the panel's own columns: its top border (`│ ╭─ 2 ROUTE`, `│ ╭─ ROUTE`, `│ ╭─ route 2`), rows
+# and bottom border stand right inside the panel's frame (the frame's `│`, one blank, then the box). A request stands only
+# in it: a received message wears the same `←` in MESSAGES, under the box (11-27), and the conversation beside the panel
+# is cut away before the box is looked for.
+ROUTE_BOX_TOP = re.compile(r"^│ ╭─ (?:\d+ ROUTE|ROUTE|route)(?=[ ─]).*╮ │$")
+ROUTE_BOX_ROW = re.compile(r"^│ │ (.*) │ │$")
+ROUTE_BOX_BOTTOM = re.compile(r"^│ ╰[─╯].*╯ │$")
 REQUEST_TAG = re.compile(r"\[[^\]│]+\]")
 REQUEST_RULE = re.compile(r"^─ request ─")
 
@@ -111,40 +113,73 @@ def _title_after(words, titles):
     return None
 
 
-def _route_box_rows(screen):
-    """Each route box's inner rows (between its borders, the panel's border cut off) in screen order,
-    one list per box. Beside the native area the panel's row is the last box row of a screen row, or
-    the first where the panel stands on the left."""
-    boxes, rows, last = [], None, True
-    for row in screen.splitlines():
-        top = ROUTE_BOX_TOP.search(row)
-        if rows is None:
-            if top:
-                rows, last = [], not row[top.end():].split("╮", 1)[-1].replace("│", "").strip()
+def _cells(row):
+    """``row`` as terminal cells: a wide letter takes two (the second empty), a combining mark none."""
+    out = []
+    for char in row:
+        if unicodedata.combining(char) or char in "\u200b\u200c\u200d\u2060\ufe0e\ufe0f":
+            if out:
+                out[-1] += char
             continue
-        if ROUTE_BOX_BOTTOM.search(row):
-            boxes.append(rows)
-            rows = None
+        out.append(char)
+        if unicodedata.east_asian_width(char) in ("W", "F"):
+            out.append("")
+    return out
+
+
+def _panel_columns(cols, configuration=None):
+    """The panel's first column and width in a window ``cols`` wide (``native-display.cjs`` ``layout``): beside the
+    native area on the right (``cols - side_width``) or the left (0) where it fits, else under it, the whole width."""
+    from session_shell import DISPLAY_DEFAULTS
+    shown = {**DISPLAY_DEFAULTS, **(configuration or {})}
+    width = shown.get("side_width")
+    width = width if isinstance(width, int) and 32 <= width <= 80 else 0
+    if shown.get("layout") == "side" and width and cols - width - 2 >= 48:
+        return (0 if shown.get("position") == "left" else cols - width), width
+    return 0, cols
+
+
+def _route_box_rows(screen, cols=None, configuration=None):
+    """Each route box's inner rows in screen order, one list per box: the screen cut to the panel's columns first,
+    then the box right inside the panel's frame (its last frame, `┌…┐` to `└…┘`). ``cols`` is the window's width
+    (the screen's widest row where it is not given: the panel's right border ends every row it stands on)."""
+    rows = [_cells(row) for row in screen.splitlines()]
+    cols = cols or max((len(row) for row in rows), default=0)
+    at, width = _panel_columns(cols, configuration)
+    strip = ["".join(row[at:at + width]).rstrip() for row in rows]
+    tops = [i for i, row in enumerate(strip) if row.startswith("┌") and row.endswith("┐")]
+    boxes, inner = [], None
+    for row in strip[tops[-1] + 1:] if tops else ():
+        if row.startswith("└") and row.endswith("┘"):
+            break
+        if inner is None:
+            if ROUTE_BOX_TOP.match(row):
+                inner = []
             continue
-        found = ROUTE_BOX_ROW.findall(row)
-        rows.append((found[-1] if last else found[0]).rstrip() if found else "")
-    if rows is not None:
-        boxes.append(rows)
+        if ROUTE_BOX_BOTTOM.match(row):
+            boxes.append(inner)
+            inner = None
+            continue
+        found = ROUTE_BOX_ROW.match(row)
+        inner.append(found.group(1).rstrip() if found else "")
+    if inner is not None:
+        boxes.append(inner)
     return boxes
 
 
-def panel_request_lines(screen, titles, marks):
+def panel_request_lines(screen, titles, marks, *, cols=None, configuration=None):
     """The route box's request lines of the given marks whose title is a recorded request title
     (whole, or cut with ``…``), each as ``mark [tag] title · state``. ``titles`` is one title or several.
 
     A request reads on one row (``← [b2] codex GPT 5.5 high 검토 제목 9c4f7d · open  2m``, the title cut on a
     narrow panel) or, beside the native area with rows to spare, as a route's doer: its head row (``← [b2]
     codex GPT 5.5 high  2m``), then two cells in its title and state on one row or two. Only rows inside
-    the route box count, so a MESSAGES row or the conversation never does. A head row with no title on it
+    the route box count, so a MESSAGES row or the conversation never does: the screen is cut to the panel's columns
+    (``cols`` and the shell's ``configuration``, its defaults where none is given) and the box read right inside its frame. A head row with no title on it
     is the request's only with the other session's ``[tag]`` or under the box's ``request`` rule (a route's
     own first row, `✓ code(standard)`, has neither)."""
     found = []
-    for rows in _route_box_rows(screen):
+    for rows in _route_box_rows(screen, cols, configuration):
         in_request_zone = False
         for at, row in enumerate(rows):
             if REQUEST_RULE.match(row):
