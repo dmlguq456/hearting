@@ -10,6 +10,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import shutil
 import os
 from pathlib import Path
 import subprocess
@@ -3020,6 +3021,107 @@ class ReplacementTest(unittest.TestCase):
         self.assertEqual((result['reason'], len(commands)), ('replacement-launch-pending', 1))
         self.assertEqual(result['record']['proof']['death_kind'], 'runtime')
         self.assertEqual(result['record']['proof']['note'], 'dead-runtime-exit')
+
+    def test_policy_refusal_can_release_a_bound_parent_notice_when_no_alternative_exists(self):
+        self._runtime_end(provider_failure_kind="cyberPolicy", model="fixture-model")
+        result = R.advance(
+            self.jobs, "att-source", authority_check=lambda *_: True,
+            run=lambda *_args, **_kw: SimpleNamespace(returncode=65,
+                stdout="reason=provider-refusal-no-alternative\n", stderr=""))
+        self.assertEqual(result["reason"], "provider-refusal-no-alternative")
+        self.assertEqual(result["failure"], "cyberPolicy")
+        self.assertEqual(R.recovery_delivery_state(self.jobs, "att-source"), "settled")
+        self.assertIn("same harness and model", result["detail"])
+        # A later explicit start may choose a new pin/model in the same claim.
+        runs = []
+        R.advance(self.jobs, "att-source", authority_check=lambda *_: True, resume_capacity=True,
+                  run=lambda command, **_kw: runs.append(command)
+                  or SimpleNamespace(returncode=65, stdout="", stderr=""))
+        self.assertEqual(len(runs), 1)
+
+    def test_a_refused_owner_waits_for_the_other_harness_to_leave_capacity(self):
+        spec = importlib.util.spec_from_file_location(
+            'replacement_owner_capacity_fixture', Path(__file__).with_name('dispatch_owner.test.py'))
+        suite = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(suite)
+        selector = suite.RouteOwnerPinTest()
+        self.addCleanup(selector.doCleanups)
+        path = selector._route(sealed=('claude', 'codex'))
+        self.addCleanup(shutil.rmtree, path.parent)
+        self._runtime_end(note='dead-runtime-error', provider_failure_kind='cyberPolicy', model='fixture-model')
+        usage = {'claude': 'limited(2100-01-01T00:10:00Z)',
+                 'codex': 'limited(2100-01-01T00:00:00Z)', 'opencode': 'ok'}
+        launches = []
+        replacement_source = R.replacement_source
+
+        def run(command, **_kwargs):
+            attempt = command[command.index('--attempt-id') + 1]
+            selection = selector._launch(path, None, usage=usage,
+                extra=('--automatic-retry-of', 'att-source', '--attempt-id', attempt))
+            launches.extend(selection.calls)
+            return SimpleNamespace(returncode=selection.rc, stdout=selection.out, stderr='')
+
+        def hold(_jobs, harness, **_kwargs):
+            if usage[harness] == 'ok':
+                return None
+            return {'label': usage[harness], 'until_epoch': 4102445400 if harness == 'claude' else 4102444800}
+
+        with mock.patch.object(R, 'replacement_source',
+                               side_effect=lambda _jobs, prior, next_: replacement_source(self.jobs, prior, next_)), \
+             mock.patch('model_profile.resolve_runtime_profile', return_value=({'model': 'fixture-model'}, {})), \
+             mock.patch('dispatch_capacity_evidence.harness_hold', side_effect=hold):
+            waited = R.advance(self.jobs, 'att-source', authority_check=lambda *_: True, run=run)
+            self.assertEqual((waited['reason'], waited.get('harness'), waited.get('retry_at'), launches),
+                             ('replacement-capacity-wait', 'claude', '2100-01-01T00:10:00Z', []))
+            usage.update(claude='ok', codex='ok')
+            R.advance(self.jobs, 'att-source', authority_check=lambda *_: True, resume_capacity=True, run=run)
+        self.assertEqual([Path(command[0]).parts[-3] for command in launches], ['claude'])
+
+    def test_a_second_content_refusal_in_a_row_returns_to_the_parent(self):
+        """The selector leaves a refused pair out, so A -> B -> C would alternate forever."""
+        refused = {'note': 'dead-runtime-error', 'failure_class': 'runtime',
+                   'provider_failure_kind': 'cyberPolicy', 'model': 'fixture-codex'}
+        second_ends = (({'harness': 'claude', 'model': 'fixture-claude', 'provider_failure_kind': 'refusal'},
+                        ('automatic-replacement-exhausted', 0)),
+                       ({'harness': 'claude', 'model': 'fixture-claude'},
+                        ('replacement-launch-pending', 1)))
+        for second, expected in second_ends:
+            with self.subTest(second=second):
+                self.tearDown_case()
+                parent = self._runtime_end(**refused)
+                first, commands = self._bound_launch()
+                self.assertEqual((first['reason'], len(commands)), ('replacement-launch-pending', 1))
+                self.assertIn('--automatic-retry-of', commands[0])
+                successor = self._successor(first['record'], parent, status='open')
+                successor.pop('provider_failure_kind')   # only B's own end writes its kind
+                ended = self._die(successor, note='dead-runtime-error', failure_class='runtime',
+                                  terminal_event='dispatch.supervisor.error', launch_started='1',
+                                  supervisor_lease='flock-v1', supervisor_lease_file=str(
+                                      D.supervisor_lease_path(self.jobs, successor['attempt_id'])), **second)
+                result, commands = self._bound_launch(ended['attempt_id'])
+                self.assertEqual((result['reason'], len(commands)), expected)
+
+    def test_a_fixed_replay_stops_on_a_content_refusal(self):
+        """A frame or batch replay keeps its harness and model, so it cannot avoid the refused pair."""
+        self._runtime_end(worker_type='frame', note='dead-runtime-error',
+                          provider_failure_kind='cyberPolicy', model='fixture-codex')
+        result, commands = self._bound_launch()
+        self.assertEqual((result['reason'], result['failure'], commands),
+                         ('provider-refusal-no-alternative', 'cyberPolicy', []))
+        self.assertIn('same harness and model', result['detail'])
+        self.assertIsNone(R.accept_terminal_delivery_duty(self.jobs, 'att-source'))
+
+    def test_a_pin_names_the_model_that_was_or_was_not_refused(self):
+        source = {'harness': 'codex', 'model': 'fixture-refused', 'provider_failure_kind': 'cyberPolicy',
+                  'note': 'dead-runtime-error', 'failure_class': 'runtime'}
+        with mock.patch('model_profile.resolve_runtime_profile', return_value=({'model': 'fixture-refused'}, {})):
+            self.assertEqual(R.refused_profile_harness(source, 'deep'), 'codex')
+            self.assertEqual(R.refused_profile_harness(
+                source, 'deep', pin={'harness': 'codex', 'model': 'fixture-refused'}), 'codex')
+            self.assertIsNone(R.refused_profile_harness(
+                source, 'deep', pin={'harness': 'codex', 'model': 'fixture-pinned'}))
+            self.assertIsNone(R.refused_profile_harness({**source, 'provider_failure_kind': 'usageLimitExceeded'},
+                                                        'deep'))
 
     def test_a_supervisor_tick_does_not_launch_a_runtime_end(self):
         self._runtime_end()

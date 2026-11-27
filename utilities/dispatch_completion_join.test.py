@@ -3896,6 +3896,41 @@ class FinishedChildClosure(unittest.TestCase):
         self.assertIn("failure_class=capacity", text)
         self.assertIn(f"capacity_log={server_log}", text)
 
+    def test_close_finished_child_keeps_the_classified_kind_for_invalid_and_capacity(self):
+        from dispatch_contract_base import _terminal_delivery_receipt
+
+        claude = {"type": "result", "is_error": True, "stop_reason": "refusal", "api_error_status": 200}
+        cases = (
+            ("claude", "stage", claude, "dead-invalid-envelope", "refusal"),
+            ("claude", "frame", claude, "dead-invalid-envelope", "refusal"),
+            ("opencode", "review", {"type": "result", "runtime": "opencode", "is_error": True,
+                "error": {"name": "APIError", "status": 429}}, "dead-capacity", "APIError"),
+            ("codex", "review", {"type": "dispatch.supervisor.turn.failed",
+                "codex_error_info": "usageLimitExceeded"}, "dead-capacity", "usageLimitExceeded"),
+        )
+        for harness, worker, event, note, kind in cases:
+            with self.subTest(harness=harness, worker=worker):
+                attempt = f"att-provider-{harness}-{worker}"
+                row = self.child(quiescent=True, attempt_id=attempt)
+                log = self.base / f"worker.{attempt}.{harness}.jsonl"
+                log.write_text(json.dumps(event) + "\n")
+                meta = dict(row.metadata, harness=harness, log_file=str(log), worker_type=worker)
+                if worker == "review":
+                    meta.update(capability="unit", route_node="unit", dispatch_depth="1",
+                                workflow_completion="runtime-v1")
+                fields = row.raw.split("\t")
+                fields[5] = ",".join(f"{k}={v}" for k, v in meta.items())
+                self.jobs.write_text("\t".join(fields) + "\n")
+                row = JOIN.exact_attempt_row(self.jobs, attempt)
+                self.assertEqual(JOIN.close_finished_child(row, jobs=self.jobs), "")
+                closed = JOIN.exact_attempt_row(self.jobs, attempt)
+                self.assertEqual((closed.status, closed.metadata["note"]), ("done", note))
+                self.assertEqual(closed.metadata.get("provider_failure_kind"), kind)
+                followup = JOIN.completion_followup_text(_terminal_delivery_receipt(closed.metadata),
+                                                         jobs=str(self.jobs))
+                self.assertIn(f"Provider failure for {attempt} was {kind}.", followup)
+                self.assertEqual("same harness and model" in followup, kind == "refusal")
+
     def test_close_finished_child_classification_evidence_override(self):
         # plan.md item 5: `ExactReviewClassification.evidence`, when a typed
         # classifier already computed it (e.g. the route-free review absent
