@@ -25,6 +25,7 @@ import time
 from typing import NamedTuple, Optional
 
 from dispatch_contract_roots import dispatch_state_root
+from environment_inheritance import inherited_environment
 
 STORE = "unit-continue"
 TEXT_BYTES = 65536                                   # the same limit an owner's answer has
@@ -339,7 +340,7 @@ def opencode_session_exists(session_id) -> bool:
     """OpenCode keeps sessions in one shared store; `session export` answers whether the id is in it."""
     try:
         done = subprocess.run(["opencode", "session", "export", session_id], capture_output=True,
-                              stdin=subprocess.DEVNULL, timeout=30, check=False)
+                              stdin=subprocess.DEVNULL, timeout=30, check=False, env=inherited_environment())
     except (OSError, subprocess.SubprocessError):
         return False
     return done.returncode == 0

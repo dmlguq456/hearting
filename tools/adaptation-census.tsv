@@ -51,6 +51,7 @@ shared-utility-deferred	dispatch_resource_wait.py
 shared-utility-deferred	dispatch_replacement_batch.py
 shared-utility-deferred	dispatch_replacement_subsession.py
 shared-utility-deferred	dispatch_supervision.py
+shared-utility-deferred	environment_inheritance.py
 shared-utility-deferred	execution-access-diagnose.py
 shared-utility-deferred	execution_access.py
 shared-utility-deferred	execution_access_diagnose.py

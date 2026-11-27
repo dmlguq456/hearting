@@ -27,6 +27,8 @@ try:
 except ImportError:  # pragma: no cover - platforms without advisory flock use direct reads
     fcntl = None
 
+from environment_inheritance import inherited_environment
+
 HARNESSES = ("claude", "codex", "opencode")
 WINDOWS = {"five_hour": 6 * 3600, "seven_day": 8 * 86400,
            "seven_day_opus": 8 * 86400, "seven_day_sonnet": 8 * 86400}
@@ -968,7 +970,10 @@ def probe(env=None, *, model, now=None):
 
 
 def _probe_once(env, model, now):
-    env = {k: v for k, v in (os.environ if env is None else env).items() if k != "CLAUDECODE"}
+    # The probe is a Claude process of its own: none of the caller's session-shell
+    # window (`inherited_environment`), and not the caller's Claude session either.
+    env = {k: v for k, v in inherited_environment(os.environ if env is None else env).items()
+           if k != "CLAUDECODE"}
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
     cli = env.get("HEARTING_CAPACITY_PROBE_CLI") or PROBE_CLI
     try:

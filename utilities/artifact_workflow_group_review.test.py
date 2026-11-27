@@ -1064,6 +1064,109 @@ class ModelCallTest(unittest.TestCase):
             self.assertEqual(R._invoke_model("p"), ("", None))
 
 
+FAKE_PROVIDER = (
+    "import json, os, sys\n"
+    "path = os.path.join(os.environ['FAKE_MODEL_ENV_DIR'], str(os.getpid()) + '.json')\n"
+    "with open(path + '.part', 'w') as out:\n"
+    "    out.write(json.dumps({'argv': sys.argv[1:], 'env': dict(os.environ)}))\n"
+    "os.replace(path + '.part', path)\n"
+    "print('{}')\n"
+)
+
+
+class WindowValuesTest(unittest.TestCase):
+    def test_the_review_and_campaign_title_models_never_receive_the_starting_windows_session_shell(self):
+        """The sealed-cycle review and the campaign-title repair run a model from
+        whatever process asked for them, a person's window included; that model gets
+        none of the window's `HEARTING_SHELL_*`, and what else the call carries still
+        arrives.
+
+        `campaign-title` calls the repair's own model entry. `seal-trigger` captures
+        the detached sweep a seal starts and runs the sweep's model call under that
+        environment, as the sweep does. Both reach a fake `claude` on PATH through
+        the real provider command and cascade; only the provider choice is fixed.
+        The window values are made up.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name)
+        fake_bin = base / "fake-bin"
+        fake_bin.mkdir()
+        seen = base / "model-environments"
+        seen.mkdir()
+        fake_claude = fake_bin / "claude"
+        fake_claude.write_text("#!" + sys.executable + "\n" + FAKE_PROVIDER, encoding="utf-8")
+        fake_claude.chmod(0o755)
+        root = base / "artifacts"
+        (root / R.CUTOVER_REL).parent.mkdir(parents=True)
+        (root / R.CUTOVER_REL).write_text("{}\n", encoding="utf-8")
+        window = {
+            "HEARTING_SHELL_SOCKET": str(base / "fixture-shell" / "control.sock"),
+            "HEARTING_SHELL_TOKEN": "f" * 64,
+            "HEARTING_SHELL_NATIVE_MODEL": "fixture-window-model",
+        }
+        scrubbed = {
+            "AGENT_DISPATCH_ATTEMPT_ID": "att-window",
+            "AGENT_ROUTE_ID": "rt-window",
+            "AGENT_REVIEW_OUTPUT": str(base / "review-output"),
+            "AGENT_ARTIFACT_WORKFLOW_GROUP_ID": "wg-window",
+        }
+        caller = {
+            **window,
+            **scrubbed,
+            "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"),
+            "FAKE_MODEL_ENV_DIR": str(seen),
+            "FIXTURE_CARRIED": "kept-by-the-review-model",
+            "AGENT_HOME": str(Path(R.__file__).resolve().parents[1]),
+            "AGENT_MODEL_GOVERNOR_ROOT": str(base / "governor"),
+            "AGENT_MODEL_WORKER_TOTAL": "5",
+            "AGENT_MODEL_WORKER_START_BUDGET": "20",
+            "XDG_STATE_HOME": str(base / "state"),
+            "AGENT_DISPATCH_JOBS": str(base / "jobs.log"),
+        }
+        rt = R._refresh_title()
+
+        def campaign_title():
+            return repair._default_invoke("Synthetic campaign title input")
+
+        def seal_trigger():
+            os.environ.pop(R.DISABLE_ENV, None)  # restored with the subtest's environment
+            with mock.patch.object(R, "in_test_process", return_value=False), \
+                    mock.patch.object(R.subprocess, "Popen") as popen:
+                self.assertTrue(R.launch_after_seal(root, {"cycle_id": "cyc_" + "3" * 32}))
+            popen.assert_called_once()
+            self.assertEqual(popen.call_args.args[0][2:4], ["sweep", "--artifact-root"])
+            sweep_env = popen.call_args.kwargs["env"]
+            self.assertEqual(sorted(key for key in sweep_env if key.startswith("HEARTING_SHELL_")), [])
+            self.assertEqual(sweep_env.get("AGENT_DISPATCH_JOBS"), caller["AGENT_DISPATCH_JOBS"])
+            for key in scrubbed:
+                self.assertNotIn(key, sweep_env)
+            with mock.patch.dict(os.environ, sweep_env, clear=True):
+                return R._invoke_model("Synthetic sweep input")
+
+        for name, call in (("campaign-title", campaign_title), ("seal-trigger", seal_trigger)):
+            with self.subTest(path=name), mock.patch.dict(os.environ, caller), \
+                    mock.patch.object(rt, "selected_providers", return_value=("claude",)):
+                before = set(seen.glob("*.json"))
+                text, harness = call()
+                self.assertEqual((text.strip(), harness), ("{}", "claude"))
+                records = [json.loads(path.read_text()) for path in sorted(set(seen.glob("*.json")) - before)]
+                self.assertEqual(len(records), 1, "the review never ran its model")
+                self.assertEqual(records[0]["argv"][0], "-p")
+                received = records[0]["env"]
+                self.assertEqual(sorted(key for key in received if key.startswith("HEARTING_SHELL_")), [])
+                self.assertEqual(received.get("FIXTURE_CARRIED"), "kept-by-the-review-model")
+                # What the review's call already kept or dropped stays as it was.
+                self.assertEqual(received.get("AGENT_SESSION_ROLE"), "worker")
+                self.assertEqual(received.get("AGENT_DISPATCH_JOBS"), caller["AGENT_DISPATCH_JOBS"])
+                for key in scrubbed:
+                    self.assertNotIn(key, received)
+                self.assertEqual(received.get("HOME"), os.environ.get("HOME"))
+                self.assertEqual(received.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"), "1")
+                # The window that asked for it keeps its own values.
+                self.assertEqual({key: os.environ.get(key) for key in window}, window)
+
+
 class CliTest(unittest.TestCase):
     def test_help_and_argument_errors(self):
         out = io.StringIO()
