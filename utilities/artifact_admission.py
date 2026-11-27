@@ -42,10 +42,9 @@ import artifact_locator
 import artifact_manifest
 import artifact_directory_bundle
 import dispatch_lock_order
-from artifact_identity import IdAllocator, RootIdentity
+from artifact_identity import ADMISSION_REL, IdAllocator, RootIdentity
 from artifact_manifest import Violation
 
-ADMISSION_REL = ".runtime/artifact-admission/v1"
 LOCK_TIMEOUT_DEFAULT = 30.0
 
 _IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")

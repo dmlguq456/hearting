@@ -556,7 +556,7 @@ class SealedBodyTest(Fixture):
     def test_show_without_an_id_lists_open_work_by_direction(self):
         request_id, _ = self.new_request(title="the title")
         rc, listing = self.show(B)
-        self.assertIn("◂ %s open" % request_id, listing)
+        self.assertIn("← %s open" % request_id, listing)
         rc, listing = self.show(A)
         self.assertIn("→ %s open" % request_id, listing)
         self.report(B, request_id, result="done")
