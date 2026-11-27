@@ -1006,9 +1006,9 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
             "context": [("context ", "dim"), *gauge] if gauge else [],
             # Spec E9 rule 42 (b): beside the native area the reading stands without the word (the folded strip's `CTX`).
             "context_side": gauge,
-            # 11-27: the open side panel ends the MODEL row with the reading, by the route doers' rule (``doer_paint``'s
-            # ``gauge5``: the five-cell gauge from 50 panel cells, the percent alone narrower).
-            "context_gauge5": gauge_parts(values.get("ctx_pct"), cells=5),
+            # 11-27: the open side panel ends the MODEL row with the gauge and percent; short of cells the gauge shortens
+            # (ten cells down to five, each at Fleet's fill and level) before the percent stands alone.
+            "context_gauges": [gauge_parts(values.get("ctx_pct"), cells=cells) for cells in range(10, 4, -1)] if gauge else [],
             "wait": answer_wait_word() + " " + (str(count) if count is not None else "?")
                     if count is None or type(count) is int and count > 0 else "",
             # A wait this panel cannot answer: one line saying where it is answered (11-14),

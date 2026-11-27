@@ -76,8 +76,9 @@ def model_for(width, workers=None, projection=session_panel, session=None):
               "now": "Compare two placements", "answer_wait": 0, "route_label": "route 1", **(session or {})}
     with patch("time.time", return_value=NOW):
         model = projection.presentation(values, {"route_panels": {"codex\0s": [row]}}, "codex", "s", width)
-    for name in ("head", "repo", "repo_side", "git", "git_side", "worktrees", "selected", "context", "context_side", "context_gauge5"):
-        model[name] = [part(*piece) for piece in model.get(name, [])]
+    for name in ("head", "repo", "repo_side", "git", "git_side", "worktrees", "selected", "context", "context_side"):
+        model[name] = [part(*piece) for piece in model[name]]
+    model["context_gauges"] = [[part(*piece) for piece in parts] for parts in model.get("context_gauges", [])]
     paint(model["routes"][0])
     return model
 
@@ -169,9 +170,10 @@ def session_rows(panel):
 
 
 class SessionContextTest(unittest.TestCase):
-    """11-27 (the person: "패널에서 MODEL + CTX를 그냥 한줄로 고치자. CTX 단어도 필요 없을듯. 라우팅이랑 일관성을 맞추자는것")."""
+    """11-27 (the person: "패널에서 MODEL + CTX를 그냥 한줄로 고치자. CTX 단어도 필요 없을듯. 라우팅이랑 일관성을 맞추자는것",
+    then "게이지는 놔두고"): the session's MODEL row ends in its gauge and percent; the route rows keep their own rule."""
 
-    def test_the_session_model_row_ends_in_the_route_rows_reading(self):
+    def test_the_session_model_row_keeps_its_gauge_at_the_right_edge(self):
         widths = (36, 44, 49, 50)
         panels = render_panels([{"width": w, "height": 52, "model": model_for(w)} for w in widths])
         for width, panel in zip(widths, panels):
@@ -183,16 +185,20 @@ class SessionContextTest(unittest.TestCase):
                 self.assertEqual(cell_width(model[:model.index("34%") + 3]), width - 2, model)
                 self.assertTrue(rows[1].startswith("│  TITLE  "), rows)
                 self.assertFalse(any(re.search(r"\bCTX\b|context", line) for line in rows), rows)
-                # The same rule as the route's doers: the five-cell gauge from 50 cells, the percent alone narrower.
+                # The gauge stands at every width: whole (ten cells) beside the model and effort from 44 cells; at 36 the
+                # effort goes first and the gauge shortens beside the whole model name.
+                gauge = re.search(r" ([━─]+) 34% │$", model)
+                self.assertIsNotNone(gauge, model)
+                self.assertEqual(gauge[1], "━━━─────" if width == 36 else "━━━───────", model)
+                self.assertEqual("high" in model, width >= 44, model)
+                # The route's doers keep their rule: the five-cell gauge from 50 cells, the percent alone narrower.
                 doers = [row for row in route_rows(panel) if re.search(r"\b(owner|worker)\b", row)]
-                gauges = [re.search(r"([━─]+) +\d+%", row) for row in [model, *doers]]
-                if width >= 50:
-                    self.assertEqual([g[1] if g else "" for g in gauges], ["━━───", "━━───", "━━━──", "━━━━─", "─────"])
-                else:
-                    self.assertEqual(gauges, [None] * 5, [model, *doers])
+                gauges = [re.search(r"([━─]+) +\d+%", row) for row in doers]
+                self.assertEqual([g[1] if g else "" for g in gauges],
+                                 ["━━───", "━━━──", "━━━━─", "─────"] if width >= 50 else [""] * 4, doers)
                 self.assertTrue(all(cell_width(row) == width for row in panel))
 
-    def test_the_session_percent_takes_the_route_rows_level_color(self):
+    def test_the_session_reading_takes_the_route_rows_level_color(self):
         scenes = [{"width": w, "height": 52, "model": model_for(w, session={"ctx_pct": pct})}
                   for w in (44, 50) for pct in (9, 63, 82)]
         for scene, panel in zip(scenes, render_panels(scenes, parts=True)):
@@ -201,27 +207,29 @@ class SessionContextTest(unittest.TestCase):
                 text = ["".join(part["text"] for part in row) for row in panel]
                 at = next(i for i, line in enumerate(text) if line.startswith("│  MODEL  "))
                 own = next(part for part in panel[at] if part["text"] == pct)
+                bar = next(part for part in panel[at] if re.fullmatch(r"━+", part["text"]))
                 doer = next(part for row in panel[at + 1:] for part in row if part["text"] == pct)
                 self.assertEqual(own["foreground"], doer["foreground"], (own, doer))
+                self.assertEqual(bar["foreground"], own["foreground"], (bar, own))
                 self.assertIsNotNone(own["foreground"])
 
-    def test_short_of_cells_the_effort_goes_first_and_no_reading_leaves_the_place_empty(self):
+    def test_short_of_cells_the_gauge_shortens_before_the_percent_stands_alone(self):
         long = {"model": "Atlas-Preview-XL-Extended", "effort": "xhigh", "ctx_pct": 100}
-        scenes = [{"width": w, "height": 40, "model": model_for(w, session=session)}
-                  for w in (36, 50) for session in (long, {"ctx_pct": None})]
-        for scene, panel in zip(scenes, render_panels(scenes)):
-            width, model = scene["width"], session_rows(panel)[0]
-            with self.subTest(width=width, values=scene["model"]["context_side"]):
-                if scene["model"]["context_side"]:
-                    # The effort goes before a cell of the model name does; the percent stays at the right edge.
-                    self.assertNotIn("xhigh", model)
-                    self.assertEqual(cell_width(model[:model.index("100%") + 4]), width - 2, model)
-                    self.assertRegex(model, r"^│  MODEL  Atlas-Preview-XL-E… +100% │$" if width == 36
-                                     else r"^│  MODEL  Atlas-Preview-XL-Extended +━━━━━ 100% │$")
-                else:
-                    # No reading: nothing stands in its place and no row of its own.
-                    self.assertRegex(model, r"^│  MODEL  gpt-6\.2-sol high +│$")
-                    self.assertTrue(session_rows(panel)[1].startswith("│  TITLE  "))
+        cases = [(50, long, r"^│  MODEL  Atlas-Preview-XL-Extended ━━━━━━━ 100% │$"),
+                 (36, long, r"^│  MODEL  Atlas-Previe… ━━━━━ 100% │$"),
+                 # Narrower than the side panel's 32 cells: the model is cut beside the five-cell gauge while six cells of it
+                 # stand, and only then does the percent stand alone.
+                 (24, {}, r"^│  gpt-6\.2-… ━━─── 34% │$"),
+                 (18, {}, r"^│  gpt-6\.2-… 34% │$"),
+                 (36, {"ctx_pct": None}, r"^│  MODEL  gpt-6\.2-sol high +│$"),
+                 (50, {"ctx_pct": None}, r"^│  MODEL  gpt-6\.2-sol high +│$")]
+        scenes = [{"width": w, "height": 40, "model": model_for(w, session=session)} for w, session, _ in cases]
+        for (width, session, want), panel in zip(cases, render_panels(scenes)):
+            rows = session_rows(panel)
+            with self.subTest(width=width, values=session):
+                self.assertRegex(rows[0], want)
+                # No reading: nothing stands in its place and no row of its own.
+                self.assertFalse(any("CTX" in line or "context" in line for line in rows), rows)
 
 
 if __name__ == "__main__":

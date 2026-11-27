@@ -422,11 +422,15 @@ class CommonSessionLineTest(unittest.TestCase):
         self.assertEqual(presented["context"][0], ("context ", "dim"))
         self.assertEqual(presented["context_side"], presented["context"][1:])
         self.assertEqual("".join(text for text, _key in presented["context_side"]), "━━━━────── 37%")
-        # 11-27: the open side panel's MODEL row ends in the route doers' five-cell gauge (``doer_paint``'s ``gauge5``).
-        self.assertEqual(presented["context_gauge5"], [tuple(part) for part in session_panel.doer_paint({"ctx_pct": 37})["gauge5"]])
-        self.assertEqual(presented["context_gauge5"], [("━━", "lvl_g"), ("───", "dim"), (" ", "dim"), ("37%", "lvl_g")])
+        # 11-27: the open side panel's MODEL row ends in the gauge; short of cells it takes a shorter one (ten cells down to five,
+        # each at Fleet's own fill and level), the first the same as `context_side`.
+        gauges = presented["context_gauges"]
+        self.assertEqual(gauges[0], presented["context_side"])
+        self.assertEqual(["".join(text for text, _key in parts) for parts in gauges],
+                         ["━━━━────── 37%", "━━━────── 37%", "━━━───── 37%", "━━━──── 37%", "━━──── 37%", "━━─── 37%"])
+        self.assertEqual(gauges[-1], [tuple(part) for part in session_panel.doer_paint({"ctx_pct": 37})["gauge5"]])
         unknown = session_panel.presentation({**values, "ctx_pct": None}, {}, "claude", "s", 40)
-        self.assertEqual((unknown["context"], unknown["context_side"], unknown["context_gauge5"]), ([], [], []))
+        self.assertEqual((unknown["context"], unknown["context_side"], unknown["context_gauges"]), ([], [], []))
         for count in (0, None):
             other = {**values, "git": {**values["git"], "extra_worktrees": count}}
             self.assertEqual(session_panel.session_worktrees(other), [])

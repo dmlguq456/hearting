@@ -83,13 +83,13 @@ const SHOWN=[
 '│   · —       TBD  —     시험용 나중 일 둘 │',
 '│   · —       TBD  —     시험용 나중 일 셋 │',
 '│ ──────────────────────────────────────── │',
-'│  MODEL  Opus 5.5 xhigh               41% │',
+'│  MODEL  Opus 5.5 xhigh      ━━━━──── 41% │',
 '│  TITLE  시험용 세션                      │',
 '│  NOW    시험용 NOW 한 줄               › │',
 '│                                          │',
 '│ ╭─ 1 QUESTIONS ───────────────────── ›─╮ │'];
-// 11-27 (the person: "패널에서 MODEL + CTX를 그냥 한줄로 고치자. CTX 단어도 필요 없을듯. 라우팅이랑 일관성을 맞추자는것"): the context
-// reading ends the MODEL row at the right edge (the route doers' rule); no CTX row.
+// 11-27 (the person: "패널에서 MODEL + CTX를 그냥 한줄로 고치자. CTX 단어도 필요 없을듯. 라우팅이랑 일관성을 맞추자는것", then
+// "게이지는 놔두고"): the gauge and percent end the MODEL row at the right edge; no CTX row.
 assert.deepEqual(ls.slice(1,14).map(l=>l.replace(/ +│$/,' │')),SHOWN.map(l=>l.replace(/ +│$/,' │')),ls.join('\n'));
 assert(ls.every(l=>cells(l)===44),ls.join('\n'));
 // The lower sections: the name and `›` at the right end, no rule; an item one cell in; the box's `›` at the end of its top line.
@@ -235,16 +235,18 @@ for(const w of [44,36,32,30])for(const [sel,whole] of [[LONG,'GPT-5.5-codex-max 
  assert.equal(ls.length,h,tag);assert(ls.every(l=>cells(l)===w),tag);
  assert(!a.some(s=>/SESSION/.test(s)),'no SESSION word\n'+tag);
  const m=a.findIndex(s=>/^ MODEL |^ GPT|^ Opus/.test(s));assert(m>0,'MODEL row stands\n'+tag);
- // 11-27: the context reading ends the row; where the value and it do not both fit the effort goes first (the route doers' rule).
- const label=w-4>=30?7:0,fits=1+label+cells(whole)+4<=w-4;
- assert(/ 41%$/.test(a[m].trimEnd()),'the reading ends the MODEL row\n'+tag);
- if(w>=36)assert(fits?a[m].includes(whole):a[m].includes(whole.split(' ')[0])&&!a[m].includes('xhigh'),'value whole where it fits\n'+tag);
+ // 11-27: the gauge and percent end the row (this backend sends one gauge, `━━━━──── 41%`); where the value and it do not both fit
+ // the effort goes first, then the model name is cut beside the gauge.
+ const label=w-4>=30?7:0,fits=1+label+cells(whole)+1+12<=w-4;
+ assert(/ ━━━━──── 41%$/.test(a[m].trimEnd()),'the gauge and percent end the MODEL row\n'+tag);
+ if(w>=36)assert(fits?a[m].includes(whole):!a[m].includes('xhigh')&&a[m].includes(whole.slice(0,6)),'value whole where it fits\n'+tag);
  if(/^─+$/.test(a[m-1]))ruled++;else bare++;
 }
 assert(ruled>0&&bare>0,ruled+' '+bare);
 // The reviewer's picture: 32 wide, 14 high, a long model name: the MODEL row keeps the name whole.
+// (11-27: the gauge and percent end that row, so the name is cut there beside them, never merged into the head.)
 {const a=inside(drawW({width:32,height:14,question:true,mem:3,selected:LONG,status:status(),backlog:backlog()}));
- assert(!a.some(s=>/SESSION/.test(s))&&a.some(s=>s.includes('GPT-5.5-codex-max xhigh')),a.join('\n'));}
+ assert(!a.some(s=>/SESSION/.test(s))&&a.some(s=>/^ GPT-5\.5-codex… ━━━━──── 41%$/.test(s.trimEnd())),a.join('\n'));}
 """)
 
     def test_the_session_head_stays_and_the_rows_give_way_in_the_order_they_did(self):

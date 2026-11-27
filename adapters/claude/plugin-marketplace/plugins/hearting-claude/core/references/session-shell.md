@@ -403,13 +403,15 @@ native area one empty row then parts the repository, Git and peers from the mode
 (without Git, the repository from the model);
 model and effort, then `context` with its gauge and percent (one row beside
 the native area, one `│`-separated row with the repo row at the bottom). Beside
-the native area the row takes the dim label `MODEL` (`MODEL  Fable 5.2 high        41%`,
-`MODEL  Checking` before the model is known) and the context reading ends it at the right edge, with no row
-and no word of its own (11-27, the person: "패널에서 MODEL + CTX를 그냥 한줄로 고치자. CTX 단어도 필요 없을듯. 라우팅이랑
-일관성을 맞추자는것"). It is the route doers' rule (the owner's and workers' first row in the route box, below): at 50 panel
-cells and wider a five-cell gauge before the percent, narrower the percent alone, in its level's color; short of cells the effort
-goes first, then the model name is cut with `…`, and the percent stays; with no reading nothing stands there. OpenCode's MCP count and
-cost take the row under it, in the value column. Narrower than 30 cells inside the label goes with the other labels;
+the native area the row takes the dim label `MODEL` (`MODEL  Fable 5.2 high  ━━━━────── 41%`,
+`MODEL  Checking` before the model is known) and the context gauge and percent end it at the right edge, in their level's color,
+with no row and no word of its own (11-27, the person: "패널에서 MODEL + CTX를 그냥 한줄로 고치자. CTX 단어도 필요 없을듯. 라우팅이랑
+일관성을 맞추자는것", then "게이지는 놔두고"). Short of cells the identity gives up whole words first, in the route doers' order
+(the effort, then the runtime; this row names none), then the gauge shortens (ten cells down to five, each at Fleet's own fill),
+then the model name is cut with `…` beside the five-cell gauge while six cells of it stand, and only where no gauge can stand
+(narrower than the side panel's 32 cells) does the percent stand alone; with no reading nothing stands there. The route box's
+owner and worker rows keep their own rule (below: the five-cell gauge from 50 panel cells, the percent alone narrower). OpenCode's
+MCP count and cost take the row under it, in the value column. Narrower than 30 cells inside the label goes with the other labels;
 running jobs and the repo's open work (`◌ N open · headline`, giving way with
 the jobs). Beside the native area no rule parts the metadata from this session's content any more
 (11-22, the person: "두칸이 아니라 한칸만 띄우도록 하자 그러면": the line that stood between CTX and TITLE is gone); the SESSION head's rule
@@ -476,7 +478,7 @@ rest of the row opens the status popup). The two parts' items come with the stat
 where a document changed (the host sends the documents' path, modification time, size, inode and change time back as `have` and, for the backlog,
 the folder it was read for; an unchanged one is neither read nor parsed again); the panel's drawing reads no file. SESSION is this session's: its
 head (11-26, panel B) is one rule without a word across the row, standing where the empty row between the two groups of metadata stood; then
-MODEL (its context reading at the right end, 11-27), TITLE, NOW (one cell in), QUESTIONS, the route box, MESSAGES, MEM. Short of rows, where the head used to take MODEL's value and row
+MODEL (its context gauge and percent at the right end, 11-27), TITLE, NOW (one cell in), QUESTIONS, the route box, MESSAGES, MEM. Short of rows, where the head used to take MODEL's value and row
 (`SESSION Opus 5.5 xhigh ────`), MODEL stands on its own row and the rule over it takes one of the rows B left (above); where none is left the rule
 goes and MODEL stands alone. Beside RESOURCES (11-26, panel B): one still rule without a word right above the `RESOURCES` name (above `USAGE`
 where the equipment's rows are all folded), in a section head's rule color; the names keep their place and shape. **The line forms (11-22, the
@@ -753,7 +755,7 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   `status_line` setting is left as it is. OpenCode has no setting or plugin slot that hides its bottom bar (checked in
   the installed `@opencode-ai/plugin` types and the documentation), so the shell's own paint is the way. Only what the line
   alone showed moves: OpenCode's cost (from the session record Fleet reads) stands in that window's panel on the row under
-  MODEL, in its value column, after the MCP count (`MCP 2/3 │ $1.23`; 11-27: the context reading itself ends the MODEL row). A window started without the shell is untouched. The row is found only in the
+  MODEL, in its value column, after the MCP count (`MCP 2/3 │ $1.23`; 11-27: the context gauge and percent end the MODEL row). A window started without the shell is untouched. The row is found only in the
   harness's own layout, and what is not found is not covered (review of #1662): Codex's footer is the status row and the help
   row (or the one thread-id status row) after the composer's last `›` row, the status row opening with a word, a number or a
   path, not a sign (`↳ queued`, `⏎ to send`, `■ stream error`) and not a draft line that begins with an id; OpenCode's bar is the

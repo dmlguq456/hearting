@@ -218,8 +218,8 @@ for(const [width,height,side] of [[40,30,true],[80,20,false]]){
  const idle=paint(width,height,side,null);
  for(const want of ['project','(topic 🚧 3)','fixture high',side?'MODEL  fixture high':'context ','42%','running: pytest','1 QUESTIONS','SESSION_TITLE',side?'6 ROUTE':'route 6','ROUTE_0',side?'MESSAGES':'messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
   assert(idle.some(s=>s.includes(want)),width+' missing '+want+'\n'+idle.join('\n'));
- // 11-27: beside the native area the context reading ends the MODEL row (no `CTX` row).
- if(side)assert(idle.some(s=>/^│  MODEL  fixture high +42% │$/.test(s))&&!idle.some(s=>/\bCTX\b/.test(s)),idle.join('\n'));
+ // 11-27: beside the native area the context gauge and percent end the MODEL row (no `CTX` row).
+ if(side)assert(idle.some(s=>/^│  MODEL  fixture high +━━━━────── 42% │$/.test(s))&&!idle.some(s=>/\bCTX\b/.test(s)),idle.join('\n'));
  // Spec rule 23: every route has a row or is counted in the box's lower border; no `more` row.
  const listed=idle.filter(s=>/ROUTE_\d/.test(s)).length,below=Number((idle.join('\n').match(/ ↓(\d+) ─╯/)||[0,0])[1]);
  assert.equal(listed+below,6,idle.join('\n'));assert(!idle.join('').includes('more'),idle.join('\n'));assert(/^└─+┘$/.test(idle.at(-1)));
@@ -1839,10 +1839,10 @@ for(const [config,background,extra,number] of [[{theme:'terminal'},'dark',{},[21
 // (11-26, panel B: the Git words stand in the REPO row's parentheses; the SESSION head is a rule without a word.)
 const r50=draw([oneShot,staged],40,50);
 // (an older backend's Git words are one piece: the name's letters go before them, fix 2 of #1863)
-// (11-27: the context reading ends the MODEL row; no CTX row.)
-assert(/^│  REPO \S+… \(fix\/fleet/.test(r50[1])&&/^│ ─+ │$/.test(r50[2])&&/^│  MODEL  claude-fable-5-2 high +41% │$/.test(r50[3])&&r50[4].startsWith('│  TITLE  '),r50.join('\n'));
+// (11-27: the gauge and percent end the MODEL row; this older one-part value gives way beside its one gauge; no CTX row.)
+assert(/^│  REPO \S+… \(fix\/fleet/.test(r50[1])&&/^│ ─+ │$/.test(r50[2])&&/^│  MODEL  claude-fable… ━━━━────── 41% │$/.test(r50[3])&&r50[4].startsWith('│  TITLE  '),r50.join('\n'));
 const noGit=view.render({width:40,height:50,side:true,fill:true,model:{...head,git:[],routes:[oneShot],route_count:1},state:'working',configuration:{},questions:()=>[]}).rows.map(r=>r.map(p=>p.text).join(''));
-assert(/^│  REPO   hearting\/ +│$/.test(noGit[1])&&/^│ ─+ │$/.test(noGit[2])&&noGit[3].includes('claude-fable-5-2 high'),noGit.join('\n'));
+assert(/^│  REPO   hearting\/ +│$/.test(noGit[1])&&/^│ ─+ │$/.test(noGit[2])&&/^│  MODEL  claude-fable… ━━━━────── 41% │$/.test(noGit[3]),noGit.join('\n'));
 // (c) Six routes and eight messages at 40×58: the question's head, then the route box (every route
 // in its whole form), the one parting row above the first section, and the rows the sections leave
 // stay empty under the box, above MESSAGES (`MESSAGES +5`, three messages of one row each (11-26, panel B), at the panel's bottom).
@@ -1934,67 +1934,71 @@ assert(bottom.some(s=>s.includes('hearting/ │'))&&bottom.some(s=>s.includes('(
 
     def test_model_and_context_rows_take_the_model_and_ctx_labels(self):
         # Spec E9 rule 42: beside the native area `MODEL` starts the model row as REPO's label starts its row.
-        # 11-27 (the person: "패널에서 MODEL + CTX를 그냥 한줄로 고치자. CTX 단어도 필요 없을듯. 라우팅이랑 일관성을 맞추자는것"):
-        # the context reading ends the MODEL row at the right edge by the route doers' rule (`alignedWhoRow`): from 50
-        # panel cells the five-cell gauge before the percent, narrower the percent alone, in its level's color; short
-        # of cells the effort goes first, then the model name is cut with `…`, and the percent stays. No `CTX` row and
-        # no word `CTX` or `context`; with no reading nothing stands there. Narrower than 30 cells inside the label
-        # goes. OpenCode's MCP count and cost take the row under it, in the value column. The bottom layout keeps its rows.
+        # 11-27 (the person: "패널에서 MODEL + CTX를 그냥 한줄로 고치자. CTX 단어도 필요 없을듯. 라우팅이랑 일관성을 맞추자는것", then
+        # "게이지는 놔두고"): the gauge and percent end the MODEL row at the right edge, in the level's colors; no `CTX` row and no word
+        # `CTX` or `context`. Short of cells the effort goes first (whole), then the gauge shortens (Fleet's `context_gauges`, ten
+        # cells down to five), then the model name is cut with `…` beside the shortest gauge (six cells of it at least), and only
+        # where no gauge can stand does the percent stand alone. With no reading nothing stands there. Narrower than 30 cells inside
+        # the label goes. OpenCode's MCP count and cost take the row under it, in the value column. The bottom layout keeps its rows.
         script = self.FIXTURE + r'''
-const D=t=>({text:t,dim:true}),pct={text:'41%',foreground:114},gauge=[P('━━━━'),D('──────'),D(' '),pct];
-const five=[{text:'━━',foreground:114},D('───'),D(' '),pct];
+const D=t=>({text:t,dim:true}),pct={text:'41%',foreground:114},bar=n=>{const f=Math.round(41*n/100);return [{text:'━'.repeat(f),foreground:114},D('─'.repeat(n-f)),D(' '),pct];};
+const gauge=bar(10),gauges=[10,9,8,7,6,5].map(bar);
 const side={...head,repo_side:[P('hearting')],worktrees:[D('wt 12')],git_side:[D('fix/fleet-opencode-…'),D(' ✓')],
- selected:[P('claude-fable-5-2'),D(' '),P('high')],context:[D('context '),...gauge],context_side:gauge,context_gauge5:five};
+ selected:[P('claude-fable-5-2'),D(' '),P('high')],context:[D('context '),...gauge],context_side:gauge,context_gauges:gauges};
 const paint=(width,o={})=>view.render({width,height:50,side:o.side!==false,fill:o.side!==false,model:{...side,...(o.model||{}),routes:[oneShot],route_count:1},
  native:o.native||{},state:'working',configuration:{},questions:()=>[]});
 const text=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
+const row=(width,o)=>text(paint(width,o))[3];
 const none=rows=>!rows.slice(0,6).some(s=>/\bCTX\b|context/.test(s));
-// (a) 38 cells: the label dim and seven cells, the percent at the right edge in its color, then TITLE (no CTX row).
-// 11-26 (panel B): the repository is one row, its Git words in parentheses (short of cells `wt` goes, then the label's column, then the
-// branch is cut so the status stays); the SESSION head is a rule without a word.
-const v38=paint(38),r38=text(v38),meta=r38.slice(1,5);
-assert(/^│  REPO hearting \(fix\/fleet-open… ✓\) │$/.test(meta[0])&&/^│ ─+ │$/.test(meta[1])
- &&/^│  MODEL  claude-fable-5-2 high +41% │$/.test(meta[2])&&meta[3].startsWith('│  TITLE  ')&&none(r38),r38.join('\n'));
-assert(text(paint(54))[1].startsWith('│  REPO   hearting (fix/fleet-opencode-… ✓)  wt 12'),text(paint(54)).join('\n'));
+// (a) 54 cells: the label dim and seven cells, then the model and effort, the ten-cell gauge and the percent at the right edge in
+// their level's color, then TITLE (no CTX row). 11-26 (panel B): the repository is one row, its Git words in parentheses (short of
+// cells `wt` goes, then the label's column, then the branch is cut so the status stays); the SESSION head is a rule without a word.
+const v54=paint(54),r54=text(v54),meta=r54.slice(1,5);
+assert(meta[0].startsWith('│  REPO   hearting (fix/fleet-opencode-… ✓)  wt 12')&&/^│ ─+ │$/.test(meta[1])
+ &&/^│  MODEL  claude-fable-5-2 high +━━━━────── 41% │$/.test(meta[2])&&meta[3].startsWith('│  TITLE  ')&&none(r54),r54.join('\n'));
+assert(/^│  REPO hearting \(fix\/fleet-open… ✓\) │$/.test(text(paint(38))[1]),text(paint(38)).join('\n'));
 // (11-22: MODEL stands one cell in.)
-const label=v38.rows[3].find(p=>/^MODEL +$/.test(p.text));
-assert(label&&label.dim===true&&label.text.length===7,JSON.stringify(v38.rows[3]));
-assert.equal(v38.rows[3].find(p=>p.text==='41%').foreground,114);
-assert(v38.groups.includes('context'),v38.groups);
-// (b) From 50 panel cells the five-cell gauge stands before the percent; at 49 the percent alone. A backend that sends no
-// five-cell gauge has the percent alone at every width.
-assert(/^│  MODEL  claude-fable-5-2 high +━━─── 41% │$/.test(text(paint(50))[3]),text(paint(50)).join('\n'));
-assert(/^│  MODEL  claude-fable-5-2 high +41% │$/.test(text(paint(49))[3]),text(paint(49)).join('\n'));
-assert(/^│  MODEL  claude-fable-5-2 high +41% │$/.test(text(paint(60,{model:{context_gauge5:undefined}}))[3]));
-// (c) Short of cells the effort goes first, then the model name is cut with `…`; the percent stays (Fleet's selection and the native one).
-assert(/^│  MODEL  claude-fable-5-2 +41% │$/.test(text(paint(34))[3]),text(paint(34)).join('\n'));
+const label=v54.rows[3].find(p=>/^MODEL +$/.test(p.text));
+assert(label&&label.dim===true&&label.text.length===7,JSON.stringify(v54.rows[3]));
+assert.equal(v54.rows[3].find(p=>p.text==='41%').foreground,114);assert.equal(v54.rows[3].find(p=>p.text==='━━━━').foreground,114);
+assert(v54.groups.includes('context'),v54.groups);
+// (b) Short of cells: the effort goes first, the gauge staying whole (44); then the gauge shortens beside the whole model (38: to
+// five cells); then the model name is cut beside the shortest gauge (34). The percent ends the row at every width.
+assert(/^│  MODEL  claude-fable-5-2 high +━━━━────── 41% │$/.test(row(50)),row(50));
+assert(/^│  MODEL  claude-fable-5-2 +━━━━────── 41% │$/.test(row(44)),row(44));
+assert(/^│  MODEL  claude-fable-5-2 ━━━──── 41% │$/.test(row(40)),row(40));
+assert(/^│  MODEL  claude-fable-5-2 ━━─── 41% │$/.test(row(38)),row(38));
+assert(/^│  MODEL  claude-fabl… ━━─── 41% │$/.test(row(34)),row(34));
 for(const o of [{model:{selected:[P('opencode-go/deepseek-v4.1-flash'),D(' '),P('max')]}},{native:{model:'opencode-go/deepseek-v4.1-flash',effort:'max'}}]){
- const row=text(paint(38,o))[3];
- assert(/^│  MODEL  opencode-go\/deepseek-\S*… +41% │$/.test(row)&&!row.includes('max')&&cells(row)===38,row);
+ const r=row(38,o);
+ assert(/^│  MODEL  opencode-go\/dee… ━━─── 41% │$/.test(r)&&!r.includes('max')&&cells(r)===38,r);
 }
+// (c) Only where no gauge can stand beside six cells of the model does the percent stand alone (narrower than the side panel's 32 cells).
+assert(/^│  claude… 41% │$/.test(text(paint(16))[3]),text(paint(16)).join('\n'));
 // (d) 30 cells inside keep the label; 29 cells inside, it goes, and the word `context` does not come back.
-assert(/^│  MODEL  claude-fable-5-2 +41% │$/.test(text(paint(34))[3]),text(paint(34)).join('\n'));
 const r33=text(paint(33));
-assert(/^│  REPO hearting \(fix\/fleet… ✓\) │$/.test(r33[1])&&/^│ ─+ │$/.test(r33[2])&&/^│  claude-fable-5-2 high +41% │$/.test(r33[3])
+assert(/^│  REPO hearting \(fix\/fleet… ✓\) │$/.test(r33[1])&&/^│ ─+ │$/.test(r33[2])&&/^│  claude-fable-5-2 ━━━──── 41% │$/.test(r33[3])
  &&!/GIT |MODEL|CTX|context/.test(r33.slice(0,6).join('')),r33.join('\n'));
 // (e) A model not known yet.
-assert(/^│  MODEL  Checking +41% │$/.test(text(paint(38,{model:{selected:[]}}))[3]),text(paint(38,{model:{selected:[]}})).join('\n'));
+assert(/^│  MODEL  Checking +━━━━────── 41% │$/.test(row(38,{model:{selected:[]}})),row(38,{model:{selected:[]}}));
 // (f) No reading: nothing stands at the right edge, and no row of its own.
-const bare=text(paint(38,{model:{context:[],context_side:[],context_gauge5:[]}}));
+const bare=text(paint(38,{model:{context:[],context_side:[],context_gauges:[]}}));
 assert(/^│  MODEL  claude-fable-5-2 high +│$/.test(bare[3])&&bare[4].startsWith('│  TITLE  ')&&!bare.slice(0,6).join('').includes('%'),bare.join('\n'));
-assert(!paint(38,{model:{context:[],context_side:[],context_gauge5:[]}}).groups.includes('context'));
+assert(!paint(38,{model:{context:[],context_side:[],context_gauges:[]}}).groups.includes('context'));
 // (g) OpenCode's MCP count and cost take the row under MODEL, in the value column; the MODEL row carries neither.
-const mcp=text(paint(38,{model:{mcp:[D('MCP '),P('3/4')],cost:[P('$1.23')]}}));
-assert(/^│  MODEL  claude-fable-5-2 high +41% │$/.test(mcp[3])&&/^│ {9}MCP 3\/4 │ \$1\.23 +│$/.test(mcp[4])&&mcp[5].startsWith('│  TITLE  '),mcp.join('\n'));
-// (h) An older backend without `context_side`: the word goes, the percent ends the row.
+const mcp=text(paint(54,{model:{mcp:[D('MCP '),P('3/4')],cost:[P('$1.23')]}}));
+assert(/^│  MODEL  claude-fable-5-2 high +━━━━────── 41% │$/.test(mcp[3])&&/^│ {9}MCP 3\/4 │ \$1\.23 +│$/.test(mcp[4])&&mcp[5].startsWith('│  TITLE  '),mcp.join('\n'));
+// (h) An older backend: without `context_gauges` the one gauge stays and the model gives way beside it; without `context_side` the
+// word goes too.
+assert(/^│  MODEL  claude-fab… ━━━━────── 41% │$/.test(row(38,{model:{context_gauges:undefined}})),row(38,{model:{context_gauges:undefined}}));
 for(const context of [[D('context '),...gauge],[P('context ━━━━────── 41%')]]){
- const old=text(paint(38,{model:{context,context_side:undefined}}));
- assert(/^│  MODEL  claude-fable-5-2 high +41% │$/.test(old[3])&&!old.join('').includes('context'),old.join('\n'));
+ const old=text(paint(54,{model:{context,context_side:undefined,context_gauges:undefined}}));
+ assert(/^│  MODEL  claude-fable-5-2 high +━━━━────── 41% │$/.test(old[3])&&!old.join('').includes('context'),old.join('\n'));
 }
 // (i) The bottom layout keeps its rows, whatever the side fragments say.
 const bottom=o=>text(paint(140,{side:false,...o}));
 assert(bottom().some(s=>s.includes('claude-fable-5-2 high │ context ━━━━────── 41%'))&&!/MODEL|CTX/.test(bottom().join('')),bottom().join('\n'));
-assert.deepEqual(bottom({model:{context_side:undefined,context_gauge5:undefined}}),bottom());
+assert.deepEqual(bottom({model:{context_side:undefined,context_gauges:undefined}}),bottom());
 '''
         self.node(script, "panel-view.cjs")
 

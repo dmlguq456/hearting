@@ -668,8 +668,8 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const pad=n=>text(' '.repeat(Math.max(0,n)));
     const cut=(parts,limit)=>{const all=size(parts);if(all<=limit)return parts;const fit=clip(parts,Math.max(0,limit-1));return [...fit.parts,{...(fit.parts.at(-1)||text('')),text:'…'}];};
     const joined=(groups,sep=' │ ')=>groups.filter(g=>g.length).flatMap((g,i)=>i?[text(sep),...g]:g);
-    // The doers' identity rule (`whoOf`, `alignedWhoRow`, below) draws the session's own MODEL row too (11-27), so its words and the
-    // role column's names are known before the rows above the route box are laid out.
+    // The doers' identity rule (`whoOf`, below) fits the session's own MODEL row too (11-27), so its words and the role column's
+    // names are known before the rows above the route box are laid out.
     const spaced=values=>values.filter(x=>x.length).flatMap((x,i)=>i?[text(' '),...x]:x);
     const ROLE=new Set(['owner','frame','frame-alt','worker']);
     let unitLabel='';      // the unit's short name on the route being drawn (a unit route's role word)
@@ -930,12 +930,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       metaGaps.add(top.length);top.push(ruleParts(inner));sessionAt=top.length-1;
       {
         // Spec rule 42: `MODEL` as REPO's label (narrower than 30 cells inside, no label, one cell in as the rows of the group above).
-        // 11-27 (the person: "패널에서 MODEL + CTX를 그냥 한줄로 고치자. CTX 단어도 필요 없을듯. 라우팅이랑 일관성을 맞추자는것"): the context
-        // reading is no row of its own and no word: it ends the MODEL row at the right edge, drawn by the route doers' rule
-        // (`alignedWhoRow`): from 50 panel cells the five-cell gauge before the percent, narrower the percent alone, in its level's
-        // color; short of cells the effort goes first, then the model name is cut with `…`, and the percent stays. With no reading
-        // nothing stands there, as on a doer's row. OpenCode's MCP count and cost, which stood after the gauge, take the row under it,
-        // in the value column. (A backend without `context_side` has the word `context` taken off its gauge here.)
+        // 11-27 (the person: "패널에서 MODEL + CTX를 그냥 한줄로 고치자. CTX 단어도 필요 없을듯. 라우팅이랑 일관성을 맞추자는것", then
+        // "게이지는 놔두고"): the context reading is no row of its own and no word: its gauge and percent end the MODEL row at the right
+        // edge, in the level's colors. Short of cells the identity gives up whole words first, in the route doers' order (`whoOf`: the
+        // effort, then the runtime; this row names none), then the gauge shortens (Fleet's `context_gauges`, ten cells down to five),
+        // then the model name is cut with `…` beside the shortest gauge (six cells of it at least, as this row's cut kept before), and
+        // only where no gauge can stand does the percent stand alone. (The route rows' own rule, the five-cell gauge from 50 panel
+        // cells and the percent alone narrower, is theirs alone.) With no reading nothing stands there, as on a doer's row.
+        // OpenCode's MCP count and cost, which stood after the gauge, take the row under it, in the value column. (A backend without
+        // `context_side` has the word `context` taken off its gauge here; one without `context_gauges` has that one gauge.)
         const word=parts=>{const first=parts[0],rest=String(first?.text??'').replace(/^context /,'');
           return !first||rest===String(first.text)?parts:rest?[{...first,text:rest},...parts.slice(1)]:parts.slice(1);};
         const gauge=Array.isArray(model.context_side)?painted(model.context_side):word(painted(model.context));
@@ -943,10 +946,20 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const last=gauge.at(-1),value=last?clean(last.text).trim().split(/\s+/).at(-1):'',percent=value?{...last,text:value}:null;
         // The model and the effort as a doer's `model_text` and `effort` (the native selection's effort comes as ` xhigh`).
         const [first,...rest]=selected,tail=rest.filter(x=>clean(x.text).trim());
-        const own={model_text:first||null,effort:tail.length?{...tail[0],text:tail.map(x=>clean(x.text)).join('').trim()}:null,
-          ...(percent?{ctx:percent,gauge5:painted(model.context_gauge5)}:{})};
+        const own={model_text:first||null,effort:tail.length?{...tail[0],text:tail.map(x=>clean(x.text)).join('').trim()}:null};
         const lead=labelled('MODEL',[]);
-        top.push(percent?alignedWhoRow(lead,own,'','',Math.max(3,size([percent]))):whoOf(lead,own,'',inner,true)||cut(lead,inner));
+        const given=Array.isArray(model.context_gauges)?model.context_gauges.map(painted).filter(g=>g.length):[];
+        const gauges=(given.length?given:[gauge]).slice().sort((a,b)=>size(b)-size(a));
+        const ending=(who,reading)=>[...who,pad(inner-size(who)-size(reading)),...reading];
+        const readingRow=()=>{
+          const M=own.model_text?[own.model_text]:[];
+          for(const g of gauges){const room=inner-size(g)-1,who=whoOf(lead,own,'',room);if(who&&size(who)>size(lead)&&size(who)<=room)return ending(who,g);}
+          const g=gauges.at(-1),left=inner-size(g)-1-size(lead);
+          if(M.length&&size(g)>size([percent])&&left>=Math.min(6,size(M)))return ending([...lead,...cut(M,left)],g);
+          const C=[percent],room=inner-size(C)-1;
+          return room<1?cut(C,inner):ending(whoOf(lead,own,'',room,true)||cut(lead,room),C);
+        };
+        top.push(percent?readingRow():whoOf(lead,own,'',inner,true)||cut(lead,inner));
         if(percent)mark(top.length-1,'context');
         const more=joined([mcp,cost]);
         if(more.length)top.push([pad(IND+labelWidth),...cut(more,inner-IND-labelWidth)]);
@@ -1457,12 +1470,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       if(shortModel&&keep.length&&size(lead)<room)return [...lead,...cut(keep,room-size(lead))];
       return cut(leads.at(-1),room);
     }
-    // Keep the right edge of the reading fixed before fitting the identity. The session's own MODEL row is drawn by the same rule
-    // (11-27), its percent in a column of its own (`column`).
-    function alignedWhoRow(lead,p,role,elapsed,column=percentWidth){
+    // Keep the right edge of the reading fixed before fitting the identity.
+    function alignedWhoRow(lead,p,role,elapsed){
       const C=[p.ctx],gauge=p.gauge5;
       const gaugeWidth=width>=50&&Array.isArray(gauge)?size(gauge)-size(C):0;
-      const reading=gaugeWidth>0?[...clip(gauge,gaugeWidth).parts,pad(column-size(C)),...C]:C;
+      const reading=gaugeWidth>0?[...clip(gauge,gaugeWidth).parts,pad(percentWidth-size(C)),...C]:C;
       const time=elapsed&&size(lead)+measure(elapsed)+size(reading)+2<=inner;
       const right=time?[text(elapsed,'dim'),text(' '),...reading]:reading;
       const room=inner-size(right)-1;

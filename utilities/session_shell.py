@@ -1376,8 +1376,9 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     panel["session"] = [styled(line) for line in panel["session"]]
     panel["brief"] = [styled(line) for line in panel["brief"]]
     quota_raw = panel["quota"]
-    for name in ("head", "repo", "repo_side", "git", "git_side", "worktrees", "memory", "selected", "context", "context_side", "context_gauge5", "quota", "jobs", "mcp", "cost"):
+    for name in ("head", "repo", "repo_side", "git", "git_side", "worktrees", "memory", "selected", "context", "context_side", "quota", "jobs", "mcp", "cost"):
         panel[name] = styled(panel[name])
+    panel["context_gauges"] = [styled(parts) for parts in panel["context_gauges"]]
     # Spec E9 rule 59 (11-16): the USAGE section, the three harnesses' usage rows (the records Fleet keeps).
     panel["usage"] = [{"harness": row["harness"], "parts": styled(row["parts"])} for row in usage_rows(harness, values)]
     # 11-16 (review of #1662): a reading at Fleet's red level carries `level: red`, so the folded strip can keep it
