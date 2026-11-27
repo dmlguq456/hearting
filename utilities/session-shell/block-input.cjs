@@ -297,9 +297,9 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
       const writeHint=local.typing[id]?(choices(row).length?text('writing_choices','Enter send · Ctrl+J newline · ↑ choices'):text('writing','Enter send · Ctrl+J newline')):text('choose_write','↑↓ choose · type to write · Enter send');
       // 11-26 (review 1861): a paste stalled: what comes is still its text; the way out is a key pressed, Enter
       // (sends what came) or the closing key, named on the same row. PR 1871: while it still comes in, its Enter and
-      // Esc are its own bytes, so the row says only that it is under way (never `Enter send`).
+      // Esc are its own bytes, so the row says it is under way and that Enter sends once it stops (a frame late too).
       const pieces=pasting&&stalled?[text('paste_stalled','paste stalled'),text('send','Enter send'),String(navigate).split(' · ').at(-1)]
-        :pasting?[text('pasting','a paste is under way')]
+        :pasting?[text('pasting','pasting · Enter sends once it stops')]
         :[...(active(row)?[writable(row)?writeHint:instruction]:[]),navigate];
       keyLines=keys(pieces,editing?1:Math.max(1,Math.max(2,budget)-2));
       tail.push(...keyLines);

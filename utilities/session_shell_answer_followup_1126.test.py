@@ -333,14 +333,16 @@ class FollowupTest(unittest.TestCase):
         comes in several reads after a held key (a focus report among them, the rest late) sends nothing before the
         person's Enter, with both backend answers, nothing reaching the native; nor does a session change mid paste.
         The gap left (a report within the key's wait makes Enter the paste's line break, and Enter within the next
-        second too) is named on the key row: `a paste is under way` while it comes in, the stalled row once it stalls."""
+        second too) is named on the key row: `pasting · Enter sends once it stops` while it comes in, the stalled row once
+        it stalls. Review 1871 round 3: the row painted while it comes in says what an Enter read a frame later does, the
+        stall timer just past (before the next paint) or the end mark and Enter in one read: it sends, once."""
         import base64
         encode = lambda step: base64.b64encode(step if isinstance(step, bytes) else step.encode()).decode()  # noqa: E731
         scenes = [{"name": name, "steps": [st if st in ("STALL", "WAIT") else encode(st) for st in steps[:-1]],
                    "last": encode(steps[-1]), "secret": bool(extra.get("secret"))} for name, steps, extra in PASTE_SPLIT]
         out = json.loads(self.node(r"""
 (async()=>{
- const labels={pasting:'a paste is under way'};
+ const labels={pasting:'pasting · Enter sends once it stops'};
  const row=x=>x.b.detail({columns:60,budget:20}).at(-1).map(p=>p.text).join('');
  const out={split:[],session:[],trap:null};
  for(const state of ['unknown','submitted'])for(const c of JSON.parse(process.argv[2])){
@@ -370,6 +372,16 @@ class FollowupTest(unittest.TestCase):
   const during=[...x.all];await x.stall();const stalledRow=row(x);
   x.route(Buffer.from('\r'));await wait(KEY_WAIT+30);
   out.trap={rows,during,stalledRow,sent:[...x.all],native:x.native};}
+ // The two moments of review 1871 round 3, the frame being what the popup painted last. (a) The stall timer has just
+ // fired and no paint came since: the frame still shows the paste coming in; Enter read now sends, once. (b) The end
+ // mark and Enter in one read: the paste ends and that Enter sends it, once. Before either, a lone Enter while it comes
+ // in is the paste's line break, as before.
+ {const x=make({},{state:'unknown',labels});x.route(Buffer.from('\x1b[200~before'));const frame=row(x);
+  for(let i=0;i<400&&!x.b.stalled;i++)await wait(1);const stalled=x.b.stalled;
+  x.route(Buffer.from('\r'));await wait(KEY_WAIT+30);out.momentA={frame,stalled,sent:[...x.all]};}
+ {const x=make({},{state:'unknown',labels});x.route(Buffer.from('\x1b[200~before'));const frame=row(x);
+  x.route(Buffer.from('\r'));await new Promise(r=>setImmediate(r));const flowing={sent:[...x.all],draft:x.draft()};
+  x.route(Buffer.from('more\x1b[201~\r'));await wait(20);out.momentB={frame,flowing,sent:[...x.all]};}
  console.log(JSON.stringify(out));
 })().catch(e=>{console.error(e);process.exit(1)});
 """, json.dumps(scenes)))
@@ -384,7 +396,13 @@ class FollowupTest(unittest.TestCase):
                 self.assertEqual((session["sent"], session["native"], session["focused"]), ([], "", False))
         trap = out["trap"]
         self.assertEqual(trap["during"], [], "the gap left: Enter after a report within its wait sends nothing")
-        self.assertEqual(set(trap["rows"]), {"a paste is under way"}, "the row never says Enter sends meanwhile")
+        self.assertEqual(set(trap["rows"]), {"pasting · Enter sends once it stops"}, "meanwhile the row says Enter sends only once it stops")
+        moment_a, moment_b = out["momentA"], out["momentB"]
+        self.assertEqual((moment_a["frame"], moment_a["stalled"], moment_a["sent"]), ("pasting · Enter sends once it stops", True, ["before"]),
+                         "(a) the frame says Enter sends once it stops; read after the stall timer, before a paint, it sends")
+        self.assertEqual(moment_b["frame"], "pasting · Enter sends once it stops")
+        self.assertEqual(moment_b["flowing"], {"sent": [], "draft": "before\n"}, "while it comes in Enter is a line break")
+        self.assertEqual(moment_b["sent"], ["before\nmore"], "(b) the end mark and Enter in one read: sent once")
         self.assertEqual(trap["stalledRow"], "paste stalled · Enter send · Esc/Ctrl+] back")
         self.assertEqual(trap["sent"], ["첫 줄" + "\n" * 9], "once stalled, Enter sends it, line breaks and all")
         self.assertEqual(trap["native"], "")
@@ -394,8 +412,8 @@ class FollowupTest(unittest.TestCase):
                 self.assertEqual(fleet_answers(steps, secret=bool(extra.get("secret"))), [SPLIT_WHOLE[name]])
         import session_shell
         from fleet.config import ui_text
-        self.assertEqual(session_shell.block_labels(70)["pasting"], ui_text("peer.delivery.hold_paste"),
-                         "the words the panel already shows for a paste under way")
+        self.assertEqual(session_shell.block_labels(70)["pasting"], ui_text("fleet.session_block.pasting"),
+                         "the key row's own words for a paste coming in")
         trap_steps = ["\x1b[200~첫 줄", "STALL", "\r", "\x1b[I", *["\r"] * 8]
         self.assertEqual(fleet_answers(trap_steps), [], "Fleet: the same gap left")
         self.assertEqual(fleet_answers(trap_steps + ["STALL", "\r", "WAIT"]), ["첫 줄" + "\n" * 9])
@@ -608,6 +626,17 @@ class PrivateTmuxEdgesTest(unittest.TestCase):
                 send("둘째 줄\r셋째" + E, delay=1.0)
                 results.append(dict(scene="lone_cr_late", sent=answers()[count:], native=received()[native:].decode(), popup=shown(screen())))
                 self.assertLessEqual(len(answers()[count:]), 1)
+                self.assertEqual(received()[native:], b"")
+                closed()
+                # PR 1871 (review round 3): while a paste comes in the frame's key row says Enter sends once it stops;
+                # its end mark and Enter in one write end it, and that Enter sends it, once, as the row said.
+                count, native = ask("end_then_enter")
+                send(P + "before", delay=.1)
+                frame = waitfor(lambda rows: any("붙여넣는 중 · 멈추면 Enter 보내기" in row for row in rows), "the row while it comes in")
+                send(E + "\r", delay=.8)
+                results.append(dict(scene="end_then_enter", sent=answers()[count:], native=received()[native:].decode(),
+                                    row=next(row for row in frame if "붙여넣는 중" in row).strip()))
+                self.assertEqual(answers()[count:], [["before"]], "the end mark and Enter in one write: sent once")
                 self.assertEqual(received()[native:], b"")
                 closed()
                 # B: a key ends a stalled paste; the person types to the native at once: every key reaches it.
