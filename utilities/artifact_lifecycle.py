@@ -176,19 +176,10 @@ def classify_route_record(path: Path, artifact_root: Path, route_id: str) -> str
 def read_root_identity(artifact_root: Path) -> Optional[artifact_identity.RootIdentity]:
     """Read the frozen root identity without allocating it or creating a folder."""
 
-    path = (
-        Path(artifact_root)
-        / artifact_admission.ADMISSION_REL
-        / "root-identity.json"
-    )
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except (OSError, ValueError, UnicodeError) as exc:
+        return artifact_identity.read_root_identity(artifact_root)
+    except (OSError, ValueError) as exc:
         raise LifecycleError("root-identity-unreadable", str(exc)) from exc
-    try:
-        return artifact_identity.RootIdentity.parse(payload)
     except artifact_identity.IdentityError as exc:
         raise LifecycleError("root-identity-invalid", str(exc)) from exc
 

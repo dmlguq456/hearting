@@ -414,6 +414,29 @@ class ActivateAndBeginTest(ProducerTestBase):
                     require_cycle=True)
         self.assertEqual(ctx.exception.code, "cutover-inactive")
 
+    def test_begin_require_cycle_names_the_active_sibling_in_the_refusal(self):
+        names = (".agent_reports", ".claude_reports")
+        for inactive, active in (names, names[::-1]):
+            with self.subTest(inactive=inactive):
+                project = Path(self._tmp.name) / inactive.lstrip(".")
+                self.root = project / inactive
+                self.root.mkdir(parents=True)
+                other = project / active
+                other.mkdir()
+                self.seed_legacy()
+                route, route_file = self.route()
+                detail = "activation required before cycle issuance"
+                with self.assertRaises(P.ProducerError) as ctx:
+                    P.prepare_route_artifact_env(route_file, start=True, jobs=self.jobs)
+                self.assertEqual((ctx.exception.code, ctx.exception.detail), ("cutover-inactive", detail))
+
+                P.activate(other, repository_id=REPO_ID, artifact_root_id=ROOT_ID)
+                with self.assertRaises(P.ProducerError) as ctx:
+                    P.prepare_route_artifact_env(route_file, start=True, jobs=self.jobs)
+                self.assertEqual((ctx.exception.code, ctx.exception.detail),
+                                 ("cutover-inactive", f"{detail} (active artifact root: {other})"))
+                self.assertFalse((self.root / "campaigns").exists())
+
     def test_activate_freezes_identity_and_is_idempotent(self):
         first = self.activate()
         self.assertEqual(first["status"], "activated")

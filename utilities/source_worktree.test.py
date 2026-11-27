@@ -364,6 +364,42 @@ class FramedStartPolicyTest(SourceWorktreeFixture):
 
 
 class ComposeStartPreparationRetryTest(SourceWorktreeFixture):
+    def test_active_legacy_root_survives_creation_of_a_document_in_the_neutral_root(self):
+        import artifact_producer as producer
+
+        active = self.primary / ".claude_reports"
+        neutral = self.primary / ".agent_reports"
+        producer.activate(active, repository_id="repo_" + "a" * 32,
+                          artifact_root_id="root_" + "b" * 32)
+        neutral.unlink()  # Model a legacy root activated before alias creation.
+        self.assertEqual(R._compose_artifact_root(self.primary), str(active))
+
+        draft = neutral / "documents" / "draft.md"
+        draft.parent.mkdir(parents=True)
+        draft.write_text("Draft\n", encoding="utf-8")
+        self.assertEqual(producer.classify_root(neutral)["state"], "inactive-with-legacy")
+
+        original_start = self.start_work
+        issued = []
+
+        def prepare_then_launch(route, path, jobs):
+            issued.append(producer.prepare_route_artifact_env(path, start=True, jobs=jobs))
+            return original_start(route, path, jobs)
+
+        argv = self.argv()
+        index = argv.index("--artifact-root")
+        del argv[index:index + 2]
+        with mock.patch.object(self, "start_work", side_effect=prepare_then_launch):
+            self.assertEqual(self.main(argv), 0)
+        route, path = self.start_calls[-1]
+        self.assertEqual(route["artifact_root"], str(active))
+        self.assertTrue(path.is_relative_to(active))
+        self.assertEqual(issued[0]["AGENT_ARTIFACT_ROOT"], str(active))
+        self.assertTrue(issued[0]["AGENT_ARTIFACT_CYCLE_ID"])
+        self.assertEqual(len(self.owner_attempt_rows()), 1)
+        self.assertEqual(list(neutral.iterdir()), [draft.parent])
+        self.assertEqual(draft.read_text(encoding="utf-8"), "Draft\n")
+
     def test_non_git_start_with_direct_starts_inline_without_git_or_worker(self):
         project = Path(self.tmp.name) / "non-git-project"
         project.mkdir()

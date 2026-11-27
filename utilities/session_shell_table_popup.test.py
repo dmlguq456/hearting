@@ -12,6 +12,7 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
 from pathlib import Path
 import contextlib
 import io
+from itertools import product
 import json
 import subprocess
 import types
@@ -79,9 +80,10 @@ class TablePopupTest(unittest.TestCase):
         shell._HELD_VIEW.clear()
         self.addCleanup(shell._HELD_VIEW.clear)
 
-    def popup(self, **request):
+    def popup(self, model=None, **request):
         # The terminal's 256 colors, as the projection reads them (TERM).
-        with mock.patch.object(shell, '_popup_view_model', lambda harness, sid, kind: view_model()), \
+        model = view_model() if model is None else model
+        with mock.patch.object(shell, '_popup_view_model', return_value=model), \
                 mock.patch('fleet.session_tags.assigned_tag', lambda harness, sid: TAGS.get((harness, sid))), \
                 mock.patch.dict(os.environ, {'TERM': 'xterm-256color'}):
             return shell._panel_popup(self.binding, request)
@@ -156,7 +158,7 @@ class TablePopupTest(unittest.TestCase):
             shell._panel_popup(other, {'kind': 'routes', 'columns': 82})
             self.assertEqual(len(calls), 4)
 
-    def test_the_route_page_is_fleets_page_at_the_popup_height(self):
+    def test_the_route_page_is_fleets_page_with_a_fitted_frame(self):
         from dataclasses import replace
         from fleet.explorer import pages
         mine = tuple(route for route in view_model().routes if route['session_tag'] == 'e9')
@@ -164,7 +166,8 @@ class TablePopupTest(unittest.TestCase):
         self.assertTrue(got['page'])
         want_rows, want_styles, _hits = self.fleet(lambda grid: pages._route_page(
             grid, replace(view_model(), routes=mine), 'rt-aaaaaaaaaaaaaaa2', 0, 81, grid.rows,
-            pages._SubsetState(None, 'route:rt-aaaaaaaaaaaaaaa2', 'rt-aaaaaaaaaaaaaaa2', True), whole=True), 82, rows=30 + 3 + sum(pages._route_visibility_rows(VISIBILITY, 0, 81)))
+            pages._SubsetState(None, 'route:rt-aaaaaaaaaaaaaaa2', 'rt-aaaaaaaaaaaaaaa2', True), whole=True),
+            82, rows=shell.POPUP_ROWS + 8)
         while want_rows and not want_rows[0]:
             want_rows.pop(0)
         self.assertEqual((got['rows'], got['styles']), (want_rows, want_styles))
@@ -186,6 +189,113 @@ class TablePopupTest(unittest.TestCase):
         # The page is longer than a low window: the host's table reads it on and says where it stands.
         low = self.popup(kind='routes', columns=82, open='rt-aaaaaaaaaaaaaaa2', page=True, rows=10)
         self.assertGreater(len(low['rows']), 13)
+
+    def test_a_long_route_page_is_whole_at_every_requested_height(self):
+        from dataclasses import replace
+
+        route = dict(ROUTES[0], shape='staged+resource')
+        ident = route['id']
+        stages = [{'n': 's%d' % i, 'st': 'active', 'when': 'now', 'out': 'out.md', 'unit': 'dev/code'}
+                  for i in range(12)]
+        node = {'n': 'leg', 'kind': 'leg', 'st': 'active', 'title': [('code dev', 'head')], 'detail': stages}
+        model = replace(view_model(), routes=(route,), nodes={ident: (node,)})
+        views = [self.popup(model, kind='routes', columns=124, open=ident, page=True, rows=height)
+                 for height in (24, 40, 54)]
+        self.assertGreater(len(views[0]['rows']), 33)
+        for view in views:
+            self.assertTrue(self.text(view['rows'])[-1].startswith('╚═'))
+            self.assertEqual(view['rows'], views[0]['rows'])
+
+    def test_short_routes_fit_their_stage_rows(self):
+        from dataclasses import replace
+
+        route = ROUTES[0]
+        ident = route['id']
+        forms = (('unit', 'one-shot-owner', 1), ('solo', 'one-shot-owner', 1),
+                 ('staged', 'staged', 3), ('team', 'staged+resource', 6))
+        for (form, shape, count), columns in product(forms, (92, 124, 188)):
+            with self.subTest(form=form, columns=columns):
+                stages = [{'n': 's%d' % i, 'st': 'active', 'when': 'now', 'out': 'out.md', 'unit': 'dev/code'}
+                          for i in range(count)]
+                node = {'n': 'leg', 'kind': 'leg', 'st': 'active', 'title': [('code dev', 'head')], 'detail': stages}
+                row = dict(route, shape=shape, **({'capability': 'unit', 'field': 'code'} if form == 'unit' else {}))
+                model = replace(view_model(), routes=(row,), nodes={ident: (node,)})
+                views = [self.popup(model, kind='routes', columns=columns, open=ident, page=True, rows=height)
+                         for height in (24, 40, 54)]
+                self.assertEqual(views[0]['rows'], views[1]['rows'])
+                self.assertEqual(views[1]['rows'], views[2]['rows'])
+                rows = self.text(views[0]['rows'])
+                for index in range(count):
+                    label = '┌─ s%d ' % index
+                    top = next(i for i, text in enumerate(rows) if label in text)
+                    left = rows[top].index(label)
+                    self.assertEqual([rows[top + offset][left:left + 1] for offset in range(1, 5)],
+                                     ['│', '│', '│', '└'])
+                self.assertIn('└', rows[-2])
+                self.assertTrue(rows[-1].startswith('╚═'))
+
+    def test_fitted_boxes_with_different_heights_keep_straight_stage_links(self):
+        from dataclasses import replace
+
+        route = ROUTES[0]
+        ident = route['id']
+        stages = [
+            {'n': 'plan', 'st': 'done', 'graph_known': True, 'level': 0},
+            {'n': 'execute', 'st': 'active', 'graph_known': True, 'level': 1, 'depends_on': ['plan'],
+             'who': ('claude', 'fixture'), 'gate': 'ready', 'says': 'working'},
+            {'n': 'check', 'st': 'todo', 'graph_known': True, 'level': 2, 'depends_on': ['execute']},
+        ]
+        node = {'n': 'leg', 'kind': 'leg', 'st': 'active', 'detail': stages}
+        model = replace(view_model(), routes=(route,), nodes={ident: (node,)})
+        view = self.popup(model, kind='routes', columns=124, open=ident, page=True)
+        frame = [row for row in self.text(view['rows']) if row.startswith('║')]
+        self.assertEqual([row.count('▶') for row in frame if '▶' in row], [2])
+
+    def test_fitted_frame_keeps_a_loop_return_on_the_panel_rail(self):
+        from dataclasses import replace
+        from fleet.palette import style_components
+
+        route = dict(ROUTES[0], shape='staged')
+        ident = route['id']
+        stages = [{'n': name, 'st': 'done'} for name in ('plan', 'execute', 'check')]
+        node = {'n': 'leg', 'kind': 'leg', 'st': 'active', 'detail': stages,
+                'loops': [(2, 0, '↺ 1 · check → plan')]}
+        model = replace(view_model(), routes=(route,), nodes={ident: (node,)})
+        view = self.popup(model, kind='routes', columns=124, open=ident, page=True)
+        rows = self.text(view['rows'])
+        first = next(i for i, row in enumerate(rows) if row.startswith('║ ┌▶'))
+        last = next(i for i, row in enumerate(rows) if row.startswith('║ └─'))
+        expected = [('┌', style_components(('y', 0, 1)))]
+        expected += [('│', expected[0][1])] * (last - first - 1)
+        expected += [('└', expected[0][1])]
+        rail = []
+        for row in view['rows'][first:last + 1]:
+            cells = [(char, view['styles'][style]) for text, style in row for char in text]
+            rail.append(cells[2])
+        self.assertEqual(rail, expected)
+
+    def test_route_raw_strip_requires_drawable_rows_and_fits_short_text(self):
+        from dataclasses import replace
+
+        route = ROUTES[0]
+        ident = route['id']
+        node = {'kind': 'leg', 'st': 'active', 'n': 'one-shot',
+                'detail': [{'n': 'one-shot', 'st': 'active'}]}
+        model = replace(view_model(), routes=(route,), nodes={ident: (node,)})
+        for lines in ((), ('', '   '), ('first', 'second', 'third')):
+            with self.subTest(lines=lines):
+                view = self.popup(replace(model, attempts={'route': ident, 'lines': lines}), kind='routes',
+                                  columns=124, open=ident, page=True, rows=40)
+                rows = self.text(view['rows'])
+                if len(lines) == 3:
+                    start = next(i for i, text in enumerate(rows) if 'owner raw' in text)
+                    self.assertIn('first', rows[start + 1])
+                    self.assertIn('second', rows[start + 2])
+                    self.assertIn('third', rows[start + 3])
+                    self.assertIn('last 3 rows', rows[start + 4])
+                    self.assertEqual(start + 5, len(rows) - 1)
+                else:
+                    self.assertNotIn('owner raw', '\n'.join(rows))
 
     def test_another_sessions_question_is_never_answered_from_this_window(self):
         # 11-15: the sessions popup and its way into another session's question are gone; an answer this

@@ -215,8 +215,9 @@ function appearance(rows,configuration={},{colors=256,noColor=false,background='
       // On a shade nothing is dimmed on top: secondary text and lines take their own color.
       if(LINES.has(role)){foreground=F[role];dim=false;}
       else if(role==='title'){foreground=F.title;dim=false;}
-      // A kind word's bracket keeps its field's hue and its weight step (quick dim) on a shade too.
-      else if(role==='kind'&&foreground!==null){/* kept as it is */}
+      // A kind word's bracket keeps its field's hue and its weight step (quick dim) on a shade too, as a zone rule's line does
+      // its zone's (11-27).
+      else if((role==='kind'||role==='zone-rule')&&foreground!==null){/* kept as it is */}
       else if(foreground===null||dim||role==='secondary'){foreground=foreground===null&&!dim&&role!=='secondary'?F.body:F.secondary;dim=false;}
       return {...part,foreground,dim,bold,background:F[shade]};
     }
@@ -1817,9 +1818,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     let keepRouteRule=true;
     const routeRule=()=>keepRouteRule&&routeRows.length>0;
     const routeBox=()=>kept.ROUTE?2+(routeRows.length?routeWindows():routeChecking.length):0;
+    // 11-27 (the person: "dispatch랑 request 구분줄에 은은하게 동일 컬러로 해주라. 서로 구분이 약간 잘 안되고 있어서"): the rule's
+    // line (the `─` before the name and the run after it; the blanks keep their dim) is the zone's hue one rung down (`zoned_<zone>`, dim), the name the lit
+    // hue it was, so two zones' rules no longer read as one gray line; where no hue is shown (mono, NO_COLOR, under 256 colors)
+    // the line is the dim line it was. Only the color changes: the same words, cells and rows.
+    const zoneHue=model.no_color!==true&&cfg.theme!=='mono'&&(model.colors??256)>=256;
+    const zoneLine=(value,zone)=>zoneHue&&styles['zoned_'+zone]?{...text(value,'zoned_'+zone),role:'zone-rule'}:{...text(value,'dim'),role:'messages'};
     const zoneRow=(zone,key)=>{
-      const room=Math.max(0,inner-box),head=[{...text('─ ','dim'),role:'messages'},{...text(zone,'zone_'+zone),role:'zone'},text(' ')];
-      return boxRow({parts:[...head,{...text('─'.repeat(Math.max(0,room-size(head))),'dim'),role:'messages'}]},key);
+      const room=Math.max(0,inner-box),head=[zoneLine('─',zone),{...text(' ','dim'),role:'messages'},{...text(zone,'zone_'+zone),role:'zone'},text(' ')];
+      return boxRow({parts:[...head,zoneLine('─'.repeat(Math.max(0,room-size(head))),zone)]},key);
     };
     const routeBlockOf=()=>{
       const key=tone.route;
@@ -2546,7 +2553,7 @@ function popupWidth(cols,kind='text'){
 // frame first (under 8 rows), then its bottom line (3 rows or fewer), so the content keeps rows.
 function popupHeight(space){return space>=8?space-2:space;}
 function popupRoom(rows,band=0){const H=popupHeight(Math.max(1,rows-band));return Math.max(0,H>3?H-2:H-1);}
-function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],current=0,model={},configuration,cellWidth,background=''}){
+function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],current=0,model={},configuration,cellWidth,background='',fixedTop=false}){
   const measure=cellWidth||(s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
   const styles=model.styles||{},text=(value,key='dim')=>({text:String(value??''),...(styles[key]||{dim:key==='dim'})});
   const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
@@ -2559,7 +2566,7 @@ function popup({cols,rows,band=0,kind='text',title=[],body=[],sections=[],curren
   const cut=(parts,limit)=>size(parts)<=limit?parts:limit<1?[]:[...clip(parts,limit-1).parts,{...text('…','dim')}];
   const space=Math.max(1,rows-band),W=Math.min(cols,popupWidth(cols,kind)),inner=Math.max(0,W-4);
   const maxH=popupHeight(space),shut=maxH>3,list=body.slice(0,Math.max(0,shut?maxH-2:maxH-1)),H=Math.min(maxH,list.length+(shut?2:1));
-  const x=Math.floor((cols-W)/2),y=Math.max(0,Math.round((space-H)/2));
+  const x=Math.floor((cols-W)/2),y=Math.max(0,Math.round((space-(fixedTop?maxH:H))/2));
   // 11-15 (panel polish 3): where nothing behind it is veiled (mono, eight colors, NO_COLOR) the
   // frame's line is bright instead of the messages' gray.
   const bright=veil(configuration,{colors:model.colors??256,noColor:model.no_color===true,background})===null;
