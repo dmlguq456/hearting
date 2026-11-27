@@ -38,6 +38,7 @@ from dispatch_completion_join import (  # noqa: E402
     delivery_required_action,
 )
 import dispatch_pending_delivery as pending_delivery  # noqa: E402
+from dispatch_receipt_identity import TERMINAL_CLASSIFICATIONS  # noqa: E402
 import peer_obligations  # noqa: E402
 import shared_readiness  # noqa: E402
 from frame_interview import PENDING_ANSWER_RULE  # noqa: E402
@@ -1361,6 +1362,8 @@ def classified_receipt(
                 if delivery.advanced or snapshot_state == "attention"
                 else "terminal-complete"
             )
+        elif state == "cancelled":
+            reason = "cancelled-by-parent"
         else:
             reason = "terminal-failure-or-unclosed"
         parked = None
@@ -1385,6 +1388,12 @@ def classified_receipt(
             instruction = (RUNTIME_V1_FOLLOWUP_PREFIXES[bool(summary)]
                            + ("\n" + (head + "\n" if head else "") + summary if summary else "")
                            + ("\n" + kept if kept else ""))
+        elif state == "cancelled":
+            # The settled parent close every carrier renders the same way.
+            from dispatch_completion_join import completion_followup_text
+            instruction = completion_followup_text({"children": [{
+                "attempt_id": launch.attempt_id, "reason": reason,
+                "required_action": required_action}]}, jobs=str(launch.jobs))
         elif parked and parked["status"] == "blocked":
             gate = parked["gate"]
             required_action = HUMAN_GATE_PREFIX + gate
@@ -1446,6 +1455,8 @@ def classified_receipt(
     title = (
         "Hearting dispatch completed"
         if state == "success"
+        else "Hearting dispatch closed by its parent"
+        if state == "cancelled"
         else "Hearting dispatch requires attention"
     )
     # Only what the model acts on: the row revision and digest are the runtime's own
@@ -1469,7 +1480,8 @@ def receipt(launch: Launch, state: str, reason: str, root: Path) -> str:
     return classified_receipt(launch, state, reason, root)[1]
 
 
-TERMINAL_STATES = frozenset({"success", "attention"})
+# The shared vocabulary: a settled parent close (`cancelled`) is a terminal wake too.
+TERMINAL_STATES = TERMINAL_CLASSIFICATIONS
 
 
 def emit_receipt(state: str, message: str, *, block: bool | None = None) -> int:

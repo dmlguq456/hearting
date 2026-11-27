@@ -2814,6 +2814,10 @@
    "en": "Start approval {approval} ({part})",
    "ko": "시작 승인 {approval} ({part})"
   },
+  "route.close.pending_next": {
+   "en": "The close goes on once its workers are seen to end; their launch watcher normally finishes it. If this route still shows in status --open-only, run this same close again or that route's resume_command. Both continue this close and start no work.",
+   "ko": "작업자가 끝난 것이 보이면 닫기가 이어집니다. 보통은 그 작업자의 실행 감시자가 마저 닫습니다. status --open-only에 이 route가 아직 있으면 같은 close를 다시 부르거나 그 route의 resume_command를 부르세요. 둘 다 이 닫기를 이어 가고 작업을 새로 시작하지 않습니다."
+  },
   "route.close.stopped_leg_next": {
    "en": "The stopped leg runs again the next time this route starts, including a start --wait the runtime asks for and the continuation after a wake. To end it, close the route.",
    "ko": "멈춘 갈래는 이 route가 다음에 start될 때 다시 뜹니다. 런타임이 시킨 start --wait와 깨어난 뒤 이어 가기도 포함됩니다. 끝내려면 route를 close하세요."
