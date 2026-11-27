@@ -417,7 +417,7 @@ def show(args, steward):
     if not args.rq:
         listing = pr.session_requests(me["harness"], me["session_id"])
         count = 0
-        for side, mark in (("in", "◂"), ("out", "→")):
+        for side, mark in (("in", "←"), ("out", "→")):
             for record in listing[side]:
                 if record["state"] in pr._OPEN_STATES + ("preparing",) or args.all:
                     other = record["requester" if side == "in" else "recipient"]

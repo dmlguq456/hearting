@@ -882,7 +882,7 @@ KINDS = (
      "Panel: the route box &middot; Fleet: ROUTES"),
     ("PEER REQUEST", "Work handed to another session, with a number, revisions, and reports", "The session that asks",
      "By the other session&rsquo;s final report or rejection, or the asker&rsquo;s cancel; a partial report keeps it open",
-     "Panel: rows in the route box&rsquo;s <code>request</code> zone, under its own named rule, each with the other session&rsquo;s number, harness, model, and effort (<code>&rarr;</code> handed out, <code>&#9666;</code> handed to you, "
+     "Panel: rows in the route box&rsquo;s <code>request</code> zone, under its own named rule, each with the other session&rsquo;s number, harness, model, and effort (<code>&rarr;</code> handed out, <code>&larr;</code> handed to you, "
      "<code>&#10003;</code> finished, <code>&#10005;</code> rejected or cancelled), whole in the MESSAGES popup &middot; Fleet: the session page&rsquo;s <code>request</code> rows and a PEERS link"),
     ("MESSAGES", "A short note, read and done", "Any session", "Nothing to close",
      "Panel: MESSAGES &middot; Fleet: the session page and PEERS"),
@@ -1831,7 +1831,7 @@ def render_fleet(d: dict) -> str:
       <p class="t">A session can hand another session work as a <b>request</b>: it gets a number, the other session
       opens the body itself, partial reports keep it open, and a final report closes it and wakes the session
       that asked. Both panels list it in the route box&rsquo;s <code>request</code> zone until it closes &mdash; <code>&rarr;</code> handed
-      out, <code>&#9666;</code> handed to you, <code>&#10003;</code> finished.</p>
+      out, <code>&larr;</code> handed to you, <code>&#10003;</code> finished.</p>
       <p class="t">Messages and watching work the same way, and none of it needs herdr or tmux. Fleet lists a
       session&rsquo;s requests on its session page and shows the newest as a PEERS link; it has no list of every
       request across sessions, and you cannot send one from Fleet yet.</p>
