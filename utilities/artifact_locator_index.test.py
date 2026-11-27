@@ -51,6 +51,14 @@ F = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = F
 _spec.loader.exec_module(F)
 
+# A real request (frame plus a sealed execution in `<frame>/_internal/executions/`), built by the
+# request folder tests' own framed fixture.
+_request_spec = importlib.util.spec_from_file_location("locator_index_request_fixture",
+                                                       Path(__file__).with_name("artifact_request.test.py"))
+Q = importlib.util.module_from_spec(_request_spec)
+sys.modules[_request_spec.name] = Q
+_request_spec.loader.exec_module(Q)
+
 SID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 ADVERSARIAL_TITLES = ["a|b", "back\\slash", "line\nbreak", "\ub05d \\|\uc12e\uc784 \u00e9",
                       " lead and trail ", "trailing\\"]
@@ -951,6 +959,9 @@ class BeginScansItsCampaignOnceTest(F.ProducerTestBase, IndexEquivalenceMixin):
     def setUp(self):
         super().setUp()
         self.activate()
+        self._watch_scans()
+
+    def _watch_scans(self):
         self.n = 0
         self.scans = []          # campaign folder names, counted outside the oracle
         self.update_scans = []   # scans made by each real update_indexes call
@@ -990,7 +1001,7 @@ class BeginScansItsCampaignOnceTest(F.ProducerTestBase, IndexEquivalenceMixin):
     def assert_index_matches_full_rebuild(self, note=""):
         self._counting = False   # the full-rebuild oracle scans every campaign; it is not the begin's cost
         try:
-            super().assert_index_matches_full_rebuild(note)
+            IndexEquivalenceMixin.assert_index_matches_full_rebuild(self, note)
         finally:
             self._counting = True
 
@@ -1228,7 +1239,7 @@ class BeginScansItsCampaignOnceTest(F.ProducerTestBase, IndexEquivalenceMixin):
         self.assert_index_matches_full_rebuild("reused")
         return result
 
-    def test_changed_published_index_alone_still_reuses_as_on_main(self):
+    def test_changed_published_index_rescans(self):
         first = self._sealed(campaign_key="once-published")[2]
         other = self._sealed(campaign_key="once-published-other")[2]
         other_path = Path(other["cycle_dir"]).parent / "campaign.json"
@@ -1238,7 +1249,7 @@ class BeginScansItsCampaignOnceTest(F.ProducerTestBase, IndexEquivalenceMixin):
             data["title"] = "other retitled"
             other_path.write_text(json.dumps(data), encoding="utf-8")
             loc.rebuild_indexes(self.root)   # the begin holds the admission lock
-        self._reuses(first, republish)
+        self._rescans(first, republish)
 
     def test_new_campaign_folder_alone_still_reuses_as_on_main(self):
         first = self._sealed(campaign_key="once-entries")[2]
@@ -1311,8 +1322,8 @@ class BeginScansItsCampaignOnceTest(F.ProducerTestBase, IndexEquivalenceMixin):
         self.assert_index_matches_full_rebuild("direct calls")
 
     # -- a hand write landing right after the precheck returned (review of #1919) ---------
-    # A folder moved, copied, swapped or dated by residue changes the folders the precheck
-    # listed, so the update scans again and answers as main in the same order. A write
+    # A folder moved, copied, swapped or dated by residue changes a folder the precheck scan
+    # opened, so the update scans again and answers as main in the same order. A write
     # inside an existing cycle (its record, `.cycle.json` or manifest) is not looked for:
     # the update answers as main does when that write lands just after the update.
     def _assert_no_shared_paths(self):
@@ -1326,16 +1337,20 @@ class BeginScansItsCampaignOnceTest(F.ProducerTestBase, IndexEquivalenceMixin):
         finally:
             adm._release_lock(self.root, fd)
 
-    def _hand_write_begin(self, first, write, *, slug=None, lands_after=None, refused=None):
+    def _hand_write_begin(self, first, write, *, slug=None, lands_after=None, refused=None, journal=False):
         self.post_prepare, self.lands_after = write, lands_after
         self.update_scans.clear()
         self.same_order.clear()
+        kwargs = {"slug": slug, "campaign_id": first["campaign_id"], "_reconcile": False,
+                  **({"journal_target": True} if journal else {})}
         try:
             with self._against_main():
                 if refused is None:
-                    return self._begin(slug=slug, campaign_id=first["campaign_id"], _reconcile=False)[2]
+                    result = self._begin(**kwargs)[2]
+                    self.assertEqual(result["layout"], "journal" if journal else "cycle")
+                    return result
                 with self.assertRaises(loc.LocatorError) as caught:
-                    self._begin(slug=slug, campaign_id=first["campaign_id"], _reconcile=False)
+                    self._begin(**kwargs)
                 self.assertEqual(caught.exception.code, refused)
                 return None
         finally:
@@ -1475,6 +1490,145 @@ class BeginScansItsCampaignOnceTest(F.ProducerTestBase, IndexEquivalenceMixin):
                     self._then(sealed, then, refused=refused)
                     if refused is not None:
                         put(old)
+
+    # -- the folders the scan opened, read alike again; the published index (second review) ----
+    # The update compares every folder the precheck scan opened -- through the very read that
+    # scan made -- and the published index bytes; any difference scans again, as main does.
+    # Each scene runs as an ordinary and a journal begin, then the campaign's next begin or a
+    # locked repair; besides `_against_main`, it asserts the outcome main gives there.
+    def _each_scene(self, scene):
+        for journal in (False, True):
+            for then in ("next-begin", "repair"):
+                with self.subTest(journal=journal, then=then):
+                    scene(journal, then, f"{'journal' if journal else 'cycle'}-{then}")
+
+    def test_legacy_cycles_turned_into_a_link_rescans_as_on_main(self):
+        # Main's scan skips a `cycles` that is a link; the precheck read it as a folder.
+        def scene(journal, then, tag):
+            first = self._sealed(campaign_key=f"once-legacy-link-{tag}")[2]
+            legacy = self._sealed(campaign_id=first["campaign_id"])[2]
+            camp_dir = Path(first["cycle_dir"]).parent
+            (camp_dir / "cycles").mkdir()
+            Path(legacy["cycle_dir"]).rename(camp_dir / "cycles" / legacy["cycle_id"])
+            self._locked(lambda: loc.rebuild_indexes(self.root))
+            rows = loc.parse_index_markdown(self._index_bytes()[1])
+            self.assertEqual(rows[legacy["cycle_id"]]["path"], f"campaigns/{camp_dir.name}/cycles/{legacy['cycle_id']}")
+
+            def link_it():
+                (camp_dir / "cycles").rename(camp_dir / ".legacy-away")
+                (camp_dir / "cycles").symlink_to(".legacy-away")
+            self._hand_write_begin(first, link_it, journal=journal)
+            self.assertEqual(self.update_scans, [[camp_dir.name]])
+            self.assertNotIn(legacy["cycle_id"], loc.parse_index_markdown(self._index_bytes()[1]))   # skipped, as main
+            self._assert_no_shared_paths()
+            self._then(first, then)
+        self._each_scene(scene)
+
+    def test_title_another_writer_published_is_not_taken_back(self):
+        # A's open cycle is retitled; B's real residue dating then rebuilds the whole index,
+        # publishing the new title. A's update must not write the precheck's old title back.
+        import artifact_residue
+
+        def scene(journal, then, tag):
+            first = self._begin(slug="open-slot", campaign_key=f"once-republish-{tag}")[2]   # stays open
+            other = self._begin(slug="residue-slot", campaign_key=f"once-republish-other-{tag}")[2]
+            record_path = P.cycle_record_path(self.root, first["cycle_id"])
+            title = f"retitled while {tag} begins"
+
+            def retitle_then_residue():
+                record = json.loads(record_path.read_text(encoding="utf-8"))
+                spare = record_path.with_name(record_path.name + ".hand")
+                spare.write_text(json.dumps({**record, "title": title}, indent=2, sort_keys=True) + "\n",
+                                 encoding="utf-8")
+                os.replace(spare, record_path)   # an editor's atomic save
+                artifact_residue._date_cycle(self.root, other, {"date": "2026-01-02"})   # to its end
+                published = loc.parse_index_markdown(self._index_bytes()[1])
+                self.assertEqual(published[first["cycle_id"]]["title"], title)
+            self._hand_write_begin(first, retitle_then_residue, journal=journal)
+            self.assertEqual(self.update_scans, [[Path(first["cycle_dir"]).parent.name]])
+            self.assertEqual(loc.parse_index_markdown(self._index_bytes()[1])[first["cycle_id"]]["title"], title)
+            self._then(first, then)
+        self._each_scene(scene)
+
+
+class BeginBesideARequestTest(Q.S.SourceRepoStartBase):
+    """`BeginScansItsCampaignOnceTest`'s second-review scenes in a campaign holding a request.
+
+    A request's execution folder is one of the folders the precheck scan opened, whether or
+    not it held an execution then, and it is read again the same way -- including the request
+    read's refusal of a symlinked `_internal` -- so the update scans again as main does.
+    """
+
+    selected, cycle = Q.RequestFolderTest.selected, Q.RequestFolderTest.cycle
+    T = BeginScansItsCampaignOnceTest
+    _watch_scans, assert_index_matches_full_rebuild = T._watch_scans, T.assert_index_matches_full_rebuild
+    _index_bytes, _main_answer, _against_main = T._index_bytes, T._main_answer, T._against_main
+    _assert_no_shared_paths, _locked, _hand_write_begin = T._assert_no_shared_paths, T._locked, T._hand_write_begin
+    _then, _each_scene = T._then, T._each_scene
+    del T
+
+    def setUp(self):
+        super().setUp()
+        self._watch_scans()
+
+    def _begin(self, slug=None, **kwargs):
+        self.n += 1
+        gate = f"beside-{self.n}"
+        route = Q.S.T.compile_for("direct", self.root, slug=slug or gate, gate_source=gate)
+        route_file = Path(Q.S.L.admit_runtime_route(self.root, route).route_file)
+        result = P.begin(self.root, route_file=route_file, capability="autopilot-code",
+                         intensity="direct", **kwargs)
+        return route, route_file, result
+
+    def _request(self):
+        """The frame record, its sealed execution's record and that execution's folder."""
+        leg, path, _ = self.selected([Q.S.CODE_STAGED, Q.S.CODE_STAGED])
+        execution = self.cycle(leg)
+        folder = P.cycle_dir(self.root, execution["campaign_id"], execution["cycle_id"])
+        self.write_output({"cycle_dir": str(folder)}, "plans/final_report.md", b"leg\n")
+        self.close(leg, path)
+        P.finalize(self.root, cycle_id=execution["cycle_id"])
+        self.assertEqual(folder.parent.parts[-2:], ("_internal", "executions"))
+        return self.cycle(self.route), execution, folder
+
+    def _rows(self):
+        return loc.parse_index_markdown(self._index_bytes()[1])
+
+    def test_request_execution_back_under_its_name_rescans_as_on_main(self):
+        # Hidden (or its whole execution folder away) when the precheck scanned; back right after.
+        frame, execution, folder = self._request()
+        camp_dir = folder.parents[3]
+        for away in (folder.with_name("." + folder.name), folder.parents[1] / ".executions-away"):
+            here = folder if away.parent == folder.parent else folder.parent
+
+            def scene(journal, then, tag, here=here, away=away):
+                here.rename(away)
+                self._locked(lambda: loc.rebuild_indexes(self.root))
+                self.assertNotIn(execution["cycle_id"], self._rows())
+                self._hand_write_begin(frame, lambda: away.rename(here), journal=journal)
+                self.assertEqual(self.update_scans, [[camp_dir.name]])
+                self.assertEqual(self._rows()[execution["cycle_id"]]["path"],
+                                 folder.relative_to(self.root).as_posix())   # walked again, as main
+                self._then(frame, then)
+            with self.subTest(away=away.name):
+                self._each_scene(scene)
+
+    def test_request_internal_turned_into_a_link_is_refused_as_on_main(self):
+        frame, execution, folder = self._request()
+        internal, camp_dir = folder.parents[1], folder.parents[3]
+        away = internal.with_name(".internal-away")
+
+        def scene(journal, then, tag):
+            def link_it():
+                internal.rename(away)
+                internal.symlink_to(away.name)
+            self._hand_write_begin(frame, link_it, journal=journal, refused="request-members-unreadable")
+            self.assertEqual(self.update_scans, [[camp_dir.name]])   # not `begun`
+            self._then(frame, then, refused="request-members-unreadable")
+            internal.unlink()   # the next round starts clean
+            away.rename(internal)
+            self._locked(lambda: loc.rebuild_indexes(self.root))
+        self._each_scene(scene)
 
 
 _WRITER_FUNCTIONS = ("_write_cycle_record", "_write_campaign", "_write_cycle_binding", "_publish_event")

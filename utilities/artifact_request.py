@@ -3,6 +3,7 @@
 No request IDs or store: producer records retain a checked reference, and each
 logical execution retains the normal cycle controls and manifest history.
 """
+from functools import partial
 from pathlib import Path
 
 import artifact_locator as locator
@@ -125,8 +126,16 @@ def execution_dir(root, record, *, anchor=None):
     return _safe(root, Path(anchor) / Path(*EXECUTIONS) / record["cycle_id"])
 
 
-def members(root, directory, *, strict=True, include_deleted=False):
-    """Only verified direct members of a request; unknown directories stay unknown."""
+def _execution_place(root, directory):
+    """The request's execution folder as `locator._folder_place` reads it (cycle-ID
+    names only), refusing a symlinked component like every request read."""
+    return locator._folder_place(_safe(root, Path(directory) / Path(*EXECUTIONS)), locator._CYCLE_ID.fullmatch)
+
+
+def members(root, directory, *, strict=True, include_deleted=False, _seen=None):
+    """Only verified direct members of a request; unknown directories stay unknown.
+
+    ``_seen`` is `locator.iter_cycle_dirs`'s record of the folders a scan opened."""
     directory = Path(directory)
     # Existing arbitrary internal support (including symlinks) is not a
     # request container. Do not add a grouping refusal to ordinary cycles.
@@ -138,16 +147,15 @@ def members(root, directory, *, strict=True, include_deleted=False):
     frame = locator.read_cycle_record(root, identity) if identity else None
     if not frame or frame.get("route_capability") != route_plan.CAPABILITY:
         return
+    parent = (directory / Path(*EXECUTIONS)).absolute()
     try:
-        parent = _safe(root, directory / Path(*EXECUTIONS))
-        paths = sorted(parent.iterdir()) if parent.is_dir() else []
+        place = locator._seen_place(_seen, parent, partial(_execution_place, root, directory))
     except (OSError, ValueError, locator.LocatorError) as exc:
         if strict:
             raise locator.LocatorError("request-members-unreadable", str(directory)) from exc
         return
-    for path in paths:
-        if not locator._CYCLE_ID.fullmatch(path.name) or path.is_symlink() or not path.is_dir():
-            continue
+    for name, _inode in place[1] if place[0] == "dir" else ():
+        path = parent / name
         record = locator.read_cycle_record(root, path.name)
         try:
             if record and (include_deleted or not record.get("deleted_at")) and execution_dir(root, record, anchor=directory) == path:
