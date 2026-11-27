@@ -245,7 +245,10 @@ Stagnation is based on strict increases in the same comparable counter or metric
 stream. Repeated fresh samples at the same value refresh observation age but do
 not reset the last-increase clock. The existing two-hour advisory can describe
 time since the last increase, or time since the first comparable observation
-when no increase has been observed. No progress signal means stagnation and ETA
+when no increase has been observed. It stretches to 1.5x the longest stretch the
+same comparison already went without an increase before one came, or, before any,
+to 1.5x the plan's time per unit (planned time / total); it never shortens. One
+stretch without an increase is told once, through admission waits inside it. No progress signal means stagnation and ETA
 are unknown. A new run, row, or source generation starts a new comparison. Do not
 subtract admission samples or spans from elapsed time, or infer a rate or ETA
 from them. Existing lifecycle, optional-failure, recipient, and delivery-receipt

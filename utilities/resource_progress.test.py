@@ -918,21 +918,27 @@ class ExperimentObservationTest(unittest.TestCase):
         tracker, _, recovered = progress._advance_progress_tracker(
             tracker, {**signal, "completed": 6}, 7401)
         self.assertIsNone(tracker["active_episode_id"])
-        tracker, _, restalled = progress._advance_progress_tracker(
+        # The 7301 s that ended in that increase is a step this run takes: 1.5x of it, not two hours.
+        self.assertEqual(tracker["longest_quiet_seconds"], 7301)
+        tracker, _, within_step = progress._advance_progress_tracker(
             tracker, {**signal, "completed": 6}, 14601)
+        self.assertIsNone(within_step["stagnation"])
+        tracker, _, restalled = progress._advance_progress_tracker(
+            tracker, {**signal, "completed": 6}, 7401 + 1.5 * 7301)
         self.assertNotEqual(restalled["stagnation"]["episode_id"], episode)
+        self.assertEqual(restalled["stagnation"]["longest_quiet_seconds"], 7301)
         reset, _, reset_state = progress._advance_progress_tracker(
-            tracker, {**signal, "completed": 2}, 14602)
+            tracker, {**signal, "completed": 2}, 18400)
         self.assertIsNone(reset["last_increase_at"])
         self.assertIsNone(reset_state["stagnation"])
         changed, _, _ = progress._advance_progress_tracker(
-            tracker, {**signal, "generation": "generation-b", "completed": 6}, 14603)
+            tracker, {**signal, "generation": "generation-b", "completed": 6}, 18401)
         self.assertIsNone(changed["last_increase_at"])
         changed_total, _, _ = progress._advance_progress_tracker(
-            tracker, {**signal, "total": 21, "completed": 6}, 14604)
+            tracker, {**signal, "total": 21, "completed": 6}, 18402)
         self.assertIsNone(changed_total["last_increase_at"])
         changed_unit, _, _ = progress._advance_progress_tracker(
-            tracker, {**signal, "unit": "epoch", "completed": 6}, 14605)
+            tracker, {**signal, "unit": "epoch", "completed": 6}, 18403)
         self.assertIsNone(changed_unit["last_increase_at"])
         first, _, _ = progress._advance_progress_tracker(None,
             {**signal, "completed": 1}, 1000)
@@ -1282,6 +1288,64 @@ class ExperimentObservationTest(unittest.TestCase):
             self.assertEqual(after_grace["admission"]["state"], "unknown")
             self.assertIn("progress-stagnation",
                 {item["kind"] for item in after_grace["observation"]["attention"]})
+
+    def _stall_notice_times(self, *, increases, until, planned=None, waits=(), poll=300):
+        """One fake run's real observer on a virtual clock: its counter (the `write_progress` shape,
+        no metric source) rises at each time in `increases`, and admission waits in each
+        `(start, end)` of `waits`. Returns when a waking notice told a stall."""
+        told, clock = [], [0]
+
+        def notify(harness, session_id, **kw):
+            if kw["key"].split(":")[2] == "attention" and "progress-stagnation" in kw["text"]:
+                told.append(clock[0])
+            return {"state": "acked"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            artifact = base / "artifact"
+            artifact.mkdir()
+            bundle = base / "registry" / "bundle"
+            bundle.mkdir(parents=True)
+            registry = base / "registry" / "index.json"
+            registry.write_text("{}\n")
+            (bundle / "run-record.json").write_text(json.dumps({"run_id": "step-run", "started_at": 0}))
+            run = {"run_id": "step-run", "started_at": 0, "artifact_root": str(artifact),
+                   "status": "running", "session": {"harness": "claude", "id": "fixture-session"},
+                   **({"planned_seconds": planned} if planned else {})}
+            with mock.patch.object(progress, "_observation_state_path", return_value=base / "state.json"), \
+                    mock.patch("session_notice.notify", side_effect=notify):
+                for now in range(0, until + 1, poll):
+                    clock[0] = now
+                    if waits:
+                        (bundle / "decision.json").write_text(json.dumps({
+                            "admitted": not any(start <= now < end for start, end in waits),
+                            "snapshot": {"t": now}, "first_snapshot": {"t": 0}}))
+                    written = max([0, *(at for at in increases if at <= now)])
+                    progress.observe_experiment(run, registry, now, row_key="run", started_at=0,
+                        status="running", alive=True,
+                        progress={"completed": sum(at <= now for at in increases), "total": 10,
+                                  "unit": "epoch", "updated_at": written, "age_s": now - written})
+        return told
+
+    def test_a_step_longer_than_two_hours_is_told_only_when_the_counter_stops(self):
+        step = 130 * 60
+        increases = [step * index for index in range(1, 5)]
+        last = increases[-1]
+        # No plan: the first step, not yet seen, is told at the two hours; the three later 130-minute
+        # steps are not; the stop after them is told once, 1.5x the step after the last increase.
+        self.assertEqual(self._stall_notice_times(increases=increases, until=last + 4 * 3600),
+                         [7200, last + 1.5 * step])
+        # A plan of ten such steps gives the first one its time before any step is seen.
+        self.assertEqual(self._stall_notice_times(increases=increases, until=last + 4 * 3600,
+                                                  planned=10 * step), [last + 1.5 * step])
+
+    def test_one_stretch_without_an_increase_is_told_once_through_admission_waits(self):
+        # The first step, with no step seen and no plan, keeps the two hours and is told there once;
+        # an admission wait and the grace after it inside the same stretch do not tell it again.
+        self.assertEqual(self._stall_notice_times(increases=[], until=350 * 60), [7200])
+        self.assertEqual(self._stall_notice_times(increases=[], until=350 * 60,
+                                                  waits=[(150 * 60, 160 * 60), (300 * 60, 310 * 60)]),
+                         [7200])
 
     def test_virtual_checkpoint_schedule_and_independent_matrix_rows(self):
         rows = []
