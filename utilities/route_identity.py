@@ -23,6 +23,9 @@ ROUTE_HASH_EXCLUDED_KEYS = frozenset(
         # reading a sealed route.  They are not part of the route contract and
         # must never invalidate lineage proof when carried in memory.
         "route_file", "_route_file",
+        # `verify_route` marks a route sealed under another release's catalog.
+        # The mark is about the reader, so the route keeps its own hash.
+        "_registry_current",
     }
 )
 
