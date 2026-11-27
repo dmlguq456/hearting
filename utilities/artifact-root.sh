@@ -51,13 +51,15 @@ emit() {
 
 emit_project_root() {
   # With one name (or none) there is nothing to choose, so no interpreter starts.
+  # A folder the shell cannot enter is left to the interpreter, whose realpath
+  # still names (and so lets `emit` judge) its physical target.
   agent=${1%/}/.agent_reports
   claude=${1%/}/.claude_reports
   if [ ! -d "$claude" ]; then
-    emit "$(physical_dir "$agent" || printf '%s' "$agent")"
-  fi
-  if [ ! -d "$agent" ]; then
-    emit "$(physical_dir "$claude" || printf '%s' "$claude")"
+    [ -d "$agent" ] || emit "$agent"
+    root=$(physical_dir "$agent" 2>/dev/null) && emit "$root"
+  elif [ ! -d "$agent" ]; then
+    root=$(physical_dir "$claude" 2>/dev/null) && emit "$root"
   fi
 
   resolver=$0
