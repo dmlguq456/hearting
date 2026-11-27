@@ -1438,7 +1438,10 @@ def continue_close(value, *, jobs=None, grace=0.3, kill_wait=0.5, attempt_id=Non
                 "effective_intensity": route["effective_intensity"], "closed_at": WS.now_iso(),
                 "terminal_gate_proven": False, "state": "cancelled", "reason": NOTE,
                 "disposition": "cancelled", "summary": value.get("summary"), "head_commit": value.get("head_commit"),
-                "owner_attempt_id": value["owner_attempt_id"], "resources": resource_states}
+                "owner_attempt_id": value["owner_attempt_id"], "resources": resource_states,
+                # The closing reader's own catalog verdict (`verify_route`), kept in the close intent.
+                **({"registry_current": route["_registry_current"] is True}
+                   if "_registry_current" in route else {})}
             WS._atomic_write(target, json.dumps(outcome, indent=2) + "\n")
             ledger._append({"at": WS.now_iso(), "route_id": route["route_id"],
                             "route_hash": route["route_hash"], "actor": "parent-close",
