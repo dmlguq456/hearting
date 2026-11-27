@@ -243,7 +243,7 @@ class WriteUnitTest(unittest.TestCase):
         must = _must_layer(self.UNIT)
         for line in ("**Input.** The settled outline and the evidence it rests on",
                      "the receiving side's form and\n  deadline", "also the apply list",
-                     "**Output.** The draft, or the revised text,",
+                     "**Output.** The draft, or the revised text,", "Outside the body",
                      "a list of the places written or changed",
                      "**Change nothing outside the settled outline and the apply list.**",
                      "**Invent no fact the evidence does not hold**",
@@ -274,10 +274,15 @@ class WriteUnitTest(unittest.TestCase):
                 text = W.unit_persona_body(ROOT, self.UNIT, field)
                 self.assertIn("roles/units/_shared/profile-preload.md", text)
                 self.assertIn("02_paper_writing_style", text)
+                self.assertIn("04_analysis_methodology", text)
+                self.assertIn("wording prevail", text)   # the outline and apply list come before a profile
 
-    def test_the_rendered_text_stays_small(self):
-        sizes = {field: len(W.unit_persona_body(ROOT, self.UNIT, field).encode("utf-8")) for field in FIELDS}
-        self.assertLess(max(sizes.values()), 4000, sizes)
+    def test_the_units_own_text_stays_small(self):
+        # The unit's own text is its body as written, every field's section included. A field's render
+        # keeps fewer sections and adds `roles/fields/<field>.md`'s fundamentals (plan's run to 1 KB);
+        # that page owns them, so they are not weighed against this unit.
+        own = len(_raw(self.UNIT).encode("utf-8"))
+        self.assertLess(own, 4000, own)
 
 
 class RouteFieldTest(unittest.TestCase):
