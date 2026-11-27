@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 import types
 import unittest
 from unittest import mock
@@ -39,6 +40,104 @@ def tearDownModule():
     else:
         os.environ["FLEET_USAGE_STATE_DIR"] = _STATE_OLD
     _STATE_TMP.cleanup()
+
+
+class ResetAwareCapacityTests(unittest.TestCase):
+    now = 1_800_000_000.0
+    hour = 3600
+    week = 168 * hour
+
+    def test_used_and_time_both_determine_the_window_score(self):
+        cases = (
+            (76, 3 * self.hour, self.week, 165 * 24 / (165 * 24 + 3 * 76) * 100),
+            (76, 144 * self.hour, self.week, 5.0),
+            (50, self.hour, self.week, 167 / 168 * 100),
+            (50, 144 * self.hour, self.week, 100 / 7),
+            (90, 600, 5 * self.hour, 290 / 380 * 100),
+            (80, 120 * self.hour, self.week, 100 / 11),
+            (0, 1, self.week, 100),
+            (100, 1, self.week, 0),
+        )
+        for used, remaining, duration, expected in cases:
+            with self.subTest(used=used, remaining=remaining, duration=duration):
+                score = C._headroom([(used, self.now + remaining, duration)], self.now)
+                self.assertAlmostEqual(score, expected)
+                self.assertAlmostEqual(C.raw_headroom({"codex": score}, "codex"), 100 - used)
+
+    def test_weekly_window_uses_at_least_ten_percent_elapsed(self):
+        for elapsed in (5 * 60, self.hour, self.week // 10):
+            with self.subTest(elapsed=elapsed):
+                score = C._headroom([(1, self.now + self.week - elapsed, self.week)], self.now)
+                self.assertAlmostEqual(score, 100 * 99 / (99 + 9))
+                self.assertEqual(C.raw_headroom({"claude": score}, "claude"), 99)
+
+    def test_five_hour_window_uses_at_least_ten_percent_elapsed(self):
+        duration = 5 * self.hour
+        score = C._headroom([(2, self.now + duration - 60, duration)], self.now)
+        self.assertAlmostEqual(score, 100 * 98 / (98 + 18))
+        self.assertEqual(C.raw_headroom({"codex": score}, "codex"), 98)
+
+    def test_balanced_select_chooses_recently_reset_claude(self):
+        scores = {
+            "claude": C._headroom([(1, self.now + self.week - 5 * 60, self.week)], self.now),
+            "codex": C._headroom([(50, self.now + 3 * 24 * self.hour, self.week)], self.now),
+            "opencode": 0,
+        }
+        policy = {"primary": ["claude", "codex"], "relief": [], "last_resort": ["opencode"]}
+        with mock.patch.dict(os.environ, {"HARNESS_CAPACITY_BIAS": ""}):
+            chosen, band, _, _ = C.select(
+                policy, dict.fromkeys(C.HARNESSES, "ok"), {"claude": 20, "codex": 10, "opencode": 0},
+                C.HARNESSES, scores, strategy="balanced", usage_gate_used_percent=85,
+                headroom_exponent=2, harness_weights={"claude": 0.95, "codex": 0.425, "opencode": 0.2},
+            )
+        self.assertEqual((chosen, band), ("claude", "primary"))
+
+    def test_unknown_or_unusable_clock_preserves_raw_headroom(self):
+        for reset, duration in (
+            (None, self.week),
+            (self.now + self.hour, None),
+            (self.now + self.hour, 0),
+            (self.now + self.hour, float("inf")),
+            (self.now + self.week, self.week),
+            (self.now + self.week + 1, self.week),
+        ):
+            with self.subTest(reset=reset, duration=duration):
+                self.assertEqual(C._headroom([(76, reset, duration)], self.now), 24)
+
+    def test_tightest_window_wins_and_expired_rows_cannot_weigh_it_down(self):
+        almost_reset = (76, self.now + 3 * self.hour, self.week)
+        unknown_reset = (55, None, self.week)
+        expired = (100, self.now, self.week)
+        score = C._headroom([almost_reset, unknown_reset, expired], self.now)
+        self.assertEqual(score, 45)
+        self.assertEqual(C.raw_headroom({"codex": score}, "codex"), 24)
+        self.assertIsNone(C._headroom([expired], self.now))
+
+    def test_gate_and_scarcity_fallback_use_actual_quota(self):
+        late = C._headroom([(90, self.now + 600, 5 * self.hour)], self.now)
+        early = C._headroom([(88, self.now + 6 * 24 * self.hour, self.week)], self.now)
+        policy = {"primary": ["codex", "claude"], "relief": [], "last_resort": []}
+        states = {"codex": "ok", "claude": "ok"}
+        options = {"strategy": "balanced", "usage_gate_used_percent": 85}
+        self.assertGreater(late, 15)
+        self.assertTrue(C.is_gated({"codex": late}, "codex", usage_gate_used_percent=85))
+        for claude in (60, early):
+            # A healthy peer wins first. When both candidates are gated, 12% of
+            # actual quota still beats 10%, regardless of their adjusted order.
+            with self.subTest(claude_score=claude):
+                scores = {"codex": late, "claude": claude}
+                chosen, _, _, _ = C.select(policy, states, {}, C.HARNESSES, scores, **options)
+                self.assertEqual(chosen, "claude")
+
+    def test_consumption_pace_does_not_move_relief_threshold(self):
+        score = C._headroom([(80, self.now + 5 * 24 * self.hour, self.week)], self.now)
+        policy = {"primary": ["codex"], "relief": ["claude"], "last_resort": [],
+                  "promote_relief_below": 15}
+        chosen, band, _, promoted = C.select(
+            policy, {"codex": "ok", "claude": "ok"}, {}, C.HARNESSES,
+            {"codex": score, "claude": 90}, strategy="balanced", usage_gate_used_percent=85)
+        self.assertLess(score, 15)
+        self.assertEqual((chosen, band, promoted), ("codex", "primary", False))
 
 
 class OwnerPreferenceTests(unittest.TestCase):
@@ -110,6 +209,63 @@ class SharedCacheFallbackTests(unittest.TestCase):
         self.assertEqual(snapshot["freshness"], "fresh")
         self.assertEqual(snapshot["payload"]["windows"][0][1], 76)
 
+    def test_codex_live_timing_is_written_through_and_reused_offline(self):
+        now = time.time()
+        endpoint = {"rate_limit": {
+            "primary_window": {"used_percent": 76, "window_minutes": 10080,
+                               "reset_at": now + 10800},
+            "secondary_window": {"used_percent": 0, "limit_window_seconds": 18000,
+                                 "resets_at": now + 3600},
+        }}
+        with tempfile.TemporaryDirectory() as home:
+            (Path(home) / "auth.json").write_text(
+                json.dumps({"tokens": {"access_token": "t", "account_id": "a"}}), encoding="utf-8")
+            with mock.patch.dict(os.environ, {"CODEX_HOME": home,
+                                             "HARNESS_CAPACITY_SCORES": "claude:93,opencode:0",
+                                             "AGENT_DISPATCH_JOBS": ""}), \
+                    mock.patch.object(C.urllib.request, "urlopen",
+                                      return_value=io.BytesIO(json.dumps(endpoint).encode("utf-8"))) as urlopen:
+                report = C.capacity_report(now=now)
+                urlopen.assert_called_once()
+        payload = self._cache().read("codex")["payload"]
+        self.assertEqual(payload["windows"][0], ["7d", 76, now + 10800])
+        self.assertEqual(payload["window_durations_seconds"], [604800, 18000])
+        score = report["scores"]["codex"]
+        self.assertAlmostEqual(score, 165 * 24 / (165 * 24 + 3 * 76) * 100)
+        self.assertEqual(report["sources"]["codex"], "live")
+        decoded = json.loads(json.dumps(report))
+        self.assertEqual(set(decoded), {"scores", "sources", "freshness"})
+        self.assertEqual(decoded["scores"], {"claude": 93, "codex": float(score), "opencode": 0})
+        self.assertEqual(decoded["freshness"]["codex"], {"raw_headroom": 24})
+        with mock.patch.object(C, "_codex_api_score", return_value=None):
+            cached, source = C._codex_probe(now + 1, 3600)
+        self.assertGreater(cached, score)
+        self.assertEqual(C.raw_headroom({"codex": cached}, "codex"), 24)
+        self.assertTrue(source.startswith("cache:"))
+
+    def test_codex_five_hour_window_uses_explicit_timing_in_live_and_cached_scores(self):
+        now = time.time()
+        endpoint = {"rate_limit": {"primary_window": {
+            "used_percent": 90, "limit_window_seconds": 18000, "reset_at": now + 600,
+        }}}
+        with tempfile.TemporaryDirectory() as home:
+            (Path(home) / "auth.json").write_text(
+                json.dumps({"tokens": {"access_token": "t", "account_id": "a"}}), encoding="utf-8")
+            with mock.patch.dict(os.environ, {"CODEX_HOME": home}), \
+                    mock.patch.object(C.urllib.request, "urlopen",
+                                      return_value=io.BytesIO(json.dumps(endpoint).encode("utf-8"))):
+                with mock.patch.object(C.time, "time", return_value=now):
+                    live = C._codex_api_score(now)
+        cached, _ = C._cached_score("codex", now, 3600)
+        self.assertAlmostEqual(live, 290 / 380 * 100)
+        self.assertEqual(cached, live)
+        self.assertEqual(C.raw_headroom({"codex": cached}, "codex"), 10)
+
+    def test_codex_legacy_label_does_not_prove_window_length(self):
+        now = 1_000_000.0
+        self._cache().record("codex", {"windows": [["7d", 76, now + 10800]]}, now=now - 1)
+        self.assertEqual(C._cached_score("codex", now, 3600), (24.0, "cache:1s"))
+
     def test_probe_failure_reuses_cached_reading_with_age_and_reason(self):
         cache = self._cache()
         cache.record("codex", {"rl_5h": None, "rl_7d": 100, "windows": [["7d", 100, None]]}, now=700.0)
@@ -146,6 +302,13 @@ class SharedCacheFallbackTests(unittest.TestCase):
         self.assertIsNone(C.window_release_epoch("codex", usage_gate_used_percent=100, now=5000.0))
         cache.record("opencode", {"rl_windows": [["wk", 100, 8000.0]]}, now=900.0)
         self.assertEqual(C.window_release_epoch("opencode", usage_gate_used_percent=100, now=1000.0), 8000.0)
+
+    def test_an_expired_full_window_cannot_mask_another_current_full_window(self):
+        self._cache().record("codex", {
+            "windows": [["5h", 100, 999.0], ["7d", 100, 7000.0]],
+            "window_durations_seconds": [18000, 604800],
+        }, now=990.0)
+        self.assertEqual(C.gauge_limit_epoch("codex", now=1000.0), 7000.0)
 
     def test_gauge_limit_epoch_skips_manual_claude_and_unknown_answers(self):
         cache = self._cache()
@@ -248,7 +411,7 @@ class SharedCacheFallbackTests(unittest.TestCase):
         other = {"codex": "opencode", "opencode": "codex"}
 
         def probe(name, score):
-            def read():
+            def read(_now):
                 begun[name].set()
                 if not begun[other[name]].wait(5):
                     raise AssertionError("the other gauge was not started while this one was read")
@@ -278,8 +441,8 @@ class SharedCacheFallbackTests(unittest.TestCase):
         # cache (codex, opencode) are read whatever is asked, because the next start's limit judgment reads it.
         asked = []
         with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": "", "HARNESS_CAPACITY_SCORES": ""}), \
-                mock.patch.object(C, "_codex_api_score", side_effect=lambda: asked.append("codex") or 60.0), \
-                mock.patch.object(C, "_opencode_api_score", side_effect=lambda: asked.append("opencode") or 40.0), \
+                mock.patch.object(C, "_codex_api_score", side_effect=lambda _now: asked.append("codex") or 60.0), \
+                mock.patch.object(C, "_opencode_api_score", side_effect=lambda _now: asked.append("opencode") or 40.0), \
                 mock.patch.object(C, "_claude_capacity_reading", side_effect=lambda *a: asked.append("claude") or (70.0, None)), \
                 mock.patch.object(C, "_claude_cache_score", return_value=(None, None)):
             self.assertEqual(C.CACHE_WRITING_GAUGES, {"codex", "opencode"})
@@ -921,9 +1084,10 @@ class ClaudeAccountAggregationTests(unittest.TestCase):
             self._write(statusline,'identical.json',{'seven_day':{'used_percentage':99,'resets_at':now+3600}},now-2)
             self._write(statusline,'rewrite.json',{'seven_day':{'used_percentage':69,'resets_at':now+3600}},now-1)
             with mock.patch.dict(os.environ,{'CLAUDE_CONFIG_DIR':home}):
-                self.assertEqual(C._claude_score(now,3600),1.)
+                self.assertAlmostEqual(C._claude_score(now, 3600), 16700 / 266)
             report = self._report(home, now)
-        self.assertEqual(report["scores"]["claude"], 1.0)
+        self.assertAlmostEqual(report["scores"]["claude"], 16700 / 266)
+        self.assertEqual(report["freshness"]["claude"]["raw_headroom"], 1.0)
         self.assertEqual(report["sources"]["claude"], "taps")
         self.assertEqual(report["freshness"]["claude"]["observation_time"], "unknown")
         self.assertEqual(report["freshness"]["claude"]["age_seconds"], 20.0)
@@ -937,9 +1101,10 @@ class ClaudeAccountAggregationTests(unittest.TestCase):
                 "five_hour": {"used_percentage": 65, "resets_at": now + 3600},
             }, now - 42.3)
             report = self._report(home, now)
-        self.assertEqual(report["scores"]["claude"], 35.0)
+        self.assertAlmostEqual(report["scores"]["claude"], 14000 / 205)
         self.assertEqual(report["sources"]["claude"], "taps")
         self.assertEqual(report["freshness"]["claude"], {
+            "raw_headroom": 35.0,
             "basis": "file-mtime",
             "age_seconds": 42.3,
             "stale_after_seconds": 3600,
@@ -971,7 +1136,7 @@ class ClaudeAccountAggregationTests(unittest.TestCase):
             self._write(statusline,'new.json',{'five_hour':{'used_percentage':2,'resets_at':now+18000},
                                              'seven_day':{'used_percentage':73,'resets_at':now+86400}},now-2)
             with mock.patch.dict(os.environ,{'CLAUDE_CONFIG_DIR':home}):
-                self.assertEqual(C._claude_score(now,3600),27.)
+                self.assertAlmostEqual(C._claude_score(now, 3600), 16200 / 235)
 
     def test_explicit_foreign_account_and_malformed_reset_are_not_current_usage(self):
         with tempfile.TemporaryDirectory() as home:
@@ -982,7 +1147,7 @@ class ClaudeAccountAggregationTests(unittest.TestCase):
             self._write(statusline,'current.json',{'seven_day':{'used_percentage':20,'resets_at':now+3600}},now-3)
             with mock.patch.dict(os.environ,{'CLAUDE_CONFIG_DIR':home}), \
                  mock.patch('dispatch_capacity_evidence._scope_candidates',return_value={'account':'current'}):
-                self.assertEqual(C._claude_score(now,3600),80.)
+                self.assertAlmostEqual(C._claude_score(now, 3600), 1336000 / 13380)
 
     def test_equal_mtime_tie_is_deterministic(self):
         with tempfile.TemporaryDirectory() as home:
@@ -1086,12 +1251,13 @@ class ClaudeAccountCacheTest(unittest.TestCase):
 
     def test_a_fresh_account_cache_beats_the_taps_and_reads_99(self):
         self.taps()
-        self.assertEqual(C._claude_capacity_reading(self.now, 3600)[0], self.FIXTURE["taps_score"])
+        taps, _ = C._claude_capacity_reading(self.now, 3600)
+        self.assertEqual(C.raw_headroom({"claude": taps}, "claude"), self.FIXTURE["taps_score"])
         self.write_cache()
         report = self.report()
-        self.assertEqual(report["scores"]["claude"], self.FIXTURE["cache_score"])
+        self.assertAlmostEqual(report["scores"]["claude"], 1415700 / 14182)
         self.assertEqual(report["sources"]["claude"], f"cache:{self.FIXTURE['cache_age']}s")
-        self.assertNotIn("claude", report["freshness"])        # tap file ages describe taps only
+        self.assertEqual(report["freshness"]["claude"], {"raw_headroom": self.FIXTURE["cache_score"]})
         # the cache source leaves the gate-release answer where the taps left it: unknown
         self.assertIsNone(C.gate_release_epoch("claude", report["sources"]["claude"], now=self.now))
 
@@ -1099,7 +1265,8 @@ class ClaudeAccountCacheTest(unittest.TestCase):
         self.taps()
         self.credential()
         report = self.report()
-        self.assertEqual(report["scores"]["claude"], self.FIXTURE["taps_score"])
+        self.assertAlmostEqual(report["scores"]["claude"], 28600 / 2736)
+        self.assertEqual(report["freshness"]["claude"]["raw_headroom"], self.FIXTURE["taps_score"])
         self.assertEqual(report["sources"]["claude"], "taps")
         self.assertEqual(report["freshness"]["claude"]["observation_time"], "unknown")
         self.assertIsNone(C.gate_release_epoch("claude", report["sources"]["claude"], now=self.now))
@@ -1108,8 +1275,8 @@ class ClaudeAccountCacheTest(unittest.TestCase):
         self.taps()
         self.write_cache(age=3601)
         report = self.report()
-        self.assertEqual((report["scores"]["claude"], report["sources"]["claude"]),
-                         (self.FIXTURE["taps_score"], "taps"))
+        self.assertEqual(report["sources"]["claude"], "taps")
+        self.assertEqual(report["freshness"]["claude"]["raw_headroom"], self.FIXTURE["taps_score"])
         self.write_cache(age=3600)
         self.assertEqual(self.report()["sources"]["claude"], "cache:3600s")
 
@@ -1118,8 +1285,8 @@ class ClaudeAccountCacheTest(unittest.TestCase):
         self.write_cache(token="token-a")
         self.credential("token-b")                              # the home now holds another login
         report = self.report()
-        self.assertEqual((report["scores"]["claude"], report["sources"]["claude"]),
-                         (self.FIXTURE["taps_score"], "taps"))
+        self.assertEqual(report["sources"]["claude"], "taps")
+        self.assertEqual(report["freshness"]["claude"]["raw_headroom"], self.FIXTURE["taps_score"])
 
     def test_no_credential_means_no_cache_reading(self):
         self.taps()
@@ -1138,6 +1305,16 @@ class ClaudeAccountCacheTest(unittest.TestCase):
         self.assertEqual(self.report()["scores"]["claude"], 30.0)
         self.write_cache(self.payload(rl_5h=None, rl_7d=None, rl_ms=[]))
         self.assertIsNone(self.report()["scores"]["claude"])    # a payload without any window reads nothing
+
+    def test_model_weekly_reset_survives_the_account_cache(self):
+        payload = self.api._quota({"limits": [
+            {"kind": "weekly_scoped", "percent": 80, "resets_at": self.now + 5 * 86400,
+             "scope": {"model": {"display_name": "Opus Model"}}},
+        ]})
+        self.assertEqual(payload["rl_ms"], [["opus", 80]])
+        self.assertEqual(payload["rs_ms"], {"opus": self.now + 5 * 86400})
+        self.write_cache(payload)
+        self.assertAlmostEqual(self.report()["scores"]["claude"], 100 / 11)
 
     def test_an_error_payload_or_garbage_percentages_are_not_a_reading(self):
         self.taps()
@@ -1192,6 +1369,25 @@ class CodexGaugeReaderTests(unittest.TestCase):
                 mock.patch.dict(os.environ, {"HARNESS_CAPACITY_SCORES": ""}):
             self.assertEqual(C.capacity_scores(now=0.0)["codex"], 61.0)
 
+    def test_rollout_fallback_uses_timing_and_drops_expired_rows(self):
+        now = time.time()
+        with tempfile.TemporaryDirectory() as home:
+            sessions = Path(home) / "sessions"
+            sessions.mkdir()
+            (sessions / "rollout.jsonl").write_text(json.dumps({"payload": {"rate_limits": {
+                "primary": {"used_percent": 100, "limit_window_seconds": 18000,
+                            "resets_at": now - 1},
+                "secondary": {"used_percent": 76.5, "window_minutes": 10080,
+                              "reset_at": now + 10800},
+            }}}), encoding="utf-8")
+            with mock.patch.dict(os.environ, {"CODEX_HOME": home}), \
+                    mock.patch.object(C, "_codex_api_score", return_value=None), \
+                    mock.patch.object(C, "_cached_score", return_value=(None, None)):
+                score, source = C._codex_probe(now, 3600)
+        self.assertAlmostEqual(score, 165 * 23.5 / (165 * 23.5 + 3 * 76.5) * 100)
+        self.assertEqual(C.raw_headroom({"codex": score}, "codex"), 23.5)
+        self.assertTrue(source.startswith("rollout;"))
+
     def test_manual_override_stays_offline(self):
         with mock.patch.object(
                 C, "_codex_api_score",
@@ -1238,10 +1434,34 @@ class OpencodeGaugeTests(unittest.TestCase):
         })
 
     def test_the_tightest_window_decides_the_headroom(self):
-        with self._with_collector({"rl_windows": [["5h", 100, 0], ["wk", 67, 0], ["mo", 53, 0]]}):
+        with self._with_collector({"rl_windows": [["5h", 100, None], ["wk", 67, None], ["mo", 53, None]]}):
             self.assertEqual(C._opencode_api_score(), 0.0)
-        with self._with_collector({"rl_windows": [["5h", 12, 0], ["wk", 40, 0]]}):
+        with self._with_collector({"rl_windows": [["5h", 12, None], ["wk", 40, None]]}):
             self.assertEqual(C._opencode_api_score(), 60.0)
+
+    def test_go_five_hour_and_weekly_are_timed_but_monthly_length_is_unknown(self):
+        C._fleet_collectors()
+        from fleet.collectors import zen_go_usage
+        now = 1_000_000.0
+        payload = zen_go_usage._usage_payload({"usage": {
+            "rolling": {"percent": 90, "resetsAt": now + 600},
+            "weekly": {"percent": 80, "resetsAt": now + 5 * 86400},
+            "monthly": {"percent": 70, "resetsAt": now + 600},
+        }})
+        self.assertEqual(payload["rl_windows"], [
+            ["5h", 90, now + 600], ["wk", 80, now + 5 * 86400], ["mo", 70, now + 600],
+        ])
+        cache = mock.Mock()
+        with mock.patch.object(zen_go_usage, "account_usage", return_value=payload), \
+                mock.patch.object(C, "_usage_cache", return_value=cache):
+            self.assertAlmostEqual(C._opencode_api_score(now), 100 / 11)
+            cache.record.assert_called_once_with("opencode", payload)
+            cache.read.return_value = {"payload": {**payload, "rl_windows": [payload["rl_windows"][0],
+                                                                          payload["rl_windows"][2]]},
+                                       "observed_at": now - 1}
+            score, source = C._cached_score("opencode", now, 3600)
+        self.assertEqual((score, source), (30, "cache:1s"))
+        self.assertEqual(C.raw_headroom({"opencode": score}, "opencode"), 10)
 
     def test_absence_and_rejection_stay_unknown_never_a_guess(self):
         for payload in (None, {}, {"rl_windows": []}, {"error": "auth", "detail": 401}):
@@ -1249,7 +1469,7 @@ class OpencodeGaugeTests(unittest.TestCase):
                 self.assertIsNone(C._opencode_api_score())
 
     def test_capacity_scores_publishes_the_gauge_and_honours_the_manual_override(self):
-        with self._with_collector({"rl_windows": [["5h", 30, 0]]}):
+        with self._with_collector({"rl_windows": [["5h", 30, None]]}):
             with mock.patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("HARNESS_CAPACITY_SCORES", None)
                 self.assertEqual(C.capacity_scores()["opencode"], 70.0)
