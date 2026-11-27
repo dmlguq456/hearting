@@ -18,6 +18,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from tools import fixture_processes
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 sys.path.insert(0, str(ROOT / "tools/install"))
@@ -162,7 +164,7 @@ class HistoryChannelTests(unittest.TestCase):
         # HOOK-LATENCY: the notice reads the whole shared lineage (about half of
         # a 1 s start). Past the hook's deadline it is left out; the start is
         # still recorded and the card path runs as before.
-        with tempfile.TemporaryDirectory() as directory:
+        with fixture_processes.TemporaryDirectory() as directory:
             state = Path(directory) / "state"
             seat = session_tidy.Seat("pane", "late-start-seat", "pane", "claude")
             for deadline, expected in ((0.0, []), (None, ["PERSON-NOTICE"]),

@@ -22,11 +22,11 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 
 from helpers import MEMORY_DIR, git
+from tools import fixture_processes
 
 
 MEM = MEMORY_DIR / "mem.py"
@@ -48,7 +48,8 @@ class SeenTestCase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.tempdir = tempfile.TemporaryDirectory(prefix="seen-", dir="/var/tmp")
+        cls.tempdir = fixture_processes.TemporaryDirectory(prefix="seen-")
+        cls.addClassCleanup(cls.tempdir.cleanup)
         cls.root = Path(cls.tempdir.name)
         cls.fake_bin = cls.root / "bin"
         cls.fake_bin.mkdir()
@@ -75,10 +76,6 @@ class SeenTestCase(unittest.TestCase):
                              f"gadget note {index} explains the widget cache layout",
                              "--headline", f"gadget headline {index} widget cache")
             assert result.returncode == 0, result.stderr
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.tempdir.cleanup()
 
     @classmethod
     def environment(cls, **extra):

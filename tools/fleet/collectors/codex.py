@@ -29,6 +29,7 @@ import contextvars
 import glob
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -2547,7 +2548,7 @@ def _duration_label(seconds):
     hard-labeled primary as 5h. Known durations get stable labels; unknown durations are
     shown as their actual duration instead of being forced into the old 5h/7d schema.
     """
-    if not isinstance(seconds, (int, float)) or seconds <= 0:
+    if seconds is None:
         return None
     seconds = int(seconds)
     known = {
@@ -2569,16 +2570,25 @@ def _duration_label(seconds):
     return "%ds" % seconds
 
 
-def _duration_label_from_minutes(minutes):
-    """Same label table as `_duration_label`, from a `window_minutes` payload field.
+def _limit_window_seconds(data):
+    """Read the provider's explicit window length; display labels may be guesses."""
+    seconds = data.get("limit_window_seconds")
+    if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) and math.isfinite(seconds) and seconds >= 1:
+        return seconds
+    minutes = data.get("window_minutes")
+    if isinstance(minutes, (int, float)) and not isinstance(minutes, bool):
+        seconds = minutes * 60
+        if math.isfinite(seconds) and seconds >= 1:
+            return seconds
+    return None
 
-    B-6/1: a live Codex payload can carry `window_minutes` (e.g. 10080 = 7 days)
-    instead of `limit_window_seconds`; without this, `_window_from_limit` fell
-    through to the legacy 5h/7d guess and mislabeled a 7-day window as "5h".
-    """
-    if not isinstance(minutes, (int, float)) or isinstance(minutes, bool) or minutes <= 0:
-        return None
-    return _duration_label(minutes * 60)
+
+def _limit_reset(data):
+    for key in ("reset_at", "resets_at"):
+        value = data.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            return float(value)
+    return None
 
 
 def _legacy_window_key(label):
@@ -2590,21 +2600,17 @@ def _legacy_window_key(label):
 
 
 def _window_from_limit(name, data, legacy_label):
-    d = data or {}
-    v = d.get("used_percent")
-    if not isinstance(v, (int, float)):
+    if not isinstance(data, dict):
         return None
-    label = (_duration_label(d.get("limit_window_seconds"))
-             or _duration_label_from_minutes(d.get("window_minutes"))
-             or legacy_label)
-    rs = d.get("reset_at")
-    if not isinstance(rs, (int, float)):
-        rs = d.get("resets_at")
-    reset = float(rs) if isinstance(rs, (int, float)) else None
-    return {"source": name, "label": label, "pct": round(v), "reset": reset}
+    used = data.get("used_percent")
+    if not isinstance(used, (int, float)) or isinstance(used, bool) or not math.isfinite(used):
+        return None
+    duration = _limit_window_seconds(data)
+    return {"source": name, "label": _duration_label(duration) or legacy_label,
+            "pct": round(used), "reset": _limit_reset(data), "duration_seconds": duration}
 
 
-def _rates_from_payload(p):
+def _rates_from_payload(p, *, window_durations=None):
     """(rl_5h, rl_7d, windows) from a token_count payload, EXPIRY-AWARE.
 
     Legacy rollout payloads had primary/secondary windows that meant 5h/7d. Newer Codex
@@ -2621,6 +2627,8 @@ def _rates_from_payload(p):
         if isinstance(win.get("reset"), (int, float)) and win["reset"] < time.time():
             win["pct"] = 0
         windows.append([win["label"], win["pct"], win.get("reset")])
+        if window_durations is not None:
+            window_durations.append(win["duration_seconds"])
         key = _legacy_window_key(win["label"])
         if key:
             legacy[key] = win["pct"]
@@ -2702,8 +2710,8 @@ def _api_usage_detail():
         w = rl.get(k) or {}
         return _window_from_limit(k, w, fallback)
 
-    raw_windows = [rp("primary_window", "5h"), rp("secondary_window", "7d")]
-    windows = [[w["label"], w["pct"], w.get("reset")] for w in raw_windows if w]
+    raw_windows = [w for w in (rp("primary_window", "5h"), rp("secondary_window", "7d")) if w]
+    windows = [[w["label"], w["pct"], w["reset"]] for w in raw_windows]
     if not windows:
         return None, "schema"
     p5 = p7 = rs5 = rs7 = None
@@ -2713,6 +2721,7 @@ def _api_usage_detail():
         elif label == "7d":
             p7, rs7 = pct, reset
     return {"rl_5h": p5, "rl_7d": p7, "rs_5h": rs5, "rs_7d": rs7, "windows": windows,
+            "window_durations_seconds": [w["duration_seconds"] for w in raw_windows],
             **_credit_metadata(d)}, "live"
 
 
@@ -2745,11 +2754,11 @@ def account_usage():
         except Exception:
             continue
         if payload.get("rate_limits"):
-            p5, p7, windows = _rates_from_payload(payload)
+            durations = []
+            p5, p7, windows = _rates_from_payload(payload, window_durations=durations)
             if windows:
-                windows = [[lbl, pct, rs] for lbl, pct, rs in (windows or [])]
                 _ACCT["data"] = {"rl_5h": p5, "rl_7d": p7, "rs_5h": None, "rs_7d": None,
-                                  "windows": windows,
+                                  "windows": windows, "window_durations_seconds": durations,
                                   **_credit_metadata(payload["rate_limits"])}
                 break
     return _ACCT["data"]

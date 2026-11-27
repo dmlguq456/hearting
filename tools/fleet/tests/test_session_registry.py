@@ -308,11 +308,12 @@ class DurationLabelTest(unittest.TestCase):
         win = codex_collector._window_from_limit(
             "primary", {"used_percent": 91, "window_minutes": 10080}, "5h")
         self.assertEqual(win["label"], "7d")
+        self.assertEqual(win["duration_seconds"], 604800)
 
-    def test_window_minutes_zero_or_missing_is_no_label_source(self):
-        self.assertIsNone(codex_collector._duration_label_from_minutes(0))
-        self.assertIsNone(codex_collector._duration_label_from_minutes(None))
-        self.assertIsNone(codex_collector._duration_label_from_minutes(True))
+    def test_window_minutes_zero_or_missing_is_no_duration_source(self):
+        for value in (0, None, True):
+            with self.subTest(window_minutes=value):
+                self.assertIsNone(codex_collector._limit_window_seconds({"window_minutes": value}))
 
 
 class ManagedClientVisibilityTest(unittest.TestCase):

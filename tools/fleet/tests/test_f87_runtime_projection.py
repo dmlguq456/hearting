@@ -14,6 +14,7 @@ import unittest.mock
 from pathlib import Path
 from types import SimpleNamespace
 
+from tools import fixture_processes
 from tools.fleet.herdr_projection import compose
 from tools.fleet import render
 from tools.fleet.session_handle import current_session_subject, minted_tag
@@ -219,7 +220,7 @@ class RuntimeProjectionTest(unittest.TestCase):
     def test_claude_positive_missing_control_and_long_titles(self):
         """F-99 — zero sid8 (`CL/<sid8>`); since 2026-11-11 (spec rule 10) the statusline
         reads `[number] project (git)` and the title belongs to the panel and Fleet."""
-        with tempfile.TemporaryDirectory() as td:
+        with fixture_processes.TemporaryDirectory() as td:
             root, sid = Path(td), "abcdefgh-claude"
             self.successful_title(root, sid, "My Task")
             native_title = "Automatic stdin title"
@@ -243,7 +244,7 @@ class RuntimeProjectionTest(unittest.TestCase):
     def test_codex_herdr_exact_argv_and_failures(self):
         sid = CODEX_SID
         agent = "[%s] codex" % minted_tag(sid)
-        with tempfile.TemporaryDirectory() as td:
+        with fixture_processes.TemporaryDirectory() as td:
             root = Path(td)
             _, rows = self.project(root, sid, title="A title")
             self.assertEqual(rows, [
@@ -280,7 +281,7 @@ class RuntimeProjectionTest(unittest.TestCase):
 
     def test_codex_private_metadata_formatter_and_fail_soft_fallback(self):
         sid = CODEX_SID
-        with tempfile.TemporaryDirectory() as td:
+        with fixture_processes.TemporaryDirectory() as td:
             root = Path(td)
             formatter = root / "formatter"
             formatter.write_text(
@@ -332,7 +333,7 @@ class RuntimeProjectionTest(unittest.TestCase):
     def test_shared_input_vectors_match_fleet_claude_and_codex(self):
         """F-99e — statusline and the pane header carry the same one title for one
         session, with zero sid8 handles anywhere."""
-        with tempfile.TemporaryDirectory() as td:
+        with fixture_processes.TemporaryDirectory() as td:
             root = Path(td)
             for harness, sid, title in (("claude","abcdefgh-claude","Task"),("codex",CODEX_SID,"Task")):
                 expected = current_session_subject(None, title)
@@ -379,7 +380,7 @@ class RuntimeProjectionTest(unittest.TestCase):
 
     def test_claude_display_hook_publishes_metadata_without_duplicate_session_lifecycle(self):
         """The native SessionStart integration owns lifecycle; Hearting paints metadata."""
-        with tempfile.TemporaryDirectory() as td:
+        with fixture_processes.TemporaryDirectory() as td:
             root, sid = Path(td), "abcdefgh-claude"
             sidecar = root / "titles/claude" / (sid + ".json")
             sidecar.parent.mkdir(parents=True, exist_ok=True)
@@ -433,7 +434,7 @@ class RuntimeProjectionTest(unittest.TestCase):
         runtime happens to run this suite: a Codex hook gets no `CODEX_THREAD_ID`
         (measured 2026-09-25), and when one is set it proves nothing either."""
         hook = ROOT / "adapters/codex/hooks/userprompt-lifecycle.py"
-        with tempfile.TemporaryDirectory() as td:
+        with fixture_processes.TemporaryDirectory() as td:
             root = Path(td)
             bindir, log = self.stub(root)
             interpreter, prelude = self.own_codex_thread(root, bindir, CODEX_SID)
@@ -599,7 +600,7 @@ class RuntimeProjectionTest(unittest.TestCase):
                 codex._INDEX.update(ts=0.0, map=None)
 
     def test_identity_guard_rejects_a_foreign_session_and_reports_the_own_one(self):
-        with tempfile.TemporaryDirectory() as td:
+        with fixture_processes.TemporaryDirectory() as td:
             root = Path(td)
             bindir, log = self.stub(root)
             self.own_claude_session(root, "real-claude-session")
@@ -632,7 +633,7 @@ class RuntimeProjectionTest(unittest.TestCase):
         collector uses, so the real session keeps its header; a foreign id is still
         refused, and a tap for another start time (a recycled pid) proves nothing."""
         from tools.fleet.collectors.procscan import read_proc_start
-        with tempfile.TemporaryDirectory() as td:
+        with fixture_processes.TemporaryDirectory() as td:
             root = Path(td)
             bindir, log = self.stub(root)
             config = Path(self.env(root)["CLAUDE_CONFIG_DIR"])
@@ -683,7 +684,7 @@ class RuntimeProjectionTest(unittest.TestCase):
 
     def test_opencode_projects_through_the_same_shared_surface(self):
         sid = "abcdefgh-opencode"
-        with tempfile.TemporaryDirectory() as td:
+        with fixture_processes.TemporaryDirectory() as td:
             _, rows = self.project(Path(td), sid, harness="opencode", title="OC task")
             oc_agent = "[%s] opencode" % minted_tag(sid)
             self.assertEqual(rows[-1][4:], ["herdr:opencode", "--display-agent", oc_agent,
@@ -692,7 +693,7 @@ class RuntimeProjectionTest(unittest.TestCase):
     def test_the_root_folder_reads_one_slash(self):
         """Review RV-PR1560 follow-up 9: the root folder `/` is its own name, never `//`."""
         import re
-        with tempfile.TemporaryDirectory() as td:
+        with fixture_processes.TemporaryDirectory() as td:
             root, sid = Path(td), "abcdefgh-claude"
             self.statusline(root, sid, "x")
             out = subprocess.run([str(STATUSLINE)], input=json.dumps({"cwd": "/", "session_id": sid}),
@@ -703,7 +704,7 @@ class RuntimeProjectionTest(unittest.TestCase):
     def test_statusline_leads_with_the_project_and_carries_no_title(self):
         """2026-11-11 (spec rule 10): `[number] project/ (git) │ model …`, no folder glyph
         and no session title; a title equal to the folder is not repeated either."""
-        with tempfile.TemporaryDirectory() as td:
+        with fixture_processes.TemporaryDirectory() as td:
             root, sid = Path(td), "abcdefgh-claude"
             import re
             strip = lambda s: re.sub(r"\x1b\[[0-9;]*m", "", s)
