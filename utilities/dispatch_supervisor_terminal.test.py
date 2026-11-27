@@ -217,6 +217,26 @@ class SupervisorTerminalIntegrationTest(unittest.TestCase):
                     "opencode", "terminal-event-missing").note)
                 self.assertEqual(result.provider_failure_kind, kind)
 
+    def test_claude_api_status_keeps_priority_with_a_readable_handoff(self):
+        from codex_dispatch_terminal import inspect_terminal_attempt
+
+        artifact = self.artifacts / "handoff.md"
+        artifact.write_text("fixture")
+        result = {"type": "result", "subtype": "success", "is_error": True,
+                  "stop_reason": "refusal",
+                  "result": f"artifact: {artifact}\nverdict: PASS\nblocker: none"}
+        log = self.base / "worker.claude.jsonl"
+        for status, note, failure in ((401, "dead-auth", "auth"), (429, "dead-capacity", "capacity")):
+            with self.subTest(status=status):
+                result["api_error_status"] = status
+                classified = SUPERVISOR.classify_session_result(result, 1, runtime="claude")
+                self.assertEqual((classified.note, classified.failure_class, classified.provider_failure_kind),
+                                 (note, failure, ""))
+                log.write_text(json.dumps(result) + "\n")
+                observed = inspect_terminal_attempt(log, worktree=self.repo,
+                                                     artifact_root_metadata=self.artifacts)
+                self.assertEqual((observed["failure_note"], observed["failure_class"]), (note, failure))
+
     def test_content_refusal_is_a_runtime_end_unless_the_status_is_a_quota(self):
         refusal = {"type": "result", "subtype": "error_during_execution", "is_error": True,
                    "stop_reason": "refusal", "result": "You've hit your usage limit"}
@@ -244,6 +264,63 @@ class SupervisorTerminalIntegrationTest(unittest.TestCase):
         # An earlier reader builds SupervisorTerminal(**payload) without this field.
         names = {field.name for field in dataclasses.fields(SUPERVISOR.SupervisorTerminal)}
         self.assertEqual(set(events[0]["terminal"]), names - {"provider_failure_kind"})
+        self.assertEqual(events[0].get("provider_failure_kind"), "cyberPolicy")
+        self.assertEqual(SUPERVISOR.supervisor_terminal_from_event(
+            {**events[0], "provider_failure_kind": "private-fixture-token"}).provider_failure_kind, "")
+        committed = self.jobs.read_bytes()
+        later = dataclasses.replace(terminal, provider_failure_kind="serverOverloaded")
+        self.assertEqual(SUPERVISOR.reconcile_supervisor_terminal(self.jobs, attempt, later), "already-terminal")
+        self.assertEqual(self.jobs.read_bytes(), committed)
+
+    def test_interrupted_terminal_write_is_recovered_with_the_refused_pair(self):
+        from unittest import mock
+        from dispatch_contract import ProcessQuiescence, SUPERVISOR_LEASE_KIND
+        from dispatch_contract_base import _terminal_delivery_receipt
+        from dispatch_replacement import refused_profile_harness
+
+        codex = {"type": "dispatch.supervisor.turn.failed", "codex_error_info": "cyberPolicy"}
+        claude = {"type": "result", "is_error": True, "stop_reason": "refusal", "api_error_status": 200}
+        opencode = {"type": "error", "sessionID": "ses-fixture",
+                    "error": {"type": "provider.content-filter"}}
+        cases = (
+            ("codex", [codex], SUPERVISOR.codex_turn_failure_terminal(codex)),
+            # The Claude driver only emits its result after the row is committed.
+            ("claude", [], SUPERVISOR.classify_session_result(claude, 1, runtime="claude")),
+            ("opencode", [opencode], SUPERVISOR.classify_session_result(opencode, 70, runtime="opencode")),
+        )
+        for harness, native, terminal in cases:
+            with self.subTest(harness=harness):
+                attempt = f"att-interrupted-{harness}"
+                raw = self.row("open", attempt, "PASS", "none").strip()
+                raw = raw.replace("harness=codex", f"harness={harness}").replace("dispatch_depth=2", "dispatch_depth=1")
+                log = self.base / "pass.codex.jsonl"
+                lease = self.base / f"{attempt}.lease"
+                self.jobs.write_text(raw + f",worker_type=owner,launch_started=1,pid=99999996,pid_start=99,"
+                                     f"model=fixture-{harness},supervisor_lease={SUPERVISOR_LEASE_KIND},"
+                                     f"supervisor_lease_file={lease}\n")
+                events = list(native)
+                with mock.patch.object(SUPERVISOR, "reconcile_attempt_terminal", side_effect=OSError("write stopped")):
+                    with self.assertRaisesRegex(OSError, "write stopped"):
+                        SUPERVISOR.reconcile_supervisor_terminal(self.jobs, attempt, terminal, emit=events.append)
+                events.append({"type": "dispatch.supervisor.error", "reason": "terminal-reconcile-failed-oSError"})
+                log.write_text("".join(json.dumps(event) + "\n" for event in events))
+                row = JOIN.exact_attempt_row(self.jobs, attempt)
+                self.assertEqual(row.status, "open")
+                with mock.patch.object(JOIN, "attempt_process_quiescence",
+                                       return_value=ProcessQuiescence("quiescent", "fixture-exited")):
+                    self.assertEqual(JOIN.close_finished_child(row, jobs=self.jobs), "")
+                closed = JOIN.exact_attempt_row(self.jobs, attempt)
+                self.assertEqual((closed.status, closed.metadata["note"]), ("done", "dead-runtime-error"))
+                self.assertEqual(closed.metadata.get("provider_failure_kind"), terminal.provider_failure_kind)
+                followup = JOIN.completion_followup_text(_terminal_delivery_receipt(closed.metadata),
+                                                         jobs=str(self.jobs))
+                self.assertIn(f"Provider failure for {attempt} was {terminal.provider_failure_kind}.", followup)
+                self.assertIn("same harness and model", followup)
+                with mock.patch("model_profile.resolve_runtime_profile",
+                                return_value=({"model": f"fixture-{harness}"}, {})):
+                    self.assertEqual(refused_profile_harness(closed.metadata, "deep"), harness)
+                with mock.patch("model_profile.resolve_runtime_profile", return_value=({"model": "different"}, {})):
+                    self.assertIsNone(refused_profile_harness(closed.metadata, "deep"))
 
     def test_failed_last_turn_cannot_harvest_an_earlier_pass(self):
         from codex_dispatch_terminal import inspect_terminal_attempt

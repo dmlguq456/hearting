@@ -978,7 +978,8 @@ def main(argv):
             pin = ((pin_doc or {}).get("selection_pins") or {}).get(pin_target(values["--worker-type"]))
             refused_harness = refused_profile_harness(predecessor, profile, pin=pin, source_root=ROOT)
             if refused_harness:
-                policy = _defaults.restrict_harness_policy(policy, set(configured) - {refused_harness})
+                configured = [h for h in configured if h != refused_harness]
+                policy = _defaults.restrict_harness_policy(policy, configured)
         allocation = (
             sealed_context.get("allocation")
             if sealed_context and isinstance(sealed_context.get("allocation"), dict)
@@ -1066,6 +1067,10 @@ def main(argv):
                     quality_band = "outside-policy-fallback"
                     break
         if selected is None:
+            # The replacement controller checks capacity holds on these same candidates.
+            if refused_harness and not configured:
+                configured = [h for h in fallback_pool
+                              if h != refused_harness and h in enabled and h not in top_excluded]
             print("\n".join(_audit(
                 "unavailable", None, "none", configured, requested, states,
                 allocation=allocation, counts=counts, rejected=rejected,
@@ -1074,7 +1079,7 @@ def main(argv):
                 relief_promoted=relief_promoted, top_excluded=top_excluded,
                 field=(sealed_context or {}).get("field"),
             )))
-            if refused_harness:
+            if refused_harness and not configured:
                 reason, detail = PROVIDER_REFUSAL_NO_ALTERNATIVE, SAME_PROVIDER_REFUSAL
             elif dropped and not configured:
                 # Every candidate was left out for not declaring `top`; say that

@@ -357,13 +357,12 @@ def classify_session_result(
     event = f"{runtime}-result"
     is_error = result.get("is_error") is True
     subtype = result.get("subtype")
-    if (process_exit == 0 and not is_error and subtype in {None, "success"}
-            and not refused_without_result(result, runtime)):
+    kind = session_provider_failure_kind(result, runtime)
+    if process_exit == 0 and not is_error and subtype in {None, "success"} and not content_refusal(kind):
         return _handoff_terminal(
             result.get("result"), event=event, process_exit=process_exit
         )
 
-    kind = session_provider_failure_kind(result, runtime)
     status = _api_status(result)
     text = "\n".join(_bounded_strings(result))
     terminal = classify_runtime_failure(
@@ -373,24 +372,26 @@ def classify_session_result(
 
 
 def session_provider_failure_kind(result: dict[str, Any], runtime: str) -> str:
+    kind = ""
     if runtime == "claude":
         # The Claude CLI can report a model refusal in an HTTP-200 result.
-        return "refusal" if result.get("stop_reason") == "refusal" else ""
-    if runtime == "opencode":
+        kind = "refusal" if result.get("stop_reason") == "refusal" else ""
+    elif runtime == "opencode":
         error = result.get("error")
         if isinstance(error, dict):
-            kind = error.get("type")
-            if isinstance(kind, str) and kind.startswith("provider."):
-                return provider_failure_kind(kind)
-            if error.get("name") == "APIError":
-                return "APIError"
-    return ""
+            error_type = error.get("type")
+            if isinstance(error_type, str) and error_type.startswith("provider."):
+                kind = provider_failure_kind(error_type)
+            elif error.get("name") == "APIError":
+                kind = "APIError"
+    if content_refusal(kind) and handoff_search(result.get("result")) is not None:
+        return ""
+    return kind
 
 
 def refused_without_result(result: dict[str, Any], runtime: str) -> bool:
     """A content refusal changes the verdict only when no handoff can be read."""
-    return (content_refusal(session_provider_failure_kind(result, runtime))
-            and handoff_search(result.get("result")) is None)
+    return content_refusal(session_provider_failure_kind(result, runtime))
 
 
 def _with_provider_failure(terminal: SupervisorTerminal, kind: str, status: str) -> SupervisorTerminal:
@@ -498,7 +499,7 @@ _MISSING_RESULT_NOTE = "dead-missing-result"
 _MISSING_RESULT_RECONCILE_REASON = "governed-process-group-drained"
 
 
-def missing_result_terminal(metadata: dict[str, Any]) -> SupervisorTerminal:
+def missing_result_terminal(metadata: dict[str, Any], *, provider_kind: str | None = None) -> SupervisorTerminal:
     """Classify a detached attempt closed with no result envelope.
 
     Only OpenCode has a durable per-session server log outside the attempt's
@@ -508,7 +509,8 @@ def missing_result_terminal(metadata: dict[str, Any]) -> SupervisorTerminal:
     evidence. Every other harness, or an unreadable/ambiguous/non-capacity
     read, keeps the conservative `dead-missing-result` note every writer used
     before this function existed: no evidence means no guess (LOOP §4). The
-    exact log's latest turn may still name the provider's failure kind.
+    exact log's latest turn may still name the provider's failure kind. Reuse
+    the terminal inspection's kind when it already read that log.
     """
     if metadata.get("harness") == "opencode":
         found = opencode_server_log.session_error(metadata)
@@ -525,7 +527,8 @@ def missing_result_terminal(metadata: dict[str, Any]) -> SupervisorTerminal:
         "dispatch-reap-missing-result",
         _MISSING_RESULT_RECONCILE_REASON,
         "0",
-        provider_failure_kind=_logged_provider_failure_kind(metadata),
+        provider_failure_kind=(_logged_provider_failure_kind(metadata) if provider_kind is None
+                               else provider_kind),
     )
 
 
@@ -704,16 +707,20 @@ def reconcile_supervisor_terminal(
     # Retain the exact writer input before a storage operation can fail.
     # Session drivers emit their final result only after this commit; native
     # turn output can also precede route/child checks or envelope conversion.
+    evidence = terminal.evidence()
     if emit is not None:
-        # The kind is row evidence only, so earlier readers still parse this input.
+        # Earlier readers construct SupervisorTerminal from the inner object.
         payload = asdict(terminal)
         payload.pop("provider_failure_kind")
-        emit({"type": "dispatch.supervisor.terminal", "terminal": payload})
+        event = {"type": "dispatch.supervisor.terminal", "terminal": payload}
+        if kind := evidence.get("provider_failure_kind"):
+            event["provider_failure_kind"] = kind
+        emit(event)
     return reconcile_attempt_terminal(
         Path(jobs),
         attempt_id,
         terminal.note,
-        evidence=terminal.evidence(),
+        evidence=evidence,
     )
 
 
@@ -812,7 +819,10 @@ def supervisor_terminal_from_event(row: dict[str, Any]) -> SupervisorTerminal | 
         terminal = SupervisorTerminal(**value)
     except TypeError:
         return None
-    return terminal if all(isinstance(field, str) for field in asdict(terminal).values()) else None
+    if not all(isinstance(field, str) for field in asdict(terminal).values()):
+        return None
+    kind = provider_failure_kind(row.get("provider_failure_kind", terminal.provider_failure_kind))
+    return replace(terminal, provider_failure_kind=kind)
 
 
 def classify_supervisor_log(path: str | Path | None, harness: str) -> SupervisorTerminal:
@@ -821,22 +831,29 @@ def classify_supervisor_log(path: str | Path | None, harness: str) -> Supervisor
     if not path:
         return classify_supervisor_error(harness, "terminal-log-missing")
     try:
-        rows, _raw_lines = _tail_rows(Path(path))
+        rows, raw_lines = _tail_rows(Path(path))
     except OSError:
         return classify_supervisor_error(harness, "terminal-log-unreadable")
+    return classify_supervisor_rows(rows, raw_lines, harness)
+
+
+def classify_supervisor_rows(
+    rows: list[dict[str, Any]], raw_lines: list[str], harness: str
+) -> SupervisorTerminal:
+    """Classify an already-read terminal tail from the same attempt log."""
     # All runtime-specific scans belong to the latest turn. An old stop,
     # failure, or result cannot finish a turn that started afterward.
     turn_starts = {"dispatch.supervisor.turn.started", "dispatch.supervisor.turn-started", "turn.started"}
     for index in range(len(rows) - 1, -1, -1):
         if rows[index].get("type") in turn_starts:
             rows = rows[index + 1:]
-            for raw_index in range(len(_raw_lines) - 1, -1, -1):
+            for raw_index in range(len(raw_lines) - 1, -1, -1):
                 try:
-                    raw_row = json.loads(_raw_lines[raw_index])
+                    raw_row = json.loads(raw_lines[raw_index])
                 except ValueError:
                     continue
                 if isinstance(raw_row, dict) and raw_row.get("type") in turn_starts:
-                    _raw_lines = _raw_lines[raw_index + 1:]
+                    raw_lines = raw_lines[raw_index + 1:]
                     break
             break
     for row in reversed(rows):
@@ -871,7 +888,7 @@ def classify_supervisor_log(path: str | Path | None, harness: str) -> Supervisor
         # request (see item 1(b): deny returns a structured tool error
         # instead and does not truncate the session; R2 stays as a typed
         # classification for whatever other cause still truncates the log).
-        if opencode_truncation_evidence(_raw_lines):
+        if opencode_truncation_evidence(raw_lines):
             return SupervisorTerminal(
                 "dead-permission-reject",
                 "permission",

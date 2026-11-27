@@ -19,7 +19,7 @@ import subprocess
 import sys
 
 from dispatch_supervisor_terminal import (
-    classify_session_result, codex_turn_failure_terminal, latest_codex_turn_failure,
+    classify_session_result, classify_supervisor_rows, latest_codex_turn_failure,
     opencode_terminal_boundary, refused_without_result, supervisor_terminal_from_event,
 )
 
@@ -260,7 +260,19 @@ def _claude_completion_tail(lines: list[str], session_id: object) -> bool:
     return True
 
 
-def _read_terminal(path: str | Path | None) -> dict[str, object]:
+def _terminal_event_absent(rows, lines, harness: str) -> dict[str, object]:
+    evidence = {}
+    if harness in {"claude", "codex", "opencode"}:
+        classified = classify_supervisor_rows(rows, lines, harness)
+        if classified.provider_failure_kind:
+            evidence["provider_failure_kind"] = classified.provider_failure_kind
+        if harness == "codex" and classified.failure_class == "capacity":
+            evidence["failure_class"] = classified.failure_class
+    return _result(2, "absent", "none", "-", "unchecked", "-",
+                   reason="terminal-event-absent", **evidence)
+
+
+def _read_terminal(path: str | Path | None, *, harness: str = "") -> dict[str, object]:
     if not path:
         return _result(
             2, "absent", "none", "-", "unchecked", "-", reason="log-file-absent"
@@ -296,12 +308,10 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
             rows.append(value)
             row_line_indices.append(line_index)
 
-    if (failure := latest_codex_turn_failure(rows)) is not None:
+    if latest_codex_turn_failure(rows) is not None:
         # The last turn ended without a handoff. A completed earlier turn
         # cannot hide this failure from the existing missing-result classifier.
-        kind = codex_turn_failure_terminal(failure).provider_failure_kind
-        return _result(2, "absent", "none", "-", "unchecked", "-", reason="terminal-event-absent",
-                       **({"provider_failure_kind": kind} if kind else {}))
+        return _terminal_event_absent(rows, lines, "codex")
 
     terminal_index = next(
         (
@@ -315,9 +325,7 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
     if terminal_index is None:
         terminal_index, opencode_final_message = opencode_terminal_boundary(rows)
     if terminal_index is None:
-        return _result(
-            2, "absent", "none", "-", "unchecked", "-", reason="terminal-event-absent"
-        )
+        return _terminal_event_absent(rows, lines, harness)
 
     terminal_row = rows[terminal_index]
     terminal_event = str(terminal_row.get("type"))
@@ -880,7 +888,8 @@ def inspect_terminal_attempt(
     type keep the compatibility note.
     """
 
-    return inspect_terminal_value(_read_terminal(path), worktree=worktree,
+    parsed = _read_terminal(path, harness=str((artifact_binding or {}).get("harness", "")))
+    return inspect_terminal_value(parsed, worktree=worktree,
         artifact_root_metadata=artifact_root_metadata, include_failure_detail=include_failure_detail,
         worker_type=worker_type, artifact_binding=artifact_binding)
 

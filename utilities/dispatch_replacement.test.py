@@ -10,6 +10,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import shutil
 import os
 from pathlib import Path
 import subprocess
@@ -3037,6 +3038,44 @@ class ReplacementTest(unittest.TestCase):
                   run=lambda command, **_kw: runs.append(command)
                   or SimpleNamespace(returncode=65, stdout="", stderr=""))
         self.assertEqual(len(runs), 1)
+
+    def test_a_refused_owner_waits_for_the_other_harness_to_leave_capacity(self):
+        spec = importlib.util.spec_from_file_location(
+            'replacement_owner_capacity_fixture', Path(__file__).with_name('dispatch_owner.test.py'))
+        suite = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(suite)
+        selector = suite.RouteOwnerPinTest()
+        self.addCleanup(selector.doCleanups)
+        path = selector._route(sealed=('claude', 'codex'))
+        self.addCleanup(shutil.rmtree, path.parent)
+        self._runtime_end(note='dead-runtime-error', provider_failure_kind='cyberPolicy', model='fixture-model')
+        usage = {'claude': 'limited(2100-01-01T00:10:00Z)',
+                 'codex': 'limited(2100-01-01T00:00:00Z)', 'opencode': 'ok'}
+        launches = []
+        replacement_source = R.replacement_source
+
+        def run(command, **_kwargs):
+            attempt = command[command.index('--attempt-id') + 1]
+            selection = selector._launch(path, None, usage=usage,
+                extra=('--automatic-retry-of', 'att-source', '--attempt-id', attempt))
+            launches.extend(selection.calls)
+            return SimpleNamespace(returncode=selection.rc, stdout=selection.out, stderr='')
+
+        def hold(_jobs, harness, **_kwargs):
+            if usage[harness] == 'ok':
+                return None
+            return {'label': usage[harness], 'until_epoch': 4102445400 if harness == 'claude' else 4102444800}
+
+        with mock.patch.object(R, 'replacement_source',
+                               side_effect=lambda _jobs, prior, next_: replacement_source(self.jobs, prior, next_)), \
+             mock.patch('model_profile.resolve_runtime_profile', return_value=({'model': 'fixture-model'}, {})), \
+             mock.patch('dispatch_capacity_evidence.harness_hold', side_effect=hold):
+            waited = R.advance(self.jobs, 'att-source', authority_check=lambda *_: True, run=run)
+            self.assertEqual((waited['reason'], waited.get('harness'), waited.get('retry_at'), launches),
+                             ('replacement-capacity-wait', 'claude', '2100-01-01T00:10:00Z', []))
+            usage.update(claude='ok', codex='ok')
+            R.advance(self.jobs, 'att-source', authority_check=lambda *_: True, resume_capacity=True, run=run)
+        self.assertEqual([Path(command[0]).parts[-3] for command in launches], ['claude'])
 
     def test_a_second_content_refusal_in_a_row_returns_to_the_parent(self):
         """The selector leaves a refused pair out, so A -> B -> C would alternate forever."""

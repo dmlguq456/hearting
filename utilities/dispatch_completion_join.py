@@ -120,7 +120,6 @@ from dispatch_contract import (  # noqa: E402
 import dispatch_pending_delivery as pending_delivery  # noqa: E402
 import dispatch_subsession_advance as subsession_advance  # noqa: E402
 from codex_dispatch_terminal import (  # noqa: E402
-    ARTIFACT_HINT_KEYS,
     REVIEW_BLOCKING_NOTE,
     review_blocking_handoff,
     inspect_terminal_attempt,
@@ -1459,7 +1458,9 @@ def unit_leg_reason_line(metadata) -> str:
     return f"Reason: {reason}"
 
 
-def completion_followup_text(receipt: dict, *, jobs: str) -> str:
+def completion_followup_text(receipt: dict, *, jobs: str, include_provider_failure: bool = True) -> str:
+    if not include_provider_failure:
+        return _completion_work_followup(receipt, jobs=jobs)
     lines = []
     refused = False
     for child in receipt.get("children") or ():
@@ -5174,7 +5175,7 @@ def classify_exact_route_free_support_outcome(
     if terminal.reconcile_reason in {
         "terminal-log-missing", "terminal-log-unreadable", "terminal-event-missing",
     }:
-        terminal = missing_result_terminal(row.metadata)
+        terminal = missing_result_terminal(row.metadata, provider_kind=terminal.provider_failure_kind)
     if terminal.note == "completed-supervisor" and terminal.failure_class == "pass":
         return ExactReviewClassification("done", "support-supervisor-pass", terminal.note,
                                          "typed-close", terminal.evidence())
@@ -5355,11 +5356,13 @@ def classify_exact_route_free_review_outcome(
         note, evidence = choice.detail, choice.census
         reason = choice.reason
         if choice.state == "absent":
-            result = missing_result_terminal({**metadata, "worktree": _row_worktree(row), "started_at": raw_fields[0]})
+            result = missing_result_terminal(
+                {**metadata, "worktree": _row_worktree(row), "started_at": raw_fields[0]},
+                provider_kind=str(terminal.get("provider_failure_kind") or ""))
             note, evidence = result.note, result.evidence()
         if choice.state in {"absent", "invalid"} and terminal.get("state") != "valid":
             reason = str(terminal.get("reason") or "terminal-" + str(terminal.get("state") or "absent"))
-        if kind := provider_failure_kind(terminal.get("provider_failure_kind")):
+        if choice.state != "absent" and (kind := terminal.get("provider_failure_kind")):
             evidence = {**(evidence or review_terminal_evidence(note, reason)), "provider_failure_kind": kind}
         return ExactReviewClassification("terminal-handoff", reason, note, "typed-close", evidence)
     artifact, evidence_reason = route_completion_evidence(
@@ -5566,8 +5569,15 @@ def close_finished_child(
         if choice.next_action != "typed-close":
             return choice.reason
         note, evidence, reason = choice.detail, choice.census, choice.reason
-        if choice.state == "typed":
-            from foreground_terminal import terminal_evidence
+        from foreground_terminal import capacity_evidence, terminal_evidence, terminal_log_evidence
+        classifier_source = INVALID_ENVELOPE_CLASSIFIER_SOURCE
+        if choice.state == "typed" and note == "dead-capacity":
+            reason = f"terminal-invalid:{terminal.get('reason') or 'claude-result-capacity'}"
+            classifier_source = "completion-join-native-capacity-v1"
+            evidence = capacity_evidence(terminal, metadata.get("log_file"))
+            evidence.update(terminal_log_evidence(terminal))
+        elif choice.state == "typed":
+            classifier_source = "completion-join-terminal-verdict-v1"
             evidence = {**terminal_evidence(terminal, note, metadata.get("log_file")),
                         **(evidence or {})}
             # SD-124 preserves the foreground wrapper's fail axis, but the
@@ -5575,26 +5585,17 @@ def close_finished_child(
             # note and exact artifact, without a failure_class annotation.
             if note == REVIEW_BLOCKING_NOTE:
                 evidence.pop("failure_class", None)
-        if choice.state == "absent":
-            missing = missing_result_terminal({**metadata, "worktree": _row_worktree(row),
-                                              "started_at": row.raw.split("\t")[0]})
+        elif choice.state == "absent":
+            classifier_source = "completion-join-missing-result-v1"
+            missing = missing_result_terminal(
+                {**metadata, "worktree": _row_worktree(row), "started_at": row.raw.split("\t")[0]},
+                provider_kind=str(terminal.get("provider_failure_kind") or ""))
             note, evidence, reason = missing.note, missing.evidence(), "terminal-envelope-absent"
         elif choice.state in {"invalid", "evidence"}:
-            evidence = {key: str(terminal.get(key) or "") for key in ARTIFACT_HINT_KEYS}
-        if choice.state == "typed" and note == "dead-capacity":
-            from foreground_terminal import capacity_evidence
-            reason = f"terminal-invalid:{terminal.get('reason') or 'claude-result-capacity'}"
-            if _close_invalid_envelope_child(
-                    row, jobs=jobs, reason=reason, note="dead-capacity",
-                    classifier_source="completion-join-native-capacity-v1",
-                    terminal_envelope=True, extra_evidence=capacity_evidence(terminal, metadata.get("log_file"))):
-                return ""
-            return choice.reason
+            evidence = terminal_log_evidence(terminal)
         if _close_invalid_envelope_child(row, jobs=jobs, reason=reason, note=note,
-            classifier_source="completion-join-terminal-verdict-v1" if choice.state == "typed"
-                              else "completion-join-missing-result-v1" if choice.state == "absent"
-                              else "completion-join-invalid-envelope-v1",
-            terminal_envelope=choice.state != "absent", extra_evidence=evidence):
+            classifier_source=classifier_source, terminal_envelope=choice.state != "absent",
+            extra_evidence=evidence):
             return ""
         return choice.reason
     artifact, evidence_reason = route_completion_evidence(

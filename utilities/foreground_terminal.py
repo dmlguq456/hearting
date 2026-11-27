@@ -44,6 +44,12 @@ def capacity_evidence(terminal: dict, log_path) -> dict[str, str]:
     return evidence
 
 
+def terminal_log_evidence(terminal: dict) -> dict[str, str]:
+    """Carry the inspector's artifact hints and classified provider kind to the row."""
+    return {key: str(terminal[key]) for key in (*ARTIFACT_HINT_KEYS, "provider_failure_kind")
+            if terminal.get(key)}
+
+
 def terminal_evidence(terminal: dict, terminal_note: str, log_path, outcome=None) -> dict[str, str]:
     """Evidence sealed on the row by the foreground tail close.
 
@@ -67,10 +73,7 @@ def terminal_evidence(terminal: dict, terminal_note: str, log_path, outcome=None
             )
     if terminal_note == "dead-capacity":
         evidence.update(capacity_evidence(terminal, log_path))
-    # The provider's failure kind is read with the terminal, never from model text.
-    for key in (*ARTIFACT_HINT_KEYS, "provider_failure_kind"):
-        if terminal.get(key):
-            evidence[key] = str(terminal[key])
+    evidence.update(terminal_log_evidence(terminal))
     if terminal_note == REVIEW_BLOCKING_NOTE and terminal.get("artifact_path_b64"):
         evidence["review_artifact_b64"] = str(terminal["artifact_path_b64"])
     return evidence
