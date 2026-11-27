@@ -787,7 +787,6 @@ class DispatchJob:
     owner_route_hash: Optional[str] = None
     attempt_id: Optional[str] = None    # canonical registry attempt identity (SD-49)
     attention_reason: Optional[str] = None  # shared terminal policy; separate from process liveness
-    provider_failure_kind: Optional[str] = None
     stall_observation: Optional[dict] = None  # exact current attempt advisory; never process liveness
     registry_order: Optional[int] = None  # append order in canonical jobs.log
     registry_priority: Optional[int] = None  # 0 canonical; larger values are legacy fallbacks

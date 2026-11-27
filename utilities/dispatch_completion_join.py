@@ -131,7 +131,7 @@ from dispatch_attempt_policy import (  # noqa: E402
     SAME_PROVIDER_REFUSAL, content_refusal, provider_failure_kind,
 )
 from dispatch_supervisor_terminal import (  # noqa: E402
-    classify_supervisor_log, logged_provider_failure_kind, missing_result_terminal,
+    classify_supervisor_log, missing_result_terminal,
 )
 from dispatch_registry_cache import registry_lines, registry_snapshot, registry_view  # noqa: E402
 
@@ -1259,7 +1259,6 @@ class CurrentDeliveryState:
     cancellation_requested: bool = False
     workflow_state: str = "complete"
     workflow_reason: str = ""
-    provider_failure_kind: str = ""
 
 
 def _delivery_choice(state, *, blocked_reason=""):
@@ -1318,10 +1317,10 @@ def previous_harvest_wording(text: str) -> str:
     return text.replace(current, previous)
 
 
-def _child_note(jobs: str, child) -> str | None:
-    """The registry note of one receipt child (None when the row cannot be read)."""
+def _child_note(jobs: str, child, key: str = "note") -> str | None:
+    """One registry value of a receipt child, its note by default (None when the row cannot be read)."""
     try:
-        return exact_attempt_row(Path(jobs), child["attempt_id"]).metadata.get("note")
+        return exact_attempt_row(Path(jobs), child["attempt_id"]).metadata.get(key)
     except (OSError, ValueError, KeyError, JoinContractError):
         return None
 
@@ -1464,10 +1463,11 @@ def completion_followup_text(receipt: dict, *, jobs: str) -> str:
     lines = []
     refused = False
     for child in receipt.get("children") or ():
-        kind = provider_failure_kind(child.get("provider_failure_kind"))
-        if child.get("required_action") == "inspect-done-failure" and kind:
-            lines.append(f"Provider failure for {child['attempt_id']} was {kind}.")
-            refused = refused or content_refusal(kind)
+        # The receipt keeps its delivery identity; the closed row holds the kind.
+        if child.get("required_action") == "inspect-done-failure" and jobs:
+            if kind := provider_failure_kind(_child_note(jobs, child, "provider_failure_kind")):
+                lines.append(f"Provider failure for {child['attempt_id']} was {kind}.")
+                refused = refused or content_refusal(kind)
     if refused:
         lines.append(SAME_PROVIDER_REFUSAL)
     lines.append(_completion_work_followup(receipt, jobs=jobs))
@@ -2066,11 +2066,8 @@ def receipt_with_delivery_observability(
         child["status"] = state.status
         child["delivery_classification"] = classification
         child["required_action"] = choice.next_action
-        child.pop("provider_failure_kind", None)
         if classification == "attention":
             child["reason"] = choice.reason or "terminal-failure-or-unclosed"
-            if choice.next_action == "inspect-done-failure" and state.provider_failure_kind:
-                child["provider_failure_kind"] = state.provider_failure_kind
         elif state.advanced:
             child["reason"] = "row-advanced"
         # Information only: the approved route plan's next leg, never a launch or an action.
@@ -4081,8 +4078,6 @@ def current_delivery_state(
         workflow_complete=completion.settled,
         workflow_state=completion.state,
         workflow_reason=completion.reason,
-        provider_failure_kind=(provider_failure_kind(current.metadata.get("provider_failure_kind"))
-                               if current is not None else ""),
     )
 
 
@@ -4654,9 +4649,6 @@ def _join_snapshot(
                     "readiness": readiness,
                     "reason": reason,
                     "required_action": choice.next_action,
-                    **({"provider_failure_kind": kind}
-                       if choice.next_action == "inspect-done-failure"
-                       and (kind := provider_failure_kind(row.metadata.get("provider_failure_kind"))) else {}),
                 }
             )
         current_attempt_ids = {child["attempt_id"] for child in children}
@@ -5346,11 +5338,9 @@ def classify_exact_route_free_review_outcome(
         )
     if sealed is not None and sealed["foreground_process_failure"] != "none":
         failure = sealed["foreground_process_failure"]
-        reason, note = f"foreground-process-{failure}", f"dead-{failure}"
-        evidence = review_terminal_evidence(note, reason)
-        if failure.startswith("exit-") and (kind := logged_provider_failure_kind(row.metadata)):
-            evidence["provider_failure_kind"] = kind
-        return ExactReviewClassification("terminal-handoff", reason, note, "typed-close", evidence)
+        return ExactReviewClassification(
+            "terminal-handoff", f"foreground-process-{failure}", f"dead-{failure}", "typed-close"
+        )
     metadata = row.metadata
     terminal = inspect_terminal_attempt(
         metadata.get("log_file"),
@@ -5591,19 +5581,13 @@ def close_finished_child(
             note, evidence, reason = missing.note, missing.evidence(), "terminal-envelope-absent"
         elif choice.state in {"invalid", "evidence"}:
             evidence = {key: str(terminal.get(key) or "") for key in ARTIFACT_HINT_KEYS}
-        kind = provider_failure_kind(terminal.get("provider_failure_kind"))
-        if kind:
-            evidence = {**(evidence or {}), "provider_failure_kind": kind}
         if choice.state == "typed" and note == "dead-capacity":
             from foreground_terminal import capacity_evidence
             reason = f"terminal-invalid:{terminal.get('reason') or 'claude-result-capacity'}"
             if _close_invalid_envelope_child(
                     row, jobs=jobs, reason=reason, note="dead-capacity",
                     classifier_source="completion-join-native-capacity-v1",
-                    terminal_envelope=True, extra_evidence={
-                        **capacity_evidence(terminal, metadata.get("log_file")),
-                        **({"provider_failure_kind": kind} if kind else {}),
-                    }):
+                    terminal_envelope=True, extra_evidence=capacity_evidence(terminal, metadata.get("log_file"))):
                 return ""
             return choice.reason
         if _close_invalid_envelope_child(row, jobs=jobs, reason=reason, note=note,

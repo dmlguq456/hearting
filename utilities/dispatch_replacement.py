@@ -1462,8 +1462,9 @@ def _same_runtime_end(jobs, rows, source, *, explicit=False):
     prior = rows[prior_id][1]
     failed_pair, prior_pair = refused_candidate(source), refused_candidate(prior)
     if failed_pair or prior_pair:
-        return (failed_pair == prior_pair
-                and source.get("provider_failure_kind") == prior.get("provider_failure_kind"))
+        # The selector leaves out a refused pair, so a repeated pair cannot stop
+        # a refusal chain. A second refusal in a row returns to the parent.
+        return bool(failed_pair and prior_pair)
     return all(source.get(key, '') == prior.get(key, '')
                for key in ('failure_class', 'terminal_event', 'harness', 'model_profile'))
 

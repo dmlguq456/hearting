@@ -568,6 +568,14 @@ class FrameTopDeclarationTest(unittest.TestCase):
         self.assertIn("reason=provider-refusal-no-alternative", out)
         self.assertIn("same harness and model", out)
 
+    def test_an_explicit_owner_whose_pair_was_refused_is_not_moved_to_another_harness(self):
+        code, out, launch, _probe = self.run_selector(
+            declared=set(self.HARNESSES), explicit="codex",
+            predecessor={"provider_failure_kind": "cyberPolicy", "model": "fixture-current"})
+        self.assertEqual(code, 65, out)
+        launch.assert_not_called()
+        self.assertIn("reason=provider-refusal-no-alternative", out)
+
     def test_a_harness_without_a_top_declaration_is_never_chosen_even_with_the_most_headroom(self):
         code, out, launch, _probe = self.run_selector(declared={"codex", "opencode"})
         self.assertEqual(code, 0, out)

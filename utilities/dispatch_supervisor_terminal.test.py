@@ -184,19 +184,66 @@ class SupervisorTerminalIntegrationTest(unittest.TestCase):
                 terminal = SUPERVISOR.missing_result_terminal(initial.metadata)
                 self.assertTrue(close_attempt_row(self.jobs, attempt, terminal.note, evidence=terminal.evidence()))
                 closed = JOIN.exact_attempt_row(self.jobs, attempt)
+                self.assertEqual(closed.metadata["provider_failure_kind"], kind)
                 receipt = _terminal_delivery_receipt(closed.metadata)
                 child = receipt["children"][0]
                 self.assertEqual(child["reason"], "terminal-failure-or-unclosed")
                 self.assertEqual(child["required_action"], "inspect-done-failure")
-                self.assertEqual(child["provider_failure_kind"], kind)
-                self.assertEqual(
-                    JOIN.canonical_delivery_receipt(receipt)["children"][0]["provider_failure_kind"], kind
-                )
+                # The delivery identity is the one an earlier gateway accepts.
+                without = {k: v for k, v in closed.metadata.items() if k != "provider_failure_kind"}
+                self.assertEqual(receipt, _terminal_delivery_receipt(without))
+                self.assertNotIn("provider_failure_kind", json.dumps(receipt))
                 notice = JOIN.completion_followup_text(receipt, jobs=str(self.jobs))
-                self.assertIn(f"was {kind}.", notice)
+                self.assertTrue(notice.startswith(f"Provider failure for {attempt} was {kind}.\n"), notice)
                 self.assertIn("same harness and model", notice)
+                self.assertEqual(notice.split("\n", 2)[2],
+                                 JOIN._completion_work_followup(receipt, jobs=str(self.jobs)))
                 for output in (notice, json.dumps(receipt), closed.raw):
                     self.assertNotIn("private-fixture-output", output)
+
+    def test_a_readable_handoff_keeps_its_verdict_and_other_kinds_only_label_it(self):
+        handoff = "artifact: -\nverdict: PASS\nblocker: none"
+        passed = SUPERVISOR.classify_session_result(
+            {"type": "result", "subtype": "success", "is_error": False,
+             "stop_reason": "refusal", "result": handoff}, 0, runtime="claude")
+        self.assertEqual((passed.note, passed.provider_failure_kind), ("completed-supervisor", ""))
+        log = self.base / "worker.opencode.jsonl"
+        for kind in ("provider.quota", "provider.rate-limit"):
+            with self.subTest(kind=kind):
+                log.write_text(json.dumps({"type": "error", "sessionID": "ses_fixture",
+                                           "error": {"type": kind, "message": "private-fixture-output"}}) + "\n")
+                result = SUPERVISOR.classify_supervisor_log(str(log), "opencode")
+                self.assertEqual(result.note, SUPERVISOR.classify_supervisor_error(
+                    "opencode", "terminal-event-missing").note)
+                self.assertEqual(result.provider_failure_kind, kind)
+
+    def test_content_refusal_is_a_runtime_end_unless_the_status_is_a_quota(self):
+        refusal = {"type": "result", "subtype": "error_during_execution", "is_error": True,
+                   "stop_reason": "refusal", "result": "You've hit your usage limit"}
+        self.assertEqual(SUPERVISOR.classify_session_result(refusal, 1, runtime="claude").note,
+                         "dead-runtime-error")
+        turn = {"type": "dispatch.supervisor.turn.failed", "codex_error_info": "cyberPolicy",
+                "message": "401 Unauthorized"}
+        self.assertEqual(SUPERVISOR.codex_turn_failure_terminal(turn).note, "dead-runtime-error")
+        quota = dict(turn, codex_error_info={"kind": "cyberPolicy", "http_status": 429})
+        self.assertEqual(SUPERVISOR.codex_turn_failure_terminal(quota).note, "dead-capacity")
+
+    def test_the_kind_reaches_the_row_but_not_the_logged_writer_input(self):
+        import dataclasses
+        from dispatch_contract import parse_registry_metadata
+
+        attempt = "att-fixture-logged-terminal"
+        self.jobs.write_text(self.row("open", attempt, "PASS", "none"), encoding="utf-8")
+        terminal = SUPERVISOR.codex_turn_failure_terminal(
+            {"type": "dispatch.supervisor.turn.failed", "codex_error_info": "cyberPolicy"})
+        events = []
+        self.assertEqual(SUPERVISOR.reconcile_supervisor_terminal(
+            self.jobs, attempt, terminal, emit=events.append), "closed")
+        fields = self.jobs.read_text(encoding="utf-8").strip().split("\t")
+        self.assertEqual(parse_registry_metadata(fields[5])["provider_failure_kind"], "cyberPolicy")
+        # An earlier reader builds SupervisorTerminal(**payload) without this field.
+        names = {field.name for field in dataclasses.fields(SUPERVISOR.SupervisorTerminal)}
+        self.assertEqual(set(events[0]["terminal"]), names - {"provider_failure_kind"})
 
     def test_failed_last_turn_cannot_harvest_an_earlier_pass(self):
         from codex_dispatch_terminal import inspect_terminal_attempt

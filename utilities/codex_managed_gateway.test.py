@@ -5,7 +5,6 @@ import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
-import hashlib
 import importlib.util
 import json
 import os
@@ -1286,28 +1285,6 @@ class ManagedGatewayTest(unittest.TestCase):
         context = starts[0]["params"]["additionalContext"]["hearting-completion"]["value"]
         self.assertIn('"next_leg":{', context)
         self.assertIn("--route-plan rec.json#1", context)
-
-    def test_a_provider_failure_survives_the_exact_gateway_delivery_identity(self) -> None:
-        request = receipt_request("batch-provider-failure")
-        receipt = request["receipt"]
-        receipt["delivery_classification"] = "attention"
-        receipt["children"][0].update(
-            reason="terminal-failure-or-unclosed", required_action="inspect-done-failure",
-            delivery_classification="attention", provider_failure_kind="cyberPolicy",
-        )
-        digest = "sha256:" + hashlib.sha256(GATEWAY.canonical(receipt).encode("utf-8")).hexdigest()
-        identity = {key: request[key] for key in ("thread_id", "parent_attempt_id", "sealed_batch_id")}
-        identity["receipt_digest"] = digest
-        request["delivery_id"] = "dlv-" + hashlib.sha256(
-            ("managed-delivery-v1\0" + GATEWAY.canonical(identity)).encode("utf-8")
-        ).hexdigest()
-        result = control(self.control, request)
-        self.assertEqual(result["status"], "accepted", result)
-        start = next(msg for msg in self.server.messages if msg.get("method") == "turn/start")
-        context = start["params"]["additionalContext"]["hearting-completion"]["value"]
-        self.assertIn('"provider_failure_kind":"cyberPolicy"', context)
-        self.assertIn("was cyberPolicy.", context)
-        self.assertIn("same harness and model", context)
 
     def test_a_malformed_or_attention_next_leg_is_rejected_before_upstream(self) -> None:
         before = self.server.counts()

@@ -1317,9 +1317,7 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
         segs += _opts_segs(j, max_width=_DIAL_MAX)[0]
     elif j.liveness == "dead":
         segs.append((" " * _WIDE_STAGE_GAP, None))
-        if kind := getattr(j, "provider_failure_kind", None):
-            segs += _stage_zone_segs([(kind, "g_dead")])
-        elif getattr(j, "note", None) == "dead-parent-orphaned":
+        if getattr(j, "note", None) == "dead-parent-orphaned":
             # SD-64/71: distinct from the generic dead-conductor cell — never blank, and
             # always names the exact node a dispatch-depth-0 decision would resume from.
             boundary = getattr(j, "resume_boundary", None) or "-"
@@ -1356,9 +1354,8 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
         # `j.elapsed_min` from back when only F-46's depth-1 rows had a clock of their own.
         # One elapsed per row — the tag — so the token is the state word alone. At 140
         # columns the duplicate had been costing the token itself, clipping it to `done …`.
-        kind = getattr(j, "provider_failure_kind", None)
-        token = kind or ("done %s" % _LIVE_GLYPH["done"])
-        segs += _stage_zone_segs([(token, "g_dead" if kind else "dim")])
+        token = "done %s" % _LIVE_GLYPH["done"]
+        segs += _stage_zone_segs([(token, "dim")])
     else:
         # F-15a options column (fixed-ish gap, dim mode/qa/profile) — a declutter move OUT of
         # the name zone, not a new axis. model/effort now live in the harness field (F-4/SD-F3).
@@ -1630,7 +1627,7 @@ def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, 
         l2 += _model_cell(_job_display_model(j, parent_model), eff, _MW, dim=True, harness=j.harness)
         l2 = _pad_to_column(l2, _session_routing_column("narrow"))
         l2 += _opts_segs(j)[0]
-    elif afterglow_j or getattr(j, "provider_failure_kind", None):
+    elif afterglow_j:
         # F-46 as corrected by F-64b: the L2 line keeps the model cell (static identity,
         # not telemetry) and swaps only the stage slot for a steady `: done ✓` token
         # (check trailing, same lead-in as `: running`). L2 already leads with the
@@ -1639,9 +1636,7 @@ def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, 
         l2 = [("    ", None), (_pad(fmt_min(j.elapsed_min), _HW), "dim")]
         l2 += _model_cell(_job_display_model(j, parent_model), eff, _MW, dim=True, harness=j.harness)
         l2.append(("    ", None))
-        kind = getattr(j, "provider_failure_kind", None)
-        token = kind or ("done %s" % _LIVE_GLYPH["done"])
-        l2 += _stage_zone_segs([(token, "g_dead" if kind else "dim")])
+        l2 += _stage_zone_segs([("done %s" % _LIVE_GLYPH["done"], "dim")])
     else:
         eff = j.effort or parent_effort or None
         l2 = [("    ", None), (_pad(fmt_min(j.elapsed_min), _HW), "dim")]
@@ -5266,8 +5261,6 @@ def _build_unbounded_lines(sessions, jobs, section, narrow, malformed, layout="w
                     if residue:
                         warning = "⚠ worker left pid %s running" % ",".join(map(str, residue))
                         route_label = [(_clip_w(warning, budget), "gate_u")]
-                    elif kind := getattr(job, "provider_failure_kind", None):
-                        route_label = [(_clip_w(kind, budget), "g_dead")]
                     elif job.liveness == "dead":
                         boundary = getattr(job, "resume_boundary", None) or "-"
                         if getattr(job, "note", None) == "dead-parent-orphaned":

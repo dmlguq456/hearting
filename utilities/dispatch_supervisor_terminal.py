@@ -357,12 +357,13 @@ def classify_session_result(
     event = f"{runtime}-result"
     is_error = result.get("is_error") is True
     subtype = result.get("subtype")
-    kind = session_provider_failure_kind(result, runtime)
-    if process_exit == 0 and not is_error and subtype in {None, "success"} and not kind:
+    if (process_exit == 0 and not is_error and subtype in {None, "success"}
+            and not refused_without_result(result, runtime)):
         return _handoff_terminal(
             result.get("result"), event=event, process_exit=process_exit
         )
 
+    kind = session_provider_failure_kind(result, runtime)
     status = _api_status(result)
     text = "\n".join(_bounded_strings(result))
     terminal = classify_runtime_failure(
@@ -384,6 +385,12 @@ def session_provider_failure_kind(result: dict[str, Any], runtime: str) -> str:
             if error.get("name") == "APIError":
                 return "APIError"
     return ""
+
+
+def refused_without_result(result: dict[str, Any], runtime: str) -> bool:
+    """A content refusal changes the verdict only when no handoff can be read."""
+    return (content_refusal(session_provider_failure_kind(result, runtime))
+            and handoff_search(result.get("result")) is None)
 
 
 def _with_provider_failure(terminal: SupervisorTerminal, kind: str, status: str) -> SupervisorTerminal:
@@ -498,8 +505,10 @@ def missing_result_terminal(metadata: dict[str, Any]) -> SupervisorTerminal:
     own (possibly absent) output; reading it -- through the single
     exact-session-bound `opencode_server_log.session_error` seam -- can
     upgrade the verdict to a typed capacity/auth close with `capacity_log`
-    evidence. Otherwise keep the existing missing-result disposition. An
-    exact native terminal can still explain that disposition to the parent.
+    evidence. Every other harness, or an unreadable/ambiguous/non-capacity
+    read, keeps the conservative `dead-missing-result` note every writer used
+    before this function existed: no evidence means no guess (LOOP §4). The
+    exact log's latest turn may still name the provider's failure kind.
     """
     if metadata.get("harness") == "opencode":
         found = opencode_server_log.session_error(metadata)
@@ -516,21 +525,14 @@ def missing_result_terminal(metadata: dict[str, Any]) -> SupervisorTerminal:
         "dispatch-reap-missing-result",
         _MISSING_RESULT_RECONCILE_REASON,
         "0",
-        provider_failure_kind=logged_provider_failure_kind(metadata),
+        provider_failure_kind=_logged_provider_failure_kind(metadata),
     )
 
 
-def logged_provider_failure_kind(metadata: dict[str, Any]) -> str:
-    """A diagnostic from the exact attempt log, independent of its verdict."""
-    harness = metadata.get("harness", "")
-    path = metadata.get("log_file")
+def _logged_provider_failure_kind(metadata: dict[str, Any]) -> str:
+    harness, path = metadata.get("harness", ""), metadata.get("log_file")
     if harness in {"codex", "claude", "opencode"} and path:
-        try:
-            if Path(path).is_file():
-                terminal = classify_supervisor_log(path, harness)
-                return provider_failure_kind(terminal.provider_failure_kind)
-        except OSError:
-            pass
+        return classify_supervisor_log(path, harness).provider_failure_kind
     return ""
 
 
@@ -703,9 +705,9 @@ def reconcile_supervisor_terminal(
     # Session drivers emit their final result only after this commit; native
     # turn output can also precede route/child checks or envelope conversion.
     if emit is not None:
+        # The kind is row evidence only, so earlier readers still parse this input.
         payload = asdict(terminal)
-        if not terminal.provider_failure_kind:
-            payload.pop("provider_failure_kind")
+        payload.pop("provider_failure_kind")
         emit({"type": "dispatch.supervisor.terminal", "terminal": payload})
     return reconcile_attempt_terminal(
         Path(jobs),
@@ -841,6 +843,7 @@ def classify_supervisor_log(path: str | Path | None, harness: str) -> Supervisor
         terminal = supervisor_terminal_from_event(row)
         if terminal is not None:
             return terminal
+    native_kind = ""
     if harness == "opencode":
         # A direct run can end on a native error without a synthesized result.
         # A subsequent step or result supersedes it. Ignore ambiguous sessions.
@@ -850,8 +853,9 @@ def classify_supervisor_log(path: str | Path | None, harness: str) -> Supervisor
             sid = last["sessionID"]
             if isinstance(sid, str) and all(row.get("sessionID") in (None, sid) for row in rows):
                 terminal = classify_session_result(last, 70, runtime="opencode")
-                if terminal.provider_failure_kind:
+                if content_refusal(terminal.provider_failure_kind):
                     return terminal
+                native_kind = terminal.provider_failure_kind   # other kinds keep the verdict below
         # R1 (Gap 1): last step_finish.reason=="stop" is the exact opencode
         # success terminal. R1 must precede R2 (auto-reject) — once item 1(b)
         # (deny instead of ask) lands, "reject then recover to reason=stop"
@@ -928,4 +932,5 @@ def classify_supervisor_log(path: str | Path | None, harness: str) -> Supervisor
         # Keep this an existing runtime continuation, not a model PASS or a
         # malformed-envelope verdict that would refuse the user's correction.
         return classify_supervisor_error(harness, "owner-exited-before-terminal-settlement")
-    return classify_supervisor_error(harness, "terminal-event-missing")
+    return replace(classify_supervisor_error(harness, "terminal-event-missing"),
+                   provider_failure_kind=native_kind)

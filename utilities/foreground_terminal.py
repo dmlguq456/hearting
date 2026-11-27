@@ -29,9 +29,7 @@ from pathlib import Path
 from typing import Callable
 
 from codex_dispatch_terminal import ARTIFACT_HINT_KEYS, REVIEW_BLOCKING_NOTE, inspect_terminal_attempt
-from dispatch_attempt_policy import content_refusal, provider_failure_kind
 from dispatch_contract import close_attempt_row
-from dispatch_supervisor_terminal import logged_provider_failure_kind
 
 
 def capacity_evidence(terminal: dict, log_path) -> dict[str, str]:
@@ -69,7 +67,8 @@ def terminal_evidence(terminal: dict, terminal_note: str, log_path, outcome=None
             )
     if terminal_note == "dead-capacity":
         evidence.update(capacity_evidence(terminal, log_path))
-    for key in ARTIFACT_HINT_KEYS:
+    # The provider's failure kind is read with the terminal, never from model text.
+    for key in (*ARTIFACT_HINT_KEYS, "provider_failure_kind"):
         if terminal.get(key):
             evidence[key] = str(terminal[key])
     if terminal_note == REVIEW_BLOCKING_NOTE and terminal.get("artifact_path_b64"):
@@ -104,8 +103,7 @@ def settle_foreground_exit(jobs, attempt_id: str | None, log_path, outcome, *, w
                                         artifact_root_metadata=artifact_root, worker_type=worker_type,
                                         artifact_binding=artifact_binding)
     valid = terminal.get("state") == "valid"
-    kind = provider_failure_kind(terminal.get("provider_failure_kind"))
-    note = terminal.get("failure_note", "") if valid or content_refusal(kind) else ""
+    note = terminal.get("failure_note", "") if valid else ""
     if outcome.failure:
         note = f"dead-{outcome.failure}"
         # A native usage-limit envelope explains an ordinary nonzero exit.
@@ -118,13 +116,8 @@ def settle_foreground_exit(jobs, attempt_id: str | None, log_path, outcome, *, w
             note = "dead-capacity"
     closed = False
     if note and attempt_id:
-        evidence = terminal_evidence(terminal, note, log_path, outcome)
-        if not outcome.failure or outcome.failure == f"exit-{outcome.exit_code}":
-            if not kind and artifact_binding:
-                kind = logged_provider_failure_kind(artifact_binding)
-            if kind:
-                evidence["provider_failure_kind"] = kind
-        closed = bool(close_attempt_row(jobs, attempt_id, note, evidence=evidence))
+        closed = bool(close_attempt_row(jobs, attempt_id, note,
+                                        evidence=terminal_evidence(terminal, note, log_path, outcome)))
         if closed:
             materialize_after_terminal_close(jobs, attempt_id)
     if outcome.failure and not closed:

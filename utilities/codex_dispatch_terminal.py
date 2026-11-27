@@ -19,8 +19,8 @@ import subprocess
 import sys
 
 from dispatch_supervisor_terminal import (
-    classify_session_result, latest_codex_turn_failure, opencode_terminal_boundary,
-    session_provider_failure_kind, supervisor_terminal_from_event,
+    classify_session_result, codex_turn_failure_terminal, latest_codex_turn_failure,
+    opencode_terminal_boundary, refused_without_result, supervisor_terminal_from_event,
 )
 
 # OPERATIONS §5.10 "Review verdict is a result, not a worker death": a review
@@ -296,10 +296,12 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
             rows.append(value)
             row_line_indices.append(line_index)
 
-    if latest_codex_turn_failure(rows) is not None:
+    if (failure := latest_codex_turn_failure(rows)) is not None:
         # The last turn ended without a handoff. A completed earlier turn
         # cannot hide this failure from the existing missing-result classifier.
-        return _result(2, "absent", "none", "-", "unchecked", "-", reason="terminal-event-absent")
+        kind = codex_turn_failure_terminal(failure).provider_failure_kind
+        return _result(2, "absent", "none", "-", "unchecked", "-", reason="terminal-event-absent",
+                       **({"provider_failure_kind": kind} if kind else {}))
 
     terminal_index = next(
         (
@@ -331,7 +333,7 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
         subtype = terminal_row.get("subtype")
         runtime = "opencode" if terminal_row.get("runtime") == "opencode" else "claude"
         if (terminal_row.get("is_error") is True or subtype not in {None, "success"}
-                or session_provider_failure_kind(terminal_row, runtime)):
+                or refused_without_result(terminal_row, runtime)):
             # The live supervisor already separates a rate-limit or auth death
             # from a broken envelope (`classify_claude_result`). This post-hoc
             # reader used to call all three "claude-result-runtime-error", so

@@ -37,7 +37,6 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.fleet import interaction as fleet_interaction
 from tools.fleet import session_registry
-from dispatch_attempt_policy import provider_failure_kind
 from dispatch_contract import WRAPPER_PARENT_HARNESSES
 import route_authority  # noqa: E402
 from dispatch_completion_join import (  # noqa: E402
@@ -2455,10 +2454,6 @@ class ManagedGateway:
                         or delivery_state != "success"):
                     raise GatewayError("receipt-child-next-leg-invalid")
                 child["next_leg"] = next_leg
-            if required_action == "inspect-done-failure":
-                kind = provider_failure_kind(raw.get("provider_failure_kind"))
-                if kind:
-                    child["provider_failure_kind"] = kind
             children.append(child)
         aggregate = (
             "success"

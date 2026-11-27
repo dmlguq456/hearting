@@ -49,19 +49,6 @@ class DoneAfterglowCollectorTest(unittest.TestCase):
         self.assertEqual(job.status, "done")     # registry word preserved verbatim
         self.assertEqual(job.elapsed_min, 5)     # elapsed measured from completion
 
-    def test_provider_failure_is_visible_on_both_worker_row_layouts(self):
-        pipe = "capability=unit,harness=codex,depth=1,note=dead-missing-result,provider_failure_kind=cyberPolicy"
-        jobs, malformed = _scan([_row("done", "refused", 1, pipe=pipe)])
-        self.assertEqual(malformed, 0)
-        job, = jobs
-        self.assertEqual(job.provider_failure_kind, "cyberPolicy")
-        job.liveness = "done"
-        for segments in (render._dispatch_row(job), render._dispatch_row_2line(job)[1]):
-            self.assertIn(("cyberPolicy", "g_dead"), segments)
-        other, _ = _scan([_row("done", "ordinary", 1,
-                              pipe=pipe.replace("cyberPolicy", "private-fixture-token"))])
-        self.assertIsNone(other[0].provider_failure_kind)
-
     def test_done_row_past_the_window_is_dropped(self):
         jobs, _malformed = _scan([_row("done", "old-done", dispatch.DONE_AFTERGLOW_MIN + 1)])
         self.assertEqual(jobs, [])
