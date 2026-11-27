@@ -52,9 +52,9 @@ class PermissionProfileTest(unittest.TestCase):
         # Codex's built-in :workspace profile makes /tmp and the launch
         # TMPDIR writable. Keep these sibling fixtures under the checkout so
         # native denial checks measure the named profile's read-only rules.
-        checkout_root = Path(__file__).resolve().parents[1]
+        self.checkout_root = Path(__file__).resolve().parents[1]
         self.temp = tempfile.TemporaryDirectory(
-            prefix=".hearting-codex-git-", dir=checkout_root)
+            prefix=".hearting-codex-git-", dir=self.checkout_root)
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
         # Native Codex runs and the git commits it drives can leave a child
@@ -69,12 +69,17 @@ class PermissionProfileTest(unittest.TestCase):
         for path in (self.artifact, self.dispatch_state, self.agent_home):
             path.mkdir(mode=0o700)
         self.git_safety_env = {
+            "GIT_CEILING_DIRECTORIES": str(self.checkout_root),
+            "LC_ALL": "C",
             "GIT_CONFIG_COUNT": "2",
             "GIT_CONFIG_KEY_0": "safe.directory",
             "GIT_CONFIG_VALUE_0": str(self.repo),
             "GIT_CONFIG_KEY_1": "safe.directory",
             "GIT_CONFIG_VALUE_1": str(self.wt),
         }
+        # Profile builders inherit this environment. Git and native Codex
+        # invocations with an explicit environment use the same settings.
+        self.enterContext(mock.patch.dict(os.environ, self.git_safety_env))
         self.env = {"PATH": os.environ["PATH"], **self.git_safety_env}
         for key, name in (("HOME", "home"), ("CODEX_HOME", "codex-home"),
                           ("XDG_CACHE_HOME", "cache"), ("XDG_STATE_HOME", "state"),
@@ -83,6 +88,11 @@ class PermissionProfileTest(unittest.TestCase):
             path = self.base / name
             path.mkdir(mode=0o700)
             self.env[key] = str(path)
+        # Before init, Git must not discover the surrounding checkout.
+        probe = subprocess.run(["git", "rev-parse", "--git-dir"], cwd=self.base,
+                               env=self.env, capture_output=True, text=True)
+        self.assertEqual(probe.returncode, 128, probe.stderr)
+        self.assertIn("not a git repository", probe.stderr, probe.stderr)
         self.git("init", "-q", str(self.repo), cwd=self.base)
         self.git("config", "user.email", "fixture@example.com")
         self.git("config", "user.name", "Fixture")
@@ -110,11 +120,31 @@ class PermissionProfileTest(unittest.TestCase):
     def profile(self, network=False, *, native=False):
         build = lambda: profiles.commit_profile_config(
             str(self.wt), list(map(str, self.roots)), "workspace-write", network)
-        with mock.patch.dict(os.environ, self.git_safety_env):
-            if native:
-                return build()
-            with mock.patch.object(profiles, "named_profiles_available", return_value=True):
-                return build()
+        if native:
+            return build()
+        with mock.patch.object(profiles, "named_profiles_available", return_value=True):
+            return build()
+
+    def owner_profile(self):
+        with mock.patch.object(profiles, "named_profiles_available", return_value=True):
+            return profiles.owner_turn_profile_config(
+                str(self.wt), list(map(str, self.roots)), "workspace-write",
+            )
+
+    def test_profile_builders_use_fixture_git_ceiling(self):
+        run = subprocess.run
+
+        def check_git_ceiling(command, **kwargs):
+            self.assertEqual(command[0], "git")
+            env = os.environ if kwargs.get("env") is None else kwargs["env"]
+            self.assertEqual(env.get("GIT_CEILING_DIRECTORIES"), str(self.checkout_root))
+            return run(command, **kwargs)
+
+        for build in (self.profile, self.owner_profile):
+            with (self.subTest(builder=build.__name__),
+                  mock.patch.object(profiles.subprocess, "run", side_effect=check_git_ceiling) as lookup):
+                self.assertIsNotNone(build())
+                lookup.assert_called_once()
 
     def test_recordish_profile_keeps_cwd_read_only_and_allows_only_scoped_roots(self):
         cwd = self.base / "recordish-docs"
@@ -213,11 +243,7 @@ class PermissionProfileTest(unittest.TestCase):
         self.assertEqual(restored, config)
 
     def test_owner_turn_profiles_keep_safe_default_and_commit_carveouts(self):
-        with mock.patch.object(profiles, "named_profiles_available", return_value=True):
-            with mock.patch.dict(os.environ, self.git_safety_env):
-                config = profiles.owner_turn_profile_config(
-                    str(self.wt), list(map(str, self.roots)), "workspace-write",
-                )
+        config = self.owner_profile()
         self.assertEqual(config["default_permissions"], profiles.OWNER_OBSERVE_PROFILE_NAME)
         profiles_by_name = config["permissions"]
         self.assertEqual(set(profiles_by_name), {
@@ -279,8 +305,9 @@ class PermissionProfileTest(unittest.TestCase):
         self.assert_outside_native_temp_roots(self.repo / "source.txt")
         probe = self.base / "probe.py"
         probe.write_text('''from pathlib import Path
-import subprocess,sys
-wt,repo=map(Path,sys.argv[1:])
+import os,subprocess,sys
+wt,repo,checkout=map(Path,sys.argv[1:])
+assert os.environ.get('GIT_CEILING_DIRECTORIES') == str(checkout), os.environ.get('GIT_CEILING_DIRECTORIES')
 (wt/'source.txt').write_text('worker edit\\n')
 subprocess.run(['git','add','source.txt'],cwd=wt,check=True)
 subprocess.run(['git','commit','-qm','worker commit'],cwd=wt,check=True)
@@ -294,8 +321,8 @@ for path in [repo/'.git/config',repo/'.git/hooks/pre-commit',repo/'source.txt',w
         config_bytes = (self.repo / ".git/config").read_bytes()
         result = subprocess.run(["codex", "sandbox", "-P", profiles.PROFILE_NAME,
             "-C", str(self.wt), *profiles.config_arguments(self.profile()), "--",
-            "python3", str(probe), str(self.wt), str(self.repo)], env=self.env,
-            text=True, capture_output=True, timeout=30)
+            "python3", str(probe), str(self.wt), str(self.repo), str(self.checkout_root)],
+            env=self.env, text=True, capture_output=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.git("log", "-1", "--format=%s", cwd=self.wt), "worker commit")
         self.assertEqual((self.repo / ".git/config").read_bytes(), config_bytes)
@@ -447,10 +474,7 @@ time.sleep(4)
         spec = importlib.util.spec_from_file_location("c4_supervisor", Path(__file__).with_name("codex-app-server-supervisor.py"))
         supervisor = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(supervisor)
-        with mock.patch.object(profiles, "named_profiles_available", return_value=True):
-            owner_profiles = profiles.owner_turn_profile_config(
-                str(self.wt), list(map(str, self.roots)), "workspace-write",
-            )
+        owner_profiles = self.owner_profile()
         self.assertIsNotNone(owner_profiles)
         # Existing user sandbox configuration must not defeat the invocation
         # profile. This is our private fixture config, never the real config.
