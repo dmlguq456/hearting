@@ -237,6 +237,45 @@ class SessionPlanTest(unittest.TestCase):
             self.assertEqual(self.plan(previous, "opencode", exists=lambda s: True).row_value,
                              "fresh:store-unsupported")
 
+    def test_opencode_session_export_never_inherits_the_callers_session_shell(self):
+        record = self.root / "received.json"
+        opencode = self.root / "opencode"
+        opencode.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, sys\n"
+            f"if sys.argv[1:] != ['session', 'export', {self.session!r}]:\n"
+            "    sys.exit(1)\n"
+            f"with open({str(record)!r}, 'w', encoding='utf-8') as out:\n"
+            "    json.dump(dict(os.environ), out)\n"
+            "print('{}')\n",
+            encoding="utf-8",
+        )
+        opencode.chmod(0o755)
+        kept = {
+            "HOME": str(self.home),
+            "XDG_CONFIG_HOME": str(self.root / "config"),
+            "XDG_DATA_HOME": str(self.root / "data"),
+            "XDG_STATE_HOME": str(self.root / "state"),
+            "XDG_CACHE_HOME": str(self.root / "cache"),
+            "OPENCODE_CONFIG_DIR": str(self.root / "opencode-config"),
+            "FIXTURE_CARRIED": "kept-by-session-export",
+        }
+        caller = {
+            **kept,
+            "PATH": str(self.root),
+            "HEARTING_SHELL_SOCKET": str(self.root / "control.sock"),
+            "HEARTING_SHELL_TOKEN": "fixture-token",
+            "HEARTING_SHELL_DIRECTORY": str(self.root / "window"),
+            "HEARTING_SHELL_NATIVE_MODEL": "fixture-window-model",
+        }
+        with mock.patch.dict(os.environ, caller, clear=True):
+            self.assertTrue(UC.opencode_session_exists(self.session))
+            self.assertFalse(UC.opencode_session_exists("ses_missing"))
+            self.assertEqual(dict(os.environ), caller)
+        received = json.loads(record.read_text(encoding="utf-8"))
+        self.assertEqual(sorted(key for key in received if key.startswith("HEARTING_SHELL_")), [])
+        self.assertEqual({key: received.get(key) for key in kept}, kept)
+
     def test_an_unreadable_previous_row_is_session_missing(self):
         with mock.patch("dispatch_completion_join.exact_attempt_row", side_effect=ValueError("gone")):
             self.assertEqual(UC.session_plan(self.root / "jobs.log", FIRST, "claude").row_value,

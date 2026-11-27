@@ -912,27 +912,35 @@ class ExperimentObservationTest(unittest.TestCase):
             tracker, {**signal, "completed": 5}, 7300)
         episode = due["stagnation"]["episode_id"]
         self.assertEqual(due["stagnation"]["since"], "last-increase")
+        # The episode is made from the same material as before the threshold followed the step.
+        material = f"{('counter', 'generation-a', 'item', 20)!r}|last-increase|{100.0:.6f}|None"
+        self.assertEqual(episode, hashlib.sha256(material.encode()).hexdigest()[:20])
         tracker, _, repeated = progress._advance_progress_tracker(
             tracker, {**signal, "completed": 5}, 7400)
         self.assertEqual(repeated["stagnation"]["episode_id"], episode)
         tracker, _, recovered = progress._advance_progress_tracker(
             tracker, {**signal, "completed": 6}, 7401)
         self.assertIsNone(tracker["active_episode_id"])
-        tracker, _, restalled = progress._advance_progress_tracker(
+        # The 7301 s that ended in that increase is a step this run takes: 1.5x of it, not two hours.
+        self.assertEqual(tracker["longest_quiet_seconds"], 7301)
+        tracker, _, within_step = progress._advance_progress_tracker(
             tracker, {**signal, "completed": 6}, 14601)
+        self.assertIsNone(within_step["stagnation"])
+        tracker, _, restalled = progress._advance_progress_tracker(
+            tracker, {**signal, "completed": 6}, 7401 + 1.5 * 7301)
         self.assertNotEqual(restalled["stagnation"]["episode_id"], episode)
         reset, _, reset_state = progress._advance_progress_tracker(
-            tracker, {**signal, "completed": 2}, 14602)
+            tracker, {**signal, "completed": 2}, 18400)
         self.assertIsNone(reset["last_increase_at"])
         self.assertIsNone(reset_state["stagnation"])
         changed, _, _ = progress._advance_progress_tracker(
-            tracker, {**signal, "generation": "generation-b", "completed": 6}, 14603)
+            tracker, {**signal, "generation": "generation-b", "completed": 6}, 18401)
         self.assertIsNone(changed["last_increase_at"])
         changed_total, _, _ = progress._advance_progress_tracker(
-            tracker, {**signal, "total": 21, "completed": 6}, 14604)
+            tracker, {**signal, "total": 21, "completed": 6}, 18402)
         self.assertIsNone(changed_total["last_increase_at"])
         changed_unit, _, _ = progress._advance_progress_tracker(
-            tracker, {**signal, "unit": "epoch", "completed": 6}, 14605)
+            tracker, {**signal, "unit": "epoch", "completed": 6}, 18403)
         self.assertIsNone(changed_unit["last_increase_at"])
         first, _, _ = progress._advance_progress_tracker(None,
             {**signal, "completed": 1}, 1000)
@@ -1282,6 +1290,127 @@ class ExperimentObservationTest(unittest.TestCase):
             self.assertEqual(after_grace["admission"]["state"], "unknown")
             self.assertIn("progress-stagnation",
                 {item["kind"] for item in after_grace["observation"]["attention"]})
+
+    def _stall_notices(self, *, increases, until, planned=None, waits=(), poll=300, total=10,
+                       base=None, start=0, pad=("artifact",)):
+        """One fake run's real observer on a virtual clock: its counter (the `write_progress` shape,
+        no metric source) rises at each time in `increases`, and admission waits in each
+        `(start, end)` of `waits`. Returns `(time, receipt sizes, text)` of each waking notice that
+        told a stall, its receipts passing `session_notice.validate` before a stand-in store and ACK.
+        `base` keeps the observer's state across calls (a later call takes it over)."""
+        import session_notice
+        told, clock = {}, [0]
+
+        def notify(harness, session_id, **kw):
+            key = kw["key"].split(":")
+            receipt = session_notice.validate({"schema_version": 1, "kind": session_notice.KIND,
+                "subject": kw["subject"], "text": " ".join(kw["text"].split())[:session_notice.MAX_TEXT],
+                "required_action": kw["required_action"], "key": kw["key"]})
+            if key[2] == "attention":
+                told.setdefault(":".join(key[:5]), [clock[0], []])[1].append(receipt)
+            return {"state": "acked"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(base or tmp)
+            artifact = base.joinpath(*pad)
+            artifact.mkdir(parents=True, exist_ok=True)
+            bundle = base / "registry" / "bundle"
+            bundle.mkdir(parents=True, exist_ok=True)
+            registry = base / "registry" / "index.json"
+            registry.write_text("{}\n")
+            (bundle / "run-record.json").write_text(json.dumps({"run_id": "step-run", "started_at": 0}))
+            run = {"run_id": "step-run", "started_at": 0, "artifact_root": str(artifact),
+                   "status": "running", "session": {"harness": "claude", "id": "fixture-session"},
+                   **({"planned_seconds": planned} if planned else {})}
+            with mock.patch.object(progress, "_observation_state_path", return_value=base / "state.json"), \
+                    mock.patch("session_notice.notify", side_effect=notify):
+                for now in range(start, until + 1, poll):
+                    clock[0] = now
+                    if waits:
+                        (bundle / "decision.json").write_text(json.dumps({
+                            "admitted": not any(begin <= now < end for begin, end in waits),
+                            "snapshot": {"t": now}, "first_snapshot": {"t": 0}}))
+                    written = max([0, *(at for at in increases if at <= now)])
+                    progress.observe_experiment(run, registry, now, row_key="run", started_at=0,
+                        status="running", alive=True,
+                        progress={"completed": sum(at <= now for at in increases), "total": total,
+                                  "unit": "epoch", "updated_at": written, "age_s": now - written})
+        size = lambda receipt: len(json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode())
+        return [(at, [size(item) for item in receipts], " ".join(item["text"] for item in receipts))
+                for at, receipts in told.values() if any("progress-stagnation" in item["text"] for item in receipts)]
+
+    def _stall_notice_times(self, **kwargs):
+        return [at for at, _, _ in self._stall_notices(**kwargs)]
+
+    def test_a_step_longer_than_two_hours_is_told_only_when_the_counter_stops(self):
+        step = 130 * 60
+        increases = [step * index for index in range(1, 5)]
+        last = increases[-1]
+        # No plan: the first step, not yet seen, is told at the two hours; the three later 130-minute
+        # steps are not; the stop after them is told once, 1.5x the step after the last increase.
+        self.assertEqual(self._stall_notice_times(increases=increases, until=last + 4 * 3600),
+                         [7200, last + 1.5 * step])
+        # A plan of ten such steps gives the first one its time before any step is seen.
+        self.assertEqual(self._stall_notice_times(increases=increases, until=last + 4 * 3600,
+                                                  planned=10 * step), [last + 1.5 * step])
+
+    def test_admission_waits_keep_the_two_hour_grace_and_the_episode_they_had(self):
+        # Only the threshold changed: the grace after an admission wait is still two hours and still
+        # makes a new episode, so these notices come when the observer before this change sent them.
+        self.assertEqual(self._stall_notice_times(increases=[], until=350 * 60), [7200])
+        self.assertEqual(self._stall_notice_times(increases=[], until=540 * 60,
+                                                  waits=[(150 * 60, 160 * 60), (350 * 60, 380 * 60)]),
+                         [7200, 160 * 60 + 7200, 380 * 60 + 7200])
+        # One 130-minute step, then a stop with a one-minute wait every three hours: told at 6h01m,
+        # the end of the first two-hour grace, already past the 195-minute threshold.
+        self.assertEqual(self._stall_notice_times(increases=[130 * 60], until=420 * 60, poll=60,
+            waits=[(minute * 60, minute * 60 + 60) for minute in range(240, 421, 180)]), [7200, 361 * 60])
+        # A state that told the first step at two hours is taken over by an observer that now knows a
+        # plan (a longer threshold): the same stretch keeps its episode and is not told again.
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self._stall_notice_times(increases=[], until=7500, base=tmp), [7200])
+            self.assertEqual(self._stall_notice_times(increases=[], until=350 * 60, base=tmp, start=7800,
+                                                      planned=10 * 130 * 60), [])
+
+    def test_the_threshold_is_finite_and_never_below_two_hours(self):
+        threshold = progress._stagnation_seconds
+        self.assertEqual(threshold({"total": 10}, 10 * 7800), 11700)
+        self.assertEqual(threshold({"total": 10, "longest_quiet_seconds": 7800}), 11700)
+        self.assertEqual(threshold({"total": 1}, 1.2e308), 7200)  # 1.5x a finite plan overflows
+        self.assertEqual(threshold({"total": 10 ** 400}, 1e6), 7200)
+        for bad in (10 ** 309, float("nan"), float("inf"), -5, 0, "7800", True, None, [7800]):
+            with self.subTest(bad=bad):
+                self.assertIsNone(progress._step_seconds(bad))
+                self.assertEqual(threshold({"total": 10, "longest_quiet_seconds": bad}), 7200)
+                signal = {"completed": 1, "total": 10, "unit": "epoch", "stream_id": "counter",
+                          "generation": "generation-a"}
+                tracker = {"stream_id": "counter", "generation": "generation-a", "unit": "epoch",
+                           "total": 10, "first_observed_at": 0.0, "last_sample": 1, "last_sample_at": 0.0,
+                           "last_increase_at": None, "active_episode_id": None, "longest_quiet_seconds": bad}
+                _, _, stalled = progress._advance_progress_tracker(tracker, signal, 7200)
+                self.assertEqual(stalled["stagnation"]["state"], "stagnant")
+                learned, _, _ = progress._advance_progress_tracker(tracker, {**signal, "completed": 2}, 600)
+                self.assertEqual(learned["longest_quiet_seconds"], 600)
+                # An increase at time 0 is the stretch's start, not a missing one.
+                zero, _, _ = progress._advance_progress_tracker(
+                    {**tracker, "first_observed_at": -60.0, "last_increase_at": 0.0}, {**signal, "completed": 2}, 7800)
+                self.assertEqual(zero["longest_quiet_seconds"], 7800)
+        self.assertEqual(self._stall_notice_times(increases=[], until=350 * 60, planned=1.2e308, total=1),
+                         [7200])
+
+    def test_a_stop_after_a_longer_step_is_told_in_the_notice_the_two_hour_rule_sent(self):
+        # Only when changes: one 130-minute step, then a stop told at 5h25m (1.5x the step) with the same
+        # receipts, byte for byte in size, as the two-hour rule's stop at 4h10m, even through a record
+        # path of wide characters near the 2,048-byte receipt limit.
+        for language, pad in (("English", ("\U0001f9ea" * 55, "\U0001f9ea" * 55 + "\uac00" * 7)),
+                              ("Korean", ("\uac00" * 80, "\uac00" * 85))):  # under 255 bytes per name
+            with self.subTest(language=language), mock.patch.dict(os.environ, {"FLEET_NOW_LANG": language}):
+                step = self._stall_notices(increases=[130 * 60], until=325 * 60, pad=pad)[-1]
+                with mock.patch.object(progress, "_stagnation_seconds", return_value=7200.0):
+                    two_hours = self._stall_notices(increases=[130 * 60], until=325 * 60, pad=pad)[-1]
+                self.assertEqual((step[0], two_hours[0]), (325 * 60, 250 * 60))
+                self.assertEqual(step[1], two_hours[1])
+                self.assertTrue(all(size <= 2048 for size in step[1]))
 
     def test_virtual_checkpoint_schedule_and_independent_matrix_rows(self):
         rows = []

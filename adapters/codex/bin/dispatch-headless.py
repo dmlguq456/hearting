@@ -1502,7 +1502,8 @@ def _respawn_supervised_owner(jobs, attempt_id, *, expected_identity, check_only
         return {"state": "not-started",
                 "reason": "consumer-respawn-launch-record-unavailable:launch_lifecycle"}
 
-    dispatch_env = dict(os.environ)
+    # The caller may be the person's own window; start from what any worker inherits.
+    dispatch_env = DISPATCH_MAIN.inherited_environment()
     dispatch_env.update(artifact_env)
     dispatch_env.update({
         "AGENT_SESSION_ROLE": "worker",

@@ -595,11 +595,29 @@ def _seal_completion_summary(request, route, primary, slot, *, publication=None)
             text = work_intent.completion_summary(route, primary, route_file=request.route_file,
                                                   cost=_completion_cost(request, route),
                                                   corrections=completion_corrections(request.jobs, request.owner_attempt_id),
-                                                  assessment=assessment, publication=publication, owner=owner)
+                                                  assessment=assessment, publication=publication, owner=owner,
+                                                  tier_notes=_tier_notes(request, route))
         if text:
             _write_exclusive(slot / work_intent.SUMMARY_NAME, text.encode())
     except Exception:  # noqa: BLE001 -- an existing or unrenderable summary keeps the delivery as it was
         return
+
+
+def _tier_notes(request, route) -> list:
+    """Each stage of this route the person selected at `top` that ran below it, from the route's registry
+    rows and its degradation ledger (`model_profile.top_stage_tier_notes`); [] when unreadable."""
+    try:
+        from model_profile import top_stage_selected, top_stage_tier_notes
+        if not any(top_stage_selected(node) for node in route.get("nodes") or ()):
+            return []
+        from dispatch_degradation import route_rows
+        from dispatch_registry_cache import registry_view
+        records = registry_view(Path(request.jobs)).completion_related(
+            request.owner_attempt_id, str(route.get("route_id") or ""), str(route.get("route_hash") or ""))
+        return top_stage_tier_notes(route, rows=[record.completion_metadata() for record in records],
+                                    degradations=route_rows(route.get("route_id"), jobs=request.jobs))
+    except Exception:  # noqa: BLE001 -- an unreadable record leaves the summary without the line
+        return []
 
 
 def _row_epoch(stamp) -> Optional[float]:

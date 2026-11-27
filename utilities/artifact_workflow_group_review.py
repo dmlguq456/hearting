@@ -41,6 +41,7 @@ import artifact_meta as M  # noqa: E402
 import artifact_producer as producer  # noqa: E402
 import artifact_workflow_groups as W  # noqa: E402
 from artifact_checkpoint_trigger import CUTOVER_REL, in_test_process  # noqa: E402
+from environment_inheritance import inherited_environment  # noqa: E402
 try:  # ends a detached child with the test that started it; no-op outside tests
     from detached_lifetime import bind as end_with_test  # noqa: E402
 except ImportError:  # a partial tree without it (e.g. a fixture release): no record
@@ -184,9 +185,9 @@ def neutral_workdir(env: Optional[Mapping[str, str]] = None) -> Path:
 
 
 def _child_env() -> Dict[str, str]:
-    """The environment for a detached child or a model call: no borrowed route or attempt."""
+    """The environment for a detached child or a model call: no borrowed route, attempt, or window."""
     env = {}
-    for key, value in os.environ.items():
+    for key, value in inherited_environment().items():
         if key in _KEEP_NAMES or not (key in _SCRUB_NAMES or key.startswith(_SCRUB_PREFIXES)):
             env[key] = value
     return env

@@ -848,6 +848,9 @@ FAKE_CLAUDE = r"""#!/usr/bin/env python3
 import json, os, sys
 with open(os.environ["FAKE_PROBE_LOG"], "a") as log:
     log.write(json.dumps(sys.argv[1:]) + "\n")
+if os.environ.get("FAKE_PROBE_ENV_LOG"):
+    with open(os.environ["FAKE_PROBE_ENV_LOG"], "a") as log:
+        log.write(json.dumps(dict(os.environ), sort_keys=True) + "\n")
 mode, reset = os.environ.get("FAKE_PROBE_MODE", "allowed"), int(os.environ.get("FAKE_PROBE_RESET", "0"))
 window = os.environ.get("FAKE_PROBE_WINDOW", "five_hour")
 emit = lambda row: print(json.dumps(row))
@@ -1317,6 +1320,57 @@ class ClaudeLimitRecheckTests(unittest.TestCase):
         self.assertEqual(self.probes(), [])
         self.assertEqual(states("--recheck")["claude"], "ok")
         self.assertEqual(len(self.probes()), 1)
+
+
+    def test_a_recheck_from_a_session_shell_window_gives_the_probe_none_of_the_window(self):
+        """An owner start or a stage fallback asked from a person's window rechecks a held
+        Claude: the probe's Claude starts with none of that window's `HEARTING_SHELL_*`.
+
+        Both callers go through `usage-check.sh --recheck` with the caller's own
+        environment (the owner copies it, the fallback inherits it). The login the
+        probe answers for and the lift it records stay as before. Made-up values.
+        """
+        owner_spec = importlib.util.spec_from_file_location(
+            "capacity_window_dispatch_owner", ROOT / "utilities/dispatch-owner.py")
+        owner = importlib.util.module_from_spec(owner_spec)
+        owner_spec.loader.exec_module(owner)
+        fallback_spec = importlib.util.spec_from_file_location(
+            "capacity_window_stage_fallback", ROOT / "utilities/stage-dispatch-fallback.py")
+        fallback = importlib.util.module_from_spec(fallback_spec)
+        fallback_spec.loader.exec_module(fallback)
+        window = {
+            "HEARTING_SHELL_SOCKET": str(self.home / "fixture-shell" / "control.sock"),
+            "HEARTING_SHELL_TOKEN": "c" * 64,
+            "HEARTING_SHELL_NATIVE_MODEL": "fixture-window-model",
+        }
+        env_log = self.home / "probe-env.log"
+        caller = {**self.env, **window, "FIXTURE_CARRIED": "kept-by-the-probe",
+                  "CLAUDECODE": "1", "FAKE_PROBE_ENV_LOG": str(env_log)}
+        askers = (
+            ("dispatch-owner", lambda jobs: owner._usage(str(jobs), recheck=True)["claude"]),
+            ("stage-dispatch-fallback", lambda jobs: fallback._usage_states(jobs, recheck=True)["claude"]),
+        )
+        for name, ask in askers:
+            with self.subTest(caller=name), mock.patch.dict(os.environ, caller, clear=True):
+                # Each caller has its own registry, so each one's recheck is due.
+                self.jobs = self.home / f"{name}.jobs.log"
+                self.jobs.write_text("")
+                self.marker(time.time() - 60, f"att-{name}", reset_text="resets 2099-01-01 00:00 (UTC)")
+                before = len(env_log.read_text().splitlines()) if env_log.exists() else 0
+                self.assertTrue(Q.usage_states(self.jobs, env=dict(os.environ))["claude"].startswith("limited("))
+                self.assertEqual(ask(self.jobs), "ok")
+                lines = env_log.read_text().splitlines()[before:]
+                self.assertEqual(len(lines), 1)
+                received = json.loads(lines[0])
+                self.assertEqual(sorted(k for k in received if k.startswith("HEARTING_SHELL_")), [])
+                self.assertEqual(received.get("FIXTURE_CARRIED"), "kept-by-the-probe")
+                self.assertNotIn("CLAUDECODE", received)
+                self.assertEqual(received.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"), "1")
+                self.assertEqual(received.get("HOME"), str(self.home))  # the same login is asked
+                # The caller's window keeps its own values.
+                self.assertEqual({key: os.environ.get(key) for key in window}, window)
+                # A later reader sees the lift the probe recorded.
+                self.assertEqual(Q.usage_states(self.jobs, env=dict(os.environ))["claude"], "ok")
 
 
 class SharedGaugeHoldTests(unittest.TestCase):
