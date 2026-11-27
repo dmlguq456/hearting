@@ -547,13 +547,11 @@ def load_node(route_path: Path, node_id: str, launch_phase: str) -> tuple[dict, 
                              "no stage fallback chain; follow your Route steps")
         try:
             import worker_bootstrap as wb
-            step = wb.human_run_step(route, route_path, node, _cycle_output_dir(route, route_path))
+            step = wb.human_run_step(route, route_path, node)
         except Exception:  # the refusal stands without its advisory command
-            step = None
+            step = ""
         if step:
-            verb, command, note = step
-            raise ValueError(f"route node {node_id} is not a dispatched stage; {verb.lower()} it yourself"
-                             + (f": `{command}` ({note})" if command else f"; {note}"))
+            raise ValueError(f"route node {node_id} is not a dispatched stage; {step}")
         raise ValueError("route node lacks checked ordered fallback")
     return route, node
 

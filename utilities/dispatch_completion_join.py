@@ -1368,11 +1368,8 @@ def _next_ready_start_lines(receipt: dict, jobs: str) -> list[str]:
                                          "Act on its verdict as your task describes, then return your final handoff.")
                     elif worker_bootstrap._dispatchable_stage(node):
                         lines.append("Next ready: " + worker_bootstrap.route_start_command(route_file, node["id"]))
-                    elif step := worker_bootstrap.human_run_step(
-                            route, route_file, node, worker_bootstrap.cycle_output_dir(route, route_file)):
-                        verb, command, note = step
-                        lines.append(f"Next ready: {command}  # {verb.lower()} {node['id']} yourself: {note}"
-                                     if command else f"Next ready: {verb.lower()} {node['id']} yourself; {note}.")
+                    elif step := worker_bootstrap.human_run_step(route, route_file, node):
+                        lines.append(f"Next ready: {step}")
                     else:
                         lines.append(f"Next ready: run {node['id']} yourself (per your Route steps).")
                 lines += _owner_handed_over_lines(route, route_file, meta.get("route_node"))

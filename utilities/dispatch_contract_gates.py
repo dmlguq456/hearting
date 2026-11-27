@@ -1489,18 +1489,16 @@ def _resource_predecessor_action(route, dep: str, actions: dict, route_file=None
     """A resource predecessor with no current marker is continued, never waited on; a stage the owner
     runs itself names its exact completion command (nothing else would publish its marker)."""
     node = next((row for row in route.get("nodes", []) if row.get("id") == dep), None)
-    if node is not None and node.get("kind") == "resource-runner":
-        actions[dep] = resource_stage_next_action(
-            GateCurrency("resource-stage-not-current", RESOURCE_STAGE_UNSETTLED), dep)
-        return
     try:
         import worker_bootstrap as wb
-        step = wb.human_run_step(route, route_file, node, wb.cycle_output_dir(route, route_file)) \
-            if wb.owner_run_stage(node) and route_file else None
+        step = wb.human_run_step(route, route_file, node) if route_file else ""
     except Exception:  # advisory text only: the refusal itself is unchanged
-        step = None
-    if step:
-        actions[dep] = f"{dep} is run by the route owner itself: run `{step[1]}` ({step[2]}), then retry this launch"
+        step = ""
+    if node is not None and node.get("kind") == "resource-runner":
+        actions[dep] = resource_stage_next_action(
+            GateCurrency("resource-stage-not-current", RESOURCE_STAGE_UNSETTLED), dep) + (f"; {step}" if step else "")
+    elif step:
+        actions[dep] = f"{dep} is run by the route owner itself: {step}; then retry this launch"
 
 
 def resource_stage_unsettled(currency: GateCurrency) -> bool:

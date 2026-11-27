@@ -187,10 +187,13 @@ for this part before the route starts. Leave `full-run` out when the approval
 or executable environment is absent, and compose it separately after approval.
 The resource runner continues to enforce route verification, hash-bound smoke
 attestation, config provenance, the governor, and its `supervised` continuation.
-The owner's Route steps, the receipt after `smoke`, `complete --check` and the
-stage-start refusal print `full-run`'s exact `resource-runner.py start` (this
-route, node, cycle registry, log and smoke attestation); replace only
-`<approved command>` with the approved payload.
+The owner's Route steps, the receipt after `smoke`, `complete --check`, the
+stage-start refusal and `workflow-supervisor status` print `full-run`'s exact
+`resource-runner.py start` only when this route's own bound cycle, its declared
+smoke attestation and any sealed config manifest (S3-2b: that manifest's run id
+with `--config-manifest`) fix every argument; otherwise they name what is
+missing. A run id the registry already holds is shown with its state, and a
+failed one is retried as `__a<N>`, instead of a new start.
 
 For a failed resource run, use `<manifest_run_id>__a<N>` (N starts at 1) on the same route; reusing the previous run ID with a new owner conflicts with its existing watch binding (`resource-watch-binding-conflict`). When a completed `compute-hosts` run is offered instead, pass its id once to the existing `resource-runner start --compute-run <run-id>` surface. The runtime accepts only same-route (or its verified owner-pin-handoff successor) and sealed-contract evidence, a zero exit, declared outputs, and a fresh remote quiescence observation. The handoff creates the next `__aN` resource row and preserves the failed row; it does not start a payload or replace independent `run-verify` judgment. A run id alone is not evidence. A run this route's own owner launched directly with `compute-hosts run` (route provenance only, no resource row) is adopted by the same command as `<node>__aN` when it is this route's finished (exit 0, no process) run that no other row holds; command, inputs and outputs are recorded as matched or unverified, not required.
 For a retryable nonzero exit, the existing declared verifier may start from the
