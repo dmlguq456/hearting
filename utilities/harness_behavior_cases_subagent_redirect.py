@@ -12,11 +12,15 @@ Loaded by ``harness_behavior_scenarios.py`` (``_load_extra``).
 
 ``subagent-redirect``
     The person's session (the TUI) calls its native subagent tool with a name of the table (the light
-    name each harness knows). The installed hook starts it as a ``general/explore`` unit route at
-    ``light``, the native call is refused with the route's one line (no native subagent request
-    reaches the model), the one worker answers and ends, and its answer comes back to the resting
-    session as the completion notice (``Answer:``). The oracle also keeps the texts the session saw
-    (the refusal line, the notice) and the times (the hook's start, the end to the notice).
+    name each harness knows). On Claude and Codex the installed hook starts it as a ``general/explore``
+    unit route at ``light``, the native call is refused with the route's one line (no native subagent
+    request reaches the model), the one worker answers and ends, and its answer comes back to the
+    resting session as the completion notice (``Answer:``). On OpenCode, which is not intercepted, the
+    native subagent runs and no unit route starts. The oracle also keeps the texts the session saw and
+    three times, each named for what it spans: the call to the tool result
+    (``call_to_tool_result_seconds``), the call to the first worker request
+    (``call_to_worker_request_seconds``) and the fixture model's release of the worker's last reply to
+    the notice (``release_to_notice_seconds``).
 
 ``subagent-redirect-no-answer``
     The same, but the worker ends with an empty answer: what the session is told when no answer comes.
@@ -27,15 +31,27 @@ Loaded by ``harness_behavior_scenarios.py`` (``_load_extra``).
     and none starts after the slot frees.
 
 ``subagent-redirect-untouched``
-    Calls the hook leaves alone: a user agent (a name not in the table), the session's own history
-    handed over (Claude ``fork``, Codex ``fork_context``), and a registered worker's call. No unit route
-    starts for any of them.
+    Calls the hook leaves alone: a user agent (a name not in the table), the user's own definition of a
+    table name (the light name), the session's own history handed over (Claude ``fork``, Codex
+    ``fork_context``), and a registered worker's call. No unit route starts for any of them.
+
+``subagent-redirect-other-hook`` (Claude, Codex)
+    Another ``PreToolUse`` hook that refuses the subagent call is registered beside Hearting's. The
+    harness runs both side by side, so Hearting's hook must start nothing: no unit route row, no
+    worker request and no native subagent request reach the model.
+
+``subagent-redirect-cost`` (Claude, Codex)
+    One open session, one prompt and one fixture model: the call made under the registration from before
+    this change (native), then, with the hook settings rewritten while the session stays open, the same
+    call again. It records for each the call, the first subagent or worker request, the parent's tool
+    result and the answer's arrival, and whether the open session took the new registration.
 
 ``subagent-redirect-faults`` (Claude, Codex)
     The registered redirect command is replaced, one at a time, by a command that fails the way a hook
     can fail (exits 1, is killed, prints garbage, runs past its timeout), and by the registration a session
     opened before this change carries (no ``--redirect``, 15 s). Each time the native subagent must still
-    run. Exit 2 is measured too: the harnesses read it as a block, which the shared redirect never returns.
+    run. Exit 2 is the control: the harnesses read it (with stderr) as a block, so the native subagent must
+    not run; the shared redirect never returns it, and Codex's runner turns the bridge's own failures into 0.
 
 Everything stays in the fixture root; no user config is read or written.
 """
@@ -282,9 +298,10 @@ class SubagentHookSeamScenario(Scenario):
         ev["spawn_schemas"] = dict(SPAWN_SCHEMAS)
         for mode in ("tui", "headless"):
             run.note(f"{mode}: sub={ev[mode]['sub_request']} seen={[s['tool'] for s in ev[mode]['seen']]}")
-        if not ev["tui"]["sub_request"]:
+        # Each mode is its own measurement: a headless run whose subagent never reached the model proves nothing.
+        if not (ev["tui"]["sub_request"] and ev["headless"]["sub_request"]):
             return "inconclusive"
-        return "pass" if ev["tui"]["seen"] else "gap"
+        return "pass" if ev["tui"]["seen"] and ev["headless"]["seen"] else "gap"
 
 
 class SubagentHookSeamV2Scenario(SubagentHookSeamScenario):
@@ -450,19 +467,36 @@ class SubagentRedirectScenario(unit.UnitRouteScenario):
             self.worker_end.set()
             self.hold_end.set()
 
+    def run_native(self, run, ev):
+        """OpenCode is not intercepted: the native subagent runs and no unit route starts."""
+        if not self.ask(run, "light"):
+            run.note("the subagent call returned nothing to the session")
+            return "inconclusive"
+        wait_for(lambda: self.native, 60, 1)
+        run.wait_idle(6, 60)
+        at, text = self.results["light"]
+        ev["call_to_tool_result_seconds"] = round(at - self.spawned["light"], 1)
+        ev["tool_result"] = text[-800:]
+        ev["native_subagent_requests"] = len(self.native)
+        ev["explore_rows"] = len(explore_rows(self.jobs))
+        run.note(f"native={len(self.native)}; rows={ev['explore_rows']}; refused-line={STARTED in text}")
+        return "pass" if self.native and not ev["explore_rows"] and STARTED not in text else "fail"
+
     def run_redirect(self, run, ev):
+        if run.harness == "opencode":
+            return self.run_native(run, ev)
         if not self.ask(run, "light"):
             run.note("the subagent call returned nothing to the session")
             return "inconclusive"
         at, text = self.results["light"]
-        ev["hook_seconds"] = round(at - self.spawned["light"], 1)
+        ev["call_to_tool_result_seconds"] = round(at - self.spawned["light"], 1)
         ev["refusal"] = text[-1200:]
         rows = wait_for(lambda: explore_rows(self.jobs), 30, 1) or []
         ev["rows_after_start"] = [{k: r.get(k) for k in ("status", "unit", "worker_type", "model_profile", "harness",
                                                           "route_id", "dispatch_depth")} for r in rows]
         workers = [r for r in run.main_requests() if "Dispatch metadata:" in r["text"] and self.sub in r["text"]]
         if workers:
-            ev["start_seconds"] = round(workers[0]["at"] - self.spawned["light"], 1)
+            ev["call_to_worker_request_seconds"] = round(workers[0]["at"] - self.spawned["light"], 1)
         run.wait_idle(6, 60)
         released = time.time()
         self.worker_end.set()
@@ -481,13 +515,15 @@ class SubagentRedirectScenario(unit.UnitRouteScenario):
                                                    "failure_class", "note", "route_id")} if rows else None)
         ev["native_subagent_requests"] = len(self.native)
         if notice:
-            ev["notice_seconds"] = round(notice[0]["at"] - released, 1)
+            ev["release_to_notice_seconds"] = round(notice[0]["at"] - released, 1)
             ev["notice"] = notice[0]["last_text"][-2500:]
+        ev["attention_notice"] = bool(notice) and "Answer:" not in ev.get("notice", "")
         ev["requests_after_notice"] = [r["last_text"][-300:] for r in self.resting(run, "light")
                                        if notice and r["at"] > notice[0]["at"]]
         run.note(f"refused={STARTED in ev['refusal']}; rows={len(rows)}; native={len(self.native)}; "
-                 f"notice={'yes' if notice else 'no'}; hook={ev.get('hook_seconds')}s; "
-                 f"start={ev.get('start_seconds')}s; end-to-notice={ev.get('notice_seconds')}s")
+                 f"notice={'yes' if notice else 'no'}; call-to-result={ev.get('call_to_tool_result_seconds')}s; "
+                 f"call-to-worker={ev.get('call_to_worker_request_seconds')}s; "
+                 f"release-to-notice={ev.get('release_to_notice_seconds')}s")
         return self.verdict(run, ev, rows, notice)
 
     def verdict(self, run, ev, rows, notice):
@@ -563,6 +599,9 @@ class SubagentRedirectCapacityScenario(SubagentRedirectScenario):
                                            if "start-refused" in p.read_text(encoding="utf-8", errors="replace"))}
 
     def run_redirect(self, run, ev):
+        if run.harness == "opencode":
+            run.note("OpenCode does not intercept the call: there is no start for the cap to refuse")
+            return "not-applicable"
         ev["hold"] = self.compose_other(run, self.HOLD, "hb-hold-slot")
         held = wait_for(lambda: [r for r in registry_rows(self.jobs) if "hb-hold-slot" in r.get("slug", "")
                                  and r["status"] not in TERMINAL_STATES], 60, 1)
@@ -573,7 +612,7 @@ class SubagentRedirectCapacityScenario(SubagentRedirectScenario):
             run.note("the subagent call returned nothing to the session")
             return "inconclusive"
         at, text = self.results["light"]
-        ev["hook_seconds"] = round(at - self.spawned["light"], 1)
+        ev["call_to_tool_result_seconds"] = round(at - self.spawned["light"], 1)
         ev["tool_result"] = text[-800:]
         wait_for(lambda: self.native, 60, 1)
         run.wait_idle(6, 60)
@@ -604,6 +643,23 @@ class SubagentRedirectUntouchedScenario(SubagentRedirectScenario):
     def prepare(self, run):
         super().prepare(run)
         self.user_agent(run)
+        self.own_light(run)
+
+    def own_light(self, run):
+        """The user's own definition under the table's light name: the harness picks it, not the built-in."""
+        model = ce.fixture_model_id(run.harness)
+        name = LIGHT_NAME[run.harness]
+        if run.harness == "claude":
+            path = Path(run.home.env["CLAUDE_CONFIG_DIR"]) / "agents" / "hb-own-light.md"
+            text = f"---\nname: {name}\ndescription: The user's own {name}.\n---\nAnswer in one line.\n"
+        elif run.harness == "codex":
+            path = Path(run.home.env["CODEX_HOME"]) / "agents" / "hb-own-light.toml"
+            text = (f'name = "{name}"\ndescription = "The user\'s own {name}."\nmodel = "{model}"\n'
+                    'developer_instructions = "Answer in one line."\n')
+        else:
+            return
+        _own_dir(path.parent)
+        path.write_text(text, encoding="utf-8")
 
     def user_agent(self, run):
         """One agent the user wrote (not in the table), on the fixture model."""
@@ -625,6 +681,8 @@ class SubagentRedirectUntouchedScenario(SubagentRedirectScenario):
 
     def calls(self, run):
         calls = [("user-agent", USER_AGENT, None)]
+        if run.harness in ("claude", "codex"):
+            calls.append(("own-light", LIGHT_NAME[run.harness], None))
         if run.harness == "claude":
             calls.append(("fork", "fork", None))
         if run.harness == "codex":
@@ -670,6 +728,8 @@ class SubagentRedirectUntouchedScenario(SubagentRedirectScenario):
         run.note("; ".join(f"{label}: native={r['native']} rows={r['rows']}" for label, r in results.items()))
         ok = all(r["rows"] == 0 and STARTED not in r.get("tool_result", "") for r in results.values())
         ok = ok and results["user-agent"]["native"]
+        if "own-light" in results:
+            ok = ok and results["own-light"]["native"]
         if results["worker"]["subagent_tool"]:
             ok = ok and results["worker"]["native"]
         else:
@@ -755,9 +815,126 @@ class SubagentRedirectFaultsScenario(SubagentRedirectScenario):
         run.note("; ".join(f"{label}: native={r['native']}" for label, r in results.items() if not label.startswith("_")))
         kept = [label for label in results if not label.startswith("_") and label != "exit-2"]
         ok = all(results[label]["native"] and not results[label]["rows"] for label in kept)
+        # The control: exit 2 with stderr is the harness's block, so nothing runs (the redirect never exits 2).
+        ev["exit_2_blocks"] = not results["exit-2"]["native"] and not results["exit-2"]["rows"]
+        return "pass" if ok and ev["exit_2_blocks"] else "fail"
+
+
+class SubagentRedirectOtherHookScenario(SubagentRedirectScenario):
+    name = "subagent-redirect-other-hook"
+    summary = ("Another PreToolUse hook refuses the subagent call beside Hearting's: the harness runs both side by "
+               "side, so Hearting's hook starts nothing (no row, no worker request) and nothing runs natively.")
+    REFUSAL = "refused-by-another-hook"
+
+    def prepare(self, run):
+        super().prepare(run)
+        command = "sh -c " + shlex.quote(f"cat >/dev/null; echo {self.REFUSAL} >&2; exit 2")
+        if run.harness == "claude":
+            path = Path(run.home.env["CLAUDE_CONFIG_DIR"]) / "settings.json"
+            matcher = "Agent"
+        elif run.harness == "codex":
+            path = Path(run.home.env["CODEX_HOME"]) / "hooks.json"
+            matcher = "spawn_agent|collaborationspawn_agent"
+        else:
+            return
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data.setdefault("hooks", {}).setdefault("PreToolUse", []).append(
+            {"matcher": matcher, "hooks": [{"type": "command", "command": command, "timeout": 10}]})
+        _write_own(path, json.dumps(data, indent=1), run.home.root)
+        if run.harness == "codex":
+            run.evidence["hook_trust_again"] = (run.home.trust_codex_hooks(run.binary) or {}).get("status")
+
+    def run_redirect(self, run, ev):
+        if run.harness == "opencode":
+            run.note("OpenCode does not intercept the call")
+            return "not-applicable"
+        if not self.ask(run, "light"):
+            run.note("the subagent call returned nothing to the session")
+            return "inconclusive"
+        run.wait_idle(6, 60)
+        wait_for(lambda: False, 20, 5)            # a start that went ahead would register by now
+        _at, text = self.results["light"]
+        workers = [r for r in run.main_requests() if "Dispatch metadata:" in r["text"] and self.sub in r["text"]]
+        ev.update(tool_result=text[-800:], explore_rows=len(explore_rows(self.jobs)), worker_requests=len(workers),
+                  native_subagent_requests=len(self.native), other_hook_refused=self.REFUSAL in text)
+        run.note(f"rows={ev['explore_rows']}; worker requests={len(workers)}; native={len(self.native)}; "
+                 f"other hook's refusal shown={ev['other_hook_refused']}")
+        ok = (not ev["explore_rows"] and not workers and not self.native and STARTED not in text
+              and ev["other_hook_refused"])
+        return "pass" if ok else "fail"
+
+
+class SubagentRedirectCostScenario(SubagentRedirectScenario):
+    name = "subagent-redirect-cost"
+    summary = ("One open session, one prompt and one fixture model: the call under the registration from before this "
+               "change (native), then the same call after the hook settings are rewritten with the session still "
+               "open. Records call, first subagent or worker request, tool result and answer arrival for each.")
+
+    def calls(self, run):
+        return [("old", LIGHT_NAME[run.harness], None), ("new", LIGHT_NAME[run.harness], None)]
+
+    def prepare(self, run):
+        super().prepare(run)
+        self.hook_file = None
+        if run.harness == "claude":
+            self.hook_file = Path(run.home.env["CLAUDE_CONFIG_DIR"]) / "settings.json"
+        elif run.harness == "codex":
+            self.hook_file = Path(run.home.env["CODEX_HOME"]) / "hooks.json"
+        if not self.hook_file:
+            return
+        self.hook_text = self.hook_file.read_text(encoding="utf-8")
+        _write_own(self.hook_file, SubagentRedirectFaultsScenario.registration(self, run, "old-line"), run.home.root)
+        if run.harness == "codex":
+            run.evidence["trust_old"] = (run.home.trust_codex_hooks(run.binary) or {}).get("status")
+
+    def arrived(self, run, label, since):
+        """The parent's first request that holds this call's answer: a fast native subagent's result can ride
+        in the same request as the tool result; the unit route's answer is its notice (or a finished receipt)."""
+        word = f"native subagent answer {self.nonce}" if label == "old" else ANSWER_HEAD
+        return [r for r in self.resting(run, label) if r["at"] >= since and word in r["text"]]
+
+    def run_redirect(self, run, ev):
+        if not self.hook_file:
+            run.note("OpenCode does not intercept the call: there is no old and new registration to compare")
+            return "not-applicable"
+        self.worker_end.set()                       # nothing is held: every answer comes when it is ready
+        measured = {}
+        for label in ("old", "new"):
+            if label == "new":
+                _write_own(self.hook_file, self.hook_text, run.home.root)   # the new line, the session still open
+                if run.harness == "codex":
+                    ev["trust_new"] = (run.home.trust_codex_hooks(run.binary) or {}).get("status")
+                time.sleep(5)
+            before_native, before_rows = len(self.native), len(explore_rows(self.jobs))
+            if not self.ask(run, label):
+                measured[label] = {"tool_result": None}
+                continue
+            call = self.spawned[label]
+            at, text = self.results[label]
+            done = wait_for(lambda: self.arrived(run, label, at), 200, 1)
+            workers = [r["at"] for r in run.main_requests()
+                       if "Dispatch metadata:" in r["text"] and f"{self.sub}-{label}" in r["text"]]
+            firsts = [t for t, seen in self.native if seen == label] + workers
+            measured[label] = {
+                "redirected": STARTED in text, "tool_result": text[-600:],
+                "call_to_tool_result_seconds": round(at - call, 1),
+                "call_to_first_subagent_request_seconds": round(min(firsts) - call, 1) if firsts else None,
+                "call_to_answer_seconds": round(done[0]["at"] - call, 1) if done else None,
+                "native": len(self.native) - before_native, "rows": len(explore_rows(self.jobs)) - before_rows}
+            run.wait_idle(6, 60)
+        ev["cost"] = measured
+        old, new = measured.get("old", {}), measured.get("new", {})
+        ev["open_session_took_new_line"] = bool(new.get("redirected"))
+        if old.get("call_to_answer_seconds") is not None and new.get("call_to_answer_seconds") is not None:
+            ev["more_seconds"] = round(new["call_to_answer_seconds"] - old["call_to_answer_seconds"], 1)
+        run.note(f"old: {old.get('call_to_answer_seconds')}s native={old.get('native')}; new: "
+                 f"{new.get('call_to_answer_seconds')}s redirected={new.get('redirected')}; "
+                 f"more={ev.get('more_seconds')}s")
+        ok = (old.get("native") and not old.get("rows") and old.get("call_to_answer_seconds") is not None
+              and new.get("tool_result") is not None)
         return "pass" if ok else "fail"
 
 
 SCENARIOS = [SubagentHookSeamScenario, SubagentHookSeamV2Scenario, SubagentRedirectScenario,
              SubagentRedirectNoAnswerScenario, SubagentRedirectCapacityScenario, SubagentRedirectUntouchedScenario,
-             SubagentRedirectFaultsScenario]
+             SubagentRedirectFaultsScenario, SubagentRedirectOtherHookScenario, SubagentRedirectCostScenario]

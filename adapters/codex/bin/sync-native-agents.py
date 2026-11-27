@@ -67,7 +67,7 @@ CATALOG_SANDBOX = "workspace-write"
 # A person's session's call of a catalog agent starts a unit route (core/OPERATIONS.md §5.10c); the
 # same definition serves a registered worker, whose call runs natively, so the line names the session.
 _UNIT_ROUTE = (" In a person's session the call starts a read-only Hearting unit route "
-               "(general/explore, {depth}) and runs natively only when that cannot start.")
+               "(general/explore, {depth}) when that is certain, and otherwise runs natively.")
 
 CATALOG_AGENTS = {
     "balanced": {

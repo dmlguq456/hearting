@@ -1,5 +1,5 @@
 ---
-description: "Breadth fan-out agent on the portable light budget — parallel sweeps, audits, comparisons, routine searches. In a person's session the call starts a read-only Hearting unit route (general/explore, light) and runs natively only when that cannot start."
+description: "Breadth fan-out agent on the portable light budget — parallel sweeps, audits, comparisons, routine searches."
 mode: subagent
 model: opencode-go/deepseek-v4.1-flash
 ---

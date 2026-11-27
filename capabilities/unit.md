@@ -48,23 +48,27 @@ The node writes only under the cycle's `units/unit/**` (one report). A read-only
 
 ## A native subagent call
 
-A person's session that calls its harness's native subagent tool (Claude `Agent`, Codex `spawn_agent` or multi-agent v2's `collaborationspawn_agent`, OpenCode `subagent`, V1 `task`) gets this route instead. The pre-tool hook (Claude and Codex `PreToolUse`, OpenCode `tool.execute.before`; `utilities/native_subagent_redirect.py`) runs `compose --start --unit general/explore --profile <depth> --ephemeral --prompt-file -` with the call's description and prompt as the brief, and refuses the native call with one line:
+A person's session that calls Claude `Agent` or Codex `spawn_agent` (multi-agent v2's `collaborationspawn_agent`) gets this route instead when that is certain. The `PreToolUse` hook (`utilities/native_subagent_redirect.py`) runs `compose --start --unit general/explore --profile <depth> --ephemeral --prompt-file -` with the call's description and prompt as the brief, and refuses the native call with one line naming the route and how its answer comes back, the start receipt's own directive:
 
 > Started as Hearting unit route `<route id>` (general/explore, `<depth>`, no record). Its answer comes back to this session as a completion notice. Do not call it again; go on with other work or end the turn.
 
-The answer is the record-free notice's `Answer:` (below). The leg is read-only: what should change comes back as a diff in the answer. The agent name picks the depth:
+That is the line when the receipt says `parent_next=end-turn`. When it says `bounded-wait` (no completion notice reaches the session), the line instead gives its `parent_next_command` to run once for the answer. The answer is the record-free notice's `Answer:` (below). The leg is read-only: what should change comes back as a diff in the answer. The agent name picks the depth:
 
 | Name in the call | Depth |
 |---|---|
 | `light`, `Explore`, `explorer`, `explore`, `memory-scout` | `light` |
-| `balanced`, `worker`, `default`, OpenCode `general`; no name on Codex and OpenCode | `balanced` |
+| `balanced`, `worker`, `default`; no name on Codex | `balanced` |
 | `general-purpose`, `Plan`; no name on Claude | `balanced-deep` |
 | `deep` | `deep` |
-| a model named in the call | the depth the harness's `models.conf` declares that model for (none: left alone) |
+| a model (Codex: and effort) named in the call | the depth the harness's `models.conf` declares it for (none: left alone) |
 
-Left alone, so the native call runs as before (with the default model of `core/HOOKS.md`): a name the table does not list (an agent that stands in for one tool, such as `web-fetch` or `statusline-setup`, `claude-code-guide`, `claude`, a user or plugin agent), a call that hands over the session's own history (Claude `fork`, which the model hook still refuses; Codex `fork_context`; a v2 call without `fork_turns: "none"`), a Claude call that resumes an agent or asks for `isolation`, an OpenCode call that continues a session, a registered worker's call, and a call made inside a native subagent.
+The route starts only when all of this holds; otherwise the hook prints nothing and the native call runs as before (with the default model of `core/HOOKS.md`):
+- The definition the harness picks for the name is Hearting's shipped one or the harness's built-in (Claude `Explore`, `Plan`, `general-purpose`; Codex `default`, `worker`, `explorer`). A project or managed definition of the same name, a user's own definition, a Codex `[agents.<name>]` declaration, or a definition that cannot be read leaves the call alone, as does a name the table does not list (`web-fetch`, `statusline-setup`, `claude-code-guide`, `claude`, a plugin agent).
+- The call carries only what a brief can: not the session's history (Claude `fork`, which the model hook still refuses; Codex `fork_context`; a v2 call without `fork_turns: "none"`), not attachments (Codex `items`, alone or beside a message), not Claude `resume` or `isolation`, nor any argument the table does not know.
+- No other hook or rule decides the same call. The harness runs every matching `PreToolUse` hook side by side, and Claude applies deny/ask rules after them, so neither can see the route started: another `PreToolUse` hook matching the subagent tool in any settings, hooks or plugin file the hook can read, a Claude `permissions.deny`/`ask` rule naming `Agent` or `Task`, or Hearting's own model policy refusing the call leaves it to the native path.
+- The caller is a person's session: not a registered worker, and not a native subagent (a Codex thread whose spawn record cannot be read counts as unknown).
 
-When the route cannot start now — the governor has no slot or start budget (`waiting-capacity`), Hearting is not reachable, the start is refused or fails, or it runs past the hook's budget (150 s; the registrations allow 180 s) — the hook prints nothing and the native call runs. That start arms no later start and its record-free route is closed (`start-refused`), so the route and the native call never both do the work. A session opened before this registration keeps the one it started with (Claude: the model hook without `--redirect`; Codex: no `spawn_agent` hook; OpenCode: the plugin it loaded) and calls natively until it is opened again.
+What decides that the route started is the start receipt (`running` or `completed`), or, when that receipt is late, a registry row of the route past its launch fence (`launch_started=1`) whose worker still runs; once either holds, the native call is refused, however late the rest of the output is. A start that has neither by the hook's budget (150 s from writing the brief; the registrations allow 180 s), or that is refused, fails or is interrupted, is stopped with its whole process group (the launcher too, so a launch fence not yet released never runs its worker), each attempt it registered is stopped, and its record-free route is closed (`start-refused`); it arms no later start. If the hook process itself goes away first, the compose process ends its own group. OpenCode is not intercepted: its `subagent` permission (`ask` when no rule matches) and other plugins' before-hooks decide inside the tool, where the plugin cannot see them, so an OpenCode subagent call runs natively. A Claude or Codex session opened before this registration keeps the one it started with (Claude: the model hook without `--redirect`; Codex: no `spawn_agent` hook) until its harness reloads hook settings or it is opened again; Claude's settings watcher may pick up the new line while the session is open (`core/HOOKS.md`).
 
 ## A worker that starts a unit route
 

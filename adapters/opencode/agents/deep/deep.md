@@ -1,5 +1,5 @@
 ---
-description: "Deep investigation agent on the portable deep budget — root cause, architecture, subtle correctness. In a person's session the call starts a read-only Hearting unit route (general/explore, deep) and runs natively only when that cannot start."
+description: "Deep investigation agent on the portable deep budget — root cause, architecture, subtle correctness."
 mode: subagent
 model: opencode-go/muse-spark-1.3-contributor
 ---

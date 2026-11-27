@@ -1,5 +1,5 @@
 ---
-description: "Execute an approved decision across multiple steps on the balanced budget. In a person's session the call starts a read-only Hearting unit route (general/explore, balanced) and runs natively only when that cannot start."
+description: "Execute an approved decision across multiple steps on the balanced budget."
 mode: subagent
 model: opencode-go/deepseek-v4.1-flash
 ---

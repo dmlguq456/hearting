@@ -53,4 +53,13 @@ if [ -z "${PYTHONPYCACHEPREFIX:-}" ] && [ -z "${PYTHONDONTWRITEBYTECODE:-}" ]; t
   fi
   unset _state_root
 fi
+if [ "$script" = "pretooluse-subagent-redirect.py" ]; then
+  # This hook only ever refuses a subagent call it started as a Hearting unit route, with deny JSON on
+  # success. A bridge a partial install lacks, or one that fails, lets the native call run: Codex reads
+  # exit 2 with stderr as a refusal, so no failure of this bridge may reach it.
+  if out=$(AGENT_HOME="$agent_root" python3 "$agent_root/adapters/codex/hooks/$script" "$@" 2>/dev/null); then
+    printf '%s' "$out"
+  fi
+  exit 0
+fi
 AGENT_HOME="$agent_root" exec python3 "$agent_root/adapters/codex/hooks/$script" "$@"

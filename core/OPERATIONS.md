@@ -1706,13 +1706,16 @@ whose report is empty, says no review was done or declares nothing is not finish
 notice path serves all three harnesses. The launching session need not be an owner: this section does not change which work is direct, solo or staged
 (`core/WORKFLOW.md` §0.2.1).
 
-A native subagent call (Claude `Agent`, Codex `spawn_agent`, OpenCode `subagent`/`task`) made by a person's session
-is started by the pre-tool hook as this route (`utilities/native_subagent_redirect.py`): the agent name picks the depth
-(`capabilities/unit.md`, A native subagent call), the call's prompt is the brief, `--ephemeral` keeps no record, and the
-call itself is refused with one line naming the route. When the route cannot start now (the governor has no slot,
-Hearting is not reachable, the start fails or exceeds the hook's budget), the hook prints nothing and the native call
-runs as before; that start arms no later start and leaves no open route, so the route and the native call do the work once. A
-registered worker's call and a call inside a native subagent are left alone.
+A native subagent call (Claude `Agent`, Codex `spawn_agent`) made by a person's session is started by the
+`PreToolUse` hook as this route (`utilities/native_subagent_redirect.py`) only when that is certain: the definition the
+harness picks for the name is Hearting's shipped one or its built-in, the call carries nothing a brief cannot, and no
+other hook or permission rule decides the same call (`capabilities/unit.md`, A native subagent call). The agent name
+picks the depth, the call's prompt is the brief, `--ephemeral` keeps no record, and the call itself is refused with one
+line naming the route and the receipt's own way back (a completion notice, or its bounded-wait command). The start
+counts once its receipt says so or a row of the route is past its launch fence and running; a start that has neither
+within the hook's budget, or is refused or fails, is stopped with its process group, its attempts are stopped and its
+route is closed, and the native call runs as before. A registered worker's call, a call inside a native subagent and
+every OpenCode subagent call run natively.
 
 A registered worker (owner, stage worker or unit worker) may open a unit route too. Its leg is a depth-1 leg of
 its own route, so no depth number stands in the way: a chain of workers each starting another is bounded by the

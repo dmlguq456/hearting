@@ -430,14 +430,23 @@ below.
 ## A Native Subagent Call Starts a Unit Route (H1)
 
 The same `Agent|Task` registration runs `hooks/subagent-model-default.sh --redirect` (timeout
-180 s). `--redirect` first hands a person's session's call to `utilities/native_subagent_redirect.py`,
-which starts it as a `general/explore` unit route (`capabilities/unit.md`, A native subagent call) and
-refuses the native call with the route's one line; Claude shows that line to the model after
-`PreToolUse:Agent hook error:`. One script holds both steps because how two hooks on one matcher combine a
-deny with an `updatedInput` was not verified. When the route does not start (the governor has no slot,
-the start fails or runs past 150 s, a name outside the table, `fork`, a worker, a native subagent) nothing
-is printed by that step and the model default below applies as before. A session opened before this
-registration keeps the old line (no `--redirect`, 15 s) and redirects nothing. Measured in isolated TUIs
+180 s). The model policy below decides first; a call it lets through goes to
+`utilities/native_subagent_redirect.py`, which starts it as a `general/explore` unit route only when that
+is certain (`capabilities/unit.md`, A native subagent call) and then refuses the native call with the
+route's line; Claude shows it to the model after `PreToolUse:Agent hook error:`. Certain means: the
+definition Claude picks for the name is Hearting's shipped one or a built-in (a project `.claude/agents/`
+file, found walking up from the working directory, wins over the user's,
+https://code.claude.com/docs/en/sub-agents#choose-the-subagent-scope); no other `PreToolUse` hook matches
+`Agent`/`Task` in the user, project, local or managed settings or an installed plugin, because matching
+hooks run in parallel (https://code.claude.com/docs/en/hooks#hook-handler-fields); and no deny/ask rule
+names `Agent`/`Task`, because those apply whatever a hook returns
+(https://code.claude.com/docs/en/permissions#precedence-among-rules-hooks-and-mods). Definitions or
+hooks given only on the command line (`--agents`, `--settings`, `--plugin-dir`) and skill or subagent
+frontmatter hooks are not visible to the hook. One script holds the policy and the redirect because how
+two hooks on one matcher combine a deny with an `updatedInput` was not verified. When the route does not
+start, nothing is printed by that step and the model default below applies as before. A session opened
+before this registration keeps the old line (no `--redirect`, 15 s) and redirects nothing until Claude's
+settings watcher reloads the hook settings. Measured in isolated TUIs
 (`harness_behavior_cases_subagent_redirect.py`): the hook sees `Agent` with `description`, `prompt`,
 `subagent_type`; a hook that exits 1, is killed, prints garbage or runs past its timeout lets the native
 call run; exit 2 blocks it (the redirect always exits 0).

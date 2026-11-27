@@ -2104,13 +2104,10 @@ try {
             self.assertEqual(recorded[0]["sessionID"], "ses_main")
             self.assertEqual(recorded[0]["args"]["questions"][0]["question"], "Which?")
 
-    def test_v2_subagent_call_is_refused_only_when_the_route_started_and_never_blocks_otherwise(self):
-        # A person's session's native subagent call is started as a unit route by the shared redirect
-        # (utilities/native_subagent_redirect.py): the plugin refuses the call with its one line (exit 1 with
-        # text) and lets it run on every other end of the helper: nothing started, an exit without text, a
-        # crash, a killed helper, a helper past the cap. The helper runs asynchronously (the service keeps
-        # serving), with the session identity its tool commands carry, and a child or worker session's call
-        # is left alone.
+    def test_v2_subagent_call_runs_natively_and_starts_no_unit_route(self):
+        # OpenCode decides a subagent call inside the tool (its `subagent` permission, `ask` when no rule
+        # matches) and in other plugins' before-hooks, none of which this plugin can see, so it never starts
+        # the call as a unit route: the native subagent runs and no helper is spawned, even with one present.
         node = shutil.which("node")
         if not node:
             self.skipTest("node is unavailable for the V2 plugin module contract")
@@ -2123,39 +2120,19 @@ try {
             (harness / "adapters" / "opencode" / "bin" / "preflight.sh").write_text("exit 0\n")
             seen = Path(tmp) / "seen.jsonl"
             (harness / "utilities" / "native_subagent_redirect.py").write_text(
-                "import json, os, signal, sys, time\n"
-                "payload = json.loads(sys.stdin.read())\n"
-                "env = {k: os.environ.get(k) for k in ('OPENCODE_SESSION_ID', 'CLAUDE_CODE_SESSION_ID',\n"
-                "       'AGENT_PARENT_COMPLETION_CARRIER', 'OPENCODE_ROOT_SESSION_ID')}\n"
-                "open(%r, 'a').write(json.dumps({'payload': payload, 'env': env, 'argv': sys.argv[1:]}) + '\\n')\n"
-                "mode = os.environ['SUBAGENT_MODE']\n"
-                "if mode == 'start':\n"
-                "    print('Started as Hearting unit route rt-fixture (general/explore, light, no record).')\n"
-                "    raise SystemExit(1)\n"
-                "if mode == 'empty-1':\n"
-                "    raise SystemExit(1)\n"
-                "if mode == 'crash':\n"
-                "    raise RuntimeError('helper crashed')\n"
-                "if mode == 'killed':\n"
-                "    os.kill(os.getpid(), signal.SIGKILL)\n"
-                "if mode == 'hang':\n"
-                "    time.sleep(30)\n"
-                "if mode == 'slow':\n"
-                "    time.sleep(1)\n" % str(seen))
+                "import sys\n"
+                "open(%r, 'a').write('ran\\n')\n"
+                "print('Started as Hearting unit route rt-fixture (general/explore, light, no record).')\n"
+                "raise SystemExit(1)\n" % str(seen))
             script = r"""
 import { pathToFileURL } from "node:url"
-// The cap (180 s) is shortened for the hang case only; every other timer keeps its delay.
-const realSetTimeout = globalThis.setTimeout
-globalThis.setTimeout = (fn, ms, ...rest) => realSetTimeout(fn, ms === 180000 ? 300 : ms, ...rest)
 const plugin = (await import(pathToFileURL(process.env.PLUGIN_PATH))).default
 const hooks = new Map()
 const ctx = {
   location: { directory: process.env.TEMP_ROOT, project: { id: "fixture" } },
   app: { log: async () => {} },
   session: {
-    get: async ({ sessionID }) => ({ data: { id: sessionID, agent: "build",
-      title: sessionID === "ses_worker" ? "hearting-worker-att-fixture" : "Main",
-      parentID: sessionID === "ses_child" ? "ses_main" : null } }),
+    get: async ({ sessionID }) => ({ data: { id: sessionID, agent: "build", title: "Main", parentID: null } }),
     prompt: async () => ({ data: null }), context: async () => ({ data: [] }),
     hook: async (name, fn) => hooks.set("session." + name, fn),
   },
@@ -2167,56 +2144,25 @@ const ctx = {
   permission: { hook: async (name, fn) => hooks.set("permission." + name, fn) },
 }
 const cleanup = await plugin.setup(ctx)
-const call = { tool: process.env.SUBAGENT_TOOL, sessionID: "ses_main",
-  input: { agent: "explore", description: "Find the panel rule", prompt: "Where is the panel rule?" } }
-const refusal = async (event) => {
+const refusal = async (tool) => {
+  const event = { tool, sessionID: "ses_main",
+    input: { agent: "explore", description: "Find the panel rule", prompt: "Where is the panel rule?" } }
   try { await hooks.get("tool.execute.before")(event); return "" } catch (error) { return String(error.message) }
 }
 try {
-  let ticks = 0
-  const ticker = setInterval(() => { ticks += 1 }, 50)
-  const began = Date.now()
-  const refused = await refusal(call)
-  const seconds = (Date.now() - began) / 1000
-  clearInterval(ticker)
-  const childRefused = await refusal({ ...call, sessionID: "ses_child" })
-  const workerRefused = await refusal({ ...call, sessionID: "ses_worker" })
-  console.log(JSON.stringify({ refused, childRefused, workerRefused, ticks, seconds }))
+  console.log(JSON.stringify({ subagent: await refusal("subagent"), task: await refusal("task") }))
 } finally { await cleanup() }
 """
-            base = {**BASE_ENV, "PLUGIN_PATH": str(ROOT / "adapters/opencode/plugins/hearting-guards.js"),
-                    "TEMP_ROOT": str(project), "HOME": str(home), "AGENT_HOME": str(harness),
-                    "PYTHONDONTWRITEBYTECODE": "1", "XDG_STATE_HOME": str(home / ".state"),
-                    "XDG_CONFIG_HOME": str(home / ".config"), "XDG_DATA_HOME": str(home / ".data"),
-                    "XDG_CACHE_HOME": str(home / ".cache"), "CLAUDE_CODE_SESSION_ID": "inherited-claude"}
-            outcomes = {}
-            for tool, mode in (("subagent", "start"), ("task", "start"), ("subagent", "pass"),
-                               ("subagent", "empty-1"), ("subagent", "crash"), ("subagent", "killed"),
-                               ("subagent", "hang"), ("subagent", "slow")):
-                result = subprocess.run([node, "--input-type=module", "-e", script], cwd=ROOT,
-                                        env={**base, "SUBAGENT_MODE": mode, "SUBAGENT_TOOL": tool}, text=True,
-                                        capture_output=True, timeout=60)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                outcomes[(tool, mode)] = json.loads(result.stdout.strip().splitlines()[-1])
-            line = "Started as Hearting unit route rt-fixture (general/explore, light, no record)."
-            self.assertEqual(outcomes[("subagent", "start")]["refused"], line)
-            self.assertEqual(outcomes[("task", "start")]["refused"], line)          # V1 names it `task`
-            for mode in ("pass", "empty-1", "crash", "killed", "hang", "slow"):
-                self.assertEqual(outcomes[("subagent", mode)]["refused"], "", mode)
-            self.assertLess(outcomes[("subagent", "hang")]["seconds"], 10)           # the cap ended the wait
-            self.assertGreater(outcomes[("subagent", "slow")]["ticks"], 5)          # the service kept serving
-            for outcome in outcomes.values():
-                self.assertEqual((outcome["childRefused"], outcome["workerRefused"]), ("", ""))
-            recorded = [json.loads(line) for line in seen.read_text().splitlines() if line.strip()]
-            self.assertEqual(len(recorded), len(outcomes))     # only the person's session runs the helper
-            first = recorded[0]
-            self.assertEqual(first["argv"], ["--opencode"])
-            self.assertEqual((first["payload"]["tool"], first["payload"]["sessionID"]), ("subagent", "ses_main"))
-            self.assertEqual(first["payload"]["args"]["prompt"], "Where is the panel rule?")
-            self.assertEqual(first["env"]["OPENCODE_SESSION_ID"], "ses_main")
-            self.assertIsNone(first["env"]["CLAUDE_CODE_SESSION_ID"])               # no inherited identity
-            carrier = first["env"]["AGENT_PARENT_COMPLETION_CARRIER"] or ""
-            self.assertTrue(carrier == "" or carrier.endswith(":ses_main"), carrier)  # the carrier its commands name
+            env = {**BASE_ENV, "PLUGIN_PATH": str(ROOT / "adapters/opencode/plugins/hearting-guards.js"),
+                   "TEMP_ROOT": str(project), "HOME": str(home), "AGENT_HOME": str(harness),
+                   "PYTHONDONTWRITEBYTECODE": "1", "XDG_STATE_HOME": str(home / ".state"),
+                   "XDG_CONFIG_HOME": str(home / ".config"), "XDG_DATA_HOME": str(home / ".data"),
+                   "XDG_CACHE_HOME": str(home / ".cache")}
+            result = subprocess.run([node, "--input-type=module", "-e", script], cwd=ROOT, env=env, text=True,
+                                    capture_output=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(json.loads(result.stdout.strip().splitlines()[-1]), {"subagent": "", "task": ""})
+            self.assertFalse(seen.exists())                  # no helper ran
 
     def test_v2_worker_and_main_sessions_both_record_a_spec_read(self):
         # GA-A5-013: the shared contract keeps the spec-read observation for every session;

@@ -1,5 +1,5 @@
 name = "deep"
-description = "Deep investigation agent on the portable deep budget — root cause, architecture, subtle correctness. In a person's session the call starts a read-only Hearting unit route (general/explore, deep) and runs natively only when that cannot start."
+description = "Deep investigation agent on the portable deep budget — root cause, architecture, subtle correctness. In a person's session the call starts a read-only Hearting unit route (general/explore, deep) when that is certain, and otherwise runs natively."
 model = "gpt-6.1-sol"
 model_reasoning_effort = "xhigh"
 sandbox_mode = "workspace-write"
