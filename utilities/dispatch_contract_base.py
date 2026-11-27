@@ -1341,6 +1341,26 @@ def diagnostic_token(value: object, limit: int = 160) -> str:
 _PROJECTION_DETAIL = re.compile(
     r"check=[A-Za-z0-9._:-]{1,64}:failed reason=[A-Za-z0-9._:/-]{1,240}|exit-[0-9]{1,3}")
 
+FRAME_OTHER_HARNESS_UNUSABLE = "frame-other-harness-unusable"
+_FRAME_ALTERNATIVE_BANDS = frozenset({"primary", "relief", "last_resort", "outside-policy-fallback"})
+_FRAME_ALTERNATIVE_EXCLUSIONS = frozenset({"not-in-band", "gated", "ineligible", "legacy-no-tiebreak"})
+
+
+def _valid_frame_alternative_detail(value: str) -> bool:
+    band, *alternatives = value.split(",", len(WRAPPER_PARENT_HARNESSES))
+    key, _, band_name = band.partition(":")
+    if (key != "band" or band_name not in _FRAME_ALTERNATIVE_BANDS
+            or not 0 < len(alternatives) < len(WRAPPER_PARENT_HARNESSES)):
+        return False
+    seen = set()
+    for entry in alternatives:
+        harness, _, exclusion = entry.partition(":")
+        if (harness not in WRAPPER_PARENT_HARNESSES or harness in seen
+                or exclusion not in _FRAME_ALTERNATIVE_EXCLUSIONS):
+            return False
+        seen.add(harness)
+    return True
+
 
 def candidate_detail(reason: str, value: object) -> str:
     """Only finite local facts may persist; unknown free text is omitted."""
@@ -1351,6 +1371,8 @@ def candidate_detail(reason: str, value: object) -> str:
     if reason == "unsafe-git-state" and value.startswith("detached HEAD in "):
         return "detached HEAD"
     if reason == "codex-runtime-projection-mismatch" and _PROJECTION_DETAIL.fullmatch(value):
+        return value
+    if reason == FRAME_OTHER_HARNESS_UNUSABLE and _valid_frame_alternative_detail(value):
         return value
     return "[detail omitted]"
 
