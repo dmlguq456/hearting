@@ -318,12 +318,29 @@ def _index():
 
 # --- identity following (N3) ------------------------------------------------
 
-def follow(endpoint, *, read_context=None):
+def _parked_links():
+    """Claude's window/background links as they are right now (``session_registry.parked_links``:
+    the table of every ``parked_successor``/``parked_origin``, read afresh, never stored)."""
+    try:
+        tools = str(Path(__file__).resolve().parents[1] / "tools")
+        if tools not in sys.path:
+            sys.path.insert(0, tools)
+        from fleet import session_registry
+        return session_registry.parked_links("claude")
+    except Exception:  # noqa: BLE001 - a link that cannot be read is no link
+        return {"successor": {}, "origin": {}}
+
+
+def follow(endpoint, *, read_context=None, links=None):
     """The session now answerable for ``endpoint``: a confirmed successor or itself.
 
     Only the lineage Hearting already confirms moves a request. A read that fails
     (unreadable, forked, unresolved) leaves it on the original session: it is
-    neither moved to a guessed session nor treated as lost.
+    neither moved to a guessed session nor treated as lost. A Claude window whose
+    conversation is held by a background session right now (``/bg``: both live facts
+    agree) is answered by that session; the link is read again at every call, so once
+    the window takes its conversation back, or the background ends, the window answers.
+    ``links`` is a reading of those links the caller made for this same pass (one listing).
     """
     harness, sid = endpoint["harness"], endpoint["session_id"]
     try:
@@ -334,22 +351,26 @@ def follow(endpoint, *, read_context=None):
         return {"harness": harness, "session_id": sid}
     if new_sid and new_harness in _HARNESSES and _SAFE.fullmatch(new_sid):
         return {"harness": new_harness, "session_id": new_sid}
+    if harness == "claude" and isinstance(sid, str):
+        held = ((links if links is not None else _parked_links()).get("successor") or {}).get(sid.lower())
+        if held and _SAFE.fullmatch(str(held.get("session_id") or "")):
+            return {"harness": "claude", "session_id": held["session_id"]}
     return {"harness": harness, "session_id": sid}
 
 
-def current_recipient(record):
-    return follow(record["recipient"])
+def current_recipient(record, *, links=None):
+    return follow(record["recipient"], links=links)
 
 
-def current_requester(record):
-    return follow(record["requester"])
+def current_requester(record, *, links=None):
+    return follow(record["requester"], links=links)
 
 
 def _same(left, right):
     return (left.get("harness"), left.get("session_id")) == (right.get("harness"), right.get("session_id"))
 
 
-def _predecessors(harness, sid):
+def _predecessors(harness, sid, *, links=None):
     """Sessions whose confirmed successor is ``sid`` (reverse lineage, verified forward)."""
     try:
         import dispatch_seat_handover as handover
@@ -363,6 +384,12 @@ def _predecessors(harness, sid):
             if edge_harness == harness:
                 reverse.setdefault(target, set()).add(origin)
         found, pending = [], list(reverse.get(sid, ()))
+        if harness == "claude":
+            # The window whose conversation this background session holds right now.
+            links = links if links is not None else _parked_links()
+            origin = (links.get("origin") or {}).get(str(sid).lower())
+            if origin and origin.get("viewer_sid"):
+                pending.append(origin["viewer_sid"])
         seen = {sid}
         while pending:
             origin = pending.pop()
@@ -370,7 +397,7 @@ def _predecessors(harness, sid):
                 continue
             seen.add(origin)
             if follow({"harness": harness, "session_id": origin},
-                      read_context=context).get("session_id") == sid:
+                      read_context=context, links=links).get("session_id") == sid:
                 found.append(origin)
             pending.extend(reverse.get(origin, ()))
         return found
@@ -782,14 +809,18 @@ def unconfirmed(record):
 
 # --- reads -----------------------------------------------------------------
 
-def session_requests(harness, sid):
+def session_requests(harness, sid, *, links=None):
     """``{"out": [...], "in": [...]}`` for a session, including its confirmed
     predecessors' requests, read from the records (the index only narrows which).
 
     Every request of the session is in it, however many there are; an interrupted
     confirmation is finished here first (:func:`settle`). A request whose first
-    revision has no seal stays listed (state `preparing`, not confirmed)."""
-    keys = {"%s:%s" % (harness, sid)} | {"%s:%s" % (harness, old) for old in _predecessors(harness, sid)}
+    revision has no seal stays listed (state `preparing`, not confirmed). The window/background
+    links are read once for the listing (or ``links``, the caller's reading for this pass)."""
+    if links is None and harness == "claude":
+        links = _parked_links()
+    keys = {"%s:%s" % (harness, sid)} | {"%s:%s" % (harness, old)
+                                         for old in _predecessors(harness, sid, links=links)}
     me = {"harness": harness, "session_id": sid}
     out, received = [], []
     for request_id, (requester_key, recipient_key) in sorted(_index().items()):
@@ -809,9 +840,9 @@ def session_requests(harness, sid):
                     parties = _index_load()
                     parties[request_id] = actual
                     _index_store(parties)
-        if requester_key in keys and _same(current_requester(record), me):
+        if requester_key in keys and _same(current_requester(record, links=links), me):
             out.append(record)
-        if recipient_key in keys and _same(current_recipient(record), me):
+        if recipient_key in keys and _same(current_recipient(record, links=links), me):
             received.append(record)
     key = lambda record: (record["state"] not in _OPEN_STATES + ("preparing",),  # noqa: E731
                           -record.get("updated", 0))

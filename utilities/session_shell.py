@@ -972,7 +972,7 @@ def _request_body(peer, ref):
     return text
 
 
-def _request_views(harness, sid, now, errors=None):
+def _request_views(harness, sid, now, errors=None, links=None):
     """``(views, watched)``: what this session sent and received as requests, read from the
     request records (the index only narrows which; never the recent-message tail), with the
     delivery rows of their messages. The files read are watched so a change repaints the panel.
@@ -981,7 +981,7 @@ def _request_views(harness, sid, now, errors=None):
     ``errors`` (the panel keeps it beside its content, never on screen)."""
     try:
         import peer_request
-        listing = peer_request.session_requests(harness, sid)
+        listing = peer_request.session_requests(harness, sid, links=links)
     except Exception as exc:  # noqa: BLE001 - a display read never stops the panel
         if errors is not None:
             errors.append("%s: %s" % (type(exc).__name__, str(exc)[:96]))
@@ -1430,7 +1430,14 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     # Requests sent and received: the open work, read from the request records (not from the
     # recent-message tail, so a request does not leave when newer messages push it out).
     request_errors = []
-    request_views, request_paths = _request_views(harness, read_sid, time.time(), request_errors)
+    if parked:
+        # The projection decided the window/background link once (``_panel_read_target``): its
+        # request lines read that same decision rather than the session records again.
+        request_views, request_paths = _request_views(
+            harness, read_sid, time.time(), request_errors,
+            links={"successor": {sid.lower(): parked}, "origin": {read_sid.lower(): parked}})
+    else:
+        request_views, request_paths = _request_views(harness, read_sid, time.time(), request_errors)
     watched.extend(request_paths)
     # 11-16: the other session's model and effort as far as the values Fleet's shared producer already read
     # for the session displays (``session_doers`` in the cache this projection reads above) know them.
