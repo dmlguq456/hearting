@@ -34,7 +34,8 @@ import dispatch_lock_order
 
 from artifact_producer_store import (
     _canonical, _digest, _earlier_documents, _ensure_dir, _excluded_by_roots, _json_bytes,
-    _read_json, _record_cycle_manifest_path, _rfc3339, _stream_file_facts, _walk_cycle_files,
+    _read_json, _record_cycle_manifest_path, _request_member_dirs, _rfc3339, _stream_file_facts,
+    _walk_cycle_files,
     _write_atomic, _write_cycle_record, ALGORITHM_VERSION, cycle_dir, cycle_record_path,
     journal_path, producer_dir, ProducerError, read_cycle_record,
 )
@@ -1529,6 +1530,8 @@ def _bounded_scan(directory: Path, *, cursor: Optional[str], known: Mapping[str,
     document = _read_json(directory / "manifest.json")
     bundle_directories = _manifest_bundle_directories(document) if isinstance(document, Mapping) else set()
     bundle_parts = {tuple(path.split("/")) for path in bundle_directories}
+    # A frame's execution folders are left out exactly as its first seal left them out.
+    skipped_parts = bundle_parts | {path.relative_to(directory).parts for path in _request_member_dirs(directory)}
     cursor_root = after[0] if after else None
     root_order = {name: index for index, (name, _top) in enumerate(
         (("artifacts", artifacts), ("_internal", internal)))}
@@ -1548,7 +1551,7 @@ def _bounded_scan(directory: Path, *, cursor: Optional[str], known: Mapping[str,
             continue
         root_after = after if cursor_root == root_name else None
         for parts, entry, is_dir in _walk_sorted(
-                str(top), (root_name,), root_after, bundle_parts, marker_callback=inspect_marker):
+                str(top), (root_name,), root_after, skipped_parts, marker_callback=inspect_marker):
             if processed and budget.walk_exhausted():
                 scan.complete = False
                 scan.cursor = "/".join(last_parts) if last_parts else normalized_cursor
@@ -1556,7 +1559,7 @@ def _bounded_scan(directory: Path, *, cursor: Optional[str], known: Mapping[str,
             budget.walked += 1
             processed += 1
             rel = "/".join(parts)
-            if parts in bundle_parts:
+            if parts in skipped_parts:
                 last_parts = parts
                 continue
             if entry.is_symlink():

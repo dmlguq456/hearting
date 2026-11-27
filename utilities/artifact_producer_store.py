@@ -321,6 +321,17 @@ def _excluded_by_roots(rel: str, roots: Iterable[str]) -> bool:
     return any(rel == root or rel.startswith(root + "/") for root in roots)
 
 
+def _request_member_dirs(directory: Path) -> Set[Path]:
+    """The execution folders a frame cycle at `directory` holds for its request.
+
+    A request's execution scopes own their own manifests. Never include a
+    later execution's files in the frame's immutable output inventory: the
+    first seal and every later refresh of the frame leave these folders out."""
+    import artifact_request
+    return set(artifact_request.members(directory.parents[2], directory, strict=False)) if (
+        directory.parent.parent.name == "campaigns") else set()
+
+
 def _walk_cycle_files(directory: Path, *, marker_observations: Optional[Dict[str, Any]] = None,
                       excluded_roots: Optional[List[str]] = None,
                       excluded: Optional[List[str]] = None,
@@ -330,11 +341,7 @@ def _walk_cycle_files(directory: Path, *, marker_observations: Optional[Dict[str
     roots = excluded_roots if excluded_roots is not None else []
     excluded_paths = excluded if excluded is not None else []
     skipped = set(skip_directories)
-    # A request's execution scopes own their own manifests. Never include a
-    # later execution's files in the frame's immutable output inventory.
-    import artifact_request
-    request_members = set(artifact_request.members(directory.parents[2], directory, strict=False)) if (
-        directory.parent.parent.name == "campaigns") else set()
+    request_members = _request_member_dirs(directory)
     out: List[Path] = []
     for current, dirs, files in os.walk(str(directory), followlinks=False):
         dirs.sort()

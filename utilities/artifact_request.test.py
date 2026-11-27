@@ -444,5 +444,36 @@ class RequestFolderTest(S.SourceRepoStartBase):
         self.interrupted_delete(after_removal=True)
 
 
+class FrameRefreshKeepsExecutionsOut(RequestFolderTest):
+    """A sealed frame's refresh lists the frame's own files, never an execution's (CORE.md "Logical
+    executions in one request folder": each execution keeps its own manifest)."""
+
+    def frame_paths(self, frame_dir):
+        document = json.loads((frame_dir / "manifest.json").read_bytes())
+        return {row["locator"]["path"] for row in document["artifact_revisions"]}
+
+    def test_a_frame_refresh_takes_in_its_own_late_file_and_none_of_its_executions_files(self):
+        leg, path, _ = self.selected([S.CODE_STAGED])
+        frame, execution = self.cycle(self.route), self.cycle(leg)
+        frame_dir = P.cycle_dir(self.root, frame["campaign_id"], frame["cycle_id"])
+        execution_dir = P.cycle_dir(self.root, execution["campaign_id"], execution["cycle_id"])
+        self.write_output({"cycle_dir": str(execution_dir)}, "plans/final_report.md", b"execution\n")
+        self.close(leg, path)
+        P.finalize(self.root, cycle_id=execution["cycle_id"], state="completed")
+        self.assertEqual(P.read_cycle_record(self.root, frame["cycle_id"])["state"], "sealed")
+        execution_rel = execution_dir.relative_to(frame_dir).as_posix() + "/"
+        self.assertEqual({p for p in self.frame_paths(frame_dir) if p.startswith(execution_rel)}, set())
+        (frame_dir / "_internal" / "frame-note.md").write_bytes(b"the frame's own late file\n")
+        result = P.refresh_cycle(self.root, frame["cycle_id"], trigger="explicit")
+        self.assertEqual(result["status"], "emitted", result)
+        paths = self.frame_paths(frame_dir)
+        self.assertIn("_internal/frame-note.md", paths)
+        self.assertEqual({p for p in paths if p.startswith(execution_rel)}, set(), result)
+        execution_manifest = json.loads((execution_dir / "manifest.json").read_bytes())
+        self.assertEqual(execution_manifest["cycle"]["cycle_id"], execution["cycle_id"])
+        self.assertIn("artifacts/plans/final_report.md",
+                      {row["locator"]["path"] for row in execution_manifest["artifact_revisions"]})
+
+
 if __name__ == "__main__":
     unittest.main()
