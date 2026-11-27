@@ -41,6 +41,59 @@ JOIN_REASONS = COMPLETION_REASONS | {"process-alive", "process-unverifiable",
                                      "terminal-commit-pending", "workflow-completion-pending"}
 
 
+# Every terminal delivery classification. `cancelled` is a settled parent close:
+# a terminal end like `success`, never a failure to inspect.
+TERMINAL_CLASSIFICATIONS = frozenset({"success", "attention", "cancelled"})
+
+
+def completion_classification(children) -> str:
+    classes = {child.get("delivery_classification") for child in children}
+    if classes == {"success"}:
+        return "success"
+    if "cancelled" in classes and classes <= {"cancelled", "success"}:
+        return "cancelled"
+    return "attention"
+
+
+def parent_close_child(child: dict) -> bool:
+    """A child its parent's close ended, as `cancelled` or, before that existed, `success`."""
+    return child.get("reason") == "cancelled-by-parent" and child.get("required_action") == "advance-completed"
+
+
+def settled_parent_close(children) -> bool:
+    """True when a receipt tells of its parent's settled close: at least one child the close
+    ended, every other one a success committed before it. The route is closed, so none advances.
+
+    The same judgment as `completion_classification`'s `cancelled`, also for the older form."""
+    return bool(children) and any(parent_close_child(child) for child in children) and all(
+        parent_close_child(child) or (child.get("delivery_classification") == "success"
+                                      and child.get("required_action") == "advance-completed")
+        for child in children)
+
+
+def legacy_parent_close_receipt(receipt: dict) -> dict | None:
+    """The settled parent close of ``receipt`` as releases before `cancelled` wrote it, else None.
+
+    Those releases carried such a close as `success` with reason `cancelled-by-parent`, and
+    render it as settled only when every child is one. A success committed before the close
+    stays out of that form, as it is: the older receiver is told the close alone, once.
+    Its replacement lineage and attention stay out with it: the form carries only what
+    belongs to the children it keeps. Only an ended receipt carrying `cancelled` has this form."""
+    children = receipt.get("children")
+    if (not isinstance(children, list) or not children
+            or not all(isinstance(child, dict) and child.get("status") == "done" for child in children)
+            or not any(child.get("delivery_classification") == "cancelled" for child in children)
+            or not settled_parent_close(children)):
+        return None
+    closed = [dict(child, delivery_classification="success") for child in children if parent_close_child(child)]
+    kept = {child.get("attempt_id") for child in closed}
+    lineage = [edge for edge in receipt.get("replacement_lineage") or [] if edge.get("replacement_attempt_id") in kept]
+    kept |= {edge.get("original_attempt_id") for edge in lineage}
+    attention = [item for item in receipt.get("replacement_attention") or [] if item.get("source_attempt_id") in kept]
+    return dict(receipt, children=closed, delivery_classification="success",
+                replacement_lineage=lineage, replacement_attention=attention)
+
+
 def unseal_receipt(encoded: str) -> dict:
     """Restore the writer's exact receipt; decoding grants no authority."""
     if not isinstance(encoded, str) or not encoded:

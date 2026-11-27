@@ -372,6 +372,13 @@ const tick=()=>new Promise(r=>setTimeout(r,5));
   const seq=['form-open',null,'form-open','form-open'];let i=0;w.setReply(async()=>({ok:true,reason:seq[Math.min(i++,seq.length-1)]}));
   const states=[];for(let k=0;k<4;k++){w.bump();w.observeForm();await tick();states.push(w.shown());}
   a.deepEqual(states,['blocked','working','blocked','blocked'],'X3');a.equal(w.state,'blocked');}
+ // Review 1127 🔴3: a screen too large to carry is no reading of the question (the host refuses it,
+ // `ok:false`): the panel stays at waiting between two readings that see the question.
+ {const w=world('codex');w.hook('select');w.reading('idle');w.hook('prompt');w.reading('working');w.hook('blocked');
+  const seq=[{ok:true,reason:'form-open'},{ok:false,reason:'screen-large'},{ok:true,reason:'form-open'}];let i=0;
+  w.setReply(async()=>seq[Math.min(i++,seq.length-1)]);
+  const states=[];for(let k=0;k<3;k++){w.bump();w.observeForm();await tick();states.push(w.shown());}
+  a.deepEqual(states,['blocked','blocked','blocked'],'too large');a.equal(w.state,'blocked');}
  // An approval: the question gone, the turn runs on, and the next hook takes over.
  {const w=world('codex');w.hook('select');w.reading('idle');w.hook('prompt');w.reading('working');w.hook('blocked');
   const seq=['form-open',null,null];let i=0;w.setReply(async()=>({ok:true,reason:seq[Math.min(i++,seq.length-1)]}));

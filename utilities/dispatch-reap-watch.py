@@ -193,11 +193,47 @@ def watch(args: argparse.Namespace) -> int:
     selected_identity = launched_attempt_identity(initial[0])
     selected_log_file = metadata.get("log_file", "")
 
-    while process_start_ticks(args.pid) == args.pid_start:
+    from route_parent_close import (
+        CLOSE_INTENT_BACKSTOP_SECONDS, RegistryObservation, recover_attempt, stop_called_workers,
+    )
+
+    def read_attempt(jobs, attempt_id):
+        row = attempt_record(jobs, attempt_id)
+        return (row[0][1], row[1]) if row is not None else (None, {})
+
+    # Owners already have the orphan watcher to drive a pending close. A
+    # depth-1 frame or unit leg has this watcher in its launch namespace.
+    observes_close = metadata.get("dispatch_depth") == "1" and (
+        metadata.get("worker_type") == "frame" or metadata.get("capability") == "unit")
+    observer = None
+    if observes_close:
+        # Its route's ledger records a parent close before any row is marked, and it
+        # changes far less often than a busy registry, which is re-read only then.
+        from workflow_state import WorkflowLedger
+        journal = (WorkflowLedger(metadata["route_id"], metadata.get("route_hash", ""), jobs=args.jobs).journal_path
+                   if metadata.get("route_id") else None)
+        observer = RegistryObservation(args.jobs, args.attempt_id, read_attempt, watched=journal)
+    closing = False
+    recheck = args.parent_recheck_interval
+    while True:
+        ended = process_start_ticks(args.pid) != args.pid_start
+        if observer is not None:
+            # An ended worker is judged once more: a close recorded as it ended is still this watcher's.
+            _status, metadata, closing = observer.refresh(force=closing or ended)
+            if closing:
+                outcome = recover_attempt(args.jobs, metadata)
+                if outcome and outcome.get("state") == "cancelled":
+                    break
+                # A close that stays pending is looked at again less and less often,
+                # at least once per close-intent backstop.
+                time.sleep(recheck)
+                recheck = min(recheck * 2, max(args.parent_recheck_interval, CLOSE_INTENT_BACKSTOP_SECONDS))
+                continue
+        if ended:
+            break
         time.sleep(args.interval)
 
     # The worker has ended: a unit worker it started that still runs would report to no one.
-    from route_parent_close import stop_called_workers
     stop_called_workers(args.jobs, args.attempt_id)
 
     # SD-OPEN-47 (H7-a): the post-exit drain loop used to rescan every
