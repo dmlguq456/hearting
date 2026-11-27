@@ -24,6 +24,9 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 import dispatch_parent_completion as parent_completion
+# The inheritance rule lives in its own small module so the summary owner and the
+# capacity probe apply it without loading this one; re-exported for the wrappers.
+from environment_inheritance import NOT_INHERITED_PREFIXES, inherited_environment  # noqa: F401
 
 
 class AdapterNamespace:
@@ -727,20 +730,6 @@ def select_model_settings(h, args, *, harness: str, label: str, knob: str,
         "source": "explicit", "role": "-", "profile": "unsealed",
         "tier": "explicit", "granularity": "legacy", "model": args.model, knob: tuning,
     }
-
-
-# What a worker never takes over from the process that launches it: the retired
-# broker bindings, and the person's session-shell window. `HEARTING_SHELL_*`
-# (the window host's socket and token, its display state and descriptors)
-# belongs to that one window; a worker sends it no events and paints no status
-# line as if it were that window.
-NOT_INHERITED_PREFIXES = ("AGENT_DISPATCH_BROKER_", "HEARTING_SHELL_")
-
-
-def inherited_environment(environ: Mapping[str, str] | None = None) -> dict[str, str]:
-    """The launching process's environment a worker starts from, without `NOT_INHERITED_PREFIXES`."""
-    environ = os.environ if environ is None else environ
-    return {key: value for key, value in environ.items() if not key.startswith(NOT_INHERITED_PREFIXES)}
 
 
 def worker_environment(h, args, *, harness: str, jobs: Path, governor_root: Path,
