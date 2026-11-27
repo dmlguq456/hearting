@@ -3,10 +3,10 @@
   "analyze-project": "sha256:323f2a4577ca11b2a8ed0046732a4f2ffb79558a0d755cd49e15decc546a8c40",
   "analyze-user": "sha256:ffd52aa06e867ea467abf339835b6bfba737847680b9a55ea1209bfc85c8b93c",
   "audit": "sha256:4ce40b55d08a6c02eee2429dd03ae695c01ad288deb74772a2020399055327c0",
-  "autopilot-apply": "sha256:aabff8dddef7b73eaea0923be6cea8de797b22ac5e4fc8e791500d273bc9991e",
+  "autopilot-apply": "sha256:a98c9d9f61a8af75d3bb4693f41ce63e2054a89adbe05b44b75f3e28a607168c",
   "autopilot-code": "sha256:1c9e252a586b8b164f1b0327b31fdab0f3fcd2dd793f21740d251eb797fa0c4b",
   "autopilot-design": "sha256:ebb8cac4a24afb54f6532a95efd5c5b1f7ebe8e8ba1dac66bc80bea1794846ac",
-  "autopilot-draft": "sha256:687140529985cb9230293923d1aa6be257e13f2058830b1c1abf3403f6e2be86",
+  "autopilot-draft": "sha256:ba2b597292214c4ed622e5d2b7122ebfb88a58f12aa65e3c923c2187e934f1ee",
   "autopilot-lab": "sha256:f786218e5d2809e979c48dbe3eaea226074e930c3dad9c5b6d31481a9945def5",
   "autopilot-refine": "sha256:67b2b68f5ab05f0a5ba2144703b9f8b0848cf4dcf58754ae0c3f56bd14fdc4ef",
   "autopilot-research": "sha256:859a2b3b8ab0b2d84f20caa41ee9028ebfaa062d99f0e415312b5d74718b16c6",
@@ -114,13 +114,13 @@
   },
   "full:autopilot-apply:default": {
    "briefs": {
-    "apply": "4e432c222d42bb438ce2",
+    "apply": "014590648cf1549b27aa",
     "handback": "29c3e4fa300dc2fdf950",
     "verify": "eb11a084071e1903729c"
    },
    "card": "[경로] autopilot-apply · staged(standard) apply→verify→handback · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  field docs (preset)\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 handback (autopilot-apply:handback)\n  자동 선택에서 Codex owner의 workspace-write가 선택되면: <WORKTREE-SCOPE-ADVISORY>.",
    "completion_gates": "f1594a0198f5d7628cca",
-   "composed_recipe": "c3ef724cf4e556dac506",
+   "composed_recipe": "28dec39848afa6db083f",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
    "human_gates": "4f53cda18c2baa0c0354",
@@ -131,7 +131,7 @@
     "handback"
    ],
    "nodes": {
-    "apply": "2081339e346f18b3e537",
+    "apply": "9aa0c155c7e9a537dac6",
     "handback": "50e6bd80ca5949dea7f1",
     "verify": "76bb24bf0158079f5bc9"
    },
@@ -225,7 +225,7 @@
   },
   "full:autopilot-draft:doc": {
    "briefs": {
-    "draft-production": "3e89e8de982c6bf48d9a",
+    "draft-production": "bef88efd5ceec9972d85",
     "fact-verify": "bf08d93199da67a9fa9f",
     "finalize": "005b304410994d627b6f",
     "frame": "69c2ceccc3f29e093019",
@@ -237,7 +237,7 @@
    },
    "card": "[경로] autopilot-draft · staged(standard) frame→frame-alternative→material-strategy→material-strategy-alternative→strategy-review→draft-production→quality-review→fact-verify→finalize · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  field docs (preset)\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  자동 선택에서 Codex owner의 workspace-write가 선택되면: <WORKTREE-SCOPE-ADVISORY>.",
    "completion_gates": "c817168192736db82e83",
-   "composed_recipe": "92ddc9e4bfd03dd03a16",
+   "composed_recipe": "7048d5f5cca070f68e08",
    "conditional_extensions": "b056b9625be214a20b3f",
    "human_gate_bindings": "53860b3d0e843b01a100",
    "human_gates": "5b005605a5f0ddb1dfdf",
@@ -254,7 +254,7 @@
     "finalize"
    ],
    "nodes": {
-    "draft-production": "436b27c2f2e0e420af39",
+    "draft-production": "11d8425b3af71c66adb1",
     "fact-verify": "939c42edaf963a217389",
     "finalize": "41aaa240ca4715c437f6",
     "frame": "dad3f3b12fe7f8d36d58",
@@ -897,7 +897,7 @@
   },
   "preset:autopilot-apply:default:standard": {
    "briefs": {
-    "apply": "4e432c222d42bb438ce2",
+    "apply": "014590648cf1549b27aa",
     "handback": "29c3e4fa300dc2fdf950",
     "verify": "eb11a084071e1903729c"
    },
@@ -913,7 +913,7 @@
     "handback"
    ],
    "nodes": {
-    "apply": "2bb318b7382d5085c587",
+    "apply": "9e7c02fc1fb93786fd5c",
     "handback": "50e6bd80ca5949dea7f1",
     "verify": "d96113b59537617dc0c7"
    },
@@ -923,7 +923,7 @@
   },
   "preset:autopilot-apply:default:strong": {
    "briefs": {
-    "apply": "7eaac94a4bf5b214384d",
+    "apply": "82fd90f2727df83b76a2",
     "handback": "cf42cd414674b5d22df6",
     "verify": "ae7fdbd6eba9bc2879da",
     "verify-alternative": "38d97499ac72598ca5be"
@@ -941,7 +941,7 @@
     "handback"
    ],
    "nodes": {
-    "apply": "2bb318b7382d5085c587",
+    "apply": "9e7c02fc1fb93786fd5c",
     "handback": "b9752352271f85778d5b",
     "verify": "968e83a3bce48ac81821",
     "verify-alternative": "443132a347e6403f6ecc"
@@ -952,7 +952,7 @@
   },
   "preset:autopilot-apply:default:thorough": {
    "briefs": {
-    "apply": "dc1ad4c5ad882f81ef57",
+    "apply": "7d3adfb0b10ab689e727",
     "handback": "3d4812396ffe02691b74",
     "verify": "20dc84f37d3eeff9778d",
     "verify-alternative": "3cdb06797476bd886974"
@@ -970,7 +970,7 @@
     "handback"
    ],
    "nodes": {
-    "apply": "2bb318b7382d5085c587",
+    "apply": "9e7c02fc1fb93786fd5c",
     "handback": "b9752352271f85778d5b",
     "verify": "968e83a3bce48ac81821",
     "verify-alternative": "443132a347e6403f6ecc"
@@ -1266,7 +1266,7 @@
   },
   "preset:autopilot-draft:doc:standard": {
    "briefs": {
-    "draft-production": "3e89e8de982c6bf48d9a",
+    "draft-production": "bef88efd5ceec9972d85",
     "fact-verify": "bf08d93199da67a9fa9f",
     "finalize": "005b304410994d627b6f",
     "frame": "69c2ceccc3f29e093019",
@@ -1294,7 +1294,7 @@
     "finalize"
    ],
    "nodes": {
-    "draft-production": "4928874c80dcbc48e606",
+    "draft-production": "ed45399fa4cde217012d",
     "fact-verify": "a3719946e63f21e9863d",
     "finalize": "882f6f4b1196c8424ed3",
     "frame": "dad3f3b12fe7f8d36d58",
@@ -1310,7 +1310,7 @@
   },
   "preset:autopilot-draft:doc:strong": {
    "briefs": {
-    "draft-production": "42e4cdf7d77da41ae51f",
+    "draft-production": "f3cb8138fac31e5b8bef",
     "fact-verify": "bb5a98b990bee7a98e97",
     "fact-verify-alternative": "cd053fb73ff1951001cf",
     "finalize": "3f8a3f030a98b327da26",
@@ -1344,7 +1344,7 @@
     "finalize"
    ],
    "nodes": {
-    "draft-production": "93ea58aff781d28b530a",
+    "draft-production": "4155496b76c9ad7164f5",
     "fact-verify": "39b67d5c89c92f36e6c7",
     "fact-verify-alternative": "9fafb25d72ffbafad72e",
     "finalize": "d19a27c048c43de0c09a",
@@ -1363,7 +1363,7 @@
   },
   "preset:autopilot-draft:doc:thorough": {
    "briefs": {
-    "draft-production": "796e724954c47ca21111",
+    "draft-production": "c8187016a26067fb717d",
     "fact-verify": "defe57e78f582a7a477a",
     "fact-verify-alternative": "d0608aec3527da755b44",
     "finalize": "632ad721350c9bb21b70",
@@ -1399,7 +1399,7 @@
     "finalize"
    ],
    "nodes": {
-    "draft-production": "93ea58aff781d28b530a",
+    "draft-production": "4155496b76c9ad7164f5",
     "fact-verify": "39b67d5c89c92f36e6c7",
     "fact-verify-alternative": "9fafb25d72ffbafad72e",
     "finalize": "65f8bc9d85bc7047012e",

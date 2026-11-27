@@ -26,7 +26,7 @@ sys.path.insert(0, str(HERE))
 import worker_bootstrap as W  # noqa: E402
 
 FIELDS = (None, "plan", "design", "code", "lab", "research", "docs", "admin", "other")
-FIELD_UNITS = ("qa/code-review", "plan/plan-author", "analysis/analyze")
+FIELD_UNITS = ("qa/code-review", "plan/plan-author", "analysis/analyze", "editorial/write")
 
 
 def _raw(unit):
@@ -224,6 +224,62 @@ class AnalysisUnitTest(unittest.TestCase):
         self.assertLess(sizes["other"], sizes[None])   # one field's line, not six
 
 
+class WriteUnitTest(unittest.TestCase):
+    """Routing fragment 11, writing half: one must layer, and reference lines for docs and admin."""
+
+    UNIT = "editorial/write"
+    LINES = {"docs": "One point per paragraph; keep each claim next to the evidence it rests on.",
+             "admin": "Answer the form's requirements one by one"}
+
+    def test_the_head_is_a_writing_stage_with_no_default_field(self):
+        head = (ROOT / "roles" / "units" / "editorial" / "write.md").read_text(encoding="utf-8").split("---")[1]
+        for line in ("unit: editorial/write", "family: editorial", "role: deep editor", "worker_type: stage",
+                     "read_only: false", "stance: none", "  verdict: [done, blocked]"):
+            self.assertIn(f"\n{line}\n", head)
+        self.assertNotIn("\nfield:", head)      # docs and admin both use it: the route's field picks
+        self.assertNotIn("\nbootstrap:", head)  # the work-style slot is fragment 12's, not made here
+
+    def test_the_must_layer_keeps_every_line_the_design_names(self):
+        must = _must_layer(self.UNIT)
+        for line in ("**Input.** The settled outline and the evidence it rests on",
+                     "the receiving side's form and\n  deadline", "also the apply list",
+                     "**Output.** The draft, or the revised text,",
+                     "a list of the places written or changed",
+                     "**Change nothing outside the settled outline and the apply list.**",
+                     "**Invent no fact the evidence does not hold**",
+                     "**A form keeps the receiving side's layout, fields, limits and deadline exactly as given.**",
+                     "**Submitting and sending are the person's.**",
+                     "Write nothing into mail, messengers or any\n  other outside communication tool",
+                     "submit\n  nothing through a portal or service"):
+            self.assertIn(line, must)
+        # An entry the brief skips is listed, not a stop: the apply stage skips unmatched and STRUCT mutations.
+        self.assertIn("listed, never guessed): end `verdict: PASS`", must)
+        self.assertIn("`blocked`\n  when there is nothing to write from", must)
+        self.assertIn("or a precondition the contract names stops the work", must)
+
+    def test_each_field_carries_its_own_lines_and_the_whole_must_layer(self):
+        must = _must_layer(self.UNIT)
+        for field in FIELDS:
+            text = W.unit_persona_body(ROOT, self.UNIT, field)
+            self.assertIn(must, text, field)
+            self.assertIn("This unit drafts and applies.", text)   # the boundary with polish, review, report
+            for other, line in self.LINES.items():
+                self.assertEqual(line in text, field in (None, other), (field, other))
+        self.assertIn("## 갈래의 기본 — admin", W.unit_persona_body(ROOT, self.UNIT, "admin"))
+        self.assertEqual(W.unit_persona_body(ROOT, self.UNIT, None), _raw(self.UNIT))
+
+    def test_the_common_guidance_preloads_writing_profiles(self):
+        for field in ("docs", "admin"):
+            with self.subTest(field=field):
+                text = W.unit_persona_body(ROOT, self.UNIT, field)
+                self.assertIn("roles/units/_shared/profile-preload.md", text)
+                self.assertIn("02_paper_writing_style", text)
+
+    def test_the_rendered_text_stays_small(self):
+        sizes = {field: len(W.unit_persona_body(ROOT, self.UNIT, field).encode("utf-8")) for field in FIELDS}
+        self.assertLess(max(sizes.values()), 4000, sizes)
+
+
 class RouteFieldTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -319,6 +375,20 @@ class ThreeHarnessRenderTest(unittest.TestCase):
                                                                         field=field))
             self.assertIn(_must_layer("analysis/analyze"), texts["claude"])
             self.assertEqual("### 참고 — code" in texts["claude"], field in ("code", None), field)
+
+    def test_the_write_stage_is_one_render_across_the_harnesses(self):
+        # The draft and apply nodes are docs routes; an old route reads its recipe's field.
+        for route, field in (({"field": "docs"}, "docs"), ({"field": "admin"}, "admin"),
+                             ({"capability": "autopilot-draft", "capability_mode": "doc"}, "docs"),
+                             ({"capability": "autopilot-apply", "capability_mode": "default"}, "docs")):
+            path = self.route(route)
+            args = self.stage_args(path, unit="editorial/write", worker_type="stage")
+            texts = {harness: self.stage_text(harness, args) for harness in self.HARNESSES}
+            self.assertEqual(len(set(texts.values())), 1, route)
+            self.assertEqual(texts["claude"], W.render_worker_bootstrap(ROOT, "stage", unit="editorial/write",
+                                                                        field=field))
+            self.assertIn("**Submitting and sending are the person's.**", texts["claude"])
+            self.assertEqual("### 참고 — admin" in texts["claude"], field == "admin", route)
 
     def test_an_unreadable_route_still_renders_the_unit_text_as_written(self):
         for path in (str(self.tmp / "missing.json"), self.route({"field": "docs"}).replace("route-", "gone-")):

@@ -969,6 +969,17 @@ def main(argv):
         if explicit is not None and explicit not in enabled and not admitted(explicit):
             raise OwnerError("explicit-adapter-disabled-by-user-policy")
         explicit_policy = "outside-profile-bands" if explicit is not None and explicit not in configured else None
+        refused_harness = None
+        if values.get("--automatic-retry-of"):
+            from dispatch_replacement import (PROVIDER_REFUSAL_NO_ALTERNATIVE, SAME_PROVIDER_REFUSAL,
+                                              refused_profile_harness, replacement_source)
+            from route_authority import pin_target
+            predecessor = replacement_source(jobs, values["--automatic-retry-of"], values.get("--attempt-id"))
+            pin = ((pin_doc or {}).get("selection_pins") or {}).get(pin_target(values["--worker-type"]))
+            refused_harness = refused_profile_harness(predecessor, profile, pin=pin, source_root=ROOT)
+            if refused_harness:
+                configured = [h for h in configured if h != refused_harness]
+                policy = _defaults.restrict_harness_policy(policy, configured)
         allocation = (
             sealed_context.get("allocation")
             if sealed_context and isinstance(sealed_context.get("allocation"), dict)
@@ -998,7 +1009,8 @@ def main(argv):
 
         def automatically_available(harness):
             score = capacity.get(harness)
-            return (harness in enabled and harness not in top_excluded and _eligible(states[harness])
+            return (harness != refused_harness and harness in enabled
+                    and harness not in top_excluded and _eligible(states[harness])
                     and score is not None and score > 0)
 
         selected = None
@@ -1007,6 +1019,9 @@ def main(argv):
         quality_band = None
         relief_promoted = False
         ranks = None
+        if refused_harness and explicit == refused_harness and _eligible(states[explicit]):
+            print(f"check=failed\nreason={PROVIDER_REFUSAL_NO_ALTERNATIVE}\nchild_spawned=0\nhint={SAME_PROVIDER_REFUSAL}")
+            return 65
         if explicit and _eligible(states[explicit]):
             selected, source, quality_band = explicit, ("route-pin" if pin_chosen else "explicit"), "explicit"
         if selected is None and config_version in {3, 4}:
@@ -1052,6 +1067,10 @@ def main(argv):
                     quality_band = "outside-policy-fallback"
                     break
         if selected is None:
+            # The replacement controller checks capacity holds on these same candidates.
+            if refused_harness and not configured:
+                configured = [h for h in fallback_pool
+                              if h != refused_harness and h in enabled and h not in top_excluded]
             print("\n".join(_audit(
                 "unavailable", None, "none", configured, requested, states,
                 allocation=allocation, counts=counts, rejected=rejected,
@@ -1060,7 +1079,9 @@ def main(argv):
                 relief_promoted=relief_promoted, top_excluded=top_excluded,
                 field=(sealed_context or {}).get("field"),
             )))
-            if dropped and not configured:
+            if refused_harness and not configured:
+                reason, detail = PROVIDER_REFUSAL_NO_ALTERNATIVE, SAME_PROVIDER_REFUSAL
+            elif dropped and not configured:
                 # Every candidate was left out for not declaring `top`; say that
                 # rather than blaming usage or capacity.
                 reason = "frame-harness-unavailable"
