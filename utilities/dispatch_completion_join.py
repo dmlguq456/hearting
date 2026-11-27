@@ -2024,7 +2024,7 @@ def receipt_with_delivery_observability(
     if not isinstance(raw_children, list):
         raise JoinContractError("delivery-receipt-children-invalid")
     children: list[dict[str, object]] = []
-    classifications: list[str] = []
+    from dispatch_receipt_identity import completion_classification
     for raw_child in raw_children:
         if not isinstance(raw_child, dict):
             raise JoinContractError("delivery-receipt-child-invalid")
@@ -2048,7 +2048,7 @@ def receipt_with_delivery_observability(
         child["status"] = state.status
         child["delivery_classification"] = classification
         child["required_action"] = choice.next_action
-        if classification == "attention":
+        if classification in {"attention", "cancelled"}:
             child["reason"] = choice.reason or "terminal-failure-or-unclosed"
         elif state.advanced:
             child["reason"] = "row-advanced"
@@ -2059,12 +2059,9 @@ def receipt_with_delivery_observability(
         else:
             child.pop("next_leg", None)
         children.append(child)
-        classifications.append(classification)
     projected = dict(receipt)
     projected["children"] = children
-    projected["delivery_classification"] = (
-        "success" if classifications and set(classifications) == {"success"} else "attention"
-    )
+    projected["delivery_classification"] = completion_classification(children)
     inherited_timing = receipt.get("delivery_timing")
     base_timing = (
         validate_delivery_timing(inherited_timing)
@@ -4010,8 +4007,8 @@ def current_delivery_state(
     import route_parent_close
     if snapshot is not None and route_parent_close.row_requested(snapshot.metadata, jobs):
         route_parent_close.recover_attempt(jobs, snapshot.metadata)
-        current = current_attempt_row(jobs, attempt_id)
-        settled = bool(current and route_parent_close.cancellation_settled(current.metadata, jobs))
+        current = current_attempt_row(jobs, attempt_id) or snapshot
+        settled = bool(route_parent_close.cancellation_settled(current.metadata, jobs))
         return CurrentDeliveryState(None, "", child_row_revision(current),
             hashlib.sha256(current.raw.encode()).hexdigest(), current.status, "CANCELLED",
             settled, 0 if settled else 1, False, settled, False, settled,
@@ -4526,11 +4523,10 @@ def _join_snapshot(
             import route_parent_close
             if route_parent_close.row_requested(row.metadata, jobs):
                 unverifiable_since.pop(row.attempt_id, None)
-                outcome = route_parent_close.recover_attempt(jobs, row.metadata)
+                route_parent_close.recover_attempt(jobs, row.metadata)
                 current = current_attempt_row(
                     jobs, row.attempt_id, registry_append_only=registry_append_only)
-                settled = bool(outcome and outcome.get("state") == "cancelled" and current
-                               and current.metadata.get("parent_close_settled") == "1")
+                settled = bool(current and route_parent_close.cancellation_settled(current.metadata, jobs))
                 pending = pending or not settled
                 closure_eligible[row.attempt_id] = settled
                 children.append({"attempt_id": row.attempt_id, "slug": row.slug,

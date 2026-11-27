@@ -41,6 +41,15 @@ JOIN_REASONS = COMPLETION_REASONS | {"process-alive", "process-unverifiable",
                                      "terminal-commit-pending", "workflow-completion-pending"}
 
 
+def completion_classification(children) -> str:
+    classes = {child.get("delivery_classification") for child in children}
+    if classes == {"success"}:
+        return "success"
+    if "cancelled" in classes and classes <= {"cancelled", "success"}:
+        return "cancelled"
+    return "attention"
+
+
 def unseal_receipt(encoded: str) -> dict:
     """Restore the writer's exact receipt; decoding grants no authority."""
     if not isinstance(encoded, str) or not encoded:

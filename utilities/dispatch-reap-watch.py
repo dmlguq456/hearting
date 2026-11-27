@@ -193,11 +193,32 @@ def watch(args: argparse.Namespace) -> int:
     selected_identity = launched_attempt_identity(initial[0])
     selected_log_file = metadata.get("log_file", "")
 
-    while process_start_ticks(args.pid) == args.pid_start:
+    from route_parent_close import RegistryObservation, recover_attempt, stop_called_workers
+
+    def read_attempt(jobs, attempt_id):
+        row = attempt_record(jobs, attempt_id)
+        return (row[0][1], row[1]) if row is not None else (None, {})
+
+    # Owners already have the orphan watcher to drive a pending close. A
+    # depth-1 frame or unit leg has this watcher in its launch namespace.
+    observes_close = metadata.get("dispatch_depth") == "1" and (
+        metadata.get("worker_type") == "frame" or metadata.get("capability") == "unit")
+    observer = RegistryObservation(args.jobs, args.attempt_id, read_attempt) if observes_close else None
+    closing = False
+    while True:
+        if observer is not None:
+            _status, metadata, closing = observer.refresh(force=closing)
+            if closing:
+                outcome = recover_attempt(args.jobs, metadata)
+                if outcome and outcome.get("state") == "cancelled":
+                    break
+                time.sleep(args.parent_recheck_interval)
+                continue
+        if process_start_ticks(args.pid) != args.pid_start:
+            break
         time.sleep(args.interval)
 
     # The worker has ended: a unit worker it started that still runs would report to no one.
-    from route_parent_close import stop_called_workers
     stop_called_workers(args.jobs, args.attempt_id)
 
     # SD-OPEN-47 (H7-a): the post-exit drain loop used to rescan every
