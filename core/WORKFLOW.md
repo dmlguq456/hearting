@@ -207,16 +207,10 @@ parts, inputs and handoffs. A report assembled from existing materials,
 including mail and attachments, normally uses `autopilot-draft/doc` with
 `analyze-project/doc` for source analysis.
 
-A small, known document correction still uses the existing direct path in the
-current session, with the capability chosen by the main session and normal
-inline `finish`. It needs no frame pair, Git start question, initialization,
-worktree or folder memory. An explicit capability/mode and an approved
-route-plan remain binding. Legacy explicit direct starts may retain their
-conservative purpose hint or unresolved storage fallback; that fallback does
-not establish the work's meaning. A Git direct start retains its existing
-default. An explicitly requested new Git repository retains its ordinary
-preparation/approval path. No new classifier, question or required argument is
-introduced.
+See [§0.2.1](#021-shape-before-preset-sd-135) for which document edits to keep in
+the current session and which work to delegate. An explicit capability/mode and an
+approved route plan remain binding. An explicitly requested new Git repository
+uses ordinary preparation and approval.
 Selection and compilation use the same task bytes, including a one-shot stdin input.
 An explicitly selected worker shape, including a route-plan leg whose own shape is not direct, is a
 worker request. In a non-Git folder, a compiled artifact-only worker route may run in the
@@ -254,14 +248,9 @@ fixed-result evaluation, reusable code, document correction or drafting, project
 and packaging use their corresponding existing capabilities. Generic analysis, conflicting
 purposes, negation, and quoted examples stay unresolved; they add no required question or flag.
 
-For multi-step document work, keep the frame's capability, graph, inputs,
-outputs, writer responsibilities and unfinished handoffs in the existing route
-plan. Artifact-only stages may use the existing non-Git worker placement. A
-step that edits an original document stays in a direct leg in the current
-session; it does not collapse the other staged legs. Format tools such as HWPX
-belong to draft/refine production and checks. Running a format tool does not
-finish material review, integration or another person's missing draft.
-
+Legacy explicit direct starts may keep a conservative purpose hint or unresolved
+storage fallback. Determine purpose from the task. Git direct starts keep their
+existing default.
 
 ### 0.2.1. Shape Before Preset (SD-135)
 
@@ -285,34 +274,34 @@ An entry's recipe is an assembly preset: the default when nothing else is
 chosen and an example of how its parts fit together. The route is the sealed
 stage list, assembled from the part catalog (`capabilities/topologies.json`
 recipes plus `part_catalog`, SD-165).
-The main session judges the existing seven direct predicates by **one local
-completion unit**, rather than separate edits or verbs:
-one reversible result for a feature or defect; known scope, whose location and
-impact a short read of the source, callers and tests establishes; focused
-verification with a known runner and expected result; no change to contracts
-shared by components, adapters or external consumers (API, schema, security
-boundary or PRD decisions); no long-running resource work; no independent
-artifact handoff; and no independent verifier. A requested test run is the
-session's own verification, not an independent verifier.
+The main session applies the seven direct predicates to **one local completion unit**.
+It has one reversible result, known scope and impact from a short read of relevant source,
+callers and tests, and focused verification with a known runner and expected result.
+It needs no change to contracts shared by components, adapters or external consumers
+(API, schema, security boundary or PRD), long-running resource work, independent artifact
+handoff or independent verifier.
 
-A small new feature or fix and its source, regression tests and README form
-the same completion unit. A new file is not scope expansion by itself; a
-small component's full suite can be focused verification. Its README explains
-the feature rather than creating an independent artifact handoff. `fix`,
-`outcome` and `edit` name this same scope. File, line and verb counts
-are not classifiers. Reading known related files to confirm scope differs
-from exploring several modules to find the cause.
+A small feature or fix and its source, regression tests and README can form one unit.
+A new file can belong to that unit. A small component's full suite can be a focused
+check. `fix`, `outcome` and `edit` follow the same scope judgment regardless of file, line
+or verb count. In the current Git worktree, read, edit, check and reply. Turn hooks record
+successive edits automatically. A new worktree or scope exploration uses an explicit route.
 
-A unit that satisfies these predicates and finishes in the current cwd's Git
-worktree needs only reading, editing, focused checking and an ordinary final
-reply. Existing turn hooks record it automatically; no task file, compose,
-finish, separate capability-info call, question or classification call is
-required. A new worktree or scope exploration uses the explicit route instead.
+Keep small document edits that fit this scope in the opening session's conversation.
+Delegate only the reading or writing task once its scope is clear. In a paper's results
+section, the opening session moves the conclusion to the front, puts the numbers in a
+figure, then adds the conditions for interpreting the results at the end. If the resulting
+version needs independent review, send it once with all three edits. For a small non-Git
+correction, the main session chooses the capability and uses the existing direct
+compose/finish in the document's folder.
 
-Use the same scope judgment for a small non-Git document correction, through
-the existing direct compose/finish path in that folder. The main session
-chooses the existing capability; the person need not name one. Material
-collection, multiple drafts, integration and independent review use the frame.
+Use the document frame to gather materials, make multiple drafts, connect claims and
+evidence across sections or integrate an external draft. Keep the capability, graph,
+inputs, outputs, writer responsibilities and unfinished handoffs, including missing
+drafts, in the route plan. Edit originals in the current session's direct leg and keep
+the other staged legs, including artifact-only workers in non-Git folders. HWPX and other
+format tools serve production and format checks. Material review and integration still
+need their own work.
 
 If the work grows, compose before the next expanded action. The new route
 links the current turn's start snapshot, observed changes and native evidence;
@@ -327,20 +316,16 @@ work or its tests passed. Missing, interrupted and running results stay unknown.
 Explicit `compose --start --shape direct --field <field> --prompt-file <task>`
 still prepares an isolated worktree and an inline route; `compose --shape direct
 --field <field>` records work already made in place. Their receipt and explicit finish contracts are unchanged.
-When the direction is clear, open `--shape solo|staged` (below); otherwise use
-`compose --start --prompt-file <task>` with no `--shape`; the
-frame chooses the capability, stages, and solo or staged shape, judging each
-leg's optional `size` (`one-change`, `one-pass`, `multi-stage`) first; an
-omitted shape follows it. Direct has no review-worker path of its own: work that
-needs an independent review is not direct. Open it with `--shape solo --intensity standard`
-(one session and one independent review, where the kind declares a one-shot review;
-`--intensity strong` or higher adds review legs: two at `strong`, three at `thorough`
-and `adversarial`; the owner starts the route's declared review nodes with the command
-its task gives, and cannot close any of them itself), or omit `--shape` and let the frame choose, or use
-`staged` when the size of the work calls for stages (`staged` is chosen for size, not to
-obtain a review where the kind declares a one-shot review; where it declares none, work that
-needs an independent review opens `staged`). The session checks a direct change itself; a second look it
-wants from another worker is a short check that keeps no record (below).
+When the direction is clear, open `--shape solo|staged` (below). With no `--shape`,
+`compose --start --prompt-file <task>` lets the frame choose the capability, stages and
+shape, judging each leg's optional `size` (`one-change`, `one-pass`, `multi-stage`) first.
+Direct has no review-worker path of its own: work that
+needs an independent review is not direct. Open `--shape solo --intensity standard`
+for a declared one-shot review. `strong` has two review legs, `thorough` and
+`adversarial` three. The owner starts them with the task's command and cannot close
+them itself. Use `staged` for work sized for stages, or for independent review where
+the kind has no one-shot review. The session checks a direct change itself, including
+requested tests. An optional second look is a short check that keeps no record (below).
 
 | Main decision | Command | Result |
 |---|---|---|
