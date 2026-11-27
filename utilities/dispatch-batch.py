@@ -1214,7 +1214,7 @@ def assign_harnesses(
             policy = ROUTE_MODULE.DEFAULTS.restrict_harness_policy(policy, allowed)
         bands = ["primary", "relief", "last_resort"]
         threshold = policy.get("promote_relief_below", 0)
-        primary = [capacity.get(name) for name in policy.get("primary", [])]
+        primary = [CAPACITY.raw_headroom(capacity, name) for name in policy.get("primary", [])]
         primary = [value for value in primary if value is not None]
         if (
             policy.get("relief")
@@ -1279,7 +1279,7 @@ def assign_harnesses(
                 # 90%-used exclusion gate.
                 gate_order = (
                     gated_legs,
-                    -sum(float(capacity.get(row[0]) or 0) for row in rows),
+                    -sum(float(CAPACITY.raw_headroom(capacity, row[0])) for row in rows),
                 )
                 allocation_order = (
                     float(sum(counts.get(row[0], 0) for row in rows)),
@@ -1329,7 +1329,7 @@ def assign_harnesses(
                      usage_gate_used_percent=allocation.get("usage_gate_used_percent", 90))
                      for row in rows]
             within_band_gate = (sum(gated),
-                -sum(float(capacity.get(row[0]) or 0) for row in rows) if all(gated) else 0.0)
+                -sum(float(CAPACITY.raw_headroom(capacity, row[0])) for row in rows) if all(gated) else 0.0)
         diversity_order = (0 if len(rows) == 2 and rows[0][0] != rows[1][0]
                            and not (worker_pin and pinned_legs) else
                            1 if len(rows) == 2 and not (worker_pin and pinned_legs) else 0)
