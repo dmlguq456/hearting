@@ -197,8 +197,8 @@ class PassThroughTest(Base):
                         code = redirect.main([flag], stdin=io.StringIO(json.dumps(payload)))
                     self.assertEqual((code, out.getvalue()), (0, ""))
 
-    def test_a_waiting_hearting_question_is_kept_and_the_native_call_is_refused_with_its_id(self):
-        """11-27: no native window stands beside a waiting question; nothing is registered or replaced."""
+    def test_a_different_question_beside_an_open_one_goes_through_as_before(self):
+        """Only the same question is held back; a different one shows natively and the open one stays as it was."""
         import session_tidy as tidy
         for harness, payload in (("claude", claude_payload()), ("codex", codex_payload()),
                                  ("opencode", opencode_payload())):
@@ -207,25 +207,16 @@ class PassThroughTest(Base):
             for turn in ("same turn", "next turn after an unrelated human prompt"):
                 with self.subTest(harness=harness, turn=turn):
                     if turn != "same turn":
-                        seat = self.f.seat(harness, SID)
-                        tidy.bump_prompt_seq(seat, harness, SID, time.time())
-                    reason = redirect.redirect(harness, payload)
-                    self.assertIsNotNone(reason)                             # refused: no native window
-                    self.assertIn(earlier["id"], reason)
-                    self.assertTrue(reason.startswith("Not shown:"), reason)  # a different question
-                    self.assertLess(len(reason), 220)
-                    self.assertNotIn("\n", reason)
+                        tidy.bump_prompt_seq(self.f.seat(harness, SID), harness, SID, time.time())
+                    for again in range(3):                                   # asked again, still shown each time
+                        self.assertIsNone(redirect.redirect(harness, payload))
                     self.assertEqual(state._read(state._signal_path(earlier))["id"], earlier["id"])
                     self.assertEqual(state._selected_entry(envelope)["state"], "open")
                     self.assertEqual([item["id"] for item in state.read_signals() if item["harness"] == harness],
                                      [earlier["id"]])
-            # `questions ask` still replaces when the turn moved on; that path is unchanged.
-            again, _ = self.f.ask(harness, SID, text="Which scope first?", choices=["Small", "Large"], recommended=0)
-            self.assertNotEqual(again["id"], earlier["id"])
-            self.assertEqual(state._selected_entry(envelope)["result"]["status"], "replaced")
             self.answered(harness)
 
-    def test_the_same_question_asked_again_natively_is_refused_with_the_waiting_id(self):
+    def test_the_same_question_asked_again_natively_is_refused_with_the_open_id(self):
         """The 11-27 scene: `questions ask`, then the same question through the native tool in the same turn."""
         for harness, payload in (("claude", claude_payload()), ("codex", codex_payload()),
                                  ("opencode", opencode_payload())):
@@ -235,25 +226,60 @@ class PassThroughTest(Base):
                     earlier, envelope = self.f.ask(harness, SID, text=text,
                                                    choices=["Proceed", "Edit", "Stop"], recommended=0)
                     reason = redirect.redirect(harness, payload)
-                    self.assertEqual(reason, redirect.reason_waiting(earlier["id"], same=True))
-                    self.assertTrue(reason.startswith("This question is already Hearting question " + earlier["id"]))
+                    self.assertEqual(reason, redirect.reason_already(earlier["id"]))
                     self.assertLess(len(reason), 220)
+                    self.assertNotIn("\n", reason)
                     self.assertEqual([item["id"] for item in state.read_signals() if item["harness"] == harness],
                                      [earlier["id"]])
                     self.assertEqual(state._selected_entry(envelope)["state"], "open")
                     self.answered(harness)
-        # Other choices, or other words, are another question.
-        earlier, _ = self.f.ask("claude", SID, text="Start now?", choices=["Proceed", "Stop"])
-        self.assertTrue(redirect.redirect("claude", claude_payload()).startswith("Not shown:"))
-        self.answered("claude")
-        earlier, _ = self.f.ask("claude", SID, text="Start later?", choices=["Proceed", "Edit", "Stop"])
-        self.assertTrue(redirect.redirect("claude", claude_payload()).startswith("Not shown:"))
-        self.answered("claude")
+        # Other choices, or other words, are another question: shown natively, as before.
+        for text, choices in (("Start now?", ["Proceed", "Stop"]), ("Start later?", ["Proceed", "Edit", "Stop"])):
+            with self.subTest(text=text, choices=choices):
+                self.f.ask("claude", SID, text=text, choices=choices)
+                self.assertIsNone(redirect.redirect("claude", claude_payload()))
+                self.answered("claude")
 
-    def test_a_waiting_question_refuses_the_native_call_even_when_registration_cannot_run(self):
-        """A seat or a state that cannot be written never puts a native window beside a waiting question."""
+    def test_an_old_question_or_one_in_another_pane_is_held_only_when_it_is_the_same(self):
         import session_tidy as tidy
-        earlier, _ = self.f.ask("claude", SID, text="Which scope first?", choices=["Small", "Large"])
+        old, _ = self.f.ask("claude", SID, text="Start now?", choices=["Proceed", "Edit", "Stop"])
+        source = state._read(state._signal_path(old))
+        source["since"] -= 73 * 3600                                         # folded on the panel, still open
+        state._write_signal_source(source)
+        self.assertTrue(next(item for item in state.read_signals() if item["id"] == old["id"])["stale"])
+        self.assertEqual(redirect.redirect("claude", claude_payload()), redirect.reason_already(old["id"]))
+        self.answered("claude")
+        self.f.ask("claude", SID, text="Which scope first?", choices=["Small", "Large"])
+        source = next(item for item in state.read_signals() if item["harness"] == "claude")
+        source["since"] -= 73 * 3600
+        state._write_signal_source({key: value for key, value in source.items() if key != "stale"})
+        self.assertIsNone(redirect.redirect("claude", claude_payload()))
+        self.answered("claude")
+        # The same session in another pane: the same question is held, a different one registers here (as before).
+        pane = tidy.session_seat(tidy.Seat("pane", "question-seat-claude-2", pane="fixture:p2", harness="claude"),
+                                 "claude", SID)
+        there = state.register_message("claude", SID, pane, "Start now?", sequence=tidy.read_prompt_seq(pane),
+                                       choices=["Proceed", "Edit", "Stop"], cwd=str(self.f.root))
+        self.assertEqual(redirect.redirect("claude", claude_payload()), redirect.reason_already(there["id"]))
+        state._remove_signal_source(there, state._signal_path(there))
+        there = state.register_message("claude", SID, pane, "Which scope first?", sequence=tidy.read_prompt_seq(pane),
+                                       choices=["Small", "Large"], cwd=str(self.f.root))
+        reason = redirect.redirect("claude", claude_payload())
+        self.assertTrue(reason.startswith("Registered as Hearting question"), reason)
+        self.assertNotIn(there["id"], reason)
+
+    def test_a_question_replaced_just_after_it_was_read_is_never_the_one_named(self):
+        earlier, _ = self.f.ask("claude", SID, text="Start now?", choices=["Proceed", "Edit", "Stop"])
+        read = state._read(state._signal_path(earlier))
+        later, _ = self.f.ask("claude", SID, text="Which scope first?", choices=["Small", "Large"])  # replaces it
+        with mock.patch.object(redirect, "_open_questions", return_value=[read]):
+            self.assertIsNone(redirect.redirect("claude", claude_payload()))   # a different question: shown
+        self.assertEqual(state._read(state._signal_path(later))["id"], later["id"])
+
+    def test_the_same_open_question_refuses_the_native_call_even_when_registration_cannot_run(self):
+        """A seat or a state that cannot be written never puts a native window beside the same open question."""
+        import session_tidy as tidy
+        earlier, _ = self.f.ask("claude", SID, text="Start now?", choices=["Proceed", "Edit", "Stop"])
         with mock.patch.object(tidy, "resolve_seat", return_value=tidy.Seat("none", "", pane="")):
             self.assertIn(earlier["id"], redirect.redirect("claude", claude_payload()))
         with mock.patch.object(tidy, "resolve_seat", side_effect=RuntimeError("seat ledger unreadable")):
@@ -263,12 +289,12 @@ class PassThroughTest(Base):
                  mock.patch.object(state, "register_message", side_effect=failure) as register:
                 self.assertIn(earlier["id"], redirect.redirect("claude", claude_payload()))
                 register.assert_not_called()
-        # Another session's or another harness's waiting question, or an answer marker, is not this one's.
-        other, _ = self.f.ask("claude", "another-session", text="Theirs?", choices=["A", "B"])
-        codex, _ = self.f.ask("codex", SID, text="Codex's?", choices=["A", "B"])
+        # Another session's or another harness's question, or an answer marker, is not this one's.
+        other, _ = self.f.ask("claude", "another-session", text="Start now?", choices=["Proceed", "Edit", "Stop"])
+        codex, _ = self.f.ask("codex", SID, text="Start now?", choices=["Proceed", "Edit", "Stop"])
         self.answered("claude")
         seat = self.f.seat("claude", SID)
-        marker = state.signal_value("claude", SID, seat.key, "[답변 필요] Marked?", sequence=tidy.read_prompt_seq(seat))
+        marker = state.signal_value("claude", SID, seat.key, "[답변 필요] Start now?", sequence=tidy.read_prompt_seq(seat))
         self.assertTrue(state.write_signal(marker))
         self.assertTrue(any(item.get("mode") != "message" for item in state.read_signals()))
         reason = redirect.redirect("claude", claude_payload())
@@ -278,24 +304,25 @@ class PassThroughTest(Base):
 
     def test_an_answer_on_its_way_holds_back_only_the_turn_that_asked(self):
         """The person answered on the board: within that turn the answer comes as the next prompt (refused);
-        after a later prompt a record that has not closed never holds the session's next question back."""
+        after a later prompt a record that has not closed never holds the same question back."""
         import session_tidy as tidy
         earlier, envelope = self.f.ask("claude", SID, text="Start now?", choices=["Proceed", "Edit", "Stop"],
                                        recommended=0)
         result = state.submit_selected_response(envelope, {"answers": {"message-response": ["Proceed"]}},
                                                 action_id="board-claude")
         self.assertEqual(result["state"], "submitted", result)
-        self.assertEqual(redirect.redirect("claude", claude_payload()),
-                         redirect.reason_waiting(earlier["id"], same=True))
+        self.assertEqual(redirect.redirect("claude", claude_payload()), redirect.reason_already(earlier["id"]))
         tidy.bump_prompt_seq(self.f.seat("claude", SID), "claude", SID, time.time())
         self.assertIsNone(redirect.redirect("claude", claude_payload()))     # the native question shows
         self.assertEqual(state._read(state._signal_path(earlier))["id"], earlier["id"])  # nothing replaced
 
-    def test_a_question_registered_meanwhile_is_the_one_the_refusal_names(self):
-        earlier, _ = self.f.ask("claude", SID, text="Which scope first?", choices=["Small", "Large"])
-        with mock.patch.object(redirect, "waiting_question", side_effect=[None, earlier]):
+    def test_the_same_question_registered_meanwhile_is_the_one_the_refusal_names(self):
+        earlier, _ = self.f.ask("claude", SID, text="Start now?", choices=["Proceed", "Edit", "Stop"])
+        with mock.patch.object(redirect, "same_waiting", side_effect=[None, earlier]):
             reason = redirect.redirect("claude", claude_payload())    # register_message refuses: open elsewhere
-        self.assertEqual(reason, redirect.reason_waiting(earlier["id"], same=False))
+        self.assertEqual(reason, redirect.reason_already(earlier["id"]))
+        with mock.patch.object(redirect, "same_waiting", side_effect=[None, None]):
+            self.assertIsNone(redirect.redirect("claude", claude_payload()))   # it is another question: shown
         self.assertEqual([item["id"] for item in state.read_signals() if item["harness"] == "claude"], [earlier["id"]])
 
     def test_the_board_answer_reaches_the_session_after_the_refusal_once(self):
