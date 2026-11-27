@@ -6,6 +6,10 @@ const crypto = require('node:crypto');
 const cp = require('node:child_process');
 const path = require('node:path');
 const readline = require('node:readline');
+// The release this host runs from stays visible to the installer's /proc scan for as long as the
+// window lives, as dispatch_contract._CODE_ROOT_FD does; Node opens it close-on-exec, so the
+// native child never sees it. An update moves the link this host was started through.
+try { fs.openSync(path.resolve(__dirname, '..', '..'), 'r'); } catch {}
 const args = process.argv.slice(2), harness = args.shift(), command = args;
 let activated = false, child, inputOwner, mouseInput, backend, server, projectionTimer, frameTimer, ended = false;
 function startupResult(value) {
@@ -931,13 +935,14 @@ function askTable(){
   // The NOW list folds to the lines the popup has: its rows less the key line and the place (3).
   const room=now?Math.max(3,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-3)):Math.max(6,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-2));
   const status=listed(t.kind);
-  const routeTable=t.kind==='ROUTE',pageAsked=!!t.page;
+  // (`framedAsked`: the first screen this route's page showed was its frame (`routeFirst` noted it), so the reading stands that frame first where it fits)
+  const routeTable=t.kind==='ROUTE',pageAsked=!!t.page,framedAsked=routeTable&&!!t.page&&!!t.framed;
   // The routes popup's held backend draws a route unfolded or its page from the collection it already made while the
   // panel's route rows are the ones that collection was read for (`reuse`); else it collects (a first read, a changed key).
   const collect=!!t.collect;t.collect=false;
   const reuse=routeTable&&!collect&&t.readKey!==undefined&&t.readKey===(popupKeys.ROUTE??null);
   const ask=extra=>{
-    const asked={kind:POPUP_KIND[t.kind],columns,open:now?t.sel||'':t.open||'',page:!!t.page,rows:room,
+    const asked={kind:POPUP_KIND[t.kind],columns,open:now?t.sel||'':t.open||'',page:!!t.page,rows:room,...(framedAsked?{framed:true}:{}),
       ...(status?{cwd:process.cwd(),routes:statusRoutes(),status:statusHeld(),own:ownFolder(),...extra}:{}),...(reuse?{reuse:true}:{})};
     if(!(now||routeTable)||t.noWorker)return readAction(asked,'popup',true);
     // The popup's own backend answers. A read it did not answer is made the one-shot way (and the popup reads
@@ -961,7 +966,8 @@ function askTable(){
     if(routeTable){
       // A collected view is reusable on either screen, even if its rows are for the screen just left.
       if(result?.ok){t.readKey=keyAsked??null;t.readAt=Number(result.read_at)||atAsked;}
-      if(pageAsked!==t.page){tableAgain=true;return;}
+      // (and one asked for a first screen this popup no longer shows: a page opened again since on another first screen)
+      if(pageAsked!==t.page||framedAsked!==(!!t.page&&!!t.framed)){tableAgain=true;return;}
     }
     if(now){
       // A part that could not be asked for goes back to the list; a list that could not be read says so.
@@ -1197,16 +1203,21 @@ function openPopup(name,open='',page=false){
   queueDisplay();
 }
 // What a routes popup shows before its own reading comes: what was read last for this session (same width, same
-// route, table or page as it opens, the panel's route values unchanged since), else for a route's page the stage boxes
+// route, table or page as it opens, the panel's route values unchanged since), else for a route's page the page's frame
 // the panel's values draw (`panelView.routePageFirst`), else the panel's route box at the popup's width; nothing
-// where there is neither (the popup's spinner). Its rows are not this reading's, so it carries `stale`.
+// where there is neither (the popup's spinner). Its rows are not this reading's, so it carries `stale`; `framed` notes whether it is a page
+// whose frame stands first (the reading asked for it follows that, not the panel's values when it is asked).
 function routeFirst(t){
   const r=routePopup;
-  if(r&&r.sid===sid&&r.width===t.width&&r.open===t.open&&r.key===popupKeys.ROUTE&&!!r.page===!!t.page)return {rows:r.rows,hits:r.hits,routes:r.routes,loaded:true,stale:{at:r.at,failed:false}};
+  if(r&&r.sid===sid&&r.width===t.width&&r.open===t.open&&r.key===popupKeys.ROUTE&&!!r.page===!!t.page)
+    return {rows:r.rows,hits:r.hits,routes:r.routes,loaded:true,stale:{at:r.at,failed:false},framed:!!r.page&&/^╔═/.test((r.rows[0]||[]).map(p=>p.text).join(''))};
   const args={model:panelModel,columns:Math.max(20,Math.min(200,t.width-4)),cellWidth,configuration:displayConfiguration,background:terminalBackground};
-  // A route with no stage line (the owner alone, a unit's) has no stage boxes: its first screen stays the panel's box.
-  const b=(t.page&&panelView.routePageFirst({...args,id:t.open}))||panelView.routesBody(args);
-  return b?{rows:b.rows,hits:b.hits,routes:b.routes,loaded:true,stale:{at:Number(panelModel.route_read_at)||0,failed:false}}:null;
+  // (11-27: every form's page, unit, solo and team, draws its frame from the panel's values; a route the panel holds no leg band for, or a
+  // drawing that throws, stays the panel's box: the first screen is a picture the popup can do without, never the reason the panel is lost.)
+  let page=null;
+  if(t.page)try{page=panelView.routePageFirst({...args,id:t.open});}catch{page=null;}
+  const b=page||panelView.routesBody(args);
+  return b?{rows:b.rows,hits:b.hits,routes:b.routes,loaded:true,stale:{at:Number(panelModel.route_read_at)||0,failed:false},framed:!!page&&panelView.routeFramed({model:panelModel,id:t.open})}:null;
 }
 // The panel's route order for its popup (failed, running, waiting, finished): the first unfolded route.
 function rankedRoutes(){
@@ -1250,7 +1261,7 @@ function enterRow(){
   if(t.kind==='ROUTE'&&t.open){
     t.page=!t.page;t.scroll=0;t.pageTop=t.page;t.follow=!t.page;
     if(t.page){
-      Object.assign(t,{rows:[],hits:[],routes:[],loaded:false,stale:null,error:false},routeFirst(t));
+      Object.assign(t,{rows:[],hits:[],routes:[],loaded:false,stale:null,error:false,framed:false},routeFirst(t));
       queueDisplay();
     }
     askTable();

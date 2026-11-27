@@ -658,6 +658,70 @@ def _owner_job(jobs):
     return owners[0] if len(owners) == 1 else None
 
 
+_LIVE_OWNER = ("working", "idle", "blocked")
+
+
+def _own_pid_alive(job):
+    """True only when the collector accepted this registry row's own PID in this pass
+    (``pid_identity_source``, from ``dispatch._authoritative_registry_pid``) and the classifier
+    found that very process alive with its recorded start (``pid_alive``, ``proc_start_match``).
+    A borrowed PID or a row whose PID was not accepted is not this attempt alive; a row with no
+    attempt id is never (the collector fills such a row's PID from a same-folder process) (11-27)."""
+    evidence = _get(job, "state_evidence")
+    seen = evidence.get("inputs") if isinstance(evidence, Mapping) else None
+    return (bool(_text(_get(job, "attempt_id"))) and isinstance(seen, Mapping)
+            and bool(seen.get("pid_identity_source"))
+            and seen.get("pid_alive") is True and seen.get("proc_start_match") is True)
+
+
+def _closed_at_route_file(job, record):
+    """Whether the outcome beside the route file this owner row records (an older route under
+    ``artifacts/routes`` too) closed the projection-validated route ``record``, read by the route
+    reader the work projection uses for its result. A route file gone or changed meanwhile cannot
+    confirm the route open, so it reads as closed: that route keeps the earlier rule."""
+    from .. import route as route_reader
+    path = _text(_get(job, "owner_route_file")) or _text(_get(job, "route_file"))
+    if not path or not os.path.isfile(path):
+        return True
+    try:
+        outcome = route_reader.load_outcome(path, record.get("route_id"), record.get("route_hash"))
+    except (AttributeError, TypeError, ValueError, OSError):
+        return True
+    return bool(outcome.get("present") and outcome.get("match") and outcome.get("closed_at"))
+
+
+def _running_owner(owner, attempts):
+    """The owner attempt whose liveness says whether the route runs: the owner, else the one
+    attempt among several whose registry row is still open and whose own process is alive
+    (``_own_pid_alive``). A continued, resumed or relaunched route carries several owner attempts
+    and its sealed record names none; with no or two such attempts nothing is guessed (11-27)."""
+    if owner is not None:
+        return owner
+    live = [job for job in attempts if _get(job, "liveness") in _LIVE_OWNER
+            and _text(_get(job, "status")) in ("open", "running") and _own_pid_alive(job)]
+    return live[0] if len(live) == 1 else None
+
+
+def _route_visibility_of(record, view, owner_jobs, owner, running):
+    """``(visibility, closed)`` of a route record: the display-only shape, stages, verification and
+    next step read from its own record, Fleet's view and its outcome sidecar, and whether that
+    sidecar closed it (``closed_at``). ``(None, False)`` without a record.
+
+    A solo route's owner is its one-shot node's own attempt, not a separate row. Without one
+    owner the detail names the one live open attempt that runs the route, else the latest."""
+    if not record:
+        return None, False
+    depth_one = [job for job in owner_jobs
+                 if _get(job, "depth") == 1 or _get(job, "dispatch_depth") == 1]
+    shown_owner = owner if owner is not None else running if running is not None else (
+        max(depth_one, key=current_attempt_rank) if depth_one else None)
+    visibility = route_visibility.bounded(route_visibility.describe(
+        record, view, owner=route_visibility.owner_from_job(shown_owner)))
+    codes = visibility.get("codes") if isinstance(visibility, Mapping) else None
+    verification = codes.get("verification") if isinstance(codes, Mapping) else None
+    return visibility, bool(isinstance(verification, Mapping) and verification.get("closed_at"))
+
+
 def _route_stem(path):
     text = _text(path)
     return os.path.splitext(os.path.basename(text))[0] if text else None
@@ -1161,7 +1225,16 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         cwd = _text(view.get("cwd")) or _text(record.get("cwd")) or _text(_get(owner, "cwd"))
         repo = (session_row or {}).get("repo") or _repo_of(resolver, cwd)
         owner_state = (session_row or {}).get("state")
-        owner_live = _text(_get(owner, "liveness")) if owner is not None else None
+        # The one live open owner attempt among several runs the route, and the route detail names
+        # it, unless the route is closed (its outcome's ``closed_at``): then everything reads as before.
+        candidate = _running_owner(owner, _owner_jobs(owner_jobs))
+        visibility, closed = _route_visibility_of(record, view, owner_jobs, owner, candidate)
+        # Closed where its own route file says so (an older route under ``artifacts/routes`` too), or unreadable.
+        ended = closed or bool(record and candidate is not None and _closed_at_route_file(candidate, record))
+        if ended and owner is None and candidate is not None:
+            visibility, closed = _route_visibility_of(record, view, owner_jobs, owner, None)
+        runner = owner if ended else candidate
+        owner_live = _text(_get(runner, "liveness")) if runner is not None else None
         if owner_live in ("working", "idle", "blocked", "dead", "done"):
             state = owner_live                    # the route is as alive as the attempt that owns it
         elif active is not None:
@@ -1294,9 +1367,16 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             # KIND reads `frame`: a frame route's default capability mode and inherited
             # intensity are not display axes. The source record keeps both values.
             mode = intensity = None
+        # The route runs while its owner or a worker of it does. An owner whose registry row is
+        # still open and whose own registered process is alive (its PID with its recorded start) is
+        # running the route however quiet it is, between stages, after a stage ended FAIL or BLOCKED,
+        # or after the last stage (11-27). A closed owner row, a closed or unvalidated route, or an
+        # owner alive by any other evidence keeps the stage rule, so a finished route does not stay.
+        owner_open = (bool(record) and not ended and runner is not None and _own_pid_alive(runner)
+                      and _text(_get(runner, "status")) in ("open", "running"))
         current = bool(run_children or worker_contexts
-                       or owner_live in ("working", "idle", "blocked")
-                       and total and done != total and (active is not None or not failed))
+                       or owner_live in _LIVE_OWNER
+                       and (owner_open or total and done != total and (active is not None or not failed)))
         running = current and (active is not None or state == "working" or run_children or worker_contexts)
         route = {
             "id": rid, "repo": repo, "session_tag": owner_tag, "title": title, "state": state,
@@ -1328,21 +1408,11 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         if doer is not None:
             route["doer"] = doer
         if record:
-            # Display only: shape and its basis, stages, verification and next step, read
-            # from this route's own record, Fleet's view and its outcome sidecar.
-            # A solo route's owner is its one-shot node's own attempt, not a separate row.
-            depth_one = [job for job in owner_jobs
-                         if _get(job, "depth") == 1 or _get(job, "dispatch_depth") == 1]
-            shown_owner = owner if owner is not None else (
-                max(depth_one, key=current_attempt_rank) if depth_one else None)
-            route["visibility"] = route_visibility.bounded(route_visibility.describe(
-                record, view, owner=route_visibility.owner_from_job(shown_owner)))
+            route["visibility"] = visibility
             # A route its supervisor closed (``capability-route close``, the outcome sidecar's
             # ``closed_at``) is over even when its owner ended without a passed gate: it is
             # neither a stopped leg to count nor one to resume.
-            codes = route["visibility"].get("codes") if isinstance(route["visibility"], Mapping) else None
-            verification = codes.get("verification") if isinstance(codes, Mapping) else None
-            if isinstance(verification, Mapping) and verification.get("closed_at"):
+            if closed:
                 route["closed"] = True
                 route["resume"] = None
         if deferred or unread:
@@ -3970,6 +4040,118 @@ def _panel_stage(stage, box=None):
     return row
 
 
+def _panel_route_record(route, route_nodes):
+    """One route's bounded record for the shell panel (``session_route_status`` hands one per route)."""
+    row = {key: str(route.get(key) or "")[:320] for key in
+           ("id", "title", "state", "shape", "worker_stage", "outcome", "repo", "capability", "field")}
+    # Each stage's box in Fleet's route detail (verdict, time, unit, output, rounds note).
+    boxes = {}
+    for group in (route_nodes or {}).get(route.get("id")) or ():
+        for item in (group.get("detail") or ()) if isinstance(group, Mapping) else ():
+            if isinstance(item, Mapping) and item.get("n"):
+                boxes.setdefault(str(item["n"]), item)
+    row["stages"] = [_panel_stage(stage, boxes.get(str(stage.get("name") or "")))
+                     for stage in (route.get("stages") or ())[:16]]
+    # The unfolded route's kind, owner and doer lines, as ROUTES reads them: the
+    # same record values, bounded; nothing here is collected a second time.
+    for key in ("mode", "intensity", "profile", "age", "worker_unit", "resume"):
+        if isinstance(route.get(key), str) and route[key]:
+            row[key] = route[key][:64]
+    row["legs"] = len(route.get("legs") or ())
+    # The route's chain (``frame ✓ → code``), the legs Fleet already reads: name and state only.
+    row["chain"] = [[str(leg[0])[:24], str(leg[1])[:12]] for leg in (route.get("legs") or ())[:6]
+                    if isinstance(leg, (list, tuple)) and len(leg) >= 2]
+    # The note right of the detail band (``detail_after``), as Fleet's route detail reads it.
+    from .pages import _route_after
+    nodes = tuple((route_nodes or {}).get(route.get("id")) or ())
+    after = route["detail_after"] if "detail_after" in route else _route_after(route, nodes)
+    if isinstance(after, str) and after.strip():
+        row["after"] = after.strip()[:200]
+    gauge = route.get("owner_gauge")
+    if isinstance(gauge, (list, tuple)) and gauge and isinstance(gauge[0], (int, float)):
+        row["owner_ctx_pct"] = round(gauge[0], 1)
+    context = route.get("owner_context")
+    if (row.get("owner_ctx_pct") is None and isinstance(context, (list, tuple)) and context
+            and type(context[0]) is int):
+        row["owner_ctx_tokens"] = context[0]
+    row["worker_contexts"] = [
+        {"stage": str(item.get("stage") or "")[:64], "harness": str(item.get("harness") or "")[:32],
+         **({"model": str(item["model"][0])[:64]} if isinstance(item.get("model"), (list, tuple))
+            and item["model"] and item["model"][0] else {}),
+         **({"ctx_pct": round(item["context"], 1)} if isinstance(item.get("context"), (int, float)) else {}),
+         # The attempt Fleet chose, so the shell finds this very job again (spec E9 rule 43).
+         **({"attempt": item["attempt"]} if isinstance(item.get("attempt"), str) and 0 < len(item["attempt"]) <= 128 else {})}
+        for item in (route.get("worker_contexts") or ())[:8] if isinstance(item, dict)]
+    row["stage_more"] = max(0, len(route.get("stages") or ()) - 16)
+    if type(route.get("result_at")) in (int, float):
+        row["result_at"] = route["result_at"]
+    row["worker"] = _worker_pieces(route.get("worker"))
+    row["owner"] = _owner_text(route)
+    pair = route.get("model")
+    if isinstance(pair, (list, tuple)) and pair and isinstance(pair[0], str) and pair[0]:
+        row["owner_model"] = pair[0][:64]
+    visibility = route.get("visibility")
+    if isinstance(visibility, dict) and visibility.get("schema") == "route_visibility_v1" and visibility.get("route_id") == row["id"]:
+        row["visibility"] = {"summary": str(visibility.get("summary") or "")[:160],
+                             "next": str(visibility.get("next") or "")[:120],
+                             "lines": [[str(line[0])[:12], str(line[1])[:200], str(line[2])[:8]]
+                                       for line in (visibility.get("lines") or ())[:14]
+                                       if isinstance(line, (list, tuple)) and len(line) == 3]}
+        # Already bounded by the shared reader. Keep its codes intact;
+        # presentation translates them, never reinterprets report prose.
+        codes = visibility.get("codes")
+        if isinstance(codes, dict) and codes.get("schema") == "route_visibility_codes_v1":
+            row["visibility"]["codes"] = codes
+    # 11-27: the leg band of the route page's frame and its head's first words (``repo/ › [tag] ›``), as Fleet draws them, so the
+    # shell's first screen for a route draws that frame from the panel's values in the cells its reading fills.
+    row["bands"] = _panel_bands(nodes)
+    # (the label of the record's own `repo`, whole: Fleet's head writes it whole and cuts the head at the frame's rule, as
+    # the first screen does; a cut here would move the tag and drop the `/`)
+    from .tables import repo_rule_label
+    row["head_repo"] = repo_rule_label(row["repo"] or None)
+    row["session_tag"] = str(route.get("session_tag") or "")[:16]
+    return row
+
+
+PANEL_BANDS = 6        # legs the panel carries; a route with more has none (its first screen stays the panel's box)
+
+
+def _panel_bands(groups):
+    """The leg band of Fleet's route page as the panel carries it: each leg's name, state, verdict, kind, its lines and the
+    title of its panel, bounded (two lines of eight pieces, a title of ten; a piece 80 cells and its key 24), and for a leg
+    the values of its stage line as Fleet counts them (`pages.current_leg_values` over the leg's whole detail: the stage
+    that matters now, its place, how many are done of how many). Only values of their own shape are carried: a text that
+    is not a string, a line that is not a list, is left out. A route of more than ``PANEL_BANDS`` legs carries none."""
+    from .pages import current_leg_values
+    groups = [group for group in (groups if isinstance(groups, (list, tuple)) else ()) if isinstance(group, Mapping)]
+    if len(groups) > PANEL_BANDS:
+        return []
+
+    def text(value, limit):
+        return value[:limit] if isinstance(value, str) else ""
+
+    def pieces(items, limit):
+        return [[item[0][:80], item[1][:24] if isinstance(item[1], str) else ""]
+                for item in (items if isinstance(items, (list, tuple)) else ())
+                if isinstance(item, (list, tuple)) and len(item) >= 2 and isinstance(item[0], str)][:limit]
+
+    bands = []
+    for group in groups:
+        lines = group.get("lines") if isinstance(group.get("lines"), (list, tuple)) else ()
+        band = {"n": text(group.get("n"), 64), "st": text(group.get("st"), 16), "verdict": text(group.get("verdict"), 16),
+                "kind": text(group.get("kind"), 8), "lines": [pieces(line, 8) for line in lines[:2] if isinstance(line, (list, tuple))],
+                "title": pieces(group.get("title"), 10)}
+        detail = group.get("detail") if isinstance(group.get("detail"), (list, tuple)) else ()
+        if detail and all(isinstance(item, Mapping) for item in detail):
+            at, stage, done, total = current_leg_values(detail)
+            # (Fleet's own words for it, `str(n or name)` (`None` for a parallel pair, as Fleet writes it); a value of another shape is none)
+            name = stage.get("n") or stage.get("name")
+            band["stage"] = {"n": (str(name) if name is None or isinstance(name, (str, int, float)) else "")[:64],
+                             "st": stage.get("st") if isinstance(stage.get("st"), str) else "", "at": at, "done": done, "of": total}
+        bands.append(band)
+    return bands
+
+
 def session_route_status(snapshot, now=None, *, include_details=False, records_out=None):
     """Question-free labels from the same route records OVERVIEW consumes. ``records_out`` (a list) receives the
     ``(rows, index)`` session records this call worked out, for a caller that needs them again in the same pass."""
@@ -4018,67 +4200,7 @@ def session_route_status(snapshot, now=None, *, include_details=False, records_o
         records = []
         # Spec rule 23: every current route (the panel shows them all, scrolling in place).
         for route in selected:
-            row = {key: str(route.get(key) or "")[:320] for key in
-                   ("id", "title", "state", "shape", "worker_stage", "outcome", "repo", "capability", "field")}
-            # Each stage's box in Fleet's route detail (verdict, time, unit, output, rounds note).
-            boxes = {}
-            for group in (route_nodes or {}).get(route.get("id")) or ():
-                for item in (group.get("detail") or ()) if isinstance(group, Mapping) else ():
-                    if isinstance(item, Mapping) and item.get("n"):
-                        boxes.setdefault(str(item["n"]), item)
-            row["stages"] = [_panel_stage(stage, boxes.get(str(stage.get("name") or "")))
-                             for stage in (route.get("stages") or ())[:16]]
-            # The unfolded route's kind, owner and doer lines, as ROUTES reads them: the
-            # same record values, bounded; nothing here is collected a second time.
-            for key in ("mode", "intensity", "profile", "age", "worker_unit", "resume"):
-                if isinstance(route.get(key), str) and route[key]:
-                    row[key] = route[key][:64]
-            row["legs"] = len(route.get("legs") or ())
-            # The route's chain (``frame ✓ → code``), the legs Fleet already reads: name and state only.
-            row["chain"] = [[str(leg[0])[:24], str(leg[1])[:12]] for leg in (route.get("legs") or ())[:6]
-                            if isinstance(leg, (list, tuple)) and len(leg) >= 2]
-            # The note right of the detail band (``detail_after``), as Fleet's route detail reads it.
-            from .pages import _route_after
-            nodes = tuple((route_nodes or {}).get(route.get("id")) or ())
-            after = route["detail_after"] if "detail_after" in route else _route_after(route, nodes)
-            if isinstance(after, str) and after.strip():
-                row["after"] = after.strip()[:200]
-            gauge = route.get("owner_gauge")
-            if isinstance(gauge, (list, tuple)) and gauge and isinstance(gauge[0], (int, float)):
-                row["owner_ctx_pct"] = round(gauge[0], 1)
-            context = route.get("owner_context")
-            if (row.get("owner_ctx_pct") is None and isinstance(context, (list, tuple)) and context
-                    and type(context[0]) is int):
-                row["owner_ctx_tokens"] = context[0]
-            row["worker_contexts"] = [
-                {"stage": str(item.get("stage") or "")[:64], "harness": str(item.get("harness") or "")[:32],
-                 **({"model": str(item["model"][0])[:64]} if isinstance(item.get("model"), (list, tuple))
-                    and item["model"] and item["model"][0] else {}),
-                 **({"ctx_pct": round(item["context"], 1)} if isinstance(item.get("context"), (int, float)) else {}),
-                 # The attempt Fleet chose, so the shell finds this very job again (spec E9 rule 43).
-                 **({"attempt": item["attempt"]} if isinstance(item.get("attempt"), str) and 0 < len(item["attempt"]) <= 128 else {})}
-                for item in (route.get("worker_contexts") or ())[:8] if isinstance(item, dict)]
-            row["stage_more"] = max(0, len(route.get("stages") or ()) - 16)
-            if type(route.get("result_at")) in (int, float):
-                row["result_at"] = route["result_at"]
-            row["worker"] = _worker_pieces(route.get("worker"))
-            row["owner"] = _owner_text(route)
-            pair = route.get("model")
-            if isinstance(pair, (list, tuple)) and pair and isinstance(pair[0], str) and pair[0]:
-                row["owner_model"] = pair[0][:64]
-            visibility = route.get("visibility")
-            if isinstance(visibility, dict) and visibility.get("schema") == "route_visibility_v1" and visibility.get("route_id") == row["id"]:
-                row["visibility"] = {"summary": str(visibility.get("summary") or "")[:160],
-                                     "next": str(visibility.get("next") or "")[:120],
-                                     "lines": [[str(line[0])[:12], str(line[1])[:200], str(line[2])[:8]]
-                                               for line in (visibility.get("lines") or ())[:14]
-                                               if isinstance(line, (list, tuple)) and len(line) == 3]}
-                # Already bounded by the shared reader. Keep its codes intact;
-                # presentation translates them, never reinterprets report prose.
-                codes = visibility.get("codes")
-                if isinstance(codes, dict) and codes.get("schema") == "route_visibility_codes_v1":
-                    row["visibility"]["codes"] = codes
-            records.append(row)
+            records.append(_panel_route_record(route, route_nodes))
         for sid in info["ids"]:
             details[str(_get(info["session"], "harness")) + "\0" + sid] = records
     return result, details

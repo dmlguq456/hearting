@@ -245,6 +245,23 @@ def owner_turn_profile_config(worktree: str, writable_roots: list[str],
     }
 
 
+def recordish_write_root(raw, cwd: Path, artifact: Path) -> str | None:
+    """The resolved write root the non-Git profile keeps, or None (source protection).
+
+    Never the cwd or an ancestor of it. An in-cwd root only when the route's
+    canonical artifact root contains it and is not itself an ancestor of the
+    cwd. `cwd` and `artifact` are already resolved. The launcher's worker temp
+    folder is judged by this same rule (`prepare_worker_temp_dir`).
+    """
+    root = Path(raw).expanduser().resolve(strict=False)
+    if root == cwd or root in cwd.parents:
+        return None
+    if cwd in root.parents and (artifact in cwd.parents
+                                or not (root == artifact or artifact in root.parents)):
+        return None
+    return str(root)
+
+
 def recordish_profile_config(worktree: str, writable_roots: list[str],
                              route_file: str | None, *, network: bool = False) -> dict | None:
     """Build a read-only Codex profile with only sealed artifact/runtime write roots."""
@@ -263,17 +280,9 @@ def recordish_profile_config(worktree: str, writable_roots: list[str],
         artifact_ancestor = artifact in cwd.parents
         allowed: set[str] = set()
         for raw in writable_roots:
-            root = Path(raw).expanduser().resolve(strict=False)
-            # Never grant the cwd or an ancestor of it. An in-cwd grant must be
-            # contained by the route's canonical artifact root.
-            if root == cwd or root in cwd.parents:
-                continue
-            if root == cwd or cwd in root.parents:
-                if artifact_ancestor:
-                    continue
-                if not (root == artifact or artifact in root.parents):
-                    continue
-            allowed.add(str(root))
+            root = recordish_write_root(raw, cwd, artifact)
+            if root is not None:
+                allowed.add(root)
         if str(artifact) not in allowed:
             allowed.add(str(artifact))
         filesystem = {root: "write" for root in sorted(allowed)}

@@ -286,7 +286,9 @@ class AdapterRawDataGrantTest(unittest.TestCase):
                 base_env = {"PATH": str(fakebin) + os.pathsep + os.environ.get("PATH", ""), "HOME": str(home),
                             "AGENT_HOME": str(ROOT), "AGENT_ARTIFACT_ROOT": str(artifact),
                             "AGENT_DISPATCH_JOBS": str(jobs), "OPENCODE_CONFIG_CONTENT": "{}",
-                            "XDG_STATE_HOME": str(root / "xdg")}
+                            "XDG_STATE_HOME": str(root / "xdg"),
+                            # A non-Git launch makes its worker temp folder below TMPDIR.
+                            "TMPDIR": str(root)}
                 with mock.patch.dict(os.environ, {**base_env, "AGENT_DISPATCH_ATTEMPT_ID": attempt}, clear=True):
                     route = route_module.compose_route(
                         capability="autopilot-code", capability_mode="dev", shape="staged", graph="plan",
