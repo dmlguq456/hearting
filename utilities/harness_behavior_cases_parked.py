@@ -43,6 +43,10 @@ from harness_behavior_cases_b import fixture_python, session_id  # noqa: E402
 STANDIN = r"""
 import json, os, subprocess, sys, time
 inbox = os.environ.get("PARKED_STANDIN_INBOX", "")
+ready = os.path.join(inbox, "ready")
+with open(ready + ".tmp", "w") as handle:          # the ready signal: argv is readable by now
+    handle.write(str(os.getpid()))
+os.replace(ready + ".tmp", ready)
 deadline = time.time() + 900
 while time.time() < deadline:
     for name in sorted(os.listdir(inbox)) if inbox and os.path.isdir(inbox) else ():
@@ -140,8 +144,9 @@ old, new, request = args["old"], args["new"], args["request"]
 rows = set()
 for path in (tidy.state_root() / "sessions").glob("*.jsonl"):
     for line in path.read_text().splitlines():
-        if '"parked-fork"' in line:
-            rows.add(json.loads(line).get("snapshot_id"))
+        item = json.loads(line)
+        if item.get("event") == "parked-fork":
+            rows.add((item.get("from"), item.get("sid"), json.dumps(item.get("parked"), sort_keys=True)))
 watch = handover.resolve_watch("parked-own-watch") or {}
 print(json.dumps({"rows": len(rows),
                   "request_follows": pr.follow({"harness": "claude", "session_id": old})["session_id"] == new,
@@ -206,6 +211,11 @@ class ParkedPanel(Scenario):
             env={**run.home.env, "PARKED_STANDIN_INBOX": str(inbox)}, cwd=str(run.home.workspace),
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         run.standins = [child]
+        # Read the stand-in's /proc entry only once it says it runs (no fixed wait).
+        if not wait_for(lambda: (inbox / "ready").exists() or child.poll() is not None, 30) \
+                or child.poll() is not None:
+            run.note("the background stand-in did not start")
+            return "fail"
         stat = Path("/proc/%d/stat" % child.pid).read_text().rsplit(")", 1)[1].split()
         start = stat[19]
         started = time.time()
