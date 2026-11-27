@@ -5371,6 +5371,25 @@ class TestValidationBasis(unittest.TestCase):
      row=next(row for row in R.route_status(artifact_root) if row["route_id"]==sealed["route_id"])
      self.assertIs(row["registry_current"],expected)
 
+ def test_raw_json_close_records_not_current_when_the_sealed_catalog_path_cannot_be_read(self):
+  # The catalog verdict is a record. A sealed `registry_root` turned into a link to itself
+  # (RuntimeError from Path.resolve() on Python 3.12; another version may raise OSError or
+  # not raise at all) is recorded as not current, and the close still writes its outcome.
+  with tempfile.TemporaryDirectory() as tmp:
+   artifact_root=Path(tmp)/"artifacts"; catalog=Path(tmp)/"catalog-a"; catalog.mkdir()
+   route=R.compile_route(**self.args(artifact_root=artifact_root))
+   route["validation_basis"]["registry_root"]=str(catalog)
+   route["registry_digest"]=route["capability_registry_digest"]="sha256:"+"1"*64
+   sealed=self._reseal(route)
+   route_path=R.canonical_route_path(artifact_root,sealed["route_id"])
+   R.write_once(route_path,sealed)
+   catalog.rmdir(); os.symlink(catalog,catalog)
+   outcome,created=R.close_route(json.loads(route_path.read_text(encoding="utf-8")),route_path,
+                                 commit="d"*40,allow_unproven=True)
+   self.assertTrue(created)
+   self.assertIs(outcome["registry_current"],False)
+   self.assertIs(json.loads(R.outcome_path(route_path).read_text(encoding="utf-8"))["registry_current"],False)
+
 class GroundingCwdLineageTest(unittest.TestCase):
  """SD-107 × SD-67/69: the mutation worktree's HEAD may move along its first-parent line."""
  def _repo(self,tmp):

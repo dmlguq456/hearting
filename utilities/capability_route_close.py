@@ -636,7 +636,8 @@ def _reader_registry_current(route):
     from capability_route_verify import verify_route
     try:
         return verify_route(dict(route), allow_stale_registry=True)["_registry_current"] is True
-    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+    except Exception:
+        # A record-only verdict: no failure reaching it (a symlink loop's RuntimeError) may stop the close.
         return False
 
 def close_route(route, route_file, commit=None, summary=None, publication=None,
