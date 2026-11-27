@@ -153,10 +153,15 @@ folder or initialize Git. Source-mutating worker scopes are refused before route
 registration or worktree preparation. Existing artifact-scope and parallel-overlap
 checks continue to bound cycle output writes. The route's sealed `source_commit=unversioned`
 is the runtime signal; a Git probe error is not equivalent to a non-Git folder.
-Its Codex profile keeps `/tmp` read-only, so every non-Git worker launch (all three
+Its Codex profile keeps `/tmp` read-only, so a non-Git worker launch (all three
 harnesses) points `TMPDIR`, `TMP`, `TEMP` and `CLAUDE_CODE_TMPDIR` at one private
-`<TMPDIR or /tmp>/hearting-<uid>` folder and grants only that folder; a nested launch
-reuses it. Git workers keep their inherited temp.
+`<TMPDIR or /tmp>/hearting-<uid>` folder, grants only that folder and records it in
+its launch input; a nested launch reuses the folder and an owner recovery reuses only
+the recorded value. A `TMPDIR` inside the source or artifact root moves it to
+`/tmp/hearting-<uid>`; the worker keeps its inherited temp, as Git workers do, when
+that place is inside them too or the folder is not a directory of the launching uid,
+mode 0700, that it can write (a link, a looser mode, a read-only mount, a share
+showing another uid), and an existing folder is left as it is.
 When the non-Git source is exactly the canonical `HOME`, the generated default
 runtime may use only its exact project-hash child under the existing managed
 state `project-runtimes` namespace. Artifact overlap, namespace-parent aliases,

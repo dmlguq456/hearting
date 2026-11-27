@@ -404,9 +404,12 @@ def bind_repository(h, args) -> int | None:
     except h.DispatchContractError as exc:
         return h.fail(exc.reason, 65, detail=exc.detail, worktree=args.worktree, child_spawned="0")
     # A Git worker keeps its inherited temp (Codex's workspace profile already
-    # writes /tmp); a non-Git worker gets its one private temp folder.
-    args.worker_temp_dir = (h.WRAPPER_COMMON.prepare_worker_temp_dir()
-                            if args.repository_kind == "non-git" else "")
+    # writes /tmp); a non-Git worker gets its one private temp folder, which its
+    # launch record keeps for recovery (`dispatch_replacement.seal_launch_input`).
+    args.worker_temp_dir = (h.WRAPPER_COMMON.prepare_worker_temp_dir(
+        source_root=args.worktree,
+        route_file=args.route_file or os.environ.get("AGENT_OWNER_ROUTE_FILE"))
+        if args.repository_kind == "non-git" else "")
     return None
 
 

@@ -1554,10 +1554,12 @@ def _respawn_supervised_owner(jobs, attempt_id, *, expected_identity, check_only
         "AGENT_OWNER_ROUTE_FILE": route_file,
         "AGENT_OWNER_ROUTE_ID": route_id,
         "AGENT_OWNER_ROUTE_HASH": route_hash,
-        # A non-Git owner's recorded grant holds its temp folder; point the temp
-        # variables back at it so a respawned owner can still write temp files.
-        **WRAPPER_COMMON.worker_temp_environment(
-            WRAPPER_COMMON.recorded_worker_temp_dir(effective["writable_roots"])),
+        # A non-Git owner's launch record keeps the temp folder its start chose;
+        # point the temp variables back at it while its grant still holds it.
+        # Git and older records keep the inherited temp; nothing is created here.
+        **WRAPPER_COMMON.worker_temp_environment(WRAPPER_COMMON.recorded_worker_temp_dir(
+            launch, effective["writable_roots"], source_root=row_fields[3],
+            route_file=route_file)),
     })
     if metadata.get("worker_role"):
         dispatch_env["AGENT_DISPATCH_WORKER_ROLE"] = metadata["worker_role"]

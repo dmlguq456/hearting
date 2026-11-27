@@ -47,50 +47,182 @@ def load_wrapper(harness):
     return wrapper
 
 
-class PrepareWorkerTempDirTest(unittest.TestCase):
-    def setUp(self):
+def write_route(path, source, artifact, source_commit="unversioned"):
+    """The route fields the acceptance rule reads (a sealed route carries them too)."""
+    path.write_text(json.dumps({"cwd": str(source), "source_commit": source_commit,
+                                "artifact_root": str(artifact)}), encoding="utf-8")
+    return path
+
+
+class _Boundary:
+    """A real non-Git source folder, its artifact root, its route and a fallback base.
+
+    The fallback base stands in for `/tmp`, so no test makes the real
+    `/tmp/hearting-<uid>`.
+    """
+
+    def make_boundary(self):
         self.base = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.source = self.base / "docs"
+        self.artifact = self.source / ".agent_reports"
+        self.artifact.mkdir(parents=True)
+        self.route = write_route(self.base / "route.json", self.source, self.artifact)
+        self.fallback = self.base / "fallback"
+        self.fallback.mkdir()
+        self.enterContext(mock.patch.object(WRAPPER_COMMON, "WORKER_TEMP_FALLBACK_BASE", self.fallback))
+
+    def prepare(self, tmpdir, **kwargs):
+        return WRAPPER_COMMON.prepare_worker_temp_dir(
+            {"TMPDIR": str(tmpdir)}, source_root=str(self.source), route_file=str(self.route), **kwargs)
+
+
+class PrepareWorkerTempDirTest(_Boundary, unittest.TestCase):
+    def setUp(self):
+        self.make_boundary()
 
     def test_creates_one_private_folder_under_the_inherited_temp(self):
-        path = WRAPPER_COMMON.prepare_worker_temp_dir({"TMPDIR": str(self.base)})
+        path = self.prepare(self.base)
         self.assertEqual(path, str(self.base / NAME))
         self.assertEqual(stat.S_IMODE(os.lstat(path).st_mode), 0o700)
 
     def test_nested_launch_reuses_the_inherited_worker_folder(self):
-        outer = WRAPPER_COMMON.prepare_worker_temp_dir({"TMPDIR": str(self.base)})
-        self.assertEqual(WRAPPER_COMMON.prepare_worker_temp_dir({"TMPDIR": outer}), outer)
+        outer = self.prepare(self.base)
+        self.assertEqual(self.prepare(outer), outer)
         self.assertFalse((Path(outer) / NAME).exists())
 
-    def test_loose_mode_is_tightened(self):
-        (self.base / NAME).mkdir(mode=0o755)
+    def test_temp_inside_the_source_or_artifact_moves_outside(self):
+        # The non-Git profile never grants a folder inside the source unless the
+        # artifact root holds it, and a temp folder is never put in the artifacts.
+        for inherited in (self.source / "tmp", self.source, self.source / "tmp" / NAME,
+                          self.artifact / "tmp", self.artifact):
+            with self.subTest(inherited=str(inherited)):
+                self.assertEqual(self.prepare(inherited), str(self.fallback / NAME))
+        self.assertEqual(sorted(path.name for path in self.source.rglob("*")), [".agent_reports"])
+        self.assertEqual(profiles.recordish_write_root(
+            self.fallback / NAME, self.source.resolve(), self.artifact.resolve()),
+            str((self.fallback / NAME).resolve()))
+
+    def test_no_place_outside_the_boundary_keeps_the_inherited_temp(self):
+        with mock.patch.object(WRAPPER_COMMON, "WORKER_TEMP_FALLBACK_BASE", self.source / "fallback"):
+            self.assertEqual(self.prepare(self.source / "tmp"), "")
+        self.assertEqual(sorted(path.name for path in self.source.rglob("*")), [".agent_reports"])
+
+    def test_existing_loose_folder_is_refused_and_left_unchanged(self):
+        (self.base / NAME).mkdir()
         os.chmod(self.base / NAME, 0o755)
-        path = WRAPPER_COMMON.prepare_worker_temp_dir({"TMPDIR": str(self.base)})
-        self.assertEqual(stat.S_IMODE(os.lstat(path).st_mode), 0o700)
+        self.assertEqual(self.prepare(self.base), "")
+        self.assertEqual(stat.S_IMODE(os.lstat(self.base / NAME).st_mode), 0o755)
+
+    def test_read_only_folder_is_refused(self):
+        # A 0700 folder of this uid inside a read-only mount: access(W_OK) fails
+        # with EROFS there, which an unprivileged fixture can only stand in for.
+        target = self.base / NAME
+        target.mkdir(mode=0o700)
+        real_access = os.access
+
+        def read_only_mount(path, mode, *args, **kwargs):
+            if Path(path) == target and mode & os.W_OK:
+                return False
+            return real_access(path, mode, *args, **kwargs)
+
+        with mock.patch.object(WRAPPER_COMMON.os, "access", side_effect=read_only_mount):
+            self.assertEqual(self.prepare(self.base), "")
+        self.assertEqual(stat.S_IMODE(os.lstat(target).st_mode), 0o700)
+
+    def test_writable_child_of_a_read_only_parent_is_taken(self):
+        if os.geteuid() == 0:
+            self.skipTest("root writes a read-only parent anyway")
+        parent = self.base / "read-only-parent"
+        (parent / NAME).mkdir(parents=True, mode=0o700)
+        os.chmod(parent / NAME, 0o700)
+        os.chmod(parent, 0o500)
+        self.addCleanup(os.chmod, parent, 0o700)
+        self.assertEqual(self.prepare(parent), str(parent / NAME))
+
+    def test_new_folder_passes_the_same_check(self):
+        previous = os.umask(0o277)
+        try:
+            self.assertEqual(self.prepare(self.base), "")
+        finally:
+            os.umask(previous)
+        self.assertEqual(stat.S_IMODE(os.lstat(self.base / NAME).st_mode), 0o500)
 
     def test_symlink_file_or_foreign_folder_is_never_adopted(self):
         target = self.base / "elsewhere"
-        target.mkdir()
+        target.mkdir(mode=0o700)
         (self.base / NAME).symlink_to(target)
-        self.assertEqual(WRAPPER_COMMON.prepare_worker_temp_dir({"TMPDIR": str(self.base)}), "")
+        self.assertEqual(self.prepare(self.base), "")
         (self.base / NAME).unlink()
         (self.base / NAME).write_text("file")
-        self.assertEqual(WRAPPER_COMMON.prepare_worker_temp_dir({"TMPDIR": str(self.base)}), "")
+        self.assertEqual(self.prepare(self.base), "")
         (self.base / NAME).unlink()
         (self.base / NAME).mkdir(mode=0o700)
         foreign = os.lstat(self.base / NAME)
+        # A network share that shows the folder under another uid.
         with mock.patch.object(WRAPPER_COMMON.os, "lstat",
                                return_value=os.stat_result((foreign.st_mode, *foreign[1:4], os.getuid() + 1, *foreign[5:]))):
-            self.assertEqual(WRAPPER_COMMON.prepare_worker_temp_dir({"TMPDIR": str(self.base)}), "")
+            self.assertEqual(self.prepare(self.base), "")
 
     def test_unusable_base_keeps_the_inherited_temp(self):
-        self.assertEqual(WRAPPER_COMMON.prepare_worker_temp_dir({"TMPDIR": str(self.base / "missing")}), "")
+        self.assertEqual(self.prepare(self.base / "missing"), "")
         self.assertEqual(WRAPPER_COMMON.worker_temp_environment(""), {})
 
-    def test_environment_and_recorded_grant_name_the_same_folder(self):
-        path = WRAPPER_COMMON.prepare_worker_temp_dir({"TMPDIR": str(self.base)})
+    def test_git_route_keeps_the_inherited_temp(self):
+        write_route(self.route, self.source, self.artifact, source_commit="0" * 40)
+        self.assertEqual(self.prepare(self.base), "")
+        self.assertFalse((self.base / NAME).exists())
+
+    def test_environment_names_the_same_folder(self):
+        path = self.prepare(self.base)
         self.assertEqual(WRAPPER_COMMON.worker_temp_environment(path), {key: path for key in TEMP_KEYS})
-        self.assertEqual(WRAPPER_COMMON.recorded_worker_temp_dir(["/artifacts", path]), path)
-        self.assertEqual(WRAPPER_COMMON.recorded_worker_temp_dir(["/artifacts", str(self.base)]), "")
+
+
+class RecordedWorkerTempTest(_Boundary, unittest.TestCase):
+    """Recovery reuses only the value the start sealed in its launch record."""
+
+    def setUp(self):
+        self.make_boundary()
+        # Two folders of the same name, both acceptable: only the record tells them apart.
+        for name in ("z-launcher-temp", "a-output"):
+            (self.base / name).mkdir()
+        self.recorded = self.prepare(self.base / "z-launcher-temp")
+        self.same_name = self.prepare(self.base / "a-output")
+        self.assertTrue(self.recorded and self.same_name)
+        self.assertEqual(Path(self.recorded).name, Path(self.same_name).name)
+
+    def recover(self, record, roots, route=None):
+        return WRAPPER_COMMON.recorded_worker_temp_dir(
+            record, roots, source_root=str(self.source), route_file=str(route or self.route))
+
+    def test_recovery_takes_the_recorded_value_in_either_order(self):
+        record = {"worker_temp_dir": self.recorded}
+        for roots in ([str(self.artifact), self.same_name, self.recorded],
+                      [str(self.artifact), self.recorded, self.same_name]):
+            with self.subTest(roots=roots):
+                self.assertEqual(self.recover(record, roots), self.recorded)
+
+    def test_older_record_without_the_value_keeps_the_inherited_temp(self):
+        self.assertEqual(self.recover({}, [str(self.artifact), self.recorded]), "")
+
+    def test_git_record_keeps_the_inherited_temp(self):
+        git_route = write_route(self.base / "git-route.json", self.source, self.artifact,
+                                source_commit="0" * 40)
+        self.assertEqual(self.recover({"worker_temp_dir": self.recorded},
+                                      [str(self.artifact), self.recorded], git_route), "")
+
+    def test_value_outside_the_recorded_grant_is_not_used(self):
+        self.assertEqual(self.recover({"worker_temp_dir": self.recorded},
+                                      [str(self.artifact), self.same_name]), "")
+
+    def test_recovery_check_makes_and_changes_nothing(self):
+        missing = self.base / "gone" / NAME
+        self.assertEqual(self.recover({"worker_temp_dir": str(missing)},
+                                      [str(self.artifact), str(missing)]), "")
+        self.assertFalse(missing.parent.exists())
+        os.chmod(self.recorded, 0o755)
+        self.assertEqual(self.recover({"worker_temp_dir": self.recorded},
+                                      [str(self.artifact), self.recorded]), "")
+        self.assertEqual(stat.S_IMODE(os.lstat(self.recorded).st_mode), 0o755)
 
 
 class LaunchBindingTest(unittest.TestCase):
@@ -100,10 +232,14 @@ class LaunchBindingTest(unittest.TestCase):
         self.base = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.dict(os.environ, {"TMPDIR": str(self.base)}))
         self.worktree = self.base / "docs"
-        self.worktree.mkdir()
+        (self.worktree / ".agent_reports").mkdir(parents=True)
+        self.route = write_route(self.base / "route.json", self.worktree, self.worktree / ".agent_reports")
+        self.fallback = self.base / "fallback"
+        self.fallback.mkdir()
+        self.enterContext(mock.patch.object(WRAPPER_COMMON, "WORKER_TEMP_FALLBACK_BASE", self.fallback))
 
     def bind(self, wrapper, kind):
-        args = SimpleNamespace(worktree=str(self.worktree), route_file="/sealed/route.json")
+        args = SimpleNamespace(worktree=str(self.worktree), route_file=str(self.route))
         with mock.patch.object(dispatch_contract, "launch_repository_identity",
                                return_value=(str(self.worktree), kind)):
             self.assertIsNone(DISPATCH_MAIN.bind_repository(wrapper, args))
@@ -116,7 +252,7 @@ class LaunchBindingTest(unittest.TestCase):
             fallback_hop="same-harness-headless", intensity="quick", capability_mode="dev",
             slug="fixture", attempt_id="att-fixture", parent_attempt_id="", worker_type="stage",
             assigned_contract="fixture", capability_owner="", owner_harness="",
-            artifact_root=str(self.base / "artifacts"), runtime_dir="", raw_data_dir="",
+            artifact_root=str(self.worktree / ".agent_reports"), runtime_dir="", raw_data_dir="",
             report_bundle_root=None, route_id="", owner_route_binding=None, route_node="refs",
             agent_home=ROOT)
         return DISPATCH_MAIN.worker_environment(
@@ -134,6 +270,20 @@ class LaunchBindingTest(unittest.TestCase):
                 for key in TEMP_KEYS:
                     self.assertEqual(env[key], args.worker_temp_dir, key)
                 self.assertIn(Path(args.worker_temp_dir), adapter_default_roots(args))
+
+    def test_temp_inside_the_source_is_replaced_by_one_outside_value(self):
+        inside = self.worktree / "tmp"
+        with mock.patch.dict(os.environ, {"TMPDIR": str(inside)}):
+            for harness in HARNESSES:
+                with self.subTest(harness=harness):
+                    wrapper = load_wrapper(harness)
+                    args = self.bind(wrapper, "non-git")
+                    self.assertEqual(args.worker_temp_dir, str(self.fallback / NAME))
+                    env = self.worker_env(wrapper, harness, args)
+                    for key in TEMP_KEYS:
+                        self.assertEqual(env[key], args.worker_temp_dir, key)
+                    self.assertIn(Path(args.worker_temp_dir), adapter_default_roots(args))
+        self.assertFalse(inside.exists())
 
     def test_git_launch_keeps_its_inherited_temp(self):
         for harness in HARNESSES:
@@ -158,10 +308,12 @@ class _CodexFixture:
         (self.cwd / ".agent_reports").mkdir(parents=True)
         (self.base / "runtime").mkdir()
         (self.base / "state" / "heartbeats").mkdir(parents=True)
-        self.temp = WRAPPER_COMMON.prepare_worker_temp_dir({"TMPDIR": str(self.base)})
-        self.route = self.base / "route.json"
-        self.route.write_text(json.dumps({"cwd": str(self.cwd), "source_commit": "unversioned",
-                                          "artifact_root": str(self.cwd / ".agent_reports")}))
+        self.route = write_route(self.base / "route.json", self.cwd, self.cwd / ".agent_reports")
+        self.temp = self.prepare_temp(self.base)
+
+    def prepare_temp(self, tmpdir):
+        return WRAPPER_COMMON.prepare_worker_temp_dir(
+            {"TMPDIR": str(tmpdir)}, source_root=str(self.cwd), route_file=str(self.route))
 
     def args(self, kind, **extra):
         values = dict(
@@ -211,6 +363,29 @@ class CodexGrantTest(_CodexFixture, unittest.TestCase):
     def test_non_git_app_server_passes_the_worker_temp_as_a_write_root(self):
         command = self.command(self.args("non-git", resolved_completion_delivery="app-server-supervised"))
         self.assertIn(f"--writable-root {self.temp}", command)
+
+    def test_temp_inside_the_source_is_granted_outside_with_one_value(self):
+        # TMPDIR inside the source: the profile would drop that folder, so the
+        # launch takes the outside fallback, and the four variables, exec's
+        # --add-dir, the profile, App Server's --writable-root and the write
+        # record all carry that one value.
+        fallback = self.base / "fallback"
+        fallback.mkdir()
+        with mock.patch.object(WRAPPER_COMMON, "WORKER_TEMP_FALLBACK_BASE", fallback):
+            temp = self.prepare_temp(self.cwd / "tmp")
+        self.assertEqual(temp, str(fallback / NAME))
+        args = self.args("non-git", worker_temp_dir=temp)
+        exec_command = self.command(args)
+        self.assertIn(f"--add-dir {temp}", exec_command)
+        _extends, filesystem = self.profile_filesystem(exec_command)
+        self.assertEqual(filesystem[temp], "write")
+        self.assertFalse(any(path.startswith(str(self.cwd / "tmp")) for path in filesystem))
+        app_server = self.command(self.args("non-git", worker_temp_dir=temp,
+                                            resolved_completion_delivery="app-server-supervised"))
+        self.assertIn(f"--writable-root {temp}", app_server)
+        self.assertEqual(set(WRAPPER_COMMON.worker_temp_environment(temp).values()), {temp})
+        self.assertIn(Path(temp), adapter_default_roots(args))
+        self.assertFalse((self.cwd / "tmp").exists())
 
     def test_git_command_is_unchanged(self):
         for extra in ({}, {"resolved_completion_delivery": "app-server-supervised"}):

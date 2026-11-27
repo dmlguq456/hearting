@@ -14,6 +14,8 @@ import io
 import os
 from pathlib import Path
 import shlex
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1371,12 +1373,18 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         self._public_correct_respawn_fixture(legacy_record=False, earlier_launch_home=True)
 
     def test_respawned_non_git_owner_keeps_its_recorded_worker_temp(self):
-        # A non-Git owner's grant records its one temp folder; the respawned owner
-        # writes temp files there again instead of the read-only /tmp.
-        self._public_correct_respawn_fixture(legacy_record=False, worker_temp_dir=True)
+        # A non-Git owner's launch record keeps its one temp folder; the respawned
+        # owner writes temp files there again instead of the read-only /tmp, even
+        # with a same-named output folder sorted first in its grant.
+        self._public_correct_respawn_fixture(legacy_record=False, temp_case="non-git")
+
+    def test_respawned_git_owner_keeps_its_temp_beside_a_same_named_output(self):
+        # A Git owner whose output folder happens to be named hearting-<uid> keeps
+        # its inherited temp, and that folder keeps its mode.
+        self._public_correct_respawn_fixture(legacy_record=False, temp_case="git-same-name-output")
 
     def _public_correct_respawn_fixture(self, *, legacy_record, additional_grant=False,
-                                        earlier_launch_home=False, worker_temp_dir=False):
+                                        earlier_launch_home=False, temp_case=None):
         import contextlib
         import dispatch_completion_join as join
         import dispatch_budget_record as budget_record
@@ -1391,6 +1399,9 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         from worker_runtime_home import prepare_worker_home
 
         base = self.base
+        if temp_case == "non-git":
+            # A real non-Git folder: the route below is sealed unversioned.
+            shutil.rmtree(base / ".git")
         jobs = base / "dispatch" / "jobs.log"
         jobs.parent.mkdir(parents=True, exist_ok=True)
         artifact_root = base / ".agent_reports"
@@ -1504,18 +1515,33 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
 
         route_compiler = load_local("respawn_route_compiler", ROOT / "utilities/capability-route.py")
         with mock.patch.dict(os.environ, env, clear=True):
-            route = route_compiler.compile_route(
-                capability="autopilot-code", capability_mode="dev", requested_intensity="direct",
-                cwd=str(base), artifact_root=str(artifact_root),
-                predicates=["atomic-outcome", "known-scope", "no-shared-contract", "no-resource-run",
-                            "no-artifact-handoff", "no-independent-verifier", "focused-verification"],
-                signals=[], transport=None, inline_reason="atomic-direct", tracking="tracked",
-                tracked_gate_evidence={
-                    "spec_read": {"satisfied": True, "source": "fixture-prd"},
-                    "drift_verdict": "within-spec", "workflow_mode": "tracked",
-                    "artifact_guard": {"satisfied": True, "source": "fixture-prechecked"},
-                },
-            )
+            if temp_case == "non-git":
+                # A non-Git folder admits only an artifact-only route: a plan stage.
+                route = route_compiler.compose_route(
+                    capability="autopilot-code", capability_mode="dev", shape="staged", graph="plan",
+                    slug="respawn-non-git-fixture", cwd=base, artifact_root=artifact_root,
+                    unassigned=True, children=["codex"], parent_harness="codex",
+                    dispatch_evidence={"tuples": [{
+                        "parent_harness": "codex", "parent_transport": "headless",
+                        "parent_sandbox": "workspace-write", "child_harness": "codex",
+                        "launch_authority": "conductor", "status": "supported",
+                        "probe_source": "codex-runtime-fixture", "probe_time": "2026-10-24T00:00:00Z",
+                        "failure_class": "", "checked_worktree": str(base.resolve()),
+                        "failure_scope": "none", "codex_command": "ok",
+                        "retry_on_isolated_worktree": 0}], "native_subagent": []})
+            else:
+                route = route_compiler.compile_route(
+                    capability="autopilot-code", capability_mode="dev", requested_intensity="direct",
+                    cwd=str(base), artifact_root=str(artifact_root),
+                    predicates=["atomic-outcome", "known-scope", "no-shared-contract", "no-resource-run",
+                                "no-artifact-handoff", "no-independent-verifier", "focused-verification"],
+                    signals=[], transport=None, inline_reason="atomic-direct", tracking="tracked",
+                    tracked_gate_evidence={
+                        "spec_read": {"satisfied": True, "source": "fixture-prd"},
+                        "drift_verdict": "within-spec", "workflow_mode": "tracked",
+                        "artifact_guard": {"satisfied": True, "source": "fixture-prechecked"},
+                    },
+                )
             route_path.write_text(json.dumps(route), encoding="utf-8")
             route_compiler.verify_route(route, str(base))
 
@@ -1557,10 +1583,26 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                                       route_hash=route["route_hash"])
             default_writable_roots = (artifact_root, runtime_dir, jobs.parent)
             worker_temp = ""
-            if worker_temp_dir:
+            same_name_output = None
+            if temp_case is not None:
                 import dispatch_wrapper_common as wrapper_common
-                worker_temp = wrapper_common.prepare_worker_temp_dir({"TMPDIR": str(base)})
-                self.assertTrue(worker_temp)
+                temp_name = f"hearting-{os.getuid()}"
+                # An output folder of the same name, sorted before the temp folder.
+                output_scratch = tempfile.TemporaryDirectory(prefix="a-output-")
+                self.addCleanup(output_scratch.cleanup)
+                same_name_output = Path(output_scratch.name) / temp_name
+                same_name_output.mkdir()
+                os.chmod(same_name_output, 0o700 if temp_case == "non-git" else 0o755)
+                default_writable_roots += (same_name_output,)
+            if temp_case == "non-git":
+                self.assertEqual(route.get("source_commit"), "unversioned")
+                # The launcher's TMPDIR (this fixture's base) is the source itself, so the
+                # start chose a folder outside it; the record keeps that one value.
+                launcher_scratch = tempfile.TemporaryDirectory(prefix="z-launcher-temp-")
+                self.addCleanup(launcher_scratch.cleanup)
+                worker_temp = wrapper_common.prepare_worker_temp_dir(
+                    {"TMPDIR": launcher_scratch.name}, source_root=str(base), route_file=str(route_path))
+                self.assertEqual(worker_temp, str(Path(launcher_scratch.name) / temp_name))
                 default_writable_roots += (Path(worker_temp),)
             access_grant = None
             access_argv = []
@@ -1602,6 +1644,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                 owner_route_binding=binding, route_id=route["route_id"], route_node="",
                 route_file=str(route_path), route_hash=route["route_hash"], artifact_root=str(artifact_root),
                 replacement_retry_brief="", execution_access_grant=access_grant,
+                worker_temp_dir=worker_temp,
             )
             input_fragment = dispatch_replacement.seal_launch_input(
                 launch_args, "codex", "ORIGINAL_TASK_SENTINEL must not be replayed")
@@ -1962,11 +2005,15 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         self.assertEqual(len(launch_environments), 1)
         self.assertEqual(launch_environments[0]["AGENT_RUNTIME_DIR"], str(runtime_dir))
         self.assertEqual(launch_environments[0]["AGENT_HOME"], str(ROOT.resolve()))
-        if worker_temp_dir:
+        if worker_temp:
             for key in ("TMPDIR", "TMP", "TEMP", "CLAUDE_CODE_TMPDIR"):
                 self.assertEqual(launch_environments[0][key], worker_temp, key)
         else:
+            self.assertEqual(launch_environments[0]["TMPDIR"], env["TMPDIR"])
             self.assertNotIn("CLAUDE_CODE_TMPDIR", launch_environments[0])
+        if same_name_output is not None:
+            self.assertEqual(stat.S_IMODE(os.lstat(same_name_output).st_mode),
+                             0o700 if temp_case == "non-git" else 0o755)
         # The respawned owner never carries the correcting window's session shell; the caller keeps it.
         self.assertEqual(sorted(key for key in launch_environments[0] if key.startswith("HEARTING_SHELL_")), [])
         self.assertEqual(launch_environments[0].get("FIXTURE_CARRIED"), "kept-by-the-respawned-owner")
@@ -2024,7 +2071,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         self.assertEqual(hashlib.sha256(resource_registry.read_bytes()).hexdigest(), resource_registry_before)
         self.assertEqual(hashlib.sha256(resource_results.read_bytes()).hexdigest(), resource_results_before)
         after = home_snapshot()
-        if worker_temp_dir:
+        if worker_temp:
             # Codex keeps its arg0 helper links in CODEX_HOME/tmp unless CODEX_HOME
             # lies under TMPDIR, which only this fixture's other variants arrange.
             after = {key: value for key, value in after.items()
