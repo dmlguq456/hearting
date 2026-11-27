@@ -35,7 +35,7 @@ from harness_behavior_scenarios import Reply, Scenario, wait_for  # noqa: E402
 from harness_behavior_cases_b import fixture_python, session_id  # noqa: E402
 
 SLEEP = "import time; time.sleep(900)"
-JOB = "e675a253"
+JOB = "scenario-parked-job"
 
 SEED_CODE = r"""
 import json, os, time
