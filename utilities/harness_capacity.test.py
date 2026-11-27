@@ -64,6 +64,34 @@ class ResetAwareCapacityTests(unittest.TestCase):
                 self.assertAlmostEqual(score, expected)
                 self.assertAlmostEqual(C.raw_headroom({"codex": score}, "codex"), 100 - used)
 
+    def test_weekly_window_uses_at_least_ten_percent_elapsed(self):
+        for elapsed in (5 * 60, self.hour, self.week // 10):
+            with self.subTest(elapsed=elapsed):
+                score = C._headroom([(1, self.now + self.week - elapsed, self.week)], self.now)
+                self.assertAlmostEqual(score, 100 * 99 / (99 + 9))
+                self.assertEqual(C.raw_headroom({"claude": score}, "claude"), 99)
+
+    def test_five_hour_window_uses_at_least_ten_percent_elapsed(self):
+        duration = 5 * self.hour
+        score = C._headroom([(2, self.now + duration - 60, duration)], self.now)
+        self.assertAlmostEqual(score, 100 * 98 / (98 + 18))
+        self.assertEqual(C.raw_headroom({"codex": score}, "codex"), 98)
+
+    def test_balanced_select_chooses_recently_reset_claude(self):
+        scores = {
+            "claude": C._headroom([(1, self.now + self.week - 5 * 60, self.week)], self.now),
+            "codex": C._headroom([(50, self.now + 3 * 24 * self.hour, self.week)], self.now),
+            "opencode": 0,
+        }
+        policy = {"primary": ["claude", "codex"], "relief": [], "last_resort": ["opencode"]}
+        with mock.patch.dict(os.environ, {"HARNESS_CAPACITY_BIAS": ""}):
+            chosen, band, _, _ = C.select(
+                policy, dict.fromkeys(C.HARNESSES, "ok"), {"claude": 20, "codex": 10, "opencode": 0},
+                C.HARNESSES, scores, strategy="balanced", usage_gate_used_percent=85,
+                headroom_exponent=2, harness_weights={"claude": 0.95, "codex": 0.425, "opencode": 0.2},
+            )
+        self.assertEqual((chosen, band), ("claude", "primary"))
+
     def test_unknown_or_unusable_clock_preserves_raw_headroom(self):
         for reset, duration in (
             (None, self.week),
@@ -214,6 +242,24 @@ class SharedCacheFallbackTests(unittest.TestCase):
         self.assertGreater(cached, score)
         self.assertEqual(C.raw_headroom({"codex": cached}, "codex"), 24)
         self.assertTrue(source.startswith("cache:"))
+
+    def test_codex_five_hour_window_uses_explicit_timing_in_live_and_cached_scores(self):
+        now = time.time()
+        endpoint = {"rate_limit": {"primary_window": {
+            "used_percent": 90, "limit_window_seconds": 18000, "reset_at": now + 600,
+        }}}
+        with tempfile.TemporaryDirectory() as home:
+            (Path(home) / "auth.json").write_text(
+                json.dumps({"tokens": {"access_token": "t", "account_id": "a"}}), encoding="utf-8")
+            with mock.patch.dict(os.environ, {"CODEX_HOME": home}), \
+                    mock.patch.object(C.urllib.request, "urlopen",
+                                      return_value=io.BytesIO(json.dumps(endpoint).encode("utf-8"))):
+                with mock.patch.object(C.time, "time", return_value=now):
+                    live = C._codex_api_score(now)
+        cached, _ = C._cached_score("codex", now, 3600)
+        self.assertAlmostEqual(live, 290 / 380 * 100)
+        self.assertEqual(cached, live)
+        self.assertEqual(C.raw_headroom({"codex": cached}, "codex"), 10)
 
     def test_codex_legacy_label_does_not_prove_window_length(self):
         now = 1_000_000.0
@@ -1393,7 +1439,7 @@ class OpencodeGaugeTests(unittest.TestCase):
         with self._with_collector({"rl_windows": [["5h", 12, None], ["wk", 40, None]]}):
             self.assertEqual(C._opencode_api_score(), 60.0)
 
-    def test_rolling_and_weekly_are_timed_but_monthly_length_is_unknown(self):
+    def test_go_five_hour_and_weekly_are_timed_but_monthly_length_is_unknown(self):
         C._fleet_collectors()
         from fleet.collectors import zen_go_usage
         now = 1_000_000.0

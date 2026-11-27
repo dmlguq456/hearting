@@ -3201,7 +3201,16 @@ class FallbackTest(unittest.TestCase):
    self.assertEqual(rank(),["claude","codex","opencode"])
    node["harness_policy"].update(primary=["claude","codex"],last_resort=["opencode"])
    payloads["codex"]={"windows":[["5h",90,now+600]],"window_durations_seconds":[18000]}
-   self.assertEqual(rank(),["claude","codex","opencode"])
+   hops,context=F.ordered_fallback_hops(route,node,self.jobs)
+   self.assertEqual(context["rank"],["claude","codex","opencode"])
+   self.assertEqual(hops[0]["candidates"][0]["child_harness"],"claude")
+   output=io.StringIO()
+   with contextlib.redirect_stdout(output):
+    F.emit_allocation(context)
+   lines=output.getvalue().splitlines()
+   self.assertIn("capacity_headroom.codex=76.3",lines)
+   self.assertEqual([line for line in lines if line.startswith("capacity_raw_headroom.")],
+                    ["capacity_raw_headroom.claude=50.0","capacity_raw_headroom.codex=10.0"])
 
  def test_depth_affinity_leads_at_its_own_depth_and_flips_at_the_other(self):
   # Equal headroom and an empty registry, so the neutral order is exactly the

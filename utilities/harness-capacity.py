@@ -31,6 +31,7 @@ _CLAUDE_TAP_DURATIONS = {
     "seven_day_overage_included": ONE_WEEK,
     "seven_day_oauth_apps": ONE_WEEK,
 }
+# Go's rolling meter covers a fixed five-hour window starting on first use.
 _OPENCODE_WINDOW_DURATIONS = {"5h": FIVE_HOURS, "wk": ONE_WEEK}
 
 # Gauges whose read writes the shared usage cache (`_codex_api_score`, `_opencode_api_score`). The next
@@ -86,8 +87,8 @@ def _window_score(headroom, remaining, duration):
     if (headroom in (0.0, 100.0) or not _finite_number(duration)
             or remaining is None or not 0 < remaining < duration):
         return headroom
-    # Scale both terms by the window length to avoid dividing by elapsed time.
-    fraction_left = remaining / duration
+    # Count at least 10% elapsed so the first usage sample cannot dominate the forecast.
+    fraction_left = min(remaining / duration, 0.9)
     reserve = headroom * (1 - fraction_left)
     expected = (100 - headroom) * fraction_left
     return 100 * reserve / (reserve + expected)

@@ -90,7 +90,9 @@ from dispatch_attempt_policy import decide_attempt, committed_outcome, readable_
 from codex_dispatch_terminal import REVIEW_BLOCKING_NOTE  # noqa: E402
 from review_round_cap import classify_round_row  # noqa: E402
 from dispatch_degradation import record_degradation  # noqa: E402
-from dispatch_allocation_receipt import record_allocation_receipt  # noqa: E402
+from dispatch_allocation_receipt import (  # noqa: E402
+    changed_raw_headroom, raw_headroom_lines, record_allocation_receipt,
+)
 from dispatch_allocation import effective_harness_weights, inert_allocation_keys  # noqa: E402
 import dispatch_launch_tuple as LAUNCH_TUPLE  # noqa: E402
 from dispatch_quality_peer import quality_peer_families  # noqa: E402
@@ -991,6 +993,8 @@ def emit_allocation(context: dict | None) -> None:
                 f"capacity_headroom.{harness}="
                 + ("unknown" if value is None else str(round(value, 1)))
             )
+        for line in raw_headroom_lines(changed_raw_headroom(context["capacity"])):
+            print(line)
         print(f"quality_band={context.get('quality_band') or 'none'}")
         print(f"relief_promoted={int(bool(context.get('relief_promoted')))}")
     print(f"allocation_preferred={context.get('preferred') or '-'}")
