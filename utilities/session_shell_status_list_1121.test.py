@@ -598,7 +598,7 @@ const statusList=require(path.join(root,'status-list.cjs'));
 const log=[];
 const ctx={process,Promise,Date,Math,Array,Number,JSON,String,Set,statusList,log,table:null,expanded:false,panelModel:{labels:{}},
   label:(n,f)=>f,cellWidth:t=>[...t].length,actionLines:[],queueDisplay:()=>log.push('display'),askTable:()=>log.push('askTable'),
-  moveSel:(d)=>log.push('moveSel '+d),enterNow:()=>log.push('enterNow'),statusListing:()=>false,listed:k=>k==='STATUS'||k==='BACKLOG',panelView:{}};
+  moveSel:(d)=>log.push('moveSel '+d),enterNow:()=>log.push('enterNow'),routeFirst:()=>{log.push('routeFirst');return null;},statusListing:()=>false,listed:k=>k==='STATUS'||k==='BACKLOG',panelView:{}};
 vm.createContext(ctx);
 vm.runInContext(cut('function tableGuide(kind){','// Key words packed')+cut('function moveRow(delta){','// Enter in the NOW popup:')
   +cut('function nowRows(t){','function popupNow(){')+one('tableParts')+cut('function tableRows(inner){','// The NOW popup\'s rows:'),ctx);
@@ -689,6 +689,7 @@ class OtherPopupsTest(unittest.TestCase):
         self.assertEqual(o['move_hand']['r'], 2)                                      # a hand-written page scrolls by a line
         self.assertEqual(o['enter_now'], ['enterNow'])
         self.assertEqual(o['enter_route']['r'], [[True, 0, True], False, True])         # the page, and back to the table following the row
+        self.assertEqual(o['enter_route']['log'], ['routeFirst', 'display', 'askTable', 'askTable'])  # Enter draws that route's first screen at once, then asks
         self.assertEqual(o['enter_route_none'], [])
         self.assertEqual(o['enter_hand'], [])
         self.assertEqual(o['enter_mem'], [])

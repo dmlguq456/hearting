@@ -85,6 +85,34 @@ class SameResultSameCloseTest(unittest.TestCase):
 
 
 class UnitCapacityExitTest(unittest.TestCase):
+    def test_opencode_nonzero_exit_keeps_the_native_error_kind(self):
+        from dispatch_completion_join import completion_followup_text, exact_attempt_row
+        from dispatch_contract_base import _terminal_delivery_receipt
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            attempt = "att-opencode-native"
+            log = root / f"stage.{attempt}.opencode.jsonl"
+            log.write_text(json.dumps({"type": "error", "sessionID": "ses-fixture",
+                                       "error": {"type": "provider.content-filter"}}) + "\n")
+            jobs = root / "jobs.log"
+            jobs.write_text(f"now\topen\t{root}\t{root}\tstage\t"
+                            f"attempt_id={attempt},attempt_schema_version=2,harness=opencode,"
+                            "worker_type=stage,transport=headless,execution_surface=registered-headless,"
+                            "fallback_hop=same-harness-headless,"
+                            f"registered_worker=1,dispatch_depth=2,log_file={log}\n")
+            legacy = mock.Mock()
+            outcome = SimpleNamespace(exit_code=70, failure="exit-70")
+            settled = F.settle_foreground_exit(jobs, attempt, log, outcome, worktree=root, artifact_root=root,
+                                               worker_type="stage", legacy_close=legacy)
+            self.assertTrue(settled["closed"], settled)
+            legacy.assert_not_called()
+            row = exact_attempt_row(jobs, attempt)
+            self.assertEqual((row.status, row.metadata["note"]), ("done", "dead-exit-70"))
+            self.assertEqual(row.metadata.get("provider_failure_kind"), "provider.content-filter")
+            receipt = _terminal_delivery_receipt(row.metadata)
+            self.assertIn("was provider.content-filter.", completion_followup_text(receipt, jobs=str(jobs)))
+
     def test_irrecoverable_process_exit_does_not_discard_exact_unit_capacity(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

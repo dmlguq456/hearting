@@ -84,3 +84,12 @@ differs from `polish` (the `Output` heading is repeated in both layers). Everyth
 including the "read `_voice.md` before acting" pointer and the invocation gate, is 지킬 것. `editorial/review` gains the one stance pointer
 line. `_voice.md` is still not carried by the runtime; no line of it was copied into a unit
 (that would add worker text), the pointers stay as they were.
+
+## New unit (2026-11-27) — editorial/write
+
+Routing redesign piece 11, the writing half. Written new from the design's must lines, not
+mined from a legacy source, so nothing was moved here. It takes the draft-production node
+of `autopilot-draft` (was `research/research-survey`) and the apply node of `autopilot-apply`
+(was `dev/refactor`). Neither old unit carried text for drafting or applying a document
+revision, so neither body changed. `_voice.md` is pointed at only for its audience-language
+section: its content boundary ("must not change claims …") is polish's rule, not a drafter's.

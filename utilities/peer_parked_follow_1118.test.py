@@ -30,8 +30,8 @@ spec.loader.exec_module(peer_message)
 import peer_address  # noqa: E402
 from fleet import session_registry as sr  # noqa: E402
 
-OLD = "92d7cdcd-3cef-4583-80e6-f9a4561ac629"
-NEW = "e675a253-0561-410f-aa04-c12345cabf70"
+OLD = "3f1c0a7e-5b2d-4c6e-9a8f-1d2e3f4a5b6c"
+NEW = "7a9b8c6d-2e4f-4a1b-8c3d-5e6f7a8b9c0d"
 OTHER = "11111111-2222-4333-8444-555555555555"
 SENDER = "66666666-7777-4888-8999-000000000000"
 HOLD = "import os; os.write(1, b'R'); os.read(0, 1)"

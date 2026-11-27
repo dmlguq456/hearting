@@ -49,8 +49,22 @@ fi
 
 # Outputs belong to this run's mktemp directory, including across clones.
 
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d)" || exit 1
+cleanup_fixture() {
+  local status=$?
+  if ! python3 - "$ROOT" "$TMP" <<'PYTHON'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "tools"))
+from fixture_processes import remove_temporary_directory
+remove_temporary_directory(sys.argv[2])
+PYTHON
+  then
+    if [ "$status" -eq 0 ]; then status=1; fi
+  fi
+  exit "$status"
+}
+trap cleanup_fixture EXIT
 # Codex prompt hooks derive a dispatch state root. HOME alone is not enough:
 # HARNESS_STATE_ROOT (and XDG_STATE_HOME) take precedence in
 # dispatch_contract.state_root(), so an inherited live value would write the
@@ -3736,7 +3750,7 @@ echo "== §5.10 main-session lifecycle predicates: harness markers only =="
 # A runtime injects CLAUDE_CODE_CHILD_SESSION into every child process an ordinary
 # interactive session spawns (hooks included), so an agent-team teammate session carries
 # it. Only harness-planted markers may gate main-session lifecycle hooks.
-predtmp="$(mktemp -d)"
+predtmp="$(mktemp -d "$TMP/pred.XXXXXX")" || exit 1
 mkdir -p "$predtmp/desk" "$predtmp/proj"
 printf '# oncall\n' > "$predtmp/oncall.md"
 HERDR="$ROOT/hooks/herdr-agent-state.sh"
@@ -3869,7 +3883,6 @@ if grep -q 'pane-fallback' "$predrecv" 2>/dev/null; then
 else bad "herdr pane state must try the next candidate tree when one fails to import"; fi
 kill "$predsrv" 2>/dev/null || true
 wait "$predsrv" 2>/dev/null || true
-rm -rf "$predtmp"
 
 echo "== drill runtime failure propagation + Fleet limit marker =="
 drilltmp="$TMP/drill-runtime-failure"

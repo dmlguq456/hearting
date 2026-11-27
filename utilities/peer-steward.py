@@ -6469,14 +6469,12 @@ def _publish_watch_readiness(store, snapshot, *, read_context, incarnation):
                 state in {"idle", "done"} and (
                     state in until or (initial_state not in {None, "unknown", state}
                                        and previous_state != state)))
-            # A watch that already took this change up asks the runner, through a
-            # token in its observation, for one fresh authority read before it
-            # publishes; that request is answered here even though the native
-            # state no longer changes.
-            serving = (previous_wait.get("state") == "result" and previous_state == state
-                       and state in {"idle", "done"}
-                       and isinstance(previous.get("readiness_transition"), dict))
-            if not trigger and not serving:
+            # Recheck an accepted idle/done result while its watch is pending,
+            # including before the observer has a reason to request fresh authority.
+            recheck = (state in {"idle", "done"} and previous_state == state
+                       and (previous.get("state") == "pending"
+                            or isinstance(previous.get("readiness_transition"), dict)))
+            if not trigger and not recheck:
                 if previous.get("state") == "terminal_pending":
                     # A confirmed end/replacement request waits for its watcher; a
                     # no-notice observation must never overwrite it.
