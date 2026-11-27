@@ -1521,10 +1521,10 @@ def _begin_cycle_record(
                 **_campaign_degradation(bound_campaign),
             }
         # The precheck refuses a duplicate copy before the first write; its
-        # campaign scan is handed to this begin's own index update below.
+        # scan of this campaign is handed to this begin's own index update below.
         prepared_index = None
         if campaign is not None:
-            prepared_index = artifact_locator.prepare_index_update(root, [campaign["campaign_id"]])
+            prepared_index = artifact_locator.prepare_index_update(root, [campaign["campaign_id"]], hand_over=True)
         head = artifact_admission.load_index_head(root)
         index = artifact_admission.load_index(root) if head is None else None
         if campaign is None and campaign_key is None:
