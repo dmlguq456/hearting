@@ -1013,14 +1013,24 @@ def emit_allocation(context: dict | None) -> None:
 TUPLE_FAILURE_CLASS = "launch-tuple"
 
 
+def _run_fields(args, note, **run):
+    """The ledger fields that say a selected-top stage ran below top: its `tier_note` and the id of
+    the run, as this launcher already knows it (`model_profile.top_stage_tier_notes` counts each run
+    once by it). Only `--start` hands a run over: a `--dry-run` or `--register` row names no run and
+    is written as before the note existed, while its receipt still prints the note."""
+    if not note or getattr(args, "action", None) != "start":
+        return {}
+    return {"tier_note": note, **run}
+
+
 def _persist_parent_cross_ledger(args, route, node, context, *, note="", attempt_id=None):
     """Record SD-100 quality degradation after a realized child start.
 
     Best-effort (record_degradation swallows failures by design); the stdout
     receipt fields already carry the verdicts, so a ledger write failure cannot
-    change the exit code or the child (AC 17 / R5). A row carrying a `tier_note`
-    names its attempt, so a reader can still tell what ran once the archive has
-    moved that attempt's registry row; a row without one is written as before.
+    change the exit code or the child (AC 17 / R5). A started run's row carrying
+    a `tier_note` names its attempt, so a reader can still tell what ran once the
+    archive has moved that attempt's registry row; any other row is written as before.
     """
     if context is None:
         return
@@ -1038,8 +1048,7 @@ def _persist_parent_cross_ledger(args, route, node, context, *, note="", attempt
             reason="sole-gate-non-peer-harness",
             sole_gate="degraded",
             leg_class="peer",
-            tier_note=note or None,
-            attempt_id=attempt_id if note else None,
+            **_run_fields(args, note, attempt_id=attempt_id),
         )
 
 
@@ -1315,8 +1324,9 @@ def terminal_attempt_state(
     return "fail-closed", fields
 
 
-def native_child_proof(args: argparse.Namespace, route: dict, node: dict) -> str:
-    """Return the proof source for a real route-owned native child, else ''."""
+def native_child_proof(args: argparse.Namespace, route: dict, node: dict) -> tuple[str, str]:
+    """Return the proof source for a real route-owned native child and the native attempt it
+    proved, else ('', '')."""
 
     def valid_native_axes(meta):
         expected={
@@ -1352,7 +1362,7 @@ def native_child_proof(args: argparse.Namespace, route: dict, node: dict) -> str
                 except (OSError, IndexError):
                     continue
                 if actual == meta["pid_start"]:
-                    return "registry-exact-pid"
+                    return "registry-exact-pid", args.native_attempt_id
     if args.native_artifact:
         path = args.native_artifact.resolve()
         try:
@@ -1365,8 +1375,8 @@ def native_child_proof(args: argparse.Namespace, route: dict, node: dict) -> str
                 and record.get("route_node") == node["id"] and producer):
             for item in registry_rows(args.jobs, route["route_id"], node["id"]):
                 if item.get("attempt_id") == producer and valid_native_axes(item):
-                    return "route-owned-artifact"
-    return ""
+                    return "route-owned-artifact", producer
+    return "", ""
 
 
 # Parent-resolution reasons that disqualify one candidate. Anything else the
@@ -3068,7 +3078,7 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                 if candidate.get("harness") not in enabled:
                     attempts.append(f"{ordinal}:native-subagent:skipped-disabled-by-user-policy")
                     continue
-                proof = native_child_proof(args, route, node)
+                proof, native_attempt = native_child_proof(args, route, node)
                 if proof:
                     note = tier_note(node, harness=candidate.get("harness"), surface="native")
                     print("check=degraded")
@@ -3106,7 +3116,8 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                         ),
                         fallback_ordinal=ordinal, fleet_visibility="degraded",
                         registered_worker=0, route_file=str(args.route),
-                        completion_gate=node.get("completion_gate"), tier_note=note or None,
+                        completion_gate=node.get("completion_gate"),
+                        **_run_fields(args, note, attempt_id=native_attempt),
                     )
                     print("degradation_ledger=" + (str(ledger) if ledger else "-"))
                     return 78
@@ -3160,7 +3171,7 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                     f"{direct_failures[-1]['reason']}:exit-{direct_failures[-1]['exit']}"
                     if direct_failures else None
                 ),
-                tier_note=note or None,
+                **_run_fields(args, note, parent_attempt_id=args.parent_attempt_id),
             )
             print("degradation_ledger=" + (str(ledger) if ledger else "-"))
             next_line = inline_owner_next_line(route, node, args.route)

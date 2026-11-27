@@ -5,11 +5,13 @@ already say how it ran carry `tier_note=selected top, ran <what ran>`.
 Covered here: the shared rule (`model_profile.tier_note`), each way down in the stage launcher (another
 harness, native-subagent, inline, an owner-inline repeat, a harness whose config declares no top), a
 batch leg (started or reused) and its group ledger rows, `workflow-supervisor status` and the completion
-summary the route's parent receives, which name each run once (a later owner's inline run of the same
-stage is its own run; an attempt the archive moved out of the registry is still read from its own ledger
-row). A stage not selected at top, or one that ran a top model, prints
-what it printed before, and an observation that cannot be read never changes the work. Fixtures never
-launch a model: the launcher's wrapper is a fixture or a real `--dry-run`."""
+summary the route's parent receives, which count each run once by the run id its writer knew: a
+registered attempt (still read from its own ledger row once the archive moved it out of the registry),
+the native attempt a `--start` confirmed (confirmed again, still one run), the owner that ran the stage
+inline (two owners, two runs, even at one tier). A preview names no run. A stage not selected at top, or
+one that ran a top model, prints what it printed before, and an observation that cannot be read never
+changes the work. Fixtures never launch a model: the launcher's wrapper is a fixture or a real
+`--dry-run`, and a real `--start` only confirms a native child (a private `sleep`) or hands over inline."""
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
@@ -18,6 +20,7 @@ import errno
 import importlib.util
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -181,9 +184,11 @@ class SharedRule(unittest.TestCase):
             "model_profile": resolved["profile"], "model_tier": resolved["tier"],
             "profile_granularity": resolved["granularity"]}), "")
 
-    def test_the_route_reader_counts_each_attempt_once_and_keeps_every_hop(self):
+    def test_the_route_reader_counts_each_run_once_by_the_run_id_its_writer_knew(self):
+        # Review 3 (11-27): one rule, never record times -- a registered worker by its attempt, a native run by
+        # the native attempt the launcher confirmed (`attempt_id`), an inline run by its owner (`parent_attempt_id`).
         route = {"route_id": "rt-a", "route_hash": "sha256:a",
-                 "nodes": [stage("impl-review"), stage("plan", profile="deep", kind="pipeline-stage")]}
+                 "nodes": [stage("impl-review"), stage("code-review"), stage("plan", profile="deep", kind="pipeline-stage")]}
         row = {"route_id": "rt-a", "route_hash": "sha256:a", "route_node": "impl-review", "attempt_id": "att-1",
                "harness": "opencode", "launch_started": "1", **OPENCODE_TOP}
         rows = [{**row, "launch_started": "0"}, row, {**row, "note": "completed-marker"},  # one attempt, three rows
@@ -191,31 +196,45 @@ class SharedRule(unittest.TestCase):
                 {**row, "attempt_id": "att-top", "harness": "claude", **KEPT_TOP},         # ran top
                 {**row, "attempt_id": "att-plan", "route_node": "plan"},                   # not selected
                 {**row, "attempt_id": "att-other", "route_hash": "sha256:b"},              # another route
-                {**row, "attempt_id": "att-unstarted", "launch_started": "0"}]             # never ran
+                {**row, "attempt_id": "att-unstarted", "launch_started": "0"},             # never ran
+                # The native attempt's own registry row says nothing of a tier: its ledger row speaks for it.
+                {"route_id": "rt-a", "route_hash": "sha256:a", "route_node": "impl-review", "attempt_id": "att-native",
+                 "harness": "codex", "registered_worker": "0", "fallback_hop": "native-subagent"}]
+        deep = "selected top, ran inline (owner claude deep)"
         inline = {"route_id": "rt-a", "route_hash": "sha256:a", "route_node": "impl-review", "fallback_hop": "inline",
-                  "registered_worker": 0, "tier_note": "selected top, ran inline (owner claude deep)"}
-        later_owner = {**inline, "event_id": "dg-2", "ts": 2.0,
-                       "tier_note": "selected top, ran inline (owner claude balanced-deep)"}
+                  "registered_worker": 0, "event_id": "dg-inline", "ts": 1.0, "parent_attempt_id": "att-owner-1",
+                  "tier_note": deep}
+        native = {**inline, "fallback_hop": "native-subagent", "event_id": "dg-native", "attempt_id": "att-native",
+                  "tier_note": "selected top, ran codex native-subagent"}
+        native.pop("parent_attempt_id")
         # A registered launch's own sole-gate row; its registry row says the same while it is there.
         sole_gate = {"route_id": "rt-a", "route_hash": "sha256:a", "route_node": "impl-review", "fallback_hop": None,
                      "reason": "sole-gate-non-peer-harness", "tier_note": "selected top, ran opencode balanced-deep"}
-        ledger = [inline, {**inline, "event_id": "dg-2", "ts": 1.0}, {**inline, "event_id": "dg-2", "ts": 1.0},
-                  later_owner,  # the same event id, another run: a later owner ran the stage inline again
-                  {**inline, "fallback_hop": "native-subagent", "tier_note": "selected top, ran codex native-subagent"},
-                  {**sole_gate, "attempt_id": "att-1"},                           # the registry holds att-1
-                  {**sole_gate, "attempt_id": "att-archived"}, {**sole_gate, "attempt_id": "att-archived"},
-                  sole_gate,                       # an older row with no attempt id: left to the registry
+        ledger = [inline, {**inline, "ts": 2.0},             # the same owner confirms the stage inline again: one run
+                  {**inline, "ts": 3.0, "parent_attempt_id": "att-owner-2"},  # same event id and tier, another owner
+                  {**inline, "ts": 4.0, "parent_attempt_id": "att-owner-3",
+                   "tier_note": "selected top, ran inline (owner claude balanced-deep)"},
+                  native, {**native, "ts": 5.0},              # the same native attempt confirmed again: one run
+                  {**native, "attempt_id": "att-native-2"},   # another native attempt: its own run
+                  {**sole_gate, "attempt_id": "att-1"},       # the registry already counted att-1
+                  {**sole_gate, "attempt_id": "att-archived"}, {**sole_gate, "attempt_id": "att-archived", "ts": 6.0},
+                  {**inline, "route_node": "code-review", "ts": 7.0},  # the same owner, another stage: its own run
+                  # Rows naming no run -- a preview's, or one written before rows named their run.
+                  sole_gate, {**inline, "parent_attempt_id": None}, {key: value for key, value in native.items()
+                                                                     if key != "attempt_id"},
                   {**inline, "tier_note": None},
                   {**inline, "route_hash": "sha256:b"}]
         expected = [
             {"node": "impl-review", "attempt_id": "att-1", "tier_note": "selected top, ran opencode balanced-deep"},
             {"node": "impl-review", "attempt_id": "att-2", "tier_note": "selected top, ran opencode balanced-deep"},
-            {"node": "impl-review", "fallback_hop": "inline", "tier_note": "selected top, ran inline (owner claude deep)"},
-            {"node": "impl-review", "fallback_hop": "inline", "tier_note": "selected top, ran inline (owner claude deep)"},
+            {"node": "impl-review", "fallback_hop": "inline", "tier_note": deep},
+            {"node": "impl-review", "fallback_hop": "inline", "tier_note": deep},
             {"node": "impl-review", "fallback_hop": "inline",
              "tier_note": "selected top, ran inline (owner claude balanced-deep)"},
             {"node": "impl-review", "fallback_hop": "native-subagent", "tier_note": "selected top, ran codex native-subagent"},
+            {"node": "impl-review", "fallback_hop": "native-subagent", "tier_note": "selected top, ran codex native-subagent"},
             {"node": "impl-review", "attempt_id": "att-archived", "tier_note": "selected top, ran opencode balanced-deep"},
+            {"node": "code-review", "fallback_hop": "inline", "tier_note": deep},
         ]
         self.assertEqual(P.top_stage_tier_notes(route, rows=rows, degradations=ledger), expected)
         # The whole ledger read twice is the same runs.
@@ -225,7 +244,8 @@ class SharedRule(unittest.TestCase):
 
 
 class StageLauncher(unittest.TestCase):
-    """The stage fallback chain on the fixture `plan` stage, sealed `top` by the person at strong."""
+    """The stage fallback chain on the fixture's `execute` stage (and `plan`, `plan-check` for real dry runs),
+    sealed `top` by the person at strong. A chain is `--start` unless it says `--dry-run`."""
     # The fallback fixture's own setup and helpers.
     setUp = T.FallbackTest.setUp
     tearDown = T.FallbackTest.tearDown
@@ -236,10 +256,11 @@ class StageLauncher(unittest.TestCase):
     launch_roots_env = T.FallbackTest.launch_roots_env
     route = T.FallbackTest.route
     seed_predecessor_markers = T.FallbackTest.seed_predecessor_markers
+    seed_plan_marker = T.FallbackTest.seed_plan_marker
     dispatch_env = T.FallbackTest.dispatch_env
-    run_inline = T.FallbackTest.run_inline
     degradation_rows = T.FallbackTest.degradation_rows
     run_chain = T.FallbackTest.run_chain
+    NATIVE_ATTEMPT = "att-native-fixture"
 
     OPENCODE = ("check=ok\nadapter=opencode\nstatus=start\nmodel_source=profile\nmodel_profile=top\n"
                 "model_tier=balanced-deep\nprofile_granularity=collapsed-top-to-balanced-deep\nmodel=fixture-model\n")
@@ -248,8 +269,9 @@ class StageLauncher(unittest.TestCase):
     UNDECLARED = "check=failed\nreason=profile-top-undeclared\nchild_spawned=0\n"
     INLINE = "selected top, ran inline (owner codex deep)"
 
-    def seed_owner(self, observed):
-        """The one live depth-1 owner row, carrying what its own launch resolved (``observed``)."""
+    def seed_owner(self, observed, attempt=T.FALLBACK_PARENT):
+        """The one live depth-1 owner row (generation ``attempt``), carrying what its own launch resolved
+        (``observed``)."""
         start = (Path("/proc") / str(self.owner.pid) / "stat").read_text().split()[21]
         extra = "".join(f",{key}={value}" for key, value in observed.items())
         kept = [line for line in (self.jobs.read_text().splitlines() if self.jobs.exists() else ())
@@ -259,7 +281,49 @@ class StageLauncher(unittest.TestCase):
             "attempt_schema_version=2,dispatch_depth=1,transport=headless,harness=codex,"
             "runtime_sandbox=workspace-write,execution_surface=registered-headless,registered_worker=1,"
             "fallback_hop=same-harness-headless,worker_type=owner,"
-            f"attempt_id={T.FALLBACK_PARENT},pid={self.owner.pid},pid_start={start}{extra}\n"), encoding="utf-8")
+            f"attempt_id={attempt},pid={self.owner.pid},pid_start={start}{extra}\n"), encoding="utf-8")
+
+    def launch(self, path, action):
+        """The launcher's own `_dispatch` in this process on `execute` (the fallback fixture's `run_inline`, with
+        ``action``; a `--start` takes the launch watch as observed)."""
+        self.seed_predecessor_markers(path, "execute")
+        argv = ["stage-dispatch-fallback.py", "--route", str(path), "--node", "execute", "--slug", "fallback-execute",
+                "--parent", "owner", "--capability-mode", "dev", "--jobs", str(self.jobs), f"--{action}"]
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(F, "watch_launched_attempt", return_value=("observed", {})):
+            return F._dispatch(F.LAUNCH_TUPLE.ReportOnlyObservation())
+
+    def cli(self, path, node, action, *extra, owner=T.FALLBACK_PARENT, **env):
+        """The real `stage-dispatch-fallback.py --<action>` process on ``node`` for owner generation ``owner``."""
+        command = [sys.executable, str(ROOT / "utilities/stage-dispatch-fallback.py"), "--route", str(path),
+                   "--node", node, "--slug", f"fallback-{node}", "--parent", "owner", "--capability-mode", "dev",
+                   "--jobs", str(self.jobs), f"--{action}", *extra]
+        inherited = {key: value for key, value in self.fixture_subprocess_env().items()
+                     if not key.startswith("AGENT_DISPATCH_CURRENT_")}
+        return subprocess.run(command, text=True, capture_output=True, env={
+            **inherited, **self.launch_roots_env(), "AGENT_DISPATCH_SELF_SLUG": "owner",
+            "AGENT_DISPATCH_ATTEMPT_ID": owner, **env})
+
+    @staticmethod
+    def every_tuple_failed(route, node_id):
+        """`--failed-tuple` for every headless candidate of ``node_id``: the chain goes on to native, then inline."""
+        node = next(node for node in route["nodes"] if node["id"] == node_id)
+        return [value for hop in node["fallback_hops"] for row in hop.get("candidates", []) if row.get("child_harness")
+                for value in ("--failed-tuple", "/".join(row[key] for key in (
+                    "parent_harness", "parent_transport", "parent_sandbox", "child_harness", "launch_authority")))]
+
+    def native_attempt(self, route, attempt):
+        """A live route-owned native attempt on `execute` (its registry row, a private live pid)."""
+        process = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        start = (Path("/proc") / str(process.pid) / "stat").read_text().split()[21]
+        with self.jobs.open("a", encoding="utf-8") as handle:
+            handle.write(f"2026-07-16T00:00:00Z\topen\t/repo\t{self.repo}\tnative\tattempt_schema_version=2,"
+                         f"route_id={route['route_id']},route_node=execute,attempt_id={attempt},dispatch_depth=2,"
+                         "transport=headless,harness=codex,execution_surface=codex-native-subagent,registered_worker=0,"
+                         f"fallback_hop=native-subagent,pid={process.pid},pid_start={start}\n")
+        return attempt
 
     def hop(self, ordinal, kind, harness=None):
         if kind == "inline":
@@ -269,16 +333,17 @@ class StageLauncher(unittest.TestCase):
                     "candidates": [{"harness": harness, "status": "supported"}]}
         return {"ordinal": ordinal, "fallback_hop": kind, "candidates": [self.tuple(harness, "supported")]}
 
-    def chain(self, profile, hops, outputs, *, proof=None, patches=(), owner=DEEP, unreadable_after_hops=False,
-              context=None):
-        """One in-process chain; returns (exit, stdout, ledger rows this chain wrote, route).
+    def chain(self, profile, hops, outputs, *, proof=None, patches=(), owner=DEEP, owner_attempt=T.FALLBACK_PARENT,
+              action="start", unreadable_after_hops=False, context=None):
+        """One in-process chain on `execute`; returns (exit, stdout, ledger rows this chain wrote, route).
 
-        ``owner`` is what the owner's registry row says its launch resolved. With
-        ``unreadable_after_hops`` every read of the registry fails with EIO once the hops are ordered.
-        ``context`` is the allocation verdict the ordering returns beside the hops."""
-        with self.dispatch_env():
-            path = self.route(same_status="supported", explicit_profiles={"plan": profile} if profile else None)
-            self.seed_owner(owner)
+        ``owner`` is what the owner's registry row (generation ``owner_attempt``) says its launch resolved.
+        ``proof`` proves `NATIVE_ATTEMPT` at a native hop. With ``unreadable_after_hops`` every read of the
+        registry fails with EIO once the hops are ordered. ``context`` is the allocation verdict the ordering
+        returns beside the hops."""
+        with self.dispatch_env(AGENT_DISPATCH_ATTEMPT_ID=owner_attempt):
+            path = self.route(same_status="supported", explicit_profiles={"execute": profile} if profile else None)
+            self.seed_owner(owner, owner_attempt)
             before = len(self.degradation_rows(path))
             results = [SimpleNamespace(returncode=0 if text.startswith("check=ok") else 64, stdout=text, stderr="")
                        for text in outputs]
@@ -299,14 +364,15 @@ class StageLauncher(unittest.TestCase):
 
             out = io.StringIO()
             with mock.patch.object(F, "ordered_fallback_hops", side_effect=order), \
-                 mock.patch.object(F, "native_child_proof", return_value=proof), \
+                 mock.patch.object(F, "native_child_proof",
+                                   return_value=(proof, self.NATIVE_ATTEMPT) if proof else ("", "")), \
                  mock.patch.object(F, "run_wrapper", side_effect=results), \
                  mock.patch.object(Path, "read_text", unreadable(read_text)), \
                  mock.patch.object(Path, "open", unreadable(path_open)), contextlib.ExitStack() as stack, \
                  contextlib.redirect_stdout(out):
                 for patch in patches:
                     stack.enter_context(patch)
-                code, _ = self.run_inline(path)
+                code = self.launch(path, action)
             return code, out.getvalue(), self.degradation_rows(path)[before:], json.loads(path.read_text())
 
     @staticmethod
@@ -335,8 +401,8 @@ class StageLauncher(unittest.TestCase):
         for label, hops, outputs, proof, expected_code, note, reason in cases:
             with self.subTest(path=label):
                 code, out, ledger, route = self.chain("top", hops, outputs, proof=proof)
-                plan = next(node for node in route["nodes"] if node["id"] == "plan")
-                self.assertEqual((plan["model_profile"], route["effective_intensity"]), ("top", "strong"))
+                execute = next(node for node in route["nodes"] if node["id"] == "execute")
+                self.assertEqual((execute["model_profile"], route["effective_intensity"]), ("top", "strong"))
                 self.assertEqual(code, expected_code, out)
                 own = self.own_block(out)
                 # One note, on the receipt's own lines, right beside the check it qualifies.
@@ -346,8 +412,11 @@ class StageLauncher(unittest.TestCase):
                     self.assertEqual(own[1], f"tier_note={note}")
                 else:
                     self.assertEqual(own[own.index("child_harness=opencode") + 1], f"tier_note={note}")
-                noted = [(row["reason"], row["tier_note"]) for row in ledger if "tier_note" in row]
-                self.assertEqual(noted, [] if reason is None else [(reason, note)])
+                # The ledger row names its run: the native attempt the launcher proved, or the owner inline.
+                noted = [(row["reason"], row["tier_note"], row.get("attempt_id") or row.get("parent_attempt_id"))
+                         for row in ledger if "tier_note" in row]
+                run = self.NATIVE_ATTEMPT if proof else T.FALLBACK_PARENT
+                self.assertEqual(noted, [] if reason is None else [(reason, note, run)])
                 if "undeclared" in label:
                     self.assertEqual(json.loads(self.cli_verdict(out)["candidate_outcomes"])[0]["reason"],
                                      "profile-top-undeclared")
@@ -420,33 +489,37 @@ class StageLauncher(unittest.TestCase):
 
     def test_two_owners_running_a_top_stage_inline_and_a_native_run_are_three_runs_everywhere(self):
         # Review 2 (11-27): a later owner generation runs the stage inline again. The inline row's event id
-        # names the stage and its hop, not the run, so both rows carry the same one; each is still a run,
-        # and so is a native-subagent run of the same stage.
+        # names the stage and its hop, not the run, so both rows carry the same one; each names its owner and
+        # is its own run, and so is a native-subagent run of the same stage.
         inline = [self.hop(1, "same-harness-headless", "codex"), self.hop(2, "inline")]
         native = [self.hop(1, "same-harness-headless", "codex"), self.hop(2, "native", "codex")]
         balanced = {"model_profile": "balanced-deep", "model_tier": "balanced-deep", "profile_granularity": "full"}
         written = []
-        for hops, owner, proof, expected_code in ((inline, DEEP, None, 79), (inline, balanced, None, 79),
-                                                  (native, DEEP, "fixture-native-proof", 78)):
-            code, out, ledger, route = self.chain("top", hops, [self.REFUSED], owner=owner, proof=proof)
+        for hops, owner, generation, proof, expected_code in (
+                (inline, DEEP, "att-owner-first", None, 79), (inline, balanced, "att-owner-later", None, 79),
+                (native, DEEP, "att-owner-later", "fixture-native-proof", 78)):
+            code, out, ledger, route = self.chain("top", hops, [self.REFUSED], owner=owner, owner_attempt=generation,
+                                                  proof=proof)
             self.assertEqual(code, expected_code, out)
             written += [row for row in ledger if "tier_note" in row]
         notes = [self.INLINE, "selected top, ran inline (owner codex balanced-deep)",
                  "selected top, ran codex native-subagent"]
-        self.assertEqual([row["tier_note"] for row in written], notes)
+        self.assertEqual([(row["tier_note"], row.get("parent_attempt_id"), row.get("attempt_id")) for row in written],
+                         [(notes[0], "att-owner-first", None), (notes[1], "att-owner-later", None),
+                          (notes[2], None, self.NATIVE_ATTEMPT)])
         self.assertEqual(written[0]["event_id"], written[1]["event_id"])
-        expected = [{"node": "plan", "fallback_hop": hop, "tier_note": note}
+        expected = [{"node": "execute", "fallback_hop": hop, "tier_note": note}
                     for hop, note in zip(("inline", "inline", "native-subagent"), notes)]
         self.assertEqual(self.every_reader(route, twice=False), self.every_reader(route))
         self.assertEqual(self.every_reader(route),
-                         (expected, expected, [f"tier       plan {note}" for note in notes], expected))
+                         (expected, expected, [f"tier       execute {note}" for note in notes], expected))
         with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "en"}):
             line = work_intent._tier_note_line(self.every_reader(route)[3], work_intent.ui_translator(), 1600)
-        self.assertEqual(line, "Ran below the selected tier: plan (selected top, ran inline (owner codex deep) / "
+        self.assertEqual(line, "Ran below the selected tier: execute (selected top, ran inline (owner codex deep) / "
                                "inline (owner codex balanced-deep) / codex native-subagent)")
 
-    def test_a_sole_gate_launch_is_one_run_while_its_registry_row_lives_and_after_the_archive_moves_it(self):
-        # Review 2 (11-27): the launch's own sole-gate row stands aside only while the registry holds that
+    def test_a_started_launch_is_one_run_while_its_registry_row_lives_and_after_the_archive_moves_it(self):
+        # Review 2 (11-27): the launch's own sole-gate row stands aside while the registry has counted that
         # attempt; once the archive moves the attempt's rows out, the ledger row still says what ran.
         import dispatch_registry_archive as ARCHIVE
         note = "selected top, ran opencode balanced-deep"
@@ -456,19 +529,19 @@ class StageLauncher(unittest.TestCase):
         attempt = self.cli_verdict(out)["attempt_id"]
         sole = [row for row in ledger if row.get("reason") == "sole-gate-non-peer-harness"]
         self.assertEqual([(row["route_node"], row["attempt_id"], row["tier_note"]) for row in sole],
-                         [("plan", attempt, note)])
+                         [("execute", attempt, note)])
         # The row `--start` registers for this launch, from what its wrapper resolved; the attempt has ended.
         meta = {"attempt_schema_version": "2", "dispatch_depth": "2", "registered_worker": "1",
-                "route_id": route["route_id"], "route_hash": route["route_hash"], "route_node": "plan",
+                "route_id": route["route_id"], "route_hash": route["route_hash"], "route_node": "execute",
                 "attempt_id": attempt, "worker_type": "stage", "launch_started": "1", "harness": "opencode",
                 **OPENCODE_TOP}
         with self.jobs.open("a", encoding="utf-8") as handle:
-            handle.write(f"2026-11-01T00:00:00Z\tdone\t{self.repo}\t{self.repo}\tfallback-plan\t"
+            handle.write(f"2026-11-01T00:00:00Z\tdone\t{self.repo}\t{self.repo}\tfallback-execute\t"
                          + ",".join(f"{key}={value}" for key, value in meta.items()) + "\n")
-        expected = [{"node": "plan", "attempt_id": attempt, "tier_note": note}]
+        expected = [{"node": "execute", "attempt_id": attempt, "tier_note": note}]
         # One run, while the registry row and its sole-gate row are both there (review 1's double).
         live = self.every_reader(route)
-        self.assertEqual(live, (expected, expected, [f"tier       plan {note}"], expected))
+        self.assertEqual(live, (expected, expected, [f"tier       execute {note}"], expected))
         # The archive moves the ended attempt's row (the fixture decides it qualifies; the move is real).
         moved = lambda lines, **_kwargs: [index for index, line in enumerate(lines) if attempt in line]
         with mock.patch.object(ARCHIVE, "select", side_effect=moved):
@@ -478,16 +551,110 @@ class StageLauncher(unittest.TestCase):
         self.assertTrue(ARCHIVE.archived_rows(self.jobs, attempt))
         self.assertEqual(self.every_reader(route), live)
 
-    def test_a_sole_gate_row_with_no_note_is_written_as_before(self):
+    def test_a_sole_gate_row_with_no_note_or_from_a_preview_is_written_as_before(self):
         deep = self.OPENCODE.replace("model_profile=top", "model_profile=deep")
-        for profile, harness, output in ((None, "opencode", deep), ("top", "claude", self.CLAUDE_TOP)):
-            with self.subTest(stage_profile=profile or "route default", harness=harness):
+        for profile, harness, output, action in ((None, "opencode", deep, "start"),
+                                                 ("top", "claude", self.CLAUDE_TOP, "start"),
+                                                 ("top", "opencode", self.OPENCODE, "dry-run")):
+            with self.subTest(stage_profile=profile or "route default", harness=harness, action=action):
                 code, out, ledger, _route = self.chain(profile, [self.hop(1, "cross-harness-headless", harness)],
-                                                       [output], context=self.sole_gate(harness))
+                                                       [output], context=self.sole_gate(harness), action=action)
                 self.assertEqual(code, 0, out)
                 sole = [row for row in ledger if row.get("reason") == "sole-gate-non-peer-harness"]
                 self.assertEqual(len(sole), 1, ledger)
                 self.assertFalse({"attempt_id", "tier_note"} & set(sole[0]), sole)
+
+    def test_a_real_preview_names_no_run_and_no_reader_says_it_ran(self):
+        # Review 3 (11-27): a real `--dry-run` of a top `plan-check` with OpenCode alone in a user's deep
+        # last-resort seat, under a codex owner: the real OpenCode wrapper previews (nothing registers or
+        # starts), yet the sole-gate row named the previewed attempt and every reader said it ran. The preview
+        # receipt keeps its note and the sole-gate row stays the diagnostic it was; no reader names a run.
+        shipped = (ROOT / "profiles/dispatch-defaults.yaml").read_text(encoding="utf-8")
+        band = "  deep:\n    primary: [claude, codex]\n    relief: []\n    last_resort: []\n"
+        self.assertEqual(shipped.count(band), 1)
+        parent = {"AGENT_DISPATCH_CURRENT_HARNESS": "codex", "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
+                  "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write"}
+        note = "selected top, ran opencode balanced-deep"
+        last_resort = band.replace("last_resort: []", "last_resort: [opencode]")
+        with T.dispatch_defaults_config_text(shipped.replace(band, last_resort)):
+            path = self.route(tuples=[self.tuple(harness, "unsupported") for harness in ("codex", "claude")]
+                              + [self.tuple("opencode", "supported")], explicit_profiles={"plan-check": "top"})
+            route = json.loads(path.read_text())
+            self.seed_owner(DEEP)
+            self.seed_plan_marker(route)
+            self.seed_predecessor_markers(path, "plan-check")
+            registry = self.jobs.read_bytes()
+            result = self.cli(path, "plan-check", "dry-run", "--worker-mode", "qa/plan-review",
+                              "--model-role", "fast reviewer", **parent)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        own = self.own_block(result.stdout)
+        relayed = result.stdout.splitlines()[len(own):]
+        self.assertIn("sole_gate=degraded", own)
+        self.assertEqual(own[own.index("child_harness=opencode") + 1], f"tier_note={note}")
+        for line in ("preview=1", "registered=0", "started=0", "child_spawned=0"):
+            self.assertIn(line, relayed)
+        self.assertEqual(self.jobs.read_bytes(), registry)
+        sole = [row for row in self.degradation_rows(path) if row.get("reason") == "sole-gate-non-peer-harness"]
+        self.assertEqual(len(sole), 1, sole)
+        self.assertFalse({"attempt_id", "tier_note"} & set(sole[0]), sole)
+        self.assertEqual(self.every_reader(route), ([], None, [], []))
+
+    def test_the_same_native_run_confirmed_twice_is_one_run_and_another_native_run_is_its_own(self):
+        # Review 3 (11-27): real `--start` confirmed one native attempt (its id, a live private pid) twice; the
+        # two ledger rows share the event id and differ only in time, and were counted as two runs. A preview
+        # names no run.
+        path = self.route(native="supported", explicit_profiles={"execute": "top"})
+        route = json.loads(path.read_text())
+        self.seed_owner(DEEP)
+        self.seed_predecessor_markers(path, "execute")
+        failed = self.every_tuple_failed(route, "execute")
+        note = "selected top, ran codex native-subagent"
+        first, other = self.native_attempt(route, "att-native-first"), self.native_attempt(route, "att-native-other")
+        for action, attempt in (("dry-run", first), ("start", first), ("start", first)):
+            result = self.cli(path, "execute", action, *failed, "--native-attempt-id", attempt)
+            self.assertEqual(result.returncode, 78, result.stdout + result.stderr)
+            self.assertIn(f"check=degraded\ntier_note={note}\nselected_hop=native-subagent\n", result.stdout)
+            self.assertIn("child_proof=registry-exact-pid\n", result.stdout)
+        rows = [row for row in self.degradation_rows(path) if row.get("reason") == "native-subagent-degraded"]
+        self.assertEqual([(row.get("attempt_id"), row.get("tier_note")) for row in rows],
+                         [(None, None), (first, note), (first, note)])
+        self.assertEqual(rows[1]["event_id"], rows[2]["event_id"])
+        self.assertNotEqual(rows[1]["ts"], rows[2]["ts"])
+        one = [{"node": "execute", "fallback_hop": "native-subagent", "tier_note": note}]
+        self.assertEqual(self.every_reader(route), (one, one, [f"tier       execute {note}"], one))
+        # Another native attempt, proven by its route-owned artifact, then by its id: one more run.
+        artifact = Path(self.tmp.name) / "native-other.json"
+        artifact.write_text(json.dumps({"route_id": route["route_id"], "route_hash": route["route_hash"],
+                                        "route_node": "execute", "producer_attempt_id": other}), encoding="utf-8")
+        for proof, value, source in (("--native-artifact", str(artifact), "route-owned-artifact"),
+                                     ("--native-attempt-id", other, "registry-exact-pid")):
+            result = self.cli(path, "execute", "start", *failed, proof, value)
+            self.assertEqual(result.returncode, 78, result.stdout + result.stderr)
+            self.assertIn(f"child_proof={source}\n", result.stdout)
+        self.assertEqual([row.get("attempt_id") for row in self.degradation_rows(path)
+                          if row.get("reason") == "native-subagent-degraded"][3:], [other, other])
+        self.assertEqual(self.every_reader(route), (one * 2, one * 2, [f"tier       execute {note}"] * 2, one * 2))
+
+    def test_two_owners_running_a_top_stage_inline_at_the_same_tier_are_two_runs(self):
+        # Review 3 (11-27): two owners of the same `deep` tier run the stage inline: the same event id and the
+        # same note, two runs. The same owner confirming it again is the same run; a preview names no run.
+        path = self.route(explicit_profiles={"execute": "top"})
+        route = json.loads(path.read_text())
+        self.seed_predecessor_markers(path, "execute")
+        failed = self.every_tuple_failed(route, "execute")
+        for action, owner in (("dry-run", "att-owner-a"), ("start", "att-owner-a"), ("start", "att-owner-b"),
+                              ("start", "att-owner-a")):
+            self.seed_owner(DEEP, owner)
+            result = self.cli(path, "execute", action, *failed, owner=owner)
+            self.assertEqual(result.returncode, 79, result.stdout + result.stderr)
+            self.assertIn(f"check=degraded\ntier_note={self.INLINE}\nselected_hop=inline\n", result.stdout)
+        rows = [row for row in self.degradation_rows(path) if row.get("fallback_hop") == "inline"]
+        self.assertEqual([(row.get("parent_attempt_id"), row.get("tier_note")) for row in rows],
+                         [(None, None), ("att-owner-a", self.INLINE), ("att-owner-b", self.INLINE),
+                          ("att-owner-a", self.INLINE)])
+        self.assertEqual(len({row["event_id"] for row in rows}), 1)
+        two = [{"node": "execute", "fallback_hop": "inline", "tier_note": self.INLINE}] * 2
+        self.assertEqual(self.every_reader(route), (two, two, [f"tier       execute {self.INLINE}"] * 2, two))
 
     def test_no_note_where_top_was_not_selected_or_a_top_model_ran_and_the_bytes_are_unchanged(self):
         cases = (
@@ -506,7 +673,7 @@ class StageLauncher(unittest.TestCase):
             with self.subTest(case=label):
                 code, out, ledger, route = self.chain(profile, hops, outputs, proof=proof)
                 if profile is None:
-                    self.assertNotEqual(next(n for n in route["nodes"] if n["id"] == "plan")["model_profile"], "top")
+                    self.assertNotEqual(next(n for n in route["nodes"] if n["id"] == "execute")["model_profile"], "top")
                 self.assertNotIn("tier_note", out)
                 self.assertFalse([row for row in ledger if "tier_note" in row], ledger)
                 # The same chain with the note switched off -- what the launcher printed before it existed.
@@ -685,7 +852,7 @@ class WhereThePersonReads(unittest.TestCase):
         self.route = {"route_id": "rt-fixture", "route_hash": "sha256:fixture", "capability": "autopilot-code",
                       "nodes": [stage("impl-review"), stage("plan", profile="deep", kind="pipeline-stage")]}
         self.inline = {"route_id": "rt-fixture", "route_hash": "sha256:fixture", "route_node": "impl-review",
-                       "fallback_hop": "inline", "registered_worker": 0,
+                       "fallback_hop": "inline", "registered_worker": 0, "parent_attempt_id": "att-owner",
                        "tier_note": "selected top, ran inline (owner claude deep)"}
         # The same launch's sole-gate row: it repeats what the registry row below already says.
         self.sole_gate = {"route_id": "rt-fixture", "route_hash": "sha256:fixture", "route_node": "impl-review",

@@ -816,7 +816,7 @@ class FallbackTest(unittest.TestCase):
     out=io.StringIO()
     proof="fixture-native-proof" if terminal=="native" else None
     with mock.patch.object(F,"ordered_fallback_hops",return_value=(hops,None)), \
-         mock.patch.object(F,"native_child_proof",return_value=proof), \
+         mock.patch.object(F,"native_child_proof",return_value=(proof or "","att-fixture-native" if proof else "")), \
          mock.patch.object(F,"run_wrapper",side_effect=[first,second]), \
          contextlib.redirect_stdout(out):
      code,_=self.run_inline(path)

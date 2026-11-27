@@ -140,15 +140,16 @@ def tier_note_ran(note) -> str:
 def top_stage_tier_notes(route, *, rows=(), degradations=()) -> list[dict]:
     """Every run where a selected-top stage of ``route`` ran below top, once each, in record order.
 
-    A run is a registered attempt, by its attempt id, or a hop no registered worker ran
-    (`registered_worker=0`: native-subagent, inline), by its own ledger record: its `event_id` names
-    the stage and the hop, not the run, so two owners running a stage inline are two runs, and only
-    the same record read twice is one. ``rows`` are registry metadata dicts: an attempt reads from
-    its latest row. ``degradations`` are degradation-ledger rows: a registered launch's own row
-    (its sole-gate row) says what its registry row says, so it is read only for an attempt the
-    registry no longer holds (the archive moved it); a row naming no attempt is left to the
-    registry. Each result is ``{"node", "attempt_id" | "fallback_hop", "tier_note"}``; an empty
-    list for a route with no selected-top stage."""
+    The one rule (2026-11-28): a run is counted once, by the run id the writer of its line already
+    knew -- a registered worker by its attempt id, a native-subagent run by the native attempt the
+    launcher confirmed (the ledger's `attempt_id`), an inline run by the owner that ran it (the
+    ledger's `parent_attempt_id`). Record times never split or join runs. ``rows`` are registry
+    metadata dicts: an attempt reads from its latest row, first. ``degradations`` are
+    degradation-ledger rows: each names its run and is passed over once that run is counted (a
+    registered launch's own sole-gate row while its registry row is there, the same native or
+    inline run confirmed again); a row naming no run -- a preview's, or one written before rows
+    named their run -- is not a run. Each result is ``{"node", "attempt_id" | "fallback_hop",
+    "tier_note"}``; an empty list for a route with no selected-top stage."""
     nodes = {node["id"]: node for node in (route or {}).get("nodes") or ()
              if isinstance(node, dict) and top_stage_selected(node)}
     if not nodes:
@@ -162,28 +163,25 @@ def top_stage_tier_notes(route, *, rows=(), degradations=()) -> list[dict]:
         latest[meta["attempt_id"]] = meta
         if meta.get("launch_started") == "1":
             started.add(meta["attempt_id"])
-    notes = []
+    notes, counted = [], set()
     for attempt, meta in latest.items():
         note = tier_note(nodes[meta["route_node"]], harness=meta.get("harness"), observed=meta) \
             if attempt in started else ""
         if note:
+            counted.add((meta["route_node"], attempt))
             notes.append({"node": meta["route_node"], "attempt_id": attempt, TIER_NOTE_KEY: note})
-    runs = {("attempt", attempt) for attempt in latest}
     for row in degradations:
         if (not isinstance(row, Mapping) or row.get("route_node") not in nodes
                 or (row.get("route_id"), row.get("route_hash")) != identity
                 or not tier_note_ran(row.get(TIER_NOTE_KEY))):
             continue
-        if str(row.get("registered_worker")) == "0":
-            run, ran = ("hop", row.get("event_id"), row.get("ts"), row[TIER_NOTE_KEY]), {
-                "fallback_hop": row.get("fallback_hop") or "-"}
-        elif row.get("attempt_id"):
-            run, ran = ("attempt", row["attempt_id"]), {"attempt_id": row["attempt_id"]}
-        else:
+        run = (row["route_node"],
+               row.get("parent_attempt_id" if row.get("fallback_hop") == "inline" else "attempt_id"))
+        if not run[1] or run in counted:
             continue
-        if run in runs:
-            continue
-        runs.add(run)
+        counted.add(run)
+        ran = ({"fallback_hop": row.get("fallback_hop") or "-"} if str(row.get("registered_worker")) == "0"
+               else {"attempt_id": run[1]})
         notes.append({"node": row["route_node"], **ran, TIER_NOTE_KEY: row[TIER_NOTE_KEY]})
     return notes
 RESOLVER_VERSION = "profile-demand/v1"
