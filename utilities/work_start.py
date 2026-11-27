@@ -1188,7 +1188,7 @@ def _capacity_pause(result, attention, resume, *, unit=False):
 def _outcome(jobs, aid):
     state = current_delivery_state(jobs, aid, parent_attempt_id=aid, advance=False)
     if state.cancellation_requested:
-        return {"attempt_id": aid, "classification": "success" if state.cancelled else "pending",
+        return {"attempt_id": aid, "classification": delivery_classification(state) if state.cancelled else "pending",
                 "required_action": "advance-completed" if state.cancelled else "",
                 "cancellation_requested": True, "state": "cancelled" if state.cancelled else "termination-pending",
                 "reason": "cancelled-by-parent"}
