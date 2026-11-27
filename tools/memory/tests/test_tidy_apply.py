@@ -423,6 +423,28 @@ class StewardObligationContinuityTest(TidyApplyCase):
         self.relations = [self.relation]
         self.assertEqual(self.report_actions(), ["open: Check the legacy measurements → assign or do now"])
 
+    def test_role_taken_after_a_clear_keeps_the_prior_ids_work(self):
+        import time
+
+        seat = self.tidy._pane_seat_of("fixture:pane")
+        self.promise("Measure the earlier samples", self.prior)
+        self.promise("Release the neighbouring project", {"harness": "claude", "session_id": "neighbor"})
+        self.promise("Release the forged project", {"harness": "claude", "session_id": "intruder"})
+        self.relation.update(origin=dict(self.relation["holder"]), lineage=[], seat_key=seat.key)
+        now = time.time()
+        with self.project():
+            # Another project's sessions used the same pane: one without a clear, one with a forged one.
+            for sid, cwd, source, at in (("neighbor", self.foreign, "startup", now - 9),
+                                         ("intruder", self.foreign, "startup", now - 7),
+                                         ("earlier-captain", self.proj, "startup", now - 5),
+                                         ("captain", self.proj, "clear", now)):
+                self.tidy._append_ledger_entry(seat, {"event": "start", "harness": "claude", "sid": sid,
+                                                      "source": source, "cwd": str(cwd), "ts": at})
+            for old in ("intruder", "earlier-captain"):
+                self.tidy._append_ledger_entry(seat, {"event": "handover", "harness": "claude", "sid": "captain",
+                    "from": old, "source": "clear", "cwd": str(self.proj), "ts": now, "bindings": []})
+        self.assertEqual(self.report_actions(), ["open: Measure the earlier samples → assign or do now"])
+
     def test_unreadable_roles_keep_existing_work_as_unsigned_project_work(self):
         self.promise("Trace the unfinished fixture", self.old_sparrow)
         self.promise("Foreign release already entered", self.wren)

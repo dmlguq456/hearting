@@ -122,6 +122,16 @@ def _holder(relation):
     return _owner_key(holder.get("harness"), holder.get("sid"))
 
 
+def _seat_predecessors(harness, sid, cwd, pane="", **seat):
+    """Confirmed same-seat clear/handover predecessors from the existing seat ledger."""
+    try:
+        import session_tidy
+        return {key for prior in session_tidy.confirmed_pane_predecessors(harness, sid, pane, cwd, **seat)
+                if (key := _owner_key(harness, prior))}
+    except Exception:
+        return set()
+
+
 def _own_role(collector, own, seat_keys=()):
     """Only these sessions' own marker files and their seat ledgers; raises when one is unreadable."""
     markers = collector.read_markers(only=own)
@@ -146,12 +156,7 @@ def scoped_owners(harness, sid, collector, *, cwd=None, seat=None):
     rows = ()
     try:
         if seat is not None:
-            try:
-                import session_tidy
-                own.update(key for prior in session_tidy.confirmed_pane_predecessors(
-                    harness, sid, seat.pane, cwd, endpoint=seat.endpoint) if (key := _owner_key(harness, prior)))
-            except Exception:
-                pass
+            own.update(_seat_predecessors(harness, sid, cwd, seat.pane, endpoint=seat.endpoint))
             markers, relations = _own_role(collector, own, (seat.key,))
             if not markers and not any(_holder(relation) in own for relation in relations
                                        if relation.get("released") is not True):
@@ -174,8 +179,14 @@ def scoped_owners(harness, sid, collector, *, cwd=None, seat=None):
         own.update(caller_keys)
         complete = True
         if seat is None:
-            # A check labels targets against every competing claim, as Fleet does.
+            # A check labels targets against every competing claim, as Fleet does, and
+            # reads the same seat chain a tidy reads, from the seat of each role it holds.
             markers, relations = collector.read_markers(), collector.read_relations()
+            cwds = {row.cwd for row in rows if caller in collector._session_keys(row)}
+            home = cwd or (next(iter(cwds)) if len(cwds) == 1 else None)
+            for key in {str(relation["seat_key"]) for relation in relations if relation.get("seat_key")
+                        and relation.get("released") is not True and _holder(relation) in own}:
+                own.update(_seat_predecessors(harness, sid, home, seat_key=key))
             try:
                 _own_role(collector, own)
             except Exception:

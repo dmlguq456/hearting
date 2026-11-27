@@ -1802,8 +1802,8 @@ def _pane_repository_map(rows: list[dict], seat: Seat, resolve_gitdir) -> dict[t
             if len(values) == 1 and identity not in conflicts}
 
 
-def _pane_lineage_inputs(harness: str, sid: str, pane: str, cwd: str, *, endpoint=None):
-    if harness not in HARNESSES or not sid or not pane or not cwd:
+def _pane_lineage_inputs(harness: str, sid: str, pane: str, cwd: str, *, endpoint=None, seat_key=None):
+    if harness not in HARNESSES or not sid or not (pane or seat_key) or not cwd:
         return None
     try:
         tools = str(Path(__file__).resolve().parents[1] / "tools")
@@ -1814,7 +1814,7 @@ def _pane_lineage_inputs(harness: str, sid: str, pane: str, cwd: str, *, endpoin
         repository = resolved[1] if isinstance(resolved, (list, tuple)) and len(resolved) > 1 else ""
         if not repository:
             return None
-        current = _pane_seat_of(pane, endpoint=endpoint)
+        current = Seat("pane", seat_key) if seat_key else _pane_seat_of(pane, endpoint=endpoint)
         current_rows = _read_ledger_lines(current)
         current_repositories = _pane_repository_map(current_rows, current, resolve_gitdir)
         if current_repositories.get((harness, sid)) != repository:
@@ -2012,9 +2012,10 @@ def _confirmed_predecessors_from(inputs, harness: str, sid: str, repository: str
     return chain
 
 
-def confirmed_pane_predecessors(harness: str, sid: str, pane: str, cwd: str, *, endpoint=None) -> list[str]:
-    """Return only confirmed same-harness clear/handover predecessors for display."""
-    state = _pane_lineage_inputs(harness, sid, pane, cwd, endpoint=endpoint)
+def confirmed_pane_predecessors(harness: str, sid: str, pane: str, cwd: str, *, endpoint=None,
+                                seat_key=None) -> list[str]:
+    """Return only confirmed same-harness clear/handover predecessors (``seat_key``: a role's seat)."""
+    state = _pane_lineage_inputs(harness, sid, pane, cwd, endpoint=endpoint, seat_key=seat_key)
     if state is None:
         return []
     repository, inputs, resolver = state
