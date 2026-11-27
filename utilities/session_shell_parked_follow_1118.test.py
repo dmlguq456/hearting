@@ -36,8 +36,8 @@ import human_wait_state  # noqa: E402
 import session_tidy  # noqa: E402
 from fleet import gitinfo, session_line, session_registry as sr, titles  # noqa: E402
 
-OLD = "92d7cdcd-3cef-4583-80e6-f9a4561ac629"
-NEW = "e675a253-0561-410f-aa04-c12345cabf70"
+OLD = "3f1c0a7e-5b2d-4c6e-9a8f-1d2e3f4a5b6c"
+NEW = "7a9b8c6d-2e4f-4a1b-8c3d-5e6f7a8b9c0d"
 ROUTE = {"id": "rt-new", "title": "route of the held session", "state": "running", "worker_stage": "plan",
          "shape": "one-shot", "owner": "autopilot-code", "stages": [{"name": "plan", "st": "active"}]}
 OLD_ROUTE = dict(ROUTE, id="rt-old", title="finished route of the original")
