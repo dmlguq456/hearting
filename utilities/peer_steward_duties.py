@@ -1081,7 +1081,6 @@ def _prompt_carrier_note(ref, target, outcome):
 _CLEAR_EXIT = {"true": 0, "skipped": 3, "queued": 3, "failed": 1, "unverified": 5}
 _CLEAR_LEDGER_STATUS = {"true": "sent", "failed": "failed", "skipped": "unknown", "queued": "unknown", "unverified": "unknown"}
 _RULE_LINE = re.compile(r"^[\s\u2500-\u257f]*\u2500{8,}[\s\u2500-\u257f]*$")
-_BOX_EDGE = re.compile(r"^\u2500{8,}[\s\u2500-\u257f]*$")     # a rule from the left edge, never a draft row
 _OPENCODE_HOME_PLACEHOLDER = "askanything"
 
 
@@ -1111,16 +1110,6 @@ def _draft_state(harness, lines):
         body, bright = _marker_remainder(lines[idx], "\u276f")
         if bright:
             return "nonempty"
-        # Claude opens its box under a rule at the left edge, and draws every further draft row
-        # indented. A marker row with no such rule right above it may be a draft's own row that the
-        # person began with the marker: another marker row above it, before that rule, leaves the
-        # box's first row undecided, so the box is read as holding a draft (review 1127).
-        if not (idx and _BOX_EDGE.match(_plain(lines[idx - 1]))):
-            for cells in reversed(lines[:idx]):
-                if _BOX_EDGE.match(_plain(cells)):
-                    break
-                if _marker_remainder(cells, "\u276f") is not None:
-                    return "nonempty"
         for cells in lines[idx + 1:]:
             if _RULE_LINE.match(_plain(cells)):
                 return "empty"          # the faint remainder, if any, is Claude's own suggestion

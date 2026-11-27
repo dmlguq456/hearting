@@ -163,7 +163,7 @@ let keyRevision = -1, keyAt = performance.now();
 // cannot (QUIET_KEY): once they are quiet, an empty composer on screen needs no repaint after them.
 // Up, Down, Right and End are not among them: they can bring a past prompt or a suggestion into the
 // composer, so the native must paint once after them (a slow one repaints its old, empty screen first).
-let typed = 0, draftChars = 0;
+let typed = 0;
 // Why the last reading kept the window from taking a message (`status().hold`): what this host
 // knows, for the sender's record (`peer-message` pending row `held`). Empty while it takes one.
 let lastHold = 'unsettled';
@@ -1863,26 +1863,13 @@ async function refreshReadiness() {
   const before=epoch,selected=selection,revision=screenRevision,observed=sequence,frontier=nativeEpoch;
   const result=await source('readiness',{screen:screenSnapshot(),state});
   if(before!==epoch||selected!==selection||revision!==screenRevision||observed!==sequence||currentDelivery){empty=false;return 'moved';}
-  // The screen alone cannot tell a draft from an empty box in every case (a draft row that starts with
-  // the box's own marker, a draft of spaces only): text the person typed since the last Enter and did
-  // not erase keeps the message waiting, whatever the screen reads (review 1127 🔴1).
-  empty=result.ok===true&&result.ready===true&&!draftChars;
-  lastHold=empty?'':result.ready===true?'draft':HOLD_OF[result.reason]||'unobserved';
+  empty=result.ok===true&&result.ready===true;
+  lastHold=empty?'':HOLD_OF[result.reason]||'unobserved';
   if(empty&&!inputSettled){submitted=frontier;lastEnter=Math.max(lastEnter,frontier);if(loneEscape)keyTail='';}
   if(empty&&state!=='idle'){state='idle';queueDisplay();queueProjection();}
   return result.ok===true||result.reason==='screen-large'?'':'unavailable';
 }
 function observeInput(data) {
-  // How many characters the person typed into the composer since the last Enter and did not erase
-  // (`draftChars`): a letter or a pasted one adds (each UTF-8 lead byte), a backspace takes one back,
-  // Enter (it submits or runs the command, and the native clears its box) and Ctrl+C (the box is
-  // cleared) end the count. Keys whose meaning the native decides (Tab, Ctrl+U, Esc) leave it.
-  const draftText=byte=>{
-    if(paste){if((byte&0xc0)!==0x80)draftChars++;return;}
-    if(byte===0x0d||byte===0x0a||byte===0x03)draftChars=0;
-    else if(byte===0x7f||byte===0x08)draftChars=Math.max(0,draftChars-1);
-    else if(byte>=0x20&&(byte&0xc0)!==0x80)draftChars++;
-  };
   // All keys invalidate an in-flight observation, but only native-bound bytes
   // can leave an unsubmitted native draft. Block/Fleet keys have no such bytes.
   epoch+=data.length;empty=false;const before=nativeEpoch;
@@ -1910,7 +1897,7 @@ function observeInput(data) {
       else if(keyTail.length>(string?512:64)){typed=nativeEpoch;keyTail='';}
     }
     else if(c==='\x1b')keyTail=c;
-    else {typed=nativeEpoch;if(!paste&&(c==='\r'||c==='\n'))lastEnter=nativeEpoch;draftText(data[offset]);}
+    else {typed=nativeEpoch;if(!paste&&(c==='\r'||c==='\n'))lastEnter=nativeEpoch;}
     if(paste)typed=nativeEpoch;
   }
   // A focus report alone is no key: it neither restarts the quiet time nor owes a repaint.
@@ -2345,11 +2332,9 @@ async function request(req) {
   if(req.op==='native-selection')return {ok:!relay,native_frame:nativeSelectionFrame()};
   if(req.op==='status'){await refreshReadiness();if(empty)checkRelease();return {ok:true,...status()};}
   // The native cells under the panel and frame: the seat's own screen for draft/form judgments.
-  // `draft_typed`: the person's text since the last Enter (draftText) stands in the box whatever the
-  // screen shows, for the readers that type into it themselves (tidy, retire).
   if(req.op==='screen'){
     if(relay)return {ok:false,reason:'display-unavailable'};
-    const answer={ok:true,screen:screenSnapshot(),...status(),...(draftChars?{draft_typed:true}:{})};
+    const answer={ok:true,screen:screenSnapshot(),...status()};
     return Buffer.byteLength(JSON.stringify({...answer,...identity()}))+1>SCREEN_BYTES?{ok:false,reason:'screen-large'}:answer;
   }
   if(req.op==='panel'&&relay)return {ok:false,reason:'display-unavailable'};
@@ -2574,7 +2559,7 @@ function buildSeed() {
   const limit=Math.min(8*1024*1024,Number(process.env.HEARTING_SHELL_SEED_LIMIT)||8*1024*1024);
   const captured=succession.capture(terminal,{scrollback:true});
   const seed={schema:succession.SCHEMA,harness,sid,native:{pid:native.pid,start:native.start},rootNative:{pid:rootNative.pid,start:rootNative.start},
-    sequence,selection,state,epoch,nativeEpoch,submitted,lastEnter,typed,draftChars,cursorVisible,expanded,foldChoice,displayConfiguration,displaySequence,
+    sequence,selection,state,epoch,nativeEpoch,submitted,lastEnter,typed,cursorVisible,expanded,foldChoice,displayConfiguration,displaySequence,
     deliveries:[...deliveries].filter(([,value])=>value==='submitted'||value==='transport-submitted').slice(-128),
     displayValues,nativeSelected,nativeContext:nativeContext??null,nativeMcp:nativeMcp??null,
     // The host's own turn observation (what the panel shows as the state), so the successor shows the same
@@ -2690,7 +2675,7 @@ async function commitSuccessor(file) {
     rootNative=root;native=row;
     sid=seed.sid;sequence=seed.sequence;selection=seed.selection;state=seed.state;epoch=seed.epoch;nativeEpoch=seed.nativeEpoch;
     // An older host's seed has no `typed`: every byte it took may have typed.
-    submitted=seed.submitted;lastEnter=seed.lastEnter;typed=Number.isSafeInteger(seed.typed)?seed.typed:nativeEpoch;draftChars=Number.isSafeInteger(seed.draftChars)?seed.draftChars:0;cursorVisible=seed.cursorVisible;expanded=seed.expanded;empty=false;
+    submitted=seed.submitted;lastEnter=seed.lastEnter;typed=Number.isSafeInteger(seed.typed)?seed.typed:nativeEpoch;cursorVisible=seed.cursorVisible;expanded=seed.expanded;empty=false;
     // An earlier release's open-by-hand choice also carried its width (`{folded:false,cols}`).
     const choice=seed.foldChoice;foldChoice=choice&&typeof choice==='object'&&typeof choice.folded==='boolean'?{folded:choice.folded}:null;
     displayConfiguration=seed.displayConfiguration;displaySequence=Number.isSafeInteger(seed.displaySequence)?seed.displaySequence:0;

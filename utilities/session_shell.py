@@ -405,7 +405,6 @@ SCREEN_HOST_OUTDATED = "shell-host-outdated"   # a host started before it learne
 SCREEN_EDITOR_OPEN = "shell-editor-open"       # settings, the Fleet explorer or a question holds the keys
 SCREEN_NO_ANSWER = "shell-no-answer"           # no or no usable answer
 SCREEN_LARGE = "shell-screen-large"            # too large a screen for one answer: its input box is not read
-SCREEN_DRAFT = "draft"                         # the person typed text since the last Enter (host draftText)
 
 
 def screen_lines(screen):
@@ -454,8 +453,6 @@ def native_screen_reason(binding: dict):
             return None, SCREEN_LARGE
     if isinstance(result, dict) and result.get("ok") and result.get("focused") is True:
         return None, SCREEN_EDITOR_OPEN
-    if isinstance(result, dict) and result.get("ok") and result.get("draft_typed") is True:
-        return None, SCREEN_DRAFT
     screen = (result.get("screen") if isinstance(result, dict) and result.get("ok")
               and result.get("focused") is False else None)
     lines, _why = screen_lines(screen)

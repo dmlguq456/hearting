@@ -90,7 +90,7 @@ const piece=name=>{const begin=text.search(new RegExp('^(?:async )?function '+na
 const code=text.match(/^const QUIET_KEY=.*;$/m)[0]+'\n'+piece('observeInput')+'\n'+piece('inputBytes');
 function make(){
   const written=[],opened=[];
-  const s={Buffer,String,epoch:0,nativeEpoch:0,lastEnter:-1,typed:0,draftChars:0,empty:true,keyTail:'',paste:false,relay:false,
+  const s={Buffer,String,epoch:0,nativeEpoch:0,lastEnter:-1,typed:0,empty:true,keyTail:'',paste:false,relay:false,
     currentDelivery:null,screenRevision:0,keyRevision:-1,keyAt:0,performance:{now:()=>0},settings:undefined,table:null,
     fleetView:undefined,heldBytes:0,activated:true,ended:false,succeeding:false,
     block:{focused:false,question:null,answeredEscape:()=>false},popupShown:()=>false,sections:()=>['FLEET'],

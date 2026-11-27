@@ -2897,7 +2897,7 @@ def cmd_retire(args):
     if _retire_foreground(pane, harness) != identity:
         return finish("foreground-changed", pending=True)
     lines = _read_screen(target)
-    # A shell seat's own reason for no screen (too large, a draft typed, an editor open) is the wait's.
+    # A shell seat's own reason for no screen (too large, an editor open) is the wait's.
     screen_reason = ((_native_trust_reason(harness, lines) or _screen_ready(harness, lines)) if lines
                      else _shell_screen_reason(target) or "screen-unavailable")
     if screen_reason:
@@ -8437,7 +8437,7 @@ def _read_screen(target):
 
 
 def _shell_screen_reason(target):
-    """Why a shell seat gave no screen (``shell-screen-large``, ``draft``, an open editor), else ``""``."""
+    """Why a shell seat gave no screen (``shell-screen-large``, an open editor), else ``""``."""
     seat = _shell_seat(target)
     if seat is None:
         return ""

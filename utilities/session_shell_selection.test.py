@@ -268,7 +268,7 @@ const row={pid:10,start:'s'},noop=()=>{};
 const c={performance,processRow:()=>row,rootNative:{pid:10,start:'s'},descends:()=>true,sameTerminal:()=>true,token:'t',harness:'claude',sequence:0,
  nativeFooter:null,paintedCommon:[],nativeContext:undefined,sid:'',nativeSelected:{},displayValues:{},panelModel:{},panelSections:undefined,panelLines:[],
  projectionKey:'',footer:'',footerSegments:[],routeDetail:false,routeScroll:0,selection:0,native:null,state:'unknown',nativeTurn:'',turnMark:0,
- seenTurn:null,turnRecord:'',formSeen:false,eventMark:0,clock:0,empty:false,submitted:-1,lastEnter:-1,typed:0,draftChars:0,KEY_QUIET_MS:2000,lastHold:'',HOLD_OF:{},block:{leave:noop,update:noop},publishNativeDisplay:noop,
+ seenTurn:null,turnRecord:'',formSeen:false,eventMark:0,clock:0,empty:false,submitted:-1,lastEnter:-1,typed:0,KEY_QUIET_MS:2000,lastHold:'',HOLD_OF:{},block:{leave:noop,update:noop},publishNativeDisplay:noop,
  queueDisplay:noop,currentDelivery:null,releaseHeld:noop,setImmediate:noop,projection:noop,heldStop:noop,
  epoch:0,nativeEpoch:0,unselected:null,routePopup:null,routePage:0,upgradeNote:'',keyTail:'',paste:false,relay:false,screenRevision:0,screenSnapshot:()=>'',queueProjection:noop,
  source:op=>Promise.resolve(op==='readiness'?{ok:true,ready:true}:{})};

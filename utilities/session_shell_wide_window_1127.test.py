@@ -9,8 +9,7 @@ through the first with text and the bottom rows that fit; the reader judges that
 judgment reads the same on it as on the whole screen, and otherwise says ``screen-large``.
 Review 1127 (fix 1): a screen is never cut. It is carried whole, each row up to its last non-blank
 cell, in a line of up to 1 MiB for the screen requests alone; past that it is ``screen-large`` and
-nothing is typed. Text the person typed since the last Enter keeps a message waiting whatever the
-screen reads, and a Claude marker row under another one before the box's top rule is a draft.
+nothing is typed. The form/draft judgment is main's, so a wide window is judged as a small one.
 
 Two parts: the judgment over every cut a host can make of synthetic screens (no process), and a
 real host in a private PTY with the synthetic native of ``fixtures.session_shell_rig`` at five
@@ -231,42 +230,6 @@ a.deepEqual(run([...Array(100).fill('z'.repeat(800)),...footer]),[],'no composer
 """)
 
 
-class ClaudeBoxStartTest(unittest.TestCase):
-    """Review 1127 🔴1: a draft row the person began with ``❯`` is no empty box."""
-    COLS = 120
-
-    def box(self, rows, top=True):
-        rule = row("─" * self.COLS, self.COLS)
-        return ([row("❯ an earlier prompt", self.COLS), row("", self.COLS)] + ([rule] if top else [])
-                + [row(text, self.COLS) for text in rows] + [rule, row("  ? for shortcuts", self.COLS, faint=True)])
-
-    def test_drafts_whose_last_row_starts_with_the_marker_read_as_drafts(self):
-        drafts = {
-            "hangul": ["❯ 한글 초안", "  둘째 줄", "  ❯"],
-            "flush": ["❯ first", "❯"],
-            "spaces-after": ["❯ first", "  ❯   "],
-            "blank-row-between": ["❯ first", "  ", "  ❯"],
-            "typed-rule": ["❯ first", "  " + "─" * 12, "  ❯"],
-        }
-        for top in (True, False):
-            for name, draft in drafts.items():
-                with self.subTest(draft=name, top_rule=top):
-                    lines = trimmed(self.box(draft, top))
-                    self.assertEqual(duties._screen_ready("claude", lines), "draft")
-
-    def test_the_box_under_its_top_rule_reads_as_before(self):
-        cases = {"empty": (["❯ "], None), "draft": (["❯ half typed"], "draft"),
-                 "second-line": (["❯ ", "  second line"], "draft")}
-        for name, (draft, want) in cases.items():
-            with self.subTest(case=name):
-                self.assertEqual(duties._screen_ready("claude", trimmed(self.box(draft))), want)
-        suggestion = self.box(["❯ "])
-        suggestion[3] = row("❯ ", self.COLS)[:2] + row("try a dim suggestion", self.COLS - 2, faint=True)
-        self.assertIsNone(duties._screen_ready("claude", trimmed(suggestion)))
-        # A box with no top rule (an older layout) and one marker row reads as it did.
-        self.assertIsNone(duties._screen_ready("claude", trimmed(self.box(["❯ "], top=False)[2:])))
-
-
 class SentLineTest(unittest.TestCase):
     def test_the_panel_and_fleet_say_why_a_sent_answer_waits_on_a_large_screen(self):
         from fleet.session_block import sent_answer_line
@@ -374,27 +337,19 @@ class WideWindowDeliveryTest(AnswerReachesIdleShellTest):
             self.assertTrue(self.deliver("claude", self.send("claude", "PEER-AFTER-SUGGESTION"))[-1].get("ok"))
         for name, keys, marker, hold in (("draft", "half typed", b"half typed", "draft"),
                                          ("hangul", "한글 조합", "조합".encode(), "draft"),
-                                         # Review 1127 🔴1: rows of Hangul, the last one begun with the marker.
-                                         ("marker-row", "한글 초안\n둘째\n❯",
-                                          "둘째".encode(), "draft"),
-                                         # Spaces only: the screen cannot tell them from an empty box.
-                                         ("spaces", "   ", b"\x1b[2J", "draft"),
                                          ("form", "/model\r", b"Select model", "form")):
             with self.subTest(case=name), self.window("claude", size, "keeps-" + name, ARI_NATIVE_FILL="dense") as rig:
                 self.keeps(rig, keys, marker, hold, name)
 
-    def test_an_erased_draft_still_takes_the_message(self):
-        # 11-16: keys that leave the box empty again (typed, then erased) are settled by the next reading.
-        with self.window("claude", SIZES[3], "erased", ARI_NATIVE_FILL="dense") as rig:
-            rig.type("abc")
-            rig.wait_for(b"abc", "the draft never painted")
-            for _ in range(3):
-                rig.type("\x7f")
-                time.sleep(0.05)
-            body = "PEER-AFTER-ERASED"
-            results = self.deliver("claude", self.send("claude", body), passes=14)
-            self.assertTrue(results[-1].get("ok"), results)
-            rig.wait(lambda: any(body in row["prompt"] for row in rig.prompts()), "the native never took it")
+    def test_a_key_typed_into_the_window_leaves_its_screen_answer_a_screen(self):
+        # Review 1127 (fix 2) 🔴3: retire types a dialog's choice into the window and reads the screen
+        # again; that key never turns the screen answer into anything but the screen.
+        with self.window("claude", SIZES[0], "typed-key") as rig:
+            rig.type("1")
+            rig.wait_for("\u276f 1".encode(), "the native never painted the key")
+            lines, why = session_shell.native_screen_reason(rig.current_binding())
+            self.assertEqual(why, "")
+            self.assertIsInstance(lines, list)
 
     def test_a_screen_past_one_request_waits_and_says_so_everywhere(self):
         # Every cell an accented letter: the 121 x 537 screen is past 1 MiB, so it is not carried at all.
