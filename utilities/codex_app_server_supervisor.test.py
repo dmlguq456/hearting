@@ -1505,6 +1505,21 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
             # A made-up value of no window: the respawned owner still takes it over.
             "FIXTURE_CARRIED": "kept-by-the-respawned-owner",
         }
+        if temp_case == "non-git":
+            # The respawned supervisor applies the non-Git profile only on a Codex CLI
+            # with named permission profiles; CI has no Codex CLI. This stand-in answers
+            # only that capability probe and fails any other use loudly.
+            fake_codex_scratch = tempfile.TemporaryDirectory(prefix="fake-codex-")
+            self.addCleanup(fake_codex_scratch.cleanup)
+            fake_codex = Path(fake_codex_scratch.name) / "codex"
+            fake_codex.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = sandbox ] && [ "$2" = --help ]; then\n'
+                "  echo '  -P, --permission-profile <NAME>'; exit 0\n"
+                "fi\n"
+                'echo "fixture codex stand-in: unexpected $*" >&2; exit 64\n', encoding="utf-8")
+            fake_codex.chmod(0o755)
+            env["PATH"] = fake_codex_scratch.name + os.pathsep + env["PATH"]
         caller_window = {key: value for key, value in env.items() if key.startswith("HEARTING_SHELL_")}
         def load_local(name, path):
             spec = importlib.util.spec_from_file_location(name, path)
