@@ -582,7 +582,8 @@ def choice_descriptions(question):
                           if isinstance(value, str) and value.strip()), "")
         else:
             words = given.get(choice) if isinstance(choice, str) else None
-        # A line break the asker wrote stays (each line's own spaces made one); the board wraps each line.
+        # The lines the asker wrote stay (each line's own spaces made one, an empty line left out); the board
+        # wraps each line.
         out.append("\n".join(" ".join(line.split()) for line in words.splitlines() if line.strip())
                    if isinstance(words, str) else "")
     return out
@@ -3364,6 +3365,23 @@ def _workflow_gate_interview(binding, item):
         return None, "workflow-interview-unavailable:" + type(exc).__name__
 
 
+def _frame_gate_choice(interview, question, option):
+    """One frame interview option as the board's choice: its label is the value; its words are its `means`
+    (with the one scope line the runtime reads from the proposal's structure) and, where it has one, its own
+    non-empty `description` with the same line (11-27, review of #1908: `choice_descriptions` draws that
+    first, once)."""
+    import frame_interview as FI
+    choice = {"value": option["label"], "label": option["label"]}
+    note = FI.route_scope_note(interview, question.get("id"), option["label"])
+    means = " ".join(part for part in (
+        option["means"] if isinstance(option.get("means"), str) else "", note) if part)
+    if means or isinstance(option.get("means"), str):
+        choice["means"] = means
+    if isinstance(option.get("description"), str) and option["description"].strip():
+        choice["description"] = " ".join(part for part in (option["description"].strip(), note) if part)
+    return choice
+
+
 def _workflow_gate_detail(binding, item):
     """Build selected-only questions from the current gate or its sealed interview."""
     route = binding["route"]
@@ -3417,14 +3435,7 @@ def _workflow_gate_detail(binding, item):
         for option in options:
             if not (isinstance(option, dict) and isinstance(option.get("label"), str)):
                 continue
-            choice = {"value": option["label"], "label": option["label"]}
-            # The card's own words, then the one line the runtime reads from the proposal's structure.
-            means = " ".join(part for part in (
-                option["means"] if isinstance(option.get("means"), str) else "",
-                FI.route_scope_note(interview, question.get("id"), option["label"])) if part)
-            if means or isinstance(option.get("means"), str):
-                choice["means"] = means
-            choices.append(choice)
+            choices.append(_frame_gate_choice(interview, question, option))
         entry = {"id": question["id"], "question": question["question"], "choices": choices,
                  # The existing frame answer validator accepts off-menu notes.
                  "is_other": True}

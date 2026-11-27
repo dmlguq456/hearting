@@ -358,19 +358,13 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
       }else scroll=0;
       if(marked.length<=spare)return [head,...top,...marked,...f].slice(0,limit);
       const size=spare>=2?spare-1:spare,lit=Math.max(0,marked.findIndex(parts=>parts[0]?.text==='▸'));
-      // 11-27 (design 가): a choice slides as one with its rows (its name's wrapped rows and its words): whole
-      // choices, the highlighted one among them (one after it first, then one before, as far as they fit), and
-      // the count of the choices left out. A choice taller than the rows alone shows its first rows.
-      const groups=choiceGroups(options),at=Math.max(0,groups.findIndex(([a,b])=>lit>=a&&lit<b));
-      const rowsOf=([a,b])=>b-a;
-      let first=at,last=at,used=rowsOf(groups[at]||[0,size]);
-      for(let after=true,stuck=0;stuck<2;after=!after){
-        const next=after?last+1:first-1,fits=next>=0&&next<groups.length&&used+rowsOf(groups[next])<=size;
-        if(fits){used+=rowsOf(groups[next]);if(after)last=next;else first=next;stuck=0;}else stuck++;
+      const more=n=>[[span(`+${n} · ${text('more_choices','more choices · ↑↓')}`)]];
+      // Choices without words under their names slide row by row, exactly as they always did.
+      if(!options.some(parts=>parts.some(part=>part.role==='choice-detail'))){
+        const from=Math.max(0,Math.min(marked.length-size,lit-Math.floor(size/2)));
+        return [head,...top,...marked.slice(from,from+size),...(spare>=2?more(marked.length-size):[]),...f].slice(0,limit);
       }
-      const from=groups.length?groups[first][0]:0,to=groups.length?Math.min(groups[last][1],from+size):size;
-      const unseen=groups.length?groups.length-(last-first+1):marked.length-size;
-      return [head,...top,...marked.slice(from,to),...(spare>=2?[[span(`+${unseen} · ${text('more_choices','more choices · ↑↓')}`)]]:[]),...f].slice(0,limit);
+      return [head,...top,...wholeChoices(options,marked,lit,spare,columns,more),...f].slice(0,limit);
     }
     if(content.length>space&&gap.length>1){gap=gap.slice(1);content=lines();}
     if(content.length<=space){scroll=0;return [head,...content,...footer].slice(0,limit);}
@@ -400,6 +394,36 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
   // across it (one ground, no other inside it); the answer being typed, and an answer picked, are
   // marked alike while this question is answered here.
   const chosenRow=(parts,on=true)=>on?parts.map(part=>({...part,tint:true})):parts;
+  // 11-27 (design 가; review of #1908): choices with words under their names slide as whole choices (a choice's name
+  // rows and its words), the highlighted one among them, one after it first and then one before, as far as they fit.
+  // `+N · more choices · ↑↓` stands only while N choices are out of sight, and never takes the row a choice that fits
+  // whole needs. A choice taller than the rows keeps its name and as many rows of its words as fit, the last ending
+  // in `…` (Fleet and `questions list` read them whole); its name and the answer row are never what gives way.
+  function wholeChoices(options,marked,lit,spare,columns,more){
+    const groups=choiceGroups(options),rows=([a,b])=>b-a;
+    if(!groups.length)return marked.slice(0,spare);
+    const at=Math.max(0,groups.findIndex(([a,b])=>lit>=a&&lit<b)),own=rows(groups[at]);
+    if(spare>=2&&own<=spare-1){
+      let first=at,last=at,used=own;
+      for(let after=true,stuck=0;stuck<2;after=!after){
+        const next=after?last+1:first-1,fits=next>=0&&next<groups.length&&used+rows(groups[next])<=spare-1;
+        if(fits){used+=rows(groups[next]);if(after)last=next;else first=next;stuck=0;}else stuck++;
+      }
+      const unseen=groups.length-(last-first+1);
+      return [...marked.slice(groups[first][0],groups[last][1]),...(unseen?more(unseen):[])];
+    }
+    if(own<=spare)return marked.slice(...groups[at]);
+    const [a]=groups[at],named=Math.max(1,options.slice(a,a+own).findIndex(parts=>parts.some(part=>part.role==='choice-detail')));
+    const keep=groups.length>1&&spare-named>=2?spare-1:spare,shown=marked.slice(a,a+keep);
+    if(keep>named){
+      const row=shown.at(-1).map(part=>({...part})),width=()=>row.reduce((n,part)=>n+measure(String(part.text)),0);
+      let end=row.length-1;
+      while(width()+1>columns&&end>=0){const chars=[...String(row[end].text)];chars.pop();row[end].text=chars.join('');if(!chars.length)end--;}
+      row[Math.max(0,end)].text=String(row[Math.max(0,end)].text)+'…';
+      shown[shown.length-1]=row;
+    }
+    return [...shown,...(keep<spare?more(groups.length-1):[])];
+  }
   // The rows of each choice, `[first, end)`: a choice's first row leads with its number, its other rows (its
   // name's wrapped rows, its words under it) with spaces.
   function choiceGroups(options){
@@ -710,6 +734,9 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
     get question(){return !!current();},
     get typing(){const row=current();return focused&&!!row&&!!state(row.item).typing[row.question.id];},
     enter,leave,update,input,detail:preview,summary,sent:sentLines,references,
+    // Where the terminal's cursor stands in the popup: while writing the caret; else the draft row (`› ` and its
+    // text). A choice's words (`choice-detail`) are never the editor, whatever they begin with (review of #1908).
+    editPart(part){return this.typing?part.caret===true:part.role!=='choice-detail'&&String(part.text).startsWith('› ')&&String(part.text).length>2;},
     choose(at){const row=current();if(focused&&row){pick(row,at);changed();}},
     write(){const row=current();if(focused&&row&&active(row)&&writable(row)){state(row.item).typing[row.question.id]=true;changed();}},
     // The wheel over the popup reads the question on, a row at a time, as ↑↓ and PgUp/PgDn do.

@@ -2232,6 +2232,24 @@ def _choice_words(spec, choices):
          if isinstance(spec.get("choice_descriptions"), Mapping) else None})
 
 
+def _fit_choice_words(details, room, lit, width):
+    """Each choice's rows of words within ``room`` rows: all of them when they fit; else the chosen choice's
+    (``lit``) first, then the others from the top as far as rows are left, a cut one's last row ending in ``…``."""
+    if sum(map(len, details)) <= room:
+        return details
+    out = [[] for _rows in details]
+    order = ([lit] if lit is not None and 0 <= lit < len(details) else []) + [
+        at for at in range(len(details)) if at != lit]
+    for at in order:
+        take = min(len(details[at]), room)
+        if take:
+            out[at] = list(details[at][:take])
+            if take < len(details[at]):
+                out[at][-1] = _clip_cut(out[at][-1], width)
+        room -= take
+    return out
+
+
 def _question_actions(grid, x, right, y, items):
     """``submit │ open pane``: one line of pressable words, each its own hit."""
     cursor = x
@@ -2329,13 +2347,12 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
                    for _value, _label, words in rows]
         words = [wrapped for text in _question_text(spec, envelope).splitlines() or [""]
                  for wrapped in _wrap(text, width)]
-        listed = len(choices) + sum(map(len, details))
         return (qid, values, choices, words,
-                listed + (1 if question_free_text_available(envelope, qid, values) else 0), details, listed)
+                len(choices) + (1 if question_free_text_available(envelope, qid, values) else 0), details)
 
     shapes = [_asked(spec) for spec in asked]
     for index, spec in enumerate(asked):
-        qid, values, choices, words, own, details, listed = shapes[index]
+        qid, values, choices, words, own, details = shapes[index]
         secret = bool(spec.get("is_secret") or spec.get("isSecret"))
         free = question_free_text_available(envelope, qid, values)
         editing = bool(private.get("editing") and (private.get("editing_question_id") or qid) == qid)
@@ -2366,8 +2383,18 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
         # 11-26: the answer grows within what is left once the question's first words (and their `more` line),
         # its choices, the later questions and the action line have their rows; taller than that, the rows
         # shown follow the place.
-        answer_shown = min(len(answer_rows), max(1, bottom - y - listed - 1 - later - min(len(words), 2)
+        answer_shown = min(len(answer_rows), max(1, bottom - y - len(choices) - 1 - later - min(len(words), 2)
                                                  - (1 if len(words) > 2 else 0))) if free else 0
+        # 11-27 (review of #1908): the choices' names, the answer rows, the later questions, the action line and the
+        # words' first rows hold their places first; the choices' words take the rows left (the chosen choice's
+        # first, then the others from the top), a cut one ending in `…`.
+        selection = question_mark(private, spec) if request_state == "open" else None
+        lit = (selection[0] if selection is not None and selection[0] >= 0 else
+               next((at for at, (value, _label) in enumerate(choices) if value in values), None))
+        details = _fit_choice_words(details, max(0, bottom - y - len(choices) - answer_shown - 1 - later
+                                                 - min(len(words), 2) - (1 if len(words) > 2 else 0)),
+                                    lit, max(1, right - indent - 5))
+        listed = len(choices) + sum(map(len, details))
         own = listed + answer_shown
         gap = 2 if choices else 0
         room = bottom - y - own - 1 - later

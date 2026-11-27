@@ -891,7 +891,7 @@ function popupNow(){
   if(table)return view;
   // The editor identifies the live draft, including its empty first cell.
   // Question text and a picked answer can also start with `› `; neither is an editor.
-  const edit=block.typing?part=>part.caret===true:part=>String(part.text).startsWith('› ')&&String(part.text).length>2;
+  const edit=part=>block.editPart(part);
   const at=body.slice(0,view.body).findIndex(row=>Array.isArray(row)&&row.some(edit));
   if(at>=0){const parts=body[at],upto=parts.slice(0,parts.findIndex(edit)+1).map(part=>part.text).join('');
     view.cursor={row:view.frame.top+at+2,col:view.frame.left+3+Math.min(inner-1,cellWidth(upto))};}

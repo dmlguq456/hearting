@@ -51,6 +51,7 @@ EIGHT = (("그림과 이름 (권장)", "그림 옆에 이름을 붙입니다.\n�
          ("수정", "다른 배열을 적습니다.\n답은 여러 줄로 쓸 수 있습니다."))
 DOWN, ENTER = "\x1b[B", "\r"
 NODE = shutil.which("node") or "node"      # found before a fixture narrows PATH
+GIT = shutil.which("git") or "git"
 
 
 def payload(harness, options=OPTIONS, text=QUESTION, **question):
@@ -74,7 +75,7 @@ const view=require(dir+'/panel-view.cjs');
 let sent=null;
 const b=create({changed(){},action(){},answer:async x=>(sent=x,{state:'submitted'})});
 b.update(a.items,'',{labels:a.labels});b.enter();
-for(const key of a.keys){if(typeof key==='object'&&key.choose!==undefined)b.choose(key.choose);else b.input(Buffer.from(key,'utf8'));}
+for(const key of a.keys){if(typeof key==='object'&&key.choose!==undefined)b.choose(key.choose);else if(typeof key==='object'&&key.write)b.write();else b.input(Buffer.from(key,'utf8'));}
 (async()=>{
 const kind='question',width=view.popupWidth(a.cols,kind),inner=Math.max(0,width-4),room=view.popupRoom(a.rows,a.band);
 const all=b.detail({budget:room+1,columns:inner}),title=all[0],body=all.slice(1);
@@ -83,12 +84,14 @@ const top=v.frame.top-v.top,left=v.frame.left-v.left;
 let lines=v.rows.slice(top,top+v.frame.height).map(r=>{const t=r.map(p=>p.text).join('');return t.slice(left,left+[...t].length);});
 const measure=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
 lines=lines.map(t=>{let out='',used=0;for(const c of t){if(used>=v.frame.width)break;out+=c;used+=measure(c);}return out;});
-// The terminal's cursor stands where the host puts it while an answer is written: drawn here as `▏`.
-const edit=b.typing?part=>part.caret===true:part=>String(part.text).startsWith('› ')&&String(part.text).length>2;
+// The terminal's cursor stands where the host puts it (the editor's own judgment, `host.cjs` `popupNow`; an editor
+// from before it had one, the host's rule of then); while an answer is written it is drawn here as `▏`.
+const edit=b.editPart?part=>b.editPart(part):b.typing?part=>part.caret===true:part=>String(part.text).startsWith('› ')&&String(part.text).length>2;
 const at=body.slice(0,v.body).findIndex(row=>Array.isArray(row)&&row.some(edit));
 let cursor=null;
-if(at>=0&&b.typing){const parts=body[at],upto=parts.slice(0,parts.findIndex(edit)+1).map(p=>p.text).join('');
-  cursor={row:at+1,col:2+Math.min(inner-1,measure(upto))};
+if(at>=0){const parts=body[at],upto=parts.slice(0,parts.findIndex(edit)+1).map(p=>p.text).join('');
+  cursor={row:at+1,col:2+Math.min(inner-1,measure(upto))};}
+if(cursor&&b.typing){
   const chars=[...lines[cursor.row]];let used=0,i=0;for(;i<chars.length&&used<cursor.col;i++)used+=measure(chars[i]);
   if(chars[i]===' ')chars[i]='▏';lines[cursor.row]=chars.join('');}
 const hits=v.hits.filter(h=>h.action.startsWith('answer-')).map(h=>({row:h.row-v.frame.top,action:h.action}));
@@ -97,7 +100,7 @@ const tinted=v.rows.slice(top,top+v.frame.height).map(r=>r.some(p=>p.background!
 const chosen=body.filter(r=>r.some(p=>p.tint)).flatMap(r=>r.filter(p=>String(p.text).trim()).map(p=>({text:p.text,dim:!!p.dim,bold:!!p.bold,role:p.role||''})));
 for(const key of a.after||[])b.input(Buffer.from(key,'utf8'));
 await new Promise(r=>setImmediate(r));
-process.stdout.write(JSON.stringify({lines,hits,chosen,sent,summary:b.summary()}));
+process.stdout.write(JSON.stringify({lines,hits,chosen,sent,cursor,summary:b.summary()}));
 })().catch(e=>{console.error(e);process.exit(1)});
 """
 
@@ -141,7 +144,7 @@ def popup(envelope, *, cols, rows=46, band=1, keys=(), after=(), source=None, se
     return json.loads(done.stdout)
 
 
-def fleet(envelope, *, cols, height=30, mark=None):
+def fleet(envelope, *, cols, height=30, mark=None, whole=False):
     """Fleet's frame rows down to the unfolded question's `submit`, and its presses' rows."""
     from tools.fleet.explorer.frame import draw
     from tools.fleet.explorer.state import NavState
@@ -157,6 +160,8 @@ def fleet(envelope, *, cols, height=30, mark=None):
                      question_overlay=overlay)
     grid = draw(vm, state, cols, height, beat=1)
     rows = grid.text_rows()
+    if whole:
+        return rows, grid, state, vm
     end = next(i for i, line in enumerate(rows) if line.strip().endswith("│     submit") or "│     submit" in line)
     return rows[:end + 1], grid, state, vm
 
@@ -755,6 +760,223 @@ class Mutations(Base):
         self.assertNotEqual(cut, source)
         envelope = self.native(options=EIGHT)
         self.assertNotEqual(self.text(popup(envelope, cols=64, rows=30, source=cut)), A_EIGHT_30)
+
+
+# ---- review of #1908 (head aa20fe83e), its five must-fix findings ----
+BASE = "b3f5a595a"          # main where #1908 branched: the panel editor before choice words
+
+
+_MAIN_EDITOR = []
+
+
+def main_editor():
+    """Main's panel editor source, read once before a fixture narrows the environment git reads."""
+    if not _MAIN_EDITOR:
+        _MAIN_EDITOR.append(subprocess.check_output([GIT, "show", BASE + ":utilities/session-shell/block-input.cjs"],
+                                                    cwd=ROOT, text=True, timeout=30))
+    return _MAIN_EDITOR[0]
+
+
+def shown_choices(lines):
+    return [int(m.group(1)) for line in lines if (m := re.match(r"│ [▸ ] (\d)  ", line))]
+
+
+def fleet_choice_rows(rows):
+    """``{row: choice number}`` for each row Fleet drew a choice's name or words on (its words' rows belong to
+    the name above them), from the first name to the answer row."""
+    out, current = {}, None
+    for at, line in enumerate(rows):
+        name = re.search(r"│     [○▸● ] (\d)  ", line)
+        if name:
+            current = int(name.group(1))
+        elif current is None:
+            continue
+        elif not re.search(r"│ {10}.*\S", line):
+            break
+        out[at] = current
+    return out
+
+
+class ReviewFix1(Base):
+    """Names, the answer row and `submit` never give way to the words; the words come after (review of #1908)."""
+
+    @classmethod
+    def setUpClass(cls):
+        main_editor()
+
+    def assert_presses_match(self, rows, grid, values):
+        drawn = fleet_choice_rows(rows)
+        self.assertTrue(drawn)
+        for at in range(len(rows)):
+            pressed = [hit.action for hit in grid.hits if hit.y == at and hit.action[0] == "question.choice"]
+            expected = [("question.choice", "message-response", values[drawn[at] - 1])] if at in drawn else []
+            self.assertEqual(pressed, expected, (at, rows[at]))
+
+    # 🔴3: a record without words slides exactly as main does.
+    def test_a_record_without_words_slides_as_on_main(self):
+        old = main_editor()
+        eight = tuple((f"선지 {n}", "") for n in range(1, 9))
+        folded = tuple((f"이름이 길어서 접히는 {n}번째 선지 " + "가나다라마바사아자차카타" * 2, "") for n in range(1, 7))
+        for options in (eight, folded):
+            self.fresh()
+            envelope = self.native(options=options)
+            for rows in (12, 13):                       # an odd and an even number of choice rows fit
+                for step in range(len(options)):
+                    with self.subTest(options=len(options), rows=rows, step=step):
+                        keys = [DOWN] * step
+                        self.assertEqual(popup(envelope, cols=64, rows=rows, keys=keys)["lines"],
+                                         popup(envelope, cols=64, rows=rows, keys=keys, source=old)["lines"])
+        self.fresh()
+        envelope = self.native(options=eight)
+        self.assertEqual(shown_choices(popup(envelope, cols=64, rows=12, keys=[DOWN] * 4)["lines"]), [3, 4, 5, 6])
+
+    # 🔴2 (a): a choice taller than the rows keeps its name and the answer row; its words end in `…`.
+    def test_a_choice_taller_than_the_rows_keeps_its_name_and_ends_its_words(self):
+        long = "\n".join(f"설명 {n}번째 줄입니다." for n in range(1, 22))
+        for options, more in ((("하나뿐", long),), None), ((("첫째", long), ("둘째", "")), "+1 · more choices · ↑↓"):
+            with self.subTest(choices=len(options)):
+                self.fresh()
+                lines = popup(self.native(options=options), cols=64, rows=12)["lines"]
+                text = "\n".join(lines)
+                self.assertIn("│ ▸ 1  " + options[0][0], text)
+                self.assertNotIn("+0", text)
+                words = [line for line in lines if line.startswith("│      설명")]
+                self.assertTrue(words)
+                self.assertTrue(words[-1][:-1].rstrip().endswith("…"), words[-1])
+                self.assertEqual([line for line in lines if "more choices" in line],
+                                 ["│ " + more + " " * (56 - len(more)) + " │"] if more else [])
+                self.assertEqual(lines[-2], "│ ›" + " " * 56 + "│")          # the answer row stays
+                self.assertEqual(len(lines), 9)                                # the frame keeps its height
+
+    # 🔴2 (b): `+N` only while choices are out of sight, never at the cost of a choice that fits whole.
+    def test_more_choices_never_takes_the_row_a_whole_choice_needs(self):
+        four = "\n".join(f"설명 {n}" for n in range(1, 5))
+        envelope = self.native(options=(("첫째", four), ("둘째", "")))
+        lines = popup(envelope, cols=64, rows=12)["lines"]
+        self.assertEqual([line[7:-1].strip() for line in lines if line.startswith("│      설명")], four.split("\n"))
+        self.assertFalse([line for line in lines if "more choices" in line])
+        lines = popup(envelope, cols=64, rows=12, keys=[DOWN])["lines"]
+        self.assertEqual(shown_choices(lines), [2])
+        self.assertTrue([line for line in lines if "+1 · more choices" in line])
+
+    # 🔴1: Fleet keeps every name, the answer row and `submit`; the words take the rows left.
+    def test_fleet_keeps_every_name_the_answer_and_submit(self):
+        envelope = self.native(options=EIGHT)
+        values = [label.replace(" (권장)", "") for label, _ in EIGHT]
+        rows, grid, *_ = fleet(envelope, cols=100, height=30, mark=(7, True))
+        text = "\n".join(rows)
+        for n, value in enumerate(values, 1):
+            self.assertRegex(text, r"[○▸] %d  %s" % (n, value))
+        self.assertIn("▸ 8  수정", text)
+        self.assertIn("│     > …", text)
+        for said in EIGHT[7][1].split("\n"):                            # the chosen choice's words first
+            self.assertIn("│          " + said, text)
+        self.assert_presses_match(rows, grid, values)
+        # At every height the names, the answer row and `submit` the same question without words shows (main's
+        # drawing: no words, no change) stand with the words too.
+        self.fresh()
+        plain = self.native(options=tuple((label, "") for label, _ in EIGHT))
+        essential = lambda rows: [line[line.index("│"):].rstrip() for line in rows
+                                  if re.search(r"│     ([○▸] \d  |> |submit)", line)]
+        for height in range(14, 36, 2):
+            with self.subTest(height=height):
+                kept = essential(fleet(plain, cols=100, height=height, mark=(7, True), whole=True)[0])
+                rows, grid, *_ = fleet(envelope, cols=100, height=height, mark=(7, True), whole=True)
+                self.assertEqual(essential(rows), kept)
+                self.assert_presses_match(rows, grid, values)
+        long = "\n".join(f"긴 설명 {n}번째 줄" for n in range(1, 42))
+        self.fresh()
+        options = (("그림과 이름", long), OPTIONS[1], OPTIONS[2], OPTIONS[3])
+        envelope = self.native(options=options)
+        values = [label for label, _ in options]
+        for height in (18, 24):
+            with self.subTest(height=height):
+                rows, grid, *_ = fleet(envelope, cols=100, height=height)
+                text = "\n".join(rows)
+                for n, value in enumerate(values, 1):
+                    self.assertRegex(text, r"○ %d  %s" % (n, value))
+                self.assertIn("│     > …", text)
+                cut = [line for line in rows if "긴 설명" in line]
+                if cut:
+                    self.assertTrue(cut[-1].rstrip().endswith("…"), cut[-1])
+                self.assert_presses_match(rows, grid, values)
+
+    # 🔴4: words that begin like the answer row are no editor; the cursor stands where it always did.
+    def test_words_that_look_like_the_answer_row_get_no_cursor(self):
+        self.assertIn("const edit=part=>block.editPart(part);", (SHELL / "host.cjs").read_text())
+        envelope = self.native(options=(("가", "› 답처럼 생긴 설명입니다"), ("나", "")))
+        self.assertIsNone(popup(envelope, cols=64)["cursor"])
+        self.assertIsNone(popup(envelope, cols=64, keys=[DOWN])["cursor"])
+        old = main_editor()
+        self.fresh()
+        plain = self.native()
+        for keys in ([], [{"write": True}], ["앞에는"], ["앞에는", "\n", "뒤에는"], ["4", "가나"], ["가나", "\x1b[A"]):
+            with self.subTest(keys=keys):
+                self.assertEqual(popup(plain, cols=64, keys=keys)["cursor"],
+                                 popup(plain, cols=64, keys=keys, source=old)["cursor"])
+        self.assertIsNotNone(popup(plain, cols=64, keys=["가나", "\x1b[A"])["cursor"])   # a draft row, not live
+
+    # 🔴5: a frame option's own description first, once, on the card and on the board (with the scope line).
+    def test_a_frame_option_with_a_description_and_means_shows_the_description_once(self):
+        import frame_interview as FI
+        interview = {"understanding": "검토 범위를 정합니다.", "questions": [{"id": "q-scope", "question": "어디까지 볼까요?",
+                     "options": [{"label": "첫 장만", "description": "먼저 읽어야 하는 다른 설명.",
+                                  "means": "첫 장의 그림과 이름을 대조합니다."},
+                                 {"label": "도감 전체", "means": "모든 장에서 같은 표기법을 확인합니다."}]}],
+                     "route_proposals": {"question": "q-scope", "by_option": {
+                         "첫 장만": {"legs": [{"capability": "a"}, {"capability": "b"}], "execution_scope": "complete"}}}}
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "en"}):
+            note = FI.route_scope_note(interview, "q-scope", "첫 장만")
+            card = FI.pending_question_block(interview)
+            question = interview["questions"][0]
+            choices = [HWS._frame_gate_choice(interview, question, option) for option in question["options"]]
+        self.assertTrue(note)
+        self.assertEqual(card.split("\n")[3:], ["- 첫 장만", "  먼저 읽어야 하는 다른 설명.", "  " + note,
+                                                 "- 도감 전체", "  모든 장에서 같은 표기법을 확인합니다."])
+        self.assertEqual(HWS.choice_descriptions({"choices": choices}),
+                         ["먼저 읽어야 하는 다른 설명. " + note, "모든 장에서 같은 표기법을 확인합니다."])
+        frame = {"kind": "question", "state": "open", "request_id": "S2:fixture", "native_ref": {"transport": "workflow-gate"},
+                 "detail": {"questions": [{"id": "q-scope", "question": "어디까지 볼까요?", "is_other": True,
+                                           "choices": choices}]}}
+        text = "\n".join(popup(frame, cols=108)["lines"])
+        self.assertIn("│      먼저 읽어야 하는 다른 설명. " + note[:40], text)
+        self.assertNotIn("첫 장의 그림과 이름을 대조합니다.", text)
+
+    # ---- the five changes undone, each failing its guard above ----
+    def mutated(self, old, new):
+        source = (SHELL / "block-input.cjs").read_text()
+        cut = source.replace(old, new)
+        self.assertNotEqual(cut, source)
+        return cut
+
+    def test_undone_a_record_without_words_takes_the_whole_choice_slide(self):
+        cut = self.mutated("if(!options.some(parts=>parts.some(part=>part.role==='choice-detail'))){", "if(false){")
+        envelope = self.native(options=tuple((f"선지 {n}", "") for n in range(1, 9)))
+        self.assertNotEqual(shown_choices(popup(envelope, cols=64, rows=12, keys=[DOWN] * 4, source=cut)["lines"]),
+                            [3, 4, 5, 6])
+
+    def test_undone_a_large_choice_loses_its_name(self):
+        cut = self.mutated("shown=marked.slice(a,a+keep);", "shown=marked.slice(a+named,a+named+keep);")
+        long = "\n".join(f"설명 {n}번째 줄입니다." for n in range(1, 22))
+        lines = popup(self.native(options=(("하나뿐", long),)), cols=64, rows=12, source=cut)["lines"]
+        self.assertNotIn("│ ▸ 1  하나뿐", "\n".join(lines))
+
+    def test_undone_plus_zero_stands(self):
+        cut = self.mutated("...(keep<spare?more(groups.length-1):[])", "...more(groups.length-1)")
+        long = "\n".join(f"설명 {n}번째 줄입니다." for n in range(1, 22))
+        lines = popup(self.native(options=(("하나뿐", long),)), cols=64, rows=12, source=cut)["lines"]
+        self.assertIn("+0", "\n".join(lines))
+
+    def test_undone_fleet_words_push_submit_out(self):
+        from tools.fleet.explorer import tables
+        with mock.patch.object(tables, "_fit_choice_words", lambda details, room, lit, width: details):
+            with self.assertRaises(StopIteration):                     # no `submit` row is drawn
+                fleet(self.native(options=EIGHT), cols=100, height=30, mark=(7, True))
+
+    def test_undone_the_editor_row_chosen_by_its_look(self):
+        cut = self.mutated("part.role!=='choice-detail'&&String(part.text)", "String(part.text)")
+        envelope = self.native(options=(("가", "› 답처럼 생긴 설명입니다"), ("나", "")))
+        self.assertIsNotNone(popup(envelope, cols=64, source=cut)["cursor"])
 
 
 if __name__ == "__main__":

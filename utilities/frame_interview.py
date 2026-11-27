@@ -855,15 +855,18 @@ def pending_question_block(interview: dict) -> str:
     """The registered words and choices the parent leaves in ordinary conversation.
 
     Each option is its own bullet with what choosing it does on the next line, two cells in (11-27,
-    design 가: the board draws the same words under the choice's name); an option saying nothing has
-    its name alone."""
+    design 가: the board draws the same words under the choice's name, read by the one rule
+    `human_wait_state.choice_descriptions`: a non-empty `description` first, else `means`); an
+    option saying nothing has its name alone."""
+    from human_wait_state import choice_descriptions
     lines = [_text(interview.get("understanding"))]
     for question in interview.get("questions") or []:
         lines.extend(["", _text(question.get("question"))])
         for option in question.get("options") or []:
             lines.append(f"- {_text(option.get('label'))}")
-            lines.extend(f"  {' '.join(said.split())}" for said in _text(option.get("means")).splitlines()
-                         if said.strip())
+            words = choice_descriptions({"choices": [{"description": option.get("description"),
+                                                      "means": option.get("means")}]})
+            lines.extend(f"  {said}" for said in words[0].splitlines())
             note = route_scope_note(interview, question.get("id"), option.get("label"))
             if note:
                 lines.append(f"  {note}")
