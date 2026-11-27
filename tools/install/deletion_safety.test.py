@@ -436,7 +436,9 @@ class ReleaseScanSelectsRouteRecordsTest(unittest.TestCase):
             self.assertEqual(reason, "", "one sidecar must not poison the scan")
             self.assertEqual([route_id for route_id, _ in results], [self.ROUTE_ID])
 
-    def test_paired_outcome_with_route_fields_still_fails_closed(self):
+    def test_paired_outcome_with_route_fields_keeps_what_it_names(self):
+        # The record is closed by its outcome; the route-shaped outcome itself
+        # is an open record under an unexpected name and keeps what it names.
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             routes = self._routes_dir(base)
@@ -445,8 +447,8 @@ class ReleaseScanSelectsRouteRecordsTest(unittest.TestCase):
             self._record(record, str(base / "release"))
             self._record(outcome, str(base / "other-release"))
             results, reason = self._scan(base)
-            self.assertEqual(results, [])
-            self.assertTrue(reason.startswith("route-record-unrecognised-name:"), reason)
+            self.assertEqual(reason, "")
+            self.assertEqual(results, [(outcome.stem, str(base / "other-release"))])
 
     def test_bad_canonical_base_cannot_hide_a_route_shaped_outcome(self):
         for base_kind in ("directory", "invalid-json"):
@@ -461,17 +463,17 @@ class ReleaseScanSelectsRouteRecordsTest(unittest.TestCase):
                     record.write_text("{ invalid", encoding="utf-8")
                 self._record(outcome, str(base / "release"))
                 results, reason = self._scan(base)
-                self.assertEqual(results, [])
-                self.assertTrue(reason.startswith("route-record-unrecognised-name:"), reason)
+                self.assertEqual(reason, "")
+                self.assertEqual(results, [(outcome.stem, str(base / "release"))])
 
-    def test_unpaired_outcome_shaped_route_still_fails_closed(self):
+    def test_unpaired_outcome_shaped_route_keeps_what_it_names(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             routes = self._routes_dir(base)
             self._record(routes / f"{self.ROUTE_ID}.outcome.json", str(base / "release"))
             results, reason = self._scan(base)
-            self.assertEqual(results, [])
-            self.assertTrue(reason.startswith("route-record-unrecognised-name:"), reason)
+            self.assertEqual(reason, "")
+            self.assertEqual(results, [(f"{self.ROUTE_ID}.outcome", str(base / "release"))])
 
     def test_every_sidecar_shape_beside_a_route_record_is_ignored(self):
         # Not a denylist of the shapes we happen to know: anything that is not
@@ -497,21 +499,48 @@ class ReleaseScanSelectsRouteRecordsTest(unittest.TestCase):
             self.assertEqual(reason, "")
             self.assertEqual([route_id for route_id, _ in results], [self.ROUTE_ID])
 
-    def test_a_genuinely_unparsable_route_record_still_fails_closed(self):
-        # The undecidable-is-in-use rule is the point of the scan and must
-        # survive: only the SELECTION narrowed, not the judgement.
+    def test_a_genuinely_unparsable_route_record_keeps_every_release_it_names(self):
+        # The undecidable-is-in-use rule survives per release: the bytes still
+        # name what the record holds, and only that is held.
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             routes = self._routes_dir(base)
-            (routes / f"{self.ROUTE_ID}.json").write_text("{ truncated", encoding="utf-8")
-            results, reason = self._scan(base)
-            self.assertTrue(reason.startswith("route-record-unparsable:"), reason)
-            self.assertEqual(results, [])
+            releases = base / "data" / "releases"
+            for name in ("v4.70.3", "v4.70.30", "v4.71.0"):
+                (releases / name).mkdir(parents=True)
+            (routes / f"{self.ROUTE_ID}.json").write_text(
+                '{ "launch_home": "' + str(releases) + '/v4.70.3", truncated',
+                encoding="utf-8")
+            with mock.patch.object(distribution, "data_root", return_value=base / "data"):
+                results, reason = self._scan(base)
+            self.assertEqual(reason, "")
+            self.assertEqual(results, [(self.ROUTE_ID, str(releases / "v4.70.3"))])
+
+    def test_an_unreadable_route_record_still_keeps_every_release(self):
+        # Bytes that cannot be read name nothing we can bound: the scan stays
+        # unreliable, which keeps every release.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            routes = self._routes_dir(base)
+            for name in (f"{self.ROUTE_ID}.json", "2026-08-13_wwd-eval-labels.json"):
+                with self.subTest(name=name):
+                    record = routes / name
+                    self._record(record, str(base / "release"))
+                    record.chmod(0)
+                    try:
+                        results, reason = self._scan(base)
+                    finally:
+                        record.chmod(0o600)
+                        # destructive-ok: reason=remove this subtest's own fixture record; boundary=one route file under this test's TemporaryDirectory
+                        record.unlink()
+                    self.assertEqual(results, [])
+                    self.assertTrue(reason.startswith("route-record-unreadable:"), reason)
 
     def test_an_unrecognised_open_route_record_is_never_skipped_silently(self):
         # Skipping a real route record removes a release's protection, and that
         # is the direction that deletes data. A name the reader does not know is
-        # adjudicated by content, not waved through.
+        # adjudicated by content, not waved through: it keeps what it names,
+        # and no longer fails the scan for every other release.
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             routes = self._routes_dir(base)
@@ -519,9 +548,11 @@ class ReleaseScanSelectsRouteRecordsTest(unittest.TestCase):
             legacy = routes / "2026-08-13_wwd-eval-labels.json"
             self._record(legacy, str(base / "other-release"))
             results, reason = self._scan(base)
-            self.assertTrue(
-                reason.startswith("route-record-unrecognised-name:"), reason)
-            self.assertEqual(results, [])
+            self.assertEqual(reason, "")
+            self.assertEqual(sorted(results), sorted([
+                (self.ROUTE_ID, str(base / "release")),
+                (legacy.stem, str(base / "other-release")),
+            ]))
 
     def test_a_closed_record_under_a_legacy_name_costs_nothing(self):
         # 79 such records exist on this machine, all closed. A closed record's
@@ -633,34 +664,50 @@ class ReleaseHeldByLiveProcessTest(unittest.TestCase):
             self.assertEqual(distribution._release_held_by_live_process(old),
                              (True, f"live-process:{projected.pid}:unsealed-projection"))
 
+    def _starting_at(self, process, when: float):
+        """Report `when` as this one process's start time."""
+        real = distribution._process_started_at
+        return mock.patch.object(
+            distribution, "_process_started_at",
+            side_effect=lambda entry: when if entry.name == str(process.pid) else real(entry))
+
     def test_a_process_started_through_current_after_it_moved_holds_only_its_target(self):
         # A merge-line run started through `current` minutes after an update
         # held every installed release (54 kept on 2026-11-04). Starting after
         # the pointer's last move means it could only load the present target.
         import time
+        margin = distribution._POINTER_ROTATION_MARGIN_SECONDS
         with tempfile.TemporaryDirectory() as tmp:
             old, new, current = self._release_family(tmp)
             rotated = current.with_name("current.next")
             rotated.symlink_to(new, target_is_directory=True)
             # destructive-ok: reason=rotate this test's temporary current pointer; boundary=current symlink under TemporaryDirectory
             os.replace(rotated, current)
+            moved = distribution._pointer_moved_at(current)
             projected = self._started(
                 [sys.executable, str(current / "utilities" / "runner.py")], tmp)
-            moved = time.time() - 3600
-            os.utime(current, (moved, moved), follow_symlinks=False)
-            self.assertEqual(distribution._release_held_by_live_process(old), (False, ""))
+            held = (True, f"live-process:{projected.pid}:unsealed-projection")
+            with self._starting_at(projected, moved + margin + 1):
+                self.assertEqual(distribution._release_held_by_live_process(old), (False, ""))
             # Within the margin of the move, or before it, the family stays held.
-            os.utime(current, (time.time(), time.time()), follow_symlinks=False)
-            self.assertEqual(distribution._release_held_by_live_process(old),
-                             (True, f"live-process:{projected.pid}:unsealed-projection"))
+            with self._starting_at(projected, moved + margin - 1):
+                self.assertEqual(distribution._release_held_by_live_process(old), held)
+            # A move time set into the past is not when the link moved: the
+            # rename set its ctime (review 2026-11-27, a skewed last move).
+            earlier = time.time() - 3600
+            os.utime(current, (earlier, earlier), follow_symlinks=False)
+            with self._starting_at(projected, earlier + margin + 600):
+                self.assertEqual(distribution._release_held_by_live_process(old), held)
             # Any other link into the family keeps it held whatever the times.
-            os.utime(current, (moved, moved), follow_symlinks=False)
             other = Path(tmp).resolve() / "pinned"
             other.symlink_to(new, target_is_directory=True)
             linked = self._started(
                 [sys.executable, str(other / "utilities" / "runner.py")], tmp)
-            self.assertEqual(distribution._release_held_by_live_process(old),
-                             (True, f"live-process:{linked.pid}:unsealed-projection"))
+            # `utime` changed the link's ctime too: place the first process after it.
+            moved = distribution._pointer_moved_at(current)
+            with self._starting_at(projected, moved + margin + 1):
+                self.assertEqual(distribution._release_held_by_live_process(old),
+                                 (True, f"live-process:{linked.pid}:unsealed-projection"))
 
     def test_an_update_keeps_where_current_pointed_before_it_moved_it(self):
         # The update moves `current` right before it prunes, so every process
@@ -668,6 +715,7 @@ class ReleaseHeldByLiveProcessTest(unittest.TestCase):
         # it (remembered first), such a process can only hold that previous
         # target or the new one (RV-BC-P4A R1).
         import time
+        margin = distribution._POINTER_ROTATION_MARGIN_SECONDS
         with tempfile.TemporaryDirectory() as tmp:
             old, new, current = self._release_family(tmp)
             mid = old.parent / "v-mid"
@@ -678,21 +726,25 @@ class ReleaseHeldByLiveProcessTest(unittest.TestCase):
             step.symlink_to(mid, target_is_directory=True)
             # destructive-ok: reason=rotate this test's temporary current pointer; boundary=current symlink under TemporaryDirectory
             os.replace(step, current)
-            earlier = time.time() - 7200
-            os.utime(current, (earlier, earlier), follow_symlinks=False)
             projected = self._started(
                 [sys.executable, str(current / "utilities" / "runner.py")], tmp)
             with mock.patch.dict(distribution._PRIOR_POINTER_MOVES, clear=True):
                 distribution._remember_prior_pointer_move(current)
+                remembered = distribution._PRIOR_POINTER_MOVES[str(current)][0]
+                time.sleep(0.05)
                 step.symlink_to(new, target_is_directory=True)
                 # destructive-ok: reason=rotate this test's temporary current pointer; boundary=current symlink under TemporaryDirectory
                 os.replace(step, current)
-                self.assertEqual(distribution._release_held_by_live_process(old), (False, ""))
-                held = (True, f"live-process:{projected.pid}:unsealed-projection")
-                self.assertEqual(distribution._release_held_by_live_process(mid), held)
-                distribution._PRIOR_POINTER_MOVES.clear()
-                # Without the remembered move the whole family stays held.
-                self.assertEqual(distribution._release_held_by_live_process(old), held)
+                moved = distribution._pointer_moved_at(current)
+                self.assertLess(remembered, moved)
+                # Started after the remembered move, before this one.
+                with self._starting_at(projected, remembered + margin + (moved - remembered) / 2):
+                    self.assertEqual(distribution._release_held_by_live_process(old), (False, ""))
+                    held = (True, f"live-process:{projected.pid}:unsealed-projection")
+                    self.assertEqual(distribution._release_held_by_live_process(mid), held)
+                    distribution._PRIOR_POINTER_MOVES.clear()
+                    # Without the remembered move the whole family stays held.
+                    self.assertEqual(distribution._release_held_by_live_process(old), held)
 
     def test_a_release_cairn_sync_names_is_an_external_pin(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1323,9 +1375,19 @@ class RouteStaleOpenMirrorTest(unittest.TestCase):
             },
         }), encoding="utf-8")
         self._registry(jobs_path, [("done", f"route_id={self.ROUTE_ID},attempt_id=att-1")])
-        results, reason = self._scan(base)
-        self.assertTrue(reason.startswith("route-record-unparsable:"), reason)
-        self.assertEqual(results, [])
+        # The record names a release only through its sealed registry path:
+        # that release stays, terminal rows or not.
+        release = base / "data" / "releases" / "v3.61.10"
+        release.mkdir(parents=True)
+        record = routes / f"{self.ROUTE_ID}.json"
+        record.write_text(record.read_text(encoding="utf-8").replace(
+            str(jobs_path), str(release / ".dispatch" / "jobs.log")), encoding="utf-8")
+        self._registry(release / ".dispatch" / "jobs.log",
+                       [("done", f"route_id={self.ROUTE_ID},attempt_id=att-1")])
+        with mock.patch.object(distribution, "data_root", return_value=base / "data"):
+            results, reason = self._scan(base)
+        self.assertEqual(reason, "")
+        self.assertEqual(results, [(self.ROUTE_ID, str(release))])
 
     def test_a_lineage_field_is_not_this_routes_row(self):
         # `source_route_id=rt-x` contains `route_id=rt-x` as a substring. The
@@ -1342,8 +1404,11 @@ class RouteStaleOpenMirrorTest(unittest.TestCase):
         base = Path(tmp.name)
         routes = self._routes_dir(base)
         (routes / f"{self.ROUTE_ID}.json").write_text("{ truncated", encoding="utf-8")
-        results, reason = self._scan(base)
-        self.assertTrue(reason.startswith("route-record-unparsable:"), reason)
+        (base / "data" / "releases" / "v-other").mkdir(parents=True)
+        with mock.patch.object(distribution, "data_root", return_value=base / "data"):
+            results, reason = self._scan(base)
+        # It names no release, so it can hold none -- nor release one.
+        self.assertEqual(reason, "")
         self.assertEqual(results, [])
 
 _MODULE_HOME = None
