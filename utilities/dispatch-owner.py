@@ -17,6 +17,7 @@ from route_plan import is_depth0_leg
 from route_form import serial_attempt_route, starts_depth2_nodes
 from owner_route_binding import OwnerRouteBindingError, validate_owner_route_binding, derive_quick_owner_binding, derive_frame_route_binding
 from dispatch_mode_contract import DispatchModeContractError, resolve_qa
+from dispatch_allocation_receipt import changed_raw_headroom, raw_headroom_lines
 from dispatch_contract import (DispatchContractError, frame_harness_admission,
                                parse_registry_metadata, record_frame_launch_degradation)
 from route_authority import (depth1_supported_harnesses, harness_admitted, pinned_launch_harness,
@@ -122,15 +123,18 @@ _HINTS = {
                                                 "for one of those (solo/quick: --children <harness>; staged: --parent-harness <harness>), or add the "
                                                 "harness to harnesses.enabled and this profile's quality bands first. This is not a usage limit -- "
                                                 "see eligibility.* above",
-    "no-eligible-route-evidence-candidate": "no sealed candidate is usable: it is usage-limited, gated, or has no positive capacity score "
-                                            "(see eligibility.* and capacity_headroom.* above). Resume the same route after the reported reset, "
+    "no-eligible-route-evidence-candidate": "no sealed candidate is usable: it is usage-limited, gated, or has no positive quota "
+                                            "(see eligibility.* above). The usage gate reads actual quota from "
+                                            "capacity_raw_headroom.* when shown and capacity_headroom.* otherwise. "
+                                            "Resume the same route after the reported reset, "
                                             "or select an available candidate already sealed in this profile; changing the candidate set requires recomposition",
     "frame-harness-unavailable": "no candidate harness declares the top profile in its runtime model config "
                                  "(CFG_MODEL_PROFILE_TOP in the selected models.conf; top_undeclared= above names the ones "
                                  "left out). Declare it with hearting model set <harness> profile/top <model[@budget]> "
                                  "for a harness the route sealed, or name a harness with --pin frame=<harness>",
-    "no-eligible-candidate": "no configured owner harness is usable: usage-limited, gated, or no positive capacity score "
-                             "(see eligibility.* and capacity_headroom.* above; utilities/usage-check.sh --harness all)",
+    "no-eligible-candidate": "no configured owner harness is usable: usage-limited, gated, or no positive quota "
+                             "(see eligibility.* above and utilities/usage-check.sh --harness all). The usage gate reads "
+                             "actual quota from capacity_raw_headroom.* when shown and capacity_headroom.* otherwise.",
     "exactly-one-action-required": "pass exactly one of --dry-run | --register | --start",
     "owner-tuple-required": "the launchable tuple is --dispatch-depth 1 --worker-type owner|review|frame (support only as a route node)",
     "invalid-model-profile": "--model-profile deep|balanced-deep|balanced|light (top only from a route that seals it)",
@@ -795,6 +799,7 @@ def _audit(
                         f"basis:file-mtime;age-seconds:{age:.1f};"
                         f"stale-after-seconds:{stale_after};observation-time:unknown"
                     )
+    lines.extend(raw_headroom_lines(changed_raw_headroom(capacity, freshness=capacity_freshness)))
     if quality_band:
         lines.append(f"quality_band={quality_band}")
     if top_excluded:
@@ -824,7 +829,7 @@ def _explicit_capacity_warning(source, adapter, capacity, allocation):
     """Typed headroom caveat for an explicit owner choice; never a gate."""
     if source != "explicit" or not adapter or capacity is None:
         return None
-    value = capacity.get(adapter)
+    value = _capacity.raw_headroom(capacity, adapter)
     if value is None:
         return "headroom-unknown"
     if value <= 0:
@@ -1008,7 +1013,7 @@ def main(argv):
         capacity_freshness = capacity_report.get("freshness") or {}
 
         def automatically_available(harness):
-            score = capacity.get(harness)
+            score = _capacity.raw_headroom(capacity, harness)
             return (harness != refused_harness and harness in enabled
                     and harness not in top_excluded and _eligible(states[harness])
                     and score is not None and score > 0)
@@ -1126,10 +1131,13 @@ def main(argv):
                     alternatives = [h for h in configured if h != first_harness]
                     if alternatives:
                         reason = "frame-other-harness-unusable"
+                        excluded_scores = {h: capacity.get(h) for h in alternatives}
+                        raw = changed_raw_headroom(excluded_scores, freshness=capacity_freshness)
                         detail = json.dumps({
                             "excluded_harnesses": alternatives,
                             "states": {h: states.get(h, "unknown") for h in alternatives},
-                            "capacity": {h: capacity.get(h) for h in alternatives},
+                            "capacity": excluded_scores,
+                            **({"capacity_raw_headroom": raw} if raw else {}),
                             "quality_band": quality_band,
                             **({"gated": {h: _capacity.is_gated(
                                     capacity, h,
