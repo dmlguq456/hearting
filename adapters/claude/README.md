@@ -64,7 +64,7 @@ so that residual runtime input is reported separately from profile masking.
 | role profile | Agent |
 | adapter bootstrap | `adapters/claude/CLAUDE.md` |
 | agent home | `$HOME/.claude` by default; overridable with `AGENT_HOME` or `CLAUDE_HOME` |
-| artifact root | primary-checkout canonical `.agent_reports` via `utilities/artifact-root.sh`; linked-worktree snapshots are read-only; legacy fallback only at the canonical root |
+| artifact root | primary checkout's canonical root via `utilities/artifact-root.sh`; linked-worktree snapshots are read-only |
 | worktree cleanup | `adapters/claude/bin/worktree-cleanup.sh`; dry-run first, apply only after merge + integrated verification + push |
 | interactive owner completion | `hooks/dispatch-owner-rewake.py`; `PostToolUse(Bash)` `asyncRewake` arms from the start receipt or the registry's same-session dispatch-depth-1 owner row — never from command text; `Stop` and `SessionStart` (a reopened conversation) watch every unwatched attempt of the session and wake once for the first due. The arm ledger keeps one waiter per attempt and re-arms after the owner's gate closes (SD-129); supervision wakes return their notice claims to the immediate prompt sweep. It waits outside the model and returns one exact-attempt receipt. |
 | in-turn records | `hooks/peer-message-record.py post-tool` hands the running turn the notices owed to this session (a due check, a report notice) through the shared sweep the prompt carrier uses, and ACKs what it showed. It carries no completion: the `asyncRewake` hook sends it, and `stop` makes up what the transcript does not show received (a turn cut by Esc or an API error runs no `stop`, so the next prompt does) |
