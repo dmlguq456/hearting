@@ -18,7 +18,7 @@ This is the portable capability contract for `autopilot-draft`. It defines runti
 ## Invocation Semantics
 
 Reuse existing material analysis, audience, deadlines and writer assignments.
-See `core/WORKFLOW.md` §0.2.1 for document edit scope, worker placement and format checks.
+See `core/WORKFLOW.md` §0.2–§0.2.1 for document edit scope, worker placement and format checks.
 
 Document draft pipeline: analyze → strategy → strategy-refine → draft →
 draft-refine → finalize. In `paper` mode, “draft” means a **paste-ready
