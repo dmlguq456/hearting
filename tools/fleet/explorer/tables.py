@@ -1752,9 +1752,11 @@ def route_zone(route):
 
 
 def zone_rule(grid, x, right, y, zone):
-    """`` ─ direct ─────``: a zone's named rule, its name in the zone's own color and its line in that color dimmed
-    (``zoned_<zone>``, 11-27; the dim line where no hue is shown); the next row."""
-    cursor = grid.put(x + 1, y, "─ ", "zoned_" + zone, limit=right)
+    """`` ─ direct ─────``: a zone's named rule, its name in the zone's own color and its line (the ``─`` before the name and the
+    run after it; the blanks keep their style) in that color dimmed (``zoned_<zone>``, 11-27; the dim line where no hue is shown);
+    the next row."""
+    cursor = grid.put(x + 1, y, "─", "zoned_" + zone, limit=right)
+    cursor = grid.put(cursor, y, " ", "line", limit=right)
     cursor = grid.put(cursor, y, zone, "zone_" + zone, limit=right)
     cursor = grid.put(cursor, y, " ", "branch_s", limit=right)
     for xx in range(min(right, cursor), right):

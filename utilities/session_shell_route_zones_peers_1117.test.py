@@ -208,8 +208,9 @@ for(const o of [{configuration:{theme:'mono'},styles:{dim:{dim:true},loc_repo:{}
 
     def test_a_zone_rule_draws_its_line_in_its_zone_color_dimmed(self):
         """11-27 (the person: "dispatch랑 request 구분줄에 은은하게 동일 컬러로 해주라. 서로 구분이 약간 잘 안되고 있어서 말이지"): a zone
-        rule's line (the `─ ` before the name and the run after it) is the zone's hue one rung down (dim), the name the lit hue, on
-        every face and shade, beside the native area and under it; where no hue is shown it is the dim line it was."""
+        rule's line (the `─` before the name and the run after it) is the zone's hue one rung down (dim), the name the lit hue, on
+        every face and shade, beside the native area and under it; where no hue is shown it is the dim line it was. The blank
+        between the `─` and the name keeps the rule's old style (review of #1898)."""
         from fleet.palette import style_components
         import session_shell
         for zone, hue in (("direct", 208), ("dispatch", 99), ("request", 43)):
@@ -219,17 +220,23 @@ for(const o of [{configuration:{theme:'mono'},styles:{dim:{dim:true},loc_repo:{}
         self.node(r"""
 const zones={direct:208,dispatch:99,request:43},deep={direct:130,dispatch:55,request:29};
 const ruleOf=(v,zone)=>v.rows.find(r=>new RegExp('│ ─ '+zone+' ─+ │').test(text(r)));
-const lineOf=row=>row.filter(p=>/^─+ ?$/.test(p.text));
-for(const side of [true,false])for(const width of [36,44,60])for(const [label,o,hue,ground] of [
- ['terminal',{},zones,undefined],['dark face',{background:'dark'},zones,undefined],
- ['light theme',{configuration:{theme:'light'}},deep,undefined],['shade',{background:'dark',configuration:{shade:'medium'}},zones,235]]){
+const lineOf=row=>row.filter(p=>/^─+$/.test(p.text));
+// The blank before the name: the old `─ ` part's paint on each face (the terminal's dim, the face's messages gray).
+const blankOf=row=>row[row.findIndex(p=>p.role==='zone')-1];
+for(const side of [true,false])for(const width of [36,44,60])for(const [label,o,hue,ground,blank] of [
+ ['terminal',{},zones,undefined,{foreground:null,dim:true}],['dark face',{background:'dark'},zones,undefined,{foreground:242,dim:false}],
+ ['light theme',{configuration:{theme:'light'}},deep,undefined,{foreground:245,dim:false}],
+ ['shade',{background:'dark',configuration:{shade:'medium'}},zones,235,{foreground:242,dim:false}]]){
  const v=render([direct,dispatch],requests,width,side?60:24,{...o,side}),at=label+' '+width+(side?' side':' bottom');
  for(const zone of Object.keys(zones)){
   const row=ruleOf(v,zone);assert(row,at+' '+zone+'\n'+plain(v).join('\n'));
   const line=lineOf(row);
-  assert.equal(line.length,2,at);                                  // the `─ ` before the name and the run after it
+  assert.equal(line.length,2,at);assert.equal(line[0].text,'─',at);  // the `─` before the name and the run after it
   for(const p of line){assert.equal(p.foreground,hue[zone],at+' '+zone);assert.equal(p.dim,true,at+' '+zone);
    if(ground!==undefined)assert.equal(p.background,ground,at);}
+  const b=blankOf(row);assert.equal(b.text,' ',at);assert.equal(b.role,'messages',at+' '+zone);
+  assert.equal(b.foreground??null,blank.foreground,at+' '+zone+' blank');assert.equal(b.dim===true,blank.dim,at+' '+zone+' blank');
+  assert.equal(b.background,ground,at+' blank ground');
   const name=row.find(p=>p.text===zone);
   assert.equal(name.foreground,hue[zone],at);assert.notEqual(name.dim,true,at);   // the name stays the lit hue, brighter than its line
  }
@@ -241,7 +248,7 @@ for(const [label,o] of [['mono',{configuration:{theme:'mono'}}],['mono dark',{co
  ['NO_COLOR',{model:{no_color:true}}],['8 colors',{model:{colors:8},styles:eight}]]){
  const v=render([direct,dispatch],requests,44,60,o);
  for(const zone of Object.keys(zones)){const line=lineOf(ruleOf(v,zone));assert.equal(line.length,2,label);
-  for(const p of line){assert.equal(p.role,'messages',label);assert(p.foreground===undefined||p.foreground===null,label+' '+zone+' '+p.foreground);}}
+  for(const p of [...line,blankOf(ruleOf(v,zone))]){assert.equal(p.role,'messages',label);assert(p.foreground===undefined||p.foreground===null,label+' '+zone+' '+p.foreground);}}
 }
 """)
 

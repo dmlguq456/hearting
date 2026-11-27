@@ -1819,13 +1819,13 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const routeRule=()=>keepRouteRule&&routeRows.length>0;
     const routeBox=()=>kept.ROUTE?2+(routeRows.length?routeWindows():routeChecking.length):0;
     // 11-27 (the person: "dispatch랑 request 구분줄에 은은하게 동일 컬러로 해주라. 서로 구분이 약간 잘 안되고 있어서"): the rule's
-    // line (the `─ ` before the name and the run after it) is the zone's hue one rung down (`zoned_<zone>`, dim), the name the lit
+    // line (the `─` before the name and the run after it; the blanks keep their dim) is the zone's hue one rung down (`zoned_<zone>`, dim), the name the lit
     // hue it was, so two zones' rules no longer read as one gray line; where no hue is shown (mono, NO_COLOR, under 256 colors)
     // the line is the dim line it was. Only the color changes: the same words, cells and rows.
     const zoneHue=model.no_color!==true&&cfg.theme!=='mono'&&(model.colors??256)>=256;
     const zoneLine=(value,zone)=>zoneHue&&styles['zoned_'+zone]?{...text(value,'zoned_'+zone),role:'zone-rule'}:{...text(value,'dim'),role:'messages'};
     const zoneRow=(zone,key)=>{
-      const room=Math.max(0,inner-box),head=[zoneLine('─ ',zone),{...text(zone,'zone_'+zone),role:'zone'},text(' ')];
+      const room=Math.max(0,inner-box),head=[zoneLine('─',zone),{...text(' ','dim'),role:'messages'},{...text(zone,'zone_'+zone),role:'zone'},text(' ')];
       return boxRow({parts:[...head,zoneLine('─'.repeat(Math.max(0,room-size(head))),zone)]},key);
     };
     const routeBlockOf=()=>{

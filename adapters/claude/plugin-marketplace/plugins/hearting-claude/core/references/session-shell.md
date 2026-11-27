@@ -560,7 +560,7 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   by CIEDE2000, its light-face pair 166; Codex's lavender 147, light-face pair 25, the Sonnet family's own step on purpose; OpenCode's pale sky 153, light-face pair 31), a status color of the box (working green,
   idle yellow, failure coral, the spinner's vanilla) or the steward pink (an 8-color terminal has none left over: the zones read in
   the default color and the white there). 11-27 (the person: "dispatch랑 request 구분줄에 은은하게 동일 컬러로 해주라"): a
-  rule's line (the `─ ` before the name and the run after it) is its zone's color one step down (dim), the name the lit color,
+  rule's line (the `─` before the name and the run after it; the blanks keep their dim) is its zone's color one step down (dim), the name the lit color,
   so the zones' rules no longer read as one gray line; where no hue is shown (mono, `NO_COLOR`, fewer than 256 colors) it is
   the dim line it was. Only the color: the words, cells and rows are the same. A
   zone with no rows has no rule, no rows at all is the empty box; a route a request opened stands in
@@ -1049,7 +1049,8 @@ frame 244/243 while idle or unknown, messages rules 242/245; the question's bord
 Neither recolors native space: the native area and Claude's status row keep
 their colors (Claude's own statusline row, where the panel is not painted, takes the theme, not the shade). An unknown position, theme or shade falls back to its own
 default without disabling the shell, and so does an unknown `route line`, `worker box` or
-`rule motion`. On a shade a kind word's bracket keeps its field's hue and its weight step (11-18).
+`rule motion`. On a shade a kind word's bracket keeps its field's hue and its weight step (11-18), and a zone rule's line its
+zone's hue dimmed (11-27).
 The same side width changes by dragging its boundary or by value controls.
 Apply saves after backing up the existing file; Cancel discards the preview;
 Defaults previews the defaults. Never edit native model or permission config.

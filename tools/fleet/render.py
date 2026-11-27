@@ -533,7 +533,10 @@ def _init_colors():
             _COLOR["kindb_" + field] = hue | curses.A_BOLD
     # 11-18 (review of #1715, follow-up 4): the three zone names (the route box's `─ direct ─`, and the request line's `→`) wear their
     # hue where no row tint stands too: `_key_attr` reads these only without a tint (a tinted cell composes its own pair).
-    # 11-27: a zone rule's line (`zoned_<zone>`) is the same pair dimmed; under 256 colors it is the dim line it was.
+    # 11-27: a zone rule's line (`zoned_<zone>`) is the same pair dimmed, only where that reads as the name's hue one step down:
+    # `NO_COLOR` unset (the snapshot's own test) and a terminal that draws a colored cell dimmed (`_dim_with_color`). Anywhere else,
+    # and under 256 colors, it is the dim line it was (the default color, `A_DIM`).
+    rule_hue = not os.environ.get("NO_COLOR") and _dim_with_color()
     for number, zone in enumerate(_ZONE_256):
         _COLOR["zoned_" + zone[len("zone_"):]] = curses.A_DIM
         try:
@@ -541,9 +544,22 @@ def _init_colors():
                 raise ValueError
             curses.init_pair(_ZONE_PAIR_START + number, _ZONE_256[zone], bg)
             _COLOR[zone] = curses.color_pair(_ZONE_PAIR_START + number)
-            _COLOR["zoned_" + zone[len("zone_"):]] = _COLOR[zone] | curses.A_DIM
+            if rule_hue:
+                _COLOR["zoned_" + zone[len("zone_"):]] = _COLOR[zone] | curses.A_DIM
         except Exception:
             pass   # (under 256 colors the zone name keeps its plain weight, as before)
+
+
+def _dim_with_color():
+    """Whether the terminal draws a colored cell dimmed: its terminfo has `dim` (``termattrs``) and ``ncv`` does not forbid dim
+    with color (bit 16). ``rxvt-unicode-256color`` has no `dim`: there a dimmed pair would read as the name's own color."""
+    try:
+        if not curses.termattrs() & curses.A_DIM:
+            return False
+        ncv = curses.tigetnum("ncv")
+    except Exception:
+        return False
+    return not (isinstance(ncv, int) and ncv > 0 and ncv & 16)
 
 
 def _attr(key):
