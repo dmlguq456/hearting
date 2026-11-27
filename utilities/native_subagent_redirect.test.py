@@ -626,16 +626,16 @@ class ReasonTest(Base):
 
     def test_end_turn_promises_the_notice(self):
         line = redirect.reason_for({"route_id": "rt-1", "state": "running", "parent_next": "end-turn"}, "light")
-        self.assertEqual(line, "Started as Hearting unit route rt-1 (general/explore, light, no record). Its answer "
-                               "comes back to this session as a completion notice. Do not call it again; go on with "
-                               "other work or end the turn.")
+        self.assertEqual(line, "Started as Hearting unit route rt-1 (general/explore, light, no record). Its answer, "
+                               "or what stopped it, comes back to this session as a completion notice. Do not call it "
+                               "again; go on with other work or end the turn.")
 
     def test_bounded_wait_gives_the_wait_command_and_promises_no_notice(self):
         line = redirect.reason_for({"route_id": "rt-1", "state": "running", "parent_next": "bounded-wait",
                                     "parent_next_command": "python3 cr.py start --route r --wait"}, "light")
         self.assertIn("No completion notice reaches this session", line)
         self.assertIn("python3 cr.py start --route r --wait", line)
-        self.assertNotIn("comes back to this session as a completion notice", line)
+        self.assertNotIn("as a completion notice", line)
         line = redirect.reason_for({"route_id": "rt-1", "state": "running", "resume_command": "resume"}, "light")
         self.assertIn("run this once to receive its answer: resume", line)
 

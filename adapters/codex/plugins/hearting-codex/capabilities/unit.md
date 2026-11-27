@@ -50,9 +50,9 @@ The node writes only under the cycle's `units/unit/**` (one report). A read-only
 
 A person's session that calls Claude `Agent` or Codex `spawn_agent` (multi-agent v2's `collaborationspawn_agent`) gets this route instead when that is certain. The `PreToolUse` hook (`utilities/native_subagent_redirect.py`) runs `compose --start --unit general/explore --profile <depth> --ephemeral --prompt-file -` with the call's description and prompt as the brief, and refuses the native call with one line naming the route and how its answer comes back, the start receipt's own directive:
 
-> Started as Hearting unit route `<route id>` (general/explore, `<depth>`, no record). Its answer comes back to this session as a completion notice. Do not call it again; go on with other work or end the turn.
+> Started as Hearting unit route `<route id>` (general/explore, `<depth>`, no record). Its answer, or what stopped it, comes back to this session as a completion notice. Do not call it again; go on with other work or end the turn.
 
-That is the line when the receipt says `parent_next=end-turn`. When it says `bounded-wait` (no completion notice reaches the session), the line instead gives its `parent_next_command` to run once for the answer. The answer is the record-free notice's `Answer:` (below). The leg is read-only: what should change comes back as a diff in the answer. The agent name picks the depth:
+That is the line when the receipt says `parent_next=end-turn`. When it says `bounded-wait` (no completion notice reaches the session), the line instead gives its `parent_next_command` to run once for the answer. The answer is the record-free notice's `Answer:` (below); a worker that ends without one (an empty answer, a usage limit) brings the notice's own next action instead, which is not the answer. The leg is read-only: what should change comes back as a diff in the answer. The agent name picks the depth:
 
 | Name in the call | Depth |
 |---|---|

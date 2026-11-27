@@ -615,8 +615,8 @@ def reason_for(receipt: dict, depth: str) -> str:
         return (f"{head} It has already finished; read its result once with: {receipt.get('resume_command', '')} "
                 "Do not call it again.")
     if receipt.get("parent_next") == "end-turn":
-        return (f"{head} Its answer comes back to this session as a completion notice. Do not call it again; "
-                "go on with other work or end the turn.")
+        return (f"{head} Its answer, or what stopped it, comes back to this session as a completion notice. "
+                "Do not call it again; go on with other work or end the turn.")
     command = receipt.get("parent_next_command") or receipt.get("resume_command") or ""
     return (f"{head} No completion notice reaches this session: run this once to receive its answer: {command} "
             "Do not call it again.")

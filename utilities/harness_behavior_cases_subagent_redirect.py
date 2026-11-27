@@ -40,6 +40,12 @@ Loaded by ``harness_behavior_scenarios.py`` (``_load_extra``).
     harness runs both side by side, so Hearting's hook must start nothing: no unit route row, no
     worker request and no native subagent request reach the model.
 
+``subagent-redirect-usage-limit`` (Claude, Codex)
+    The redirected route's worker hits a usage limit (a loopback 429 whose reset is about 45 s away) after
+    the hook already refused the native call: the session must be told about its route (the answer, or
+    the notice's next action) and no native subagent may run; whether the answer itself arrived after the
+    reset is recorded beside the verdict.
+
 ``subagent-redirect-cost`` (Claude, Codex)
     One open session, one prompt and one fixture model: the call made under the registration from before
     this change (native), then, with the hook settings rewritten while the session stays open, the same
@@ -68,6 +74,7 @@ import sys
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness_behavior_scenarios import Reply, Scenario, wait_for  # noqa: E402
@@ -864,6 +871,67 @@ class SubagentRedirectOtherHookScenario(SubagentRedirectScenario):
         return "pass" if ok else "fail"
 
 
+class SubagentRedirectUsageLimitScenario(SubagentRedirectScenario):
+    name = "subagent-redirect-usage-limit"
+    summary = ("The redirected route's worker hits a usage limit after the hook refused the native call: what the "
+               "session is told, that no native subagent runs, and whether the answer arrives after the reset.")
+    WAIT = 300
+    LIMIT_SECONDS = 45
+
+    def __init__(self):
+        super().__init__()
+        self.limit_until = None
+        self.limited = 0
+        self.refused = threading.Event()
+
+    def worker_reply(self, run, record, earlier):
+        if self.limit_until is None:
+            self.limit_until = int(time.time()) + self.LIMIT_SECONDS
+        if time.time() < self.limit_until:
+            self.limited += 1
+            reset = datetime.fromtimestamp(self.limit_until, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            kind = "rate_limit_error" if record["protocol"] == "anthropic" else "usage_limit_reached"
+            error = {"type": kind, "code": kind, "message": f"Usage limit reached. It resets {reset} (UTC).",
+                     "resets_at": self.limit_until}
+            # Held until the session has the hook's refusal: the limit comes after the start was confirmed.
+            return Reply(gate=self.refused, http_error=(429, {"type": "error", "error": error}))
+        return super().worker_reply(run, record, earlier)
+
+    def run_redirect(self, run, ev):
+        if run.harness == "opencode":
+            run.note("OpenCode does not intercept the call")
+            return "not-applicable"
+        self.worker_end.set()                       # the answer is not held once the limit has passed
+        if not self.ask(run, "light"):
+            run.note("the subagent call returned nothing to the session")
+            return "inconclusive"
+        _at, text = self.results["light"]
+        ev["refusal"] = text[-800:]
+        refused_at = time.time()
+        self.refused.set()
+        answer = wait_for(lambda: [r for r in self.resting(run, "light") if r["at"] > refused_at
+                                   and ANSWER_HEAD in r["text"][-8000:]], self.WAIT, 2)
+        run.wait_idle(6, 60)
+        rows = explore_rows(self.jobs)
+        handles = [r.get("route_id") for r in rows if r.get("route_id")] + [r.get("attempt_id") for r in rows
+                                                                            if r.get("attempt_id")]
+        told = [r["last_text"][-700:] for r in self.resting(run, "light")
+                if r["at"] > refused_at and r["last_kind"] != "tool"
+                and any(handle in r["last_text"] for handle in handles)]
+        ev.update(limited_requests=self.limited, native_subagent_requests=len(self.native),
+                  rows=[{k: r.get(k) for k in ("status", "failure_class", "note", "attempt_id")} for r in rows],
+                  told_before_answer=[t for t in told if ANSWER_HEAD not in t][:3],
+                  refusal_to_answer_seconds=round(answer[0]["at"] - refused_at, 1) if answer else None)
+        run.note(f"refused={STARTED in text}; 429s={self.limited}; rows={len(rows)}; native={len(self.native)}; "
+                 f"answer after={ev['refusal_to_answer_seconds']}s")
+        ev["answer_arrived"] = bool(answer)
+        if not self.limited:
+            return "inconclusive"
+        # The session is told about its route (the answer, or the notice's next action); nothing runs natively.
+        ok = STARTED in text and not self.native and (bool(answer) or bool(told))
+        return "pass" if ok else "fail"
+
+
 class SubagentRedirectCostScenario(SubagentRedirectScenario):
     name = "subagent-redirect-cost"
     summary = ("One open session, one prompt and one fixture model: the call under the registration from before this "
@@ -937,4 +1005,5 @@ class SubagentRedirectCostScenario(SubagentRedirectScenario):
 
 SCENARIOS = [SubagentHookSeamScenario, SubagentHookSeamV2Scenario, SubagentRedirectScenario,
              SubagentRedirectNoAnswerScenario, SubagentRedirectCapacityScenario, SubagentRedirectUntouchedScenario,
-             SubagentRedirectFaultsScenario, SubagentRedirectOtherHookScenario, SubagentRedirectCostScenario]
+             SubagentRedirectFaultsScenario, SubagentRedirectOtherHookScenario, SubagentRedirectUsageLimitScenario,
+             SubagentRedirectCostScenario]
