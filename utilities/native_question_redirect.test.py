@@ -496,6 +496,18 @@ class PassThroughTest(Base):
                         patch.stop()
                 self.assertLess(elapsed, 1.35, name)                           # the budget, not budget + 1.4 s
         self.assertEqual(state.read_signals(), [])                           # nothing was registered
+        # A spent budget is a failed registration, never a late decision: with the same question open and the
+        # seat resolved past the budget, the native question shows (no refusal decided after the expiry).
+        earlier, _ = self.f.ask("claude", SID, text="Start now?", choices=["Proceed", "Edit", "Stop"])
+
+        def late_seat(harness, *args, **kwargs):
+            time.sleep(3)
+            return self.f.seat(harness, SID)
+        with mock.patch.object(tidy, "resolve_seat", side_effect=late_seat):
+            started = time.monotonic()
+            self.assertIsNone(redirect.redirect("claude", claude_payload(), seconds=1))
+            self.assertLess(time.monotonic() - started, 1.35)
+        self.assertEqual(redirect.redirect("claude", claude_payload()), redirect.reason_already(earlier["id"]))
 
     def test_the_budget_is_inside_every_hook_timeout(self):
         claude = json.loads((ROOT / "adapters/claude/settings.json").read_text())

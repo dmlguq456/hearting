@@ -455,7 +455,7 @@ const chosen=(id,state)=>({...written(id,state),questions:[{id:'q'+id,question:'
 const take=(b,bytes,why)=>assert.equal(b.input(Buffer.from(bytes)).length,0,why);
 for(const [first,rest,why] of [[['\x1b[200~'],['pasted words',' and more','\x1b[201~'],'a paste begun into an empty answer'],
                                [[[0xea]],[[0xb0,0x80]],'a character’s first byte'],
-                               [['\x1b['],['C'],'a key’s first bytes']]){
+                               [['\x1b['],['C\tmore'],'a key’s first bytes, then Tab and letters in one read']]){
  const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
  b.update([written('A')],'',{});b.enter();
  for(const bytes of first)take(b,bytes,why);
