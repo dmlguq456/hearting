@@ -18,9 +18,10 @@ and reads its start receipt. Once the receipt says Hearting holds the call (runn
 worker, or ended) the native call is refused with one line naming the route and how its answer comes back
 (`capabilities/unit.md`, A native subagent call). A usage limit or a failed start after that reaches the
 session through the runtime's existing wait and its completion or attention notice, never as the native
-call. A compose that registers nothing (no receipt, or a refusal) leaves the native call to run. The hook
-never stops a start: one window is left, a hook ended from outside (killed, the harness's timeout) between
-the registration and its refusal line, where both can run.
+call. Without a receipt that says Hearting holds the call (none, or a refusal) the native call runs. The hook
+never stops a start. Two windows are left where both can run: a hook ended from outside (killed, the
+harness's timeout) between the registration and its refusal line, and a compose that fails after registering
+without writing such a receipt.
 
 OpenCode is not intercepted (`adapters/opencode/ADAPTATION.md`).
 
@@ -299,10 +300,13 @@ def require_sole_decision(harness: str, tool: str, cwd: str) -> None:
     for arg in _harness_argv()[1:]:
         if arg.split("=", 1)[0] in _LAUNCH_LAYERS[harness] or (harness == "codex" and re.match(r"-[cp].", arg)):
             raise Skip("launch-layer")
+    if harness == "claude" and (_home(harness) / "remote-settings.json").exists():
+        raise Skip("server-managed-settings")      # the copy of settings an organization's server manages
     path, name = _REGISTRATION[harness]
     ours = {handler.get("command") for group in _json(ROOT / "adapters" / harness / path)["hooks"]["PreToolUse"]
             if name in str(group.get("matcher")).split("|") for handler in group["hooks"]}
-    tools, registered = {tool} | ({"Agent", "Task"} if harness == "claude" else set()), 0
+    # Codex also picks `spawn_agent` hooks by the alias `Agent` (core/src/tools/hook_names.rs).
+    tools, registered = {tool} | ({"Agent", "Task"} if harness == "claude" else {"Agent"}), 0
     for hooks, settings in _decision_sources(harness, cwd):
         if harness == "claude" and _rules_decide(settings):
             raise Skip("another-decision")
@@ -392,18 +396,19 @@ def start(harness: str, call: dict, depth: str, cwd: str) -> dict | None:
             time.sleep(POLL_SECONDS)
 
 
-def reason_for(receipt: dict, depth: str) -> str:
+def reason_for(receipt: dict, depth: str, harness: str = "") -> str:
     """The refusal line: the route, and how its answer reaches this session (the receipt's own directive)."""
     waiting = receipt.get("state") == "waiting-capacity"
     head = (f"{'Queued' if waiting else 'Started'} as Hearting unit route {receipt['route_id']} ({UNIT}, {depth}, "
             "no record)." + (" It waits for a free worker and does not run natively." if waiting else ""))
     if receipt.get("state") == "completed" and str(receipt.get("summary") or "").strip():
         return f"{head} It has already finished; its answer:\n{str(receipt['summary']).strip()}\nDo not call it again."
-    if receipt.get("state") == "completed" or receipt.get("result"):
-        return (f"{head} It has already ended; read its result once with: {receipt.get('resume_command', '')} "
-                "Do not call it again.")
-    if receipt.get("parent_next") == "end-turn":
-        return (f"{head} Its answer, or what stopped it, comes back to this session as a completion notice. "
+    ended, command = receipt.get("state") == "completed" or receipt.get("result"), receipt.get("resume_command")
+    if ended and str(command or "").strip():
+        return f"{head} It has already ended; read its result once with: {command} Do not call it again."
+    if ended or receipt.get("parent_next") == "end-turn":   # ended with no command to read it: a cancelled unit
+        idle = " If this session is idle by then, it comes with the next message." if waiting and harness == "claude" else ""
+        return (f"{head} Its answer, or what stopped it, comes back to this session as a completion notice.{idle} "
                 "Do not call it again; go on with other work or end the turn.")
     command = receipt.get("parent_next_command") or receipt.get("resume_command") or ""
     return (f"{head} No completion notice reaches this session: run this once to receive its answer: {command} "
@@ -429,7 +434,7 @@ def redirect(harness: str, payload: dict) -> str | None:
         return None
     try:
         receipt = start(harness, call, depth, cwd)
-        return None if receipt is None else reason_for(receipt, depth)
+        return None if receipt is None else reason_for(receipt, depth, harness)
     except BaseException:  # noqa: BLE001 -- a start that cannot be read registered nothing this hook knows of
         return None
 

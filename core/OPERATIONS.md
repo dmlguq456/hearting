@@ -1715,9 +1715,9 @@ agent name picks the depth, the call's prompt is the brief and `--ephemeral` kee
 says Hearting holds the call (running, waiting for a free worker, or ended) the call itself is refused with one line
 naming the route and the receipt's own way back (a completion notice, or its bounded-wait command); with every slot
 taken it waits in Hearting's queue and does not fall back to the native call, and a usage limit or failed start
-after that comes back through the existing wait and notices. A start that registers nothing leaves the native call
-to run, and the hook leaves every start it began to finish; a hook ended from outside between the registration and its line can
-leave both running. A registered worker's call, a call inside a native subagent and every OpenCode subagent call
+after that comes back through the existing wait and notices. Without a receipt saying Hearting holds the call the
+native call runs, and the hook leaves every start it began to finish; a hook ended from outside between the
+registration and its line, or a compose that fails after registering without such a receipt, can leave both running. A registered worker's call, a call inside a native subagent and every OpenCode subagent call
 run natively.
 
 A registered worker (owner, stage worker or unit worker) may open a unit route too. Its leg is a depth-1 leg of

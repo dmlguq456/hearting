@@ -298,8 +298,9 @@ Codex picks for the name is Hearting's shipped file (apart from the rendered `mo
 `explorer`); a role is named by its file's `name` field, a higher config layer replaces a lower one, and a
 user role overrides a built-in, so any project, system or `[agents.<name>]` definition of the name, or a
 `config_file` an `[agents.*]` role names whose `name` is it, leaves the call native; no other `PreToolUse`
-handler in `hooks.json` or inline `[hooks]` of any layer or plugin matches the call (in a linked worktree
-the main checkout's project layer is read too,
+handler in `hooks.json` or inline `[hooks]` of any layer or plugin matches the call, by `spawn_agent` or by
+its alias `Agent` (https://github.com/openai/codex/blob/rust-v0.171.0/codex-rs/core/src/tools/hook_names.rs;
+in a linked worktree the main checkout's project layer is read too,
 https://github.com/openai/codex/blob/rust-v0.171.0/codex-rs/config/src/loader/mod.rs), and Hearting's own
 command, compared exactly, is registered once, because matching handlers run concurrently and any deny wins
 (https://github.com/openai/codex/blob/rust-v0.171.0/codex-rs/hooks/src/engine/dispatcher.rs,

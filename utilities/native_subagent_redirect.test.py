@@ -460,6 +460,26 @@ class OtherDecisionTest(Homes):
         with self.assertRaises(Exception):
             redirect.require_sole_decision("codex", "spawn_agent", str(linked))   # cannot tell: native
 
+    def test_codex_another_hook_on_the_alias_agent(self):
+        # Codex picks `spawn_agent` hooks by its alias `Agent` too (core/src/tools/hook_names.rs).
+        for matcher in ("Agent", "Agent|Task", "^Agent$"):
+            with self.subTest(matcher=matcher):
+                self.register("codex", {"matcher": matcher, "hooks": [self.REFUSE]})
+                self.assertFalse(self.sole("codex", "spawn_agent"))
+        self.register("codex", {"matcher": "Bash", "hooks": [self.REFUSE]})
+        self.assertTrue(self.sole("codex", "spawn_agent"))
+
+    def test_codex_our_hook_registered_again_on_the_alias_agent(self):
+        self.register("codex", {**ours("codex"), "matcher": "Agent"})
+        self.assertFalse(self.sole("codex", "spawn_agent"))              # it would run twice
+
+    def test_claude_server_managed_settings(self):
+        self.register("claude")
+        self.write(self.claude_home / "remote-settings.json", "{}")       # the copy the server's settings leave
+        self.assertFalse(self.sole("claude", "Agent"))
+        (self.claude_home / "remote-settings.json").unlink()
+        self.assertTrue(self.sole("claude", "Agent"))
+
     def test_a_call_another_hook_refuses_starts_nothing(self):
         self.ship("claude", "light")
         self.register("claude", {"matcher": "Agent", "hooks": [{"type": "command", "command": "exit 2"}]})
@@ -562,6 +582,9 @@ class StartTest(Base):
         self.assertTrue(line.startswith("Queued as Hearting unit route rt-0123456789abcdef (general/explore, light, "
                                         "no record). It waits for a free worker and does not run natively."), line)
         self.assertIn("comes back to this session as a completion notice", line)
+        self.assertNotIn("idle", line)
+        self.assertIn("If this session is idle by then, it comes with the next message.",
+                      redirect.reason_for(receipt, "light", "claude"))
 
     def test_the_first_capacity_refusal_of_this_start_arms_the_runtime_s_resume(self):
         # The receipt `_capacity_wait` gives the first refusal; with this start's environment the existing capacity
@@ -644,6 +667,13 @@ class ReasonTest(Base):
         self.assertIn("It has already finished; its answer:\nAnswered: x", line)
         line = redirect.reason_for({"route_id": "rt-1", "state": "completed", "resume_command": "resume"}, "light")
         self.assertIn("read its result once with: resume", line)
+
+    def test_an_ended_receipt_with_no_command_promises_the_notice(self):
+        # A unit cancelled right after its start: `work_start` leaves `resume_command` empty.
+        line = redirect.reason_for({"route_id": "rt-1", "state": "cancelled", "result": {"stopped": True},
+                                    "resume_command": "", "parent_next": "inspect-receipt"}, "light")
+        self.assertIn("Its answer, or what stopped it, comes back to this session as a completion notice.", line)
+        self.assertNotIn("read its result once with", line)
 
 
 class EntryTest(Base):
