@@ -557,7 +557,7 @@ class RequestFolderTest(S.SourceRepoStartBase):
         (frame_dir / "_internal" / "frame-note.md").write_bytes(b"the frame's own late file\n")
         self.assert_frame_note_in_and_no_execution_rows(frame_dir, P.refresh_cycle(linked, frame["cycle_id"]))
 
-    def test_old_execution_rows_neither_spend_the_absence_check_nor_hold_back_a_refinalize(self):
+    def test_old_execution_rows_do_not_spend_the_absence_check_and_a_refinalize_defers_as_on_main(self):
         import artifact_producer_refresh as REF
         # More old member rows than the absence check's floor plus the 22 walk entries a turn-end run has left.
         frame, _execution, frame_dir, execution_dir = self.sealed_frame_with_execution(
@@ -581,11 +581,13 @@ class RequestFolderTest(S.SourceRepoStartBase):
             self.assertEqual(result["changes"]["removed"], ["_internal/z-removed.txt"], cursor)
             self.assertEqual(result["changes"]["reclassified"], [], cursor)
             self.assertEqual({p for p in self.frame_paths(frame_dir) if p.startswith(member)}, old_rows, cursor)
+        # A refinalize keeps main's path: the old rows the seal walk leaves out look removed, the files are there,
+        # so it defers and the frame's late file waits for a refresh. The old rows stay as they are.
         (frame_dir / "_internal" / "frame-note.md").write_bytes(b"the frame's own late file\n")
         refinalized = P.finalize(self.root, cycle_id=frame_id)
-        self.assertTrue(refinalized.get("refreshed"), refinalized)
-        self.assertNotIn("deferred", refinalized)
-        self.assertIn("_internal/frame-note.md", self.frame_paths(frame_dir))
+        self.assertEqual((refinalized.get("refreshed"), refinalized.get("deferred")),
+                         (False, "files-changed-during-read"), refinalized)
+        self.assertNotIn("_internal/frame-note.md", self.frame_paths(frame_dir))
         self.assertEqual({p for p in self.frame_paths(frame_dir) if p.startswith(member)}, old_rows)
 
 

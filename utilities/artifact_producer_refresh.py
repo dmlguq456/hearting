@@ -139,7 +139,7 @@ def _refreshed_document(root: Path, record: Mapping[str, Any], document: Mapping
                         facts: Sequence[Tuple[str, str, int]], *, allocator: artifact_identity.IdAllocator,
                         now: Optional[float],
                         removable: Optional[Iterable[str]] = None,
-                        excluded_roots: Sequence[str] = (), kept_roots: Sequence[str] = (),
+                        excluded_roots: Sequence[str] = (),
                         ) -> Tuple[Optional[Dict[str, Any]], Dict[str, List[str]]]:
     """The cycle's next document, or `None` when no file differs from `document`.
 
@@ -149,11 +149,10 @@ def _refreshed_document(root: Path, record: Mapping[str, Any], document: Mapping
     would not list today is neither changed nor removed.  `cycle`, `routes[]` and
     the terminal fields are never touched.  `removable`, when given, names the only
     declared paths a missing fact may remove: a scan that stopped early has not seen
-    the rest of the tree, so a file it did not visit is never read as deleted.  Rows under
-    `kept_roots` (a frame's execution folders) stay exactly as they are."""
+    the rest of the tree, so a file it did not visit is never read as deleted."""
     declared = {row.get("locator", {}).get("path"): row
                 for row in document.get("artifact_revisions", []) or [] if isinstance(row, dict)}
-    present = {rel: (digest, size) for rel, digest, size in facts if not _excluded_by_roots(rel, kept_roots)}
+    present = {rel: (digest, size) for rel, digest, size in facts}
     changes: Dict[str, List[str]] = {"added": [], "modified": [], "removed": [], "reclassified": []}
     for rel in sorted(declared):
         if _excluded_by_roots(rel, excluded_roots):
@@ -167,7 +166,7 @@ def _refreshed_document(root: Path, record: Mapping[str, Any], document: Mapping
     removable_set = None if removable is None else set(removable)
     for rel in sorted(declared):
         if (rel not in present and not _outside_inclusion_rule(rel)
-                and not _excluded_by_roots(rel, excluded_roots) and not _excluded_by_roots(rel, kept_roots)
+                and not _excluded_by_roots(rel, excluded_roots)
                 and (removable_set is None or rel in removable_set)):
             changes["removed"].append(rel)
     if not any(changes.values()):
@@ -1199,7 +1198,7 @@ def _refresh_cycle_locked(root: Path, record: Mapping[str, Any], *, now: Optiona
         facts = prescan.facts
         refreshed, changes = _refreshed_document(
             root, record, document, facts, allocator=alloc, now=now,
-            excluded_roots=prescan.excluded_roots, kept_roots=_request_member_dirs(directory))
+            excluded_roots=prescan.excluded_roots)
         deferred = refreshed is not None and not _prescan_holds(directory, prescan, changes)
     else:
         deferred = True
