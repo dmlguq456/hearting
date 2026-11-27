@@ -3721,8 +3721,8 @@ def _unrecognised_open_route_record(path: Path, listed_names: set[str] | None = 
 # releases it names; a record longer than this cannot be bounded and keeps all.
 _ROUTE_RECORD_SCAN_MAX_BYTES = 16 * 1_048_576
 # JSON escapes, undone before the search, so a release name whose dots are
-# written as `.` (or a path with `\/`) is still found -- also in a record
-# that does not parse.
+# written as unicode escapes (backslash, `u002e`) or a path with escaped
+# slashes is still found, also in a record that does not parse.
 _JSON_ESCAPE_RE = re.compile(r"\\(?:u([0-9a-fA-F]{4})|(.))", re.S)
 
 
