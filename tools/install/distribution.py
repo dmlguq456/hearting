@@ -4260,43 +4260,50 @@ def _remember_prior_pointer_move(pointer: Path) -> None:
         pass
 
 
-def _projection_pointer(value: str, family: str) -> Path | None:
-    """The moving link a projected argument goes through, or None.
+def _projection_pointer(value: str, family: str) -> tuple[Path, Path | None] | None:
+    """`(moving link, its bundle store)` a projected argument goes through, or None.
 
-    Two links move when an update installs a release: the family's own
-    `current`, and each runtime's `<runtime home>/hearting`, which names the
-    runtime's linked bundle (`.harness/bundles/<key>/source`, itself a fixed
-    link to one release). Links outside the family are followed, as `realpath`
-    would; any other link that lands inside the family names a release without
-    saying when, so it is None.
+    Two kinds of link move when an update installs a release: the family's own
+    `current`, and every link a runtime activation points into one of its
+    linked bundles (`<runtime home>/.harness/bundles/<key>/source`, itself a
+    fixed link to one release) -- the runtime's `hearting` projection and the
+    hooks projected through a bundle (21 `dispatch-owner-rewake.py` processes on
+    2026-11-27). The walk expands each link's text as `realpath` does, so a
+    launcher that goes through `current` is found too. A path that reaches the
+    family through any other link names a release without saying when: None.
     """
     family_dir = family.rstrip("/")
     family_parent = os.path.dirname(family_dir)
-    parts = list(Path(value).parts)
-    if not parts or not os.path.isabs(value):
+    if not os.path.isabs(value):
         return None
-    location = Path(parts.pop(0))
+    pending = list(Path(value).parts[1:])
+    location = Path("/")
     hops = 0
-    while parts:
-        location = location / parts.pop(0)
+    while pending:
+        location = location / pending.pop(0)
         try:
             if not stat.S_ISLNK(os.lstat(location).st_mode):
                 continue
             raw = os.readlink(location)
-            resolved = os.path.realpath(location)
         except OSError:
             return None
         hops += 1
         if hops > 40:
             return None
-        hop = Path(os.path.normpath(location.parent / raw))
         if location.name == "current" and os.path.realpath(location.parent) == family_parent:
-            return location
-        if hop.name == "source" and hop.parent.parent == location.parent / ".harness" / "bundles":
-            return location
-        if resolved == family_dir or resolved.startswith(family_dir + "/"):
-            return None
-        location = Path(resolved)
+            return location, None
+        hop = Path(os.path.join(location.parent, raw))
+        parts = hop.parts
+        for index in range(len(parts) - 3):
+            if parts[index:index + 2] == (".harness", "bundles") and parts[index + 3] == "source":
+                return location, Path(*parts[:index + 2])
+        if ".." in Path(raw).parts:
+            try:
+                hop = Path(os.path.realpath(location))
+            except OSError:
+                return None
+        pending = list(hop.parts[1:]) + pending
+        location = Path("/")
     return None
 
 
@@ -4390,7 +4397,7 @@ def _projection_targets(
 ) -> set[str] | None:
     """The releases a process started through a moving pointer can have loaded, or None.
 
-    Every projected argument must go through a moving pointer
+    Every projected argument must go through a moving link
     (`_projection_pointer`); `os.replace` gives a moved link its own mtime. A
     process that started after the pointer's last move can only have loaded its
     present target. One that started after the move before that, which this
@@ -4413,10 +4420,14 @@ def _projection_targets(
     margin = _POINTER_ROTATION_MARGIN_SECONDS
     targets: set[str] = set()
     placed: list[Path] = []
+    stores: set[Path] = set()
     for value in projections:
-        pointer = _projection_pointer(value, family)
-        if pointer is None:
+        found = _projection_pointer(value, family)
+        if found is None:
             return None
+        pointer, store = found
+        if store is not None:
+            stores.add(store)
         try:
             moved = os.lstat(pointer).st_mtime
             target = os.path.realpath(pointer)
@@ -4431,16 +4442,16 @@ def _projection_targets(
             placed.append(pointer)
     if not placed:
         return targets
+    pointers = {Path(family.rstrip("/")).parent / "current", *placed}
+    for runtime in RUNTIMES:
+        home = _runtime_home(runtime)
+        pointers.add(home / "hearting")
+        stores.add(home / ".harness" / "bundles")
     cache = {} if cache is None else cache
-    if "history" not in cache:
-        pointers = {Path(family.rstrip("/")).parent / "current", *placed}
-        stores = {pointer.parent / ".harness" / "bundles" for pointer in placed}
-        for runtime in RUNTIMES:
-            home = _runtime_home(runtime)
-            pointers.add(home / "hearting")
-            stores.add(home / ".harness" / "bundles")
-        cache["history"] = _activation_history(family, sorted(stores), sorted(pointers))
-    held = _history_targets(cache["history"], started) if cache["history"] is not None else None
+    key = (frozenset(stores), frozenset(pointers))
+    if key not in cache:
+        cache[key] = _activation_history(family, sorted(stores), sorted(pointers))
+    held = _history_targets(cache[key], started) if cache[key] is not None else None
     return None if held is None else targets | held
 
 
@@ -5472,31 +5483,37 @@ def _remove_dead_release_bundles() -> list[Path]:
 
 # A source directory that does not answer within this many seconds (a hung NFS
 # mount) keeps its bytecode, and so does every other directory on its mount;
-# after this many such directories the sweep stops until the next update.
+# after this many such mounts the sweep stops until the next update. Source
+# directories are listed this many side by side (a cold NFS cache took 253 s
+# one by one on 2026-11-27).
 _ORPHAN_PYCACHE_PROBE_SECONDS = 5.0
 _ORPHAN_PYCACHE_PROBE_TIMEOUTS = 3
+_ORPHAN_PYCACHE_PROBE_BATCH = 16
 
 
 def _list_source_directory(path: str) -> set[str]:
     return set(os.listdir(path))
 
 
-def _bounded_source_listing(path: str) -> tuple[str, set[str]]:
-    """`(state, names)` for one source directory: ok, missing, error or timeout."""
-    answer: dict = {}
+def _bounded_source_listings(paths: list[str]) -> dict[str, tuple[str, set[str]]]:
+    """`{path: (state, names)}` for source directories: ok, missing, error or timeout."""
+    answers: dict = {}
 
-    def probe() -> None:
+    def probe(path: str) -> None:
         try:
-            answer["value"] = ("ok", _list_source_directory(path))
+            answers[path] = ("ok", _list_source_directory(path))
         except (FileNotFoundError, NotADirectoryError):
-            answer["value"] = ("missing", set())
+            answers[path] = ("missing", set())
         except OSError:
-            answer["value"] = ("error", set())
+            answers[path] = ("error", set())
 
-    worker = threading.Thread(target=probe, daemon=True)
-    worker.start()
-    worker.join(_ORPHAN_PYCACHE_PROBE_SECONDS)
-    return answer.get("value", ("timeout", set()))
+    workers = [threading.Thread(target=probe, args=(path,), daemon=True) for path in paths]
+    for worker in workers:
+        worker.start()
+    deadline = time.monotonic() + _ORPHAN_PYCACHE_PROBE_SECONDS
+    for worker in workers:
+        worker.join(max(0.0, deadline - time.monotonic()))
+    return {path: answers.get(path, ("timeout", set())) for path in paths}
 
 
 def _mount_point(path: str) -> str:
@@ -5556,7 +5573,6 @@ def _cleanup_orphan_source_pycache() -> list[Path]:
     removed: list[Path] = []
     visited: list[Path] = []
     blocked: list[str] = []
-    timeouts = 0
 
     def remove_bytecode(tree: Path) -> None:
         for root, directories, files in os.walk(tree, topdown=False):
@@ -5571,31 +5587,18 @@ def _cleanup_orphan_source_pycache() -> list[Path]:
             visited.extend(Path(root) / name for name in directories)
         visited.append(tree)
 
-    pending = [(base, "/")]
-    while pending:
-        cache, source = pending.pop()
-        if any(source == mount or source.startswith(mount.rstrip("/") + "/") for mount in blocked):
-            continue
-        state, names = _bounded_source_listing(source)
-        if state == "timeout":
-            timeouts += 1
-            blocked.append(_mount_point(source))
-            if timeouts >= _ORPHAN_PYCACHE_PROBE_TIMEOUTS:
-                print(f"harness release: bytecode sweep stopped after {timeouts} unanswered "
-                      "source directories; the rest waits for a later update", file=sys.stderr)
-                break
-            continue
+    def judge(cache: Path, source: str, state: str, names: set[str]) -> None:
         if state == "error":
-            continue
+            return
         if state == "missing":
             remove_bytecode(cache)
-            continue
+            return
         visited.append(cache)
         try:
             with os.scandir(cache) as stream:
                 entries = list(stream)
         except OSError:
-            continue
+            return
         for entry in entries:
             path = Path(entry.path)
             if entry.is_dir(follow_symlinks=False):
@@ -5611,6 +5614,25 @@ def _cleanup_orphan_source_pycache() -> list[Path]:
                         removed.append(path)
                     except OSError:
                         pass
+
+    pending = [(base, "/")]
+    while pending and len(blocked) < _ORPHAN_PYCACHE_PROBE_TIMEOUTS:
+        batch = [(cache, source) for cache, source in pending[-_ORPHAN_PYCACHE_PROBE_BATCH:]
+                 if not any(source == mount or source.startswith(mount.rstrip("/") + "/")
+                            for mount in blocked)]
+        del pending[-_ORPHAN_PYCACHE_PROBE_BATCH:]
+        listings = _bounded_source_listings([source for _cache, source in batch])
+        for cache, source in batch:
+            state, names = listings[source]
+            if state == "timeout":
+                mount = _mount_point(source)
+                if mount not in blocked:
+                    blocked.append(mount)
+                continue
+            judge(cache, source, state, names)
+    if len(blocked) >= _ORPHAN_PYCACHE_PROBE_TIMEOUTS:
+        print(f"harness release: bytecode sweep stopped after {len(blocked)} unanswered "
+              "mounts; the rest waits for a later update", file=sys.stderr)
     for directory in sorted(set(visited), key=lambda path: len(path.parts), reverse=True):
         if directory != base:
             try:

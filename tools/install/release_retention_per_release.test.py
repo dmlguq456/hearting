@@ -271,6 +271,36 @@ class PerReleaseRetentionTest(unittest.TestCase):
         self.assertEqual(sorted(path.name.split("-")[1] for path in bundles.iterdir()),
                          ["v4.41.0", "v4.42.0", "v4.43.0", "v4.45.0", "v4.46.0"])
 
+    def test_a_hook_or_launcher_link_is_placed_like_the_projection(self):
+        # Activation also links hooks through a bundle (21 rewake hooks held
+        # every release on 2026-11-27), and a launcher's text names `current`.
+        family = self._family("v4.40.0", "v4.41.0", "v4.42.0", "v4.43.0", "v4.44.0")
+        times = self._bundles(family, 1_790_000_000.0)
+        bundles = self.root / "claude" / ".harness" / "bundles"
+        hook = self.root / "claude" / "hooks" / "rewake.py"
+        hook.parent.mkdir(parents=True)
+        hook.symlink_to(bundles / f"release-{family[-1].name}-000000000000-000000000000"
+                        / "source" / "utilities" / "runner.py")
+        os.utime(hook, (times[family[-1]], times[family[-1]]), follow_symlinks=False)
+        launcher = self.root / "bin" / "tool"
+        launcher.parent.mkdir()
+        launcher.symlink_to(self.data / "current" / "utilities" / "runner.py")
+        hooked = self._started([sys.executable, str(hook)])
+        launched = self._started([sys.executable, str(launcher)])
+        real_started = distribution._process_started_at
+
+        def started(entry):
+            if entry.name == str(hooked.pid):
+                return times[family[1]] + 600
+            return real_started(entry)
+
+        with mock.patch.object(distribution, "_process_started_at", side_effect=started):
+            held = [distribution._release_held_by_live_process(release)[0] for release in family]
+        # The hook started under v4.41.0 (and holds one on each side); the
+        # launcher started after `current` last moved, so it holds only today's
+        # target. Neither holds v4.43.0.
+        self.assertEqual(held, [True, True, True, False, True])
+
     def test_a_start_older_than_every_activation_still_keeps_the_family(self):
         family = self._family("v4.40.0", "v4.41.0", "v4.42.0")
         times = self._bundles(family, 1_790_000_000.0)
