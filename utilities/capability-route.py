@@ -2797,8 +2797,8 @@ def main():
             # An unproven terminal gate is recorded and warned about below, never refused:
             # the refusal was bypassed almost every time it fired.
             import route_parent_close
-            # Running frame legs are this route's work too: they stop before the record closes.
-            legs=route_parent_close.stop_route_legs(route)
+            # A full stop includes frame legs in the route cancellation itself.
+            legs=None if a.stop_resources else route_parent_close.stop_route_legs(route)
             if legs and legs["state"]!="cancelled":
                 print(json.dumps(legs,sort_keys=True))
                 return
@@ -2822,6 +2822,9 @@ def main():
                 from work_start import pin_handoff_continuation
                 outcome=pin_handoff_continuation(route, a.route, route_parent_close.jobs_path(),
                                                 {**outcome,"summary":a.summary or outcome.get("summary")})
+                if a.stop_resources:
+                    # Only a full stop's wait names the way on: without the flag, resume_command relaunches stopped legs.
+                    outcome=route_parent_close.explain_pending(outcome,UI_TEXT.translator())
                 print(json.dumps(outcome,sort_keys=True))
                 return
             print(json.dumps(outcome,sort_keys=True))
@@ -2944,8 +2947,13 @@ def main():
                                   "route_id": route["route_id"], "node_id": a.node,
                                   "reason": "owner-closure-review-nodes-only"}
                         if node.get("kind") == "resource-runner":
+                            try:
+                                import worker_bootstrap as _wb
+                                step = _wb.human_run_step(route, Path(a.route).resolve(), node)
+                            except Exception:  # the read-only answer stands without its command
+                                step = ""
                             result["next_action"] = (
-                                "use the resource node's existing start path; a completed compute-hosts "
+                                (step or "use the resource node's existing start path") + "; a completed compute-hosts "
                                 "candidate may be supplied with --compute-run <run-id>; a route-bound "
                                 "exit-0 run whose receipt names only a leftover `running` row is adopted "
                                 "and that row is settled; a finished run this route's owner launched "

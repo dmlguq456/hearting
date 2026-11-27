@@ -658,6 +658,70 @@ def _owner_job(jobs):
     return owners[0] if len(owners) == 1 else None
 
 
+_LIVE_OWNER = ("working", "idle", "blocked")
+
+
+def _own_pid_alive(job):
+    """True only when the collector accepted this registry row's own PID in this pass
+    (``pid_identity_source``, from ``dispatch._authoritative_registry_pid``) and the classifier
+    found that very process alive with its recorded start (``pid_alive``, ``proc_start_match``).
+    A borrowed PID or a row whose PID was not accepted is not this attempt alive; a row with no
+    attempt id is never (the collector fills such a row's PID from a same-folder process) (11-27)."""
+    evidence = _get(job, "state_evidence")
+    seen = evidence.get("inputs") if isinstance(evidence, Mapping) else None
+    return (bool(_text(_get(job, "attempt_id"))) and isinstance(seen, Mapping)
+            and bool(seen.get("pid_identity_source"))
+            and seen.get("pid_alive") is True and seen.get("proc_start_match") is True)
+
+
+def _closed_at_route_file(job, record):
+    """Whether the outcome beside the route file this owner row records (an older route under
+    ``artifacts/routes`` too) closed the projection-validated route ``record``, read by the route
+    reader the work projection uses for its result. A route file gone or changed meanwhile cannot
+    confirm the route open, so it reads as closed: that route keeps the earlier rule."""
+    from .. import route as route_reader
+    path = _text(_get(job, "owner_route_file")) or _text(_get(job, "route_file"))
+    if not path or not os.path.isfile(path):
+        return True
+    try:
+        outcome = route_reader.load_outcome(path, record.get("route_id"), record.get("route_hash"))
+    except (AttributeError, TypeError, ValueError, OSError):
+        return True
+    return bool(outcome.get("present") and outcome.get("match") and outcome.get("closed_at"))
+
+
+def _running_owner(owner, attempts):
+    """The owner attempt whose liveness says whether the route runs: the owner, else the one
+    attempt among several whose registry row is still open and whose own process is alive
+    (``_own_pid_alive``). A continued, resumed or relaunched route carries several owner attempts
+    and its sealed record names none; with no or two such attempts nothing is guessed (11-27)."""
+    if owner is not None:
+        return owner
+    live = [job for job in attempts if _get(job, "liveness") in _LIVE_OWNER
+            and _text(_get(job, "status")) in ("open", "running") and _own_pid_alive(job)]
+    return live[0] if len(live) == 1 else None
+
+
+def _route_visibility_of(record, view, owner_jobs, owner, running):
+    """``(visibility, closed)`` of a route record: the display-only shape, stages, verification and
+    next step read from its own record, Fleet's view and its outcome sidecar, and whether that
+    sidecar closed it (``closed_at``). ``(None, False)`` without a record.
+
+    A solo route's owner is its one-shot node's own attempt, not a separate row. Without one
+    owner the detail names the one live open attempt that runs the route, else the latest."""
+    if not record:
+        return None, False
+    depth_one = [job for job in owner_jobs
+                 if _get(job, "depth") == 1 or _get(job, "dispatch_depth") == 1]
+    shown_owner = owner if owner is not None else running if running is not None else (
+        max(depth_one, key=current_attempt_rank) if depth_one else None)
+    visibility = route_visibility.bounded(route_visibility.describe(
+        record, view, owner=route_visibility.owner_from_job(shown_owner)))
+    codes = visibility.get("codes") if isinstance(visibility, Mapping) else None
+    verification = codes.get("verification") if isinstance(codes, Mapping) else None
+    return visibility, bool(isinstance(verification, Mapping) and verification.get("closed_at"))
+
+
 def _route_stem(path):
     text = _text(path)
     return os.path.splitext(os.path.basename(text))[0] if text else None
@@ -1161,7 +1225,16 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         cwd = _text(view.get("cwd")) or _text(record.get("cwd")) or _text(_get(owner, "cwd"))
         repo = (session_row or {}).get("repo") or _repo_of(resolver, cwd)
         owner_state = (session_row or {}).get("state")
-        owner_live = _text(_get(owner, "liveness")) if owner is not None else None
+        # The one live open owner attempt among several runs the route, and the route detail names
+        # it, unless the route is closed (its outcome's ``closed_at``): then everything reads as before.
+        candidate = _running_owner(owner, _owner_jobs(owner_jobs))
+        visibility, closed = _route_visibility_of(record, view, owner_jobs, owner, candidate)
+        # Closed where its own route file says so (an older route under ``artifacts/routes`` too), or unreadable.
+        ended = closed or bool(record and candidate is not None and _closed_at_route_file(candidate, record))
+        if ended and owner is None and candidate is not None:
+            visibility, closed = _route_visibility_of(record, view, owner_jobs, owner, None)
+        runner = owner if ended else candidate
+        owner_live = _text(_get(runner, "liveness")) if runner is not None else None
         if owner_live in ("working", "idle", "blocked", "dead", "done"):
             state = owner_live                    # the route is as alive as the attempt that owns it
         elif active is not None:
@@ -1294,9 +1367,16 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             # KIND reads `frame`: a frame route's default capability mode and inherited
             # intensity are not display axes. The source record keeps both values.
             mode = intensity = None
+        # The route runs while its owner or a worker of it does. An owner whose registry row is
+        # still open and whose own registered process is alive (its PID with its recorded start) is
+        # running the route however quiet it is, between stages, after a stage ended FAIL or BLOCKED,
+        # or after the last stage (11-27). A closed owner row, a closed or unvalidated route, or an
+        # owner alive by any other evidence keeps the stage rule, so a finished route does not stay.
+        owner_open = (bool(record) and not ended and runner is not None and _own_pid_alive(runner)
+                      and _text(_get(runner, "status")) in ("open", "running"))
         current = bool(run_children or worker_contexts
-                       or owner_live in ("working", "idle", "blocked")
-                       and total and done != total and (active is not None or not failed))
+                       or owner_live in _LIVE_OWNER
+                       and (owner_open or total and done != total and (active is not None or not failed)))
         running = current and (active is not None or state == "working" or run_children or worker_contexts)
         route = {
             "id": rid, "repo": repo, "session_tag": owner_tag, "title": title, "state": state,
@@ -1328,21 +1408,11 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         if doer is not None:
             route["doer"] = doer
         if record:
-            # Display only: shape and its basis, stages, verification and next step, read
-            # from this route's own record, Fleet's view and its outcome sidecar.
-            # A solo route's owner is its one-shot node's own attempt, not a separate row.
-            depth_one = [job for job in owner_jobs
-                         if _get(job, "depth") == 1 or _get(job, "dispatch_depth") == 1]
-            shown_owner = owner if owner is not None else (
-                max(depth_one, key=current_attempt_rank) if depth_one else None)
-            route["visibility"] = route_visibility.bounded(route_visibility.describe(
-                record, view, owner=route_visibility.owner_from_job(shown_owner)))
+            route["visibility"] = visibility
             # A route its supervisor closed (``capability-route close``, the outcome sidecar's
             # ``closed_at``) is over even when its owner ended without a passed gate: it is
             # neither a stopped leg to count nor one to resume.
-            codes = route["visibility"].get("codes") if isinstance(route["visibility"], Mapping) else None
-            verification = codes.get("verification") if isinstance(codes, Mapping) else None
-            if isinstance(verification, Mapping) and verification.get("closed_at"):
+            if closed:
                 route["closed"] = True
                 route["resume"] = None
         if deferred or unread:

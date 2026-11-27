@@ -27,7 +27,7 @@ _WRITERS = {
     "dispatch-reap-watch.py",
     "dispatch_completion_join.py",
 }
-_OPTIONAL = {"fallback_ordinal", "fleet_visibility", "reason", "detail", "registered_worker", "capability", "completion_gate", "route_file", "parent", "parent_attempt_id", "parent_pid", "parent_pid_start", "harness", "attempt_trace", "prior_attempt_ids", "last_direct_failure", "candidate_outcomes", "candidate_outcomes_omitted", "child_proof", "parallel_group", "parallel_leg_index", "parallel_leg_count", "attempt_id", "exit_code", "launch_state", "event_id", "leg_class", "auxiliary_check", "parent_cross", "cause", "sole_gate", "subsession_id", "slice_manifest_sha256"}
+_OPTIONAL = {"fallback_ordinal", "fleet_visibility", "reason", "detail", "registered_worker", "capability", "completion_gate", "route_file", "parent", "parent_attempt_id", "parent_pid", "parent_pid_start", "harness", "attempt_trace", "prior_attempt_ids", "last_direct_failure", "candidate_outcomes", "candidate_outcomes_omitted", "child_proof", "parallel_group", "parallel_leg_index", "parallel_leg_count", "attempt_id", "exit_code", "launch_state", "event_id", "leg_class", "auxiliary_check", "parent_cross", "cause", "sole_gate", "subsession_id", "slice_manifest_sha256", "tier_note"}
 
 def _home():
     return str(_resolve_agent_home())
@@ -119,3 +119,23 @@ def record_degradation(*, route_id=None, route_node=None, route_hash=None, dispa
         return _append_locked(root, filename, payload)
     except BaseException:
         return None
+
+
+def route_rows(route_id, *, agent_home=None, jobs=None):
+    """The ledger rows recorded for one route, oldest first; [] when there are none or the ledger is unreadable."""
+    if not isinstance(route_id, str) or not route_id or "/" in route_id or route_id.startswith("."):
+        return []
+    try:
+        path = _resolve_dispatch_state_root(agent_home or _home(), jobs) / "degradations" / (route_id + ".jsonl")
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:  # an unresolvable root or a missing ledger reads as no rows
+        return []
+    rows = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and row.get("route_id") == route_id:
+            rows.append(row)
+    return rows

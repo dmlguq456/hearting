@@ -152,6 +152,13 @@ state for Claude and Codex alike; they never replace the Codex queue with input.
 The native callback supplies its session ID before a passive registry may exist.
 Its nearest verified native process and birth must still belong to this wrapped
 terminal; a worker or service callback cannot select another terminal's session.
+A registered worker does not hold the attachment at all: every worker launch,
+in every harness, leaves the launching window's `HEARTING_SHELL_*` values out of
+the worker's environment, and the person's window keeps them. The same rule
+(`utilities/environment_inheritance.py`) holds for the model an attempt's
+summary owner runs, for the Claude capacity probe, and for the models of the
+work-start prior-art scan and the sealed-cycle review and campaign title. It also
+holds for the two OpenCode lookups (`auth list` and `session export`).
 For a shared Codex daemon callback, reuse the native MCP origin's live TUI
 PID/thread proof and its current unique selection. Read the attachment only
 from that TUI's own initial environment; never inherit the daemon's first

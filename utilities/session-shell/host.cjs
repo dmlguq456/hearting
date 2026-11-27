@@ -6,6 +6,10 @@ const crypto = require('node:crypto');
 const cp = require('node:child_process');
 const path = require('node:path');
 const readline = require('node:readline');
+// The release this host runs from stays visible to the installer's /proc scan for as long as the
+// window lives, as dispatch_contract._CODE_ROOT_FD does; Node opens it close-on-exec, so the
+// native child never sees it. An update moves the link this host was started through.
+try { fs.openSync(path.resolve(__dirname, '..', '..'), 'r'); } catch {}
 const args = process.argv.slice(2), harness = args.shift(), command = args;
 let activated = false, child, inputOwner, mouseInput, backend, server, projectionTimer, frameTimer, ended = false;
 function startupResult(value) {
@@ -167,7 +171,7 @@ let typed = 0;
 // Why the last reading kept the window from taking a message (`status().hold`): what this host
 // knows, for the sender's record (`peer-message` pending row `held`). Empty while it takes one.
 let lastHold = 'unsettled';
-const HOLD_OF={'form-open':'form','native-trust-wait':'form','draft':'draft','draft-unknown':'draft'};
+const HOLD_OF={'form-open':'form','native-trust-wait':'form','draft':'draft','draft-unknown':'draft','screen-large':'screen-large'};
 const QUIET_KEY=/^(?:\x1b|\x1b\[[\d;]*[DEGHPQRSZ]|\x1b\[(?:[1-3567]|1\d|2[0-689]|3[0-4])(?:;\d+)*~|\x1bO[DHP-S]|\x1b\[<[\d;]*[Mm]|\x1b\[[?>=][\d;:$ ]*[@-~]|\x1b\[[\d;]*[nt]|\x1b[\]P_][^\x07\x1b]*(?:\x07|\x1b\\))$/;
 // How long the keys must have been quiet before a screen read after them may stand for them: right
 // after a person's Enter the composer is empty before that turn's prompt callback comes, and a slow
@@ -217,8 +221,8 @@ function live() { const row = native && processRow(native.pid); return !!row && 
 function status() {
   const ready=empty && !keyTail && !paste && (!block.focused||block.waitingForReceipt) && !table && !settings && !fleetView;
   // `busy` a turn runs, `form` a native or shell menu/question is open, `draft` text stands in the
-  // composer, `paste` one is under way, `unsettled` keys are not settled yet, `unobserved` the
-  // native's rest is not confirmed.
+  // composer, `paste` one is under way, `unsettled` keys are not settled yet, `screen-large` the
+  // screen is too large for its input box to be read, `unobserved` the native's rest is not confirmed.
   const hold=ready&&state==='idle'?'':paste?'paste':state==='blocked'?'form':state!=='idle'?'busy'
     :table||settings||fleetView||block.focused&&!block.waitingForReceipt?'form':keyTail?'unsettled':lastHold||'unsettled';
   return {...identity(),epoch,state,empty:ready,hold,alive:live(),expanded,focused:block.focused||!!table||!!settings||!!fleetView,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"};
@@ -236,7 +240,14 @@ function projectionAnswered(data){
   if(!data.ok){projectionMissed();return;}
   clearTimeout(staleTimer);staleTimer=undefined;if(stale){stale=false;projectionKey='';}
 }
+// One line to the backend or one answer on the control socket stays within 64 KiB, so neither side
+// buffers an unbounded line from its peer. A line that carries the native screen (these requests and
+// the `screen` answer) gets SCREEN_BYTES instead, the whole frame counted once (session_shell
+// MAX_SCREEN_BYTES is the same number): a 300 × 800 window filled to the width is about 440 KB.
+// Past it the screen is `screen-large`, its input box not read; a cut screen is never judged.
+const SCREEN_BYTES=1024*1024;
 function source(op, extra={}) {
+  const SCREEN_OPS=new Set(['readiness','payload']),limit=SCREEN_OPS.has(op)?1024*1024:65536;
   if(op==='action'||op==='answer')return readAction(extra,op);
   if (!backend || backend.exitCode !== null || !sid&&!['display-settings','display-bootstrap','display-model','register','unregister'].includes(op)) return Promise.resolve({ok:false,reason:'source-unavailable'});
   return new Promise(resolve => {
@@ -248,7 +259,8 @@ function source(op, extra={}) {
       setTimeout(()=>{if(op==='projection'){projectionMissed();return;}calls.delete(id);resolve({ok:false,reason:'source-unavailable'});},1500);
     calls.set(id,{resolve:op==='projection'?data=>{projectionAnswered(data);resolve(data);}:resolve,timer});
     const frame=JSON.stringify({id,op,binding:binding(),...extra})+'\n';
-    if(Buffer.byteLength(frame)>65536){calls.delete(id);clearTimeout(timer);resolve({ok:false,reason:'source-request-too-large'});return;}
+    if(Buffer.byteLength(frame)>limit){calls.delete(id);clearTimeout(timer);
+      resolve({ok:false,reason:SCREEN_OPS.has(op)?'screen-large':'source-request-too-large'});return;}
     backend.stdin.write(frame);
   });
 }
@@ -1375,7 +1387,11 @@ function observeSelectedModel(lines){
   const key=displayModelKey(lines);
   if(key===modelReadKey||!/\? for shortcuts/.test(key)||!/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/.test(key))return;
   modelReadKey=key;modelReading=true;const selected=selection,start=native.start;
-  source('display-model',{lines}).then(data=>{
+  // The same short evidence the native selection carries (nativeSelectionFrame: the composer mark, the
+  // identity fields of the footer row and its key hint); none, or an invalid one, asks nothing.
+  const frame=nativeSelectionFrame();
+  if(frame.invalid||!frame.lines.length){modelReading=false;return;}
+  source('display-model',{lines:frame.lines}).then(data=>{
     const now=Array.from({length:terminal.rows},(_,i)=>terminal.buffer.active.getLine(terminal.buffer.active.viewportY+i)?.translateToString(true)||'');
     if(data.ok&&!relay&&live()&&native.start===start&&selection===selected&&displayModelKey(now)===key){
       nativeSelected={...data.display};bootstrapModel=true;displayValues={...displayValues,...nativeSelected};publishNativeDisplay();queueDisplay();
@@ -1518,7 +1534,7 @@ function queueLayout(){
   if(layoutQueued)return;layoutQueued=true;
   setImmediate(()=>{layoutQueued=false;try{applyLayout();}catch{rawRelay();}});
 }
-const block=require('./block-input.cjs')({changed:queueDisplay,cellWidth,
+const block=require('./block-input.cjs')({changed:queueDisplay,cellWidth,hold:()=>empty?'':lastHold,
   answer:async fields=>{const result=await source('answer',fields);queueProjection();return result;},
   action:key=>blockAction(key)});
 let actionLines=[];
@@ -1803,6 +1819,11 @@ async function releaseHeld(ref,cancel=false) {
   if(currentDelivery===ref){currentDelivery=undefined;heldBytes=0;if(state==='submitting'){state='unknown';eventMark=++clock;}queueProjection();}
   releasing=undefined;process.stdin.resume();rebuildDisplay();
 }
+// The native cells the form and draft judgments read (session_shell.screen_lines), as [text, dim]
+// runs per row, the whole viewport. A row ends at its last cell that is not a blank: no judgment
+// reads a blank at a row's end (each strips it and reads no brightness of a space), and carrying
+// them made every request grow with the window's width (11-27: a 121 × 537 window's empty screen
+// alone was 65 KB). A screen too large for one request is never cut: it is not read (`screen-large`).
 function screenSnapshot() {
   const lines=[],buffer=terminal.buffer.active;
   for(let y=0;y<terminal.rows;y++){
@@ -1812,6 +1833,7 @@ function screenSnapshot() {
       const dim=!!cell.isDim(),text=cell.getChars()||' ',previous=runs[runs.length-1];
       if(previous&&previous[1]===dim)previous[0]+=text;else runs.push([text,dim]);
     }
+    while(runs.length){const run=runs[runs.length-1];run[0]=run[0].replace(/ +$/,'');if(run[0])break;runs.pop();}
     lines.push(runs);
   }
   return lines;
@@ -1850,7 +1872,7 @@ async function refreshReadiness() {
   lastHold=empty?'':HOLD_OF[result.reason]||'unobserved';
   if(empty&&!inputSettled){submitted=frontier;lastEnter=Math.max(lastEnter,frontier);if(loneEscape)keyTail='';}
   if(empty&&state!=='idle'){state='idle';queueDisplay();queueProjection();}
-  return result.ok===true?'':'unavailable';
+  return result.ok===true||result.reason==='screen-large'?'':'unavailable';
 }
 function observeInput(data) {
   // All keys invalidate an in-flight observation, but only native-bound bytes
@@ -2315,7 +2337,11 @@ async function request(req) {
   if(req.op==='native-selection')return {ok:!relay,native_frame:nativeSelectionFrame()};
   if(req.op==='status'){await refreshReadiness();if(empty)checkRelease();return {ok:true,...status()};}
   // The native cells under the panel and frame: the seat's own screen for draft/form judgments.
-  if(req.op==='screen')return relay?{ok:false,reason:'display-unavailable'}:{ok:true,screen:screenSnapshot(),...status()};
+  if(req.op==='screen'){
+    if(relay)return {ok:false,reason:'display-unavailable'};
+    const answer={ok:true,screen:screenSnapshot(),...status()};
+    return Buffer.byteLength(JSON.stringify({...answer,...identity()}))+1>SCREEN_BYTES?{ok:false,reason:'screen-large'}:answer;
+  }
   if(req.op==='panel'&&relay)return {ok:false,reason:'display-unavailable'};
   if(req.op==='panel'){foldByHand(req.expanded!==true);applyLayout();return {ok:true,...status()};}
   if(req.op!=='inject'||harness==='codex')return {ok:false,reason:'unsupported-operation',not_started:true};

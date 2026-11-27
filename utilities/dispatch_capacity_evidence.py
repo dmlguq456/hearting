@@ -27,6 +27,8 @@ try:
 except ImportError:  # pragma: no cover - platforms without advisory flock use direct reads
     fcntl = None
 
+from environment_inheritance import inherited_environment
+
 HARNESSES = ("claude", "codex", "opencode")
 WINDOWS = {"five_hour": 6 * 3600, "seven_day": 8 * 86400,
            "seven_day_opus": 8 * 86400, "seven_day_sonnet": 8 * 86400}
@@ -968,7 +970,10 @@ def probe(env=None, *, model, now=None):
 
 
 def _probe_once(env, model, now):
-    env = {k: v for k, v in (os.environ if env is None else env).items() if k != "CLAUDECODE"}
+    # The probe is a Claude process of its own: none of the caller's session-shell
+    # window (`inherited_environment`), and not the caller's Claude session either.
+    env = {k: v for k, v in inherited_environment(os.environ if env is None else env).items()
+           if k != "CLAUDECODE"}
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
     cli = env.get("HEARTING_CAPACITY_PROBE_CLI") or PROBE_CLI
     try:
@@ -1344,6 +1349,16 @@ def attempt_model(jobs, attempt_id, *, now=None):
     return next((r["m"] for r in records if r["a"] == attempt_id and r.get("m")), None)
 
 
+def usage_jobs(jobs=None):
+    """Resolve the registry the usage CLI and the owner selector read."""
+    jobs = jobs or os.environ.get("AGENT_DISPATCH_JOBS")
+    if jobs:
+        return jobs
+    root = subprocess.run([str(Path(__file__).with_name("dispatch-state-root.sh"))],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    return str(Path(root) / "jobs.log")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("inspect", "states"))
@@ -1354,15 +1369,11 @@ def main():
     parser.add_argument("--recheck", action="store_true",
                         help="launch decision: recheck a holding Claude limit with one probe (at most every 10 minutes)")
     args = parser.parse_args()
-    if not args.jobs:
-        args.jobs = os.environ.get("AGENT_DISPATCH_JOBS")
-    if not args.jobs:
-        root = subprocess.run([str(Path(__file__).with_name("dispatch-state-root.sh"))], capture_output=True, text=True, check=True).stdout.strip()
-        args.jobs = str(Path(root) / "jobs.log")
+    jobs = usage_jobs(args.jobs)
     if args.action == "inspect":
-        print(json.dumps(observations(args.jobs), sort_keys=True))
+        print(json.dumps(observations(jobs), sort_keys=True))
     else:
-        states = usage_states(args.jobs, profile=args.model_profile, unknown_window_min=args.unknown_window_min,
+        states = usage_states(jobs, profile=args.model_profile, unknown_window_min=args.unknown_window_min,
                               recheck=args.recheck)
         for harness in HARNESSES if args.harness == "all" else [args.harness]:
             print(harness, states[harness])
