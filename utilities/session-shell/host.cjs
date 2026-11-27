@@ -927,8 +927,8 @@ function askTable(){
   const collect=!!t.collect;t.collect=false;
   const reuse=routeTable&&!collect&&t.readKey!==undefined&&t.readKey===(popupKeys.ROUTE??null);
   const ask=extra=>{
-    // (`framed`: the first screen of this route's page is its frame, so the reading stands that frame first where the page fits)
-    const asked={kind:POPUP_KIND[t.kind],columns,open:now?t.sel||'':t.open||'',page:!!t.page,rows:room,...(routeTable&&t.page&&panelView.routeFramed({model:panelModel,id:t.open})?{framed:true}:{}),
+    // (`framed`: the first screen this route's page showed was its frame (`routeFirst` noted it), so the reading stands that frame first where the page fits)
+    const asked={kind:POPUP_KIND[t.kind],columns,open:now?t.sel||'':t.open||'',page:!!t.page,rows:room,...(routeTable&&t.page&&t.framed?{framed:true}:{}),
       ...(status?{cwd:process.cwd(),routes:statusRoutes(),status:statusHeld(),own:ownFolder(),...extra}:{}),...(reuse?{reuse:true}:{})};
     if(!(now||routeTable)||t.noWorker)return readAction(asked,'popup',true);
     // The popup's own backend answers. A read it did not answer is made the one-shot way (and the popup reads
@@ -1190,17 +1190,19 @@ function openPopup(name,open='',page=false){
 // What a routes popup shows before its own reading comes: what was read last for this session (same width, same
 // route, table or page as it opens, the panel's route values unchanged since), else for a route's page the page's frame
 // the panel's values draw (`panelView.routePageFirst`), else the panel's route box at the popup's width; nothing
-// where there is neither (the popup's spinner). Its rows are not this reading's, so it carries `stale`.
+// where there is neither (the popup's spinner). Its rows are not this reading's, so it carries `stale`; `framed` notes whether it is a page
+// whose frame stands first (the reading asked for it follows that, not the panel's values when it is asked).
 function routeFirst(t){
   const r=routePopup;
-  if(r&&r.sid===sid&&r.width===t.width&&r.open===t.open&&r.key===popupKeys.ROUTE&&!!r.page===!!t.page)return {rows:r.rows,hits:r.hits,routes:r.routes,loaded:true,stale:{at:r.at,failed:false}};
+  if(r&&r.sid===sid&&r.width===t.width&&r.open===t.open&&r.key===popupKeys.ROUTE&&!!r.page===!!t.page)
+    return {rows:r.rows,hits:r.hits,routes:r.routes,loaded:true,stale:{at:r.at,failed:false},framed:!!r.page&&/^╔═/.test((r.rows[0]||[]).map(p=>p.text).join(''))};
   const args={model:panelModel,columns:Math.max(20,Math.min(200,t.width-4)),cellWidth,configuration:displayConfiguration,background:terminalBackground};
   // (11-27: every form's page, unit, solo and team, draws its frame from the panel's values; a route the panel holds no leg band for, or a
   // drawing that throws, stays the panel's box: the first screen is a picture the popup can do without, never the reason the panel is lost.)
   let page=null;
   if(t.page)try{page=panelView.routePageFirst({...args,id:t.open});}catch{page=null;}
   const b=page||panelView.routesBody(args);
-  return b?{rows:b.rows,hits:b.hits,routes:b.routes,loaded:true,stale:{at:Number(panelModel.route_read_at)||0,failed:false}}:null;
+  return b?{rows:b.rows,hits:b.hits,routes:b.routes,loaded:true,stale:{at:Number(panelModel.route_read_at)||0,failed:false},framed:!!page&&panelView.routeFramed({model:panelModel,id:t.open})}:null;
 }
 // The panel's route order for its popup (failed, running, waiting, finished): the first unfolded route.
 function rankedRoutes(){
@@ -1244,7 +1246,7 @@ function enterRow(){
   if(t.kind==='ROUTE'&&t.open){
     t.page=!t.page;t.scroll=0;t.pageTop=t.page;t.follow=!t.page;
     if(t.page){
-      Object.assign(t,{rows:[],hits:[],routes:[],loaded:false,stale:null,error:false},routeFirst(t));
+      Object.assign(t,{rows:[],hits:[],routes:[],loaded:false,stale:null,error:false,framed:false},routeFirst(t));
       queueDisplay();
     }
     askTable();

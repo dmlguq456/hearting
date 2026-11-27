@@ -72,8 +72,8 @@ opens the routes popup on that route's page (Fleet's route page: the frame first
 popup shows that frame at once for every form (unit, solo, team), drawn from the values the panel already holds, in the cells the reading fills (only values
 come in; no border, title or name moves, and the reading leaves the frame on its rows; what only the reading knows, a parallel pair, a loop, the owner's raw
 strip, more than sixteen stages, can lengthen the frame below its band); a team route's head keeps the form word `team`, never `staged`. A long route (its frame and
-lines past what the popup's answer carries), a route of seven legs or more and one the cache keeps without these values are as they were: the first screen its
-stage boxes (or the route list), the page the lines first and the frame under them), a press on the
+lines past what the popup's answer carries) reads as it did, the lines first and the frame under them (right after the press its frame stands, until the reading
+replaces it); a route of seven legs or more and one the cache keeps without these values are as they were on both screens), a press on the
 section's head (or Ctrl+], ←→) the routes table, a request's row the MESSAGES
 popup. Values the host could not refresh for a while are shown, not claimed:
 nothing spins, and the frame takes no route state. A value that cannot be read

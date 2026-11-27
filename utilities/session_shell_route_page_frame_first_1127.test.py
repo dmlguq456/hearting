@@ -13,9 +13,10 @@ The two that remained of #1760 (closed; built again on today's main, the person'
   * No word changes: the head, the stage boxes' titles and every value are Fleet's own (a team route's first screen keeps the form word `team`
     it has always said where the reading's head says `staged`), and the stage boxes keep the colors the first screen drew them in.
   * Reviews of #1900 (11-27): the frame stands first only where it all fits: the first screen holds the frame's values (a band of six legs at
-    most) and the whole page fits the answer's rows and bytes. Else both screens are drawn as before 11-27, cell for cell (a long route, seven
-    legs, a cache that kept the route without these values), the page cut only to the bytes the host reads. The band's stage line is the
-    producer's count over the whole leg; a long repository name stands the tag where the reading does; a value not of its shape is no value.
+    most), the page request carries what that first screen was (`framed`), and the whole page fits the answer's rows and bytes. Else the
+    answer is main's, byte for byte (a long route, seven legs, a cache that kept the route without these values; a long route's first screen
+    still stands the frame, which the reading replaces). The band's stage line is the producer's count over the whole leg; a long repository
+    name stands the tag where the reading does; a value not of its shape is no value.
   * What this does not hold equal, by design: what only the reading knows lengthens the frame under the band's panel title, never above it — a
     parallel pair (`∥ 2-way`, measured 28 → 35 rows to the frame's bottom at 132×46), a loop (`↺ N back`, 21 → 24), the owner's raw strip (28 → 34),
     more than sixteen stages (50 → 56, the first screen's `+N` under the sixteen). The comparison here covers chains of one, three and six stages.
@@ -303,11 +304,34 @@ const out={};
 for(const mode of ['throws','frame','none']){
   const ctx={routePopup:null,sid:'s',popupKeys:{ROUTE:'k'},panelModel:{route_read_at:7},cellWidth:null,displayConfiguration:{},terminalBackground:'',Math,Number,
     panelView:{routePageFirst:()=>{if(mode==='throws')throw new TypeError('(parts||[]).map is not a function');return mode==='frame'?{rows:[['FRAME']],hits:[],routes:['r']}:null;},
-               routesBody:()=>({rows:[['BOX']],hits:[],routes:['r']})}};
+               routeFramed:()=>true,routesBody:()=>({rows:[['BOX']],hits:[],routes:['r']})}};
   vm.createContext(ctx);vm.runInContext(src.slice(a,b+2),ctx);
   out[mode]=ctx.routeFirst({width:120,open:'r',page:true}).rows[0][0];
 }
 assert.deepEqual(out,{throws:'BOX',frame:'FRAME',none:'BOX'});
+console.log('ok');
+"""
+        done = subprocess.run([self.node, "-e", script, str(ROOT / "utilities/session-shell")], capture_output=True, text=True, timeout=60)
+        self.assertEqual((done.returncode, done.stdout.strip()), (0, "ok"), done.stderr)
+
+    def test_the_first_screen_notes_whether_it_showed_the_frame(self):
+        # (review 3 of #1900, red 3: the page request takes `framed` from the first screen shown (`routeFirst`), never from the panel's values when sent)
+        script = r"""
+const fs=require('fs'),vm=require('vm'),path=require('path'),assert=require('node:assert/strict');
+const src=fs.readFileSync(path.join(process.argv[1],'host.cjs'),'utf8');
+const a=src.indexOf('function routeFirst(t){'),b=src.indexOf('\n}\n',a);
+const run=(popup,framed,drawn)=>{
+  const ctx={routePopup:popup,sid:'s',popupKeys:{ROUTE:'k'},panelModel:{},cellWidth:null,displayConfiguration:{},terminalBackground:'',Math,Number,
+    panelView:{routePageFirst:()=>drawn?{rows:[[{text:'X'}]],hits:[],routes:['r']}:null,routeFramed:()=>framed,routesBody:()=>({rows:[[{text:'BOX'}]],hits:[],routes:['r']})}};
+  vm.createContext(ctx);vm.runInContext(src.slice(a,b+2),ctx);return ctx.routeFirst({width:120,open:'r',page:true}).framed;};
+const cached=first=>({sid:'s',width:120,open:'r',key:'k',page:true,rows:[[{text:first}]],hits:[],routes:['r'],at:1});
+// (the page read last, shown again: its own order says, whatever the panel holds now)
+assert.equal(run(cached('╔═ project/ › [e9] › 제목'),false,true),true);
+assert.equal(run(cached('   todo:        a'),true,true),false);
+// (drawn now from the panel's values: the frame, or the screen as before 11-27, or the route list)
+assert.equal(run(null,true,true),true);
+assert.equal(run(null,false,true),false);
+assert.equal(run(null,true,false),false);
 console.log('ok');
 """
         done = subprocess.run([self.node, "-e", script, str(ROOT / "utilities/session-shell")], capture_output=True, text=True, timeout=60)
@@ -365,22 +389,19 @@ console.log('ok');
         wide = [["why", "the person asked for it", "info"]] + [["path", "ก" * 165 + "%03d" % i, "info"] for i in range(18)] + [["next", "wait for the stage", "info"]]
         folded = [["why", "the person asked for it", "info"]] + [["path", "/" + "a" * 129, "info"]] * 13 + [["next", "wait for the stage", "info"]]
         cases = (("150 short lines, 39 stages, 80×24", 39, short, 72, {}), ("15 lines folded at 30 cells", 6, folded, 30, {}),
-                 ("wide letters filling the answer, 45 stages", 45, wide, 192, {}), ("39 stages, the last two parallel, step-39 running", 39, twenty, 72,
-                                                                                    {"running": 38, "parallel": ((37, 38),)}))
+                 ("wide letters filling the answer, 45 stages", 45, wide, 192, {}), ("wide letters, 6 path lines, 37 stages", 37, wide[:7] + wide[-1:], 192, {}),
+                 ("39 stages, the last two parallel, step-39 running", 39, twenty, 72, {"running": 38, "parallel": ((37, 38),)}))
         for label, n, lines, columns, extra in cases:
             with self.subTest(label):
                 vm, _record = build_long(n, lines, **extra)
                 fitted, end = drawn(vm, columns, True)
                 self.assertTrue(end > session_shell.POPUP_ROWS or weight(fitted) > session_shell.POPUP_ANSWER_BYTES, (end, weight(fitted)))
-                result = page_answer(vm, columns)
-                rows, before = text_of(result), text_of(drawn(vm, columns, False)[0])
-                self.assertFalse(rows[0].startswith("╔═"), rows[0])
-                self.assertEqual(rows, before[:len(rows)])                           # (main's page, cut only where the bytes end)
-                self.assertTrue(any(row.strip().startswith("next:") for row in rows))
-                self.assertLessEqual(weight(result), session_shell.POPUP_ANSWER_BYTES)
-                self.assertLessEqual(len(rows), session_shell.POPUP_ROWS)
-                if weight({**result, "rows": drawn(vm, columns, False)[0]["rows"]}) <= session_shell.POPUP_ANSWER_BYTES:
-                    self.assertEqual(rows, before)
+                result, before = page_answer(vm, columns), drawn(vm, columns, False)[0]
+                self.assertFalse(text_of(result)[0].startswith("╔═"), text_of(result)[0])
+                # (main's answer whole: every row, style and press target; one past the held reader's 64 KiB the host reads the one-shot way)
+                self.assertEqual((result["rows"], result["styles"], result["hits"]), (before["rows"], before["styles"], before["hits"]))
+                self.assertTrue(any(row.strip().startswith("next:") for row in text_of(result)))
+                self.assertLessEqual(len(result["rows"]), session_shell.POPUP_ROWS)
 
     def test_the_frame_stands_first_up_to_the_answers_rows_and_bytes(self):
         # (the edge: a page whose last row is the answer's last stands its frame first; one row more, or one line past the bytes, is the page as before)
@@ -414,9 +435,8 @@ console.log('ok');
                 result = page_answer(vm, 192)
                 rows = text_of(result)
                 self.assertEqual(rows[0].startswith("╔═"), framed)
-                drawn_rows = text_of(drawn(vm, 192, framed)[0])
-                self.assertEqual(rows, drawn_rows if framed else drawn_rows[:len(rows)])     # (the page as before, cut where the bytes end)
-                self.assertLessEqual(weight(result), session_shell.POPUP_ANSWER_BYTES)
+                self.assertEqual(rows, text_of(drawn(vm, 192, framed)[0]))               # (the frame first, or main's answer whole)
+                self.assertEqual(weight(result) <= session_shell.POPUP_ANSWER_BYTES, framed)
 
     def test_the_bands_stage_line_is_the_producers_count(self):
         # (review of #1900, red 2: the first screen counted again from the sixteen stages the panel holds, and stacked parallel pairs flat)

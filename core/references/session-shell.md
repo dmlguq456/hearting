@@ -1264,8 +1264,9 @@ C1) as a space. In a table ↑↓, Tab and Shift+Tab unfold the next or
 previous route (Fleet's `▶`) or read on a row; Enter opens the
 unfolded route's page (Fleet's route page, `_route_page(whole=True)`: the stage frame first, then the route row,
 then what is to do and the verification lines with the route's paths, so the frame stands on the rows its first
-screen drew it on, where that first screen was the frame and the whole page fits the answer's rows and bytes; else, a long
-route's page, the page as before 11-27: the lines first, the frame under them; Fleet's own screen keeps its order) and again goes back to the table. A route's page keeps its
+screen drew it on, where that first screen showed the frame and the whole page fits the answer's rows and bytes; else the
+answer as before 11-27: the lines first, the frame under them (a long route's reading is as it was; its first screen still stands the frame,
+which the reading replaces); Fleet's own screen keeps its order) and again goes back to the table. A route's page keeps its
 top edge at the upper edge of the popup area while the reading comes in. The stage frame and the
 popup grow down to fit their content. PgUp/PgDn and the wheel read a longer page or table on (its place,
 `3/20`, leads the keys row; ↑↓ and Tab keep the unfolded row in view, and a table longer than the rows the popup carries, or than the answer the host reads, shows the rows that fit and ends with one dim line for the rest in the entrance's words, `외 N개`); `p` folds or opens the panel (the popup closes so

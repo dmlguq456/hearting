@@ -2046,9 +2046,9 @@ def _panel_popup(binding, request):
 
 def _route_page_answer(subset, opened, columns, kind, ids, read_at, colors, no_color, framed):
     """A route's page as the host reads it (the host fits it to the window and reads the rest with PgUp/PgDn). Its frame stands first
-    where the host's first screen drew that frame (``framed``) and the whole page then fits the answer (``POPUP_ROWS`` rows and
-    ``POPUP_ANSWER_BYTES``); else it is the page as it was before 11-27 (the lines first, the frame under them), as many of its rows
-    as the answer carries. Drawn twice at most."""
+    where the host's first screen showed that frame (``framed``) and the whole page then fits the answer (``POPUP_ROWS`` rows and
+    ``POPUP_ANSWER_BYTES``); else it is the answer as before 11-27, byte for byte (the lines first, the frame under them; one past what
+    the held reader takes is read the one-shot way, as it always was). Drawn twice at most."""
     from fleet.explorer.grid import CellGrid
     from fleet.explorer import pages
 
@@ -2070,11 +2070,7 @@ def _route_page_answer(subset, opened, columns, kind, ids, read_at, colors, no_c
         answer, end = draw(True)
         if end is not None and end <= POPUP_ROWS and weight(answer) <= POPUP_ANSWER_BYTES:
             return answer
-    answer, _end = draw(False)
-    count = len(answer["rows"])           # (the most rows that weigh what the host reads: the lines come first, the frame's last rows go)
-    while count and weight({**answer, "rows": answer["rows"][:count]}) > POPUP_ANSWER_BYTES:
-        count -= max(1, count // 16)
-    return {**answer, "rows": answer["rows"][:count], "hits": [hit for hit in answer["hits"] if hit["row"] < count]}
+    return draw(False)[0]
 
 
 def _input_readiness(binding, request):
