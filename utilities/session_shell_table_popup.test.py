@@ -187,6 +187,22 @@ class TablePopupTest(unittest.TestCase):
                     self.assertIn((label + ':' + text).replace(' ', ''), whole, (window, columns, label))
                 self.assertNotRegex(whole, r'\+\d+more', (window, columns))
 
+    def test_a_long_route_page_is_whole_at_every_requested_height(self):
+        from dataclasses import replace
+
+        route = dict(ROUTES[0], shape='staged+resource')
+        ident = route['id']
+        stages = [{'n': 's%d' % i, 'st': 'active', 'when': 'now', 'out': 'out.md', 'unit': 'dev/code'}
+                  for i in range(12)]
+        node = {'n': 'leg', 'kind': 'leg', 'st': 'active', 'title': [('code dev', 'head')], 'detail': stages}
+        model = replace(view_model(), routes=(route,), nodes={ident: (node,)})
+        views = [self.popup(model, kind='routes', columns=124, open=ident, page=True, rows=height)
+                 for height in (24, 40, 54)]
+        self.assertGreater(len(views[0]['rows']), 33)
+        for view in views:
+            self.assertTrue(self.text(view['rows'])[-1].startswith('╚═'))
+            self.assertEqual(view['rows'], views[0]['rows'])
+
     def test_short_routes_fit_their_stage_rows(self):
         from dataclasses import replace
 
