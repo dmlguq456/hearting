@@ -152,6 +152,13 @@ class SessionPageZones(unittest.TestCase):
         row = next(i for i, line in enumerate(text) if re.search(r"─ direct ─", line))
         at = text[row].index("direct")
         self.assertEqual(grid.cells[row][at][1], "zone_direct")
+        # 11-27: the rule's line (the `─` before the name, the run after it) is the zone's hue dimmed, the panel's one rule; the
+        # blank between the `─` and the name keeps the rule's old `line` (`dim`), as the blank after the name keeps its own.
+        start = text[row].index("─ direct")
+        line = [col for col in range(start, len(text[row])) if text[row][col] == "─"]
+        self.assertGreater(len(line), 3, text[row])
+        self.assertEqual({grid.cells[row][col][1] for col in line}, {"zoned_direct"}, text[row])
+        self.assertEqual(grid.cells[row][start + 1][:2], (" ", "dim"), text[row])
         for scope in ("ROUTES", "OVERVIEW"):
             rows = draw(vm, NavState(scope=scope) if scope == "ROUTES" else NavState(), 140, 45, beat=1).text_rows()
             self.assertFalse(any(re.search(r"─ (direct|dispatch|request) ─", line) for line in rows), scope)
