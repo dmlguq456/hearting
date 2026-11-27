@@ -202,11 +202,12 @@ from capability_route_compose import (  # noqa: F401
 from capability_route_scope import (  # noqa: F401
     _bind_entry_execution_scope, _CAMPAIGN_ROWS_UNSET, _compose_campaign_line,
     _project_entry_scope_nodes, compose_campaign_hint, COMPOSE_CAMPAIGN_LIST_CAP,
-    compose_campaign_selection, compose_campaign_summaries, compose_card, frame_advice, frame_advice_reason,
+    compose_campaign_default, compose_campaign_selection, compose_campaign_summaries, compose_card,
+    frame_advice, frame_advice_reason,
     compose_decision_lines, compose_default_slug, compose_observations, compose_omission_lines,
     compose_resolve_campaign_key, COMPOSE_SLUG_WORDS, cwd_campaign_keys,
     CWD_CAMPAIGN_KEYS_SHOWN, CWD_CAMPAIGN_SCAN_ROUTES, declared_start_approvals,
-    first_campaign_key, project_entry_execution_scope, route_plan_execution_scope,
+    project_entry_execution_scope, route_plan_execution_scope,
     route_start_approvals, valid_entry_execution_scope_marker,
 )
 from capability_route_verify import (  # noqa: F401
@@ -1034,7 +1035,8 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
                   transport_evidence="compose-default", jobs=None, profile_demands=None, explicit_profiles=None,
                   campaign_key=None, parent_cycle_id=None, profile=None, work_request=None, unassigned=False,
                   selection_pins=None, route_plan=None, frameless=False, execution_scope=None,
-                  extra_stages=None, selection_only=False, capability_source=None, field=None, unit=None):
+                  extra_stages=None, selection_only=False, capability_source=None, field=None, unit=None,
+                  campaign_default=None):
     """Resolve every default, then compile through the ordinary sealer.
 
     `route_plan` (a binding read by `route_plan.read_route_plan`) seals `{decision, digest, index}`
@@ -1131,17 +1133,15 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
         raise ValueError(mismatch)
     cwd = str(Path(cwd).resolve(strict=True))
     artifact_root = str(Path(artifact_root).resolve())
-    # The campaign is the agent's proposal for the work stream (CONVENTIONS
-    # "Campaign or cycle").  A route sealed without one silently landed in the
-    # root's degraded `_unassigned` container (Project-C 2026-09-15: nine
-    # routes, zero keys), so compose demands the proposal, shows the streams
-    # that already exist, and accepts only an explicit opt-out.
     if unassigned and (campaign_key is not None or parent_cycle_id is not None):
         raise ValueError("compose-campaign-selection-conflict:--unassigned excludes --campaign-key and --parent-cycle")
     if campaign_key is None and parent_cycle_id is None and not unassigned:
-        campaign_key = first_campaign_key(artifact_root, cwd)
-        if campaign_key is None:
+        # The CLI picks in the source folder before it prepares an isolated worktree.
+        if campaign_default is None:
+            campaign_default = compose_campaign_default(artifact_root, cwd)
+        if campaign_default.source is None:
             raise ValueError("compose-campaign-key-required:" + compose_campaign_hint(artifact_root, cwd))
+        campaign_key = campaign_default.key
     if tracking is None:
         tracking = "tracked" if shape in ("staged", "framed") or resume_graph else "untracked"
     gate = None if selection_only else {
@@ -1895,7 +1895,11 @@ def main():
                          "frame legs or depth-2 workers and every resume/replacement reuses it. TARGET is owner|frame|worker, "
                          "e.g. --pin owner=opencode:<provider/model>@<effort> --pin worker=opencode. "
                          "Top models are accepted for frame only (owner/worker keep the tool and drop the model with a warning)")
-    cp.add_argument("--campaign-key",help="the work stream this route joins or creates (default: this session's latest campaign in the same artifact root; a folder name or near spelling of one active campaign joins it); `artifact_producer.py campaign-list` shows active keys. Size it as a stream with a one-sentence closing condition — not a project name, not a one-cycle task (join the stream that task serves)")
+    cp.add_argument("--campaign-key", help="the work stream this route joins, creates, or reopens. "
+                    "Defaults check this session's latest route in the same artifact root and the current "
+                    "folder's sole active stream, skipping closed campaigns. A folder name or near spelling "
+                    "can join an active stream. `artifact_producer.py campaign-list` shows active keys. "
+                    "Give the stream a one-sentence closing condition.")
     cp.add_argument("--unassigned",action="store_true",help="explicit opt-out: keep this work in the root's degraded _unassigned container, proposing no stream")
     cp.add_argument("--parent-cycle",help="open or sealed predecessor cycle; causal link, not input approval")
     cp.add_argument("--plan",default=None,help="optional declared capability sequence for this session's route chain, e.g. research,draft,apply; shown in Fleet, not sealed into the route")
@@ -2096,21 +2100,24 @@ def main():
             import unit_ephemeral
             artifact_root=a.artifact_root=str(unit_ephemeral.scratch_root(artifact_root))
             a.unassigned=True
+        campaign_default = None
         if a.campaign_key is None and a.parent_cycle is None and not a.unassigned:
-            a.campaign_key=_session_campaign_key(artifact_root)
-            if a.campaign_key:
-                print(f"campaign_key_default={a.campaign_key} source=this-session-latest-route",file=sys.stderr)
-            else:
-                # A session's first compose joins this folder's one active stream; with several, the
-                # refusal names them first.
-                here=cwd_campaign_keys(artifact_root,cwd)
-                if len(here)==1:
-                    a.campaign_key=here[0]
-                    print(f"campaign_key_default={a.campaign_key} source=this-folder-only-active-stream",file=sys.stderr)
+            campaign_default = compose_campaign_default(artifact_root, cwd, _session_campaign_key(artifact_root))
+            a.campaign_key, source, skipped = campaign_default
+            if source is not None:
+                detail = f" skipped={skipped[0]} reason={skipped[1]}" if skipped else ""
+                print(f"campaign_key_default={a.campaign_key or 'none'} source={source}{detail}", file=sys.stderr)
         elif a.campaign_key is not None:
-            a.campaign_key,given=compose_resolve_campaign_key(artifact_root,a.campaign_key)
+            a.campaign_key, given = compose_resolve_campaign_key(artifact_root, a.campaign_key)
             if given is not None:
-                print(f"campaign_key_resolved={a.campaign_key} given={given}",file=sys.stderr)
+                print(f"campaign_key_resolved={a.campaign_key} given={given}", file=sys.stderr)
+            else:
+                explicit = compose_campaign_selection({"artifact_root": artifact_root, "campaign_key": a.campaign_key})
+                if explicit["mode"] == "reopen":
+                    print(f"campaign_key_default={a.campaign_key} source=explicit action=reopen", file=sys.stderr)
+                elif explicit.get("blocked_reason") == "campaign-not-active":
+                    print(f"campaign_key_default={a.campaign_key} source=explicit action=blocked "
+                          "reason=campaign-not-active", file=sys.stderr)
         slug_named = a.slug is not None
         route_plan_binding = None
         if a.route_plan:
@@ -2200,6 +2207,7 @@ def main():
             capability_mode=a.capability_mode,shape=shape,graph=a.graph,
             slug=a.slug,cwd=cwd,artifact_root=artifact_root,intensity=a.intensity,signals=a.signal,
             campaign_key=a.campaign_key,parent_cycle_id=a.parent_cycle,unassigned=a.unassigned,
+            campaign_default=campaign_default,
             spec_read=a.spec_read,drift_verdict=a.drift_verdict,tracking=a.tracking,
             artifact_guard=a.artifact_guard,
             children=[c.strip() for c in a.children.split(",") if c.strip()] if a.children else None,
