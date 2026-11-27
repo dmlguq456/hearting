@@ -753,14 +753,15 @@ assert.equal(idleRoute.rows.find(r=>/editing host/.test(r.map(p=>p.text).join(''
 const area=v1.hits.filter(h=>h.action==='popup:ROUTE:w').map(h=>h.row),routeRows=v1.rows.map((r,i)=>/^│ │ /.test(r.map(p=>p.text).join(''))&&!/^│ │ ─ dispatch ─+ │ │$/.test(r.map(p=>p.text).join(''))?i:-1).filter(i=>i>=0);// (11-17: the zone rule `─ dispatch ───` opens nothing)
 assert.equal(routeRows.length,9,JSON.stringify(routeRows));
 for(const i of routeRows)assert(area.includes(i),i+' '+JSON.stringify(area));
-// Two workers still share the stage box and show their own time in NOW.
+// Two workers still share the stage box and show their own time in NOW. (11-27, review of #1885: where the time leaves the
+// value's last row no room, that row's last word goes on beside the time, so the value stays whole on its two rows.)
 b=box(draw([two],40,60));const top=b.findIndex(s=>/^│ │   │ ⠋ worker .*34% │ │ │$/.test(s));
-assert(top>0&&/^│ │   │   running the codex r… +12m │ │ │$/.test(b[top+1])&&/^│ │   │ ● worker .*71% │ │ │$/.test(b[top+2])
- &&/^│ │   │   waiting for the owner +8m │ │ │$/.test(b[top+3])&&/^│ │   └─+┘ │ │$/.test(b[top+4])&&b[top+5].startsWith('│ ╰'),b.join('\n'));
+assert(top>0&&/^│ │   │   running the codex +│ │ │$/.test(b[top+1])&&/^│ │   │   review +12m │ │ │$/.test(b[top+2])&&/^│ │   │ ● worker .*71% │ │ │$/.test(b[top+3])
+ &&/^│ │   │   waiting for the owner +8m │ │ │$/.test(b[top+4])&&/^│ │   └─+┘ │ │$/.test(b[top+5])&&b[top+6].startsWith('│ ╰'),b.join('\n'));
 // A worker's NOW is dim when the worker is not working (its own kind), bright while it works.
 const v2=view.render({width:40,height:60,side:true,model:{...head,routes:[two],route_count:1},configuration:{},questions:()=>[]});
 const nowOf=(re,word)=>v2.rows.find(r=>re.test(r.map(p=>p.text).join(''))).find(p=>p.text===word);
-assert.equal(nowOf(/running the codex r…/,'running').dim,false);assert.equal(nowOf(/waiting for the owner/,'waiting').dim,true);
+assert.equal(nowOf(/running the codex/,'running').dim,false);assert.equal(nowOf(/waiting for the owner/,'waiting').dim,true);
 // No role recorded anywhere: no role column, one space before the model.
 b=box(draw([{...solo,role:undefined}],40,60));
 assert(b.some(s=>s.includes('│ │   ⠋ claude Opus 5.5 xhigh'))&&b.some(s=>/^│ │     CTX ━━━─+ 38% +│ │$/.test(s))&&b.some(s=>/^│ │     editing host\.cjs +│ │$/.test(s)),b.join('\n'));

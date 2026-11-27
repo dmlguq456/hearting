@@ -162,6 +162,59 @@ class RouteContextTest(unittest.TestCase):
 
 
 
+def time_workers(now):
+    return [worker("codex", "gpt-6.2-sol", "high", 63, now, 12), worker("opencode", "Atlas-Preview-XL", "", 82, "Check margins", 8)]
+
+
+class WorkerTimeTest(unittest.TestCase):
+    """11-27, review of #1885: a worker's time ends its last NOW row without cutting a value that fits in two rows."""
+
+    @staticmethod
+    def now_rows(panel, now):
+        # The first worker's NOW rows: the rows under its who row up to the next worker's.
+        rows = route_rows(panel) if any("╭─ 1 ROUTE" in line for line in panel) else []
+        at = next((i for i, line in enumerate(rows) if "gpt-6.2-sol" in line), None)
+        if at is None:
+            return []    # (the worker's rows have gone at this height)
+        out = []
+        for line in rows[at + 1:]:
+            if re.search(r"\bworker\b|[└╰]", line):
+                break
+            out.append(re.sub(r"^[│ ]+|[│ ]+$", "", line))
+        return out
+
+    def test_the_time_fits_one_row_or_takes_the_last_word_to_a_second(self):
+        scenes = [{"width": w, "height": 64, "model": model_for(w, time_workers(now))}
+                  for w, now in ((44, "Read labels"), (44, "Check every sample margin"), (50, "Check every sample margin"))]
+        one, two, wide = (self.now_rows(panel, None) for panel in render_panels(scenes))
+        self.assertRegex(" / ".join(one), r"^Read labels +12m$")
+        # The value and the time do not fit one row of the closed box at 44: the last word goes on, the value stays whole.
+        self.assertEqual(len(two), 2, two)
+        self.assertEqual(two[0], "Check every sample")
+        self.assertRegex(two[1], r"^margin +12m$")
+        self.assertRegex(" / ".join(wide), r"^Check every sample margin +12m$")
+
+    def test_short_of_rows_the_one_row_is_cut_before_the_time(self):
+        heights, kinds = range(16, 65), set()
+        scenes = [{"width": w, "height": h, "model": model_for(w, time_workers("Check every sample margin and its labels"))}
+                  for w in (36, 44) for h in heights]
+        for scene, panel in zip(scenes, render_panels(scenes)):
+            rows = self.now_rows(panel, None)
+            with self.subTest(width=scene["width"], height=scene["height"]):
+                if not rows or not rows[0].startswith("Check"):
+                    continue    # (the NOW rows have gone at this height)
+                self.assertRegex(rows[-1], r" 12m$", rows)
+                if len(rows) == 1 and "…" in rows[0]:
+                    kinds.add("cut")
+                    self.assertRegex(rows[0], r"^Check every \S.*… +12m$")
+                else:
+                    kinds.add("whole" if "labels" in " ".join(rows) else "two-cut")
+                    self.assertLessEqual(len(rows), 2, rows)
+                self.assertTrue(all(cell_width(line) == scene["width"] for line in panel))
+        self.assertIn("cut", kinds)
+        self.assertTrue(kinds & {"whole", "two-cut"}, kinds)
+
+
 def session_rows(panel):
     # The SESSION group's rows: from the rule over MODEL to the first box (QUESTIONS or ROUTE).
     start = next(i for i, line in enumerate(panel) if re.fullmatch(r"│ ─+ │", line))

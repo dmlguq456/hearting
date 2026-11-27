@@ -1505,10 +1505,18 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const nowRows=(p,kind,gap,most=2,elapsed='')=>{
       const value=clean(p?.now||'').replace(/\s+/g,' ').trim();
       if(!value)return [];
-      const room=Math.max(1,inner-gap),body=[text(value,kind==='working'||kind==='blocked'?'loc_repo':'dim')];
+      const key=kind==='working'||kind==='blocked'?'loc_repo':'dim',room=Math.max(1,inner-gap),body=[text(value,key)];
       const stampWidth=measure(elapsed),showTime=stampWidth>0&&room>stampWidth+1;
       const lastRoom=showTime?room-stampWidth-1:room;
-      const rows=wrapAll(body,room),shown=rows.slice(0,most),last=shown.length-1;
+      const rows=wrapAll(body,room);
+      // A worker's time ends the last NOW row: where the value's last row leaves it no room and another row is allowed, that
+      // row's last word goes to the next row, beside the time, so the value stays whole within `most` rows; only past them,
+      // or where one row is allowed, is the end cut with `…` (11-27, review of #1885).
+      if(showTime&&rows.length<most&&size(rows.at(-1))>lastRoom){
+        const words=rows.at(-1).map(x=>clean(x.text)).join('').trim().split(' ');
+        if(words.length>1&&measure(words.at(-1))<=lastRoom)rows.splice(-1,1,...[words.slice(0,-1).join(' '),words.at(-1)].map(w=>wrapAll([text(w,key)],room)[0]));
+      }
+      const shown=rows.slice(0,most),last=shown.length-1;
       if(rows.length>most||size(shown[last])>lastRoom)shown[last]=ellipsis(shown[last],lastRoom);
       if(showTime)shown[last].push(pad(room-size(shown[last])-stampWidth),text(elapsed,'dim'));
       return shown.map(row=>[text(' '.repeat(gap)),...row]);
