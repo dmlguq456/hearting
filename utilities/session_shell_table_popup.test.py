@@ -232,6 +232,29 @@ class TablePopupTest(unittest.TestCase):
         frame = [row for row in self.text(view['rows']) if row.startswith('║')]
         self.assertEqual([row.count('▶') for row in frame if '▶' in row], [2])
 
+    def test_fitted_frame_keeps_a_loop_return_on_the_panel_rail(self):
+        from dataclasses import replace
+        from fleet.palette import style_components
+
+        route = dict(ROUTES[0], shape='staged')
+        ident = route['id']
+        stages = [{'n': name, 'st': 'done'} for name in ('plan', 'execute', 'check')]
+        node = {'n': 'leg', 'kind': 'leg', 'st': 'active', 'detail': stages,
+                'loops': [(2, 0, '↺ 1 · check → plan')]}
+        model = replace(view_model(), routes=(route,), nodes={ident: (node,)})
+        view = self.popup(model, kind='routes', columns=124, open=ident, page=True)
+        rows = self.text(view['rows'])
+        first = next(i for i, row in enumerate(rows) if row.startswith('║ ┌▶'))
+        last = next(i for i, row in enumerate(rows) if row.startswith('║ └─'))
+        expected = [('┌', style_components(('y', 0, 1)))]
+        expected += [('│', expected[0][1])] * (last - first - 1)
+        expected += [('└', expected[0][1])]
+        rail = []
+        for row in view['rows'][first:last + 1]:
+            cells = [(char, view['styles'][style]) for text, style in row for char in text]
+            rail.append(cells[2])
+        self.assertEqual(rail, expected)
+
     def test_route_raw_strip_requires_drawable_rows_and_fits_short_text(self):
         from dataclasses import replace
 

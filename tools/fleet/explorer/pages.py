@@ -1161,10 +1161,11 @@ def _route_frame_edges(grid, x, right, y, bottom, frame_key):
         grid.put(xx, yy, glyph, frame_key)
 
 
-def _route_panel_edges(grid, left, right, y, bottom, style, frame_key):
-    for yy in range(y + 1, bottom):
-        grid.put(left, yy, "│", style)
-        grid.put(right, yy, "│", style)
+def _route_panel_edges(grid, left, right, y, bottom, style, frame_key, *, keep_content=False):
+    for yy in range(y + 1, min(bottom, grid.rows)):
+        for xx in (left, right):
+            if not keep_content or (0 <= xx < grid.cols and grid.cells[yy][xx][0] == " "):
+                grid.put(xx, yy, "│", style)
     grid.put(left, bottom, "╧", frame_key)
     grid.put(right, bottom, "╧", frame_key)
 
@@ -1327,7 +1328,8 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None, *, fi
             end += raw_rows + 3
         bottom = end
         _route_frame_edges(grid, x, right, y, bottom, frame_key)
-        _route_panel_edges(grid, panel_left, panel_right, panel_y, bottom, style, frame_key)
+        # Return arrows can share the side rail. The fitted frame is drawn last.
+        _route_panel_edges(grid, panel_left, panel_right, panel_y, bottom, style, frame_key, keep_content=True)
     grid.mark_moved()
     return bottom + 1
 
