@@ -182,11 +182,14 @@ class KindCell(unittest.TestCase):
                                      color_pair=mock.Mock(side_effect=lambda n: n << 8)):
                 render._init_colors()
             for number, (name, hue) in enumerate(palette._ZONE_256.items()):
+                rule = "zoned_" + name[len("zone_"):]          # 11-27: the zone rule's line, the same pair dimmed
                 if colors == 256:
                     self.assertEqual(final[render._ZONE_PAIR_START + number], (hue, -1), name)
                     self.assertEqual(render._key_attr(name), (render._ZONE_PAIR_START + number) << 8, name)   # no tint: the key's own pair
+                    self.assertEqual(render._key_attr(rule), (render._ZONE_PAIR_START + number) << 8 | 1 << 21, rule)
                 else:
                     self.assertEqual(render._COLOR.get(name, 0), 0, name)                                       # as before: no hue
+                    self.assertEqual(render._key_attr(rule), 1 << 21, rule)                                     # the dim line it was
 
 
 def session(tag, harness="claude", **values):

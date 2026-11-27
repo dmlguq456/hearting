@@ -533,12 +533,15 @@ def _init_colors():
             _COLOR["kindb_" + field] = hue | curses.A_BOLD
     # 11-18 (review of #1715, follow-up 4): the three zone names (the route box's `─ direct ─`, and the request line's `→`) wear their
     # hue where no row tint stands too: `_key_attr` reads these only without a tint (a tinted cell composes its own pair).
+    # 11-27: a zone rule's line (`zoned_<zone>`) is the same pair dimmed; under 256 colors it is the dim line it was.
     for number, zone in enumerate(_ZONE_256):
+        _COLOR["zoned_" + zone[len("zone_"):]] = curses.A_DIM
         try:
             if curses.COLORS < 256:
                 raise ValueError
             curses.init_pair(_ZONE_PAIR_START + number, _ZONE_256[zone], bg)
             _COLOR[zone] = curses.color_pair(_ZONE_PAIR_START + number)
+            _COLOR["zoned_" + zone[len("zone_"):]] = _COLOR[zone] | curses.A_DIM
         except Exception:
             pass   # (under 256 colors the zone name keeps its plain weight, as before)
 

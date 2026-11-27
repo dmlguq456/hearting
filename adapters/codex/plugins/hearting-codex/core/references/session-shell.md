@@ -559,10 +559,13 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   color: direct orange (208), dispatch violet, request aqua, none a harness color (the harnesses' own are Claude's softer clay orange 173, 13 apart
   by CIEDE2000, its light-face pair 166; Codex's lavender 147, light-face pair 25, the Sonnet family's own step on purpose; OpenCode's pale sky 153, light-face pair 31), a status color of the box (working green,
   idle yellow, failure coral, the spinner's vanilla) or the steward pink (an 8-color terminal has none left over: the zones read in
-  the default color and the white there). A
+  the default color and the white there). 11-27 (the person: "dispatch랑 request 구분줄에 은은하게 동일 컬러로 해주라"): a
+  rule's line (the `─ ` before the name and the run after it) is its zone's color one step down (dim), the name the lit color,
+  so the zones' rules no longer read as one gray line; where no hue is shown (mono, `NO_COLOR`, fewer than 256 colors) it is
+  the dim line it was. Only the color: the words, cells and rows are the same. A
   zone with no rows has no rule, no rows at all is the empty box; a route a request opened stands in
   direct or dispatch like any other. Fleet's session page lists its routes in the same zones and order
-  (` ─ direct ─`, ` ─ dispatch ─`, ` ─ request ─`; its section head counts routes alone), has the PEERS
+  (` ─ direct ─`, ` ─ dispatch ─`, ` ─ request ─`, each line in its zone's color dimmed; its section head counts routes alone), has the PEERS
   line directly under its title row, before MODEL (the numbers of other sessions open that session's page;
   the panel's are plain text), keeps its older bottom row (`PEERS  [e4] · [a3]   PEERS tab ›`: the sessions a link joins to
   this one, messages too, and the way to their tab) whole where the window has no supervision and, where it has, leaves off the
