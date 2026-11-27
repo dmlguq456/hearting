@@ -81,7 +81,7 @@ from ..model import (DONE_AFTERGLOW_MIN, ContextEvidence, DispatchJob,
 from ..token_budget import (context_policy_snapshot, context_policy_used_pct,
                             opencode_context_tokens, parse_codex_token_count,
                             telemetry_from_explicit)
-from . import procscan
+from . import procscan, project_status
 from . import parse_cache
 from . import shell_jobs
 
@@ -4016,8 +4016,8 @@ def _find_plan_dir(jcwd, slug, key=None, capability=None, worker_role=None,
 
     bases = bases_for(artifact_root) if artifact_root else []
     if not bases:
-        ar = ".agent_reports" if os.path.isdir(os.path.join(jcwd, ".agent_reports")) else ".claude_reports"
-        bases = bases_for(os.path.join(jcwd, ar))
+        root = project_status.artifact_root(jcwd)
+        bases = bases_for(root) if root else []
     cand = sorted((d for base in bases for d in children(base)
                    if os.path.basename(d).endswith("_" + slug)), key=os.path.basename)
     if not cand:

@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from artifact_root_selection import select_artifact_root
 from claude_project_dir import encode_project_dir_component
 import protocol_v2
 import sync_v2
@@ -94,14 +95,8 @@ DOCTOR_WORKING_BLOAT_CEILING = 150
 
 
 def artifact_root(cwd: Path) -> Path:
-    """Return the project artifact root, preferring the neutral name."""
-    agent = cwd / ".agent_reports"
-    if agent.exists():
-        return agent
-    legacy = cwd / ".claude_reports"
-    if legacy.exists():
-        return legacy
-    return agent
+    """Choose the report directory alongside the supplied project path."""
+    return select_artifact_root(cwd)
 
 
 # Auto-commit prefix distinguishes synchronized dumps from manual commits.
