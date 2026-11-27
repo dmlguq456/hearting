@@ -1081,6 +1081,7 @@ def _prompt_carrier_note(ref, target, outcome):
 _CLEAR_EXIT = {"true": 0, "skipped": 3, "queued": 3, "failed": 1, "unverified": 5}
 _CLEAR_LEDGER_STATUS = {"true": "sent", "failed": "failed", "skipped": "unknown", "queued": "unknown", "unverified": "unknown"}
 _RULE_LINE = re.compile(r"^[\s\u2500-\u257f]*\u2500{8,}[\s\u2500-\u257f]*$")
+_BOX_EDGE = re.compile(r"^\u2500{8,}[\s\u2500-\u257f]*$")     # a rule from the left edge, never a draft row
 _OPENCODE_HOME_PLACEHOLDER = "askanything"
 
 
@@ -1110,6 +1111,16 @@ def _draft_state(harness, lines):
         body, bright = _marker_remainder(lines[idx], "\u276f")
         if bright:
             return "nonempty"
+        # Claude opens its box under a rule at the left edge, and draws every further draft row
+        # indented. A marker row with no such rule right above it may be a draft's own row that the
+        # person began with the marker: another marker row above it, before that rule, leaves the
+        # box's first row undecided, so the box is read as holding a draft (review 1127).
+        if not (idx and _BOX_EDGE.match(_plain(lines[idx - 1]))):
+            for cells in reversed(lines[:idx]):
+                if _BOX_EDGE.match(_plain(cells)):
+                    break
+                if _marker_remainder(cells, "\u276f") is not None:
+                    return "nonempty"
         for cells in lines[idx + 1:]:
             if _RULE_LINE.match(_plain(cells)):
                 return "empty"          # the faint remainder, if any, is Claude's own suggestion
@@ -1127,7 +1138,15 @@ def _draft_state(harness, lines):
         below = lines[idx + 1] if idx + 1 < len(lines) else []
         return "empty" if not _plain(below).strip() else "unknown"
     if harness == "opencode":
-        block, _top = _opencode_box(lines)
+        block, end = [], None
+        for i in range(len(lines) - 1, -1, -1):
+            text = _plain(lines[i]).lstrip()
+            if text.startswith("\u2503"):
+                if end is None:
+                    end = i
+                block.insert(0, text[1:])
+            elif end is not None:
+                break
         if len(block) < 2:
             return "unknown"
         # The last bar line is the agent/model line. Typed text starts right after the bar's
@@ -1139,20 +1158,6 @@ def _draft_state(harness, lines):
             return "empty"
         return "nonempty"
     return "unknown"
-
-
-def _opencode_box(lines):
-    """OpenCode's input box: the screen's last run of rows that start with its bar, as the bodies after
-    the bar, and the index of its first row (None without one)."""
-    block, top = [], None
-    for i in range(len(lines) - 1, -1, -1):
-        text = _plain(lines[i]).lstrip()
-        if text.startswith("┃"):
-            block.insert(0, text[1:])
-            top = i
-        elif top is not None:
-            break
-    return block, top
 
 
 def _opencode_left_text(body):
@@ -1174,31 +1179,6 @@ def _screen_ready(harness, lines):
     if draft != "empty":
         return "draft-unknown"
     return None
-
-
-def _screen_cut_reads_same(harness, head, bottom):
-    """True when :func:`_screen_ready` reads ``head + bottom`` as it reads the whole screen they were cut from.
-
-    A screen too large to carry whole keeps its rows from the top through its first one with text
-    (``head``) and the bottom rows that fit (``bottom``); the rows between were left off. Every reading
-    of ``_screen_ready`` starts at the bottom but one: the last 15 non-blank rows (``_blocking_screen``'s
-    window), the input box from its marker row down (Claude ``❯``, Codex ``›``) or OpenCode's run of bar
-    rows with the row above it (``_draft_state``). The other is Codex's hook review, which owns the top
-    and is read from the screen's first non-blank row: a cut Codex screen is read only when that row is
-    known and is not the review's. When the bottom holds all of these, no row left off is read; a form
-    those last rows show is read so whatever the box shows, as ``_screen_ready`` reads it first."""
-    if harness not in ("claude", "codex", "opencode") or sum(1 for cells in bottom if _plain(cells).strip()) < 15:
-        return False
-    if harness == "codex":
-        first = next((_plain(cells) for cells in head if _plain(cells).strip()), None)
-        if first is None or "hooksneedreview" in "".join(first.split()).lower():
-            return False
-    if _blocking_screen(harness, head + bottom):
-        return True
-    if harness == "opencode":
-        return bool(_opencode_box(bottom)[1])     # not without a box, or one that may go on above the cut
-    marker = "\u276f" if harness == "claude" else "\u203a"
-    return any(_marker_remainder(cells, marker) is not None for cells in bottom)
 
 
 def _codex_rollout_exists(thread_id):

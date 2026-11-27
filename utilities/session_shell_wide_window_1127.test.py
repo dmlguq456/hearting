@@ -7,6 +7,10 @@ hold ``unobserved`` ("its rest is not confirmed"). A 121 x 537 window's empty sc
 sends each row up to its last non-blank cell and, for a screen still too large, its top rows
 through the first with text and the bottom rows that fit; the reader judges that only when the
 judgment reads the same on it as on the whole screen, and otherwise says ``screen-large``.
+Review 1127 (fix 1): a screen is never cut. It is carried whole, each row up to its last non-blank
+cell, in a line of up to 1 MiB for the screen requests alone; past that it is ``screen-large`` and
+nothing is typed. Text the person typed since the last Enter keeps a message waiting whatever the
+screen reads, and a Claude marker row under another one before the box's top rule is a draft.
 
 Two parts: the judgment over every cut a host can make of synthetic screens (no process), and a
 real host in a private PTY with the synthetic native of ``fixtures.session_shell_rig`` at five
@@ -20,20 +24,21 @@ import contextlib
 import json
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 from fixtures.session_shell_rig import (  # noqa: E402
     ROOT, SID, AnswerReachesIdleShellTest, ShellRig, _peer_module)
 
+sys.path.insert(1, str(ROOT / "tools"))
 import peer_steward_duties as duties  # noqa: E402
 import session_shell  # noqa: E402
 
 ENTRY = ROOT / "utilities/session-shell/entry.py"
 # The native sizes of the windows seen held (rows, columns); the side panel takes PANEL more columns.
-SIZES = ((60, 240), (121, 267), (121, 507), (121, 537), (200, 600))
+SIZES = ((60, 240), (121, 267), (121, 507), (121, 537), (200, 600), (300, 800))
 PANEL = 42
-# host.cjs SCREEN_BYTES: the most a carried screen takes.
-SCREEN_BYTES = 48 * 1024
+SCREEN_BYTES = session_shell.MAX_SCREEN_BYTES
 
 
 # ---- synthetic screens: rows of (char, faint) cells, padded to the width as the old host sent them ----
@@ -148,95 +153,141 @@ def trimmed(lines):
     return out
 
 
-def cut(lines, bottom, keep_head=True):
-    """Rows through the first with text (unless dropped), nulls, then rows from ``bottom`` on."""
-    head = next((i for i, cells in enumerate(lines) if cells), -1) + 1 if keep_head else 0
-    if bottom <= head:
-        return wire(lines)
-    return [runs if (y < head or y >= bottom) else None for y, runs in enumerate(wire(lines))]
-
-
-class CutScreensReadAsWholeScreensTest(unittest.TestCase):
-    """The judgment over every screen a host can carry reads as over the whole screen, or says it cannot."""
+class WholeScreensTest(unittest.TestCase):
+    """What the host carries reads as the whole screen; nothing else is read."""
 
     def test_row_ends_carry_nothing_the_judgment_reads(self):
         for harness in ("claude", "codex", "opencode"):
-            for rows, cols in SIZES:
+            for rows, cols in SIZES[:5]:
                 for name, lines in screens(harness, rows, cols):
                     with self.subTest(harness=harness, size=(rows, cols), screen=name):
-                        whole = duties._screen_ready(harness, lines)
-                        got, why = session_shell.screen_lines(harness, wire(trimmed(lines)))
+                        got, why = session_shell.screen_lines(wire(trimmed(lines)))
                         self.assertEqual(why, "")
-                        self.assertEqual(duties._screen_ready(harness, got), whole)
+                        self.assertEqual(duties._screen_ready(harness, got), duties._screen_ready(harness, lines))
 
-    def test_every_cut_reads_as_the_whole_screen_or_is_screen_large(self):
-        judged = refused = 0
-        for harness in ("claude", "codex", "opencode"):
-            for (rows, cols), step in (((30, 100), 1), ((121, 537), 9)):
-                for name, lines in screens(harness, rows, cols):
-                    whole = duties._screen_ready(harness, lines)
-                    short = trimmed(lines)
-                    for keep_head in (True, False):
-                        for bottom in range(1, len(short), step):
-                            got, why = session_shell.screen_lines(harness, cut(short, bottom, keep_head))
-                            if got is None:
-                                self.assertEqual(why, "screen-large", (harness, name, bottom))
-                                refused += 1
-                                continue
-                            judged += 1
-                            self.assertEqual(duties._screen_ready(harness, got), whole,
-                                             (harness, (rows, cols), name, bottom, keep_head))
-        # Both answers happen: a cut is judged when it can be, not refused wholesale.
-        self.assertGreater(judged, 1000)
-        self.assertGreater(refused, 1000)
-
-    def test_a_cut_that_keeps_the_box_and_fifteen_rows_is_judged_in_each_harness(self):
-        for harness in ("claude", "codex", "opencode"):
-            for state in ("empty", "draft", "draft-hangul"):
-                with self.subTest(harness=harness, state=state):
-                    box = bottoms(harness, 537)[state]
-                    lines = trimmed(transcript(121 - len(box), 537, "dense") + box)
-                    got, why = session_shell.screen_lines(harness, cut(lines, 121 - len(box) - 20))
-                    self.assertEqual(why, "")
-                    self.assertEqual(duties._screen_ready(harness, got), duties._screen_ready(harness, lines))
-        self.assertIsNone(duties._screen_ready("claude", trimmed(transcript(100, 537, "dense") + bottoms("claude", 537)["suggestion"])))
-
-    def test_a_form_in_the_last_rows_of_a_cut_reads_as_a_form_in_each_harness(self):
-        for harness, state in (("claude", "menu"), ("codex", "location"), ("opencode", "form"), ("opencode", "dialog")):
-            with self.subTest(harness=harness, state=state):
-                box = bottoms(harness, 537)[state]
-                lines = trimmed(transcript(121 - len(box), 537, "dense") + box)
-                got, why = session_shell.screen_lines(harness, cut(lines, 121 - len(box) - 20))
-                self.assertEqual((why, duties._screen_ready(harness, got)), ("", "form-open"))
-                self.assertEqual(duties._screen_ready(harness, lines), "form-open")
-
-    def test_what_a_cut_cannot_show_is_screen_large_never_ready(self):
-        cases = []
-        # OpenCode's box goes on above the cut: its only text is in a row left off.
-        tall = trimmed(transcript(40, 300, "dense") + bottoms("opencode", 300)["tall-draft"])
-        cases.append(("opencode", tall, len(tall) - 30))
-        # Claude's marker row is above the cut (a second draft line under it is all that came).
-        lines = trimmed(transcript(80, 300, "dense") + [row("❯ draft", 300)] + [row("  more of it", 300)] * 30
-                        + [row("─" * 80, 300)])
-        cases.append(("claude", lines, len(lines) - 20))
-        # Codex's hook review heads the screen; its confirm line is in a row left off.
-        review = [row("Hooks need review", 300), row("2 hooks are new or changed.", 300), row("\u203a 1. Review hooks", 300),
-                  row("  2. Trust all and continue", 300), row("  3. Continue without trusting", 300)]
-        lines = trimmed(review + transcript(20, 300, "dense") + [row("Press enter to confirm", 300)]
-                        + transcript(90, 300, "dense") + bottoms("codex", 300)["empty"])
-        cases.append(("codex", lines, len(lines) - 40))
-        for harness, lines, bottom in cases:
-            with self.subTest(harness=harness):
-                self.assertNotEqual(duties._screen_ready(harness, lines), None)
-                self.assertEqual(session_shell.screen_lines(harness, cut(lines, bottom)), (None, "screen-large"))
-
-    def test_a_malformed_carry_is_unavailable(self):
+    def test_a_carry_with_rows_left_off_is_unavailable(self):
         lines = wire(trimmed(transcript(30, 80, "dense") + bottoms("claude", 80)["empty"]))
-        for screen in ("x", [None, [["a", False]], None, [["b", False]], None], [["a"]], [[["a", 1]]], {"rows": []}):
-            with self.subTest(screen=screen):
-                self.assertEqual(session_shell.screen_lines("claude", screen), (None, "screen-unavailable"))
-        broken = [runs if y not in (3, 9) else None for y, runs in enumerate(lines)]
-        self.assertEqual(session_shell.screen_lines("claude", broken), (None, "screen-unavailable"))
+        for screen in ("x", [None] + lines, lines[:3] + [None] + lines[4:], [["a"]], [[["a", 1]]], {"rows": []}):
+            with self.subTest(screen=str(screen)[:40]):
+                self.assertEqual(session_shell.screen_lines(screen), (None, "screen-unavailable"))
+
+    def test_the_screen_limit_is_one_number_on_both_sides(self):
+        source = (ROOT / "utilities/session-shell/host.cjs").read_text()
+        self.assertIn("const SCREEN_BYTES=1024*1024;", source)
+        self.assertIn("SCREEN_OPS=new Set(['readiness','payload']),limit=SCREEN_OPS.has(op)?1024*1024:65536;", source)
+        self.assertEqual(session_shell.MAX_SCREEN_BYTES, 1024 * 1024)
+        self.assertEqual(session_shell.SCREEN_REQUESTS, {"readiness", "payload"})
+
+
+class HostCarryTest(unittest.TestCase):
+    """host.cjs's own code for what a request carries, on a synthetic terminal (no process)."""
+
+    def node(self, code):
+        import subprocess
+        done = subprocess.run(["node", "-e", code, str(ROOT / "utilities/session-shell/host.cjs")],
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_a_screen_request_past_the_limit_is_refused_as_screen_large_and_never_sent(self):
+        # Review 1127 🔴3/🔴7: the whole frame is counted once; past it nothing is read (ok:false), so no
+        # caller takes it as an answer about the screen (a form gone, an empty box).
+        self.node(r"""
+const fs=require('fs'),a=require('node:assert/strict');
+const src=fs.readFileSync(process.argv[1],'utf8'),s=src.slice(src.indexOf('function source('),src.indexOf('function readAction('));
+const written=[];
+const f=new Function('Buffer','setTimeout','clearTimeout',`let callID=0;const calls=new Map(),sid='s',harness='claude';
+  const backend={exitCode:null,stdin:{write:frame=>written.push(frame)}};function binding(){return {harness};}
+  function readAction(){}function projectionMissed(){}function projectionAnswered(){}
+  ${s};return source;`);
+const source=f(Buffer,()=>0,()=>{});
+(async()=>{
+  source('readiness',{screen:[[['x'.repeat(900*1024),false]]]});a.equal(written.length,1,'under 1 MiB goes');
+  a.deepEqual(await source('readiness',{screen:[[['x'.repeat(1024*1024),false]]]}),{ok:false,reason:'screen-large'});
+  a.deepEqual(await source('payload',{screen:[[['x'.repeat(1024*1024),false]]]}),{ok:false,reason:'screen-large'});
+  a.deepEqual(await source('projection',{x:'y'.repeat(70000)}),{ok:false,reason:'source-request-too-large'});
+  a.equal(written.length,1,'nothing past its limit is written');
+})().catch(e=>{console.error(e);process.exitCode=1;});
+""")
+
+    def test_the_codex_model_reading_carries_the_short_evidence_or_asks_nothing(self):
+        # Review 1127 🔴7: the footer reading asks with the native selection's own short evidence; a
+        # screen with no composer mark, or a long draft under it, asks nothing.
+        self.node(r"""
+const fs=require('fs'),a=require('node:assert/strict');
+const src=fs.readFileSync(process.argv[1],'utf8');
+const piece=(from,to)=>src.slice(src.indexOf(from),src.indexOf(to,src.indexOf(from)));
+const code=piece('function nativeSelectionFrame()','let checkingNativeSelection=')+piece('function displayModelKey(','let paintedCursor=');
+const uuid='01a1c650-6f32-7880-bb70-815b30d8bd06';
+const run=rows=>{const asked=[];const terminal={rows:rows.length,buffer:{active:{viewportY:0,getLine:y=>({translateToString:()=>rows[y]})}}};
+  new Function('terminal','asked',`let harness='codex',modelReading=false,native={start:'1'},nativeSelected={},modelReadKey='',selection=0,
+    screenRevision=0,epoch=0,relay=false;function source(op,x){asked.push(JSON.stringify(x).length);return {then:()=>({finally:()=>{}})};}
+    ${code};observeSelectedModel(Array.from({length:terminal.rows},(_,i)=>terminal.buffer.active.getLine(i).translateToString(true)));`)(terminal,asked);
+  return asked;};
+const footer=[uuid+' · Context 12% used','? for shortcuts'];
+a.equal(run(['x'.repeat(800),'› ','',...footer]).length,1,'a composer and its footer: asked');
+a.ok(run(['x'.repeat(800),'› ','',...footer])[0]<400,'with the short evidence only');
+a.deepEqual(run(['› '+'x'.repeat(790),...Array(95).fill('  '+'y'.repeat(790)),'',...footer]),[],'a long draft under the mark');
+a.deepEqual(run([...Array(100).fill('z'.repeat(800)),...footer]),[],'no composer mark');
+""")
+
+
+class ClaudeBoxStartTest(unittest.TestCase):
+    """Review 1127 🔴1: a draft row the person began with ``❯`` is no empty box."""
+    COLS = 120
+
+    def box(self, rows, top=True):
+        rule = row("─" * self.COLS, self.COLS)
+        return ([row("❯ an earlier prompt", self.COLS), row("", self.COLS)] + ([rule] if top else [])
+                + [row(text, self.COLS) for text in rows] + [rule, row("  ? for shortcuts", self.COLS, faint=True)])
+
+    def test_drafts_whose_last_row_starts_with_the_marker_read_as_drafts(self):
+        drafts = {
+            "hangul": ["❯ 한글 초안", "  둘째 줄", "  ❯"],
+            "flush": ["❯ first", "❯"],
+            "spaces-after": ["❯ first", "  ❯   "],
+            "blank-row-between": ["❯ first", "  ", "  ❯"],
+            "typed-rule": ["❯ first", "  " + "─" * 12, "  ❯"],
+        }
+        for top in (True, False):
+            for name, draft in drafts.items():
+                with self.subTest(draft=name, top_rule=top):
+                    lines = trimmed(self.box(draft, top))
+                    self.assertEqual(duties._screen_ready("claude", lines), "draft")
+
+    def test_the_box_under_its_top_rule_reads_as_before(self):
+        cases = {"empty": (["❯ "], None), "draft": (["❯ half typed"], "draft"),
+                 "second-line": (["❯ ", "  second line"], "draft")}
+        for name, (draft, want) in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(duties._screen_ready("claude", trimmed(self.box(draft))), want)
+        suggestion = self.box(["❯ "])
+        suggestion[3] = row("❯ ", self.COLS)[:2] + row("try a dim suggestion", self.COLS - 2, faint=True)
+        self.assertIsNone(duties._screen_ready("claude", trimmed(suggestion)))
+        # A box with no top rule (an older layout) and one marker row reads as it did.
+        self.assertIsNone(duties._screen_ready("claude", trimmed(self.box(["❯ "], top=False)[2:])))
+
+
+class SentLineTest(unittest.TestCase):
+    def test_the_panel_and_fleet_say_why_a_sent_answer_waits_on_a_large_screen(self):
+        from fleet.session_block import sent_answer_line
+        from fleet.config import ui_text
+        words = ui_text("peer.delivery.hold_screen_large")
+        self.assertIn(words, "".join(text for text, _style in sent_answer_line(["A"], wait="screen-large")))
+        self.assertIn(ui_text("peer.delivery.hold_old_shell_large"),
+                      "".join(text for text, _style in sent_answer_line(["A"], wait="old-shell-large")))
+        code = r"""
+const assert=require('node:assert/strict'),create=require(process.argv[1]);
+let hold='screen-large';
+const block=create({changed(){},answer:async()=>({state:'submitted'}),action(){},hold:()=>hold});
+const sent={id:'sent',revision:'r0',answerable:false,request_state:'submitted',sent:['A'],questions:[{id:'q',question:'Q',choices:['A']}]};
+block.update([sent],'',{labels:{hold_screen_large:'TOO-LARGE'}});
+assert.deepEqual(block.sent().map(r=>r.map(x=>x.text).join('')),['✓ answer sent · A · TOO-LARGE']);
+hold='';assert.deepEqual(block.sent().map(r=>r.map(x=>x.text).join('')),['✓ answer sent · A']);
+"""
+        import subprocess
+        done = subprocess.run(["node", "-e", code, str(ROOT / "utilities/session-shell/block-input.cjs")],
+                              capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
 
 
 # ---- a real host ----
@@ -280,8 +331,8 @@ class WideWindowDeliveryTest(AnswerReachesIdleShellTest):
                         body = "PEER-WIDE-%d-%d-%s" % (size[0], size[1], fill or "empty")
                         results = self.deliver(harness, self.send(harness, body))
                         self.assertTrue(results[-1].get("ok"), results)
-                        if harness == "claude":
-                            rig.wait(lambda: any(body in row["prompt"] for row in rig.prompts()), "the native never took it")
+                        # The native itself took the exact body, not only the socket.
+                        rig.wait(lambda: any(body in row["prompt"] for row in rig.prompts()), "the native never took it")
 
     def test_an_empty_screen_carries_the_same_few_bytes_at_every_size(self):
         sizes = []
@@ -300,6 +351,21 @@ class WideWindowDeliveryTest(AnswerReachesIdleShellTest):
                 self.assertEqual(why, "")
                 self.assertIsInstance(lines, list)
 
+    def keeps(self, rig, keys, marker, hold, name):
+        rig.type(keys)
+        rig.wait_for(marker, "the native never painted " + name)
+        # Once the keys are quiet (host.cjs KEY_QUIET_MS) the reading is the screen's own.
+        rig.wait(lambda: rig.status().get("hold") == hold, "the hold never read " + hold)
+        body = "PEER-NOT-OVER-" + name.upper()
+        ref = self.send("claude", body)
+        results = self.deliver("claude", ref, passes=3)
+        self.assertEqual([result.get("reason") for result in results], ["not-idle-empty"] * 3)
+        self.assertEqual({result.get("hold") for result in results}, {hold}, results)
+        # Nothing was written: no prompt, no byte of the message on the native's screen, still pending.
+        self.assertEqual(rig.prompts(), [])
+        self.assertNotIn(body.encode(), bytes(rig.raw))
+        self.assertEqual((_peer_module()._read_pending(ref) or {}).get("state"), "pending")
+
     def test_a_draft_a_form_a_suggestion_and_hangul_read_as_in_a_small_window(self):
         size = SIZES[-1]
         # A dim suggestion in the empty composer is no draft: the message goes in.
@@ -307,26 +373,49 @@ class WideWindowDeliveryTest(AnswerReachesIdleShellTest):
             rig.wait_for(b"try this", "the suggestion never painted")
             self.assertTrue(self.deliver("claude", self.send("claude", "PEER-AFTER-SUGGESTION"))[-1].get("ok"))
         for name, keys, marker, hold in (("draft", "half typed", b"half typed", "draft"),
-                                         ("hangul", "\ud55c\uae00 \uc870\ud569", "\uc870\ud569".encode(), "draft"),
+                                         ("hangul", "한글 조합", "조합".encode(), "draft"),
+                                         # Review 1127 🔴1: rows of Hangul, the last one begun with the marker.
+                                         ("marker-row", "한글 초안\n둘째\n❯",
+                                          "둘째".encode(), "draft"),
+                                         # Spaces only: the screen cannot tell them from an empty box.
+                                         ("spaces", "   ", b"\x1b[2J", "draft"),
                                          ("form", "/model\r", b"Select model", "form")):
             with self.subTest(case=name), self.window("claude", size, "keeps-" + name, ARI_NATIVE_FILL="dense") as rig:
-                rig.type(keys)
-                rig.wait_for(marker, "the native never painted " + name)
-                # Once the keys are quiet (host.cjs KEY_QUIET_MS) the reading is the screen's own.
-                rig.wait(lambda: rig.status().get("hold") == hold, "the hold never read " + hold)
-                results = self.deliver("claude", self.send("claude", "PEER-NOT-OVER-" + name.upper()), passes=3)
-                self.assertEqual([result.get("reason") for result in results], ["not-idle-empty"] * 3)
-                self.assertEqual({result.get("hold") for result in results}, {hold}, results)
-                self.assertEqual(rig.prompts(), [])
+                self.keeps(rig, keys, marker, hold, name)
 
-    def test_a_screen_whose_box_cannot_be_carried_says_so(self):
-        # The composer at the top and the window filled to the width under it: what fits from the
-        # bottom holds no composer row, so its emptiness is not read and the hold names why.
-        with self.window("claude", SIZES[-1], "below", idle=False, ARI_NATIVE_FILL="below") as rig:
+    def test_an_erased_draft_still_takes_the_message(self):
+        # 11-16: keys that leave the box empty again (typed, then erased) are settled by the next reading.
+        with self.window("claude", SIZES[3], "erased", ARI_NATIVE_FILL="dense") as rig:
+            rig.type("abc")
+            rig.wait_for(b"abc", "the draft never painted")
+            for _ in range(3):
+                rig.type("\x7f")
+                time.sleep(0.05)
+            body = "PEER-AFTER-ERASED"
+            results = self.deliver("claude", self.send("claude", body), passes=14)
+            self.assertTrue(results[-1].get("ok"), results)
+            rig.wait(lambda: any(body in row["prompt"] for row in rig.prompts()), "the native never took it")
+
+    def test_a_screen_past_one_request_waits_and_says_so_everywhere(self):
+        # Every cell an accented letter: the 121 x 537 screen is past 1 MiB, so it is not carried at all.
+        with self.window("claude", SIZES[3], "heavy", idle=False, ARI_NATIVE_FILL="heavy") as rig:
             rig.wait(lambda: rig.status().get("hold") == "screen-large", "the hold never named the screen")
-            results = self.deliver("claude", self.send("claude", "PEER-NOT-OVER-LARGE"), passes=2)
+            body = "PEER-NOT-OVER-LARGE"
+            ref = self.send("claude", body)
+            results = self.deliver("claude", ref, passes=2)
             self.assertEqual({result.get("hold") for result in results}, {"screen-large"}, results)
+            self.assertNotIn(body.encode(), bytes(rig.raw))
             self.assertEqual(session_shell.native_screen_reason(rig.current_binding()), (None, session_shell.SCREEN_LARGE))
+            # A sent answer to this session says the same, read from what its waiting message was held on.
+            self.assertTrue(_peer_module().note_pending_hold(ref, "screen-large"))
+            self.assertEqual(session_shell.answer_delivery_wait("claude", SID, "idle"), "screen-large")
+            # Retire's look: the reason, not `screen-unavailable`.
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("ww_steward", ROOT / "utilities/peer-steward.py")
+            steward = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(steward)
+            with mock.patch.object(steward, "_shell_seat", return_value=rig.current_binding()):
+                self.assertEqual(steward._shell_screen_reason("fixture:p1"), session_shell.SCREEN_LARGE)
         import peer_request
         self.assertTrue(peer_request.hold_words({"state": "pending", "held": {"reason": "screen-large"}}))
 

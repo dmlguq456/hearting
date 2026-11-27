@@ -23,7 +23,7 @@ function declaration(name){
 const quiet=text.match(/^const QUIET_KEY=.*;$/m)[0];
 const observation=quiet+'\n'+declaration('refreshReadiness')+'\n'+declaration('observeInput');
 function make(){
-  const s={Buffer,performance,epoch:0,nativeEpoch:0,lastEnter:-1,submitted:-1,typed:0,empty:true,keyTail:'',paste:false,
+  const s={Buffer,performance,epoch:0,nativeEpoch:0,lastEnter:-1,submitted:-1,typed:0,draftChars:0,empty:true,keyTail:'',paste:false,
     harness:'claude',KEY_QUIET_MS:2000,lastHold:'',HOLD_OF:{},
     relay:false,currentDelivery:null,sid:'owned-sid',sequence:0,selection:0,screenRevision:0,state:'idle',
     screenSnapshot:()=>[],queueProjection:()=>{},source:async()=>({ok:true,ready:true})};
@@ -72,7 +72,7 @@ function declaration(name){
 }
 const code=text.match(/^const QUIET_KEY=.*;$/m)[0]+'\n'+['refreshReadiness','observeInput','observeReport','nativePointer'].map(declaration).join('\n');
 function make(){
-  const s={Buffer,performance,epoch:0,nativeEpoch:0,lastEnter:-1,submitted:-1,typed:0,empty:true,keyTail:'',paste:false,
+  const s={Buffer,performance,epoch:0,nativeEpoch:0,lastEnter:-1,submitted:-1,typed:0,draftChars:0,empty:true,keyTail:'',paste:false,
     harness:'claude',KEY_QUIET_MS:2000,lastHold:'',HOLD_OF:{},
     relay:false,currentDelivery:null,sid:'owned-sid',sequence:0,selection:0,screenRevision:0,state:'idle',heldBytes:0,
     left:0,written:[],held:[],screenSnapshot:()=>[],queueProjection:()=>{},queueDisplay:()=>{},
@@ -119,7 +119,7 @@ const code=text.slice(text.indexOf('async function lifecycle(req)'),text.indexOf
 (async()=>{
   for(const harness of ['claude','codex','opencode'])for(const between of [true,false]){
     let resolve;const s={Promise,harness,token:'t',rootNative:{pid:10,start:'1'},sequence:1,sid:'A',state:'idle',
-      empty:true,submitted:0,lastEnter:0,typed:0,lastHold:'',HOLD_OF:{},currentDelivery:null,epoch:5,selection:1,screenRevision:10,nativeEpoch:0,
+      empty:true,submitted:0,lastEnter:0,typed:0,draftChars:0,lastHold:'',HOLD_OF:{},currentDelivery:null,epoch:5,selection:1,screenRevision:10,nativeEpoch:0,
       relay:false,paste:false,keyTail:'',clock:0,eventMark:0,formSeen:false,painted:[],source:()=>new Promise(r=>resolve=r),screenSnapshot:()=>[],
       processRow:pid=>({pid,start:'1'}),descends:()=>true,sameTerminal:()=>true,projection(){},
       queueProjection(){},status:()=>({})};

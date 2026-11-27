@@ -23,6 +23,11 @@ HARNESSES = frozenset(("claude", "codex", "opencode"))
 SCHEMA = "hearting-session-shell-v1"
 MAX_RECORD_BYTES = 8192
 MAX_CONTROL_BYTES = 64 * 1024
+# A line that carries the native screen: the host's readiness/payload requests to its backend and
+# its `screen` answer, the whole frame (host.cjs SCREEN_BYTES is the same number). Past it the host
+# answers `screen-large` instead of sending the screen; no screen is ever cut to fit.
+MAX_SCREEN_BYTES = 1024 * 1024
+SCREEN_REQUESTS = frozenset({"readiness", "payload"})
 _SID = re.compile(r"^[A-Za-z0-9._-]{1,256}$")
 
 
@@ -299,6 +304,13 @@ def release_behind(binding: dict) -> bool | None:
 # session whose state is not known.
 ANSWER_WAIT_OLD_SHELL = "old-shell"
 ANSWER_WAIT_NO_SHELL = "no-shell"
+# A window whose screen is too large to read (``screen-large``), and the same for an older host than
+# this release (``old-shell-large``): it refuses its own screen request past 64 KiB before reading it,
+# so it says only ``unobserved``; made smaller once (or reopened), it reads and moves to this release.
+HOLD_SCREEN_LARGE = "screen-large"
+HOLD_OLD_SHELL_LARGE = "old-shell-large"
+# The request an older host builds of its screen, and the most it sends.
+_OLD_HOST_REQUEST_BYTES = 65536
 # Fleet's session states (``fleet.model.classify_session``) of a session that rests: idle, never
 # used, or silent past the session window with its process alive.
 RESTING_STATES = frozenset({"idle", "unused", "stale"})
@@ -314,7 +326,25 @@ def answer_delivery_wait(harness: str, sid: str, state: str | None = None) -> st
     binding, reason = exact_binding(harness, sid)
     if binding is None:
         return ANSWER_WAIT_NO_SHELL if harness == "claude" and reason == "attachment-unavailable" else ""
+    # The courier's last reading of this window, kept on its waiting messages (``held``): a size the
+    # window cannot read is the cause, whatever release it runs.
+    held = _size_held(harness, sid)
+    if held:
+        return held
     return ANSWER_WAIT_OLD_SHELL if release_behind(binding) else ""
+
+
+def _size_held(harness, sid):
+    """The size word a message still waiting for this session was last held on, else ``""``."""
+    try:
+        rows = _peer_message()._pending_rows(recipient={"harness": harness, "session_id": sid})
+        for row in rows:
+            held = str(((row or {}).get("held") or {}).get("reason") or "")
+            if (row or {}).get("state") == "pending" and held in (HOLD_SCREEN_LARGE, HOLD_OLD_SHELL_LARGE):
+                return held
+    except Exception:  # noqa: BLE001 - an unreadable store names no cause
+        pass
+    return ""
 
 
 def mark_answer_waits(items, states=None):
@@ -374,26 +404,18 @@ PASSTHROUGH = "passthrough"
 SCREEN_HOST_OUTDATED = "shell-host-outdated"   # a host started before it learned `screen`
 SCREEN_EDITOR_OPEN = "shell-editor-open"       # settings, the Fleet explorer or a question holds the keys
 SCREEN_NO_ANSWER = "shell-no-answer"           # no or no usable answer
-SCREEN_LARGE = "shell-screen-large"            # too large a screen for its input box to be read
+SCREEN_LARGE = "shell-screen-large"            # too large a screen for one answer: its input box is not read
+SCREEN_DRAFT = "draft"                         # the person typed text since the last Enter (host draftText)
 
 
-def screen_lines(harness: str, screen):
+def screen_lines(screen):
     """``(lines, "")`` for a screen the host sent, as ``(char, faint)`` cell rows, else ``(None, why)``.
 
-    The host sends each native row up to its last non-blank cell. A screen past the host's size
-    sends its rows from the top through the first with text and the bottom rows that fit, and each
-    row between them as null. Those rows are read only when the form/draft judgment reads them as it
-    would read the whole screen (``peer_steward_duties._screen_cut_reads_same``); otherwise the screen
-    is ``screen-large``, never a guess over rows nobody saw."""
+    The host sends every native row, each up to its last non-blank cell; the judgments read it whole."""
     if not isinstance(screen, list):
         return None, "screen-unavailable"
-    rows, gap = [], None
+    rows = []
     for runs in screen:
-        if runs is None:
-            if gap is not None and gap != len(rows):
-                return None, "screen-unavailable"       # rows left off in one run only
-            gap = len(rows)
-            continue
         if not isinstance(runs, list):
             return None, "screen-unavailable"
         line = []
@@ -403,10 +425,6 @@ def screen_lines(harness: str, screen):
                 return None, "screen-unavailable"
             line.extend((char, run[1]) for char in run[0])
         rows.append(line)
-    if gap is not None:
-        from peer_steward_duties import _screen_cut_reads_same
-        if not _screen_cut_reads_same(harness, rows[:gap], rows[gap:]):
-            return None, "screen-large"
     return rows, ""
 
 
@@ -432,14 +450,16 @@ def native_screen_reason(binding: dict):
             return PASSTHROUGH, ""
         if result.get("reason") == "unsupported-operation":
             return None, SCREEN_HOST_OUTDATED
+        if result.get("reason") == "screen-large":
+            return None, SCREEN_LARGE
     if isinstance(result, dict) and result.get("ok") and result.get("focused") is True:
         return None, SCREEN_EDITOR_OPEN
+    if isinstance(result, dict) and result.get("ok") and result.get("draft_typed") is True:
+        return None, SCREEN_DRAFT
     screen = (result.get("screen") if isinstance(result, dict) and result.get("ok")
               and result.get("focused") is False else None)
-    lines, why = screen_lines(binding.get("harness"), screen)
-    if lines is None:
-        return None, SCREEN_LARGE if why == "screen-large" else SCREEN_NO_ANSWER
-    return lines, ""
+    lines, _why = screen_lines(screen)
+    return (lines, "") if lines is not None else (None, SCREEN_NO_ANSWER)
 
 
 def open_panel(harness: str, sid: str) -> dict:
@@ -475,12 +495,13 @@ def control(binding: dict, operation: str, **fields) -> dict:
             started = True
             stream.sendall(raw)
             response = bytearray()
+            limit = MAX_SCREEN_BYTES if operation == "screen" else MAX_CONTROL_BYTES
             while b"\n" not in response:
-                chunk = stream.recv(min(4096, MAX_CONTROL_BYTES + 1 - len(response)))
+                chunk = stream.recv(min(65536, limit + 1 - len(response)))
                 if not chunk:
                     raise ValueError("incomplete control response")
                 response.extend(chunk)
-                if len(response) > MAX_CONTROL_BYTES:
+                if len(response) > limit:
                     raise ValueError("control response too large")
             result = json.loads(response.partition(b"\n")[0])
             if (not isinstance(result, dict) or any(result.get(key) != val for key, val in identity.items())):
@@ -538,6 +559,8 @@ def _hold(binding, status):
     A host from before that word names only its state; an older release than the one installed
     takes the message once its window is reopened or typed in (``old-shell``)."""
     hold = status.get("hold") if status.get("ok") else ""
+    if hold == "unobserved" and release_behind(binding) and _old_host_screen_large(binding):
+        return HOLD_OLD_SHELL_LARGE
     if isinstance(hold, str) and hold:
         return hold
     if status.get("state") == "blocked":
@@ -545,6 +568,16 @@ def _hold(binding, status):
     if status.get("state") in ("working", "submitting"):
         return "busy"
     return ANSWER_WAIT_OLD_SHELL if status.get("ok") and "hold" not in status and release_behind(binding) else "unobserved"
+
+
+def _old_host_screen_large(binding):
+    """True when an older host's own screen request is past what it sends (64 KiB), measured on its
+    ``screen`` answer: the request it builds carries the same rows with its binding."""
+    result = control(binding, "screen")
+    if not result.get("ok") or not isinstance(result.get("screen"), list):
+        return False
+    request = {"id": 1, "op": "readiness", "binding": binding, "screen": result["screen"], "state": "idle"}
+    return len(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()) + 1 > _OLD_HOST_REQUEST_BYTES
 
 
 def deliver_pending(ref: str, harness: str, sid: str) -> dict:
@@ -1215,6 +1248,8 @@ def block_labels(editor: int) -> dict:
         *states, "choose", "choose_write", "writing", "writing_choices", "send", "navigate", "navigate_write",
         "text", "changed", "complete", "busy", "empty", "full", "more", "more_choose", "more_down",
         "more_page", "more_choices", "sent", "questions", "paste_stalled")}
+    # A sent answer this window has not taken because its screen is too large to read (host `lastHold`).
+    labels["hold_screen_large"] = ui_text("peer.delivery.hold_screen_large")
     if editor < 64:
         # 11-26: a narrow popup keeps `Enter send` and the line-break key while an answer is written: its
         # closing key's word is short enough that the key packing leaves out `Tab next` (then `↑ choices`)
@@ -2079,10 +2114,10 @@ def _panel_popup(binding, request):
 def _input_readiness(binding, request):
     """Use the ordinary form/draft judgment on this PTY's parsed native cells."""
     from peer_steward_duties import _screen_ready
-    lines, why = screen_lines(binding["harness"], request.get("screen"))
-    if lines is None and why != "screen-large":
+    lines, why = screen_lines(request.get("screen"))
+    if lines is None:
         return {"ok": False, "reason": why}
-    reason = why or _screen_ready(binding["harness"], lines)
+    reason = _screen_ready(binding["harness"], lines)
     idle = request.get("state") == "idle"
     if binding["harness"] == "claude":
         from fleet import session_registry
@@ -2238,9 +2273,12 @@ def _backend() -> int:
     for line in sys.stdin:
         request = {}
         try:
-            if len(line.encode()) > MAX_CONTROL_BYTES:
+            size = len(line.encode())
+            if size > MAX_SCREEN_BYTES:
                 raise ValueError("request too large")
             request = json.loads(line)
+            if size > MAX_CONTROL_BYTES and request.get("op") not in SCREEN_REQUESTS:
+                raise ValueError("request too large")
             result = _backend_operation(request)
         except Exception:
             result = {"ok": False, "reason": "source-unavailable"}

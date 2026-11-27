@@ -163,7 +163,7 @@ let keyRevision = -1, keyAt = performance.now();
 // cannot (QUIET_KEY): once they are quiet, an empty composer on screen needs no repaint after them.
 // Up, Down, Right and End are not among them: they can bring a past prompt or a suggestion into the
 // composer, so the native must paint once after them (a slow one repaints its old, empty screen first).
-let typed = 0;
+let typed = 0, draftChars = 0;
 // Why the last reading kept the window from taking a message (`status().hold`): what this host
 // knows, for the sender's record (`peer-message` pending row `held`). Empty while it takes one.
 let lastHold = 'unsettled';
@@ -236,7 +236,14 @@ function projectionAnswered(data){
   if(!data.ok){projectionMissed();return;}
   clearTimeout(staleTimer);staleTimer=undefined;if(stale){stale=false;projectionKey='';}
 }
+// One line to the backend or one answer on the control socket stays within 64 KiB, so neither side
+// buffers an unbounded line from its peer. A line that carries the native screen (these requests and
+// the `screen` answer) gets SCREEN_BYTES instead, the whole frame counted once (session_shell
+// MAX_SCREEN_BYTES is the same number): a 300 × 800 window filled to the width is about 440 KB.
+// Past it the screen is `screen-large`, its input box not read; a cut screen is never judged.
+const SCREEN_BYTES=1024*1024;
 function source(op, extra={}) {
+  const SCREEN_OPS=new Set(['readiness','payload']),limit=SCREEN_OPS.has(op)?1024*1024:65536;
   if(op==='action'||op==='answer')return readAction(extra,op);
   if (!backend || backend.exitCode !== null || !sid&&!['display-settings','display-bootstrap','display-model','register','unregister'].includes(op)) return Promise.resolve({ok:false,reason:'source-unavailable'});
   return new Promise(resolve => {
@@ -248,7 +255,8 @@ function source(op, extra={}) {
       setTimeout(()=>{if(op==='projection'){projectionMissed();return;}calls.delete(id);resolve({ok:false,reason:'source-unavailable'});},1500);
     calls.set(id,{resolve:op==='projection'?data=>{projectionAnswered(data);resolve(data);}:resolve,timer});
     const frame=JSON.stringify({id,op,binding:binding(),...extra})+'\n';
-    if(Buffer.byteLength(frame)>65536){calls.delete(id);clearTimeout(timer);resolve({ok:false,reason:'source-request-too-large'});return;}
+    if(Buffer.byteLength(frame)>limit){calls.delete(id);clearTimeout(timer);
+      resolve({ok:false,reason:SCREEN_OPS.has(op)?'screen-large':'source-request-too-large'});return;}
     backend.stdin.write(frame);
   });
 }
@@ -1374,10 +1382,11 @@ function observeSelectedModel(lines){
   const key=displayModelKey(lines);
   if(key===modelReadKey||!/\? for shortcuts/.test(key)||!/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/.test(key))return;
   modelReadKey=key;modelReading=true;const selected=selection,start=native.start;
-  // The reading (pane_ownership.codex_footer_threads) starts at the last composer row (`›`): only
-  // that row and the rows under it travel, so a wide or tall transcript never makes the request too large.
-  const prompt=lines.findLastIndex(line=>/^[ \u00a0]*›/.test(line));
-  source('display-model',{lines:prompt<0?lines:lines.slice(prompt)}).then(data=>{
+  // The same short evidence the native selection carries (nativeSelectionFrame: the composer mark, the
+  // identity fields of the footer row and its key hint); none, or an invalid one, asks nothing.
+  const frame=nativeSelectionFrame();
+  if(frame.invalid||!frame.lines.length){modelReading=false;return;}
+  source('display-model',{lines:frame.lines}).then(data=>{
     const now=Array.from({length:terminal.rows},(_,i)=>terminal.buffer.active.getLine(terminal.buffer.active.viewportY+i)?.translateToString(true)||'');
     if(data.ok&&!relay&&live()&&native.start===start&&selection===selected&&displayModelKey(now)===key){
       nativeSelected={...data.display};bootstrapModel=true;displayValues={...displayValues,...nativeSelected};publishNativeDisplay();queueDisplay();
@@ -1520,7 +1529,7 @@ function queueLayout(){
   if(layoutQueued)return;layoutQueued=true;
   setImmediate(()=>{layoutQueued=false;try{applyLayout();}catch{rawRelay();}});
 }
-const block=require('./block-input.cjs')({changed:queueDisplay,cellWidth,
+const block=require('./block-input.cjs')({changed:queueDisplay,cellWidth,hold:()=>empty?'':lastHold,
   answer:async fields=>{const result=await source('answer',fields);queueProjection();return result;},
   action:key=>blockAction(key)});
 let actionLines=[];
@@ -1806,15 +1815,10 @@ async function releaseHeld(ref,cancel=false) {
   releasing=undefined;process.stdin.resume();rebuildDisplay();
 }
 // The native cells the form and draft judgments read (session_shell.screen_lines), as [text, dim]
-// runs per row. A row ends at its last cell that is not a blank: no judgment reads a blank at a
-// row's end (each strips it and reads no brightness of a space), and carrying them made every
-// request grow with the window (11-27: a 121 × 537 window's empty screen alone was 65 KB, past the
-// 64 KiB a request carries, and its idle session took no message for hours). A screen still past
-// SCREEN_BYTES carries its rows from the top through the first with text, then the bottom rows
-// that fit, and each row between them as null; the reader decides whether the judgment reads the
-// same on that (peer_steward_duties._screen_cut_reads_same). Either way the size of a request no
-// longer depends on the window's.
-const SCREEN_BYTES=48*1024;
+// runs per row, the whole viewport. A row ends at its last cell that is not a blank: no judgment
+// reads a blank at a row's end (each strips it and reads no brightness of a space), and carrying
+// them made every request grow with the window's width (11-27: a 121 × 537 window's empty screen
+// alone was 65 KB). A screen too large for one request is never cut: it is not read (`screen-large`).
 function screenSnapshot() {
   const lines=[],buffer=terminal.buffer.active;
   for(let y=0;y<terminal.rows;y++){
@@ -1827,14 +1831,7 @@ function screenSnapshot() {
     while(runs.length){const run=runs[runs.length-1];run[0]=run[0].replace(/ +$/,'');if(run[0])break;runs.pop();}
     lines.push(runs);
   }
-  // A row's bytes with its comma; a row left off is `null,`.
-  const sizes=lines.map(row=>Buffer.byteLength(JSON.stringify(row))+1);
-  if(sizes.reduce((sum,size)=>sum+size,1)<=SCREEN_BYTES)return lines;
-  let head=lines.findIndex(row=>row.length)+1,headBytes=sizes.slice(0,head).reduce((sum,size)=>sum+size,0);
-  if(headBytes>SCREEN_BYTES/4){head=0;headBytes=0;}
-  let room=SCREEN_BYTES-1-headBytes-5*(lines.length-head),bottom=lines.length;
-  while(bottom>head&&sizes[bottom-1]-5<=room){bottom--;room-=sizes[bottom]-5;}
-  return lines.map((row,y)=>y<head||y>=bottom?row:null);
+  return lines;
 }
 // Returns why the reading gave no answer for the screen it was asked about ('moved': the screen,
 // input or lifecycle changed meanwhile; 'unavailable': the backend did not answer), or '' when it did.
@@ -1866,13 +1863,26 @@ async function refreshReadiness() {
   const before=epoch,selected=selection,revision=screenRevision,observed=sequence,frontier=nativeEpoch;
   const result=await source('readiness',{screen:screenSnapshot(),state});
   if(before!==epoch||selected!==selection||revision!==screenRevision||observed!==sequence||currentDelivery){empty=false;return 'moved';}
-  empty=result.ok===true&&result.ready===true;
-  lastHold=empty?'':HOLD_OF[result.reason]||'unobserved';
+  // The screen alone cannot tell a draft from an empty box in every case (a draft row that starts with
+  // the box's own marker, a draft of spaces only): text the person typed since the last Enter and did
+  // not erase keeps the message waiting, whatever the screen reads (review 1127 🔴1).
+  empty=result.ok===true&&result.ready===true&&!draftChars;
+  lastHold=empty?'':result.ready===true?'draft':HOLD_OF[result.reason]||'unobserved';
   if(empty&&!inputSettled){submitted=frontier;lastEnter=Math.max(lastEnter,frontier);if(loneEscape)keyTail='';}
   if(empty&&state!=='idle'){state='idle';queueDisplay();queueProjection();}
-  return result.ok===true?'':'unavailable';
+  return result.ok===true||result.reason==='screen-large'?'':'unavailable';
 }
 function observeInput(data) {
+  // How many characters the person typed into the composer since the last Enter and did not erase
+  // (`draftChars`): a letter or a pasted one adds (each UTF-8 lead byte), a backspace takes one back,
+  // Enter (it submits or runs the command, and the native clears its box) and Ctrl+C (the box is
+  // cleared) end the count. Keys whose meaning the native decides (Tab, Ctrl+U, Esc) leave it.
+  const draftText=byte=>{
+    if(paste){if((byte&0xc0)!==0x80)draftChars++;return;}
+    if(byte===0x0d||byte===0x0a||byte===0x03)draftChars=0;
+    else if(byte===0x7f||byte===0x08)draftChars=Math.max(0,draftChars-1);
+    else if(byte>=0x20&&(byte&0xc0)!==0x80)draftChars++;
+  };
   // All keys invalidate an in-flight observation, but only native-bound bytes
   // can leave an unsubmitted native draft. Block/Fleet keys have no such bytes.
   epoch+=data.length;empty=false;const before=nativeEpoch;
@@ -1900,7 +1910,7 @@ function observeInput(data) {
       else if(keyTail.length>(string?512:64)){typed=nativeEpoch;keyTail='';}
     }
     else if(c==='\x1b')keyTail=c;
-    else {typed=nativeEpoch;if(!paste&&(c==='\r'||c==='\n'))lastEnter=nativeEpoch;}
+    else {typed=nativeEpoch;if(!paste&&(c==='\r'||c==='\n'))lastEnter=nativeEpoch;draftText(data[offset]);}
     if(paste)typed=nativeEpoch;
   }
   // A focus report alone is no key: it neither restarts the quiet time nor owes a repaint.
@@ -2335,7 +2345,13 @@ async function request(req) {
   if(req.op==='native-selection')return {ok:!relay,native_frame:nativeSelectionFrame()};
   if(req.op==='status'){await refreshReadiness();if(empty)checkRelease();return {ok:true,...status()};}
   // The native cells under the panel and frame: the seat's own screen for draft/form judgments.
-  if(req.op==='screen')return relay?{ok:false,reason:'display-unavailable'}:{ok:true,screen:screenSnapshot(),...status()};
+  // `draft_typed`: the person's text since the last Enter (draftText) stands in the box whatever the
+  // screen shows, for the readers that type into it themselves (tidy, retire).
+  if(req.op==='screen'){
+    if(relay)return {ok:false,reason:'display-unavailable'};
+    const answer={ok:true,screen:screenSnapshot(),...status(),...(draftChars?{draft_typed:true}:{})};
+    return Buffer.byteLength(JSON.stringify({...answer,...identity()}))+1>SCREEN_BYTES?{ok:false,reason:'screen-large'}:answer;
+  }
   if(req.op==='panel'&&relay)return {ok:false,reason:'display-unavailable'};
   if(req.op==='panel'){foldByHand(req.expanded!==true);applyLayout();return {ok:true,...status()};}
   if(req.op!=='inject'||harness==='codex')return {ok:false,reason:'unsupported-operation',not_started:true};
@@ -2558,7 +2574,7 @@ function buildSeed() {
   const limit=Math.min(8*1024*1024,Number(process.env.HEARTING_SHELL_SEED_LIMIT)||8*1024*1024);
   const captured=succession.capture(terminal,{scrollback:true});
   const seed={schema:succession.SCHEMA,harness,sid,native:{pid:native.pid,start:native.start},rootNative:{pid:rootNative.pid,start:rootNative.start},
-    sequence,selection,state,epoch,nativeEpoch,submitted,lastEnter,typed,cursorVisible,expanded,foldChoice,displayConfiguration,displaySequence,
+    sequence,selection,state,epoch,nativeEpoch,submitted,lastEnter,typed,draftChars,cursorVisible,expanded,foldChoice,displayConfiguration,displaySequence,
     deliveries:[...deliveries].filter(([,value])=>value==='submitted'||value==='transport-submitted').slice(-128),
     displayValues,nativeSelected,nativeContext:nativeContext??null,nativeMcp:nativeMcp??null,
     // The host's own turn observation (what the panel shows as the state), so the successor shows the same
@@ -2674,7 +2690,7 @@ async function commitSuccessor(file) {
     rootNative=root;native=row;
     sid=seed.sid;sequence=seed.sequence;selection=seed.selection;state=seed.state;epoch=seed.epoch;nativeEpoch=seed.nativeEpoch;
     // An older host's seed has no `typed`: every byte it took may have typed.
-    submitted=seed.submitted;lastEnter=seed.lastEnter;typed=Number.isSafeInteger(seed.typed)?seed.typed:nativeEpoch;cursorVisible=seed.cursorVisible;expanded=seed.expanded;empty=false;
+    submitted=seed.submitted;lastEnter=seed.lastEnter;typed=Number.isSafeInteger(seed.typed)?seed.typed:nativeEpoch;draftChars=Number.isSafeInteger(seed.draftChars)?seed.draftChars:0;cursorVisible=seed.cursorVisible;expanded=seed.expanded;empty=false;
     // An earlier release's open-by-hand choice also carried its width (`{folded:false,cols}`).
     const choice=seed.foldChoice;foldChoice=choice&&typeof choice==='object'&&typeof choice.folded==='boolean'?{folded:choice.folded}:null;
     displayConfiguration=seed.displayConfiguration;displaySequence=Number.isSafeInteger(seed.displaySequence)?seed.displaySequence:0;

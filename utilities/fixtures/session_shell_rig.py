@@ -75,12 +75,16 @@ sized=None
 def fill(where):
     # `ARI_NATIVE_FILL=dense`: every row above the composer filled to the width, as a busy transcript
     # fills a wide window: width rules (three bytes a cell), Hangul (two cells, three bytes a letter)
-    # and dim text; `below`: the same rows under the composer instead. The native's own size is
-    # noted once per size (`size`: rows, columns).
+    # and dim text; `below`: the same rows under the composer instead; `heavy`: rows of accented
+    # letters, too much for one request. The native's own size is noted once per size (`size`: rows, columns).
     global sized
     size=os.get_terminal_size(0)
     if sized!=size:sized=size;note(size=[size.lines,size.columns])
-    if os.environ.get('ARI_NATIVE_FILL')!=where:return ''
+    fill=os.environ.get('ARI_NATIVE_FILL')
+    if fill=='heavy' and where=='dense':
+        # Every cell a letter with twelve combining accents: a screen past what one request carries.
+        return ''.join(('e'+'\u0301'*12)*size.columns+'\r\n' for n in range(size.lines-5))
+    if fill!=where:return ''
     rows=['\u2500'*size.columns if n%3==0 else '\ud55c\uae00'*(size.columns//4) if n%3==1
           else '\x1b[2m'+('dim transcript '*size.columns)[:size.columns]+'\x1b[22m' for n in range(size.lines-5)]
     return ''.join(row+'\r\n' for row in rows)

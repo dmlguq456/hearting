@@ -268,7 +268,7 @@ const row={pid:10,start:'s'},noop=()=>{};
 const c={performance,processRow:()=>row,rootNative:{pid:10,start:'s'},descends:()=>true,sameTerminal:()=>true,token:'t',harness:'claude',sequence:0,
  nativeFooter:null,paintedCommon:[],nativeContext:undefined,sid:'',nativeSelected:{},displayValues:{},panelModel:{},panelSections:undefined,panelLines:[],
  projectionKey:'',footer:'',footerSegments:[],routeDetail:false,routeScroll:0,selection:0,native:null,state:'unknown',nativeTurn:'',turnMark:0,
- seenTurn:null,turnRecord:'',formSeen:false,eventMark:0,clock:0,empty:false,submitted:-1,lastEnter:-1,typed:0,KEY_QUIET_MS:2000,lastHold:'',HOLD_OF:{},block:{leave:noop,update:noop},publishNativeDisplay:noop,
+ seenTurn:null,turnRecord:'',formSeen:false,eventMark:0,clock:0,empty:false,submitted:-1,lastEnter:-1,typed:0,draftChars:0,KEY_QUIET_MS:2000,lastHold:'',HOLD_OF:{},block:{leave:noop,update:noop},publishNativeDisplay:noop,
  queueDisplay:noop,currentDelivery:null,releaseHeld:noop,setImmediate:noop,projection:noop,heldStop:noop,
  epoch:0,nativeEpoch:0,unselected:null,routePopup:null,routePage:0,upgradeNote:'',keyTail:'',paste:false,relay:false,screenRevision:0,screenSnapshot:()=>'',queueProjection:noop,
  source:op=>Promise.resolve(op==='readiness'?{ok:true,ready:true}:{})};
@@ -372,6 +372,13 @@ const tick=()=>new Promise(r=>setTimeout(r,5));
   const seq=['form-open',null,'form-open','form-open'];let i=0;w.setReply(async()=>({ok:true,reason:seq[Math.min(i++,seq.length-1)]}));
   const states=[];for(let k=0;k<4;k++){w.bump();w.observeForm();await tick();states.push(w.shown());}
   a.deepEqual(states,['blocked','working','blocked','blocked'],'X3');a.equal(w.state,'blocked');}
+ // Review 1127 🔴3: a screen too large to carry is no reading of the question (the host refuses it,
+ // `ok:false`): the panel stays at waiting between two readings that see the question.
+ {const w=world('codex');w.hook('select');w.reading('idle');w.hook('prompt');w.reading('working');w.hook('blocked');
+  const seq=[{ok:true,reason:'form-open'},{ok:false,reason:'screen-large'},{ok:true,reason:'form-open'}];let i=0;
+  w.setReply(async()=>seq[Math.min(i++,seq.length-1)]);
+  const states=[];for(let k=0;k<3;k++){w.bump();w.observeForm();await tick();states.push(w.shown());}
+  a.deepEqual(states,['blocked','blocked','blocked'],'too large');a.equal(w.state,'blocked');}
  // An approval: the question gone, the turn runs on, and the next hook takes over.
  {const w=world('codex');w.hook('select');w.reading('idle');w.hook('prompt');w.reading('working');w.hook('blocked');
   const seq=['form-open',null,null];let i=0;w.setReply(async()=>({ok:true,reason:seq[Math.min(i++,seq.length-1)]}));

@@ -330,7 +330,7 @@ const text=fs.readFileSync(process.argv[1],'utf8');
 const piece=name=>{const begin=text.search(new RegExp('^(?:async )?function '+name+'\\(','m'));return text.slice(begin,text.indexOf('\n}',begin)+2);};
 const code=text.match(/^const QUIET_KEY=.*;$/m)[0]+'\n'+piece('refreshReadiness')+'\n'+piece('observeInput');
 function make(harness='claude'){
-  const s={Buffer,now:0,epoch:0,nativeEpoch:0,lastEnter:-1,submitted:-1,typed:0,empty:true,keyTail:'',paste:false,relay:false,
+  const s={Buffer,now:0,epoch:0,nativeEpoch:0,lastEnter:-1,submitted:-1,typed:0,draftChars:0,empty:true,keyTail:'',paste:false,relay:false,
     currentDelivery:null,sid:'sid',sequence:0,selection:0,screenRevision:0,keyRevision:-1,keyAt:0,state:'idle',harness,
     KEY_QUIET_MS:2000,lastHold:'',HOLD_OF:{},asked:0,screenSnapshot:()=>[],queueDisplay:()=>{},queueProjection:()=>{}};
   s.performance={now:()=>s.now};s.source=async()=>{s.asked++;return {ok:true,ready:true};};
@@ -356,10 +356,17 @@ const after=async(keys,{harness,paint=false}={})=>{
     const r=await after(keys);a.equal(r.late,false,JSON.stringify(keys)+' may have recalled text: no repaint, no proof');
     const p=await after(keys,{paint:true});a.equal(p.late,true,JSON.stringify(keys)+' a repaint after it and the quiet time');
   }
-  for(const keys of [['x'],['\t'],['\x7f'],['\x15'],['\x19'],['\x1b[13;2u'],['\x1b[27;5;13~'],['\x1bOM'],['\x1bb','c'],
-      ['\x1b[200~','x','\x1b[201~'],['\x1b]11;x\r'],['\x1b[D','a','\x1b[C']]){
+  for(const keys of [['\t'],['\x7f'],['\x15'],['\x19'],['\x1b[13;2u'],['\x1b[27;5;13~'],['\x1bOM'],
+      ['\x1b]11;x\r'],['x','\x7f'],['\ud55c','\x7f'],['x','\r'],['x','\x03']]){
     const r=await after(keys);a.equal(r.late,false,JSON.stringify(keys)+' may have typed: no repaint, no proof');
     const p=await after(keys,{paint:true});a.equal(p.late,true,JSON.stringify(keys)+' a repaint after it and the quiet time');
+  }
+  // Review 1127: text typed since the last Enter and not erased stands in the box whatever the screen
+  // reads (a draft of spaces, a draft row begun with the box's own marker): no reading settles it.
+  for(const keys of [['x'],['\x1bb','c'],['\x1b[200~','x','\x1b[201~'],['\x1b[D','a','\x1b[C'],['   '],['\ud55c\uae00'],['ab','\x7f']]){
+    const p=await after(keys.map(key=>Buffer.from(key,'utf8').toString('latin1')),{paint:true});
+    a.equal(p.late,false,JSON.stringify(keys)+' typed text, a repaint and the quiet time');
+    a.equal(p.s.lastHold,'draft',JSON.stringify(keys));
   }
   const paste=await after(['\x1b[200~half']);a.equal(paste.late,false,'an unfinished paste');a.equal(paste.s.asked,0);
   const opencode=await after(['\x1b'],{harness:'opencode',paint:true});a.equal(opencode.late,false,'OpenCode waits for its next turn');
