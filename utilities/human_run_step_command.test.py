@@ -433,10 +433,22 @@ class HumanRunStepCommandTest(unittest.TestCase):
             shutil.rmtree(experiments)
         self.command_in(W.human_run_step(route, path, node))
 
+    def test_only_a_file_beside_the_slugs_is_passed_over(self):
+        route, path, out, node = self.attested_setup()
+        # `_RUNLOG.md` beside the slugs is not a slug. Inside a slug, an `_internal` that is a file is not a form the
+        # check decides, so it prints one line rather than the start.
+        slug = out / "experiments" / "fixture-run"
+        slug.mkdir(parents=True)
+        (out / "experiments" / "_RUNLOG.md").write_text("| fixture-run | pending |\n")
+        (slug / "_internal").write_text("fixture\n")
+        self.assertEqual(W.human_run_step(route, path, node), MAYBE_SEALED)
+        (slug / "_internal").unlink()
+        self.command_in(W.human_run_step(route, path, node))
+
     def test_an_error_while_listing_or_checking_experiments_prints_one_line(self):
         route, path, out, node = self.attested_setup()
         (out / "experiments" / "fixture-run").mkdir(parents=True)
-        real_listdir, real_lstat = os.listdir, os.lstat
+        real_listdir, real_lstat, real_stat = os.listdir, os.lstat, os.stat
 
         def failing_listdir(target, *args, **kwargs):
             if Path(target).name == "experiments":
@@ -447,7 +459,12 @@ class HumanRunStepCommandTest(unittest.TestCase):
             if Path(target).name == "configs":
                 raise PermissionError(errno.EACCES, "fixture permission error", str(target))
             return real_lstat(target, *args, **kwargs)
-        for name, failing in (("listdir", failing_listdir), ("lstat", failing_lstat)):
+
+        def failing_stat(target, *args, **kwargs):
+            if isinstance(target, (str, os.PathLike)) and Path(target).name == "fixture-run":
+                raise OSError(errno.EIO, "fixture I/O error", str(target))
+            return real_stat(target, *args, **kwargs)
+        for name, failing in (("listdir", failing_listdir), ("lstat", failing_lstat), ("stat", failing_stat)):
             with self.subTest(name), mock.patch.object(W.os, name, failing):
                 self.assertEqual(W.human_run_step(route, path, node), MAYBE_SEALED)
         self.command_in(W.human_run_step(route, path, node))
