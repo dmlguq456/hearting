@@ -1344,6 +1344,18 @@ def _process_carries_marker(base: Path, marker: bytes) -> tuple[bool, bool]:
     else:
         if marker in cwd:
             return True, True
+    # A fixture binary can live under the temp root while its argv, environment
+    # and cwd name nothing there (a managed daemon started by its copied binary).
+    try:
+        exe = os.fsencode(os.readlink(base / "exe"))
+        readable = True
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+    else:
+        if marker in exe:
+            return True, True
     return False, readable
 
 

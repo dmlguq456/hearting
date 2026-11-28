@@ -234,6 +234,25 @@ class FailureKindClassifierTest(unittest.TestCase):
                     self.result(stderr, stdout=stdout)), "error")
 
 
+class FixtureProcessMarkerTest(unittest.TestCase):
+    def test_a_binary_under_the_temp_root_marks_the_process(self):
+        runner = load_runner_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "fixture-root"
+            root.mkdir()
+            outside = Path(tmp) / "outside"
+            outside.mkdir()
+            proc = Path(tmp) / "proc"
+            proc.mkdir()
+            (proc / "cmdline").write_bytes(b"codex\0")
+            (proc / "environ").write_bytes(b"")
+            os.symlink(str(root / "bin" / "codex"), proc / "exe")
+            (proc / "cwd").symlink_to(outside)
+            self.assertEqual(runner._process_carries_marker(proc, os.fsencode(str(root))), (True, True))
+            self.assertEqual(runner._process_carries_marker(proc, os.fsencode(str(outside / "other"))),
+                             (False, True))
+
+
 class MixedReporterFixture(RunTestsFixtureBase):
     def test_named_rows_keep_their_own_failure_kind(self):
         write_suite(self.root, "mixed.test.py", """
