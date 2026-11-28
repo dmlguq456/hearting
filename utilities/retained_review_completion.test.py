@@ -129,7 +129,12 @@ class RetainedReviewTest(unittest.TestCase):
                 replacement_input_argv=["--route-node",self.node["id"]],route_id=self.route["route_id"],route_node=self.node["id"])
         sealed = replacement.seal_launch_input(args,harness,"Own alternative correction input "+aid)
         pid = self.live.pid if getattr(self,"live",None) is not None and aid=="att-retained-rejected" else 99999999
-        start = D.process_start_ticks(pid) if pid != 99999999 else "1"
+        # A finished attempt (pid 99999999 is no process) began when its row was written: a same-user process whose
+        # environment cannot be read and that was born before then is not its descendant (`_denied_process_outside_attempt`).
+        # With start tick 1 every such process on the host could have been, and the prior attempt read as unsettled
+        # (CI 11-28: 13 of 76 runs, shard 1; one undumpable same-user process anywhere fails ten of these tests).
+        start = D.process_start_ticks(pid) if pid != 99999999 else str(
+            int(float(Path("/proc/uptime").read_text().split()[0]) * os.sysconf("SC_CLK_TCK")))
         extra = (f"worker_type=review,harness={harness},artifact_root={self.root},route_file={self.path},"
                  f"parent_attempt_id=att-retained-owner,parent_sid={PARENT},log_file={log},"
                  f"pid={pid},pid_start={start},pgid={pid},"+
