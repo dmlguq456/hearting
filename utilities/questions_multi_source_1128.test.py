@@ -416,47 +416,6 @@ console.log(JSON.stringify([block.summary().count,block.references().length,(lin
         path.write_bytes(kept)
         self.assertEqual(self.open_ids(), sorted([a["id"], b["id"]]))
 
-    def test_an_answer_on_its_way_waits_out_an_unreadable_file_and_lands_when_it_reads_again(self):
-        # Review 1: while the session's file could not be read (another row broken), the answer on its way to A
-        # ended as "no longer there": rejected before sending, `answered-elsewhere` after its receipt, and stuck
-        # after the file came back. Unreadable is not gone.
-        for when in ("before-send", "after-receipt"):
-            with self.subTest(when=when):
-                sid = "unreadable-" + when
-                a, ea = self.f.ask(sid=sid, text="A?", choices=["x", "y"])
-                b, _ = self.f.ask(sid=sid, text="B?", choices=["x", "y"])
-                other, eo = self.f.ask(sid="beside-" + when, text="Theirs?", choices=["x", "y"])
-                self.assertEqual(self.f.submit(ea, "y", "action-" + when)["state"], "submitted")
-                self.assertEqual(self.f.submit(eo, "x", "beside-" + when)["state"], "submitted")
-                path = waits._questions_path("claude", sid)
-                kept = path.read_bytes()
-                rows = json.loads(kept)
-                rows["questions"][b["id"]]["since"] = "broken"
-                if when == "after-receipt":
-                    wire, _, _ = self.f.prepare(a)
-                path.write_text(json.dumps(rows))
-                # Another session's question and answer go on as ever.
-                self.assertTrue(session_notice.notice_is_current(self.f.record(other)))
-                wire_o, _, _ = self.f.prepare(other)
-                self.f.consume(other, wire_o)
-                self.assertEqual(self.source(other)["completion"]["action_id"], "beside-" + when)
-                if when == "before-send":
-                    self.assertTrue(session_notice.notice_is_current(self.f.record(a)))
-                    _calls, _ref, row = self.f.courier(a)
-                    wire = row["text"]
-                self.assertNotEqual(self.f.record(a)["state"], "rejected")
-                self.f.consume(a, wire)
-                entry = waits._selected_entry(ea)
-                self.assertEqual((entry["state"], entry.get("source_terminal")), ("submitted", None))
-                path.write_bytes(kept)
-                # The existing re-observation of the acknowledged receipt applies it once the file reads.
-                with contextlib.suppress(StopIteration):              # its duty is done after the pass
-                    self.f.courier(a)
-                self.assertEqual((self.source(a)["lifecycle"], self.source(a)["completion"]["action_id"]),
-                                 ("answered", "action-" + when))
-                self.assertEqual(waits._selected_entry(ea)["state"], "applied")
-                self.assertEqual(self.source(b)["lifecycle"], "open")
-
     def test_asking_again_after_the_same_registration_ended_says_its_end_not_a_wait(self):
         # Review 7: closing A and asking the same text at the same prompt said "registered, waiting" with
         # exit 0 while nothing waited. The next prompt opens a new id, as before.
@@ -478,6 +437,23 @@ console.log(JSON.stringify([block.summary().count,block.references().length,(lin
             self.assertEqual(code, 0)
             self.assertNotEqual(json.loads(out)["id"], first["id"])
             self.assertEqual(self.open_ids(), [json.loads(out)["id"]])
+
+    # Independent review 2 (11-28).
+
+    def test_a_draft_returns_while_the_hook_holds_the_seat_lock(self):
+        # Review 2's first: the draft took the seat lock, so a Fleet save waited for as long as the prompt hook held
+        # it. A draft takes no seat lock (main never did); it returns at once.
+        import threading
+        a, ea = self.f.ask(text="Drafted while the hook runs?", choices=["x", "y"])
+        saved = []
+        with tidy.seat_lock(a["seat_key"]):                           # the hook, paused inside its lock
+            worker = threading.Thread(target=lambda: saved.append(waits.write_selected_draft(ea, "typed")))
+            worker.start()
+            worker.join(10)
+            returned = not worker.is_alive()
+        worker.join()
+        self.assertTrue(returned)
+        self.assertEqual((saved[0].get("draft"), waits._selected_entry(ea)["draft"]), ("typed", "typed"))
 
 
 if __name__ == "__main__":

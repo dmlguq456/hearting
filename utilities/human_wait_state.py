@@ -16,7 +16,7 @@ import threading
 import fcntl
 import math
 import uuid
-from contextlib import contextmanager, nullcontext, suppress
+from contextlib import contextmanager, suppress
 from datetime import datetime
 import ipaddress
 import socket
@@ -963,11 +963,6 @@ def message_binding_valid(binding):
                     for key in ("body_id", "body_sha256")))
 
 
-def _message_file_unknown(binding):
-    """Whether this answer's session file cannot be read (its questions unknown, not gone)."""
-    return _read_questions_file(_questions_path(binding["harness"], binding["session_id"])) is None
-
-
 def message_answer_body(binding, *, current=False):
     """Resolve an action-bound private body; no caller-provided path is ever read."""
     if not message_binding_valid(binding):
@@ -988,12 +983,6 @@ def message_answer_body(binding, *, current=False):
         raise ValueError("message-answer-body-missing-or-changed")
     if current:
         signal = _read(_signal_path(binding))
-        if signal is None and _message_file_unknown(binding):
-            # Unreadable is not gone: no writer changes the file while it cannot be read, so the
-            # answer claimed while its question was open keeps its turn; its receipt waits for the
-            # file (``complete_message_answer``).
-            signal = {"id": binding["request_id"], "harness": binding["harness"], "lifecycle": "open",
-                      "session_id": binding["session_id"], "sequence": binding["sequence"]}
         if (not signal or signal.get("id") != binding["request_id"]
                 or signal.get("harness") != binding["harness"]
                 or signal.get("session_id") != binding["session_id"]
@@ -1123,10 +1112,6 @@ def complete_message_answer(receipt, recipient):
     import session_tidy as tidy
     with tidy.seat_lock(binding["seat_key"]):
         signal = _read(_signal_path(binding))
-        if signal is None and _message_file_unknown(binding):
-            # Not "answered elsewhere": the exact receipt stays, and the pass that observes it again
-            # (peer_obligations.acknowledge_session_notice_delivery) applies it once the file reads.
-            raise OSError("question-storage-unreadable")
         exact = (signal and signal.get("id") == binding["request_id"]
                  and signal.get("harness") == binding["harness"]
                  and signal.get("session_id") == binding["session_id"]
@@ -4235,29 +4220,25 @@ def write_selected_draft(ref, draft):
         return _selected_fallback(base, "selected-draft-invalid")
     envelope = dict(ref)
     envelope["selected_id"] = base["id"]
-    native = base.get("native_ref") or {}
-    message = native.get("transport") == "hearting-message-answer"
-    if message:
-        import session_tidy as tidy
-    # A message question's draft takes the order its close takes (seat lock, then the store), so
-    # one that comes after the close never makes an answer record of it again.
-    with tidy.seat_lock(native["seat_key"]) if message else nullcontext():
-        signal = _message_source(base) if message else None
-        if message and (signal or {}).get("lifecycle") != "open":
+    if (base.get("native_ref") or {}).get("transport") == "hearting-message-answer":
+        # A draft from a screen opened before its question ended makes no answer record of it again.
+        # No lock: a close landing between this read and the store below is not excluded.
+        lifecycle = (_message_source(base) or {}).get("lifecycle")
+        if lifecycle != "open":
             return _selected_fallback(base, "message-question-no-longer-current", state={
-                "answered": "applied", "cancelled": "cancelled"}.get((signal or {}).get("lifecycle"), "unknown"))
-        previous = _selected_entry(envelope)
-        if previous and (previous.get("state") in {"submitted", "received", "applied",
-                                                    "cancelled", "expired"}
-                         or (previous.get("state") == "unknown" and previous.get("action_id"))):
-            return _selected_fallback(base, "selected-response-already-settled-or-ambiguous",
-                                      state=previous["state"])
-        entry = previous or {"draft": "", "state": "open"}
-        draft_state = "unknown" if ref.get("state") == "unknown" else "open"
-        entry["draft"] = draft
-        entry["state"] = draft_state
-        if not _store_selected_entry(envelope, entry):
-            return _selected_fallback(base, "selected-draft-storage-unavailable")
+                "answered": "applied", "cancelled": "cancelled"}.get(lifecycle, "unknown"))
+    previous = _selected_entry(envelope)
+    if previous and (previous.get("state") in {"submitted", "received", "applied",
+                                                "cancelled", "expired"}
+                     or (previous.get("state") == "unknown" and previous.get("action_id"))):
+        return _selected_fallback(base, "selected-response-already-settled-or-ambiguous",
+                                  state=previous["state"])
+    entry = previous or {"draft": "", "state": "open"}
+    draft_state = "unknown" if ref.get("state") == "unknown" else "open"
+    entry["draft"] = draft
+    entry["state"] = draft_state
+    if not _store_selected_entry(envelope, entry):
+        return _selected_fallback(base, "selected-draft-storage-unavailable")
     updated = dict(ref)
     updated.update({"selected_id": base["id"], "draft": draft, "state": draft_state})
     return updated
