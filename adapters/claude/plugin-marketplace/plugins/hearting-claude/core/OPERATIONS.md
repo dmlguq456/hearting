@@ -1553,15 +1553,18 @@ correction sent after `--register` and before the first consumer attaches is
 queued and handed to the first turn (a relaunch of a never-claimed row keeps
 that queue). Codex uses its existing App Server connection to steer an active
 turn; Claude and OpenCode retain the input for the next turn of the same
-session. A Claude owner also sees an early copy: in an ordinary turn the
-supervisor's PreToolUse hook adds queued corrections not yet shown as
-`additionalContext` beside the next main-thread tool result, only when that
-whole context fits the 10,000-unit (UTF-16) hook limit, and marks them shown. The
-input stays queued and the next turn's prompt still delivers it, noting the
-earlier copy; a cleanup turn or the reserved last turn shows none, and no receipt
-rests on the copy. Pending input takes precedence over automatic stage advancement and
-terminal closure. A transport receipt proves delivery, not implementation; an
-interrupted send remains unknown (`delivery-unknown`) and is handed back through
+session. A Claude owner may also see an early copy. Only when the supervisor's
+turn state says this attempt's open turn is ordinary (not a cleanup turn or the
+reserved last turn), its PreToolUse hook adds queued corrections not yet shown
+as `additionalContext` beside the next main-thread tool result, if that whole
+context fits the 10,000-unit (UTF-16) hook limit and holds no literal
+`<system-reminder` tag, and marks them shown internally. An unreadable turn
+state, a state without the turn kind, or any other condition shows no copy.
+Either way the input stays queued and the next turn's prompt delivers it, noting
+an earlier copy; no receipt rests on the copy. Pending input takes precedence
+over automatic stage advancement and terminal closure. A transport receipt
+proves delivery, not implementation; an interrupted send remains unknown
+(`delivery-unknown`) and is handed back through
 the existing supervision notice carrier. A host whose supervisor probe does not
 report support runs the owner as the existing one-shot, creates no input state,
 and `correct` reports `owner-input-unsupported` before queueing; an owner

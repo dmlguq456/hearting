@@ -16,7 +16,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
-from dispatch_contract import dispatch_state_roots  # noqa: E402
+from dispatch_contract import dispatch_state_roots, supervisor_lease_path  # noqa: E402
 
 
 def deny(reason: str) -> int:
@@ -78,20 +78,19 @@ def main() -> int:
 
 
 def show_owner_input(registry: Path, attempt: str, payload: dict[str, Any]) -> int:
-    """Show a copy of queued owner corrections beside this main-thread tool's result; the next
-    owner turn still delivers them (OPERATIONS §5.10). The reserved last turn shows none."""
+    """Copy queued owner corrections beside this tool's result only in an ordinary turn (OPERATIONS §5.10)."""
     if payload.get("agent_id") or not payload.get("tool_use_id"):
         return 0
     try:
-        from dispatch_contract import supervisor_lease_path
-        with supervisor_lease_path(registry, attempt).with_suffix(".input.json").open("rb") as handle:
-            if b'"queued": 0,' in handle.read(1024):
-                return 0
-        import dispatch_budget_record
-        if any(row.get("purpose") == "terminal-handoff"
-               for row in dispatch_budget_record.read_rows(registry.parent, attempt)):
+        # The input state itself (replaced whole), not a count: no unshown queued correction ends here.
+        value = json.loads(supervisor_lease_path(registry, attempt).with_suffix(".input.json").read_text())
+        if not any(item.get("state") == "queued" and not item.get("shown") for item in value["requests"]):
             return 0
         import dispatch_owner_input
+        from dispatch_completion_join import read_supervisor_phase_state
+        state = read_supervisor_phase_state(Path(os.environ.get("AGENT_DISPATCH_COMPLETION_STATE_FILE", "")), attempt)
+        if state is None or not state.ordinary_turn:
+            return 0
         text = dispatch_owner_input.show_in_turn(registry, attempt, str(payload["tool_use_id"]))
     except Exception:
         return 0

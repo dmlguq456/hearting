@@ -897,7 +897,8 @@ class OwnerFinishCorrectionRegressionTest(OwnerInputTest):
 
 
 class InTurnCopyTest(unittest.TestCase):
-    """A Claude owner's tool hook shows a copy of queued input; the next turn delivers it (OPERATIONS §5.10)."""
+    """A Claude owner's tool hook shows a copy of queued input only in a turn its supervisor opened
+    as ordinary; the next turn delivers it either way (OPERATIONS §5.10)."""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -910,15 +911,25 @@ class InTurnCopyTest(unittest.TestCase):
         held.__enter__()
         self.addCleanup(held.__exit__, None, None, None)
         self.control = I.OwnerInput(self.jobs, self.attempt, 'session-1', 'claude-next-turn', lambda _: None)
+        self.turn_state = Path(self.temp.name) / 'supervisor-turn.json'
+        self.open_turn(ordinary=True)
 
-    def hook(self, tool='toolu-1', route_id='', **extra):
+    def open_turn(self, *, ordinary, attempt=None):
+        import dispatch_completion_join as J
+        self.turn_state.unlink(missing_ok=True)
+        J.begin_supervisor_turn(self.turn_state, attempt or self.attempt, set(), ordinary_turn=ordinary)
+
+    def hook(self, tool='toolu-1', route_id='', state=True, **extra):
         request = {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash', 'tool_use_id': tool,
                    'tool_input': {'command': extra.pop('command', 'true')}, 'cwd': self.temp.name, **extra}
+        env = {**os.environ, 'AGENT_HOME': str(ROOT), 'AGENT_DISPATCH_JOBS': str(self.jobs),
+               'AGENT_DISPATCH_ATTEMPT_ID': self.attempt, 'AGENT_ROUTE_ID': route_id,
+               'AGENT_DISPATCH_COMPLETION_MODE': 'supervised'}
+        env.pop('AGENT_DISPATCH_COMPLETION_STATE_FILE', None)
+        if state:
+            env['AGENT_DISPATCH_COMPLETION_STATE_FILE'] = str(self.turn_state if state is True else state)
         done = subprocess.run([sys.executable, str(ROOT / 'hooks/registered-parent-park.py')],
-                              input=json.dumps(request), capture_output=True, text=True, timeout=60,
-                              env={**os.environ, 'AGENT_HOME': str(ROOT), 'AGENT_DISPATCH_JOBS': str(self.jobs),
-                                   'AGENT_DISPATCH_ATTEMPT_ID': self.attempt, 'AGENT_ROUTE_ID': route_id,
-                                   'AGENT_DISPATCH_COMPLETION_MODE': 'supervised'})
+                              input=json.dumps(request), capture_output=True, text=True, timeout=60, env=env)
         self.assertEqual(done.returncode, 0, done.stderr)
         output = json.loads(done.stdout)['hookSpecificOutput'] if done.stdout.strip() else {}
         self.assertNotIn('permissionDecision', output)
@@ -934,8 +945,14 @@ class InTurnCopyTest(unittest.TestCase):
         self.control.completed(turn)
         return prompt
 
+    def correct_cli(self, *argv):
+        done = subprocess.run([sys.executable, str(ROOT / 'utilities/capability-route.py'), 'correct',
+                               '--jobs', str(self.jobs), '--attempt-id', self.attempt, *argv],
+                              capture_output=True, text=True, timeout=60, cwd=self.temp.name)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout.splitlines()[0])
+
     def test_a_copy_is_shown_once_and_the_next_turn_still_delivers_it(self):
-        self.assertIn(b'"queued": 0,', I._path(self.jobs, self.attempt).read_bytes()[:1024])
         self.assertEqual(self.hook(), '')
         I.submit(self.jobs, self.attempt, 'use the other dataset', 'C')
         self.assertIn('use the other dataset', self.hook('toolu-1'))
@@ -946,12 +963,65 @@ class InTurnCopyTest(unittest.TestCase):
         copy = self.hook('toolu-4')
         self.assertIn('and keep the seed', copy)
         self.assertNotIn('use the other dataset', copy)
+        # The copy mark is internal: neither `inspect` nor a `correct` receipt carries it.
+        self.assertFalse(any('shown' in item for item in I.inspect(self.jobs, self.attempt)['requests']))
         prompt = self.deliver('2')
         self.assertEqual((prompt.count('use the other dataset'), prompt.count('and keep the seed')), (1, 1))
         self.assertEqual(prompt.count('Already shown beside a tool result in the previous turn: C, D.'), 1)
         self.assertEqual([e['state'] for e in self.item('C')['events']],
                          ['queued', 'sending', 'accepted', 'turn-completed'])
-        self.assertIn(b'"queued": 0,', I._path(self.jobs, self.attempt).read_bytes()[:1024])
+        # The writer is main's: no count beside the requests.
+        self.assertNotIn('queued', json.loads(I._path(self.jobs, self.attempt).read_text()))
+
+    def test_only_an_ordinary_turn_the_supervisor_opened_shows_a_copy(self):
+        I.submit(self.jobs, self.attempt, 'only when certain', 'C')
+        import dispatch_completion_join as J
+        cases = {'no turn state named': dict(state=False),
+                 'turn state unreadable': dict(state=Path(self.temp.name)),
+                 'turn state missing': dict(state=Path(self.temp.name) / 'absent.json')}
+        for name, kwargs in cases.items():
+            with self.subTest(name):
+                self.assertEqual(self.hook(**kwargs), '')
+        for name, opened in {'reserved last turn or a supervisor without the turn kind': dict(ordinary=False),
+                             'another attempt': dict(ordinary=True, attempt=unique_attempt_id('att-other'))}.items():
+            with self.subTest(name):
+                self.open_turn(**opened)
+                self.assertEqual(self.hook(), '')
+        with self.subTest('no open turn'):
+            self.open_turn(ordinary=True)
+            J.write_supervisor_state(self.turn_state, self.attempt, set(), phase='parked')
+            self.assertEqual(self.hook(), '')
+        self.assertNotIn('shown', self.item('C'))
+        # The ledger's earlier reserved turn does not decide a later ordinary turn.
+        import dispatch_budget_record as budget
+        self.assertEqual(budget.reserve(self.jobs.parent, parent_attempt_id=self.attempt, route_id='r',
+                                        route_hash='h', ordinal=1, purpose='terminal-handoff', klass='reserved',
+                                        remaining={}), (True, ''))
+        self.open_turn(ordinary=True)
+        self.assertIn('only when certain', self.hook('toolu-9'))
+        self.assertEqual(self.deliver('2').count('only when certain'), 1)
+
+    def test_an_older_writer_leaving_a_count_does_not_hide_a_queued_correction(self):
+        # The previous head's writer left `"queued": 0`; main's `correct` keeps unknown keys.
+        path = I._path(self.jobs, self.attempt)
+        value = json.loads(path.read_text())
+        path.write_text(json.dumps({**value, 'queued': 0}, sort_keys=True))
+        message = Path(self.temp.name) / 'message.txt'
+        message.write_text('filed by the command line')
+        self.assertNotIn('shown', json.dumps(self.correct_cli('--request-id', 'C', '--message-file', str(message))))
+        self.assertEqual(json.loads(path.read_text())['queued'], 0)
+        self.assertIn('filed by the command line', self.hook('toolu-1'))
+        self.assertEqual(self.item('C')['shown'], 'toolu-1')
+        self.assertNotIn('shown', json.dumps(self.correct_cli()))
+
+    def test_a_literal_reminder_tag_shows_no_copy_and_delivers_whole(self):
+        text = 'keep <system-reminder>this literal</system-reminder> as written'
+        I.submit(self.jobs, self.attempt, text, 'C')
+        self.assertEqual(self.hook('toolu-1'), '')
+        self.assertNotIn('shown', self.item('C'))
+        prompt = self.deliver('2')
+        self.assertEqual(prompt.count(json.dumps(text)[1:-1]), 1)
+        self.assertNotIn('Already shown', prompt)
 
     def test_only_a_whole_context_within_the_utf16_limit_is_shown(self):
         def correction(request_id, units):
@@ -976,20 +1046,10 @@ class InTurnCopyTest(unittest.TestCase):
         self.assertEqual(I.show_in_turn(self.jobs, self.attempt, 'toolu-3'), '')
         self.assertEqual(self.deliver('1').count('shown twice at most'), 1)
 
-    def test_the_reserved_last_turn_and_a_cleanup_turn_show_no_copy(self):
+    def test_a_cleanup_scope_shows_no_copy_even_in_an_ordinary_turn_state(self):
         import dispatch_budget_record as budget
-        I.submit(self.jobs, self.attempt, 'not in the last turn', 'C')
+        I.submit(self.jobs, self.attempt, 'not in a cleanup turn', 'D')
         state = self.jobs.parent
-        self.assertEqual(budget.reserve(state, parent_attempt_id=self.attempt, route_id='r', route_hash='h',
-                                        ordinal=1, purpose='ordinary', klass='gross', remaining={}), (True, ''))
-        self.assertIn('not in the last turn', self.hook('toolu-1'))
-        I.submit(self.jobs, self.attempt, 'filed in the last turn', 'D')
-        self.assertEqual(budget.reserve(state, parent_attempt_id=self.attempt, route_id='r', route_hash='h',
-                                        ordinal=2, purpose='terminal-handoff', klass='reserved',
-                                        remaining={}), (True, ''))
-        self.assertEqual(self.hook('toolu-2'), '')
-        self.assertNotIn('shown', self.item('D'))
-        state.joinpath('supervisor-budget', self.attempt + '.jsonl').unlink()
         claim = budget.claim_terminal_handoff(state, owner_attempt_id=self.attempt, route_hash='h',
                                               child_attempt_ids=[], continuation_ordinal=0)
         budget.convert_claim_to_prompt_intent(state, claim, prompt='cleanup', cleanup_scope=dict(

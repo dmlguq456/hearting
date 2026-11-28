@@ -467,9 +467,10 @@ adapter adds a cancellation command, reason requirement or approval step.
 
 Owner corrections are accepted independently of delivery. Codex active-turn
 steering is only accepted after a matching turn response; Claude and OpenCode
-next-turn transports deliver on a later owner turn; a Claude owner's PreToolUse
-hook also shows a copy beside its next main-thread tool result in an ordinary
-turn, which changes no receipt. An owner parked on model
+next-turn transports deliver on a later owner turn; in an ordinary turn a Claude
+owner's PreToolUse hook may also show a copy beside its next main-thread tool
+result when conditions allow, which changes no receipt or delivery. An owner
+parked on model
 children receives a queued correction at the next checkpoint of the same
 30-second join pieces that carry resource attention
 (`join_with_resource_attention`): the children are not delivered, keep running

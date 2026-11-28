@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""A correction filed while a Claude owner's turn runs is shown there early and delivered next turn.
+"""A correction filed while a Claude owner's ordinary turn runs is shown there early and delivered next turn.
 
 The real supervisor drives a fake `claude` that runs the real PreToolUse hook
 from the supervisor's `--settings`. The hook only shows a copy of queued
-corrections beside a tool result (OPERATIONS §5.10); the receipt follows the
-next-turn delivery alone, so every failure path keeps main's receipt.
+corrections beside a tool result when the supervisor's turn state says the open
+turn is ordinary (OPERATIONS §5.10); the receipt follows the next-turn delivery
+alone, so every failure path keeps main's receipt.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -66,24 +68,34 @@ def run_turn(prompt, uuid):
     with open(trace, encoding='utf-8') as handle:
         turn = 1 + sum('"turn-start"' in line for line in handle)
     session = args[args.index('--resume' if '--resume' in args else '--session-id') + 1]
-    log(event='turn-start', turn=turn, prompt=prompt, session=session)
+    state_file = os.environ['AGENT_DISPATCH_COMPLETION_STATE_FILE']
+    with open(state_file, encoding='utf-8') as handle:
+        state = json.load(handle)
+    delivered = state['delivered_attempt_ids']
+    log(event='turn-start', turn=turn, prompt=prompt, session=session, ordinary=state.get('ordinary_turn', False))
     if '<owner-corrections>' in prompt:
         log(event='read', turn=turn, ids=ids_in(prompt), noted='Already shown beside a tool result' in prompt)
-    with open(os.environ['AGENT_DISPATCH_COMPLETION_STATE_FILE'], encoding='utf-8') as handle:
-        delivered = json.load(handle)['delivered_attempt_ids']
     for index, step in enumerate(plan.get(str(turn), []), 1):
         tool = f'toolu-{turn}-{index}'
         request = {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash', 'tool_input': {},
                    'tool_use_id': tool, 'cwd': os.getcwd()}
         if step.get('subagent'):
             request['agent_id'] = 'agent-1'
+        hook_env = {**os.environ, 'AGENT_HOME': root, 'AGENT_DISPATCH_JOBS': jobs,
+                    'AGENT_DISPATCH_ATTEMPT_ID': parent, 'AGENT_DISPATCH_COMPLETION_MODE': 'supervised'}
+        if step.get('turn_state') == 'unreadable':
+            hook_env['AGENT_DISPATCH_COMPLETION_STATE_FILE'] = os.path.dirname(trace)
+        elif step.get('turn_state') == 'without-kind':  # as a supervisor before this field writes it
+            with open(state_file, encoding='utf-8') as handle:
+                older = json.load(handle)
+            older.pop('ordinary_turn', None)
+            with open(state_file + '.older', 'w', encoding='utf-8') as handle:
+                json.dump(older, handle)
+            os.replace(state_file + '.older', state_file)
         if step.get('hook') != 'skip':
             command = eio_hook if step.get('hook') == 'eio' else hook
             done = subprocess.run(command, shell=isinstance(command, str), input=json.dumps(request),
-                                  capture_output=True, text=True, timeout=60,
-                                  env={**os.environ, 'AGENT_HOME': root, 'AGENT_DISPATCH_JOBS': jobs,
-                                       'AGENT_DISPATCH_ATTEMPT_ID': parent,
-                                       'AGENT_DISPATCH_COMPLETION_MODE': 'supervised'})
+                                  capture_output=True, text=True, timeout=60, env=hook_env)
             assert done.returncode == 0, done.stderr
             context = (json.loads(done.stdout)['hookSpecificOutput'].get('additionalContext', '')
                        if done.stdout.strip() else '')
@@ -91,6 +103,20 @@ def run_turn(prompt, uuid):
                 log(event='shown', turn=turn, tool=tool, ids=ids_in(context))
         for item in step.get('file', []):
             I.submit(jobs, parent, 'correction ' + item, item)
+        for item in step.get('cli', []):
+            # The previous head's writer left `"queued": 0`; `correct` keeps unknown keys.
+            with open(I._path(jobs, parent), encoding='utf-8') as handle:
+                value = json.load(handle)
+            with open(I._path(jobs, parent), 'w', encoding='utf-8') as handle:
+                json.dump({**value, 'queued': 0}, handle, sort_keys=True)
+            with open(trace + '.message', 'w', encoding='utf-8') as handle:
+                handle.write('correction ' + item)
+            correct_root = os.environ.get('FAKE_CORRECT_ROOT') or root
+            done = subprocess.run([sys.executable, correct_root + '/utilities/capability-route.py', 'correct',
+                                   '--jobs', jobs, '--attempt-id', parent, '--request-id', item,
+                                   '--message-file', trace + '.message'], capture_output=True, text=True, timeout=60)
+            assert done.returncode == 0, done.stderr
+            log(event='cli', receipt=json.loads(done.stdout.splitlines()[0]))
         if step.get('kill'):
             os.kill(os.getppid(), signal.SIGKILL)
             os._exit(0)
@@ -239,8 +265,9 @@ class InTurnCorrectionTest(unittest.TestCase):
         self.assertEqual(self.reads(trace), [(2, True)])
         self.assertEqual(self.history(), DELIVERED)
         self.assertEqual((self.receipt()["turn_id"], self.receipt()["shown"]), ("2", "toolu-1-2"))
-        self.assertIn("is also shown beside the claude owner's next tool result",
-                      I.inspect(self.jobs, PARENT)["delivery_notice"].lower())
+        self.assertIn("a copy may also appear beside its next tool result",
+                      I.inspect(self.jobs, PARENT)["delivery_notice"])
+        self.assertTrue(all(row["ordinary"] for row in trace if row["event"] == "turn-start"))
 
     def test_a_subagent_tool_or_no_later_tool_shows_no_copy(self):
         for name, plan in {"subagent": {"1": [{"file": ["C"]}, {"subagent": True}]},
@@ -283,13 +310,56 @@ class InTurnCorrectionTest(unittest.TestCase):
                                 for turn, steps in plan.items()}, **kwargs)
                 self.assertEqual(self.history(), expected)
 
-    def test_the_reserved_last_turn_shows_no_copy(self):
-        trace = self.run_owner({"2": [{"file": ["C"]}, {}]}, extra=("--max-continuations", "1"))
-        prompts = [row["prompt"] for row in trace if row["event"] == "turn-start"]
-        self.assertIn("reserved", prompts[1])
-        self.assertEqual(self.shown(trace), [])
-        self.assertEqual(self.reads(trace), [(3, False)])
+    def test_the_reserved_turn_shows_none_and_the_correction_turn_after_it_shows_one(self):
+        for transport in ("stream-json", "resume-process"):
+            with self.subTest(transport):
+                trace = self.run_owner({"2": [{"file": ["C"]}, {}], "3": [{"file": ["D"]}, {}, {}]},
+                                       transport=transport, extra=("--max-continuations", "1"))
+                turns = [row for row in trace if row["event"] == "turn-start"]
+                self.assertIn("reserved", turns[1]["prompt"])
+                # The supervisor names each turn's kind when it opens it, not the attempt's ledger.
+                self.assertEqual([row["ordinary"] for row in turns], [True, False] + [True] * (len(turns) - 2))
+                self.assertEqual((self.shown(trace), self.reads(trace)), ([], [(3, False)]))
+                self.assertEqual((self.shown(trace, "D"), self.reads(trace, "D")), (["toolu-3-2"], [(4, True)]))
+                self.assertEqual((self.history(), self.history("D")), (DELIVERED, DELIVERED))
+
+    def test_an_unreadable_turn_state_or_one_without_the_kind_shows_no_copy(self):
+        for name, state in {"unreadable": "unreadable", "older supervisor": "without-kind"}.items():
+            with self.subTest(name):
+                trace = self.run_owner({"1": [{"file": ["C"]}, {"turn_state": state}, {"turn_state": state}]})
+                self.assertEqual((self.shown(trace), self.reads(trace)), ([], [(2, False)]))
+                self.assertEqual(self.history(), DELIVERED)
+
+    def test_a_correction_the_command_line_files_beside_an_older_count_is_shown(self):
+        trace = self.run_owner({"1": [{"cli": ["C"]}, {}, {}]})
+        self.assertEqual((self.shown(trace), self.reads(trace)), (["toolu-1-2"], [(2, True)]))
         self.assertEqual(self.history(), DELIVERED)
+        receipts = [row["receipt"] for row in trace if row["event"] == "cli"]
+        self.assertTrue(receipts and all("shown" not in json.dumps(receipt) for receipt in receipts))
+        self.assertNotIn("shown", json.dumps(I.inspect(self.jobs, PARENT)))
+
+    def test_an_explicit_cleanup_turn_shows_no_copy(self):
+        for transport in ("stream-json", "resume-process"):
+            with self.subTest(transport):
+                self.new_run()
+                route = {"cwd": str(self.root), "artifact_root": str(self.root / ".agent_reports"),
+                         "nodes": [{"id": "report", "terminal": True}],
+                         "workflow_contract": {"terminal_nodes": ["report"]},
+                         "runtime_support": {"terminal_commit": True}}
+                encoded = json.dumps(route, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                route["route_hash"] = "sha256:" + hashlib.sha256(encoded.encode()).hexdigest()
+                route["route_id"] = "rt-" + route["route_hash"].split(":", 1)[1][:16]
+                (self.base / "route.json").write_text(json.dumps(route), encoding="utf-8")
+                trace = self.supervise(
+                    {"2": [{"file": ["C"]}, {}, {}]}, rc=3, transport=transport,
+                    extra=("--max-continuations", "1", "--enable-terminal-commit",
+                           "--route-file", str(self.base / "route.json"),
+                           "--route-id", route["route_id"], "--route-hash", route["route_hash"]))
+                turns = [row for row in trace if row["event"] == "turn-start"]
+                self.assertIn("partial report", turns[1]["prompt"])
+                self.assertEqual([row["ordinary"] for row in turns], [True, False])
+                self.assertEqual(self.shown(trace), [])
+                self.assertNotIn("shown", self.receipt())
 
 
 if __name__ == "__main__":

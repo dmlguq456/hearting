@@ -141,9 +141,6 @@ def _locked(jobs, attempt, *, create=False):
 def _write(path, value):
     fd, name = tempfile.mkstemp(prefix=".owner-input-", dir=path.parent)
     try:
-        if value.get("schema_version") == 1:
-            # Sorted ahead of `requests`, so a tool hook reads an empty queue from the head.
-            value["queued"] = sum(item.get("state") == "queued" for item in value["requests"])
         with os.fdopen(fd, "w") as handle:
             json.dump(value, handle, ensure_ascii=False, sort_keys=True)
             handle.flush()
@@ -242,8 +239,8 @@ def _public(value, *, live=False, reachable=None, owner_phase=None, metadata=Non
             "phase-unavailable": "Queued corrections may wait for the next owner turn."}.get(
                 timing, "Queued corrections are delayed until the next owner turn.")
     if value["transport"] == "claude-next-turn":
-        lead = ("A queued correction is also shown beside the Claude owner's next tool result in "
-                "its running turn; it is delivered at the next owner turn as before.")
+        lead += (" In an ordinary Claude owner turn a copy may also appear beside its next tool "
+                 "result when conditions allow; the next owner turn still delivers it.")
     notice = (lead + " An owner parked on its children gets that turn at its next wait checkpoint, "
               "within about 30 seconds, and the children keep running; an owner waiting only on "
               "resources gets it within seconds. A serial sub-session chain starts no further "
@@ -265,7 +262,7 @@ def _public(value, *, live=False, reachable=None, owner_phase=None, metadata=Non
             "supervisor_live": live, "owner_phase": phase,
             "delivery_timing": timing, "delivery_notice": notice,
             "one_shot": one_shot, "application_guaranteed": False,
-            "requests": [{key: item[key] for key in item if key != "text"}
+            "requests": [{key: item[key] for key in item if key not in ("text", "shown")}
                          for item in value["requests"]],
             "applied": "not-verified",
             "next_step": "Inspect delivery receipts; do not replay an unknown send or restart the owner."}
@@ -707,7 +704,9 @@ def show_in_turn(jobs, attempt, tool_use):
         items = [item for item in (value or {}).get("requests", [])
                  if item["state"] == "queued" and not item.get("shown")]
         text = OwnerInput.text(items)
-        if not text or len(text.encode("utf-16-le", "surrogatepass")) // 2 > HOOK_CONTEXT_UNITS:
+        # Claude rewrites a literal reminder tag before injecting, so its length is not certain.
+        if (not text or len(text.encode("utf-16-le", "surrogatepass")) // 2 > HOOK_CONTEXT_UNITS
+                or re.search(r"</?system-reminder", text, re.IGNORECASE)):
             return ""
         for item in items:
             item["shown"] = tool_use

@@ -1416,6 +1416,8 @@ def main(argv: list[str] | None = None) -> int:
     # can flip it for the whole loop -- the reserve is spendable exactly once
     # per owner lifetime (D47-4's "gross_remaining == reserved boundary" case).
     terminal_handoff_issued = [False]
+    # A turn the reserve opened is not ordinary until it completes (OPERATIONS §5.10).
+    turn_reserve = ledger.reserved_remaining
     pending_handoff_intent = None
     handoff_claim = None
     next_prompt = initial_prompt
@@ -1507,6 +1509,8 @@ def main(argv: list[str] | None = None) -> int:
             begin_supervisor_turn(
                 state_path, args.parent_attempt_id, delivered,
                 receipt_id=active_outbox.receipt_id if active_outbox is not None else None,
+                ordinary_turn=(pending_handoff_intent is None
+                               and ledger.reserved_remaining == turn_reserve),
             )
             turn_ordinal += 1
             args.owner_runtime_turn_ordinal = turn_ordinal
@@ -1627,6 +1631,7 @@ def main(argv: list[str] | None = None) -> int:
                 emit(result)
                 return process_rc or 3
             edge_block_failures = 0
+            turn_reserve = ledger.reserved_remaining
             DECISIONS.refresh_owner_route(args)
             rows = current_children(Path(args.jobs), args.parent_attempt_id,
                                     route_id=args.route_id, route_hash=args.route_hash)

@@ -2122,6 +2122,8 @@ class SupervisorState:
     delivered_attempt_ids: frozenset[str]
     outbox: SupervisorOutbox | None = None
     resource: dict[str, object] | None = None
+    # Set only by the supervisor opening an ordinary owner turn (OPERATIONS §5.10).
+    ordinary_turn: bool = False
 
 
 def valid_resource_state(value: object) -> bool:
@@ -2383,6 +2385,7 @@ def _write_supervisor_state_unlocked(
     phase: str = "parked",
     outbox: SupervisorOutbox | None = None,
     resource: dict[str, object] | None = None,
+    ordinary_turn: bool = False,
 ) -> None:
     if path is None:
         return
@@ -2453,7 +2456,11 @@ def _write_supervisor_state_unlocked(
             "receipt": outbox.receipt,
             "consumed_attempt_ids": sorted(outbox.consumed_attempt_ids),
         }
+    if ordinary_turn and phase == "running-turn":
+        value["ordinary_turn"] = True
     encoded = json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    if len(encoded) > MAX_STATE_BYTES and value.pop("ordinary_turn", None):  # optional, never oversized
+        encoded = json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
     if len(encoded) > MAX_STATE_BYTES:
         raise JoinContractError("supervisor-state-oversized")
     temporary: Path | None = None
@@ -2561,6 +2568,7 @@ def begin_supervisor_turn(
     delivered_attempt_ids: set[str],
     *,
     receipt_id: str | None = None,
+    ordinary_turn: bool = False,
 ) -> None:
     """Publish execution without acknowledging or overwriting pending delivery.
 
@@ -2584,6 +2592,7 @@ def begin_supervisor_turn(
             delivered.update(state.delivered_attempt_ids)
         _write_supervisor_state_unlocked(
             path, parent_attempt_id, delivered, phase="running-turn", outbox=outbox,
+            ordinary_turn=ordinary_turn,
         )
 
 
@@ -2688,7 +2697,8 @@ def read_supervisor_phase_state(
             (resource["outbox"] is not None and
              resource["outbox"]["receipt"]["parent_attempt_id"] != parent_attempt_id)):
         return None
-    return SupervisorState(str(value["phase"]), frozenset(delivered), outbox, resource)
+    return SupervisorState(str(value["phase"]), frozenset(delivered), outbox, resource,
+                           value["phase"] == "running-turn" and value.get("ordinary_turn") is True)
 
 
 def read_supervisor_state(
