@@ -2,8 +2,10 @@
 """Codex PreToolUse(request_user_input[_async]): carry the outcome of
 utilities/native_question_redirect.py. A registered or unknown question is refused with its one
 line; a question that goes through (registration failed before any write, no same question read)
-is first published as this thread's `codex-question` Fleet decision marker, so the shared wait list
-counts it until the native question's own PostToolUse or the next prompt clears it."""
+is first offered to the shared wait list as this thread's `codex-question` Fleet decision marker,
+observation only: one that cannot be written does not hold the question back. A managed gateway
+replaces it with its own request's wait and clears that at the answer; without one, the native
+question's own PostToolUse or the next prompt clears it."""
 
 import os
 import sys

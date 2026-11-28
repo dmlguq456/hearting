@@ -1250,7 +1250,7 @@ class ManagedGateway:
                         turn_id=(pending[0].turn_id if len(pending) == 1 else None),
                         item_id=(pending[0].item_id if len(pending) == 1 else None),
                     )
-            elif existing and existing.get("source") == "codex-appserver":
+            elif existing and existing.get("source") in ("codex-appserver", "codex-question"):
                 retired = self._retired_appserver_requests.get(
                     (thread_id, request_key(existing.get("request_id"))), {})
                 reason = {"applied": "answered", "received": "answered",

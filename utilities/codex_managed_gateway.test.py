@@ -1636,6 +1636,40 @@ class ManagedGatewayTest(unittest.TestCase):
         self.client.respond(902, {"answers": {"choice": {"selected": ["Proceed"]}}})
         self.wait_interaction("thread-1", False)
 
+    def test_a_hook_marker_the_gateway_could_not_replace_still_ends_with_its_requests(self) -> None:
+        # Review 2 #1 (11-28): only the replacement write fails, so the hook's `codex-question`
+        # marker stays while the request is open; the answer, a cancel, or two requests cancelled
+        # in one turn still leave no marker once the gateway holds no request of the thread.
+        def unreplaced(*request_ids: int) -> None:
+            self.assertTrue(GATEWAY.fleet_interaction.set_wait(
+                "thread-1", "codex", "decision", "codex-question"))
+            with mock.patch.object(GATEWAY.fleet_interaction, "_atomic_write",
+                                   side_effect=OSError("fixture")):
+                for request_id in request_ids:
+                    self.server.emit_user_input(request_id)
+                    self.client.wait_for(
+                        lambda value, request_id=request_id: value.get("id") == request_id
+                        and value.get("method") == "item/tool/requestUserInput")
+            self.assertEqual(GATEWAY.fleet_interaction.read_wait(
+                "thread-1", "codex")["source"], "codex-question")
+
+        unreplaced(902)
+        answer = {"answers": {"choice": {"selected": ["Proceed"]}}}
+        self.client.respond(902, answer)
+        deadline = time.monotonic() + 5
+        while (not any(value.get("id") == 902 for value in self.server.approval_responses)
+               and time.monotonic() < deadline):
+            time.sleep(0.01)
+        resolved = self.server.emit_resolved("thread-1", 902)
+        self.client.wait_for(lambda value: value == resolved)
+        self.wait_interaction("thread-1", False)
+
+        for request_ids in ((903,), (904, 905)):
+            with self.subTest(cancelled=request_ids):
+                unreplaced(*request_ids)
+                self.server.complete_turn(status="interrupted")
+                self.wait_interaction("thread-1", False)
+
     def test_question_deadline_projection_preserves_identity_and_real_answers(self) -> None:
         # Current schema generated from the installed codex-cli 0.153.4:
         # autoResolutionMs is deprecated; isBlocking is the timer authority.
