@@ -5376,6 +5376,41 @@ class ClearTest(_TmpRootMixin, unittest.TestCase):
                 rc, line = self.clear_cmd(world)
             self.assertEqual((rc, f"reason={reason}" in line, world.typed()), (3, True, []), line)
 
+    def test_a_cancel_after_the_compact_claim_and_before_the_last_check_types_nothing(self):
+        # RV-PR1960 (4): a manual tidy's last check handed back the copy it was given, so a cancel
+        # landing right after `claim_clear` still typed /compact on every harness. The last check now
+        # reads the booking again (its nonce, its status, its claim). A cancel after the typing
+        # started is answered `compact=sending`, as before.
+        for (harness, sid, screen), after_typing in itertools.product(
+                (("claude", "sid-A", CLAUDE_EMPTY), ("codex", "thr-A", CODEX_EMPTY),
+                 ("opencode", "ses_A", OPENCODE_EMPTY)), (False, True)):
+            with self.subTest(harness=harness, after_typing=after_typing):
+                seat = self.book(harness=harness, sid=sid)
+                world = _ClearWorld(harness=harness, sid=sid, screens=[screen], new_sid=None)
+                real_claim, answers = self.clear.claim_clear, []
+
+                def cancel():
+                    answers.append(self.clear.cancel_booking(self.st.session_seat(seat, harness, sid)))
+
+                def claim_then_cancel(*args, **kwargs):
+                    claimed = real_claim(*args, **kwargs)
+                    if not after_typing:
+                        cancel()
+                    return claimed
+                if after_typing:
+                    world.on_send = cancel
+                with mock.patch.object(self.clear, "claim_clear", side_effect=claim_then_cancel), \
+                        mock.patch.object(peer_steward, "_process_session", return_value=sid):
+                    rc, line = self.clear_cmd(world)
+                self.assertEqual(answers, ["cancel=booking compact=sending"])
+                self.assertEqual(len(world.typed()), 1 if after_typing else 0, line)
+                if not after_typing:
+                    self.assertEqual(rc, 3, line)
+                    self.assertIn("cleared=skipped", line)
+                    self.assertIn("reason=superseded", line)
+                held = self.clear.read_reservation(seat.key)
+                self.assertEqual((held["status"], held["reason"]), ("cancelled", "explicit-cancelled"))
+
     # -- doubt is "not cleared": zero input ---------------------------------------------------
 
     def test_working_blocked_unreadable_and_form_screens_get_no_input(self):
@@ -6068,18 +6103,38 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
         ref = line.split("transfer_ref=", 1)[1].split()[0]
         self.assertEqual(peer_steward.peer_message._read_pending(ref)["state"], "unverified")
 
-    # --- RV-PR1931, split out: cancel and the late-draft recall. A continue row carries its booking's
-    # origin, and each carrier asks that booking whether it still sends the row (one decision). ---
+    def test_continue_keeps_exact_no_trailer_ref_pending_for_native_callback(self):
+        self.cleared()
+        refused = mock.patch.object(peer_steward, "_native_idle_prompt_guard",
+                                    return_value=("draft", None))
+        no_send = mock.patch.object(peer_steward, "_herdr_prompt",
+                                    side_effect=AssertionError("continue PTY send"))
+        with refused, no_send, self.empty_codex_box():
+            rc, line = self.continue_cmd()
+        self.assertEqual(rc, 3, line)
+        self.assertIn("continued=queued", line)
+        self.assertIn("reason=draft", line)
+        ref = line.split("transfer_ref=", 1)[1].split()[0]
+        row = peer_steward.peer_message._read_pending(ref)
+        self.assertEqual((row["state"], row["text"], row["no_trailer"], row["receipt"]),
+                         ("pending", self.clear.CONTINUE_TEXT, True, "session-tidy-continue"))
+        self.assertEqual(row["to"], {"harness": "claude", "session_id": "sid-B",
+                                     "name": None, "pane_id": "w1:pX"})
+        claim_id = line.split("claim_id=", 1)[1].split()[0]
+        self.assertTrue(self.clear._finish_continue(
+            self.seat_obj.key, "n0nce", "queued", "awaiting-native-receiver",
+            claim_id=claim_id, transfer_ref=ref))
+        booked = self.booking()["continued"]
+        self.assertEqual((booked["state"], booked["transfer_ref"]), ("pending", ref))
+        with refused, no_send, self.empty_codex_box():
+            second_rc, second = self.continue_cmd()
+        self.assertEqual(second_rc, 3, second)
+        self.assertIn("transfer_ref=" + ref, second)
+        self.assertEqual(peer_steward.peer_message._read_pending(ref)["state"], "pending")
 
-    def late_draft_ask(self, guard_answers):
-        """One `peer-steward.py continue`: the box read empty before the claim, and the guard just
-        before typing answers ``guard_answers`` in turn ((reason, proof) pairs, or callables)."""
-        def guard(*_a, **_k):
-            answer = next(guard_answers)
-            return answer() if callable(answer) else answer
-        with mock.patch.object(peer_steward, "_native_idle_prompt_guard", side_effect=guard), \
-                self.empty_codex_box():
-            return self.continue_cmd()
+    # --- `/session-tidy 취소` and the continue's peer row (PR #1960, narrowed): the cancel ends the
+    # booking only. Before a peer row exists the continue is not typed; once one exists (bound, or
+    # still being bound) the row and the ledger stay as they are and the answer says it was handed. ---
 
     def hook_context(self, sid="sid-B"):
         """What the person's next prompt hook in the continuing Claude session would carry."""
@@ -6089,8 +6144,8 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
         return out.getvalue()
 
     def fresh(self, **kwargs):
-        """``cleared`` with no peer row left from an earlier case: the fixture's booking nonce repeats,
-        so an earlier case's continue row would have this booking's origin."""
+        """``cleared`` with no peer row left from an earlier case (the fixture's text and endpoints
+        repeat, so an earlier case's pending row would be this case's retry)."""
         shutil.rmtree(peer_steward.peer_message._pending_dir(), ignore_errors=True)
         return self.cleared(**kwargs)
 
@@ -6104,130 +6159,21 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
         seat = self.st.session_seat(self.seat_obj, req["harness"], req["new_session"])
         return self.st.tidy_claim_by_id(seat, claim_id)
 
-    def test_a_draft_seen_just_before_typing_takes_the_claim_and_the_ref_back(self):
-        # RV-PR1931 (3): the guard just before typing saw writing that appeared after the look, and
-        # the `queued` continue kept its bound ref: the person's next prompt carried it. The claim and
-        # the ref now go back together while no carrier took the row (first or second guard).
-        for reason, answers in itertools.product(
-                ("draft", "draft-unknown", "form-open"),
-                (lambda r: [(r, None)], lambda r: [(None, {"pid": 202}), (r, None)])):
-            with self.subTest(reason=reason, guard=len(answers(reason))):
-                self.fresh()
-                with mock.patch.object(peer_steward, "_herdr_prompt",
-                                       side_effect=AssertionError("continue PTY send")):
-                    rc, line = self.late_draft_ask(iter(answers(reason)))
-                self.assertEqual(rc, 3, line)
-                self.assertIn("continued=queued", line)
-                self.assertIn("reason=" + reason, line)
-                self.assertNotIn("transfer_ref=", line)
-                held = self.booking()["continued"]
-                self.assertEqual(held["state"], "pending")
-                self.assertNotIn("transfer_ref", held)
-                self.assertEqual(self.claim_row(held["claim_id"])["state"], "released")
-                self.assertNotIn(self.clear.CONTINUE_TEXT, self.hook_context())   # the person's prompt
+    def listed(self, harness, sid):
+        return [row["ref"] for row in peer_steward.peer_message.pending_messages(
+            {"harness": harness, "session_id": sid})]
 
-    def test_a_late_draft_takes_back_an_earlier_handed_ref_no_carrier_took(self):
-        # The first ask's guard said `target-state-changed`: the ref went to the prompt hook. The next
-        # ask's guard sees writing before any carrier took that row: it goes back too, with both claims.
-        self.fresh()
-        no_send = mock.patch.object(peer_steward, "_herdr_prompt",
-                                    side_effect=AssertionError("continue PTY send"))
-        with no_send:
-            rc, line = self.late_draft_ask(iter([("target-state-changed", None)]))
-        self.assertEqual(rc, 3, line)
-        self.assertIn("continued=queued", line)
-        ref = line.split("transfer_ref=", 1)[1].split()[0]
-        row = peer_steward.peer_message._read_pending(ref)
-        self.assertEqual((row["state"], row["text"], row["no_trailer"], row["receipt"]),
-                         ("pending", self.clear.CONTINUE_TEXT, True, "session-tidy-continue"))
-        self.assertEqual(row["to"], {"harness": "claude", "session_id": "sid-B",
-                                     "name": None, "pane_id": "w1:pX"})
-        self.assertEqual(row["tidy_origin"], {"seat": self.seat_obj.key, "nonce": "n0nce",
-                                              "card_generation": self.booking()["card_generation"]})
-        first = line.split("claim_id=", 1)[1].split()[0]
-        self.assertTrue(self.clear._finish_continue(
-            self.seat_obj.key, "n0nce", "queued", "awaiting-native-receiver",
-            claim_id=first, transfer_ref=ref))
-        booked = self.booking()["continued"]
-        self.assertEqual((booked["state"], booked["transfer_ref"]), ("pending", ref))
-        self.assertIs(self.clear.continue_origin_sends(row), True)
-        with no_send:
-            second_rc, second = self.late_draft_ask(iter([("draft", None)]))
-        self.assertEqual(second_rc, 3, second)
-        self.assertNotIn("transfer_ref=", second)
-        held = self.booking()["continued"]
-        self.assertEqual(held["state"], "pending")
-        self.assertNotIn("transfer_ref", held)
-        for claim_id in (first, held["claim_id"]):
-            self.assertEqual(self.claim_row(claim_id)["state"], "released")
-        self.assertNotIn(self.clear.CONTINUE_TEXT, self.hook_context())
-        self.assertEqual(peer_steward.peer_message._read_pending(ref)["state"], "pending")
-
-    def test_a_late_draft_after_a_carrier_took_the_row_leaves_it_as_on_main(self):
-        # "이미 잡혔으면 main처럼 둔다": the prompt hook took the bound row before the guard saw the
-        # writing; it is on its way, so the ref stays bound and nothing is taken back.
-        self.fresh()
-
-        def hook_takes_it_then_draft():
-            ref = self.booking()["continued"]["transfer_ref"]       # bound before the typing
-            self.hook_context()                    # (its output goes to the captured print here)
-            self.assertEqual(peer_steward.peer_message._read_pending(ref)["state"], "queued")
-            return ("draft", None)
-        with mock.patch.object(peer_steward, "_herdr_prompt", side_effect=AssertionError("continue PTY send")):
-            rc, line = self.late_draft_ask(iter([hook_takes_it_then_draft]))
-        self.assertEqual(rc, 3, line)
-        self.assertIn("continued=queued", line)
-        ref = line.split("transfer_ref=", 1)[1].split()[0]
-        self.assertEqual(self.booking()["continued"]["transfer_ref"], ref)
-        self.assertEqual(peer_steward.peer_message._read_pending(ref)["state"], "queued")
-
-    def test_after_a_late_draft_the_continue_is_typed_once_when_the_box_clears(self):
-        self.fresh()
-        guard = iter([("draft", None), (None, {"pid": 202}), (None, {"pid": 202})])
-        asks, slept = [], []
-
-        def ask(path, nonce, pane):
-            rc, line = self.late_draft_ask(guard)
-            asks.append(line)
-            return dict(part.partition("=")[::2] for part in line.split())
-        typed = mock.Mock(return_value=(0, {}))
-        with mock.patch.object(peer_steward, "_herdr_prompt", typed):
-            outcome = self.clear._continue(self.seat_obj.key, "n0nce", ask, sleep=slept.append, ask_again=True)
-            self.assertEqual(outcome, "continued")
-            self.assertEqual(len(asks), 2, asks)
-            self.assertIn("reason=draft", asks[0])
-            self.assertNotIn("transfer_ref=", asks[0])
-            self.assertIn("continued=true", asks[1])
-            self.assertEqual(slept, [self.clear.CONTINUE_INPUT_RETRY_SEC])
-            typed.assert_called_once()
-            self.assertEqual(self.booking()["continued"]["state"], "sent")
-            rc, line = self.late_draft_ask(iter([(None, {"pid": 202})] * 2))     # never typed again
-            self.assertIn("continued=skipped", line)
-            typed.assert_called_once()
-
-    def test_after_a_late_draft_a_submitted_prompt_or_a_cancel_sends_nothing(self):
-        for then in ("prompt", "cancel"):
-            with self.subTest(then=then):
-                self.fresh()
-                with mock.patch.object(peer_steward, "_herdr_prompt",
-                                       side_effect=AssertionError("continue PTY send")):
-                    rc, line = self.late_draft_ask(iter([("draft", None)]))
-                    self.assertIn("continued=queued", line)
-                    caller = self.st.session_seat(self.seat_obj, "claude", "sid-B")
-                    if then == "prompt":
-                        self.assertNotIn(self.clear.CONTINUE_TEXT, self.hook_context())
-                        with self.st.seat_lock(self.seat_obj.key):
-                            self.st.bump_prompt_seq(caller, "claude", "sid-B", time.time())
-                    else:
-                        self.assertEqual(self.clear.cancel_booking(self.caller()), "cancel=continue")
-                    outcome = self.clear._continue(self.seat_obj.key, "n0nce",
-                                                   lambda *_a: self.late_draft_ask(iter([(None, {"pid": 202})] * 2))
-                                                   and self.fail("asked again"),
-                                                   sleep=lambda _s: None, ask_again=True)
-                self.assertEqual(outcome, "cleared")
-                held = self.booking()["continued"]
-                self.assertEqual((held["state"], held["reason"]),
-                                 ("skipped", "new-input" if then == "prompt" else "explicit-cancelled"))
+    def opencode_pending(self, sid, **fields):
+        """One ``peer-message.py pending`` call of OpenCode's idle plugin; (rc, printed JSON)."""
+        from dispatch_contract import process_start_ticks
+        args = {"to_harness": "opencode", "to_session_id": sid, "received": None, "claim": None,
+                "queued": None, "resuming": None, "reserve": None, "begin_write": None,
+                "release_reservation": None, "claim_pid": str(os.getpid()),
+                "claim_start": process_start_ticks(os.getpid()), "claim_token": None, "message_id": None}
+        printed = []
+        with mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(a[0])):
+            rc = peer_steward.peer_message.cmd_pending(SimpleNamespace(**{**args, **fields}))
+        return rc, (json.loads(printed[-1]) if rc == 0 and printed else None)
 
     def handed(self, harness, sid, ref):
         """Whether the carrier of ``harness`` hands ``ref`` to session ``sid`` now, by its own path:
@@ -6252,68 +6198,7 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
         if rc:
             return False
         rc, _begun = self.opencode_pending(sid, begin_write=ref, claim_token=reserved["rpc_claim"]["token"])
-        if rc:      # the plugin lets its reservation go and moves to its next row
-            self.opencode_pending(sid, release_reservation=ref, claim_token=reserved["rpc_claim"]["token"])
         return rc == 0
-
-    def opencode_pending(self, sid, **fields):
-        """One ``peer-message.py pending`` call of OpenCode's idle plugin; (rc, printed JSON)."""
-        from dispatch_contract import process_start_ticks
-        args = {"to_harness": "opencode", "to_session_id": sid, "received": None, "claim": None,
-                "queued": None, "resuming": None, "reserve": None, "begin_write": None,
-                "release_reservation": None, "claim_pid": str(os.getpid()),
-                "claim_start": process_start_ticks(os.getpid()), "claim_token": None, "message_id": None}
-        printed = []
-        with mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(a[0])):
-            rc = peer_steward.peer_message.cmd_pending(SimpleNamespace(**{**args, **fields}))
-        return rc, (json.loads(printed[-1]) if rc == 0 and printed else None)
-
-    def cancel_while_preparing(self):
-        """The real ``continue``, with the person's cancel landing after its claim and before the
-        ref it prepares is bound (the reviewer's order). Returns that ref; the steward no longer
-        names it."""
-        peer = peer_steward.peer_message
-        real, refs = peer.prepare_peer_message, []
-
-        def cancel_then_prepare(*args, **kwargs):
-            self.assertEqual(self.clear.cancel_booking(self.caller()), "cancel=continue")
-            text, ref = real(*args, **kwargs)
-            refs.append(ref)
-            return text, ref
-        with mock.patch.object(peer, "prepare_peer_message", side_effect=cancel_then_prepare), \
-             mock.patch.object(peer, "deliver_pending_codex", side_effect=AssertionError("queued after the cancel")), \
-             mock.patch.object(peer_steward, "_native_idle_prompt_guard",
-                               side_effect=AssertionError("typed after the cancel")), \
-             self.empty_codex_box():
-            rc, line = self.continue_cmd()
-        self.assertIn("continued=skipped", line)
-        self.assertIn("reason=continue-claim-changed", line)
-        self.assertNotIn("transfer_ref=", line)
-        return refs[0], line.split("claim_id=", 1)[1].split()[0]
-
-    def listed(self, harness, sid):
-        return [row["ref"] for row in peer_steward.peer_message.pending_messages(
-            {"harness": harness, "session_id": sid})]
-
-    def test_a_cancel_between_the_claim_and_the_bound_ref_leaves_a_row_no_carrier_hands_over(self):
-        # Scene 1 (claim x cancel), RV-PR1931 round 2 (1): the cancel came after the steward's claim
-        # and before the row it was preparing was bound. No carrier hands that row over, the claim's
-        # ledger row ends released, and the row takes no carrier's slot.
-        for harness in ("claude", "codex", "opencode"):
-            with self.subTest(harness=harness):
-                self.fresh(harness=harness, sid="old-sid", new="new-sid")
-                ref, claim_id = self.cancel_while_preparing()
-                held = self.booking()["continued"]
-                self.assertEqual((held["state"], held["reason"]), ("skipped", "explicit-cancelled"))
-                self.assertNotIn("transfer_ref", held)
-                self.assertEqual(self.claim_row(claim_id)["state"], "released")
-                row = peer_steward.peer_message._read_pending(ref)
-                self.assertEqual((row["state"], row["text"], row["no_trailer"]),
-                                 ("pending", self.clear.CONTINUE_TEXT, True))
-                self.assertNotIn(ref, self.listed(harness, "new-sid"))
-                self.assertFalse(self.handed(harness, "new-sid", ref))
-                row = peer_steward.peer_message._read_pending(ref)
-                self.assertEqual((row["state"], row.get("rpc_claim")), ("pending", None))   # left as it is
 
     def handed_continue(self, harness):
         """A continue handed to its session's carrier and waiting there (``pending`` + ref): the
@@ -6321,8 +6206,11 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
         self.fresh(harness=harness, sid="old-sid", new="new-sid")
         queued = {"status": "queued", "reason": "native-queue-behind-active-turn"}
         with mock.patch.object(peer_steward.peer_message, "deliver_pending_codex", return_value=queued), \
-             mock.patch.object(peer_steward, "_herdr_prompt", side_effect=AssertionError("continue PTY send")):
-            rc, line = self.late_draft_ask(iter([("target-state-changed", None)]))
+             mock.patch.object(peer_steward, "_native_idle_prompt_guard",
+                               return_value=("target-state-changed", None)), \
+             mock.patch.object(peer_steward, "_herdr_prompt", side_effect=AssertionError("continue PTY send")), \
+             self.empty_codex_box():
+            rc, line = self.continue_cmd()
         self.assertIn("continued=queued", line)
         ref = line.split("transfer_ref=", 1)[1].split()[0]
         claim_id = line.split("claim_id=", 1)[1].split()[0]
@@ -6332,188 +6220,81 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(self.listed(harness, "new-sid"), [ref])
         return ref, claim_id
 
-    def test_a_cancel_takes_back_a_handed_continue_no_carrier_took(self):
-        # Scene 1 (pending+ref x cancel): no carrier has taken the row, so the cancel takes it back:
-        # every carrier now leaves it, it leaves their lists, and its claim ends released.
+    def assert_never_asked_again(self):
+        self.assertEqual(self.clear._continue(self.seat_obj.key, "n0nce",
+                                              lambda *_a: self.fail("asked again after the cancel"),
+                                              sleep=lambda _s: None, ask_again=True), "cleared")
+
+    def test_a_cancel_before_the_continue_has_a_peer_row_types_nothing(self):
+        # The box held writing before the claim: the continue waits with no claim and no row. The
+        # cancel ends it there; no row is ever prepared and nothing asks again.
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                self.fresh(harness=harness, sid="old-sid", new="new-sid")
+                with mock.patch.object(peer_steward, "_herdr_prompt", side_effect=AssertionError("typed")), \
+                     self.empty_codex_box("draft"):
+                    rc, line = self.continue_cmd()
+                self.assertEqual(rc, 3, line)
+                self.assertIn("continued=queued", line)
+                self.assertNotIn("transfer_ref=", line)
+                self.assertEqual(self.booking()["continued"]["state"], "pending")
+                self.assertEqual(self.clear.cancel_booking(self.caller()), "cancel=continue")
+                held = self.booking()["continued"]
+                self.assertEqual((held["state"], held["reason"]), ("skipped", "explicit-cancelled"))
+                self.assertNotIn("transfer_ref", held)
+                self.assert_never_asked_again()
+                self.assertEqual(self.listed(harness, "new-sid"), [])
+
+    def test_a_cancel_once_the_continue_row_is_bound_leaves_the_row_and_the_ledger_as_they_are(self):
+        # Question Q2's default: a continue already handed to its session's carrier is not taken
+        # back. The row, its delivery and the claim's ledger row are what they would be with no
+        # cancel; the booking ends, so nothing asks again or prepares another row.
         for harness in ("claude", "codex", "opencode"):
             with self.subTest(harness=harness):
                 ref, claim_id = self.handed_continue(harness)
-                self.assertEqual(self.clear.cancel_booking(self.caller()), "cancel=continue")
+                before = peer_steward.peer_message._read_pending(ref)
+                self.assertEqual(self.clear.cancel_booking(self.caller()), "cancel=continue handed=native")
                 held = self.booking()["continued"]
                 self.assertEqual((held["state"], held["reason"], held["transfer_ref"]),
                                  ("skipped", "explicit-cancelled", ref))
-                self.assertEqual(self.claim_row(claim_id)["state"], "released")
-                self.assertEqual(self.listed(harness, "new-sid"), [])
-                self.assertFalse(self.handed(harness, "new-sid", ref))
-                self.assertEqual(peer_steward.peer_message._read_pending(ref)["state"], "pending")
+                self.assertEqual(peer_steward.peer_message._read_pending(ref), before)
+                self.assertEqual(self.claim_row(claim_id)["state"], "sending")
+                self.assert_never_asked_again()
+                self.assertEqual(self.listed(harness, "new-sid"), [ref])
+                self.assertTrue(self.handed(harness, "new-sid", ref))
 
-    def test_a_cancel_after_a_carrier_took_the_continue_says_it_may_still_arrive(self):
-        # Scene 1 (taken x cancel), question Q2's default: a carrier already started writing the row,
-        # so it cannot be taken back; the answer says so and the claim's ledger row stays the claim's.
+    def test_a_cancel_while_the_steward_prepares_the_row_answers_handed(self):
+        # The gap a booking-only cancel cannot see: after the steward's claim, the row may already be
+        # prepared before its ref is bound. A claim a pane steward holds is answered as handed; the
+        # bind then fails and the row stays with its carrier, its claim's ledger row `sending`.
+        peer = peer_steward.peer_message
         for harness in ("claude", "codex", "opencode"):
             with self.subTest(harness=harness):
-                ref, claim_id = self.handed_continue(harness)
-                peer = peer_steward.peer_message
-                row = peer._read_pending(ref)
-                recipient = {"harness": harness, "session_id": "new-sid", "pane_id": "w1:pX"}
-                reserved = peer.reserve_pending_herdr(ref, recipient, receipt="test-carrier-inflight")
-                self.assertIsNotNone(peer.begin_pending_write(reserved, recipient=recipient,
-                                                              receipt="test-carrier-inflight"), row)
-                self.assertEqual(self.clear.cancel_booking(self.caller()), "cancel=continue handed=native")
+                self.fresh(harness=harness, sid="old-sid", new="new-sid")
+                real, answers = peer.prepare_peer_message, []
+
+                def cancel_then_prepare(*args, **kwargs):
+                    answers.append(self.clear.cancel_booking(self.caller()))
+                    return real(*args, **kwargs)
+                with mock.patch.object(peer, "prepare_peer_message", side_effect=cancel_then_prepare), \
+                     mock.patch.object(peer, "deliver_pending_codex",
+                                       side_effect=AssertionError("queued after the cancel")), \
+                     mock.patch.object(peer_steward, "_native_idle_prompt_guard",
+                                       side_effect=AssertionError("typed after the cancel")), \
+                     self.empty_codex_box():
+                    rc, line = self.continue_cmd()
+                self.assertEqual(answers, ["cancel=continue handed=native"])
+                self.assertIn("continued=skipped", line)
+                self.assertIn("reason=continue-claim-changed", line)
+                ref = line.split("transfer_ref=", 1)[1].split()[0]
+                claim_id = line.split("claim_id=", 1)[1].split()[0]
                 held = self.booking()["continued"]
                 self.assertEqual((held["state"], held["reason"]), ("skipped", "explicit-cancelled"))
+                self.assertNotIn("transfer_ref", held)
                 self.assertEqual(self.claim_row(claim_id)["state"], "sending")
-
-    def test_a_newer_booking_stops_the_old_continue_ref(self):
-        # Scene 3, RV-PR1931 round 3 (1): after a cancel (or with none) a newer booking from another
-        # session was written at the same window; the old ref then went out again on Codex and
-        # OpenCode, since "is this a continue?" was read from the booking files that remained.
-        for harness, cancelled in itertools.product(("claude", "codex", "opencode"), (True, False)):
-            with self.subTest(harness=harness, cancelled=cancelled):
-                if cancelled:
-                    self.fresh(harness=harness, sid="old-sid", new="new-sid")
-                    ref, _claim_id = self.cancel_while_preparing()
-                else:
-                    ref, _claim_id = self.handed_continue(harness)
-                old = self.booking()
-                self.clear._write_reservation({
-                    **{key: old[key] for key in ("schema", "seat", "cwd")},
-                    "nonce": "n3wer", "status": "reserved", "created": time.time(),
-                    "deadline": time.time() + 600, "harness": harness, "sid": "other-sid",
-                    "card_generation": old["card_generation"] + 1, "prompt_seq": 0, "continue_off": False})
-                self.assertEqual(self.listed(harness, "new-sid"), [])
-                self.assertFalse(self.handed(harness, "new-sid", ref))
-
-    def test_an_ordinary_message_or_a_plain_no_trailer_prompt_still_goes_out(self):
-        # Scene 4, RV-PR1931 round 3 (1): only a row sealed with a booking's origin asks the booking.
-        # A plain no-trailer prompt from the booking's own session with the same text (and one from
-        # another session), and a peer message with the same text, go out on their carriers while
-        # that session's continue is cancelled; the continue's preparation does not take the plain row.
-        peer = peer_steward.peer_message
-        for harness in ("claude", "codex", "opencode"):
-            with self.subTest(harness=harness):
-                self.fresh(harness=harness, sid="old-sid", new="new-sid")
-                recipient = {"harness": harness, "session_id": "new-sid", "name": None, "pane_id": "w1:pX"}
-                own = {"harness": harness, "session_id": "old-sid", "name": None}
-                _text, plain = peer.prepare_peer_message(self.clear.CONTINUE_TEXT, own, recipient, defer=True,
-                                                         with_trailer=False, receipt="native-pending")
-                continue_ref, _claim_id = self.cancel_while_preparing()
-                self.assertNotEqual(continue_ref, plain)
-                self.assertNotIn("tidy_origin", peer._read_pending(plain))
-                self.assertIsNone(self.clear.continue_origin_sends(peer._read_pending(plain)))
-                _text, ordinary = peer.prepare_peer_message(self.clear.CONTINUE_TEXT, own,
-                                                            {"harness": harness, "session_id": "new-sid"},
-                                                            defer=True)
-                _text, other = peer.prepare_peer_message(
-                    self.clear.CONTINUE_TEXT, {"harness": harness, "session_id": "other-sid", "name": None},
-                    recipient, defer=True, with_trailer=False, receipt="native-pending")
-                self.assertTrue({plain, ordinary, other} <= set(self.listed(harness, "new-sid")))
-                self.assertNotIn(continue_ref, self.listed(harness, "new-sid"))
-                self.assertFalse(self.handed(harness, "new-sid", continue_ref))
-                self.assertTrue(self.handed(harness, "new-sid", ordinary))
-                if harness == "claude":
-                    # A plain no-trailer prompt is no hook context (as before); its own pane carrier
-                    # (reserve, then the write) takes it.
-                    self.assertFalse(self.handed(harness, "new-sid", plain))
-                    for ref in (plain, other):
-                        self.assertIsNotNone(peer.claim_pending_herdr(ref, recipient))
-                else:
-                    self.assertTrue(self.handed(harness, "new-sid", plain))
-                    self.assertTrue(self.handed(harness, "new-sid", other))
-
-    def test_a_refused_continue_row_does_not_hold_back_ordinary_rows_in_the_first_slots(self):
-        # Scene 5, RV-PR1931 round 3 (3): a refused continue row went back to `pending` each time and
-        # took the first of OpenCode 1.x's 3 slots (2.x: 5) and the Codex retry's 3; the ordinary row
-        # behind two unverified rows never went out. The list now leaves it out.
-        peer = peer_steward.peer_message
-        for harness, slots in (("opencode", 3), ("opencode", 5), ("codex", 3)):
-            with self.subTest(harness=harness, slots=slots):
-                self.fresh(harness=harness, sid="old-sid", new="new-sid")
-                refused, _claim_id = self.cancel_while_preparing()
-                recipient = {"harness": harness, "session_id": "new-sid"}
-                ahead = []
-                for index in range(slots - 1):
-                    _text, ref = peer.prepare_peer_message(
-                        f"unverified {index}", {"harness": harness, "session_id": f"s{index}", "name": None},
-                        recipient, defer=True)
-                    peer._save_pending(dict(peer._read_pending(ref), state="unverified", receipt="native-queue-inflight"))
-                    ahead.append(ref)
-                _text, ordinary = peer.prepare_peer_message(
-                    "ordinary", {"harness": harness, "session_id": "s-last", "name": None}, recipient, defer=True)
-                order = {ref: index for index, ref in enumerate([refused, *ahead, ordinary])}
-                real_rows = peer._pending_rows
-
-                def in_order(*args, **kwargs):
-                    return iter(sorted(real_rows(*args, **kwargs), key=lambda row: order.get(row["ref"], 99)))
-                with mock.patch.object(peer, "_pending_rows", side_effect=in_order):
-                    if harness == "opencode":
-                        rc, listed = self.opencode_pending("new-sid")
-                        self.assertEqual(rc, 0)
-                        refs = [row["ref"] for row in listed]
-                    else:
-                        delivered = []
-                        with mock.patch.object(peer, "deliver_pending_codex",
-                                               side_effect=lambda ref, **_k: delivered.append(ref) or {}):
-                            peer.retry_pending_codex(recipient)
-                        refs = delivered
-                self.assertNotIn(refused, refs)
-                self.assertIn(ordinary, refs[:slots])
-                self.assertTrue(self.handed(harness, "new-sid", ordinary))
-
-    def test_a_hook_that_read_the_row_before_a_late_draft_took_it_back_does_not_carry_it(self):
-        # Scene 7, RV-PR1931 round 2 (3): the prompt hook read the bound continue row, then the guard
-        # just before typing saw writing and the claim and the ref went back; the hook still put the
-        # ref on the person's prompt. Its reservation now asks the booking, which no longer binds it.
-        self.fresh()
-        peer, listed = peer_steward.peer_message, []
-        recipient = {"harness": "claude", "session_id": "sid-B"}
-
-        def hook_reads_then_draft(*_args, **_kwargs):
-            listed.extend(peer._pending_rows(recipient=recipient, sender=recipient))
-            return ("draft", None)
-        with mock.patch.object(peer_steward, "_native_idle_prompt_guard", side_effect=hook_reads_then_draft), \
-             mock.patch.object(peer_steward, "_herdr_prompt", side_effect=AssertionError("continue PTY send")), \
-             self.empty_codex_box():
-            rc, line = self.continue_cmd()
-        self.assertIn("continued=queued", line)
-        self.assertNotIn("transfer_ref=", line)
-        self.assertEqual(len(listed), 1)
-        ref = listed[0]["ref"]
-        self.assertNotIn("transfer_ref", self.booking()["continued"])
-        with mock.patch.object(peer, "_pending_rows", side_effect=lambda *a, **k: iter(listed)):
-            context = self.hook_context()              # the hook's reservation comes after the hold
-        self.assertNotIn(self.clear.CONTINUE_TEXT, context)
-        self.assertEqual(peer._read_pending(ref)["state"], "pending")
-
-    def test_after_a_late_draft_a_refusal_that_is_not_the_box_hands_the_same_ref_to_the_hook(self):
-        # Scene 6, RV-PR1931 round 2 (4): a late draft took the claim back, the box was emptied, and
-        # the next ask's first guard said `target-state-changed`. That ask binds the same pending row
-        # again (same origin), and the person's next prompt hook carries it.
-        for second_guard in (False, True):
-            with self.subTest(draft_at_second_guard=second_guard):
-                self.fresh()
-                first = [(None, {"pid": 202}), ("draft", None)] if second_guard else [("draft", None)]
-                guard, asks, slept = iter([*first, ("target-state-changed", None)]), [], []
-                peer = peer_steward.peer_message
-
-                def ask(path, nonce, pane):
-                    rc, line = self.late_draft_ask(guard)
-                    asks.append(line)
-                    return dict(part.partition("=")[::2] for part in line.split())
-                with mock.patch.object(peer_steward, "_herdr_prompt",
-                                       side_effect=AssertionError("continue PTY send")):
-                    self.assertEqual(self.clear._continue(self.seat_obj.key, "n0nce", ask, sleep=slept.append,
-                                                          ask_again=True), "cleared")
-                self.assertEqual(len(asks), 2, asks)
-                self.assertIn("reason=draft", asks[0])
-                self.assertNotIn("transfer_ref=", asks[0])
-                self.assertIn("reason=target-state-changed", asks[1])
-                ref = asks[1].split("transfer_ref=", 1)[1].split()[0]
-                self.assertEqual(self.listed("claude", "sid-B"), [ref])       # the first ask's row, bound again
-                held = self.booking()["continued"]
-                self.assertEqual((held["state"], held["transfer_ref"]), ("pending", ref))
-                self.assertIn(self.clear.CONTINUE_TEXT, self.hook_context())   # the person's next prompt carries it
-                self.assertNotEqual(peer._read_pending(ref)["state"], "pending")
+                self.assert_never_asked_again()
+                self.assertEqual(self.listed(harness, "new-sid"), [ref])
+                self.assertTrue(self.handed(harness, "new-sid", ref))
 
     def empty_codex_box(self, screen_reason=None, *, reads=None):
         """The pane reads as an idle Codex screen whose input box is empty (or ``screen_reason``)."""

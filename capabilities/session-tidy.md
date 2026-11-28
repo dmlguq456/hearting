@@ -176,15 +176,7 @@ open form holds the continue without binding it (15 seconds between asks while i
 continue is then typed only into an empty prompt, read again just before typing; a Codex or
 OpenCode continue starts its turn only over an empty input box, read again after the claim.
 Claude's private connection holds a draft the same way, before or after its claim: no claim stays
-bound, and the helper asks again. When the guard just before typing finds writing that appeared
-after the look, the claim and its bound ref go back together while no carrier has taken the row,
-so the person's next prompt does not carry the continue; a row a carrier already took stays as it
-is. The continue's peer row is sealed with its booking's origin (seat, nonce and card generation),
-and each carrier that hands one over (Claude's prompt hook and pane typing, the Codex queue,
-OpenCode's idle write) asks that booking once, under the row lock it takes the row with, whether it
-still sends this row; a row it no longer sends stays where it is and takes no carrier's slot. A row
-with no origin (an ordinary peer message, another session's plain no-trailer prompt, an answer)
-keeps its carrier's rule. When the booked card
+bound, and the helper asks again. When the booked card
 generation already reached the continuing session (that generation's receipt of the booked harness
 and session id; another card or session proves nothing), a continue that was not sent ends without
 a line; the line asking the person to type the continue appears only while the card still waits
@@ -202,16 +194,20 @@ unavailable native callback leaves the booking pending or skipped under the
 existing result rules. `정리만` (`enqueue --no-clear`) keeps the window as it is
 and cancels a pending booking; `enqueue --no-continue` compacts without the
 continue action. `취소` (`cancel`) writes no card and queues no memory work: it
-stops what the window's booking would still type, a /compact not typed yet or
-the continue after a confirmed compaction, deciding from the booking's current
-record under its lock (and, when a continue ref is bound, under that row's lock
-first). A booking the same user turn's prompt already ended counts as cancelled
-by it, and that turn's own end books no new idle tidy (the next prompt does). A
-continue no carrier has taken is taken back; a /compact or continue whose
-typing or handing already started cannot be, and the result line says it may
-still arrive with the next turn. A continue claim that wrote nothing ends
-`released` in the ledger, even after a cancel or a newer booking, and a later
-settle keeps it so, so the person's own `이어서해` counts as their prompt. Outside herdr or tmux the session prints the manual `/compact`
+ends the window's booking, deciding from its current record under its lock, and
+touches no peer row and no ledger row. A booking the same user turn's prompt
+already ended counts as cancelled by it, and that turn's own end books no new
+idle tidy (the next prompt does). A /compact not typed yet is not typed; after
+its claim, the last check before the typing (idle and manual alike) reads the
+booking again and types nothing, and the result line says only that a typing
+already past that check may not stop. A continue with no peer row yet is not
+typed. Once a peer row may exist for it (its ref is bound, or a pane steward
+holds its claim and may be binding one) or Claude's private connection holds
+its claim, the row stays with its carrier and the result line says it cannot be
+taken back and may arrive with the next turn. A continue claim that wrote
+nothing ends `released` in the ledger, even after a cancel or a newer booking,
+and a later settle keeps it so, so the person's own `이어서해` counts as their
+prompt. Outside herdr or tmux the session prints the manual `/compact`
 command. A handoff compacts only the calling window, never the target, and that
 window does not continue from a card marked as handed off; failed delivery
 preserves the card for normal continuation.

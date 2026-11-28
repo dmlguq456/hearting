@@ -5336,13 +5336,13 @@ class ContinueHelperTest(TidyCase):
 
     def test_cancel_while_the_continue_is_claimed_stays_after_the_claim_is_released(self):
         # Scene 2, RV-PR1931 (2): a cancel during `sending` answered `cancel=none` and wrote nothing,
-        # so the steward's release put the continue back and the helper sent it again. A pane
-        # steward binds nothing after the cancel, so nothing is typed ("cancel=continue").
+        # so the steward's release put the continue back and the helper sent it again. The booking
+        # now ends; a pane steward may already have prepared its row, so the answer is "handed".
         seat, req, path = self.pending_continue()
         with self.iso.patched_environ(self.extra):
             claim, why = clear.claim_continue(path, req["nonce"])        # the steward's claim
         self.assertEqual(why, "")
-        self.assertEqual(self.cancel_cli(), ("cancel=continue", self.CONTINUE_SAY))
+        self.assertEqual(self.cancel_cli(), ("cancel=continue handed=native", self.HANDED_SAY))
         with self.iso.patched_environ(self.extra):
             self.assertFalse(clear.bind_continue_transfer(claim, "d" * 32))
             self.assertFalse(clear.release_unsent_continue(claim))       # a busy window: claim let go
@@ -5361,7 +5361,7 @@ class ContinueHelperTest(TidyCase):
         with self.iso.patched_environ(self.extra):
             claim, why = clear.claim_continue(path, req["nonce"])
         self.assertEqual(why, "")
-        self.assertEqual(self.cancel_cli()[0], "cancel=continue")
+        self.assertEqual(self.cancel_cli()[0], "cancel=continue handed=native")
         sid = self.booking(seat)["new_session"]
         with self.iso.patched_environ(self.extra), \
                 mock.patch.object(clear, "_ensure_helper", return_value=(True, "")), \
@@ -5392,7 +5392,7 @@ class ContinueHelperTest(TidyCase):
     def test_cancel_decides_under_the_ref_bound_meanwhile(self):
         # RV-PR1931 (2): the cancel read a pending continue with no ref; before it took the lock,
         # Codex was handed the ref. It said "nothing is typed" from its earlier copy. It now decides
-        # again under that ref's row lock; a row it cannot read may be on its way, and it says so.
+        # from the booking read under its lock: a bound ref is a handed row, and it says so.
         seat, req, path = self.pending_continue()
         real_read, raced = clear.read_reservation, []
 
@@ -5459,8 +5459,8 @@ class ContinueHelperTest(TidyCase):
         self.assertEqual(self.booking(seat)["status"], "cancelled")
 
     def test_cancel_after_the_compaction_stops_its_continue_quietly(self):
-        # A continue with no ref is taken back; one whose row cannot be read (here: none was written)
-        # may be on its way, and the answer says it may still arrive.
+        # A continue with no ref (no peer row yet) is not typed; one with a bound ref was handed to its
+        # session's carrier and may still arrive, and the answer says so. Neither asks again.
         for verdict, line, say in (
                 ({"continued": "queued", "reason": "awaiting-native-receiver"}, "cancel=continue",
                  self.CONTINUE_SAY),

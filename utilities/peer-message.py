@@ -2765,22 +2765,6 @@ def _request_withdrawn(row):
         return False
 
 
-def _continue_origin_refused(row):
-    """A booked session-tidy continue its booking no longer sends is not sent.
-
-    Only a row sealed with its booking's origin (``tidy_origin``) asks
-    ``session_tidy_clear.continue_origin_sends``, under the row lock the carrier takes it
-    with; every other row (an ordinary peer message, a plain no-trailer prompt, an answer)
-    is never refused here and keeps its carrier's rule."""
-    if not isinstance(row, dict) or "tidy_origin" not in row:
-        return False
-    try:
-        from session_tidy_clear import continue_origin_sends
-        return continue_origin_sends(row) is not True
-    except Exception:  # noqa: BLE001 - an unreadable booking hands over nothing it may have cancelled
-        return True
-
-
 def _registered_delivery_settled(row, *, read_context=None):
     try:
         from peer_obligations import registered_delivery_settled
@@ -2805,9 +2789,7 @@ def pending_messages(recipient, *, deadline=None):
     rows = []
     for row in _pending_rows(recipient=recipient, deadline=deadline):
         current = pending_delivery_recipient(row)
-        if _same_transfer_session(current, recipient) and not _continue_origin_refused(row):
-            # A continue its booking no longer sends stays on disk but takes no carrier's slot
-            # (OpenCode's first 3 or 5, the Codex retry's first 3) and is no unreceived request.
+        if _same_transfer_session(current, recipient):
             rows.append(row)
     return rows
 
@@ -2816,7 +2798,7 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
                          with_trailer=True, reference_evidence=None, first_input_process=None,
                          producer_binding=None, handoff=None, original_target=None, server=None,
                          prepared=None, namespace=None, request=None, display_line=None,
-                         private_body=False, tidy_origin=None):
+                         private_body=False):
     """A retry reuses a pending intent; ordinary sends need no preparation lock.
 
     A display form (see the block above ``_transfer_path``) is sealed only for a recipient
@@ -2829,10 +2811,7 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
     ``namespace`` is the Herdr socket a window ``original_target`` was read on (default:
     this environment's own, as ``peer_address.resolve`` reads it). A window request
     belongs to the namespace it was first made on: a row from another namespace, or an
-    unbound one that never recorded its namespace, is not this call's retry.
-    ``tidy_origin`` (a booked session-tidy continue's booking: seat, nonce, card generation)
-    is sealed on the row; a row is this call's retry only with the same origin, so another
-    booking's continue or an ordinary row is never taken for it (``continue_origin_sends``)."""
+    unbound one that never recorded its namespace, is not this call's retry."""
     endpoints_verified = (_valid_transfer_sender(sender, producer_binding, recipient, list(refs))
                           and (_valid_transfer_endpoint(recipient)
                                or _valid_pane_bound_endpoint(recipient)))
@@ -2940,7 +2919,6 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
                     and row.get("producer_binding") == producer_binding
                     and row.get("handoff") == handoff
                     and row.get("request") == request_seal
-                    and row.get("tidy_origin") == tidy_origin
                     and matches_target(row))
 
     def existing():
@@ -3045,8 +3023,6 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
             pending["request"] = request_seal
         if producer_binding is not None:
             pending["producer_binding"] = dict(producer_binding)
-        if tidy_origin is not None:
-            pending["tidy_origin"] = dict(tidy_origin)
         if (_valid_pane_bound_endpoint(recipient)
                 and _valid_first_input_process(first_input_process, recipient)):
             pending["first_input_process"] = dict(first_input_process)
@@ -3168,8 +3144,6 @@ def _reserve_pending_herdr(ref, recipient, *, receipt,
             return None
         if _request_withdrawn(row):
             return None
-        if _continue_origin_refused(row):
-            return None
         if _registered_delivery_settled(row):
             return None
         claim = {"token": secrets.token_hex(16), "pid": claimant.get("pid"),
@@ -3219,12 +3193,9 @@ def begin_pending_write(row, *, recipient=None, receipt=None, claimant=None):
                 or (not claim.get("first_input")
                     and not _pending_target_matches(current, recipient))
                 or _registered_delivery_settled(current)
-                or _request_withdrawn(current)
-                or _continue_origin_refused(current)):
+                or _request_withdrawn(current)):
             # A request revision cancelled or superseded after its reservation is
             # not written; this is the same pending lock a cancel reads it under.
-            # So is a booked continue its booking no longer sends (a tidy cancel or
-            # an input-box hold writes the booking under this lock).
             return None
         if not _registered_submission_current(current):
             return None
@@ -3499,8 +3470,6 @@ def _deliver_pending_codex_row(ref, *, timeout, start_interrupted, before_submit
             return {"status": "received", "reason": "exact-peer-ref"}
         if _request_withdrawn(row):
             return {"status": "not-required", "reason": "request-withdrawn"}
-        if _continue_origin_refused(row):
-            return {"status": "not-required", "reason": "continue-not-current"}
         if _registered_delivery_settled(row):
             return {"status": "not-required", "reason": "dispatch-notice-consumed"}
         if not _valid_transfer_sender(row["from"], row.get("producer_binding"),
@@ -3541,9 +3510,6 @@ def _deliver_pending_codex_row(ref, *, timeout, start_interrupted, before_submit
                 # Cancelled or superseded since the check above: not handed over.
                 # A cancel reads this row under this same lock after it is recorded.
                 raise QueueDeliveryError("request-withdrawn-before-add")
-            if _continue_origin_refused(current):
-                # A booked continue cancelled, held or replaced since the take: not added.
-                raise QueueDeliveryError("continue-not-current-before-add")
             if not _registered_submission_current(current):
                 raise QueueDeliveryError("peer-dispatch-recipient-changed-before-add")
             current = {key: value for key, value in current.items() if key != "steer_turn_id"}
@@ -3561,8 +3527,6 @@ def _deliver_pending_codex_row(ref, *, timeout, start_interrupted, before_submit
                 raise QueueDeliveryError("peer-claim-changed-before-steer")
             if _request_withdrawn(current):
                 raise QueueDeliveryError("request-withdrawn-before-steer")
-            if _continue_origin_refused(current):
-                raise QueueDeliveryError("continue-not-current-before-steer")
             if not _registered_submission_current(current):
                 raise QueueDeliveryError("peer-dispatch-recipient-changed-before-steer")
             _save_pending(dict(current, state="unverified", receipt="native-steer-inflight",
@@ -5305,11 +5269,9 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
             if recipient["harness"] == "claude" and _runtime_completion_copy(row):
                 continue
             # The sole no-trailer context is the booked session-tidy continue;
-            # ordinary peer bodies still require their exact sealed trailer. A continue
-            # sealed with its booking's origin goes while that booking still sends it,
-            # asked under the reservation's lock (`_continue_origin_refused`).
+            # ordinary peer bodies still require their exact sealed trailer.
             if row.get("no_trailer"):
-                if "tidy_origin" not in row and row.get("receipt") != "session-tidy-continue":
+                if row.get("receipt") != "session-tidy-continue":
                     continue
             else:
                 parsed = parse_peer_trailer(row.get("text"), recipient, include_ref=True)
