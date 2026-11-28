@@ -502,10 +502,7 @@ class FrameAlternativeSelectionTest(unittest.TestCase):
                 if should_record:
                     record.assert_called_once()
                     self.assertEqual(record.call_args.kwargs["reason"], "frame-other-harness-unusable")
-                    detail = json.loads(record.call_args.kwargs["detail"])
-                    self.assertEqual(detail["states"]["claude"], "limited(usage-gate)")
-                    self.assertEqual(detail["capacity"], {"claude": 80.0})
-                    self.assertEqual(detail["capacity_raw_headroom"], {"claude": 10.0})
+                    self.assertEqual(record.call_args.kwargs["detail"], "band:primary,claude:ineligible")
 
 class FrameTopDeclarationTest(unittest.TestCase):
     """Automatic frame-leg assignment chooses only harnesses whose runtime config declares `top`."""
@@ -2938,7 +2935,8 @@ class FrameAssignmentIncidentTest(unittest.TestCase):
              mock.patch.object(OWNER, "_declares_top", return_value=True), \
              mock.patch.object(artifact_producer, "prepare_route_artifact_env", return_value={}) as prepare, \
              mock.patch.object(OWNER, "select_launch_lifecycle", return_value="detached"), \
-             mock.patch.object(OWNER, "record_frame_launch_degradation") as record, \
+             mock.patch.object(OWNER, "record_frame_launch_degradation",
+                               wraps=OWNER.record_frame_launch_degradation) as record, \
              mock.patch.object(OWNER, "run_owner_wrapper", return_value=0) as wrapper, \
              mock.patch.dict(os.environ, _isolated_env({"AGENT_DISPATCH_JOBS": str(jobs)}), clear=True), \
              contextlib.redirect_stdout(out):
@@ -3077,10 +3075,7 @@ class FrameAssignmentIncidentTest(unittest.TestCase):
         self.assertNotEqual(got.wrapper, "opencode")
         got.record.assert_called_once()
         self.assertEqual(got.record.call_args.kwargs["reason"], "frame-other-harness-unusable")
-        detail = json.loads(got.record.call_args.kwargs["detail"])
-        self.assertTrue(detail["gated"]["codex"], detail)
-        self.assertEqual(detail["quality_band"], "primary")
-        self.assertEqual(sorted(detail["excluded_harnesses"]), ["codex", "opencode"])
+        self.assertEqual(got.record.call_args.kwargs["detail"], "band:primary,codex:gated,opencode:not-in-band")
         # the same harness runs the second leg on another model
         rotated = pair_model_rotation("claude", config, "top", first_model)
         self.assertIn("model_diversity_proposal=proposed", got.out)
@@ -3092,6 +3087,54 @@ class FrameAssignmentIncidentTest(unittest.TestCase):
         self.assertEqual((got.rc, got.wrapper), (0, "codex"), got.out)
         self.assertNotIn("frame-other-harness-unusable", got.out)
         got.record.assert_not_called()
+
+
+    def test_frame_alternative_exclusions_reach_the_receipt_and_ledger(self):
+        for band, headroom, state, exclusion in (
+            ("last_resort", 23, "ok", "not-in-band"),
+            ("primary", 23, "ok", None),
+            ("primary", 15, "ok", "gated"),
+            ("primary", 23, "limited(fixture-only)", "ineligible"),
+        ):
+            with self.subTest(band=band, headroom=headroom, state=state), tempfile.TemporaryDirectory() as td:
+                path = Path(td) / "route.json"
+                policy = {"primary": ["claude"], "relief": [], "last_resort": [], "promote_relief_below": 0}
+                policy[band].append("codex")
+                route = {
+                    "route_id": "rt-fixture-frame-alternative", "route_hash": "sha256:fixture",
+                    "capability": "autopilot-code", "capability_mode": "dev", "effective_intensity": "standard",
+                    "slug": "fixture", "cwd": td,
+                    "dispatch_evidence": {"tuples": [
+                        {"status": "supported", "child_harness": h} for h in ("claude", "codex")
+                    ]},
+                    "dispatch_allocation": {
+                        "strategy": "balanced", "window": 30, "usage_gate_used_percent": 85,
+                        "harness_order": ["claude", "codex"],
+                    },
+                    "nodes": [
+                        {"id": name, "worker_type": "frame", "unit": "plan/frame", "dispatch_depth": 1,
+                         "launch_authority": "depth-0", "model_profile": "top", "role": "plan/frame",
+                         "harness_policy": policy}
+                        for name in ("frame", "frame-alternative")
+                    ],
+                }
+                path.write_text(json.dumps(route), encoding="utf-8")
+                got = self._launch(path, "frame-alternative", first=("claude", "fixture-first-model"),
+                                   scores={"claude": 94, "codex": headroom},
+                                   states={"claude": "ok", "codex": state, "opencode": "unknown"})
+                self.assertEqual((got.rc, got.wrapper), (0, "claude" if exclusion else "codex"), got.out)
+                trace = next(line for line in got.out.splitlines() if line.startswith("trace.4="))
+                ledger = Path(td) / "degradations" / f"{route['route_id']}.jsonl"
+                if exclusion is None:
+                    self.assertTrue(trace.endswith(";deviation_reason=none"), trace)
+                    self.assertFalse(ledger.exists())
+                    continue
+                expected = f"band:primary,codex:{exclusion}"
+                self.assertTrue(trace.endswith(f";deviation_reason=frame-other-harness-unusable;deviation_detail={expected}"),
+                                trace)
+                rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+                self.assertEqual([(row["reason"], row["detail"]) for row in rows],
+                                 [("frame-other-harness-unusable", expected)])
 
 
 if __name__ == "__main__":
