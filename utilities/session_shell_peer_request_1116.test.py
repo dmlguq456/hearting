@@ -146,7 +146,8 @@ assert(route,'a route row of the same form');
 for(const w of ['claude','Opus 5.5','xhigh'])assert.equal(route.find(p=>p.text===w).foreground,part(w).foreground,w);
 // The title and the status follow, the status dim; a closed one's mark is the success color.
 assert(rows[at+1].includes('review the popup keys')&&rows[at+2].includes('partial answer'),rows.slice(at,at+3).join('\n'));
-const closed=draw({width:60,requests:[done]}),rows2=lines(closed),c=rows2.findIndex(s=>s.includes('✓ [e1] claude'));
+// (11-27: and its direction after it, `✓ → [e1]`.)
+const closed=draw({width:60,requests:[done]}),rows2=lines(closed),c=rows2.findIndex(s=>s.includes('✓ → [e1] claude'));
 assert(c>0,rows2.join('\n'));assert.equal(closed.rows[c].find(p=>p.text==='✓').foreground,styles.lvl_g.foreground);
 assert.equal(closed.rows[c+2].find(p=>p.text.includes('final answer')).dim,true);
 """)

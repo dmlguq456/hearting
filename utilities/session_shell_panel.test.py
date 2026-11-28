@@ -219,7 +219,7 @@ for(const [width,height,side] of [[40,30,true],[80,20,false]]){
  for(const want of ['project','(topic 🚧 3)','fixture high',side?'CTX    ━━━━':'context ','42%','running: pytest','1 QUESTIONS','SESSION_TITLE',side?'6 ROUTE':'route 6','ROUTE_0',side?'MESSAGES':'messages','MESSAGE_TWO','5h 23% │ 7d 60%'])
   assert(idle.some(s=>s.includes(want)),width+' missing '+want+'\n'+idle.join('\n'));
  // Spec rule 23: every route has a row or is counted in the box's lower border; no `more` row.
- const listed=idle.filter(s=>/ROUTE_\d/.test(s)).length,below=Number((idle.join('\n').match(/ ↓(\d+) ─╯/)||[0,0])[1]);
+ const listed=idle.filter(s=>/ROUTE_\d/.test(s)).length,below=Number((idle.join('\n').match(/ ↓ (\d+) more ─╯/)||[0,0])[1]);
  assert.equal(listed+below,6,idle.join('\n'));assert(!idle.join('').includes('more'),idle.join('\n'));assert(/^└─+┘$/.test(idle.at(-1)));
  assert(idle.at(-2).includes('7d 60%'),'quota is the last row');
 }
@@ -231,7 +231,7 @@ for(const [width,side,low] of [[40,true,14],[80,false,10]])for(let height=low;he
  // Spec rules 23, 31 (v4.36.4's order, the route box again): the messages fold to one row (the newest
  // stays) before the route box scrolls; 11-20: the messages section goes before the route box does.
  if(text.includes('MESSAGE_TWO'))assert(text.includes('ROUTE_0'),text);
- if(text.includes('MESSAGE_ONE'))assert(!/[↑↓]\d/.test(text),text);
+ if(text.includes('MESSAGE_ONE'))assert(!/[↑↓] \d+ more/.test(text),text);
 }
 const r=view.render({width:40,height:30,side:true,model,sid:'exact',configuration:{},questions:()=>[]});
 assert(!r.hits.some(h=>h.action==='details'));
@@ -253,14 +253,15 @@ const paint=(model,width,height,extra={})=>{const r=view.render({width,height,si
 // and nothing folds into `+N more` or opens Fleet.
 const twelve={...base,routes:Array.from({length:12},(_,i)=>route('r'+i,'ROUTE_'+i)),route_count:12,route_total:12};
 let r=paint(twelve,40,40);assert(r.plain.some(s=>s.includes('12 ROUTE')),r.plain.join('\n'));
-assert(r.plain.some(s=>s.includes('ROUTE_11'))&&!r.plain.join('').includes('more'),r.plain.join('\n'));
-// Fewer rows: the rows shown plus the border counts (`↑N` above, `↓N` below) are always the whole count.
+assert(r.plain.some(s=>s.includes('ROUTE_11'))&&!/\+\d+ more/.test(r.plain.join('')),r.plain.join('\n'));
+// Fewer rows: the rows shown plus the border counts (`↑ N more` above, `↓ N more` below) are always the whole count
+// (11-27: the borders' `more` is not the `+N more` row the box no longer has).
 const six={...base,routes:Array.from({length:6},(_,i)=>route('r'+i,'ROUTE_'+i)),route_count:6,route_total:6};
-const hidden=(plain,arrow)=>Number((plain.join('\n').match(new RegExp(' '+arrow+'(\\d+) (?:─|›─)[╮╯]'))||[0,0])[1]);
+const hidden=(plain,arrow)=>Number((plain.join('\n').match(new RegExp(' '+arrow+' (\\d+) more (?:─|›─)[╮╯]'))||[0,0])[1]);
 for(let height=10;height<=22;height++){
  for(const model of [six,twelve])for(const scroll of [0,3,99]){
   r=paint(model,40,height,{routeScroll:scroll});const shown=new Set(r.hits.filter(h=>h.action.startsWith('popup:ROUTE:')).map(h=>h.action)).size;
-  assert(!r.plain.join('').includes('more')&&!r.hits.some(h=>h.action==='fleet'),height+'\n'+r.plain.join('\n'));
+  assert(!/\+\d+ more/.test(r.plain.join(''))&&!r.hits.some(h=>h.action==='fleet'),height+'\n'+r.plain.join('\n'));
   if(r.routeArea){
    assert.equal(shown+hidden(r.plain,'↑')+hidden(r.plain,'↓'),model.route_total,height+'\n'+r.plain.join('\n'));
    assert.equal(hidden(r.plain,'↑'),r.routeArea.offset);assert(r.routeArea.offset<=r.routeArea.max);
@@ -268,7 +269,7 @@ for(let height=10;height<=22;height++){
  }
 }
 // A producer total above the rows it sent is counted in the lower border.
-r=paint({...six,route_total:9},40,40);assert(r.plain.some(s=>/ ↓3 ─╯/.test(s)),r.plain.join('\n'));
+r=paint({...six,route_total:9},40,40);assert(r.plain.some(s=>/ ↓ 3 more ─╯/.test(s)),r.plain.join('\n'));
 // While the box scrolls, a working route comes before waiting, stopped and finished ones.
 const mixed={...base,route_count:4,routes:[{...route('d','DONE_R'),kind:'done'},{...route('x','DEAD_R'),kind:'dead'},{...route('b','WAIT_R'),kind:'blocked'},route('w','WORK_R')]};
 for(let height=10;height<=16;height++){r=paint(mixed,40,height);if(r.routeArea?.max){const first=r.plain.find(s=>/_R/.test(s));assert(first.includes('WORK_R'),height+'\n'+r.plain.join('\n'));}}
@@ -514,8 +515,8 @@ for(const q of [null,question])for(let h=12;h<=30;h++){
  // route box scrolls; the newest message goes only with the section.
  const hidden=['MESSAGE_1','MESSAGE_2'].filter(m=>!all.includes(m)).length;
  if(all.includes('MESSAGE_3')&&hidden)assert(new RegExp('│ MESSAGES \\+'+hidden+' ').test(all),h+'\n'+all);
- if(all.includes('MESSAGE_1')&&all.includes('ROUTE_0'))assert(rows.filter(s=>s.includes('ROUTE_')).length===3&&!/[↑↓]\d/.test(all),h+'\n'+all);
- if(/[↑↓]\d/.test(all))assert(!two&&!all.includes('MESSAGE_2')&&!all.includes('MESSAGE_1'),h+'\n'+all);
+ if(all.includes('MESSAGE_1')&&all.includes('ROUTE_0'))assert(rows.filter(s=>s.includes('ROUTE_')).length===3&&!/[↑↓] \d+ more/.test(all),h+'\n'+all);
+ if(/[↑↓] \d+ more/.test(all))assert(!two&&!all.includes('MESSAGE_2')&&!all.includes('MESSAGE_1'),h+'\n'+all);
  // (The route box that went leaves rows over, which a section that fits there takes back: the newest message only, never an older one.)
  if(!all.includes('╭─ 3 ROUTE'))assert(!all.includes('MESSAGE_1')&&!all.includes('MESSAGE_2'),h+' the messages go before the route box\n'+all);
 }
@@ -2250,7 +2251,7 @@ const brief=()=>({count:2,label:'QUESTIONS',rows:[[p('◑ 패널을 접었을 �
  one:[[p('◑ 패널을 접었을 때의 모양을 어느 안으로')]],line:[p('패널을 접었을 때')],choices:4});
 const paint=height=>pv.render({width:44,height,side:true,model,native:{},state:'working',sid:'s',harness:'claude',frame:0,brief,sent:()=>[]});
 // (11-16: with room QUESTIONS is a thin rounded box, its name in the top line; short of rows the box's two lines go and the section reads as a head row and its rows.)
-const HEADS=[['QUESTIONS',/^│ ╭─ 3 QUESTIONS ─+ ›─╮ │$|^│ 3 QUESTIONS +› │$/],['ROUTE',/^│ ╭─ 4 ROUTE ─+(?: [↑↓]\d+)? ›─╮ │$|^│ ╭─ 4 ROUTE ─+ ›─╮ │$/],
+const HEADS=[['QUESTIONS',/^│ ╭─ 3 QUESTIONS ─+ ›─╮ │$|^│ 3 QUESTIONS +› │$/],['ROUTE',/^│ ╭─ 4 ROUTE ─+(?: [↑↓] \d+ more)? ›─╮ │$|^│ ╭─ 4 ROUTE ─+ ›─╮ │$/],
  ['MESSAGES',/^│ MESSAGES(?: \+\d+)? +› │$/],['MEM',/^│ MEM +› │$/]];
 // The rows under each head, up to the next head (MEM: its `◆` rows; a box: up to its bottom line).
 const sections=rows=>{const at=HEADS.map(([name,re])=>[name,rows.findIndex(s=>re.test(s))]);
@@ -2275,7 +2276,7 @@ for(const [height,rowsOf] of [[46,{QUESTIONS:2,MESSAGES:3,MEM:2}],[20,{QUESTIONS
  const box=sec.ROUTE.rows,routeRows=box.filter(s=>/^│ │ [⠏⠋✕✓] /.test(s));
  // (Each route keeps its time too: these routes carry no owner, and a route does not lose its time for that.)
  if(height===46)assert(routeRows.length===4&&box.filter(s=>/│ │   2\/2: execute/.test(s)).length===1&&['23m','54m','14m','31m'].every(m=>box.filter(s=>new RegExp('│ │ .*'+m+' +│ │$').test(s)).length===1)&&box.at(-1).startsWith('│ ╰─')&&!/[↑↓]\d/.test(box.at(-1)),label);
- else assert(routeRows.length>=1&&routeRows.length<4&&/↓\d+ ─╯/.test(box.at(-1))&&routeRows[0].includes('질문 팝업'),label);
+ else assert(routeRows.length>=1&&routeRows.length<4&&/↓ \d+ more ─╯/.test(box.at(-1))&&routeRows[0].includes('질문 팝업'),label);
  // Press actions: the question's head and rows open it; every head and row of MESSAGES its popup;
  // the box's top line the route popup and a route's rows the popup with that route unfolded; MEM opens nothing.
  const act=i=>v.hits.filter(h=>h.row===i).map(h=>h.action).filter(a=>a!=='fold'&&a!=='settings');
@@ -3179,8 +3180,8 @@ for(const [width,height] of [[32,30],[37,30],[38,30],[80,24]]){
  // Requests stand once, in the box: MESSAGES counts and shows the messages alone.
  const m=lines.findIndex(s=>/^│ (MESSAGES +|messages ─+ )› │$/.test(s)),box=lines.findIndex(s=>s.includes('╰'));
  // (11-27: a received request wears the received message's `←`, so each request's mark is counted in the box, above MESSAGES,
- // and the one `←` under MESSAGES is the message's.)
- for(const mark of ['←','→','✓'])assert(lines.slice(0,m).filter(s=>s.includes(mark)).length===1,mark+width+'\n'+lines.join('\n'));
+ // and the one `←` under MESSAGES is the message's. A closed request keeps its direction after its result: `✓ → [e1]`.)
+ for(const mark of ['← [e7]','→ [52]','✓ → [e1]'])assert(lines.slice(0,m).filter(s=>s.includes(mark)).length===1,mark+width+'\n'+lines.join('\n'));
  // Under MESSAGES the message stands alone: the one row with a mark (in the old `◂` or any other) is the message's own `← [e7]`
  // with its text on it or under it, and no request's title, state or id is drawn there.
  const below=lines.slice(m+1),marked=below.map((s,i)=>i).filter(i=>/[◂←→✓✕]/.test(below[i]));
@@ -3232,7 +3233,8 @@ assert.notDeepEqual(text(wheel),lines);
 for(const width of [32,37,38])for(const height of [30,11])for(const status of ['partial answer','final answer','open'])for(const title of ['검토 제목 1c9036d9 길게 이어지는 제목','review title 1c9036d9 and more words'])for(const [glyph,kind] of [['←','request-in'],['✓','request-done']]){
  const model={...base,messages:[],requests:[q('rq-aaaaaa',glyph,'[6e]',title,status,kind)]};
  const lines=text(render(width,height,{},model));
- const at=lines.findIndex(s=>s.includes(glyph+' [6e]'));
+ // (11-27: a closed request keeps its direction after its result, `✓ → [6e]`.)
+ const at=lines.findIndex(s=>s.includes((glyph==='✓'?'✓ →':glyph)+' [6e]'));
  const label=[width,height,status,glyph].join(' ')+'\n'+lines.join('\n');
  assert(at>0,'the head row stands with the other session: '+label);
  const rows=lines.slice(at,at+3).join('\n');

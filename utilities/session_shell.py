@@ -1563,7 +1563,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
             "block": {"prefix": [styled(line) for line in prefix], "tail": [styled(line) for line in tail],
                       "labels": labels, "styles": {**{key: style_components(key, colors=colors, no_color=no_color)
                       for key in ("dim", "loc_repo", "g_blocked", "lvl_g", "lvl_r")},
-                      # The chosen choice's `▸` takes this session's harness color (spec E9 rule 53).
+                      # The chosen choice's `▶` takes this session's harness color (spec E9 rule 53).
                       "harness": style_components("hb_" + str(harness), colors=colors, no_color=no_color)}},
             "native_display": {"model": values.get("model"), "effort": values.get("effort"),
                                "context_percent": values.get("ctx_pct")},
@@ -2091,23 +2091,42 @@ def _panel_popup(binding, request):
     ids = [str(route.get("id") or "") for route in routes]
     page = request.get("page") is True and opened in ids
     if page:
-        # The route page draws its content once. The host fits that page to
-        # the window and reads the remaining rows with PgUp/PgDn.
-        subset = replace(vm, routes=routes)
-        pages._route_page(grid, subset, opened, 0, columns - 1, grid.rows,
-                          pages._SubsetState(None, "route:" + opened, opened, True), whole=True)
-    elif routes:
+        return _route_page_answer(replace(vm, routes=routes), opened, columns, kind, ids, read_at, colors, no_color,
+                                  request.get("framed") is True)
+    if routes:
         pages._draw_route_subset(grid, vm, routes, 0, 0, grid.rows - 4, opened=opened, no_repo_group=True)
     rows, styles, hits = popup_rows(grid, colors=colors, no_color=no_color)
-    # The route page starts under Fleet's page head: its empty rows above the content go.
-    while page and rows and not rows[0]:
-        rows.pop(0)
-        hits = [{**hit, "row": hit["row"] - 1} for hit in hits if hit["row"] > 0]
-    if page:
-        return {"ok": True, "kind": kind, "rows": rows, "styles": styles, "hits": hits, "routes": ids[:64], "page": page,
-                "read_at": int(read_at)}
     return _popup_table(kind, rows, styles, hits, len(ids), colors=colors, no_color=no_color, page=False,
                         read_at=int(read_at))
+
+
+def _route_page_answer(subset, opened, columns, kind, ids, read_at, colors, no_color, framed):
+    """A route's page as the host reads it (the host fits it to the window and reads the rest with PgUp/PgDn). Its frame stands first
+    where the host's first screen showed that frame (``framed``) and the whole page then fits the answer (``POPUP_ROWS`` rows and
+    ``POPUP_ANSWER_BYTES``); else it is the answer as before 11-27, byte for byte (the lines first, the frame under them; one past what
+    the held reader takes is read the one-shot way, as it always was). Drawn twice at most."""
+    from fleet.explorer.grid import CellGrid
+    from fleet.explorer import pages
+
+    def draw(frame_first):
+        grid = CellGrid(columns, POPUP_ROWS + 8)
+        end = pages._route_page(grid, subset, opened, 0, columns - 1, grid.rows,
+                                pages._SubsetState(None, "route:" + opened, opened, True), whole=True, frame_first=frame_first)
+        rows, styles, hits = popup_rows(grid, colors=colors, no_color=no_color)
+        # The route page starts under Fleet's page head: its empty rows above the content go.
+        while rows and not rows[0]:
+            rows.pop(0)
+            hits = [{**hit, "row": hit["row"] - 1} for hit in hits if hit["row"] > 0]
+        return {"ok": True, "kind": kind, "rows": rows, "styles": styles, "hits": hits, "routes": ids[:64], "page": True,
+                "read_at": int(read_at)}, end
+
+    def weight(result):
+        return len(json.dumps({"id": 0, **result}, ensure_ascii=False).encode())
+    if framed:
+        answer, end = draw(True)
+        if end is not None and end <= POPUP_ROWS and weight(answer) <= POPUP_ANSWER_BYTES:
+            return answer
+    return draw(False)[0]
 
 
 def _input_readiness(binding, request):
