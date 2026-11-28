@@ -1130,7 +1130,8 @@ class WorkerTest(Homes):
                 ({"state": "running", "parent_next": "end-turn"}, "Started " + head + notice.format("")),
                 ({"state": "waiting-capacity", "parent_next": "end-turn"},
                  "Queued " + head + " It waits for a free worker and does not run natively." + notice.format(
-                     " If this session is idle by then, it comes with the next message.")),
+                     " If this session went idle before the queued worker started, the notice comes with the next "
+                     "message.")),
                 ({"state": "running", "parent_next": "bounded-wait", "parent_next_command": "cr w"},
                  "Started " + head + " No completion notice reaches this session: run this once to receive its "
                  "answer: cr w Do not call it again."),
