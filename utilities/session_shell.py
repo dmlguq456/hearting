@@ -1237,6 +1237,20 @@ def _panel_read_target(harness, sid, native_pid, native_start):
     return sid, native_pid, native_start, None
 
 
+def styled_parts(parts, *, colors=256, no_color=False) -> list:
+    """``(text, key)`` parts as the panel paints them: the text and its key's look, plus a role where
+    the panel reads one."""
+    from fleet.palette import style_components
+    from fleet.session_line import fresh_part
+    from fleet.session_block import CHOICE_DETAIL
+    # Spec E9 rule 50 (d): Git's `↑N`/`↓N` are marked so the panel can read them as the
+    # rest of the Git words where it shows no hue (mono, eight colors). A choice's words under its
+    # name (11-27) are marked so the editor keeps them dim on the chosen choice's rows.
+    return [{"text": text, **style_components(key, colors=colors, no_color=no_color),
+             **({"role": "git-fresh"} if fresh_part(text, key) else
+                {"role": "choice-detail"} if key == CHOICE_DETAIL else {})} for text, key in parts]
+
+
 def block_labels(editor: int) -> dict:
     """The question block's words for a popup of ``editor`` cells (the editor and the tests read the same)."""
     from fleet.config import ui_text
@@ -1275,13 +1289,13 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     import questions
     from fleet.prompt_line import last_input
     from fleet.session_tags import assigned_tag
-    from fleet.session_line import line_segments, fresh_part
+    from fleet.session_line import line_segments
     from fleet.session_line import status_lines
     from fleet.session_block import block_lines, block_sections, question_presentations
     from fleet.palette import style_components
     from fleet.config import ui_text
     from fleet.session_view import observe
-    from fleet.session_work import observe as observe_work, open_count, recent_memory
+    from fleet.session_work import observe as observe_work, open_count, recent_memory, shown_records
     from fleet.session_panel import MEMORY_ITEMS, presentation, request_rows, resource_rows, usage_rows
     from fleet.session_line import peer_message_rows
     read_sid, read_pid, read_start, parked = _panel_read_target(harness, sid, native_pid, native_start)
@@ -1351,10 +1365,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     if os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit"):
         colors = 1 << 24
     def styled(parts):
-        # Spec E9 rule 50 (d): Git's `↑N`/`↓N` are marked so the panel can read them as the
-        # rest of the Git words where it shows no hue (mono, eight colors).
-        return [{"text": text, **style_components(key, colors=colors, no_color=no_color),
-                 **({"role": "git-fresh"} if fresh_part(text, key) else {})} for text, key in parts]
+        return styled_parts(parts, colors=colors, no_color=no_color)
     segments = styled(line_segments(values, columns))
     # Spec E9 rules 37 (b), 46 (c): the repo's newest saved memory records, five at most (11-16; the
     # journal Fleet reads, read again only when it changed); their headlines ride the open-work
@@ -1363,8 +1374,7 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     work, work_paths = observe_work(values.get("cwd"),
                                     tuple(row["headline_id"] for row in memory_rows if row.get("headline_id")))
     if memory_rows:
-        values["memory_recent"] = [{**row, "headline": work.headlines.get(str(row.get("headline_id")), "")}
-                                   for row in memory_rows]
+        values["memory_recent"] = shown_records(memory_rows, work)
         values["memory_latest"] = values["memory_recent"][0]
     watched.extend(work_paths)
     watched.extend(memory_paths)
@@ -1436,8 +1446,9 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     quota_raw = panel["quota"]
     for name in ("head", "repo", "repo_side", "git", "git_side", "worktrees", "memory", "selected", "context", "context_side", "quota", "jobs", "mcp", "cost"):
         panel[name] = styled(panel[name])
+    panel["context_gauges"] = [styled(parts) for parts in panel["context_gauges"]]
     # Spec E9 rule 59 (11-16): the USAGE section, the three harnesses' usage rows (the records Fleet keeps).
-    panel["usage"] = [{"harness": row["harness"], "parts": styled(row["parts"])} for row in usage_rows(harness, values)]
+    panel["usage"] = [{"harness": row["harness"], "parts": styled(row["parts"]), "columns": row["columns"]} for row in usage_rows(harness, values)]
     # 11-16 (review of #1662): a reading at Fleet's red level carries `level: red`, so the folded strip can keep it
     # (the strip lets the other windows go first) in the place the old notice row gave it.
     panel["quota"] = [{**part, "level": "red"} if key == "lvl_r" else part
@@ -1503,7 +1514,8 @@ def panel_projection(harness: str, sid: str, *, native_pid=None, native_start=No
     # 11-18: the RESOURCES section (the compute hosts' CPU, memory and GPU use and the numbers of the sessions that hold a GPU): the
     # sample the shared producer already took, in the cache read above (no read of its own).
     panel["resources"] = [{"host": styled(row["host"]), "stats": [styled(item) for item in row["stats"]],
-                           "gpus": [{name: styled(parts) for name, parts in gpu.items()} for gpu in row["gpus"]]}
+                           "gpus": [{name: styled(parts) for name, parts in gpu.items()} for gpu in row["gpus"]],
+                           "brief": [styled(item) for item in row["brief"]]}
                           for row in resource_rows(view.get("resources"), time.time())]
     for request in panel["requests"]:
         # Painted as a route's doer is: the same harness, model and effort keys.

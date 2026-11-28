@@ -22,6 +22,7 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import ast
 import contextlib
+import errno
 import importlib.util
 import io
 import json
@@ -50,6 +51,14 @@ _spec = importlib.util.spec_from_file_location("seal_index_speed_producer_fixtur
 F = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = F
 _spec.loader.exec_module(F)
+
+# A real request (frame plus a sealed execution in `<frame>/_internal/executions/`), built by the
+# request folder tests' own framed fixture.
+_request_spec = importlib.util.spec_from_file_location("locator_index_request_fixture",
+                                                       Path(__file__).with_name("artifact_request.test.py"))
+Q = importlib.util.module_from_spec(_request_spec)
+sys.modules[_request_spec.name] = Q
+_request_spec.loader.exec_module(Q)
 
 SID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 ADVERSARIAL_TITLES = ["a|b", "back\\slash", "line\nbreak", "\ub05d \\|\uc12e\uc784 \u00e9",
@@ -929,6 +938,913 @@ class ScanCountTest(F.ProducerTestBase, IndexEquivalenceMixin):
                 self.assertLessEqual(scan_campaign.call_count, k)
                 for cid in dropped_ids:
                     self.assertEqual(P.read_cycle_record(self.root, cid)["state"], "dropped")
+
+
+@contextlib.contextmanager
+def _unreachable_target(test):
+    """A folder whose parent this user cannot search (the third review's host), or a skip
+    where search permission does not bind (root)."""
+    with tempfile.TemporaryDirectory() as base:
+        locked = Path(base) / "locked"
+        target = locked / "target"
+        target.mkdir(parents=True)
+        locked.chmod(0o600)
+        try:
+            try:
+                os.stat(target)
+            except PermissionError:
+                pass
+            else:
+                test.skipTest("search permission does not bind this user (root)")
+            yield target
+        finally:
+            locked.chmod(0o700)
+
+
+def _is_dir_raises(path):
+    """What the walk's own ``Path.is_dir()`` (it follows a link) does there: raise the read
+    error (Python 3.12), or answer False (3.13+, `os.path.isdir`)."""
+    try:
+        path.is_dir()
+    except PermissionError:
+        return True
+    return False
+
+
+class BeginScansItsCampaignOnceTest(F.ProducerTestBase, IndexEquivalenceMixin):
+    """A begin that opens a cycle in an existing campaign scans that campaign
+    once: its read-only index precheck hands its scan to the same begin's index
+    update, which adds only the cycle folder the begin itself created.
+
+    `_against_main` checks every precheck and update inside a begin against
+    main's computation of the same call on the same disk state
+    (`_plan_update` with nothing handed over): the same index bytes, status,
+    rescanned and skipped campaigns, and the same refusal. Whenever the
+    handed-over scan cannot be shown equal, the update scans again.
+
+    A hand write that lands right after the precheck (`post_prepare`) is checked
+    against main in the same order, or -- for a write inside an existing cycle
+    folder, which is not looked for (`lands_after`) -- against main with that
+    write landing just after the update.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.activate()
+        self._watch_scans()
+
+    def _watch_scans(self):
+        self.n = 0
+        self.scans = []          # campaign folder names, counted outside the oracle
+        self.update_scans = []   # scans made by each real update_indexes call
+        self.prepared = []       # each real prepare_index_update result
+        self.pre_update = None   # optional hand change between the begin's writes and its update
+        self.pre_prepare = None  # optional hand change just before the begin's precheck
+        self.post_prepare = None  # optional hand change just after the begin's precheck returned
+        self.lands_after = None  # (undo, redo) of that change: compare with main as if it came after the update
+        self.same_order = []     # main's answer to each update with the change where it really landed
+        self._counting = True
+        real_scan = loc.scan_campaign
+
+        def counted(*args, **kwargs):
+            if self._counting:
+                self.scans.append(Path(args[1]).name)
+            return real_scan(*args, **kwargs)
+
+        patcher = mock.patch.object(loc, "scan_campaign", side_effect=counted)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _begin(self, slug=None, **kwargs):
+        self.n += 1
+        gate = f"once-{self.n}"
+        route, route_file = self.route(slug=slug or gate, gate_source=gate)
+        result = P.begin(self.root, route_file=route_file, capability="autopilot-code",
+                         intensity="direct", **kwargs)
+        return route, route_file, result
+
+    def _sealed(self, **kwargs):
+        route, route_file, result = self._begin(**kwargs)
+        self.write_output(result)
+        self.close(route, route_file)
+        P.finalize(self.root, cycle_id=result["cycle_id"])
+        return route, route_file, result
+
+    def assert_index_matches_full_rebuild(self, note=""):
+        self._counting = False   # the full-rebuild oracle scans every campaign; it is not the begin's cost
+        try:
+            IndexEquivalenceMixin.assert_index_matches_full_rebuild(self, note)
+        finally:
+            self._counting = True
+
+    def _index_bytes(self):
+        base = self.root / "campaigns"
+        return ((base / "INDEX.json").read_bytes() if (base / "INDEX.json").is_file() else None,
+                (base / "INDEX.md").read_bytes() if (base / "INDEX.md").is_file() else None)
+
+    def _main_answer(self, root, ids):
+        self._counting = False
+        try:
+            rows, mapping, status, rescanned, skipped, _ = loc._plan_update(root, ids)
+        except loc.LocatorError as exc:
+            return ("refused", exc.code, exc.detail)
+        except OSError as exc:   # the walk raises a folder it cannot read as it is
+            return ("raised", type(exc).__name__, exc.errno, exc.filename)
+        finally:
+            self._counting = True
+        return ("ok", status, rescanned, skipped, *loc.render_indexes(mapping, rows))
+
+    @contextlib.contextmanager
+    def _against_main(self):
+        real_prepare, real_update = loc.prepare_index_update, loc.update_indexes
+
+        def prepare(root, ids, **kwargs):
+            if self.pre_prepare is not None:
+                self.pre_prepare()
+            ids = list(ids)
+            want = self._main_answer(root, ids)
+            try:
+                got = real_prepare(root, ids, **kwargs)
+            except loc.LocatorError as exc:
+                self.assertEqual(("refused", exc.code, exc.detail), want)
+                raise
+            except OSError as exc:
+                self.assertEqual(("raised", type(exc).__name__, exc.errno, exc.filename), want)
+                raise
+            self.assertEqual(("ok", got.status, got.rescanned, got.skipped), want[:4])
+            self.prepared.append(got)
+            if self.post_prepare is not None:
+                self.post_prepare()
+            return got
+
+        def update(root, ids, **kwargs):
+            if self.pre_update is not None:
+                self.pre_update(kwargs)
+            ids = list(ids)
+            want = self._main_answer(root, ids)
+            if self.lands_after is not None:
+                undo, redo = self.lands_after
+                self.same_order.append(want)
+                undo()
+                want = self._main_answer(root, ids)
+                redo()
+            before = self._index_bytes()
+            start = len(self.scans)
+            try:
+                got = real_update(root, ids, **kwargs)
+            except loc.LocatorError as exc:
+                self.assertEqual(("refused", exc.code, exc.detail), want)
+                raise
+            except OSError as exc:
+                self.assertEqual(("raised", type(exc).__name__, exc.errno, exc.filename), want)
+                raise
+            finally:
+                self.update_scans.append(self.scans[start:])
+            self.assertEqual(want[0], "ok", want)
+            status = "unchanged" if before == tuple(want[4:6]) else want[1]
+            self.assertEqual((got.status, got.rescanned, got.skipped), (status, want[2], want[3]))
+            self.assertEqual(self._index_bytes(), tuple(want[4:6]))
+            return got
+
+        with mock.patch.object(loc, "prepare_index_update", side_effect=prepare), \
+                mock.patch.object(loc, "update_indexes", side_effect=update):
+            yield
+
+    def _counted_begin(self, **kwargs):
+        self.scans.clear()
+        self.update_scans.clear()
+        with self._against_main():
+            result = self._begin(**kwargs)[2]
+        self.assert_index_matches_full_rebuild(str(kwargs))
+        return result
+
+    def _campaign_rel(self, result):
+        return Path(result["cycle_dir"]).parent.name
+
+    # -- the scenes ---------------------------------------------------------------------
+    def test_new_cycle_in_an_existing_campaign_scans_it_once(self):
+        first = self._begin(campaign_key="once-stream")[2]
+        result = self._counted_begin(campaign_id=first["campaign_id"])
+        self.assertEqual(result["status"], "begun")
+        self.assertEqual(self.scans, [self._campaign_rel(first)])   # was 2 on main
+        self.assertEqual(self.update_scans, [[]])
+
+    def test_new_campaign_still_scans_once(self):
+        result = self._counted_begin(campaign_key="once-new-stream")
+        self.assertEqual((result["status"], result["campaign_created"]), ("begun", True))
+        self.assertEqual(self.scans, [self._campaign_rel(result)])
+
+    def test_unit_turn_continuation_scans_once(self):
+        route, route_file, first = self._sealed(campaign_key="once-turns")
+        R = F.R
+        R.retire_stale_closure(route_file)
+        self.scans.clear()
+        self.update_scans.clear()
+        with self._against_main():
+            second = P.begin(self.root, route_file=route_file, capability="autopilot-code",
+                             intensity="direct", fresh_cycle="att-once-turn-2")
+        self.assertEqual((second["status"], second["campaign_id"]), ("begun", first["campaign_id"]))
+        self.assertEqual(self.scans, [self._campaign_rel(first)])
+        self.assert_index_matches_full_rebuild("continuation")
+        with self._against_main():   # asking again resumes it without any index work
+            again = P.begin(self.root, route_file=route_file, capability="autopilot-code",
+                            intensity="direct", fresh_cycle="att-once-turn-2")
+        self.assertEqual((again["status"], again["cycle_id"]), ("resumed", second["cycle_id"]))
+        self.assertEqual(self.scans, [self._campaign_rel(first)])
+
+    def test_journal_begin_scans_once(self):
+        first = self._begin(campaign_key="once-journal")[2]
+        result = self._counted_begin(campaign_key="once-journal", journal_target=True)
+        self.assertEqual(result["layout"], "journal")
+        self.assertEqual(self.scans, [self._campaign_rel(first)])
+
+    def test_only_the_begins_own_campaign_is_handed_over(self):
+        for journal in (False, True):
+            with self.subTest(journal=journal):
+                key = f"once-target-{journal}"
+                target = self._sealed(campaign_key=key)[2]
+                other = self._sealed(campaign_key=f"once-other-{journal}")[2]
+                moved = self._sealed(campaign_key=f"once-moved-{journal}")[2]
+                other_dir = Path(other["cycle_dir"]).parent
+                copy = other_dir.with_name(other_dir.name + "-copy")
+                shutil.copytree(other_dir, copy)                     # skipped, as on main
+                moved_dir = Path(moved["cycle_dir"]).parent
+                renamed = moved_dir.with_name(moved_dir.name + "-renamed")
+                moved_dir.rename(renamed)                            # rescanned, as on main
+                self.scans.clear()
+                self.update_scans.clear()
+                with self._against_main():
+                    result = self._begin(_reconcile=False, **({"campaign_key": key, "journal_target": True}
+                                                              if journal else {"campaign_id": target["campaign_id"]}))[2]
+                self.assertEqual(result["layout"], "journal" if journal else "cycle")
+                others = sorted([copy.name, renamed.name])
+                self.assertEqual(sorted(self.scans), sorted([self._campaign_rel(target), *others, *others]))
+                self.assertEqual([sorted(scans) for scans in self.update_scans], [others])   # main: 3, here 2
+                shutil.rmtree(copy)                                  # the next round starts clean
+                fd = adm._acquire_lock(self.root, timeout=5.0)
+                try:
+                    loc.rebuild_indexes(self.root)
+                finally:
+                    adm._release_lock(self.root, fd)
+
+    def test_duplicate_copy_is_refused_before_the_first_write(self):
+        target = self._sealed(campaign_key="once-dup")[2]
+        camp_dir = Path(target["cycle_dir"]).parent
+        shutil.copytree(camp_dir, camp_dir.with_name(camp_dir.name + "-copy"))
+
+        def state():   # every campaign folder file and cycle record
+            files = {}
+            for base, pattern in ((self.root / "campaigns", "*"), (P.producer_dir(self.root) / "cycles", "cyc_*.json")):
+                for path in sorted(base.rglob(pattern)):
+                    files[path.relative_to(self.root).as_posix()] = path.read_bytes() if path.is_file() else None
+            return files
+
+        before = state()
+        with self.assertRaises(loc.LocatorError) as caught:
+            with self._against_main():
+                self._begin(campaign_id=target["campaign_id"])
+        self.assertEqual(caught.exception.code, "locator-index-duplicate-id")
+        self.assertEqual(state(), before)
+        self.assertEqual(self.update_scans, [])
+
+    def test_missing_index_is_rebuilt_leniently_as_on_main(self):
+        first = self._sealed(campaign_key="once-lenient")[2]
+        self._sealed(campaign_key="once-lenient-other")
+        # The begin's own lookups heal a missing index before its precheck; drop it right there.
+        self.pre_prepare = lambda: (self.root / "campaigns" / "INDEX.json").unlink()
+        try:
+            with self._against_main():
+                self._begin(campaign_id=first["campaign_id"], _reconcile=False)
+        finally:
+            self.pre_prepare = None
+        self.assertEqual((self.prepared[0].status, self.prepared[0].scans), ("rebuilt", None))   # nothing handed over
+        self.assertTrue(self.update_scans and all(self.update_scans))   # every update scanned, as on main
+        self.assert_index_matches_full_rebuild("lenient")
+
+    # -- when the handed-over scan cannot be used, the update scans again -----------------
+    def _rescans(self, first, change):
+        self.pre_update = change
+        try:
+            with self._against_main():
+                result = self._begin(campaign_id=first["campaign_id"], _reconcile=False)[2]
+        finally:
+            self.pre_update = None
+        self.assertEqual(self.update_scans[-1], [self._campaign_rel(first)])
+        self.assert_index_matches_full_rebuild("rescanned")
+        return result
+
+    def test_begin_that_fills_campaign_display_fields_rescans(self):
+        first = self._sealed(campaign_key="once-fill")[2]
+        path = Path(first["cycle_dir"]).parent / "campaign.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for key in ("slug", "title", "slug_source", "slug_truncated"):
+            data.pop(key, None)
+        path.write_text(json.dumps(data), encoding="utf-8")
+        fd = adm._acquire_lock(self.root, timeout=5.0)
+        try:
+            loc.rebuild_indexes(self.root)
+        finally:
+            adm._release_lock(self.root, fd)
+        self._rescans(first, None)
+
+    def test_hand_edited_campaign_record_rescans(self):
+        first = self._sealed(campaign_key="once-title")[2]
+        record_path = P.cycle_record_path(self.root, first["cycle_id"])
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        record.pop("title"), record.pop("slug")   # its row now shows the campaign's title
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+        fd = adm._acquire_lock(self.root, timeout=5.0)
+        try:
+            loc.rebuild_indexes(self.root)
+        finally:
+            adm._release_lock(self.root, fd)
+        path = Path(first["cycle_dir"]).parent / "campaign.json"
+
+        def retitle(_kwargs):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["title"] = "retitled by hand"
+            path.write_text(json.dumps(data), encoding="utf-8")
+        self._rescans(first, retitle)
+        rows = loc.parse_index_markdown(self._index_bytes()[1])
+        self.assertEqual(rows[first["cycle_id"]]["title"], "retitled by hand")
+
+    def _reuses(self, first, change):
+        self.pre_update = change
+        try:
+            with self._against_main():
+                result = self._begin(campaign_id=first["campaign_id"], _reconcile=False)[2]
+        finally:
+            self.pre_update = None
+        self.assertEqual(self.update_scans[-1], [])
+        self.assert_index_matches_full_rebuild("reused")
+        return result
+
+    def test_changed_published_index_rescans(self):
+        first = self._sealed(campaign_key="once-published")[2]
+        other = self._sealed(campaign_key="once-published-other")[2]
+        other_path = Path(other["cycle_dir"]).parent / "campaign.json"
+
+        def republish(_kwargs):
+            data = json.loads(other_path.read_text(encoding="utf-8"))
+            data["title"] = "other retitled"
+            other_path.write_text(json.dumps(data), encoding="utf-8")
+            loc.rebuild_indexes(self.root)   # the begin holds the admission lock
+        self._rescans(first, republish)
+
+    def test_new_campaign_folder_alone_still_reuses_as_on_main(self):
+        first = self._sealed(campaign_key="once-entries")[2]
+        self._reuses(first, lambda _kwargs: (self.root / "campaigns" / "zz-hand-made").mkdir())
+
+    def test_new_cycle_not_named_as_added_rescans(self):
+        first = self._sealed(campaign_key="once-unnamed")[2]
+        self._rescans(first, lambda kwargs: kwargs.pop("added"))   # the cycle list grew by a folder not handed over
+
+    def test_legacy_folder_named_like_the_new_cycle_rescans_and_refuses_as_on_main(self):
+        first = self._sealed(campaign_key="once-legacy")[2]
+        camp_dir = Path(first["cycle_dir"]).parent
+
+        def twin(kwargs):
+            new_id = json.loads((camp_dir / "campaign.json").read_text(encoding="utf-8"))["cycles"][-1]
+            (camp_dir / "cycles" / new_id / "artifacts").mkdir(parents=True)
+        self.pre_update = twin
+        try:
+            with self.assertRaises(loc.LocatorError) as caught:
+                with self._against_main():
+                    self._begin(campaign_id=first["campaign_id"], _reconcile=False)
+        finally:
+            self.pre_update = None
+        self.assertEqual(caught.exception.code, "locator-index-duplicate-id")
+        self.assertEqual(self.update_scans[-1], [camp_dir.name])
+
+    def test_new_folder_bound_to_another_cycle_rescans_and_refuses_as_on_main(self):
+        first = self._sealed(campaign_key="once-binding")[2]
+
+        def rebind(kwargs):
+            marker = Path(kwargs["added"]) / loc.CYCLE_BINDING
+            marker.write_bytes(loc.cycle_binding_bytes(first["campaign_id"], first["cycle_id"]))
+        self.pre_update = rebind
+        try:
+            with self.assertRaises(loc.LocatorError):
+                with self._against_main():
+                    self._begin(campaign_id=first["campaign_id"], _reconcile=False)
+        finally:
+            self.pre_update = None
+        self.assertEqual(self.update_scans[-1], [Path(first["cycle_dir"]).parent.name])
+
+    def test_update_for_other_campaigns_or_without_the_folder_rescans(self):
+        first = self._sealed(campaign_key="once-direct")[2]
+        other = self._sealed(campaign_key="once-direct-other")[2]
+        rel = Path(first["cycle_dir"]).parent.name
+        fd = adm._acquire_lock(self.root, timeout=5.0)
+        try:
+            self.assertIsNone(loc.prepare_index_update(self.root, [first["campaign_id"]]).scans)   # other callers
+            prepared = loc.prepare_index_update(self.root, [first["campaign_id"]], hand_over=True)
+            self.assertIsNotNone(prepared.scans)
+            for ids in ([first["campaign_id"], other["campaign_id"]], [other["campaign_id"]]):
+                self.scans.clear()
+                loc.update_indexes(self.root, ids, prepared=prepared)
+                self.assertIn(Path(other["cycle_dir"]).parent.name, self.scans)
+            self.scans.clear()
+            loc.update_indexes(self.root, [first["campaign_id"]], prepared=prepared)
+            self.assertEqual(self.scans, [])   # nothing changed: the handed-over scan answers
+        finally:
+            adm._release_lock(self.root, fd)
+        # After another begin (its campaign record and folders changed) the old precheck is stale: rescan.
+        route, route_file, opened = self._begin(campaign_id=first["campaign_id"])
+        fd = adm._acquire_lock(self.root, timeout=5.0)
+        try:
+            self.scans.clear()
+            stale = loc.update_indexes(self.root, [first["campaign_id"]], prepared=prepared)
+            self.assertEqual(self.scans, [rel])
+            self.assertEqual(stale.status, "unchanged")
+        finally:
+            adm._release_lock(self.root, fd)
+        self.assert_index_matches_full_rebuild("direct calls")
+
+    # -- a hand write landing right after the precheck returned (review of #1919) ---------
+    # A folder moved, copied, swapped or dated by residue changes a folder the precheck scan
+    # opened, so the update scans again and answers as main in the same order. A write
+    # inside an existing cycle (its record, `.cycle.json` or manifest) is not looked for:
+    # the update answers as main does when that write lands just after the update.
+    def _assert_no_shared_paths(self):
+        paths = [row["path"] for row in loc.parse_index_markdown(self._index_bytes()[1]).values()]
+        self.assertEqual(len(paths), len(set(paths)), "two ids on one path")
+
+    def _locked(self, call):
+        fd = adm._acquire_lock(self.root, timeout=5.0)
+        try:
+            return call()
+        finally:
+            adm._release_lock(self.root, fd)
+
+    def _hand_write_begin(self, first, write, *, slug=None, lands_after=None, refused=None, journal=False,
+                          raised=None, before_precheck=False):
+        if before_precheck:
+            self.pre_prepare = write
+        else:
+            self.post_prepare = write
+        self.lands_after = lands_after
+        self.update_scans.clear()
+        self.same_order.clear()
+        kwargs = {"slug": slug, "campaign_id": first["campaign_id"], "_reconcile": False,
+                  **({"journal_target": True} if journal else {})}
+        try:
+            with self._against_main():
+                if raised is not None:   # an OS error main's walk raises as it is
+                    with self.assertRaises(OSError) as caught:
+                        self._begin(**kwargs)
+                    self.assertEqual(caught.exception.errno, raised)
+                    return None
+                if refused is None:
+                    result = self._begin(**kwargs)[2]
+                    self.assertEqual(result["layout"], "journal" if journal else "cycle")
+                    return result
+                with self.assertRaises(loc.LocatorError) as caught:
+                    self._begin(**kwargs)
+                self.assertEqual(caught.exception.code, refused)
+                return None
+        finally:
+            self.pre_prepare = self.post_prepare = self.lands_after = None
+
+    def _then(self, first, then, refused=None):
+        """What follows: the campaign's next begin (after its root reconcile), or a locked repair."""
+        if then == "next-begin":
+            with self._against_main():
+                if refused is not None:
+                    with self.assertRaises(loc.LocatorError) as caught:
+                        self._begin(campaign_id=first["campaign_id"])
+                    self.assertEqual(caught.exception.code, refused)
+                    return
+                self._begin(campaign_id=first["campaign_id"])
+        else:
+            outcome = self._locked(lambda: loc.verify_indexes(self.root, repair=True))
+            if refused is not None:
+                self.assertEqual((outcome["status"], outcome.get("code")), ("problems", refused))
+                return
+            self.assertIn(outcome["status"], ("rebuilt", "current"))
+        self.assert_index_matches_full_rebuild(then)
+        self._assert_no_shared_paths()
+
+    def test_hand_moved_cycle_folder_rescans_as_on_main(self):
+        for then in ("next-begin", "repair"):
+            for where in ("renamed", "moved-out"):
+                with self.subTest(then=then, where=where):
+                    key = f"once-move-{then}-{where}"
+                    elsewhere = Path(self._sealed(campaign_key=key + "-elsewhere")[2]["cycle_dir"]).parent
+                    first = self._begin(slug="same-slot", campaign_key=key)[2]   # stays open
+                    old = Path(first["cycle_dir"])
+                    moved = old.with_name("hand-renamed") if where == "renamed" else elsewhere / "hand-moved-in"
+                    result = self._hand_write_begin(first, lambda: old.rename(moved), slug="same-slot")
+                    # The freed name, as on main in this order (main with the move after the update: `-2`).
+                    self.assertEqual(Path(result["cycle_dir"]).name, old.name)
+                    self.assertEqual(self.update_scans, [[old.parent.name]])
+                    self._assert_no_shared_paths()
+                    self._then(first, then)
+
+    def test_hand_copied_cycle_folder_is_refused_as_on_main(self):
+        for then in ("next-begin", "repair"):
+            with self.subTest(then=then):
+                first = self._sealed(campaign_key=f"once-copy-{then}")[2]
+                old = Path(first["cycle_dir"])
+                copy = old.with_name(old.name + "-copy")
+                self._hand_write_begin(first, lambda: shutil.copytree(old, copy),
+                                       refused="locator-index-duplicate-id")   # not `begun`
+                self.assertEqual(self.update_scans, [[old.parent.name]])
+                self._then(first, then, refused="locator-index-duplicate-id")
+                shutil.rmtree(copy)
+
+    def test_residue_dating_rescans_as_on_main(self):
+        import artifact_residue
+        for then in ("next-begin", "repair"):
+            with self.subTest(then=then):
+                first = self._begin(slug="same-slot", campaign_key=f"once-residue-{then}")[2]   # stays open
+
+                def date_it():   # the real `_date_cycle`: record, then folder; stopped before its index rebuild
+                    with mock.patch.object(artifact_residue.artifact_locator, "rebuild_indexes",
+                                           side_effect=RuntimeError("stopped before the rebuild")):
+                        with self.assertRaises(RuntimeError):
+                            artifact_residue._date_cycle(self.root, first, {"date": "2026-01-02"})
+                result = self._hand_write_begin(first, date_it, slug="same-slot")
+                self.assertEqual(Path(result["cycle_dir"]).name, Path(first["cycle_dir"]).name)
+                self.assertEqual(self.update_scans, [[Path(first["cycle_dir"]).parent.name]])
+                rows = loc.parse_index_markdown(self._index_bytes()[1])
+                self.assertEqual(Path(rows[first["cycle_id"]]["path"]).name, "2026-01-02_same-slot")
+                self.assertEqual(rows[first["campaign_id"]]["started"], "2026-01-02T00:00:00Z")
+                self._assert_no_shared_paths()
+                self._then(first, then)
+
+    def test_swapped_cycle_folders_rescan_as_on_main(self):
+        # The same names, other folders: only the inodes show it.
+        for then in ("next-begin", "repair"):
+            with self.subTest(then=then):
+                first = self._sealed(campaign_key=f"once-swap-{then}")[2]
+                second = self._sealed(campaign_id=first["campaign_id"])[2]
+                a, b = Path(first["cycle_dir"]), Path(second["cycle_dir"])
+                spare = a.with_name("swap-spare")
+
+                def swap():
+                    a.rename(spare)
+                    b.rename(a)
+                    spare.rename(b)
+                self._hand_write_begin(first, swap)
+                self.assertEqual(self.update_scans, [[a.parent.name]])
+                rows = loc.parse_index_markdown(self._index_bytes()[1])
+                self.assertEqual((Path(rows[first["cycle_id"]]["path"]).name, Path(rows[second["cycle_id"]]["path"]).name),
+                                 (b.name, a.name))
+                self._then(first, then)
+
+    def test_writes_inside_existing_cycles_answer_as_main_after_the_update(self):
+        def edit(**fields):
+            return lambda value: {**value, **fields}
+
+        def manifest_names(cycle_id):
+            return lambda value: {**value, "cycle": {**value["cycle"], "cycle_id": cycle_id}}
+
+        # scene -> (file, given (open, sealed) cycles; its change; main's refusal in the same order)
+        scenes = {
+            "record-title": (lambda o, s: P.cycle_record_path(self.root, o["cycle_id"]),
+                             lambda o, s: edit(title="retitled by hand"), None),
+            "record-state": (lambda o, s: P.cycle_record_path(self.root, s["cycle_id"]),
+                             lambda o, s: edit(state="abandoned"), None),
+            "record-started": (lambda o, s: P.cycle_record_path(self.root, s["cycle_id"]),
+                               lambda o, s: edit(started_on="2026-01-03T00:00:00Z"), None),
+            "cycle-binding": (lambda o, s: Path(o["cycle_dir"]) / loc.CYCLE_BINDING,
+                              lambda o, s: edit(cycle_id=s["cycle_id"]), "locator-index-duplicate-id"),
+            "manifest": (lambda o, s: Path(s["cycle_dir"]) / "manifest.json",
+                         lambda o, s: manifest_names(o["cycle_id"]), "locator-cycle-binding-id-mismatch"),
+        }
+        for scene, (pick, change, refused) in scenes.items():
+            for then in ("next-begin", "repair"):
+                with self.subTest(scene=scene, then=then):
+                    sealed = self._sealed(campaign_key=f"once-inside-{scene}-{then}")[2]
+                    opened = self._begin(campaign_id=sealed["campaign_id"])[2]
+                    path = pick(opened, sealed)
+                    old = path.read_bytes()
+                    new = (json.dumps(change(opened, sealed)(json.loads(old)), indent=2, sort_keys=True)
+                           + "\n").encode("utf-8")
+                    spare = path.with_name(path.name + ".hand")
+
+                    def put(data, path=path, spare=spare):   # an editor's atomic save
+                        spare.write_bytes(data)
+                        os.replace(spare, path)
+                    self._hand_write_begin(sealed, lambda: put(new),
+                                           lands_after=(lambda: put(old), lambda: put(new)))
+                    self.assertEqual(self.update_scans, [[]])   # handed over; the wrapper compared it
+                    same_order = self.same_order[0]
+                    if refused is not None:   # main in the same order refuses; with the write after, it begins
+                        self.assertEqual(same_order[:2], ("refused", refused))
+                    else:                     # main in the same order already shows the write
+                        self.assertEqual(same_order[0], "ok")
+                        self.assertNotEqual(tuple(same_order[4:6]), self._index_bytes())
+                    self._assert_no_shared_paths()
+                    self._then(sealed, then, refused=refused)
+                    if refused is not None:
+                        put(old)
+
+    # -- the folders the scan opened, read alike again; the published index (second review) ----
+    # The update compares every folder the precheck scan opened -- through the very read that
+    # scan made -- and the published index bytes; any difference scans again, as main does.
+    # Each scene runs as an ordinary and a journal begin, then the campaign's next begin or a
+    # locked repair; besides `_against_main`, it asserts the outcome main gives there.
+    def _each_scene(self, scene):
+        for journal in (False, True):
+            for then in ("next-begin", "repair"):
+                with self.subTest(journal=journal, then=then):
+                    scene(journal, then, f"{'journal' if journal else 'cycle'}-{then}")
+
+    def test_legacy_cycles_turned_into_a_link_rescans_as_on_main(self):
+        # Main's scan skips a `cycles` that is a link; the precheck read it as a folder.
+        def scene(journal, then, tag):
+            first = self._sealed(campaign_key=f"once-legacy-link-{tag}")[2]
+            legacy = self._sealed(campaign_id=first["campaign_id"])[2]
+            camp_dir = Path(first["cycle_dir"]).parent
+            (camp_dir / "cycles").mkdir()
+            Path(legacy["cycle_dir"]).rename(camp_dir / "cycles" / legacy["cycle_id"])
+            self._locked(lambda: loc.rebuild_indexes(self.root))
+            rows = loc.parse_index_markdown(self._index_bytes()[1])
+            self.assertEqual(rows[legacy["cycle_id"]]["path"], f"campaigns/{camp_dir.name}/cycles/{legacy['cycle_id']}")
+
+            def link_it():
+                (camp_dir / "cycles").rename(camp_dir / ".legacy-away")
+                (camp_dir / "cycles").symlink_to(".legacy-away")
+            self._hand_write_begin(first, link_it, journal=journal)
+            self.assertEqual(self.update_scans, [[camp_dir.name]])
+            self.assertNotIn(legacy["cycle_id"], loc.parse_index_markdown(self._index_bytes()[1]))   # skipped, as main
+            self._assert_no_shared_paths()
+            self._then(first, then)
+        self._each_scene(scene)
+
+    def test_title_another_writer_published_is_not_taken_back(self):
+        # A's open cycle is retitled; B's real residue dating then rebuilds the whole index,
+        # publishing the new title. A's update must not write the precheck's old title back.
+        import artifact_residue
+
+        def scene(journal, then, tag):
+            first = self._begin(slug="open-slot", campaign_key=f"once-republish-{tag}")[2]   # stays open
+            other = self._begin(slug="residue-slot", campaign_key=f"once-republish-other-{tag}")[2]
+            record_path = P.cycle_record_path(self.root, first["cycle_id"])
+            title = f"retitled while {tag} begins"
+
+            def retitle_then_residue():
+                record = json.loads(record_path.read_text(encoding="utf-8"))
+                spare = record_path.with_name(record_path.name + ".hand")
+                spare.write_text(json.dumps({**record, "title": title}, indent=2, sort_keys=True) + "\n",
+                                 encoding="utf-8")
+                os.replace(spare, record_path)   # an editor's atomic save
+                artifact_residue._date_cycle(self.root, other, {"date": "2026-01-02"})   # to its end
+                published = loc.parse_index_markdown(self._index_bytes()[1])
+                self.assertEqual(published[first["cycle_id"]]["title"], title)
+            self._hand_write_begin(first, retitle_then_residue, journal=journal)
+            self.assertEqual(self.update_scans, [[Path(first["cycle_dir"]).parent.name]])
+            self.assertEqual(loc.parse_index_markdown(self._index_bytes()[1])[first["cycle_id"]]["title"], title)
+            self._then(first, then)
+        self._each_scene(scene)
+
+    def test_republished_index_markdown_alone_rescans(self):
+        # Only INDEX.md changes: a title retitled and republished, no folder moved or added
+        # (the journal path adds none), so INDEX.json reads the same as at the precheck.
+        def scene(journal, then, tag):
+            first = self._begin(slug="md-slot", campaign_key=f"once-md-only-{tag}")[2]   # stays open
+            record_path = P.cycle_record_path(self.root, first["cycle_id"])
+            title = f"republished while {tag} begins"
+            same = {}
+
+            def retitle_and_republish():
+                before = self._index_bytes()
+                record = json.loads(record_path.read_text(encoding="utf-8"))
+                spare = record_path.with_name(record_path.name + ".hand")
+                spare.write_text(json.dumps({**record, "title": title}, indent=2, sort_keys=True) + "\n",
+                                 encoding="utf-8")
+                os.replace(spare, record_path)   # an editor's atomic save
+                loc.rebuild_indexes(self.root)   # the begin holds the admission lock
+                after = self._index_bytes()
+                same.update(json=before[0] == after[0], md=before[1] == after[1])
+            self._hand_write_begin(first, retitle_and_republish, journal=journal)
+            self.assertEqual(same, {"json": True, "md": False})
+            self.assertEqual(self.update_scans, [[Path(first["cycle_dir"]).parent.name]])
+            self.assertEqual(loc.parse_index_markdown(self._index_bytes()[1])[first["cycle_id"]]["title"], title)
+            self._then(first, then)
+        self._each_scene(scene)
+
+    # -- each folder judged by the walk's own calls (third review) ------------------------
+    # The walk asks `is_dir()` of the campaign, `cycles` and each entry before `is_symlink()`,
+    # following a link as it always has: a link right under a campaign whose target's parent
+    # cannot be searched raises there (Python 3.12), and every reader, the precheck and the
+    # update say so as main does.
+    def _sealed_with_status(self, key):
+        route, route_file, result = self._begin(campaign_key=key)
+        self.write_output(result)
+        self.write_output(result, "status.md", b"# status\n")   # a legacy cycle page
+        self.close(route, route_file)
+        P.finalize(self.root, cycle_id=result["cycle_id"])
+        (Path(result["cycle_dir"]).parent / "campaign.md").unlink()   # an older campaign without its own page
+        return result
+
+    def test_link_to_an_unreachable_target_reads_as_on_main(self):
+        import artifact_campaign_documents
+        import artifact_reader
+        first = self._sealed_with_status("once-unreachable-readers")
+        camp_dir = Path(first["cycle_dir"]).parent
+
+        def readers():
+            status = C.status(self.root, camp_dir)
+            document = artifact_campaign_documents.campaign_status(camp_dir)
+            try:
+                buckets = sorted(path.relative_to(self.root).as_posix()
+                                 for path, _ in artifact_reader.cycle_bucket_dirs(self.root, "plans"))
+            except OSError as exc:
+                buckets = (type(exc).__name__, exc.errno, exc.filename)
+            return ((status["closable"], status.get("close_refusal", {}).get("reason")),
+                    (document["status"], document.get("path") and Path(document["path"]).name), buckets)
+
+        reachable = readers()
+        self.assertEqual(reachable[:2], ((True, None), ("known", "status.md")))
+        with _unreachable_target(self) as target:
+            link = camp_dir / "unreachable-link"
+            link.symlink_to(target)
+            try:
+                got = readers()
+            finally:
+                link.unlink()
+            if _is_dir_raises(target):   # main: each reader meets the read error
+                self.assertEqual(got, ((False, "campaign-directory-unreadable"), ("unknown", None),
+                                       ("PermissionError", errno.EACCES, str(link))))
+            else:                        # main on 3.13+: the link is not a folder there
+                self.assertEqual(got, reachable)
+        self.assertEqual(readers(), reachable)
+
+    def test_link_to_an_unreachable_target_in_a_begin_answers_as_main(self):
+        # Before the precheck, main's precheck raises; right after it, main's update raises.
+        def scene(journal, then, tag):
+            for before_precheck in (True, False):
+                with self.subTest(before_precheck=before_precheck):
+                    first = self._sealed_with_status(f"once-unreachable-{tag}-{before_precheck}")
+                    camp_dir = Path(first["cycle_dir"]).parent
+                    link = camp_dir / "unreachable-link"
+                    with _unreachable_target(self) as target:
+                        raises = _is_dir_raises(target)
+                        try:
+                            self._hand_write_begin(first, lambda: link.symlink_to(target), journal=journal,
+                                                   raised=errno.EACCES if raises else None,
+                                                   before_precheck=before_precheck)
+                            if raises:   # no update after the precheck raised; else scanned again into it
+                                self.assertEqual(self.update_scans, [] if before_precheck else [[camp_dir.name]])
+                        finally:
+                            if link.is_symlink():
+                                link.unlink()
+                    self._then(first, then)
+        self._each_scene(scene)
+
+
+class BeginBesideARequestTest(Q.S.SourceRepoStartBase):
+    """`BeginScansItsCampaignOnceTest`'s second-review scenes in a campaign holding a request.
+
+    A request's execution folder is one of the folders the precheck scan opened, whether or
+    not it held an execution then, and it is read again the same way -- including the request
+    read's refusal of a symlinked `_internal` -- so the update scans again as main does.
+    """
+
+    selected, cycle = Q.RequestFolderTest.selected, Q.RequestFolderTest.cycle
+    T = BeginScansItsCampaignOnceTest
+    _watch_scans, assert_index_matches_full_rebuild = T._watch_scans, T.assert_index_matches_full_rebuild
+    _index_bytes, _main_answer, _against_main = T._index_bytes, T._main_answer, T._against_main
+    _assert_no_shared_paths, _locked, _hand_write_begin = T._assert_no_shared_paths, T._locked, T._hand_write_begin
+    _then, _each_scene = T._then, T._each_scene
+    del T
+
+    def setUp(self):
+        super().setUp()
+        self._watch_scans()
+
+    def _begin(self, slug=None, **kwargs):
+        self.n += 1
+        gate = f"beside-{self.n}"
+        route = Q.S.T.compile_for("direct", self.root, slug=slug or gate, gate_source=gate)
+        route_file = Path(Q.S.L.admit_runtime_route(self.root, route).route_file)
+        result = P.begin(self.root, route_file=route_file, capability="autopilot-code",
+                         intensity="direct", **kwargs)
+        return route, route_file, result
+
+    def _request(self):
+        """The frame record, its sealed execution's record and that execution's folder."""
+        leg, path, _ = self.selected([Q.S.CODE_STAGED, Q.S.CODE_STAGED])
+        execution = self.cycle(leg)
+        folder = P.cycle_dir(self.root, execution["campaign_id"], execution["cycle_id"])
+        self.write_output({"cycle_dir": str(folder)}, "plans/final_report.md", b"leg\n")
+        self.close(leg, path)
+        P.finalize(self.root, cycle_id=execution["cycle_id"])
+        self.assertEqual(folder.parent.parts[-2:], ("_internal", "executions"))
+        return self.cycle(self.route), execution, folder
+
+    def _rows(self):
+        return loc.parse_index_markdown(self._index_bytes()[1])
+
+    def test_request_execution_back_under_its_name_rescans_as_on_main(self):
+        # Hidden (or its whole execution folder away) when the precheck scanned; back right after.
+        frame, execution, folder = self._request()
+        camp_dir = folder.parents[3]
+        for away in (folder.with_name("." + folder.name), folder.parents[1] / ".executions-away"):
+            here = folder if away.parent == folder.parent else folder.parent
+
+            def scene(journal, then, tag, here=here, away=away):
+                here.rename(away)
+                try:
+                    self._locked(lambda: loc.rebuild_indexes(self.root))
+                    self.assertNotIn(execution["cycle_id"], self._rows())
+                    self._hand_write_begin(frame, lambda: away.rename(here), journal=journal)
+                    self.assertEqual(self.update_scans, [[camp_dir.name]])
+                    self.assertEqual(self._rows()[execution["cycle_id"]]["path"],
+                                     folder.relative_to(self.root).as_posix())   # walked again, as main
+                    self._then(frame, then)
+                finally:   # each round starts from the request as it was, whatever this one did
+                    if not here.exists():
+                        away.rename(here)
+            with self.subTest(away=away.name):
+                self._each_scene(scene)
+
+    def test_request_internal_turned_into_a_link_is_refused_as_on_main(self):
+        frame, execution, folder = self._request()
+        internal, camp_dir = folder.parents[1], folder.parents[3]
+        away = internal.with_name(".internal-away")
+
+        def scene(journal, then, tag):
+            def link_it():
+                internal.rename(away)
+                internal.symlink_to(away.name)
+            try:
+                self._hand_write_begin(frame, link_it, journal=journal, refused="request-members-unreadable")
+                self.assertEqual(self.update_scans, [[camp_dir.name]])   # not `begun`
+                self._then(frame, then, refused="request-members-unreadable")
+            finally:   # each round starts from the request as it was, whatever this one did
+                if internal.is_symlink():
+                    internal.unlink()
+                    away.rename(internal)
+                self._locked(lambda: loc.rebuild_indexes(self.root))
+        self._each_scene(scene)
+
+    def test_request_members_boundary_is_main_s(self):
+        # `members` refuses an execution folder it cannot list inside its `strict` boundary
+        # (`request-members-unreadable`; lenient: nothing), raises an entry it cannot judge as it
+        # is (outside that boundary), and asks `is_symlink()` before `is_dir()`, so a linked
+        # execution is skipped without following it. A begin's update answers as main.
+        import artifact_request
+        frame, execution, folder = self._request()
+        executions, internal = folder.parent, folder.parents[1]
+        frame_dir = folder.parents[2]
+        mode = executions.stat().st_mode & 0o777
+
+        def moved_to_a_link(path):
+            away = path.with_name("." + path.name + "-away")
+
+            def change():
+                path.rename(away)
+                path.symlink_to(away.name)
+
+            def undo():
+                if path.is_symlink():
+                    path.unlink()
+                    away.rename(path)
+            return change, undo
+
+        def outcome(strict):
+            try:
+                return ("members", [path.name for path in artifact_request.members(self.root, frame_dir, strict=strict)])
+            except loc.LocatorError as exc:
+                return ("refused", exc.code)
+            except OSError as exc:
+                return ("raised", type(exc).__name__, exc.errno)
+
+        unreadable = ("refused", "request-members-unreadable")
+        with _unreachable_target(self) as target:
+            raises = _is_dir_raises(target)   # and `is_symlink()` alike: both raise on 3.12
+            linked = executions / ("cyc_" + "0" * 32)
+            unjudged = ("raised", "PermissionError", errno.EACCES) if raises else ("members", [])
+            cases = {   # name -> (change, undo, main strict, main lenient, main's refusal in a begin)
+                "internal-link": (*moved_to_a_link(internal), unreadable, ("members", []), unreadable[1]),
+                "executions-link": (*moved_to_a_link(executions), unreadable, ("members", []), unreadable[1]),
+                "executions-unlisted": (lambda: executions.chmod(0o000), lambda: executions.chmod(mode),
+                                        unreadable, ("members", []), unreadable[1]),
+                "executions-unsearchable": (lambda: executions.chmod(0o400), lambda: executions.chmod(mode),
+                                            unjudged, unjudged, errno.EACCES if raises else None),
+                "linked-execution": (lambda: linked.symlink_to(target),
+                                     lambda: linked.unlink() if linked.is_symlink() else None,
+                                     ("members", [folder.name]), ("members", [folder.name]), None),
+            }
+            self.assertEqual((outcome(True), outcome(False)), (("members", [folder.name]),) * 2)
+            for name, (change, undo, strict, lenient, refused) in cases.items():
+                with self.subTest(case=name):
+                    change()
+                    try:
+                        self.assertEqual((outcome(True), outcome(False)), (strict, lenient))
+                    finally:
+                        undo()
+                    try:   # the same change right after a begin's precheck
+                        self._hand_write_begin(frame, change, **({"raised": refused} if isinstance(refused, int)
+                                                                 else {"refused": refused}))
+                    finally:
+                        undo()
+                        self._locked(lambda: loc.rebuild_indexes(self.root))
+                    self.assertEqual((outcome(True), outcome(False)), (("members", [folder.name]),) * 2)
 
 
 _WRITER_FUNCTIONS = ("_write_cycle_record", "_write_campaign", "_write_cycle_binding", "_publish_event")
