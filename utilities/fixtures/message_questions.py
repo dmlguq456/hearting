@@ -72,9 +72,18 @@ class MessageQuestionFixture:
             {"answers": {"message-response": [text]}}, action_id=action)
 
     def record(self, signal):
-        delivery = "delivery-" + __import__("hashlib").sha256(
-            ("notice\0question-answer:" + signal["id"]).encode()).hexdigest()
-        return pending.read(self.root, signal["session_id"], delivery)
+        """The delivery of the question's current answer: the question's own key, or, after an
+        earlier answer's delivery ended without arriving, the later answer's own (``notify``)."""
+        sha = lambda text: __import__("hashlib").sha256(text.encode()).hexdigest()
+        key = "notice\0question-answer:" + signal["id"]
+        found = pending.read(self.root, signal["session_id"], "delivery-" + sha(key))
+        entry = waits._selected_entry({"harness": signal["harness"], "session_id": signal["session_id"],
+                                       "request_id": signal["id"], "question_id": "message-response",
+                                       "turn_id": None}) or {}
+        action = entry.get("action_id")
+        if found and action and found["receipt"]["answer_binding"]["action_id"] != action:
+            return pending.read(self.root, signal["session_id"], "delivery-" + sha(key + "\0" + action)) or found
+        return found
 
     display = False   # True: the receiver has shown it reads the short forms, the producer's line is sealed
     shell = True      # False: the session has no shell host, so its rows wait for its own callbacks

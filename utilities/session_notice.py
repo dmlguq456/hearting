@@ -173,6 +173,13 @@ def notify(harness: str, session_id: str, *, key: str, subject: str, text: str,
     delivery_id = "delivery-" + digest
     root = jobs_path.parent
     record = pending_delivery.read(root, session_id, delivery_id)
+    if answer_binding is not None and _ended_undelivered(record) and (
+            (record["receipt"].get("answer_binding") or {}).get("action_id") != answer_binding["action_id"]):
+        # The question's earlier answer never arrived and its record stays as it ended; this
+        # answer is a new action and goes as its own delivery (`release_undelivered_answer`).
+        delivery_id = "delivery-" + hashlib.sha256(
+            f"{KIND}\0{key}\0{answer_binding['action_id']}".encode()).hexdigest()
+        record = pending_delivery.read(root, session_id, delivery_id)
     if record is None:
         record = pending_delivery.create(
             root, recipient_kind=carrier, recipient_key=session_id,
@@ -206,6 +213,44 @@ def retain_pending(jobs, record) -> bool:
                 ensure_runner=False)
         return True
     except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+        return False
+
+
+# A delivery that ended without reaching its session. `acked` reached it; an open record
+# (`sent-ambiguous` included) may still, and waits for its own receipt as before.
+UNDELIVERED = frozenset({"rejected", "expired"})
+
+
+def _ended_undelivered(record) -> bool:
+    return (isinstance(record, dict) and record.get("state") in UNDELIVERED
+            and isinstance(record.get("receipt"), dict))
+
+
+def release_undelivered_answer(record) -> bool:
+    """A person's answer whose delivery ended without arriving is the person's to give again.
+
+    "Answer sent" holds only while that delivery can still arrive. Once its record ended
+    `rejected` or `expired`, whichever release's courier ended it, the exact action it carried
+    leaves the answer record (the existing `_release_unsubmitted_selected_action`): the question
+    counts and can be answered again, and the next answer goes as a new delivery (`notify`); the
+    ended record stays as its receipt. Only a claim still `submitted` for that exact action is
+    released, so an answer the session received or applied, an answer whose delivery result is
+    unconfirmed (`unknown`), a later answer and a question answered elsewhere stay as they are,
+    and reading the same record again changes nothing.
+    """
+    if not _ended_undelivered(record) or "answer_binding" not in record["receipt"]:
+        return False
+    import human_wait_state as waits
+    binding = record["receipt"]["answer_binding"]
+    if not waits.message_binding_valid(binding):
+        return False
+    envelope = {key: binding[key] for key in ("harness", "session_id", "request_id", "question_id")}
+    envelope["turn_id"] = None
+    try:
+        return bool(waits._release_unsubmitted_selected_action(
+            envelope, binding["action_id"],
+            {"status": record["state"], "reason": record.get("expiry_reason") or record["state"]}))
+    except (OSError, ValueError, TypeError):
         return False
 
 
