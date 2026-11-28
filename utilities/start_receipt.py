@@ -150,24 +150,33 @@ def next_line(receipt, parented=None):
 
 
 def _parented(receipt, jobs):
-    """Open routes the calling session parents in ``jobs`` after a launch, else None.
+    """Open routes the launching session parents, or None.
 
-    A cached registry read; any failure leaves the line as it was and never delays the start."""
-    if jobs is None or not isinstance(receipt, dict) or receipt.get("parent_next") != "end-turn":
+    Counted only from the registry generation this launch already read while it is still
+    current, with the parent its own row names: nothing is read again and no identity is
+    looked up for it, so anything else leaves the line as it was."""
+    if (jobs is None or not isinstance(receipt, dict) or receipt.get("parent_next") != "end-turn"
+            or (receipt.get("auto_resume") or {}).get("resume_at")):
         return None
     try:
-        who = identity()
+        from dispatch_registry_cache import held_registry_view
         from dispatch_supervision import open_route_count
-        return open_route_count(jobs, who.session_id) if who.known else None
+        attempt = next((launch.get("attempt_id") for launch in receipt.get("launches") or ()
+                        if isinstance(launch, dict) and launch.get("attempt_id")), None)
+        view = held_registry_view(jobs) if attempt else None
+        own = view.handover_attempt(attempt) if view is not None else None
+        return open_route_count(view, own[1].get("parent_sid")) if own else None
     except Exception:  # noqa: BLE001 - the count is a hint, the receipt is the result
         return None
 
 
 def print_next_line(receipt, stream=None, jobs=None):
-    """Write `next_line` last on stderr: stdout keeps exactly the JSON its readers parse."""
+    """Write `next_line` last on stderr: stdout keeps exactly the JSON its readers parse.
+
+    The JSON is flushed first, whatever the optional count does."""
+    sys.stdout.flush()
     line = next_line(receipt, _parented(receipt, jobs))
     if line:
-        sys.stdout.flush()
         print(line, file=stream or sys.stderr, flush=True)
 
 

@@ -2862,7 +2862,9 @@ differ, because the receiving session has to read their context anew. It is wort
 considering once the routes held grow to fill this session's context, some are far
 from the rest in kind or topic, and a supervised session already holds related routes
 or is waiting, so related routes gather in one session; use a waiting session before
-starting another, and the user decides how many sessions run.
+starting another, and the user decides how many sessions run. The open-route counts that
+launch receipts and steward checks show are the registry's open owner rows, so a route can
+still count for a moment after it closes.
 
 **Optional session shell.** An opt-in PTY attachment supplies a collapsed status
 line, a read-only panel and guarded idle wake. Its exact-session transport and

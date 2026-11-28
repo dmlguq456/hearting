@@ -626,6 +626,7 @@ def _observe_role(harness: str, session_id: str) -> dict:
     targets = []
     cwds = set()
     agents = ()
+    flagged = False
     observation = _end_observation()
     if collector is not None:
         # Native registry rows only (as `_holder_cwd` and `grant_steward`): no Herdr agent list.
@@ -661,24 +662,33 @@ def _observe_role(harness: str, session_id: str) -> dict:
                              if t_sid else "unknown"),
                 **({"unresolved": True} if target.get("unresolved") else {}),
                 "owed": _pending_count(module, t_harness, t_sid)})
+        try:  # `_role_flagged` from the rows, targets and end observation already read
+            flagged = bool(collector.role_flag(harness, session_id, sessions=rows, _targets=resolved,
+                                               observation=observation))
+        except Exception:  # noqa: BLE001 - an unknown flag adds nothing
+            flagged = False
     _lengthen_shared_prefixes(targets)
+    # Route counts are for a flagged steward only, all from one registry generation.
+    view = _registry_view() if flagged else None
+    from dispatch_supervision import open_route_count as count
     for target in targets:  # a waiting target may be waiting on routes it launched itself
-        if _waiting(target) and target.get("session_id"):
-            target["open_routes"] = _parented_routes(target["session_id"])
+        if view is not None and _waiting(target) and target.get("session_id"):
+            target["open_routes"] = count(view, target["session_id"])
     pending = _pending_count(module, harness, session_id)
     work, decisions = _open_work(harness, session_id)
     lab = _observe_lab(cwds)
     return {"targets": targets, "pending_messages": pending,
             "open_work": work, "user_decisions": decisions, "lab": lab,
-            "parented_routes": _parented_routes(session_id)}
+            "flagged": flagged, "parented_routes": count(view, session_id)}
 
 
-def _parented_routes(session_id):
-    """Open routes this holder parents (cached registry count), or None when unreadable."""
+def _registry_view():
+    """The dispatch registry's current generation, or None when it cannot be read. The read
+    takes no file lock, so it never waits on a writer."""
     try:
-        import dispatch_supervision
         import session_notice
-        return dispatch_supervision.open_route_count(session_notice._registry(None), session_id)
+        from dispatch_registry_cache import registry_view
+        return registry_view(session_notice._registry(None))
     except Exception:  # noqa: BLE001 - a count is a hint; the check goes on without it
         return None
 
@@ -746,8 +756,8 @@ def waiting_targets(observation: dict, waiting_since=None, now: float | None = N
     rows = []
     for t in observation.get("targets") or ():
         routes = t.get("open_routes")
-        if (not _waiting(t) or _queued_for(t) or {t.get("name"), t.get("session_id")} & set(exclude)
-                or style == "start" and routes != 0):
+        known = {t.get("name"), (t.get("harness"), t.get("session_id"))}  # `exclude`: names or (harness, sid)
+        if not _waiting(t) or _queued_for(t) or known & set(exclude) or style == "start" and routes != 0:
             continue
         minutes = int(max(0.0, now - float((waiting_since or {}).get(str(t.get("session_id")), now))) // 60)
         span = f" {minutes // 60} h" if style == "notice" and minutes >= 120 else f" {minutes} min" if minutes else ""
@@ -763,12 +773,12 @@ def start_waiting_line(harness: str, session_id: str, exclude=()) -> str:
     are idle now (the just-started session excluded), else "". Reads only; never blocks."""
     try:
         if not session_id or not _role_held(harness, session_id)["held"] \
-                or not _role_flagged(harness, session_id):
+                or not _role_flagged(harness, session_id):  # cheap gate before the observation
             return ""
+        seen = _observe_role(harness, session_id)
         duty = _store().get(duty_id(harness, session_id)) or {}
-        waiting = waiting_targets(_observe_role(harness, session_id),
-                                  (duty.get("observation") or {}).get("waiting_since"),
-                                  style="start", exclude=exclude)
+        waiting = waiting_targets(seen, (duty.get("observation") or {}).get("waiting_since"),
+                                  style="start", exclude=exclude) if seen.get("flagged") else []
     except Exception:  # noqa: BLE001 - the session is already open; this line is only a hint
         return ""
     return ("already-waiting=" + ",".join(waiting) + " (sessions you supervise that are idle now)"
@@ -911,8 +921,9 @@ def _notice_text(base: str, seen: dict, action: str, key: str, waiting_since, no
         text = " ".join((advice + (" | " + line if line else "")).split())
         if fits(text):
             text = text + names if names and fits(text + names) else text
-            return next((text + tail for tail in _streams_tails(seen, waiting_since, now)
-                         if fits(text + tail)), text)
+            tails = (_streams_tails(seen, waiting_since, now) if seen.get("flagged")
+                     and action in ("assign-next", "run-steward-check") else ())
+            return next((text + tail for tail in tails if fits(text + tail)), text)
     return base
 
 
@@ -1361,13 +1372,13 @@ def cmd_check(harness: str, session_id: str, *, now: float | None = None, out=No
         print(f"target name={target['name']} harness={target['harness']} "
               f"state={target['state']} liveness={target['liveness']}"
               + (f" owed={owed}" if owed else ""), file=out)
-    routes = seen.get("parented_routes")
+    flagged, routes = seen.get("flagged"), seen.get("parented_routes")  # steward-flag lines only
     print(f"pending_messages={seen['pending_messages']} undelivered_notices={undelivered}"
           f" open_work={len(seen.get('open_work') or ())}"
           + (f" user_decisions={len(seen['user_decisions'])}" if seen.get("user_decisions") else "")
-          + (f" parented_routes={routes}" if isinstance(routes, int) else ""),
+          + (f" parented_routes={routes}" if flagged and isinstance(routes, int) else ""),
           file=out)
-    waiting = waiting_targets(seen, waiting_since, now)
+    waiting = waiting_targets(seen, waiting_since, now) if flagged else []
     if waiting:
         print("waiting=" + ",".join(waiting), file=out)
     for action in actions:

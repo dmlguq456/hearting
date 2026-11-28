@@ -11,6 +11,7 @@ import tempfile
 import unittest
 import shlex
 from unittest.mock import patch
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'utilities'))
@@ -294,41 +295,94 @@ def owner_row(attempt, route, parent='sid-a', status='open', depth='1'):
 
 
 class LaunchLineRoutesTest(unittest.TestCase):
-    """A launch's last line names the open routes the launching session parents, read from the registry."""
+    """A launch's last line names the open routes its session parents, only from the registry
+    generation the launch itself already read and still current; otherwise the old line."""
 
     OLD = 'next: end this turn; the runtime brings the result back to this session'
-    END = {'state': 'running', 'parent_next': 'end-turn'}
 
-    def line(self, jobs, sid='sid-a'):
+    def setUp(self):
+        import dispatch_registry_cache as cache
+        self.cache = cache
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.jobs = Path(self.tmp.name) / 'jobs.log'
+        self.reads = []  # (kind, bytes) of every registry read made while the line is written
+
+    def launch(self, text, read_as=None):
+        """Write the registry, then read it as `start_work` does after its launch registers."""
+        self.jobs.write_text(text)
+        self.cache.registry_snapshot(read_as or self.jobs)
+
+    def line(self, result=None, jobs=None):
+        result = result or {'state': 'running', 'parent_next': 'end-turn', 'launches': [{'attempt_id': 'att-own'}]}
+        real_read, real_suffix = self.cache._stable_read, self.cache._read_retained_suffix
+
+        def read(*a, **k):
+            value = real_read(*a, **k)
+            self.reads.append(('full', len(value[2])))
+            return value
+
+        def suffix(*a, **k):
+            value = real_suffix(*a, **k)
+            self.reads.append(('suffix', len(value[2])))
+            return value
+
         stream = io.StringIO()
-        with patch.object(receipt, 'identity', return_value=SessionIdentity('claude', sid, 'test', 'sole')):
-            receipt.print_next_line(self.END, stream=stream, jobs=jobs)
+        with patch.object(self.cache, '_stable_read', side_effect=read), \
+                patch.object(self.cache, '_read_retained_suffix', side_effect=suffix), \
+                patch.object(receipt, 'identity', side_effect=AssertionError('no identity lookup')):
+            receipt.print_next_line(result, stream=stream, jobs=jobs or self.jobs)
         return stream.getvalue().splitlines()[-1]
 
-    def test_zero_one_and_eighteen_open_routes(self):
-        with tempfile.TemporaryDirectory() as temp:
-            jobs = Path(temp) / 'jobs.log'
-            jobs.write_text(owner_row('att-x', 'rt-x', parent='sid-b') + owner_row('att-d', 'rt-d', status='done'))
-            self.assertEqual(self.line(jobs), self.OLD)
-            jobs.write_text(owner_row('att-1', 'rt-1') + owner_row('att-s', 'rt-s', depth='2'))
-            self.assertEqual(self.line(jobs), self.OLD + ' · this session now parents 1 open route')
-            jobs.write_text(''.join(owner_row(f'att-{i}', f'rt-{i}') for i in range(18)))
-            self.assertEqual(self.line(jobs), self.OLD + ' · this session now parents 18 open routes')
-            # The hook's republished receipt and any other caller without a registry keep the old line.
-            self.assertEqual(receipt.next_line(self.END), self.OLD)
+    def test_zero_one_and_eighteen_open_routes_from_the_generation_the_launch_read(self):
+        self.launch(owner_row('att-own', 'rt-own', status='done') + owner_row('att-x', 'rt-x', parent='sid-b'))
+        self.assertEqual(self.line(), self.OLD)
+        self.launch(owner_row('att-own', 'rt-own') + owner_row('att-s', 'rt-s', depth='2'))
+        self.assertEqual(self.line(), self.OLD + ' · this session now parents 1 open route')
+        self.launch(owner_row('att-own', 'rt-own') + ''.join(owner_row(f'att-{i}', f'rt-{i}') for i in range(17)))
+        self.assertEqual(self.line(), self.OLD + ' · this session now parents 18 open routes')
+        self.assertEqual(self.reads, [])  # nothing was read again and no identity was looked up
+        # The hook's republished receipt and any caller without a registry keep the old line.
+        self.assertEqual(receipt.next_line({'state': 'running', 'parent_next': 'end-turn'}), self.OLD)
 
-    def test_a_count_that_fails_or_cannot_be_read_leaves_the_receipt_as_it_was(self):
-        with tempfile.TemporaryDirectory() as temp:
-            jobs = Path(temp) / 'jobs.log'
-            jobs.write_text(owner_row('att-1', 'rt-1'))
-            with patch('dispatch_supervision.open_route_count', side_effect=RuntimeError('broken')):
-                self.assertEqual(self.line(jobs), self.OLD)
-            self.assertEqual(self.line(Path(temp) / 'missing.log'), self.OLD)
-            with patch.object(receipt, 'identity', return_value=SessionIdentity()):
-                stream = io.StringIO()
-                receipt.print_next_line(self.END, stream=stream, jobs=jobs)
-                self.assertEqual(stream.getvalue().splitlines()[-1], self.OLD)
+    def test_a_generation_the_launch_does_not_hold_leaves_the_old_line_without_a_read(self):
+        self.launch(owner_row('att-own', 'rt-own'))
+        with self.jobs.open('a') as file:  # another route registers after the launch read
+            file.write(owner_row('att-x', 'rt-x', parent='sid-b'))
+        self.assertEqual(self.line(), self.OLD)
+        alias = Path(self.tmp.name) / 'alias.log'
+        alias.symlink_to(self.jobs)
+        self.cache.clear_cache()
+        self.launch(owner_row('att-own', 'rt-own'), read_as=alias)  # read under another name
+        self.assertEqual(self.line(), self.OLD)
+        self.cache.clear_cache()  # a registry this process never read
+        self.assertEqual(self.line(), self.OLD)
+        self.assertEqual(self.reads, [])
 
+    def test_an_incomplete_generation_or_a_failed_count_leaves_the_old_line(self):
+        self.launch(owner_row('att-own', 'rt-own') + 'missing columns\n')
+        self.assertEqual(self.line(), self.OLD)
+        self.launch(owner_row('att-own', 'rt-own'))
+        with patch('dispatch_supervision.open_route_count', side_effect=RuntimeError('broken')):
+            self.assertEqual(self.line(), self.OLD)
+        self.assertEqual(self.line({'state': 'running', 'parent_next': 'end-turn', 'launches': []}), self.OLD)
+
+    def test_a_receipt_that_adds_no_count_starts_no_lookup_and_the_json_goes_first(self):
+        self.launch(owner_row('att-own', 'rt-own'))
+        events = []
+        resumed = {'state': 'needs-attention', 'parent_next': 'end-turn', 'launches': [{'attempt_id': 'att-own'}],
+                   'auto_resume': {'resume_at': '2026-11-28T01:00:00Z'}}
+        with patch.object(self.cache, 'held_registry_view', side_effect=AssertionError('no lookup')):
+            self.assertIn('starts this route again', self.line(resumed))
+            self.assertIn('bounded wait', self.line({'state': 'running', 'parent_next': 'bounded-wait',
+                                                     'parent_next_command': 'wait'}))
+        stdout = SimpleNamespace(flush=lambda: events.append('flush'))
+        held = self.cache.held_registry_view
+        with patch.object(sys, 'stdout', stdout), \
+                patch.object(self.cache, 'held_registry_view',
+                             side_effect=lambda jobs: events.append('count') or held(jobs)):
+            self.assertTrue(self.line().endswith('1 open route'))
+        self.assertEqual(events[:2], ['flush', 'count'])
 
 if __name__ == '__main__':
     unittest.main()

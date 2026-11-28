@@ -1127,22 +1127,26 @@ def _open_attempt_rows(jobs):
     return result
 
 
-def open_route_count(jobs, session_id):
-    """How many routes ``session_id`` parents now: its open dispatch-depth-1 owner attempts,
-    counted by route, from one cached registry read with no per-row liveness observation.
+def open_route_count(view, session_id):
+    """How many routes ``session_id`` parents in one registry generation: its dispatch-depth-1
+    owner attempts whose last row is open, counted by route.
 
-    ``None`` when the session is unknown or the registry cannot be read; a caller then says
-    nothing about the count rather than a wrong number.
+    ``None`` for no view, an unknown session, or a generation its reader calls incomplete or
+    empty: what could not be read is never shown as none. It counts the registry's open owner
+    rows, so a route may still count for a moment after it closes, until its row does.
     """
-    try:
-        if not session_id or not Path(jobs).is_file():
-            return None
-        return len({metadata.get("owner_route_id") or metadata.get("route_id")
-                    for _status, metadata in _open_attempt_rows(jobs)
-                    if metadata.get("parent_sid") == session_id
-                    and metadata.get("dispatch_depth") == "1" and metadata.get("worker_type") == "owner"})
-    except (OSError, ValueError, TypeError, UnicodeError):
+    if view is None or not session_id or view.completeness_reason or not view.record_count:
         return None
+    routes = set()
+    for record in view.completion_parent_records(session_id):
+        if record.status not in {"open", "running"}:
+            continue
+        metadata = record.completion_metadata()
+        last = view.handover_attempt(metadata.get("attempt_id", ""))  # the attempt's last row decides
+        if (last and last[0] in {"open", "running"} and metadata.get("dispatch_depth") == "1"
+                and metadata.get("worker_type") == "owner"):
+            routes.add(metadata.get("owner_route_id") or metadata.get("route_id") or "")
+    return len(routes - {""})
 
 
 def running_route_ids(jobs, candidates, session_id=None):

@@ -1719,9 +1719,10 @@ def cmd_start(args, *, retain_failure=True):
         print(result, end="")
     if code == 0 and requester[0]:
         try:  # a steward hears which of its sessions already wait; the start is already done
-            started = re.search(r"\bsession_id=(\S+)", result)
+            started = re.search(r"^started=true\b.*?\bsession_id=(\S+)", result, re.M)  # its own line only
+            sid = started.group(1) if started and started.group(1) != "-" else None
             line = _steward_check_module().start_waiting_line(
-                requester[1], requester[0], exclude={args.name, started and started.group(1)} - {None, "-"})
+                requester[1], requester[0], exclude={(args.kind, sid)} if sid else {args.name})
             if line:
                 print(line)
         except Exception:  # noqa: BLE001

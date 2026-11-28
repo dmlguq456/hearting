@@ -2355,29 +2355,54 @@ class StallNoticeRunningToolTest(unittest.TestCase):
 
 
 class OpenRouteCountTest(unittest.TestCase):
-    """The open routes a session parents: its open dispatch-depth-1 owner attempts, by route."""
+    """The open routes a session parents in one registry generation: its dispatch-depth-1 owner
+    attempts whose last row is open, by route; an incomplete or empty generation is no count."""
+
+    OWNER = dict(dispatch_depth="1", worker_type="owner", parent_sid="sid-a",
+                 parent_completion_delivery="claude-parent-runtime", route_id="")
+
+    def count(self, text, sid="sid-a", raw=None):
+        jobs = Path(self.temp.name) / f"jobs-{len(os.listdir(self.temp.name))}.log"
+        jobs.write_bytes(raw if raw is not None else text.encode())
+        return supervision.open_route_count(supervision.registry_view(jobs), sid)
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
 
     def test_only_open_depth_one_owner_routes_of_that_parent_count(self):
-        with tempfile.TemporaryDirectory() as temp:
-            jobs = Path(temp) / "jobs.log"
-            owner = dict(dispatch_depth="1", worker_type="owner", parent_sid="sid-a",
-                         parent_completion_delivery="claude-parent-runtime", route_id="")
-            jobs.write_text(
-                row("att-r1", owner_route_id="rt-one", **owner)
+        owner = self.OWNER
+        text = (row("att-r1", owner_route_id="rt-one", **owner)
                 + row("att-r2", status="running", owner_route_id="rt-two", **owner)
                 + row("att-closed", status="done", owner_route_id="rt-closed", **owner)
-                + row("att-stage", **{**owner, "dispatch_depth": "2", "worker_type": "stage",
-                                      "route_id": "rt-stage"})
+                + row("att-stage", **{**owner, "dispatch_depth": "2", "worker_type": "stage", "route_id": "rt-stage"})
                 + row("att-nested", owner_route_id="rt-nested", **{**owner, "dispatch_depth": "2"})
                 + row("att-other", owner_route_id="rt-other", **{**owner, "parent_sid": "sid-b"}))
-            self.assertEqual(supervision.open_route_count(jobs, "sid-a"), 2)
-            self.assertEqual(supervision.open_route_count(jobs, "sid-b"), 1)
-            self.assertEqual(supervision.open_route_count(jobs, "sid-none"), 0)
-            self.assertIsNone(supervision.open_route_count(jobs, ""))
-            self.assertIsNone(supervision.open_route_count(Path(temp) / "missing.log", "sid-a"))
-            with mock.patch.object(supervision, "registry_view", side_effect=OSError("unreadable")):
-                self.assertIsNone(supervision.open_route_count(jobs, "sid-a"))
+        self.assertEqual(self.count(text), 2)
+        self.assertEqual(self.count(text, "sid-b"), 1)
+        self.assertEqual(self.count(text, "sid-none"), 0)
+        self.assertIsNone(self.count(text, ""))
+        self.assertIsNone(supervision.open_route_count(None, "sid-a"))
+        # Two open attempts of one route (a correction or a replacement) are one route.
+        self.assertEqual(self.count(row("att-a", owner_route_id="rt-same", **owner)
+                                    + row("att-b", owner_route_id="rt-same", **owner)), 1)
 
+    def test_the_last_row_of_an_attempt_decides(self):
+        owner = self.OWNER
+        self.assertEqual(self.count(row("att-1", owner_route_id="rt-1", **owner)
+                                    + row("att-1", status="done", owner_route_id="rt-1", **owner)), 0)
+        self.assertEqual(self.count(row("att-1", status="done", owner_route_id="rt-1", **owner)
+                                    + row("att-1", owner_route_id="rt-1", **owner)), 1)
+
+    def test_what_could_not_be_read_is_not_a_count(self):
+        good = row("att-1", owner_route_id="rt-1", **self.OWNER)
+        self.assertEqual(self.count(good), 1)
+        for name, raw in (("malformed", (good + "missing columns\n").encode()),
+                          ("partial tail", (good + good).encode()[:-1]),
+                          ("invalid utf-8", good.encode() + b"\xff\xfe\n"),
+                          ("empty", b""), ("one malformed row", b"missing columns\n")):
+            with self.subTest(name):
+                self.assertIsNone(self.count("", raw=raw))
 
 if __name__ == "__main__":
     unittest.main()
