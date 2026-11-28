@@ -21,18 +21,34 @@ from capability_route_dispatch import _expand_parallel_groups
 from replica_batch_contract import MAX_TOP_LEGS
 
 
-def _resolve_owner_profile(effective, registry, demand=None, explicit_profile=None, owner_default=None):
-    """One selection for compile and verify: demand, otherwise legacy default.
+def _code_one_shot_profile(capability, mode, effective, form):
+    return (capability, mode, effective, form) == ("autopilot-code", "dev", "quick", "solo")
+
+
+def _shared_one_shot_profile_input(values):
+    """The owner and its one-shot node are two names for one process."""
+    owner, one_shot = values.get("__owner__"), values.get("one-shot")
+    if owner is not None and one_shot is not None and owner != one_shot:
+        raise ValueError("owner-node-profile-selection-conflict:one-shot")
+    return owner if owner is not None else one_shot
+
+
+def _resolve_owner_profile(effective, registry, demand=None, explicit_profile=None, owner_default=None,
+                           *, code_one_shot_default=False):
+    """Resolve the owner choice and enforce its registered profile eligibility.
 
     Intensity describes the workflow shape; its compatibility default must not
     veto the independently validated judgment/execution demand. `owner_default` is the default of an
     owner that makes the work itself at a higher intensity (the middle cell `solo·standard`, whose
     recipe declares it): that owner is read as the maker (A), not as the intensity's conductor.
     """
-    default = owner_default or registry["owner_profile_by_intensity"].get(effective) or "light"
+    fallback = owner_default or registry["owner_profile_by_intensity"].get(effective) or "light"
+    selected = explicit_profile
+    if selected is None and demand is None and not code_one_shot_default:
+        selected = fallback
     selection = PROFILE.resolve_profile_demand(
-        demand, explicit_profile=explicit_profile if explicit_profile is not None else default if demand is None else None,
-        legacy=explicit_profile is None, existing_versioned_stage=True)
+        demand, explicit_profile=selected, legacy=explicit_profile is None, existing_versioned_stage=True,
+        code_one_shot_default=code_one_shot_default)
     profile = selection["resolved_profile"]
     if effective == "direct":
         if profile == PROFILE.TOP_PROFILE:
@@ -415,31 +431,49 @@ def _verify_profile_contract(route):
             if node.get("dispatch_depth") == 2 and node.get("model_profile") == PROFILE.TOP_PROFILE:
                 raise ValueError("profile-top-needs-selection-contract:" + str(node.get("id")))
         return
-    if type(version) is not int or version != 1:
+    if type(version) is not int or version not in (1, PROFILE.CODE_ONE_SHOT_PROFILE_CONTRACT):
+        raise ValueError("profile-selection-version-unsupported")
+    shared = version == PROFILE.CODE_ONE_SHOT_PROFILE_CONTRACT
+    form = ROUTE_FORM.route_form(route)
+    if shared and not _code_one_shot_profile(route.get("capability"), route.get("capability_mode"),
+                                            route.get("effective_intensity"), form):
         raise ValueError("profile-selection-version-unsupported")
     demands, explicit = _profile_input_maps(route.get("nodes", []), route.get("profile_demands"),
                                             route.get("explicit_profiles"), route.get("effective_intensity"))
-    if route.get("owner_profile_demand") != demands.get("__owner__"):
+    owner_demand = _shared_one_shot_profile_input(demands) if shared else demands.get("__owner__")
+    owner_explicit = _shared_one_shot_profile_input(explicit) if shared else explicit.get("__owner__")
+    if route.get("owner_profile_demand") != owner_demand:
         raise ValueError("owner-profile-demand-map-mismatch")
     owner_profile = route.get("owner_model_profile") or "light"
+    fallback = owner_profile if not shared and owner_demand is None and owner_explicit is None else None
     owner_expected = PROFILE.resolve_profile_demand(
-        demands.get("__owner__"), explicit_profile=(explicit.get("__owner__")
-            if "__owner__" in explicit or "__owner__" in demands else owner_profile),
-        legacy="__owner__" not in explicit, existing_versioned_stage=True)
+        owner_demand, explicit_profile=owner_explicit or fallback, legacy=owner_explicit is None,
+        existing_versioned_stage=True, code_one_shot_default=shared)
     if owner_expected != route.get("owner_profile_selection"):
         raise ValueError("owner-profile-selection-map-mismatch")
+    PROFILE.validate_profile_selection(
+        owner_expected, owner_demand, profile=route.get("owner_model_profile"),
+        existing_versioned_stage=True, code_one_shot_default=shared,
+    )
+    shared_node = None
+    if shared:
+        shared_node = next((node for node in route["nodes"] if _owner_node(node, "quick", form)), None)
+        if (route.get("owner_model_profile") != owner_expected["resolved_profile"]
+                or shared_node is None
+                or shared_node.get("model_profile") != owner_profile
+                or shared_node.get("profile_selection") != owner_expected
+                or shared_node.get("profile_demand") != owner_demand
+                or (shared_node.get("profile_explicit") is True) != (owner_explicit is not None)):
+            raise ValueError("owner-node-profile-selection-conflict:one-shot")
     for node in route.get("nodes", []):
+        if node is shared_node:
+            continue
         node_id = node["id"]
         if node_id in demands and node.get("profile_demand") != demands[node_id]:
             raise ValueError("node-profile-demand-map-mismatch:" + node_id)
         if node_id in explicit and (node.get("profile_selection", {}).get("source") != "explicit"
                                    or node.get("model_profile") != explicit[node_id]):
             raise ValueError("node-profile-explicit-map-mismatch:" + node_id)
-    PROFILE.validate_profile_selection(
-        route.get("owner_profile_selection"), route.get("owner_profile_demand"),
-        profile=route.get("owner_model_profile"), existing_versioned_stage=True,
-    )
-    for node in route.get("nodes", []):
         if _no_model_node(node):
             continue
         PROFILE.validate_profile_selection(node.get("profile_selection"), node.get("profile_demand"),

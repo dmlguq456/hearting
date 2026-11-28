@@ -302,8 +302,9 @@ class TestRoute(unittest.TestCase):
      self.assertEqual(route["owner_dispatch_depth"],1)
      self.assertEqual(route["max_dispatch_depth"],1)
      self.assertEqual(owner["dispatch_depth"],1)
-     self.assertEqual(route["owner_model_profile"],"balanced-deep")
-     self.assertEqual(owner["model_profile"],"balanced-deep")
+     profile="balanced" if (recipe["capability"],mode)==("autopilot-code","dev") else "balanced-deep"
+     self.assertEqual(route["owner_model_profile"],profile)
+     self.assertEqual(owner["model_profile"],profile)
      self.assertEqual(owner["execution_surface"],"registered-headless")
      self.assertTrue(owner["registered_worker"])
      for leg in route["nodes"][:2]:
@@ -352,10 +353,11 @@ class TestRoute(unittest.TestCase):
      transport=None,tracking="tracked",
      tracked_gate_evidence=self.args()["tracked_gate_evidence"],
      registered_headless_evidence=self.registered_headless())
-    self.assertEqual(quick["owner_model_profile"],"balanced-deep")
+    profile="balanced" if (recipe["capability"],mode)==("autopilot-code","dev") else "balanced-deep"
+    self.assertEqual(quick["owner_model_profile"],profile)
     self.assertEqual(
      next(n for n in quick["nodes"] if n["id"]=="one-shot")["model_profile"],
-     "balanced-deep")
+     profile)
     R.verify_route(quick,R.ROOT); compiled+=1
     for intensity in ("standard","strong","thorough","adversarial"):
      with self.subTest(capability=recipe["capability"],mode=mode,intensity=intensity):
@@ -10397,11 +10399,11 @@ class FrameBootstrapLayerTest(unittest.TestCase):
     self.assertEqual(by_id["frame-alternative"]["model_profile"],rungs["others"])
     R.verify_route(route,R.ROOT)
 
-  # quick: owner is `balanced-deep`, so both legs still land on top.
+  # The quick code maker also has two top frame legs.
   route=self.quick()
   rungs=ladder[route["owner_model_profile"]]
   by_id={n["id"]:n for n in route["nodes"]}
-  self.assertEqual(route["owner_model_profile"],"balanced-deep")
+  self.assertEqual(route["owner_model_profile"],"balanced")
   self.assertEqual(by_id["frame"]["model_profile"],rungs["anchor"])
   self.assertEqual(by_id["frame-alternative"]["model_profile"],rungs["others"])
   self.assertEqual((rungs["anchor"],rungs["others"]),("top","top"))

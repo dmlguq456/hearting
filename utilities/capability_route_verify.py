@@ -616,12 +616,15 @@ def _verify_route(route, expected_cwd, *, allow_stale_registry):
     observed_dispatch_depths = [route["owner_dispatch_depth"]]
     effective=route.get("effective_intensity")
     form=route_form(route)
-    selected_owner, _ = _resolve_owner_profile(
-        effective, registry, route.get("owner_profile_demand"),
-        (route.get("explicit_profiles") or {}).get("__owner__"),
-        owner_default=one_shot_owner_default(route_recipe, effective, form == "solo"))
-    if route.get("owner_model_profile") != selected_owner:
-        raise ValueError("owner_model_profile differs from the portable owner selection")
+    # The shared one-shot contract has already recomputed the owner's selection
+    # and checked the node against it. Earlier seals use their recipe defaults.
+    if route.get("profile_selection_contract_version") != PROFILE.CODE_ONE_SHOT_PROFILE_CONTRACT:
+        selected_owner, _ = _resolve_owner_profile(
+            effective, registry, route.get("owner_profile_demand"),
+            (route.get("explicit_profiles") or {}).get("__owner__"),
+            owner_default=one_shot_owner_default(route_recipe, effective, form == "solo"))
+        if route.get("owner_model_profile") != selected_owner:
+            raise ValueError("owner_model_profile differs from the portable owner selection")
     # The owner's own node (quick `one-shot`) must carry the profile the route
     # sealed for the owner (the policy check above already admitted it, `top`
     # included); a standard+ recipe's semantic owner node keeps the portable

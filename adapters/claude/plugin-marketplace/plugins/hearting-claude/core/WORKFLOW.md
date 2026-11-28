@@ -264,6 +264,12 @@ original explicit/default choice was not recorded. Worker estimates count stage
 and frame legs, excluding the separately shown owner and any retries or later
 routes chosen by a frame.
 
+When opening the work, read the task and settled decisions once to fill the existing
+`--profile-demands` for `__owner__` or a node ID. Leave the demand absent when evidence is unclear.
+
+- For judgment (`judgment_requirement`), an approved edit is `predetermined`, a decision that could change the outcome is `important`, and choosing a recovery direction with an unresolved cause is `difficult-uncertain`.
+- For execution (`execution_scope`), applying a fixed rule in one file is `short-local`, and applying and checking that rule across several modules is `extended-multistep`.
+
 framed는 기본 두 갈래다. 작고 국소적인 일이면 `--intensity quick`을 붙일
 수 있고, 과제가 공통 규칙·spec·여러 어댑터를 건드리면 하팅이 두 갈래로
 지킨다.

@@ -185,6 +185,8 @@ def top_stage_tier_notes(route, *, rows=(), degradations=()) -> list[dict]:
         notes.append({"node": row["route_node"], **ran, TIER_NOTE_KEY: row[TIER_NOTE_KEY]})
     return notes
 RESOLVER_VERSION = "profile-demand/v1"
+CODE_ONE_SHOT_DEFAULT_RESOLVER = "profile-demand/v2"
+CODE_ONE_SHOT_PROFILE_CONTRACT = 2
 DEMAND_SCHEMA_VERSION = 1
 DEMAND_JUDGMENTS = ("predetermined", "important", "difficult-uncertain")
 DEMAND_SCOPES = ("short-local", "extended-multistep")
@@ -261,9 +263,17 @@ def resolve_profile_demand(
     explicit_profile: str | None = None,
     legacy: bool = False,
     existing_versioned_stage: bool = False,
+    code_one_shot_default: bool = False,
 ) -> dict[str, object]:
     """Resolve one demand into a sealed selection; no adapter/model knowledge."""
     if demand is None:
+        if code_one_shot_default and explicit_profile is None:
+            return {
+                "schema_version": 1, "source": "product-default",
+                "resolver_version": CODE_ONE_SHOT_DEFAULT_RESOLVER, "demand_digest": None,
+                "resolved_profile": "balanced", "judgment_floor": "unknown",
+                "reason": "no-difficulty-evidence",
+            }
         if legacy and existing_versioned_stage and explicit_profile in PORTABLE_PROFILES:
             return {
                 "schema_version": 1, "source": "legacy", "resolver_version": RESOLVER_VERSION,
@@ -314,26 +324,32 @@ def resolve_profile_demand(
 
 
 def validate_profile_selection(selection, demand=None, *, profile=None,
-                               existing_versioned_stage=False):
+                               existing_versioned_stage=False, code_one_shot_default=False):
     """Recompute every semantic field, rather than trusting a supplied digest."""
     fields = {"schema_version", "source", "resolver_version", "demand_digest",
               "resolved_profile", "judgment_floor", "reason"}
     if (not isinstance(selection, Mapping) or set(selection) != fields
             or type(selection.get("schema_version")) is not int
-            or selection["schema_version"] != 1
-            or selection.get("resolver_version") != RESOLVER_VERSION):
+            or selection["schema_version"] != 1):
         raise ModelProfileError("unsupported or invalid profile selection contract",
                                 "profile-selection-version-unsupported")
-    source = selection.get("source")
-    if source not in {"matrix", "explicit", "legacy"}:
-        raise ModelProfileError("invalid profile selection source", "profile-selection-invalid")
     resolved = selection.get("resolved_profile")
     if profile is not None and resolved != profile:
         raise ModelProfileError("sealed profile differs from selection", "profile-selection-mismatch")
-    expected = resolve_profile_demand(
-        demand, explicit_profile=resolved if source in {"explicit", "legacy"} else None,
-        legacy=source == "legacy", existing_versioned_stage=existing_versioned_stage,
-    )
+    version = selection["resolver_version"]
+    if version == CODE_ONE_SHOT_DEFAULT_RESOLVER and code_one_shot_default:
+        expected = resolve_profile_demand(demand, code_one_shot_default=True)
+    elif version == RESOLVER_VERSION:
+        source = selection.get("source")
+        if source not in {"matrix", "explicit", "legacy"}:
+            raise ModelProfileError("invalid profile selection source", "profile-selection-invalid")
+        expected = resolve_profile_demand(
+            demand, explicit_profile=resolved if source in {"explicit", "legacy"} else None,
+            legacy=source == "legacy", existing_versioned_stage=existing_versioned_stage,
+        )
+    else:
+        raise ModelProfileError("unsupported or invalid profile selection contract",
+                                "profile-selection-version-unsupported")
     if dict(selection) != expected:
         raise ModelProfileError("sealed profile selection differs from resolver",
                                 "profile-selection-mismatch")
@@ -841,15 +857,19 @@ def selection_receipt(args):
         selection, demand = node.get("profile_selection"), node.get("profile_demand")
     else:
         selection, demand = route.get("owner_profile_selection"), route.get("owner_profile_demand")
-    if route.get("profile_selection_contract_version") is None:
+    version = route.get("profile_selection_contract_version")
+    if version is None:
         return {"profile_selection_source": "legacy", "profile_resolver_version": "-",
                 "profile_demand_digest": "-", "profile_judgment_floor": "unknown"}
-    if type(route["profile_selection_contract_version"]) is not int or route["profile_selection_contract_version"] != 1:
+    if type(version) is not int or version not in (1, CODE_ONE_SHOT_PROFILE_CONTRACT):
         raise ModelProfileError("unsupported profile selection contract", "profile-selection-version-unsupported")
     profile = args.resolved_model_settings["profile"]
     if _lower_launch_verified(args, route, node_id, selection, profile):
         profile = selection["resolved_profile"]  # the sealed selection is still checked as sealed
-    validate_profile_selection(selection, demand, profile=profile, existing_versioned_stage=True)
+    validate_profile_selection(
+        selection, demand, profile=profile, existing_versioned_stage=True,
+        code_one_shot_default=version == CODE_ONE_SHOT_PROFILE_CONTRACT and node_id in (None, "one-shot"),
+    )
     receipt = {"profile_selection_source": selection["source"],
                "profile_resolver_version": selection["resolver_version"],
                "profile_demand_digest": selection["demand_digest"] or "-",

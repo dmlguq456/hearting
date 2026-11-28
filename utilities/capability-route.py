@@ -177,6 +177,7 @@ from capability_route_nodes import (  # noqa: F401
     _frameless_recipe, _load_sd160_snapshots, _no_model_node, _one_leg_frame_recipe,
     _owner_node, _profile_input_maps, _quick_frame_diversity, _quick_gate_bindings,
     one_shot_owner_default, one_shot_review_declared, one_shot_review_node, one_shot_review_nodes,
+    _code_one_shot_profile, _shared_one_shot_profile_input,
     _recipe_has_frame, _resolve_owner_profile, _sd160_snapshot_path, _seal_confirmation_mode,
     _seal_profile_demands, _seal_small_work_confirmation, _seal_terminal_commit_support,
     _stamp_frame_profiles, _unit_blocks_digest, _verify_profile_contract, unit_leg_node,
@@ -764,7 +765,7 @@ def build_continuation_route(
     if pins:
         route["selection_pins"]={"contract_version":SELECTION_PIN_CONTRACT_VERSION,**pins}
     route.update(result)
-    if route.get("profile_selection_contract_version") == 1:
+    if route.get("profile_selection_contract_version") in (1, PROFILE.CODE_ONE_SHOT_PROFILE_CONTRACT):
         retained = {node["id"] for node in route_nodes} | {"__owner__"}
         for key in ("profile_demands", "explicit_profiles"):
             route[key] = {k: v for k, v in route.get(key, {}).items() if k in retained}
@@ -1678,19 +1679,27 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         explicit_profiles = {**{n["id"]: profile for n in nodes if not _no_model_node(n)},
                              "__owner__": profile, **(explicit_profiles or {})}
     profile_demands, explicit_profiles = _profile_input_maps(nodes, profile_demands, explicit_profiles, effective)
-    owner_demand = profile_demands.get("__owner__")
+    shared = _code_one_shot_profile(capability, capability_mode, effective, form)
+    owner_demand = _shared_one_shot_profile_input(profile_demands) if shared else profile_demands.get("__owner__")
+    owner_explicit = _shared_one_shot_profile_input(explicit_profiles) if shared else explicit_profiles.get("__owner__")
     owner_model_profile, owner_profile_selection = _resolve_owner_profile(
-        effective, registry, owner_demand, explicit_profiles.get("__owner__"),
-        owner_default=one_shot_owner_default(recipe, effective, form == "solo"))
+        effective, registry, owner_demand, owner_explicit,
+        owner_default=one_shot_owner_default(recipe, effective, form == "solo"),
+        code_one_shot_default=shared)
     resolved_owner_profile = owner_profile_selection["resolved_profile"]
-    if owner_demand is not None or "__owner__" in explicit_profiles:
-        # Quick's one-shot is the owner process, so there is one selection.
-        # Semantic owner stages in standard+ remain independently selected.
-        for node in nodes:
-            if _owner_node(node, effective, form):
-                node["model_profile"] = resolved_owner_profile
+    shared_node = None
+    for node in nodes:
+        if not _owner_node(node, effective, form):
+            continue
+        if shared:
+            shared_node = node
+            node.update(model_profile=resolved_owner_profile, profile_demand=owner_demand,
+                        profile_selection=dict(owner_profile_selection))
+            if owner_explicit is not None:
                 node["profile_explicit"] = True
-                node["profile_demand"] = owner_demand
+        elif owner_demand is not None or owner_explicit is not None:
+            node.update(model_profile=resolved_owner_profile, profile_demand=owner_demand,
+                        profile_explicit=True)
     # The frame bootstrap tier ladder, applied for BOTH shapes at once, after
     # `resolved_owner_profile` and before `_seal_profile_demands`. Quick's
     # frame pair is built literally above by `_quick_frame`, and the five
@@ -1702,7 +1711,8 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
     # in two homes. The one home is `model_profile.FRAME_PROFILE_LADDER`.
     _stamp_frame_profiles(nodes, resolved_owner_profile, owner_demand)
     legacy_nodes = not composed or _versioned_subgraph(registry, recipe)
-    _seal_profile_demands(nodes, profile_demands, explicit_profiles, legacy=legacy_nodes)
+    _seal_profile_demands((node for node in nodes if node is not shared_node),
+                          profile_demands, explicit_profiles, legacy=legacy_nodes)
     for node in nodes:
         if _owner_node(node, effective, form) and node["model_profile"] != owner_model_profile:
             raise ValueError("owner-node-profile-selection-conflict:" + node["id"])
@@ -1741,7 +1751,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
       "schema_version":ROUTE_SCHEMA_VERSION,"capability":capability,"capability_mode":capability_mode,
       "requested_intensity":requested_intensity,"effective_intensity":effective,
       "owner_model_profile":owner_model_profile,
-      "profile_selection_contract_version":1,
+      "profile_selection_contract_version":PROFILE.CODE_ONE_SHOT_PROFILE_CONTRACT if shared else 1,
       "persona_independence_contract_version":1,
       "profile_demands":profile_demands,"explicit_profiles":explicit_profiles,
       "owner_profile_demand":owner_demand,"owner_profile_selection":owner_profile_selection,
