@@ -138,11 +138,19 @@ term.loadAddon(new Unicode11Addon());term.unicode.activeVersion='11';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const child=pty.spawn(cfg.python,[cfg.entry,cfg.harness,cfg.python,cfg.fake,cfg.harness,cfg.sid,cfg.control],{cols,rows,cwd:cfg.project,
   env:{...process.env,TERM:'xterm-256color',NODE_OPTIONS:'--require '+cfg.launcher}});
-child.onData(d=>term.write(d));
+// The host draws each panel or popup frame inside synchronized output (`ESC[?2026h` … `ESC[?2026l`, host.cjs), and a
+// terminal shows such a frame only once it is whole. A frame's bytes can come in two PTY reads on a loaded machine;
+// a read between them saw half a popup (3 of 6 stage boxes, a page without its boxes: CI 11-26 and 11-27).
+let framing=false,arrived=0,tail='';
+const take=d=>{arrived++;term.write(d);const t=tail+d,open=t.lastIndexOf('\x1b[?2026h'),shut=t.lastIndexOf('\x1b[?2026l');
+  if(open>=0||shut>=0)framing=open>shut;tail=t.slice(-7);};
+child.onData(take);
 const flush=()=>new Promise(r=>term.write('',r));
+// Every byte that arrived is parsed and no frame is open (one that never closes is read as it stands after 2 s).
+const whole=async()=>{for(let i=0;i<400;i++){const n=arrived;await flush();if(!framing&&n===arrived)return;await sleep(5);}};
 const cellsOf=y=>{const line=term.buffer.active.getLine(y),out=[];for(let x=0;x<cols;x++){const c=line?.getCell(x);out.push(!c?' ':c.getWidth()===0?'':c.getChars()||' ');}return out;};
-const screen=async()=>{await flush();const grid=Array.from({length:rows},(_,y)=>cellsOf(y)),out=grid.map(c=>c.join('').trimEnd());out.grid=grid;return out;};
-const at=async needle=>{await flush();for(let y=0;y<rows;y++){const c=cellsOf(y),where=[];let text='';
+const screen=async()=>{await whole();const grid=Array.from({length:rows},(_,y)=>cellsOf(y)),out=grid.map(c=>c.join('').trimEnd());out.grid=grid;return out;};
+const at=async needle=>{await whole();for(let y=0;y<rows;y++){const c=cellsOf(y),where=[];let text='';
   c.forEach((ch,x)=>{for(const _ of ch)where.push(x);text+=ch;});const i=text.indexOf(needle);if(i>=0)return {x:where[i],y};}return null;};
 const until=async(test,what,ms=20000)=>{const began=Date.now();while(Date.now()-began<ms){const s=await screen();if(test(s))return {s,ms:Date.now()-began};await sleep(25);}
   throw Error('never '+what+'\n'+(await screen()).join('\n'));};

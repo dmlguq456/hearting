@@ -28,6 +28,11 @@ FLEET_S=importlib.util.spec_from_file_location("fleet_route",FLEET_P)
 FLEET_ROUTE=importlib.util.module_from_spec(FLEET_S); FLEET_S.loader.exec_module(FLEET_ROUTE)
 sys.path.insert(0,str(P.parent))
 sys.path.insert(0,str(P.parent.parent/"tools"))
+import fixture_processes  # noqa: E402
+# A `close` run from the CLI is not a test process, so it asks the detached entrance
+# worker for a turn and returns without waiting for it (capability_route_close.py).
+# Its tests remove their artifact root with fixture_processes.TemporaryDirectory,
+# which settles that writer first.
 from fixture_processes import unique_attempt_id  # noqa: E402
 import dispatch_contract as D
 CLI_STAGE_COMPILE=unique_attempt_id("att-cli-stage-compile")
@@ -1656,7 +1661,7 @@ class TestRoute(unittest.TestCase):
   # was bypassed almost every time it fired. The route closes, the sidecar
   # records `terminal_gate_proven=false`, and one warning line says so.
   import subprocess,sys
-  with tempfile.TemporaryDirectory() as tmp:
+  with fixture_processes.TemporaryDirectory() as tmp:
    artifact_root=Path(tmp)
    compiled=self._run_compile_cli(self._compile_cli_args(artifact_root))
    self.assertEqual(compiled.returncode,0,compiled.stderr)
@@ -1680,7 +1685,7 @@ class TestRoute(unittest.TestCase):
   # `--allow-unproven` is still accepted (compatibility) and changes nothing; the
   # no-flag form is covered by test_close_before_complete_records_unproven_without_refusing.
   import subprocess,sys
-  with tempfile.TemporaryDirectory() as tmp:
+  with fixture_processes.TemporaryDirectory() as tmp:
    artifact_root=Path(tmp)
    compiled=self._run_compile_cli(self._compile_cli_args(artifact_root))
    self.assertEqual(compiled.returncode,0,compiled.stderr)
@@ -1706,7 +1711,7 @@ class TestRoute(unittest.TestCase):
  def test_close_accepts_a_route_id(self):
   # `close --route` named a file only; the `rt-...` id the other commands print was a FileNotFoundError.
   import subprocess,sys
-  with tempfile.TemporaryDirectory() as tmp:
+  with fixture_processes.TemporaryDirectory() as tmp:
    artifact_root=Path(tmp)
    compiled=self._run_compile_cli(self._compile_cli_args(artifact_root))
    self.assertEqual(compiled.returncode,0,compiled.stderr)
@@ -5088,7 +5093,7 @@ class TestValidationBasis(unittest.TestCase):
    self.assertIn("registered=0 started=0 child_spawned=0",launch.stderr)
  def test_close_still_accepts_launch_tuple_mismatch(self):
   import subprocess,sys
-  with tempfile.TemporaryDirectory() as tmp:
+  with fixture_processes.TemporaryDirectory() as tmp:
    artifact_root=Path(tmp)/"artifacts"
    route=R.compile_route(**self.args(artifact_root=artifact_root))
    route["launch_compatibility_tuple"]["runtime_root"]["content_digest"]="sha256:"+"f"*64
@@ -5351,7 +5356,7 @@ class TestValidationBasis(unittest.TestCase):
   cases=((same_catalog,False,True),(other_catalog,True,False),(newer_basis,True,False))
   for vary,carried,expected in cases:
    for closer in ("cli","raw-json"):
-    with self.subTest(case=vary.__name__,closer=closer), tempfile.TemporaryDirectory() as tmp:
+    with self.subTest(case=vary.__name__,closer=closer), fixture_processes.TemporaryDirectory() as tmp:
      artifact_root=Path(tmp)/"artifacts"
      sealed=self._reseal(vary(R.compile_route(**self.args(artifact_root=artifact_root))))
      on_disk=dict(sealed,_registry_current=carried)
