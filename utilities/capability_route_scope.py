@@ -20,6 +20,7 @@ import route_plan as ROUTE_PLAN
 import route_authority as ROUTE_AUTHORITY
 import owner_write_advisory as OWNER_WRITE_ADVISORY
 import resource_resume as RESOURCE_RESUME
+import route_form as ROUTE_FORM
 
 from capability_route_base import (
     canonical_routes_dir, ORDER, route_hash, TOPO, UI_TEXT,
@@ -630,6 +631,7 @@ def compose_card(route, plan=None, plan_source=None, *, owner_harness=None,
     shape = route.get("selection", {}).get("shape") or shape_for_intensity(route["effective_intensity"])
     ids = [node["id"] for node in route["nodes"]]
     framed = shape == "framed"
+    shape = ROUTE_FORM.shape_word(shape)    # the recorded `staged` reads `team` in the header
     graph = "→".join(ids) if ids else "-"
     t = UI_TEXT.translator()
     gates = ",".join(sorted({row["gate"] for row in route.get("human_gate_bindings") or []})) or t("route.none")

@@ -61,7 +61,7 @@ sealed before this cycle keeps its own generation's gate name, binding and
 node shape and is **never retro-fitted** — the entry fence in
 `utilities/dispatch_contract.py` reads only the route object it was handed.
 
-Depth-0 launches the frame pair (both legs `top`, a pin or explicit profile wins; a route composed from an approved proposal via `--route-plan`, or as a `solo` or `staged` compose, has no frame nodes), joins both direction briefs, and builds
+Depth-0 launches the frame pair (both legs `top`, a pin or explicit profile wins; a route composed from an approved proposal via `--route-plan`, or as a `solo` or `team` compose, has no frame nodes), joins both direction briefs, and builds
 `shards/frame/frame-summary.json` (five fields — 방향/대안/위험/범위 변경/비용,
 ≤1KB) plus the **frame interview** `shards/frame/interview.json` (SD-129: a
 one-sentence restatement the user confirms, a plain-language brief, and at
@@ -119,7 +119,7 @@ binds `direct`, `quick`, and `standard+`; only the acting owner differs.
 
 Use portable role names from `roles/README.md` and `core/CONVENTIONS.md`. Concrete model names, subagent frontmatter, and runtime-specific tool lists belong in adapter files.
 
-Pipeline intensity follows `core/CONVENTIONS.md §1`: `direct` has no plan stage or durable plan artifact; `quick` is one registered-headless dispatch-depth-1 one-shot conductor with its inline micro-plan plus plan-check-lite; `standard+` uses the capability's durable work-cycle plan when applicable. This recipe has no separate `plan-check` node (only `autopilot-code` declares one): `quick` checks its micro-plan inline (plan-check-lite), and `standard+` reviews through the recipe's own review stages — `review` — rather than after every stage. Verification rigor for those reviews and final verify is derived from intensity; it does not name a model or introduce a separate stage graph. `capabilities/topologies.json` (recipe plus `part_catalog`) is the one stage list; `capability-route.py stages --capability autopilot-refine` prints it.
+Pipeline intensity follows `core/CONVENTIONS.md §1`: `direct` has no plan stage or durable plan artifact; `quick` is a `solo` route: one registered-headless dispatch-depth-1 owner with its inline micro-plan plus plan-check-lite; a `team` route (`standard+`) uses the capability's durable work-cycle plan when applicable, and `solo` takes `standard` and above only where the kind declares a one-shot review. This recipe has no separate `plan-check` node (only `autopilot-code` declares one): `quick` checks its micro-plan inline (plan-check-lite), and a `team` route reviews through the recipe's own review stages — `review` — rather than after every stage. Verification rigor for those reviews and final verify is derived from intensity; it does not name a model or introduce a separate stage graph. `capabilities/topologies.json` (recipe plus `part_catalog`) is the one stage list; `capability-route.py stages --capability autopilot-refine` prints it.
 
 ## Guard Requirements
 

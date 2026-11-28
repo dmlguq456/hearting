@@ -302,7 +302,7 @@ Use the document frame to gather materials, make multiple drafts, connect claims
 evidence across sections or integrate an external draft. Keep the capability, graph,
 inputs, outputs, writer responsibilities and unfinished handoffs, including missing
 drafts, in the route plan. Edit originals in the current session's direct leg and keep
-the other staged legs, including artifact-only workers in non-Git folders. HWPX and other
+the other team legs, including artifact-only workers in non-Git folders. HWPX and other
 format tools serve production and format checks. Material review and integration still
 need their own work.
 
@@ -319,7 +319,7 @@ work or its tests passed. Missing, interrupted and running results stay unknown.
 Explicit `compose --start --shape direct --field <field> --prompt-file <task>`
 still prepares an isolated worktree and an inline route; `compose --shape direct
 --field <field>` records work already made in place. Their receipt and explicit finish contracts are unchanged.
-When the direction is clear, open `--shape solo|staged` (below). With no `--shape`,
+When the direction is clear, open `--shape solo|team` (below). With no `--shape`,
 `compose --start --prompt-file <task>` lets the frame choose the capability, stages and
 shape, judging each leg's optional `size` (`one-change`, `one-pass`, `multi-stage`) first.
 Direct has no review-worker path of its own: work that
@@ -330,7 +330,7 @@ review, open `--shape solo --intensity standard` if the kind declares a one-shot
 `adversarial` three, and where the kind declares a test, an independent test follows them.
 The owner starts the review legs with the task's group command and the test with the
 command the receipt prints once the current reviews pass, and cannot close any of them
-itself. Use `staged` for work sized for stages, or for independent review where
+itself. Use `team` for work sized for stages, or for independent review where
 the kind has no one-shot review. The session checks a direct change itself, including
 requested tests. An optional second look is a short check that keeps no record (below).
 
@@ -339,7 +339,7 @@ requested tests. An optional second look is a short check that keeps no record (
 | One reversible local completion unit in the current Git worktree, including a small feature with its tests and README | read → edit → check → reply | automatic record; no start/finish round trip |
 | Explicit direct source change needing preparation | `compose --start --shape direct --field <field> --prompt-file <task>` | isolated worktree, inline node, dispatch depth 0 |
 | One reversible local completion unit already made in place | `compose --shape direct --field <field>` | records the in-place change as an inline node |
-| New work whose direction is clear | `compose --start --shape solo\|staged --capability <kind> --prompt-file <task>` | opened directly; a sign may add the one advice line below |
+| New work whose direction is clear | `compose --start --shape solo\|team --capability <kind> --prompt-file <task>` | opened directly; a sign may add the one advice line below |
 | Other new work (more than one reading is plausible) | `compose --start --prompt-file <task>` | framed; frame proposes the smallest route and the existing interview confirms it |
 
 Handing one read-only job to another worker opens that unit as a route of its own, with no owner
@@ -353,7 +353,7 @@ command without `--ephemeral`, or `audit`. After one revision, that review is on
 checks (`capabilities/audit.md`). A unit route's one worker starts with the brief, and its end closes
 the route and returns the sealed summary to the session that opened it; a worker opens one the same way (`core/OPERATIONS.md` §5.10c). A unit route has no intensity
 (one unit does one job and nothing checks it; `core/CONVENTIONS.md` §1). It does not
-change which work is direct, solo or staged; it is how a session hands work to another
+change which work is direct, solo or team; it is how a session hands work to another
 worker, in place of a native subagent: a person's session's Claude or Codex native
 subagent call is taken this way for it when that is certain (decided before anything
 is registered; once registered, a full slot waits in Hearting's queue), and runs
@@ -370,8 +370,10 @@ Examples of the same boundary:
 - **Full frame:** shared contracts, external API/schema changes, migrations,
   security or data risk, even when the edit is short.
 
-`solo` means one registered owner; `staged` means separate stages. Shape
-omission starts a framed route. `--capability`, `--capability-mode`, `--field`,
+`solo` means one registered owner that makes the work itself; from `standard` the runtime
+adds the kind's declared verification nodes to the same route. `team` (recorded as `staged`,
+which `--shape` still accepts) means an owner and separate stages. Shape omission starts a
+framed route: a frame leg proposes the form, not a form of its own. `--capability`, `--capability-mode`, `--field`,
 `--graph`, and `--profile` without a shape are routing hints recorded for the
 frame, not sealed choices. `--pin` applies as usual.
 
@@ -379,7 +381,7 @@ frame, not sealed choices. `--pin` applies as usual.
 beside its kind (the preset recipe, `capability`): the route's `field` and
 `field_source` — `explicit` when named with `--field`, `preset` when taken from
 the kind's default, `frame` when a frame proposal's leg names it or its proposed
-kind supplies it. A `direct`, `solo` or `staged` compose names `--capability`,
+kind supplies it. A `direct`, `solo` or `team` compose names `--capability`,
 `--field`, or both; naming neither is refused with the missing option named,
 and nothing silently becomes code. A field alone opens its default kind;
 `admin` and `other` have none and come with a kind (`--capability
@@ -404,7 +406,7 @@ English words in every language.
 each kind's field on its first line, and the `[경로]` card shows one line
 `field <field> (<field_source>)` under its `cwd · slug` line.
 
-Open a route directly (`--shape solo|staged`) when the direction is clear. The
+Open a route directly (`--shape solo|team`) when the direction is clear. The
 opening session judges that: a frame or the person already decided the shape
 (resume a stopped route, follow the runtime-printed `next_leg`, continue within
 an approved frame decision of the same campaign, follow the person's explicit
@@ -412,11 +414,11 @@ capability and stages), or the request itself leaves one admissible direction.
 When more than one reading is plausible, omit the shape and let a frame settle
 it. The main session also judges whether follow-up stays within an approved
 scope. Use the decided shape explicitly; a person-named
-stage list uses `--shape staged --capability <kind> --graph <stage,…>`.
+stage list uses `--shape team --capability <kind> --graph <stage,…>`.
 
 **Direction advice.** Where the request shows a sign that settling the direction
 first is worth it — a protected path (`core/`, `capabilities/`, `roles/`,
-`spec/`, a PRD), two or more adapters, or a spec or ship kind — the `[경로]` card of a `solo` or `staged` route adds
+`spec/`, a PRD), two or more adapters, or a spec or ship kind — the `[경로]` card of a `solo` or `team` route adds
 one line, `방향 잡기 권함: <reason>` (`Direction check advised: <reason>` in
 English), and the receipt's stderr one machine line, `frame_advice=<reason>`.
 It is advice only: nothing blocks, no input is required, and the route is open
@@ -440,11 +442,11 @@ look again. Development that changes no screen opens at once. When the person
 says to go without a mockup, open at once: this is a default, not a gate, and
 no flag or check refuses it. To open the design route ahead of the choice, leave
 the packaging stage for the development job that follows:
-`--shape staged --capability autopilot-design --graph refs,build,visual-verify,critic-review`.
+`--shape team --capability autopilot-design --graph refs,build,visual-verify,critic-review`.
 
 A route made from a
 proposal (`compose --route-plan <record>#<i>`, a command the runtime prints)
-has no frame nodes, and neither has a `solo` or `staged` compose: those shapes
+has no frame nodes, and neither has a `solo` or `team` compose: those shapes
 compile without the recipe's frame pair (a route sealed earlier keeps the
 frame nodes it was sealed with).
 
@@ -688,8 +690,8 @@ outside the artifact root is informational and is not a marker-gate input;
 absence evidence distinguishes that checkout file from a governing PRD), and both
 eligibility probes (`dispatch-readiness`). The result is sealed, verified,
 bound, and guarded exactly like a recipe route: `selection.route_origin`
-records `compose` or `preset`, `selection.shape` records the shape, a staged
-route is `composed: true` with its recipe embedded, and every staged node
+records `compose` or `preset`, `selection.shape` records the shape (`staged` for the `team` form), a team
+route is `composed: true` with its recipe embedded, and every team node
 keeps its unit, gate, write scope, model profile, and permissions from the
 owning capability's recipe. A stage id may name a unit from the node's
 declared `unit_choices` (`execute:dev/refactor`). A `capability:stage` token
@@ -699,7 +701,7 @@ inside the host's artifact scope, and seals the name mapping as `part_io`; the
 host capability still owns the artifacts, and a token that is not a registered
 shareable part is the same unknown-node refusal as any other. To borrow another kind's read
 worker, name the kind and write its part in `--graph`
-(`--capability autopilot-code --shape staged --graph analyze-project:analysis,autopilot-draft:quality-review,report`);
+(`--capability autopilot-code --shape team --graph analyze-project:analysis,autopilot-draft:quality-review,report`);
 that refusal names what the kind can borrow, and `stages --capability <kind>` lists it with a
 summary that says which text each borrowable review fits. The worker stage after a review also
 receives the borrowed result that review read (a resource run or an owner step keeps only what it
@@ -753,7 +755,7 @@ The main session resolves any material unknown from the task's existing evidence
    `_RUNLOG`?
 
 A gate answer that selects dispatch follows `OPERATIONS §5.10` registry and
-liveness rules; an inline answer for `standard+` separable work requires the
+liveness rules; an inline answer for separable `team` work requires the
 recorded reason.
 
 ### 0.4. Primary Entry Confirmation
@@ -930,7 +932,7 @@ storage or GPU scope and only selects that node's payload launch.
 
 Before approval, choose from compact manifest routing metadata and §0.2; do not
 load the full entry Skill body or its references merely to propose a route. At
-`standard+`, the dispatch-depth-1 owner reads the selected capability contract and each
+a `team` route, the dispatch-depth-1 owner reads the selected capability contract and each
 dispatch-depth-2 worker reads only its stage contract. `direct` or `quick` acting
 sessions read `capabilities/<name>.md` directly after approval; the entry Skill is explicit-only. If a runtime automatically
 injects a selected Skill body into main, do not duplicate that read; record the
@@ -1051,7 +1053,7 @@ above stay obligations on the acting session that nothing checks mechanically.
 Only code/design/draft/refine/spec recipes carry the frame pair at `quick` and
 above, before the owner, when they run as a preset (`compile`); the `framed`
 shape (§0.2.1) runs the same pair ahead of any non-direct work, and a `solo` or
-`staged` compose has none. Other recipes retain their topology. `direct` asks its
+`team` compose has none. Other recipes retain their topology. `direct` asks its
 question inline in the §0.4 card and records the answer in the plan or work log.
 The recorded answers become `shards/frame/intent.md`, rendered by depth-0.
 The runtime supplies the released task and decisions to the owner and every
@@ -1613,22 +1615,28 @@ projection mechanics; `CONVENTIONS §3` carries the cross-document invariants.
 
 `↻` marks an iteration point. Common post-work capabilities are read-only `audit` and Markdown correction through `autopilot-refine`. Cross-project profile updates go through `analyze-user` and `mem profile-append`.
 
-## 1.1. Pipeline Intensity Routing
+## 1.1. Form, Intensity and Model Role
 
-Autopilot entrypoints choose `intensity`; verification rigor is derived from it under `CONVENTIONS §1.1`, not from a separate `--qa` axis. Intensity selects the stage graph and dispatch depth, while derived rigor scales plan checks, selected independent review, and final verification.
+Autopilot entrypoints choose a form and an intensity: the size of the work picks the form, its risk picks the intensity (`CONVENTIONS §1`). Verification rigor is derived from intensity under `CONVENTIONS §1.1`, not from a separate `--qa` axis. Each worker's model role is chosen separately (`CONVENTIONS §2.2`).
 
-| Request shape | Default | Routing |
-|---|---|---|
-| One-off answer, typo, rename, or explicit no-artifact work | `direct` | No plan stage, plan check, or durable plan |
-| Small localized change that misses at least one atomic-direct predicate and has no promotion signal | `quick` | A depth-0-run bootstrap layer runs first — two frame legs with distinct personas and usage-aware harness selection, joined and interviewed directly by the depth-0 session, both `top`. Then a registered-headless dispatch-depth-1 one-shot conductor with orient-lite, micro-plan, plan-check-lite, focused verification, and concise report; no dispatch depth 2 |
-| Work with a promotion signal or separable durable stages | `standard` | Same depth-0-run bootstrap frame layer as `quick`, then durable plan/checklist; a dispatch-depth-1 conductor (default `deep`) dispatches selected stages with file-only handoff and realizes only registry-declared parallel groups (plan/implementation-review, not frame) |
-| Important multi-file or risk-bearing work | `strong` | A `deep` owner plus the declared plan/review groups; selected high-value anchors may widen to a third profile/perspective leg while other groups remain width two |
-| Complex cross-domain or cross-harness work | `thorough` | Bounded dispatch-depth-2 perspective and verifier workers |
-| High-stakes, irreversible, security, or external-facing work | `adversarial` | Thorough plus an explicit adversary, failure-mode, or security pass |
+| Size of the work | Form |
+|---|---|
+| One-off answer, typo, rename, explicit no-artifact work, or one reversible local completion unit (§0.2.1) | `direct` |
+| One read-only job: a review, a lookup, a check | `unit` |
+| Work one session can make and check, including several independent outcomes it can finish in one pass | `solo` |
+| Work that does not fit one session: separable durable stages, several modules or adapters, a migration, or a direction that can still bend | `team` |
 
-The rows from `standard` up describe the `staged` (team) form. A `solo` route (`--shape solo`, one owner that makes the work) can carry `standard` through `adversarial` where its kind declares a one-shot review (code does): it keeps its `balanced` owner and adds only that kind's review legs after the work (one at `standard`, two at `strong`, three at `thorough` and `adversarial`) and, from `strong`, its independent test after them, with no frame bootstrap, plan or plan check.
+| Risk of the work | Intensity |
+|---|---|
+| Localized and reversible; the maker's own check is enough | `quick` |
+| A promotion signal — a shared contract or spec, a security or data boundary — or anything a second reader should confirm | `standard` |
+| Important multi-file or risk-bearing work | `strong` |
+| Complex cross-domain or cross-harness work | `thorough` |
+| High-stakes, irreversible, security, or external-facing work | `adversarial` |
 
-The quick row describes the lighter procedure, not a smaller deliverable. The original request, approved endpoint, and assigned scope remain the completion boundary: examples and concise reports do not replace requested investigation, results, or verification. A report endpoint ends with the approved report; a bounded stage finishes only its assigned work and reports any actual unfinished duty through the existing outcome semantics.
+A promotion signal raises the intensity, not the form: one-session work with a shared-contract sign is `solo·standard` where the kind declares a one-shot review, and `team` only when its size calls for it. A `solo` route can carry `standard` through `adversarial` where its kind declares a one-shot review (code does): it keeps its `balanced` owner and adds only that kind's review legs after the work (one at `standard`, two at `strong`, three at `thorough` and `adversarial`) and, from `strong`, its independent test after them, with no plan or plan check. A kind that declares none keeps `solo` at `quick` and takes `standard` and higher as a `team` route. A frame proposal whose intensity its form does not allow keeps the highest allowed intensity at or below the proposed one, and the change is recorded for review. A `solo` route opened with `--shape solo` or from a frame proposal runs without its own frame pair; a `quick` route compiled from a preset keeps its depth-0-run bootstrap frame pair (two legs with distinct personas and usage-aware harness selection, joined and interviewed directly by the depth-0 session, both `top`). A `team` route's stage graph, conductor (default `deep`) and parallel groups (plan and implementation review, not frame) are in `CONVENTIONS §1`.
+
+The `quick` intensity describes the lighter procedure, not a smaller deliverable. The original request, approved endpoint, and assigned scope remain the completion boundary: examples and concise reports do not replace requested investigation, results, or verification. A report endpoint ends with the approved report; a bounded stage finishes only its assigned work and reports any actual unfinished duty through the existing outcome semantics.
 
 Only `direct` has no plan. Every other autopilot graph includes a plan check, but independent QA is not repeated after every sub-stage by default. Independent passes use route-declared bounded groups with separate execution contexts and distinct personas, retaining model-profile/perspective asymmetry where declared; every review — down to a `direct`/`quick` self-check — carries the refute-by-default adversarial stance. `CONVENTIONS §1` is canonical for the graph.
 
@@ -1679,7 +1687,7 @@ When a code or intent change affects the spec, update every affected surface in 
 | Public API change in a library | Public API, examples, semver impact, and module-dependency Component |
 | CLI command or option change | Commands, options, exit codes, README examples, and command-tree Component |
 
-`autopilot-spec refine` identifies the impact list, confirms it, and updates it atomically. When `autopilot-code` detects spec impact, its plan or code owner updates the affected component PRD before implementation through the same route: run `spec-transaction --node execute` inside `code-execute` for standard+, use the one-shot transaction for quick, and apply it inline for direct. It does not start a separate spec route or reconfirm the unchanged scope. After the final code report, Step 7 updates `analysis_project`: edit small changes directly or run incremental `/analyze-project --mode code --skip-qa` for large ones.
+`autopilot-spec refine` identifies the impact list, confirms it, and updates it atomically. When `autopilot-code` detects spec impact, its plan or code owner updates the affected component PRD before implementation through the same route: run `spec-transaction --node execute` inside `code-execute` for a `team` route, use the one-shot transaction for a `solo` route, and apply it inline for direct. It does not start a separate spec route or reconfirm the unchanged scope. After the final code report, Step 7 updates `analysis_project`: edit small changes directly or run incremental `/analyze-project --mode code --skip-qa` for large ones.
 
 ## 5. Entrypoint-to-Worker Routing
 
@@ -1693,14 +1701,14 @@ under §0.4, and internal routing is automatic. Portable model roles come from
 | `analyze-project` | One capability analyzing code, paper, or document mode itself |
 | `autopilot-spec` | Planning role for PRD, material role for research import, and setup logic for hosting and CI/CD |
 | `autopilot-design` | Design maker and critic plus material web-image-search |
-| `autopilot-code` | Direct is dispatch-depth-0 inline. From `quick`, depth-0 first runs the two-leg frame bootstrap (see above). Quick defaults to `balanced-deep` and standard+ to `deep`; explicit profile choices take precedence. Each uses one registered dispatch-depth-1 owner. At `strong+`, plan, plan-check and implementation-review open asymmetric declared groups; `thorough+` adds each group's declared third leg (implementation-risk, simplicity check, failure-mode). Planning, implementation, test, report, and task-aware review remain separate file-handoff stages. |
+| `autopilot-code` | Direct is dispatch-depth-0 inline. From `quick`, depth-0 first runs the two-leg frame bootstrap (see above). A `quick` owner defaults to `balanced-deep`, a `team` conductor to `deep` and a `solo` owner at `standard` or higher to the `balanced` its recipe declares; explicit profile choices take precedence. Each uses one registered dispatch-depth-1 owner. On a `team` route at `strong+`, plan, plan-check and implementation-review open asymmetric declared groups; `thorough+` adds each group's declared third leg (implementation-risk, simplicity check, failure-mode). Planning, implementation, test, report, and task-aware review remain separate file-handoff stages. |
 | `autopilot-code` in app mode | General code flow plus design critique at plan review and after render, DB migration safety, and automatic deploy after an authorized push |
 | `autopilot-draft` | Material figure/data/reference work, writing implementation, editorial polish, and research fact-check |
 | `autopilot-refine` | Reuse the draft roles plus editorial review |
-| `autopilot-lab` | Setup uses research plan review, implementation scaffold, and QA smoke tests. Evaluation uses functional QA, figure generation, and research survey; at `standard+`, checkpoint evaluation, media generation, report assembly, and independent verification dispatch as stage workers under the eval execution topology in `capabilities/autopilot-lab.md`. The actual long-running training run is asynchronous and supervised through RUNLOG ⏳ rather than a stage-worker dispatch. |
+| `autopilot-lab` | Setup uses research plan review, implementation scaffold, and QA smoke tests. Evaluation uses functional QA, figure generation, and research survey; on a `team` route, checkpoint evaluation, media generation, report assembly, and independent verification dispatch as stage workers under the eval execution topology in `capabilities/autopilot-lab.md`. The actual long-running training run is asynchronous and supervised through RUNLOG ⏳ rather than a stage-worker dispatch. |
 | `analyze-user` | Cross-project material collection plus editorial review |
 
-For every durable stage at `standard+`, use an independent headless session under `OPERATIONS §5.10`; the node's unit runs inside that session, and the dispatch-depth-1 conductor passes only artifact paths. Direct stays dispatch depth 0, and a depth-0-run bootstrap layer — two frame legs with distinct personas and usage-aware harness selection, joined and interviewed directly by the depth-0 session, both `top` — runs ahead of quick, which stays one registered-headless dispatch-depth-1 one-shot conductor.
+For every durable stage of a `team` route, use an independent headless session under `OPERATIONS §5.10`; the node's unit runs inside that session, and the dispatch-depth-1 conductor passes only artifact paths. Direct stays dispatch depth 0, and a depth-0-run bootstrap layer — two frame legs with distinct personas and usage-aware harness selection, joined and interviewed directly by the depth-0 session, both `top` — runs ahead of quick, which stays one registered-headless dispatch-depth-1 `solo` owner.
 
 Each entrypoint is an explicit unit of intent. The §0.4 confirmation is the
 single top-level route handshake. Capability-local review controls such as
@@ -1755,8 +1763,8 @@ In a spec-backed project, a later fix or feature—especially in a new session�
 0. **Understand existing artifacts first:** follow the read-only orientation order in §0.1 before editing or choosing a capability, then read `spec/prd.md`, `pipeline_state.yaml`, and recent `plans/*`. Reading the spec that governs the declared work scope — root `prd.md` or the relevant `spec/<slug>/prd.md` — is a hard gate in a spec-backed cwd; which candidate governs remains agent judgment, recorded via route-record `spec_read.source`. Adapter-native markers and gates deny entry to spec-changing capabilities when a current spec of this project has not been read in the current session or has changed since the read.
 1. **Refresh analysis when needed:** if `analysis_project/code/` is stale or the domain is unfamiliar, run incremental `analyze-project --mode code` first.
 2. **Require a spec:** when absent, route to `autopilot-spec` before development. A single throwaway is the only exception, and repetition should graduate to a spec.
-3. **Check spec drift before code:** compare the request with `spec/prd.md` and its relevant component PRD. A route, schema/entity, UI-flow, external integration, migration, or existing code drift is spec-significant. The plan or code owner updates that component PRD before implementation through the same route: run `spec-transaction --node execute` inside `code-execute` for standard+, use the one-shot transaction for quick, and apply it inline for direct. `spec_touch` remains scope-derived capacity, and only actual seeded PRD authoring changes publish through normal route completion; the code `final_report` remains cycle-local primary. The transaction preserves the exact pre-image under `_internal/versions/v{N}/` and retains its revision, CAS, transaction, and snapshot checks. Proceed autonomously when drift is clear; ask only when classification is genuinely ambiguous. An explicit user deferral is the sole exception. Record “no spec impact” for within-spec implementation details. `autopilot-code` repeats this verdict in preflight Step 0 as a backstop.
-4. **Run `autopilot-code`:** intensity selects the graph. Direct performs inline production plus sanity/report. Quick uses one registered-headless dispatch-depth-1 one-shot conductor for micro-plan, plan-check-lite, focused verification, and report with no dispatch depth 2. Only `standard+` creates a durable `plans/<date>_<slug>/` cycle. Derived rigor never creates a separate plan cycle by itself.
+3. **Check spec drift before code:** compare the request with `spec/prd.md` and its relevant component PRD. A route, schema/entity, UI-flow, external integration, migration, or existing code drift is spec-significant. The plan or code owner updates that component PRD before implementation through the same route: run `spec-transaction --node execute` inside `code-execute` for a `team` route, use the one-shot transaction for a `solo` route, and apply it inline for direct. `spec_touch` remains scope-derived capacity, and only actual seeded PRD authoring changes publish through normal route completion; the code `final_report` remains cycle-local primary. The transaction preserves the exact pre-image under `_internal/versions/v{N}/` and retains its revision, CAS, transaction, and snapshot checks. Proceed autonomously when drift is clear; ask only when classification is genuinely ambiguous. An explicit user deferral is the sole exception. Record “no spec impact” for within-spec implementation details. `autopilot-code` repeats this verdict in preflight Step 0 as a backstop.
+4. **Run `autopilot-code`:** intensity selects the graph. Direct performs inline production plus sanity/report. A `solo` route uses one registered-headless dispatch-depth-1 owner for micro-plan, plan-check-lite, focused verification, and report, with no dispatch depth 2 at `quick`. Only a `team` route creates a durable `plans/<date>_<slug>/` cycle. Derived rigor never creates a separate plan cycle by itself.
 
 These rules close three gaps: a broken trail caused by over-creating plans for quick work, spec drift that bypasses versioned spec update, and blind editing in a new session. Both `autopilot-spec` and `autopilot-code` are iterable; post-build change is another invocation of the same capability, not a new workflow family.
 # Capability route topology
@@ -1769,8 +1777,8 @@ dispatch-depth-2 worker never routes and never selects another worker. Enumerate
 recipes are curated fast paths, not the default. For a request no recipe fits, the
 entry composes its own route from the same catalog (**compose-on-demand**, §0.2.1):
 `capability-route.py compose` defaults to `framed`; `--shape direct` selects
-inline work. Explicit `solo` and `staged` shapes remain available for decisions
-already made by a frame or the person; `--shape staged --graph <stage,…>`
+inline work. Explicit `solo` and `team` shapes remain available for decisions
+already made by a frame or the person; `--shape team --graph <stage,…>`
 selects that decided subgraph. Each decided shape names its kind, its field, or
 both (Fields, §0.2.1). Both use the same
 validator and seal; a subgraph embeds its recipe as `composed: true`. Confirmation

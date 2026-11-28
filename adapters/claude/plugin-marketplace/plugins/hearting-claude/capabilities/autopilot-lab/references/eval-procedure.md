@@ -9,7 +9,7 @@ creation/finalization below apply when executing an evaluation, not merely
 reporting a completed one. Do not rerun inference or alter a completed run's
 status/timestamps to satisfy the eval label.
 
-> **Stage dispatch:** use the contract in `setup-procedure.md`. Apply the `WORKFLOW §0.3` pre-execution gate before E2. At standard+, group separable stages into workers by write ownership per the eval execution topology in `capabilities/autopilot-lab.md`, and dispatch them as dispatch-depth-2 headless sessions with file-only handoff. Each worker reads supplied artifact paths such as `metrics.jsonl`, `REPORT.md`, and research inputs, never earlier conversational context. Routed outputs follow each node's declared paths. Running a separable stage inline requires the recorded reason in `_RUNLOG` or the experiment `_internal/` (`OPERATIONS §5.10` inline exceptions).
+> **Stage dispatch:** use the contract in `setup-procedure.md`. Apply the `WORKFLOW §0.3` pre-execution gate before E2. On a `team` route, group separable stages into workers by write ownership per the eval execution topology in `capabilities/autopilot-lab.md`, and dispatch them as dispatch-depth-2 headless sessions with file-only handoff. Each worker reads supplied artifact paths such as `metrics.jsonl`, `REPORT.md`, and research inputs, never earlier conversational context. Routed outputs follow each node's declared paths. Running a separable stage inline requires the recorded reason in `_RUNLOG` or the experiment `_internal/` (`OPERATIONS §5.10` inline exceptions).
 
 #### Eval steps and their parts (stage list: `capability-route.py stages --capability autopilot-lab`)
 

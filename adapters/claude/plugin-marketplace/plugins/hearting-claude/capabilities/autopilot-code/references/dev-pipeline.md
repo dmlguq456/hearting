@@ -1,18 +1,18 @@
 ## Pipeline: Mode dev
 
-Select the stage graph from `--intensity` before QA. `direct` performs produce plus sanity/report without this durable pipeline. `quick` uses one registered-headless dispatch-depth-1 one-shot conductor with an inline micro-plan, plan-check-lite, and focused verification. standard+ follows the durable pipeline below.
+Select the stage graph from `--intensity` before QA. `direct` performs produce plus sanity/report without this durable pipeline. `quick` (`solo`) uses one registered-headless dispatch-depth-1 owner with an inline micro-plan, plan-check-lite, and focused verification; a `solo` route at `standard` or higher adds the kind's declared verification nodes (`owner-execution.md`). A `team` route follows the durable pipeline below.
 
-The default standard+ route carries the `plan-check` review node; execute it only when selected by the compiled graph. When selected, choose its unit by risk axis: UI or visual risk → the `design/critic` unit; research or domain risk → the `research/plan-review` unit; construction quality (the compiled default) → the `qa/plan-review` unit. Each selected review runs as a sibling node dispatched by the owner. Do not add a review node omitted by the explicit graph.
+The default team route carries the `plan-check` review node; execute it only when selected by the compiled graph. When selected, choose its unit by risk axis: UI or visual risk → the `design/critic` unit; research or domain risk → the `research/plan-review` unit; construction quality (the compiled default) → the `qa/plan-review` unit. Each selected review runs as a sibling node dispatched by the owner. Do not add a review node omitted by the explicit graph.
 
-### Standard+ Stage Dispatch
+### Team Stage Dispatch
 
 The dispatch-depth-1 owner is a thin conductor. The approved pre-execution gate must already
-have compiled an immutable standard+ route file with checked headless evidence. If that route
+have compiled an immutable team route file with checked headless evidence. If that route
 file or the canonical jobs path is unavailable, stop instead of launching an unbound row.
 
 #### Sealing the checked evidence (before the owner exists)
 
-Create the final isolated source worktree before collecting any standard+ route evidence.
+Create the final isolated source worktree before collecting any team route evidence.
 Run every probe against that exact absolute path; each tuple records it as
 `checked_worktree`, and the route compiler requires it to equal the route `cwd`. Evidence
 from the primary checkout, a staging worktree, or a worktree that was later replaced is not
@@ -87,7 +87,7 @@ single missing-leg recovery proves every other N-1 member; any larger partial la
 Keep `ROUTE_FILE`, `NODE_ID`, and the captured `ATTEMPT_ID` together until that node's
 completion transaction succeeds. Dispatch tools inherit the immutable canonical registry
 through `AGENT_DISPATCH_JOBS`; do not reconstruct or cache a second registry path. Never
-dispatch standard+ with a raw wrapper command that omits the route record.
+dispatch a team route with a raw wrapper command that omits the route record.
 
 The runtime adds the node's declared scope and the absolute paths of inputs compose took from an earlier cycle to every stage assignment, with or without `--prompt-file`; a prompt file carries only subskill name, input paths, output contract, intensity, and slug. It never carries plan bodies or prior-stage conversation. Each stage reads files; the conductor reads only verdict and gate state. Register every stage in the sealed registry; the model-worker governor, not the conductor, bounds how many run at once. Runtime-owned completion observes exact liveness outside the model; the conductor never adds a recurring monitor. One-line or no-artifact micro-stages stay inline.
 
@@ -127,9 +127,9 @@ absence is *no claim*, never a failure.
 
 #### Closed Inline Fallback
 
-Run standard+ stages in-session only when:
+Run team stages in-session only when:
 
-1. it is a micro-stage inside the checked quick one-shot owner;
+1. it is a micro-stage inside the checked quick `solo` owner;
 2. every route-sealed registered-headless candidate has a typed hard-unavailable result and the compiled fallback policy reaches inline; or
 3. the conductor judges the edit nonseparable because file artifacts cannot carry a boundary-coupled semantic contract.
 
@@ -142,7 +142,7 @@ instead of degrading to an inline run of a node whose own recorded state, not ru
 what is blocking it — most often `capability-route.py revise --route <route> --node <node> --evidence
 <evidence-path> --basis review-findings|user-direction|owner-correction` when the gate's evidence
 changed after its marker published (a recorded edit is kept as history and the node proceeds). For case 3, record reasoning in the
-selected node's declared output; an unrecorded inline standard+ run violates the contract.
+selected node's declared output; an unrecorded inline team run violates the contract.
 Still parallelize separable census or disjoint file groups. The Claude stage-dispatch hook
 only reminds you of this list; it does not deny the in-session run.
 
@@ -274,7 +274,7 @@ Skip only for `direct` (orient-lite carries the framing posture inline). For `qu
 and every `standard+` intensity, the direction gate already ran (owner-execution.md
 "Pre-Owner Direction Gate"): depth-0 itself launched exactly two frame legs — `frame`
 and `frame-alternative`, both `top` (a pin with a profile or an explicit profile wins; a
-route made from a proposal via `--route-plan`, or as a `solo` or `staged` compose, has no frame nodes) — as its own
+route made from a proposal via `--route-plan`, or as a `solo` or `team` compose, has no frame nodes) — as its own
 bootstrap layer, after route binding and producer begin but before owner launch. There is no third frame leg
 at any intensity; `strong+` widening applies only to plan, plan-check and implementation review
 (above), never to frame. See `core/WORKFLOW.md` for the full depth-0 procedure.
@@ -286,13 +286,13 @@ cannot start on an unreleased gate — every launch surface refuses it.
 
 ### Step 1: code-plan
 
-Skip for direct. quick uses an inline micro-plan. For standard+, first verify the SD-13 precondition: the repository has an artifact root and `spec/`. Then dispatch:
+Skip for direct. quick uses an inline micro-plan. For a team route, first verify the SD-13 precondition: the repository has an artifact root and `spec/`. Then dispatch:
 
 ```bash
 AGENT_HOME=$(utilities/agent-home.sh)
 NODE_ID=plan
 STAGE_PROMPT_FILE=<file holding: sub-skill contract + absolute input paths (Intent: shards/frame/intent.md first, then every direction brief) + output contract>
-# Run the route-bound dispatch transaction from "Standard+ Stage Dispatch",
+# Run the route-bound dispatch transaction from "Team Stage Dispatch",
 # capture ATTEMPT_ID, then use that same value for `capability-route.py complete`.
 ```
 
@@ -300,7 +300,7 @@ On the normal supervised path, yield `runtime_wait: registered-children` and con
 the typed receipt on resume; a `parent_next=bounded-wait` receipt runs its printed
 command once.
 
-After the typed receipt (or fallback exit 0), read only plan status and paths. A terminal recovery receipt permits checked exact-attempt diagnosis; raw transcript inspection still requires a terminal/closed row or explicit operator recovery. Direct and the quick one-shot owner keep their declared inline plan; standard+ invokes `code-plan` in-session only after the compiled fallback policy reaches inline under the closed rules above.
+After the typed receipt (or fallback exit 0), read only plan status and paths. A terminal recovery receipt permits checked exact-attempt diagnosis; raw transcript inspection still requires a terminal/closed row or explicit operator recovery. Direct and the quick `solo` owner keep their declared inline plan; a team route invokes `code-plan` in-session only after the compiled fallback policy reaches inline under the closed rules above.
 
 At `strong` the compiled route contains `plan` (`deep`) and `plan-alternative`
 (`balanced-deep`). At `thorough|adversarial` it also contains the light
@@ -313,7 +313,7 @@ arbitrates.
 
 Only graphs that select this step use it. direct has none; quick already completed plan-check-lite.
 
-The default standard+ route contains the `plan-check` review node (default unit `qa/plan-review`, completion gate `code-plan-check`). When selected, `execute` is record-bound to its completion marker and cannot start without it. Intensity scales the selected review's depth and reviewer role/family; the compiled graph determines whether the node runs.
+The default team route contains the `plan-check` review node (default unit `qa/plan-review`, completion gate `code-plan-check`). When selected, `execute` is record-bound to its completion marker and cannot start without it. Intensity scales the selected review's depth and reviewer role/family; the compiled graph determines whether the node runs.
 
 At `strong` and above `plan-check` is additionally the plan arbiter: it is
 record-bound to every declared plan leg, reads their suffix-isolated plan/checklist
@@ -350,7 +350,7 @@ others. When a non-anchor leg wins or a graft is required, materialize the final
 
 ### Step 3: code-execute
 
-For standard+, run the route-bound dispatch transaction with `NODE_ID=execute`; its route node
+For a team route, run the route-bound dispatch transaction with `NODE_ID=execute`; its route node
 selects `assigned_contract=code-execute` and the portable implementer role. Pass the absolute
 `plan.md` path, retain the emitted attempt ID, yield for the typed receipt, and publish exact completion. Fallback
 to in-session only under the closed rules above.
@@ -408,7 +408,7 @@ verdict is read and the merge is recorded.
 
 ### Step 4: code-test
 
-For standard+, run the route-bound dispatch transaction with `NODE_ID=test`; its route node
+For a team route, run the route-bound dispatch transaction with `NODE_ID=test`; its route node
 selects `assigned_contract=code-test` and the reviewer role. strong+ may select a deeper reviewer.
 Pass plan verification, checklist, dev-log, and selected implementation-review paths so
 code-test can assess existing results against the current target. It runs only missing or
@@ -433,7 +433,7 @@ quick reports verify-lite failure without retry. Other graphs may open at most o
 
 ### Step 5: code-report
 
-For standard+, run the route-bound dispatch transaction with `NODE_ID=report`; its route node
+For a team route, run the route-bound dispatch transaction with `NODE_ID=report`; its route node
 selects `assigned_contract=code-report` and the writer role. Pass plan, checklist, dev logs,
 test logs, and review paths, retain the emitted attempt ID, yield for the typed receipt, and publish exact completion
 from the final report. Use the closed fallback when needed.

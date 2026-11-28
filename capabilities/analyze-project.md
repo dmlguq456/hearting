@@ -44,7 +44,7 @@ source for downstream `autopilot-{draft,code,research}` capabilities.
 `analyze-project:analysis` is a separate one-off part: an optional, shareable stage
 (unit `analysis/analyze`) that answers one question about what is already at hand
 and writes only its `analysis.md`, never `analysis_project/`. Another kind borrows it
-in an explicit graph, for example `--capability autopilot-code --shape staged --graph
+in an explicit graph, for example `--capability autopilot-code --shape team --graph
 analyze-project:analysis,autopilot-draft:quality-review,report`, and it is written under
 that host's `parts/analyze-project/analysis/`. It fetches no outside sources; that
 stays `autopilot-research`.
@@ -72,7 +72,7 @@ binds `direct`, `quick`, and `standard+`; only the acting owner differs.
 2. **write only inside the open cycle.** Every durable artifact goes under
    `<cycle_dir>/artifacts/analysis_project/...` (`AGENT_ARTIFACT_OUTPUT_DIR`).
    `artifact_producer.py` owns cycle output paths and shared revisions.
-3. **stage workers join, never fork.** `standard+` stage workers receive
+3. **stage workers join, never fork.** `team` stage workers receive
    `AGENT_ARTIFACT_CAMPAIGN_ID`/`CYCLE_ID`/`PRODUCER_ID`/`CYCLE_DIR`/`OUTPUT_DIR`
    from the owner (dispatch env pass-through) and call `begin --node <id>`
    on the same route, which resumes the owner's open cycle.

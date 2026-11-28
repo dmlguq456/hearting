@@ -10,29 +10,56 @@
 
 ## §1. Pipeline Intensity, Stage Graph, and Assurance (canonical)
 
-Intensity supplies the default recipe below; an explicit graph selects its stages. Rigor (§1.1) budgets only selected checks. QA policy output is a recommendation, never evidence that a check ran. There is no separate user-facing `--qa` selector.
+The form and intensity below supply the default recipe; an explicit graph selects its stages. Rigor (§1.1) budgets only selected checks. QA policy output is a recommendation, never evidence that a check ran. There is no separate user-facing `--qa` selector.
 
 | Stage | Meaning | Typical realization |
 |---|---|---|
 | `intake` | Parse request, mode, constraints, risk, and intensity | Route/capability preflight, spec significance, target selection |
 | `orient` | Gather only the context needed for the selected intensity | Read spec, source, or material artifacts; `orient-lite` for quick |
-| `plan` | Choose the work path before production | Absent for direct, inline micro-plan for quick, durable plan for standard+ |
+| `plan` | Choose the work path before production | Absent for direct, inline micro-plan for quick and `solo`, durable plan for `team` |
 | `plan-check` | Check that the plan can safely feed production | Included by the quick+ default recipe; optional in an explicit graph |
 | `produce` | Create or modify the artifact | Code, draft, report, design, spec, or note |
 | `verify` | Run a concrete checker | Tests, visual harness, claim verification, compile, consistency, or drift check |
 | `synth` | Merge independent perspectives into one path | Only when perspective workers ran |
 | `report` | Return outcome, evidence, artifact paths, and remaining risk | Summary, handoff, or user-facing report |
 
-| Intensity | Stage graph | Plan and check policy | Dispatch | Assurance |
-|---|---|---|---|---|
-| `direct` | `intake → produce → sanity/report` | No plan, plan check, or durable plan; final sanity only | Inline | none/light |
-| `quick` | `intake → orient-lite → micro-plan → plan-check-lite → produce → verify-lite → report` | One dispatch-depth-1 session; 3–4 focused plan questions and one concrete sanity check | One-shot conductor; no dispatch depth 2 | quick |
-| `standard` | `intake → orient → synth/owner-plan → plan-check → optional verifier/planner → produce → verify → report` (frame already ran as a fixed two-leg depth-0 bootstrap before this graph starts) | Durable plan where the capability owns a work cycle | Thin conductor dispatches each durable stage as dispatch depth 2 with file-only handoff | standard |
-| `strong` | Standard plus eligible declared groups on every retained graph anchor, two-way by default, and an optional fix loop | Retain framing breadth and open the declared plan-committal, implementation-review, or other risk groups, including in `--graph` subgraphs; a registry `width_by_intensity` may widen a high-value group to three legs | Stage dispatch plus bounded parallel-group fan-out/fan-in; exact width is route-sealed | standard/thorough |
-| `thorough` | Strong groups plus deeper synthesis/verification | A declared group may add a third implementation-risk, failure-mode, or contrarian leg; unchanged groups remain width two | The base recipe realizes only registry-declared 2–4-way siblings; composed routes may add other bounded dispatch-depth-2 perspectives | thorough |
-| `adversarial` | Thorough plus adversarial failure-mode/security verification | Use the route-declared width and adversarial perspective; no undeclared fan-out | Bounded declared group or composed adversary/verifier; dispatch depth remains at most 2 | adversarial |
+A route says four things: what the work is (its field and kind), who makes it (its **form**), how many layers of independent verification it gets (its **intensity**), and how deep a judgment each worker brings (its **model role**, §2.2). The size of the work picks the form; its risk picks the intensity; each worker's place picks its model role. They are chosen and recorded separately.
 
-The Stage graph and Dispatch columns describe the `staged` (team) form; a `solo` route keeps the `quick` graph and adds its declared verification nodes (see the allowed pairs below): one review at `standard`, the kind's review legs and then its test from `strong`, with the same retry limit and rigor as the `staged` route at that intensity.
+| Form | Who makes it | Chosen when | Dispatch |
+|---|---|---|---|
+| `direct` | The current session, inline | One reversible local completion unit (`WORKFLOW §0.2.1`) | Dispatch depth 0 only |
+| `unit` | One unit alone, with no owner | One read-only job: a review, a lookup, a check | One depth-1 leg (`OPERATIONS §5.10c`) |
+| `solo` | One registered owner that runs the kind's whole procedure itself | The work fits one session | One depth-1 owner; from `standard`, plus the kind's declared verification nodes at depth 2 |
+| `team` | An owner and stage workers | The work does not fit one session: separable durable stages, several modules or adapters, a migration, or a direction that can still bend | A depth-1 conductor; stages at depth 2 |
+
+Whether a route has an intensity marks the line between the forms: a route with none does one job and nothing checks it (`unit`); a route with one answers for the whole work (`direct`, `solo`, `team`). Records and commands keep their values: `selection.shape` is `direct`, `solo`, `staged` (the `team` form) or `framed` (a route whose form a frame leg proposes; not a form), a unit route's kind is `unit` and its records keep `quick` as a compatibility value, and `--shape staged` is accepted as `--shape team` (a frame proposal's `shape: staged` too). No sealed route is rewritten.
+
+| Intensity | Independent verification | Rigor (§1.1) |
+|---|---|---|
+| `direct` | None; used only by the `direct` form | none/light |
+| `quick` | None beyond the maker's own check | quick |
+| `standard` | One independent review | standard |
+| `strong` | Two independent layers from different perspectives (declared groups, two-way by default); a `solo` route adds an independent test after its review legs | standard |
+| `thorough` | Strong plus a third deeper, implementation-risk, failure-mode or contrarian leg where declared | thorough |
+| `adversarial` | Thorough plus an adversarial failure-mode or security pass | adversarial |
+
+| Form \ intensity | `direct` | `quick` | `standard` | `strong` and above |
+|---|---|---|---|---|
+| `direct` | inline | — | — | — |
+| `unit` (no intensity) | — | — | — | — |
+| `solo` | — | the solo procedure, self-checked | the solo procedure plus one independent review, where the kind declares one (`one_shot_review` in `capabilities/topologies.json`) | the review legs of that declaration, then an independent test, where the kind declares one |
+| `team` | — | — | the team graph with one review lane | the declared groups |
+
+| Cell | Stage graph | Plan and check policy | Dispatch | Assurance |
+|---|---|---|---|---|
+| `direct·direct` | `intake → produce → sanity/report` | No plan, plan check, or durable plan; final sanity only | Inline | none/light |
+| `solo·quick` | `intake → orient-lite → micro-plan → plan-check-lite → produce → verify-lite → report` | One dispatch-depth-1 session; 3–4 focused plan questions and one concrete sanity check | Solo owner; no dispatch depth 2 | quick |
+| `solo·standard` | The `solo·quick` graph, then `independent review → (blocking findings) one batched correction by the same session → closure check` | The maker's own plan check and verification stay those of `solo·quick`; the review is the tier's one selected pass | The owner starts the kind's declared review node at dispatch depth 2 with the command its task gives, and cannot close it itself; no conductor | standard |
+| `solo·strong` and above | The `solo·quick` graph, then the kind's review legs, then `independent test`; blocking findings get one batched correction (two at `thorough` and `adversarial`) and the reviews and the test run again | No plan or plan-check group; the review legs are the implementation-review group the `team` route realizes, two-way at `strong` and three-way at `thorough` and above | The owner starts each group and the test with the command its task or receipt prints, and cannot close any of them itself; no conductor | standard at `strong`; thorough and adversarial at those intensities |
+| `team·standard` | `intake → orient → synth/owner-plan → plan-check → optional verifier/planner → produce → verify → report` (frame already ran as a fixed two-leg depth-0 bootstrap before this graph starts) | Durable plan where the capability owns a work cycle | Thin conductor dispatches each durable stage as dispatch depth 2 with file-only handoff | standard |
+| `team·strong` | Standard plus eligible declared groups on every retained graph anchor, two-way by default, and an optional fix loop | Retain framing breadth and open the declared plan-committal, implementation-review, or other risk groups, including in `--graph` subgraphs; a registry `width_by_intensity` may widen a high-value group to three legs | Stage dispatch plus bounded parallel-group fan-out/fan-in; exact width is route-sealed | standard/thorough |
+| `team·thorough` | Strong groups plus deeper synthesis/verification | A declared group may add a third implementation-risk, failure-mode, or contrarian leg; unchanged groups remain width two | The base recipe realizes only registry-declared 2–4-way siblings; composed routes may add other bounded dispatch-depth-2 perspectives | thorough |
+| `team·adversarial` | Thorough plus adversarial failure-mode/security verification | Use the route-declared width and adversarial perspective; no undeclared fan-out | Bounded declared group or composed adversary/verifier; dispatch depth remains at most 2 | adversarial |
 
 Intensity controls procedure and default rigor; the recorded request, released decisions, approved endpoint, and node scope control delivery. Quick examples and concise procedures do not replace requested investigation, deliverables, or verification. Complete feasible assigned work, honor report endpoints, and report unfinished duties with the existing outcome semantics. A bounded stage stops at its assigned portion. A stage that produces the work is judged by the checks its own environment can run; the leg's wider verification belongs to the later verification stage and the owner, and a check the producing environment cannot run is recorded as a `handed-over:` line (exact command and reason) for them rather than as an unfinished duty; a check that ran and failed stays a FAIL.
 
@@ -43,11 +70,10 @@ agent nesting, or proof of registry membership. Dispatch depth 0 covers all
 interactive sessions, including peers and steward sessions; dispatch depth 1 owns
 the capability pipeline; dispatch depth 2
 serves bounded review, perspective, and pipeline-stage nodes. Direct stays inline
-at dispatch depth 0. Quick is semantically one registered-headless one-shot
-conductor at dispatch depth 1 and opens no child node. A `solo` route at `standard` or higher (where the kind declares a one-shot review) keeps that one owner, which makes the work itself; its children are the route's declared verification nodes at dispatch depth 2 (one review at `standard`; from `strong` the kind's review legs, the same declared group a `staged` route realizes, and then its test). The owner starts them with the command its task gives (one command starts the whole group) and cannot close any of them itself. Its transport/schema
+at dispatch depth 0. A `solo` route's owner is one registered-headless session at dispatch depth 1 that runs its kind's whole procedure itself. At `quick` it opens no child node. At `standard` or higher (where the kind declares a one-shot review) it keeps that one owner, which makes the work itself; its children are the route's declared verification nodes at dispatch depth 2 (one review at `standard`; from `strong` the kind's review legs, the same declared group a `team` route realizes, and then its test). The owner starts them with the command its task gives (one command starts the whole group) and cannot close any of them itself. Its transport/schema
 compatibility identity remains `worker_type=owner`, `unit=_kernel/owner`,
-`owner_model_profile`, and `one-shot-owner`; those names do not make it a
-standard+ capability owner. Standard+ fallback attempts retain their node's dispatch depth when the
+`owner_model_profile`, node `one-shot`, and topology `one-shot-owner`; those names do not make it a
+`team` conductor. A `team` route's fallback attempts retain their node's dispatch depth when the
 execution surface changes from registered headless to inline, or to a runtime-native subagent where the
 route sealed a candidate for that hop (compose's readiness check records none). No route has a node at dispatch
 depth 3 or greater; a unit route a worker opens is a route of its own: its leg is dispatch depth 1, hangs below
@@ -58,7 +84,7 @@ surfaces and carry no dispatch depth.
 Conditional capability follow-ups are owner postconditions, not dispatch
 nodes. `capabilities/topologies.json` declares their activation condition,
 terminal anchors, and source-output references; the route compiler seals the
-effective direct, quick, or standard+ anchors. A false readiness predicate
+effective direct, `solo` (quick), or `team` anchors. A false readiness predicate
 produces its declared typed skip and does not add dispatch depth or invalidate
 the primary artifact. For the note follow-up, only a bounded live remote-DB
 probe activates the postcondition; hooks and environment-variable presence
@@ -102,13 +128,13 @@ Track rules:
 - Design, apply, and ship require executable render, build, compile, or deployment evidence; reviewer prose never substitutes for it.
 - Spec review checks coherence and downstream API/data/UI impact; factual citations may additionally require source checking.
 
-Intensity resolves in this order: explicit `--intensity`, capability default, then request shape in `WORKFLOW §1.1`. Rigor then maps deterministically: direct to none/light, quick to quick, standard or strong to standard, thorough to thorough, and adversarial to adversarial.
+Form resolves in this order: explicit `--shape` or `--unit`, a frame proposal's size and shape, then the framed route. Intensity resolves in this order: explicit `--intensity`, capability default, then request shape in `WORKFLOW §1.1`. Rigor then maps deterministically: direct to none/light, quick to quick, standard or strong to standard, thorough to thorough, and adversarial to adversarial.
 
-Whether a route has an intensity marks the line between the forms: a route with none does one job and nothing checks it (`unit`), and a route with one answers for the whole work (`solo`, `staged`). Shape and intensity are separate, but not every pair exists. Allowed pairs: `direct` with `direct`; `solo` with `quick`, or with any intensity from `standard` up where the kind declares a one-shot review (`one_shot_review` in `capabilities/topologies.json`; code does); `staged` with `standard` or higher. An omitted intensity takes the shape's default: `direct` for `direct`, `quick` for `solo`, `standard` for `staged`. A unit route (`--unit`) has no intensity: it is one unit's one job, `--intensity` is refused for it (an old `--intensity quick` is accepted and ignored), to have the work checked open `solo` or `staged`, to judge more deeply raise `--profile`, and its records keep `quick` as a compatibility value. A promotion signal raises the intensity, not the shape: `--shape solo` with a signal is `solo` at `standard` (or the higher intensity asked for) where the kind declares that review, and otherwise stays the staged route it sealed before. A frame proposal whose known intensity its shape does not allow keeps the highest allowed intensity at or below the proposed one, and the change is recorded for review; unknown values remain invalid. A person-entered CLI mismatch is refused with the allowed values.
+Form and intensity are separate, but not every pair exists. Allowed pairs: `direct` with `direct`; `solo` with `quick`, or with any intensity from `standard` up where the kind declares a one-shot review (`one_shot_review` in `capabilities/topologies.json`; code does); `team` with `standard` or higher. An omitted intensity takes the form's default: `direct` for `direct`, `quick` for `solo`, `standard` for `team`. `standard` does not imply `team`: work that fits one session stays `solo` where its kind declares a one-shot review, and `team` is chosen for the size of the work, not to obtain a review that `solo` could give. A unit route (`--unit`) has no intensity: it is one unit's one job, `--intensity` is refused for it (an old `--intensity quick` is accepted and ignored), to have the work checked open `solo` or `team`, to judge more deeply raise `--profile`, and its records keep `quick` as a compatibility value. Depth of judgment is not intensity either: to have work checked more deeply, raise the intensity, since each layer brings an independent verifier at its own model role, rather than the maker's model. A promotion signal raises the intensity, not the form: `--shape solo` with a signal is `solo` at `standard` (or the higher intensity asked for) where the kind declares that review, and otherwise stays the team route it sealed before. A frame proposal whose known intensity its shape does not allow keeps the highest allowed intensity at or below the proposed one, and the change is recorded for review; unknown values remain invalid. A person-entered CLI mismatch is refused with the allowed values.
 
 An external adversary is required only when an adversarial graph actually selects that pass. The adapter must prove that a different reviewer, engine, or harness ran. If an explicitly requested adversarial pass is unavailable, fail loudly; if routing auto-escalated, fall back to thorough and report it. Runtime wrapper names are not portable semantics.
 
-`--no-fact-check` and `--no-style-audit` remain orthogonal and appear only on capabilities that expose those checks. `code-plan` realizes durable plan and plan-check for standard+; quick keeps an inline micro-plan. `code-refine` corrects an existing durable plan and is not automatic in quick. `code-test` scales concrete verification with rigor. `code-report` reports and synthesizes without adding QA.
+`--no-fact-check` and `--no-style-audit` remain orthogonal and appear only on capabilities that expose those checks. `code-plan` realizes durable plan and plan-check for `team` routes; `solo` and `quick` keep an inline micro-plan. `code-refine` corrects an existing durable plan and is not automatic in quick. `code-test` scales concrete verification with rigor. `code-report` reports and synthesizes without adding QA.
 
 ### §1.2. Token and Context Pressure
 
@@ -148,13 +174,13 @@ Shared contracts use model roles rather than concrete model names. Vendor-specif
 | `fast writer` | Low-cost assembly of verified artifacts into a user-facing summary | Short mechanical synthesis |
 | `deep editor` | Reader-facing prose written for a person to read | Final reports, polish, translation |
 | `deep maker` | Generation requiring aesthetic, strategic, architectural, or domain judgment | Planning, research synthesis, visual design, editorial rewrite |
-| `deep orchestrator` | High-judgment conductor for stage gates, failover, and evidence synthesis | Standard+ dispatch-depth-1 capability owner |
+| `deep orchestrator` | High-judgment conductor for stage gates, failover, and evidence synthesis | `team` dispatch-depth-1 capability owner |
 | `external adversary` | Hostile review through an independent engine or runtime | Adversarial verification |
 | `orchestrator` | Balanced mechanical coordination of already decided calls, paths, and states | Wrappers, dispatch mechanics, report assembly |
 
 ### §2.1. Dispatch Routing
 
-The default role for a standard+ conductor is `deep orchestrator`. Do not alias the retained balanced `orchestrator` to it. A role names behavior and responsibility, not execution budget. Dispatch selection order is explicit route profile and target (including an explicit route pin: `compose --pin <owner|frame|worker>=<harness>[:<model>[@<effort>]]` seals a tool and optionally a model and effort once, and every launch, resume and replacement of that route reads it; top models are accepted only for frame; the route's parent session may later move an owner, frame or worker pin with `start --route <file> --pin <target>=<harness>[:<model>[@<effort>]]`, which leaves the sealed route as it is, records the change beside it with the launch tuples the runtime probed for that pin and what the runtime knew of the instruction's source, and applies from that target's next launch; an attempt that already launched keeps what it launched with). An owner pin selects only the owner and does not pin frame legs; every launch, resume and replacement reads the pin of its own target. A depth-1 frame leg is eligible on any harness the route's evidence admits for its owner or for its own launch (`route_authority.depth1_supported_harnesses`), and its first selection follows the owner's rule. After usage gates and quality bands, automatically allocated frame pairs and width-two groups prefer a different harness only as a tie-break among ungated candidates of the same band; an explicit frame/worker pin or the absence of such an alternative selects the same harness, with the reason recorded. If such a width-two pair resolves to one concrete model, shared code may rotate the selected leg to the next declared profile whose configured model differs and passes the existing target-usage check. Explicit `--profile`, `--explicit-profiles`, and harness/profile-only pins remain eligible for rotation; only a concrete model pin or capacity-retry-chosen model is preserved. Traversal skips profiles configured to the sibling's model and skips `top` and `mini`; profile order is a decision rule, not a quality ranking. The sealed profile remains in route evidence, and no eligible alternative records its reason while running under the seal. Then apply persona independence, in-class stage affinity, allocation ordering, cost, and latency. Portable core records role, model profile, and any required harness-family axis separately. Adapters own exact model IDs, effort/variant realization, runtime probes, and eligibility.
+The default role for a `team` conductor is `deep orchestrator`. Do not alias the retained balanced `orchestrator` to it. A role names behavior and responsibility, not execution budget. Dispatch selection order is explicit route profile and target (including an explicit route pin: `compose --pin <owner|frame|worker>=<harness>[:<model>[@<effort>]]` seals a tool and optionally a model and effort once, and every launch, resume and replacement of that route reads it; top models are accepted only for frame; the route's parent session may later move an owner, frame or worker pin with `start --route <file> --pin <target>=<harness>[:<model>[@<effort>]]`, which leaves the sealed route as it is, records the change beside it with the launch tuples the runtime probed for that pin and what the runtime knew of the instruction's source, and applies from that target's next launch; an attempt that already launched keeps what it launched with). An owner pin selects only the owner and does not pin frame legs; every launch, resume and replacement reads the pin of its own target. A depth-1 frame leg is eligible on any harness the route's evidence admits for its owner or for its own launch (`route_authority.depth1_supported_harnesses`), and its first selection follows the owner's rule. After usage gates and quality bands, automatically allocated frame pairs and width-two groups prefer a different harness only as a tie-break among ungated candidates of the same band; an explicit frame/worker pin or the absence of such an alternative selects the same harness, with the reason recorded. If such a width-two pair resolves to one concrete model, shared code may rotate the selected leg to the next declared profile whose configured model differs and passes the existing target-usage check. Explicit `--profile`, `--explicit-profiles`, and harness/profile-only pins remain eligible for rotation; only a concrete model pin or capacity-retry-chosen model is preserved. Traversal skips profiles configured to the sibling's model and skips `top` and `mini`; profile order is a decision rule, not a quality ranking. The sealed profile remains in route evidence, and no eligible alternative records its reason while running under the seal. Then apply persona independence, in-class stage affinity, allocation ordering, cost, and latency. Portable core records role, model profile, and any required harness-family axis separately. Adapters own exact model IDs, effort/variant realization, runtime probes, and eligibility.
 
 Harness capacity is evaluated only inside user-declared quality bands. A fresh
 headroom signal may reorder quality peers and may promote a declared relief band
@@ -181,7 +207,7 @@ hard eligibility. A field name inside that block (`design: {codex: 1.0}` or `doc
 
 `utilities/dispatch-route.sh` is read-only and emits stable key/value trace, rejected, fallback, and unknown records. It does not register, launch, or mutate caches or worktrees. Without an adapter probe, OpenCode remains `unknown` rather than guessed.
 
-For a staged route with a fixed owner harness, readiness checks that owner as
+For a `team` route with a fixed owner harness, readiness checks that owner as
 the conductor of its workers, even when a different harness composed the route
 or its frame supplied the first evidence. Ordinary start fills missing checked
 evidence through the existing pin journal, retaining the sealed route and intent.
@@ -233,7 +259,7 @@ defaults (a solo owner at `standard` or higher, which makes the work itself, def
 its recipe declares), used only when neither an explicit profile nor an owner demand is supplied. A complete owner demand
 selects its model through the same resolver as a stage; intensity does not impose
 a second profile floor. Compile and verification recompute this one selection,
-and quick's one-shot process carries its owner's selection. Registered-profile
+and a `solo` owner's process carries its own selection. Registered-profile
 eligibility, QA, intensity, depth, peer authority and vendor constraints remain
 independent. Invalid supplied data or an unknown profile is rejected before
 route issuance; choosing outside the recommendation is not a refusal.
@@ -276,7 +302,7 @@ Role binding rules:
   the relevant review persona into a separate execution through the standard
   transport. The same harness is sufficient; there is no separate wrapper-team agent.
 
-For standard+ code stage dispatch, role and profile are explicit: ordinary frame/plan use `deep maker + balanced-deep`, execute uses `fast implementer + light`, test uses `fast reviewer` with `light`, report (the reader-facing final artifact) uses `deep editor` with `balanced-deep` as a recommended default that `--profile`, `--explicit-profiles`, or `--pin` can change, and route-selected high-risk or parallel legs override only the profile declared for that leg. Strong plan convergence uses `deep`; thorough implementation-risk exploration may deliberately use `light` while a failure-mode review uses `deep`.
+For `team` code stage dispatch, role and profile are explicit: ordinary frame/plan use `deep maker + balanced-deep`, execute runs its `dev/backend` unit at `balanced`, plan check, implementation review and test run at `light`, report (the reader-facing final artifact) uses `deep editor` with `balanced-deep` as a recommended default that `--profile`, `--explicit-profiles`, or `--pin` can change, and route-selected high-risk or parallel legs override only the profile declared for that leg. Strong plan convergence uses `deep`; thorough implementation-risk exploration may deliberately use `light` while a failure-mode review uses `deep`.
 
 ---
 
@@ -968,8 +994,9 @@ Draft Step 0 and research Step 1.5 are the existing track-specific instances. Sp
 Unified memory lives in `MEMORY.md` with §7 numbering preserved. That file is the single source.
 # Route, resource, and report invariants
 
-Dispatch depth applies to portable route ownership: quick is dispatch depth 1,
-standard+ has a dispatch-depth-1 owner and at most dispatch-depth-2 nodes, and a
+Dispatch depth applies to portable route ownership: a `solo` route's owner is dispatch depth 1
+(its declared verification nodes, from `standard`, at dispatch depth 2),
+a `team` route has a dispatch-depth-1 owner and at most dispatch-depth-2 nodes, and a
 native or inline fallback keeps that logical value without becoming a registered
 worker. Resource runners are detached processes with no dispatch depth, while
 runtime-native subagents and Claude agent-team teammate sessions retain their own

@@ -112,7 +112,7 @@ The Claude Code adapter maps portable roles from `core/CONVENTIONS.md §2` to co
 | `deep editor` | `opus` | Reader-facing prose written for a person to read: final reports, polish, translation |
 | `deep reviewer` | `opus` | methodology, domain expertise, completeness, safety/security, architecture risk |
 | `deep maker` | `opus` | Planning, research synthesis, and visual/editorial work requiring high judgment |
-| `deep orchestrator` | `opus` xhigh | Stage gates, failover, and evidence judgment for standard+ dispatch-depth-1 ownership |
+| `deep orchestrator` | `opus` xhigh | Stage gates, failover, and evidence judgment for team dispatch-depth-1 ownership |
 | `fast implementer` | `sonnet` | Routine implementation and refactoring; escalate complex API/library design |
 | `orchestrator` | `sonnet` medium | Balanced mechanical coordination of decided calls, paths, and states |
 | `external adversary` | a different reviewer, engine or harness, proven by the adapter (`CONVENTIONS §1`) | Independent hostile review for the `adversarial` intensity pass. The same Codex engine may host a neutral cross-harness parallel leg, but that is a reviewer role, not this hostile role. |
@@ -122,7 +122,7 @@ Route-bound registered work uses a second, independent execution-budget axis:
 
 | Model profile | Claude realization | Registered topology use |
 |---|---|---|
-| `deep` | `opus` / `xhigh` | standard+ ownership, convergence, and highest-risk legs |
+| `deep` | `opus` / `xhigh` | team ownership, convergence, and highest-risk legs |
 | `balanced-deep` | `opus` / `medium` | quick one-shot conduction and subordinate deep-model judgment at lower coordination cost |
 | `balanced` | `sonnet` / `high` | long multi-step execution after the decision is settled |
 | `light` | `sonnet` / `medium` | routine implementation, verification, reporting, and breadth legs |
@@ -157,6 +157,8 @@ new release is not yet installed.
 
 Two `CONVENTIONS §1.1` properties are intensity-independent and this adapter honors them: every review or verification unit carries the refute-by-default adversarial stance (anchored in `CONVENTIONS §1.1` / `roles/MODES.md`; `roles/units/_shared/stance.md` is the single source those units load), and every declared independent group records its realized independence. Registry-v6 groups launch 2–4 blind dispatch-depth-2 siblings atomically, use at least two harness families when `cross-harness` is required, and add asymmetric model profiles and perspectives to reduce correlated error. The hostile `external adversary` pass stays reserved for `adversarial`. If an explicitly requested cross-harness axis cannot be realized, fail loudly; an auto-selected group may use typed same-family degradation while preserving and reporting profile/perspective diversity.
 
+`direct` is inline; a `solo` route is one registered-headless dispatch-depth-1 owner that makes the work itself (at `quick` with no child node; from `standard`, where the kind declares a one-shot review, it starts that kind's verification nodes at dispatch depth 2); a `team` route (`standard+`) uses a dispatch-depth-1 capability owner and, when separable, dispatch-depth-2 `code-plan -> code-execute -> code-test -> code-report` stage workers (`core/CONVENTIONS.md §1`).
+
 ## Compatibility
 
 Claude Code projects created before the neutral artifact root use `.claude_reports/`. This adapter recognizes both names at the project-wide canonical root. New projects should use `.agent_reports/`; existing projects can migrate later or keep the legacy directory indefinitely.
@@ -179,7 +181,7 @@ provide `profile_demand` on every ad-hoc unit. Missing fields fail closed.
 `stages [--capability <name>] [--json]` prints the part catalog a graph is
 assembled from: every stage as `capability:stage` with its one-line summary,
 inputs and outputs, `unit_choices`, `shareable`, `start_approval`, optional parts,
-and the parts of other recipes this host can borrow. `compose --shape staged --graph` accepts a
+and the parts of other recipes this host can borrow. `compose --shape team --graph` accepts a
 host stage id or a shareable `capability:stage` (for example
 `inspect,autopilot-research:retrieval,autopilot-research:synthesis,report`); a
 borrowed part is written under `parts/<capability>/<stage>/` inside the host's own
@@ -187,7 +189,7 @@ artifact scope. Claude reaches both through `adapters/claude/bin/capability-rout
 Codex and OpenCode through `preflight.sh compose|stages`; every surface forwards
 the arguments unmodified and prints the same output.
 
-A shape-omitted `--graph` is a frame routing hint. Assemble `staged` routes only
+A shape-omitted `--graph` is a frame routing hint. Assemble `team` routes only
 for a frame brief or person-named stage list; follow the shared
 [WORKFLOW §0.2.1 guidance](../../core/WORKFLOW.md#021-shape-before-preset-sd-135).
 

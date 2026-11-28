@@ -151,12 +151,12 @@ created: {YYYY-MM-DD}
      at `standard` gets one independent review in the same route where its kind
      declares one (code does). Important or risk-bearing one-pass work raises it
      further (`strong`+: more review legs and an independent test) and stays `solo` where its kind declares one. Where the kind declares no one-shot review, work
-     that needs an independent review opens `staged`.
-   - `multi-stage` → `staged`: the work does not fit one session — separable
+     that needs an independent review opens `team`.
+   - `multi-stage` → `team`: the work does not fit one session — separable
      durable stages, several modules or adapters, a migration, or a direction
      that can still bend. Choose it for the size of the work, never to obtain
      a review.
-   A staged leg for one-pass work adds stages, review rounds and cost without
+   A `team` leg for one-pass work adds stages, review rounds and cost without
    catching more. Omit `shape` and it follows `size`; a different `shape` is
    kept and the difference is shown to the person.
 
@@ -174,10 +174,10 @@ created: {YYYY-MM-DD}
    and responsibilities, drafts, integration, and review. Reuse known audience,
    dates and assignments; ask only for missing content decisions in the same
    interview. Do not ask whether to start Git or which capability to choose.
-   Keep artifact-only staged legs in the original folder and canonical artifact
+   Keep artifact-only team legs in the original folder and canonical artifact
    root. Put document production and original-document edits in direct legs in
    the current session when they need the non-Git project's files,
-   retaining the surrounding staged graph and existing `done_when`, `parallel`
+   retaining the surrounding team graph and existing `done_when`, `parallel`
    and `hands_over` fields. Unreceived writer results remain unfinished.
    HWPX and other format tools are production/check tools in draft or refine;
    their use is not completion of the document workflow. Do not initialize Git,
@@ -194,9 +194,9 @@ created: {YYYY-MM-DD}
          mode: eval              # only when the capability has several modes
          field: lab              # optional: plan | design | code | lab | research | docs | admin | other; omitted, the capability's default field
          size: multi-stage       # one-change | one-pass | multi-stage, judged before the shape
-         shape: staged           # direct | solo | staged; omitted, it follows size
-         graph: [eval-run, metrics, report]   # staged only; stage ids or capability:stage[:unit] from the catalogue; never a frame stage
-         intensity: standard     # optional; direct fixes direct, solo allows quick, or standard and higher where its kind declares a one-shot review, and staged allows standard+
+         shape: team             # direct | solo | team (`staged`, the recorded word, is accepted too); omitted, it follows size
+         graph: [eval-run, metrics, report]   # team only; stage ids or capability:stage[:unit] from the catalogue; never a frame stage
+         intensity: standard     # optional; direct fixes direct, solo allows quick, or standard and higher where its kind declares a one-shot review, and team allows standard and higher
          cwd: /path/to/task-repository  # optional: existing checkout or requested new repository; relative to the frame's cwd
          why: "one sentence"
          done_when:              # optional, 1-5: what shows this leg is finished (a sentence or {text, check})

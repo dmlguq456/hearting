@@ -141,10 +141,7 @@ contract v3 atomically claims one stable attempt row before spawn and starts
 no child for a duplicate claim. A standard+ Codex dispatch-depth-1 owner
 receives workspace-write network access for this purpose; dispatch-depth-2
 workers do not. The retired broker exposes only legacy `status`/`stop`.
-`standard+` uses a dispatch-depth-1 capability owner and, when separable,
-dispatch-depth-2 `code-plan -> code-execute -> code-test -> code-report` stage
-workers; `direct` is inline and `quick` is one registered-headless
-dispatch-depth-1 one-shot conductor. For `autopilot-code`, `capability-info` and `route` print the portable pipeline contract (`code-plan>code-execute>code-test>code-report` for `standard+`).
+`direct` is inline; a `solo` route is one registered-headless dispatch-depth-1 owner that makes the work itself (at `quick` with no child node; from `standard`, where the kind declares a one-shot review, it starts that kind's verification nodes at dispatch depth 2); a `team` route (`standard+`) uses a dispatch-depth-1 capability owner and, when separable, dispatch-depth-2 `code-plan -> code-execute -> code-test -> code-report` stage workers (`core/CONVENTIONS.md §1`). For `autopilot-code`, `capability-info` and `route` print the portable pipeline contract (`code-plan>code-execute>code-test>code-report` for `standard+`).
 A native subagent call (`spawn_agent`) is taken as a Hearting unit route by the
 `PreToolUse` hook when that is certain, and otherwise runs natively. After
 integration, verification, and push, use `preflight.sh worktree-cleanup
@@ -466,7 +463,7 @@ route additionally seals one of these profiles from the single
 
 | Model profile | Codex realization | Registered topology use |
 |---|---|---|
-| `deep` | configured deep tier / `xhigh` | standard+ ownership, convergence, and highest-risk legs |
+| `deep` | configured deep tier / `xhigh` | team ownership, convergence, and highest-risk legs |
 | `balanced-deep` | configured deep tier / `medium` | quick one-shot conduction and subordinate deep-model judgment at a lower coordination budget |
 | `balanced` | configured light tier / `high` | long multi-step execution after the decision is settled |
 | `light` | configured light tier / `medium` | routine implementation, verification, reporting, and breadth legs |
@@ -534,7 +531,7 @@ provide `profile_demand` on every ad-hoc unit. Missing fields fail closed.
 `stages [--capability <name>] [--json]` prints the part catalog a graph is
 assembled from: every stage as `capability:stage` with its one-line summary,
 inputs and outputs, `unit_choices`, `shareable`, `start_approval`, optional parts,
-and the parts of other recipes this host can borrow. `compose --shape staged --graph` accepts a
+and the parts of other recipes this host can borrow. `compose --shape team --graph` accepts a
 host stage id or a shareable `capability:stage` (for example
 `inspect,autopilot-research:retrieval,autopilot-research:synthesis,report`); a
 borrowed part is written under `parts/<capability>/<stage>/` inside the host's own
@@ -542,7 +539,7 @@ artifact scope. Claude reaches both through `adapters/claude/bin/capability-rout
 Codex and OpenCode through `preflight.sh compose|stages`; every surface forwards
 the arguments unmodified and prints the same output.
 
-A shape-omitted `--graph` is a frame routing hint. Assemble `staged` routes only
+A shape-omitted `--graph` is a frame routing hint. Assemble `team` routes only
 for a frame brief or person-named stage list; follow the shared
 [WORKFLOW §0.2.1 guidance](../../core/WORKFLOW.md#021-shape-before-preset-sd-135).
 

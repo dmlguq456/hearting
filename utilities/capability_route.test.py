@@ -7715,6 +7715,27 @@ class ShapeIntensityDiagnosticTest(unittest.TestCase):
    with self.subTest(shape=shape):
     with self.assertRaisesRegex(ValueError, rf"compose-shape-intensity-mismatch:{shape} .*allowed: {allowed}"):
      self.compose(shape=shape,graph=None if shape != "staged" else "execute,test,report",intensity=intensity)
+ def test_team_is_the_typed_word_for_staged_and_opens_the_same_route(self):
+  # `team` is accepted wherever `staged` is; the record keeps `staged`, and a refusal repeats the word typed.
+  def sealed(route):
+   text=json.dumps(route,sort_keys=True)
+   for key in ("route_id","route_hash"): text=text.replace(str(route.get(key)),"<%s>"%key)
+   return re.sub(r'"(?:created_at|created|sealed_at|ts|timestamp|started_at)": (?:"[^"]*"|[0-9.]+)','"<time>": 0',text)
+  staged=self.compose(shape="staged",graph=None,slug="same-route"); team=self.compose(shape="team",graph=None,slug="same-route")
+  self.assertEqual(team["selection"]["shape"],"staged")
+  self.assertEqual(sealed(team),sealed(staged))
+  self.assertEqual(sealed(self.compose(shape="staged",shape_word="team",graph=None,slug="same-route")),sealed(staged))
+  R.verify_route(team,R.ROOT)
+  with self.assertRaisesRegex(ValueError,r"compose-shape-intensity-mismatch:team \(allowed: standard,strong"):
+   self.compose(shape="team",graph=None,intensity="quick")
+  with self.assertRaisesRegex(ValueError,r"compose-shape-intensity-mismatch:staged \(allowed: standard,strong"):
+   self.compose(shape="staged",graph=None,intensity="quick")
+  self.assertEqual(self.compose(shape="team",graph="execute,test,report",slug="same-route")["selection"]["shape"],"staged")
+ def test_the_receipt_header_says_team_for_the_recorded_staged(self):
+  route=self.compose(shape="staged",graph=None)
+  header=R.compose_card(route).splitlines()[0]
+  self.assertIn("team(standard)",header); self.assertNotIn("staged",header)
+  self.assertEqual(route["selection"]["shape"],"staged")
  def test_a_kind_that_declares_no_one_shot_review_still_carries_only_quick_on_solo(self):
   # The middle cell is declared per kind (`one_shot_review`); lab declares none.
   with self.assertRaisesRegex(ValueError, r"compose-shape-intensity-mismatch:solo .*allowed: quick\)"):
@@ -7952,6 +7973,18 @@ class ComposeRouteTest(TestRoute):
    R.main()
   self.assertIn("mini only with --shape direct"," ".join(out.getvalue().split()))
 
+ def test_help_lists_the_form_words_and_accepts_team_and_the_old_words(self):
+  out=io.StringIO()
+  with mock.patch.object(sys,"argv",[str(P),"compose","--help"]),contextlib.redirect_stdout(out), \
+       self.assertRaises(SystemExit):
+   R.main()
+  text=" ".join(out.getvalue().split())
+  self.assertIn("--shape {direct,solo,team}",text)
+  self.assertIn("team (an owner and stage workers",text); self.assertIn("`staged` is the same form",text)
+  self.assertNotIn("framed (",text); self.assertNotIn("staged (capability recipe",text)
+  # the person's word and the old ones are all accepted by the parser
+  for word in ("direct","solo","team","staged","framed"):
+   self.assertIn(word,R.COMPOSE_SHAPE_WORDS)
  def test_non_git_classified_research_modes_compile_and_seal_as_direct(self):
   with tempfile.TemporaryDirectory() as tmp:
    for mode in ("academic","market","technology"):

@@ -108,6 +108,14 @@ def read_outcome(record):
     return dict(data, _path=path)
 
 
+# The record's word `staged` is the `team` form; a text a person reads says `team`, a code keeps the record's word.
+_SHAPE_WORD = {"staged": "team"}
+
+
+def _shape_word(shape):
+    return _SHAPE_WORD.get(shape, shape)
+
+
 def _shape(record):
     selection = record.get("selection") if isinstance(record.get("selection"), dict) else {}
     shape = selection.get("shape")
@@ -610,7 +618,7 @@ def summary_text(desc, current=True):
         return ""
     verification = desc.get("verification") or {}
     unit = _is_unit_route(desc)
-    parts = [] if unit else ["%s·%s" % (desc.get("shape") or "unknown",
+    parts = [] if unit else ["%s·%s" % (_shape_word(desc.get("shape")) or "unknown",
                                         _BASIS_WORD.get((desc.get("basis") or {}).get("kind"), "basis unrecorded"))]
     if current and desc.get("current"):
         if (desc.get("next") or {}).get("kind") == "no-response":
@@ -645,7 +653,7 @@ def detail_lines(desc):
         lines = [("unit", named or "·", "info")]
     else:
         lines = [("route", "%s · %s · %s %s" % (
-            desc.get("shape"), _BASIS_WORD.get(basis.get("kind"), "basis unrecorded"),
+            _shape_word(desc.get("shape")), _BASIS_WORD.get(basis.get("kind"), "basis unrecorded"),
             desc.get("capability") or "·", desc.get("intensity") or ""), "info")]
     if basis.get("notes"):
         lines.append(("why", "; ".join(basis["notes"]), "dim"))

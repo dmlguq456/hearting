@@ -79,7 +79,7 @@ binds `direct`, `quick`, and `standard+`; only the acting owner differs.
 
 Use portable role names from `roles/README.md` and `core/CONVENTIONS.md`. Concrete model names, subagent frontmatter, and runtime-specific tool lists belong in adapter files.
 
-Pipeline intensity follows `core/CONVENTIONS.md §1`: `direct` has no plan stage or durable plan artifact; `quick` is one registered-headless dispatch-depth-1 one-shot conductor with its inline micro-plan plus plan-check-lite; `standard+` uses the capability's durable work-cycle plan when applicable. This recipe has no separate `plan-check` node (only `autopilot-code` declares one): `quick` checks its micro-plan inline (plan-check-lite), and `standard+` reviews through the recipe's own review stages — `smoke` and `run-verify` (setup) and `independent-verify` (eval), plus the optional `diagnose` part — rather than after every stage. Verification rigor for those reviews and final verify is derived from intensity; it does not name a model or introduce a separate stage graph. `capabilities/topologies.json` (recipe plus `part_catalog`) is the one stage list; `capability-route.py stages --capability autopilot-lab` prints it.
+Pipeline intensity follows `core/CONVENTIONS.md §1`: `direct` has no plan stage or durable plan artifact; `quick` is a `solo` route: one registered-headless dispatch-depth-1 owner with its inline micro-plan plus plan-check-lite; a `team` route (`standard+`) uses the capability's durable work-cycle plan when applicable, and `solo` takes `standard` and above only where the kind declares a one-shot review. This recipe has no separate `plan-check` node (only `autopilot-code` declares one): `quick` checks its micro-plan inline (plan-check-lite), and a `team` route reviews through the recipe's own review stages — `smoke` and `run-verify` (setup) and `independent-verify` (eval), plus the optional `diagnose` part — rather than after every stage. Verification rigor for those reviews and final verify is derived from intensity; it does not name a model or introduce a separate stage graph. `capabilities/topologies.json` (recipe plus `part_catalog`) is the one stage list; `capability-route.py stages --capability autopilot-lab` prints it.
 
 ## Guard Requirements
 
@@ -131,11 +131,11 @@ At `strong` or higher, include `independent-verify`; its declared two-way group
 feeds the automatic owner close, which reconciles both verdicts in one summary.
 This uses the existing `eval` recipe and `--graph`, with the same `setup`/`eval`
 modes. A frame uses this default when assembling that work; an already decided
-route can use this staged example:
+route can use this team example:
 
 ```sh
 hearting run capability-route compose --prompt-file <task> \
-  --shape staged --capability autopilot-lab --capability-mode eval \
+  --shape team --capability autopilot-lab --capability-mode eval \
   --intensity strong --graph metrics,diagnose,report,independent-verify --explain
 ```
 
@@ -356,9 +356,9 @@ OS file or network enforcement; the owner and model children stay `workspace-wri
 (see `docs/lab-execution-access.md`). It differs from `smoke`, `full-run` and
 `eval-run`, which keep the hash-bound attestation and provenance requirements.
 
-### Eval execution topology (`standard+`)
+### Eval execution topology (`team`)
 
-The full recipe's separable stages of a `standard+` eval are: (1) context and experiment
+The full recipe's separable stages of a `team` eval are: (1) context and experiment
 contract, (2) evaluation harness preparation, (3) checkpoint evaluation run,
 (4) metrics and per-array analysis, (5) figures, audio, and playback HTML,
 (6) canonical report-bundle assembly, (7) independent verification, (8)

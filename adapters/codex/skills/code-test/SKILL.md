@@ -43,7 +43,7 @@ contract. It is adapter-owned output, not a legacy compatibility Skill copy.
 
 Artifact root: `core/CONVENTIONS.md §5.1`.
 
-When invoked from a `standard+` `autopilot-code` stage cycle, write verification
+When invoked from a `team` `autopilot-code` stage cycle, write verification
 evidence only to the test node's declared outputs and write scope. Return the final verdict to `code-report`, which owns
 `pipeline_summary.md`; the `code-test` stage must not write that report-owned
 artifact. Standalone invocations should create or reuse an appropriate
@@ -59,7 +59,7 @@ Required evidence:
 
 ## Artifact Producer Lifecycle
 
-`code-test` is a `standard+` stage worker: it never issues its own campaign or
+`code-test` is a `team` stage worker: it never issues its own campaign or
 cycle. It receives the owner's open cycle through
 `AGENT_ARTIFACT_CAMPAIGN_ID`/`AGENT_ARTIFACT_CYCLE_ID`/`AGENT_ARTIFACT_PRODUCER_ID`/
 `AGENT_ARTIFACT_CYCLE_DIR`/`AGENT_ARTIFACT_OUTPUT_DIR` (dispatch env
@@ -124,7 +124,7 @@ Additional test-entry gates:
    current test gate.
 4. Record commands, outputs or excerpts, skips, blockers, and the first
    actionable failure in `test_logs/`.
-5. Emit the final verdict as a handoff to `code-report`; in a `standard+` stage
+5. Emit the final verdict as a handoff to `code-report`; in a `team` stage
    cycle, `code-report` alone updates `pipeline_summary.md`. When no
    `code-report` stage exists, a standalone invocation may update its own
    standalone work-cycle summary.

@@ -131,7 +131,7 @@ class EditTriggerTest(Fixture):
         self.assertIn(f"--cwd {self.repo}", line)
         self.assertIn("For one atomic, reversible inline change", reason)
         self.assertIn("make the edit in the worktree it prints", reason)
-        self.assertIn("open --shape solo|staged --capability <kind> when the direction is clear", reason)
+        self.assertIn("open --shape solo|team --capability <kind> when the direction is clear", reason)
         self.assertIn("otherwise omit --shape", reason)
         self.assertIn("the frame decides the route", reason)
         self.assertIn("person-specified route", reason)

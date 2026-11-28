@@ -240,7 +240,7 @@ class UnitComposeTest(F.FramedBase):
         # 11-20: "unit에는 강도를 표시안하는게 맞겠네". An intensity other than the old `quick` is refused in a text that
         # tells where checking is opened; `quick` (an old command) is accepted and ignored; another flag's text says no `quick`.
         why = ("a unit route has no intensity: one unit does one job and nothing checks it; to have the work checked open "
-               "--shape solo or staged with --intensity, and to judge more deeply use --profile")
+               "--shape solo or team with --intensity, and to judge more deeply use --profile")
         for value in ("standard", "strong", "direct"):
             with self.subTest(intensity=value), self.assertRaises(ValueError) as refused:
                 self.unit("qa/code-review", intensity=value)

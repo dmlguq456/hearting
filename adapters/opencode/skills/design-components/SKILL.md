@@ -49,7 +49,7 @@ Artifact root: `core/CONVENTIONS.md §5.1`; output placement: `§5`.
 
 ## Artifact Producer Lifecycle
 
-`design-components` is a `standard+` stage worker: it never issues its own campaign or
+`design-components` is a `team` stage worker: it never issues its own campaign or
 cycle. It receives the owner's open cycle through
 `AGENT_ARTIFACT_CAMPAIGN_ID`/`AGENT_ARTIFACT_CYCLE_ID`/`AGENT_ARTIFACT_PRODUCER_ID`/
 `AGENT_ARTIFACT_CYCLE_DIR`/`AGENT_ARTIFACT_OUTPUT_DIR` (dispatch env

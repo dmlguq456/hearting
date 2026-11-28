@@ -2,7 +2,7 @@
 
 Use the deepest eligible planning profile selected by the active adapter when cross-file reasoning or call-site analysis would benefit from it.
 
-> **Stage-session entry (`standard+` dispatch, spec/stage-dispatch SD-2)**: Run in-session or as an isolated dispatch-depth-2 stage worker dispatched by the `autopilot-code` conductor. Inputs are the task and paths supplied by the route; never depend on prior-stage conversation. The stage uses its node's declared outputs and write scope. Independent plan review is the sibling `plan-check` node, not an in-stage delegation.
+> **Stage-session entry (`team` dispatch, spec/stage-dispatch SD-2)**: Run in-session or as an isolated dispatch-depth-2 stage worker dispatched by the `autopilot-code` conductor. Inputs are the task and paths supplied by the route; never depend on prior-stage conversation. The stage uses its node's declared outputs and write scope. Independent plan review is the sibling `plan-check` node, not an in-stage delegation.
 
 > **Language rule**: Follow the audience and artifact language contract in [arguments-and-decisions.md#language-rule](../../autopilot-code/references/arguments-and-decisions.md). Write the canonical plan in the selected artifact language; do not generate a language mirror merely because the skill source is English or the conversation uses a particular language.
 
@@ -52,7 +52,7 @@ Add a `slices` block only when the work splits into 2–4 packages that own exac
 
 ## Plan-Check Assurance
 
-Derive verification rigor from the caller's `--intensity` and plan risk under CONVENTIONS §1.1 (`<agent-home>/core/CONVENTIONS.md#11-verification-rigor-tiers`). Rigor does not select this stage: `code-plan` runs only after the caller chooses a durable `standard+` graph. `direct` skips it; `quick` uses a one-shot worker with an inline micro-plan and plan-check-lite.
+Derive verification rigor from the caller's `--intensity` and plan risk under CONVENTIONS §1.1 (`<agent-home>/core/CONVENTIONS.md#11-verification-rigor-tiers`). Rigor does not select this stage: `code-plan` runs only after the caller chooses a durable `team` graph. `direct` skips it; a `solo` route (`quick`) uses its one owner with an inline micro-plan and plan-check-lite.
 
 Use the supplied `plan.md` path to locate its sibling checklist and logs. The independent `plan-check` node owns its review output.
 

@@ -40,11 +40,11 @@ Rigor is derived from intensity and is not a separate `--qa` axis; see [CONVENTI
 - `thorough` → thorough
 - `adversarial` → adversarial
 
-Rigor changes plan-check, selected review, and final code-test depth; it does not select a graph. Dispatch-depth-2 dispatch belongs to the standard+ owner-worker graph, not rigor alone. direct and quick do not open dispatch depth 2 without explicit escalation.
+Rigor changes plan-check, selected review, and final code-test depth; it does not select a graph. Dispatch-depth-2 dispatch belongs to the team owner-worker graph, not rigor alone. direct and quick do not open dispatch depth 2 without explicit escalation.
 
 The code track has no card/PDF fact-checker. Its ground truth is source, tests, runtime behavior, API and CLI surfaces, and security review. Security-sensitive auth, secrets, external input, API-contract, or deserialization work may add `roles/units/qa/security-review.md`; claim that pass only when it ran.
 
-High-stakes wording may justify raising intensity to strong, thorough, or adversarial. Durable standard+ cycles store intensity and derived rigor in plan frontmatter or pipeline state. Mid-cycle changes affect later checks but do not rewrite completed graph stages.
+High-stakes wording may justify raising intensity to strong, thorough, or adversarial. Durable team cycles store intensity and derived rigor in plan frontmatter or pipeline state. Mid-cycle changes affect later checks but do not rewrite completed graph stages.
 
 ### `--user-refine` — explicit opt-in only
 

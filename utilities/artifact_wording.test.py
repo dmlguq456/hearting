@@ -43,7 +43,7 @@ CYCLE_RELATIVE_TARGETS = [
      "Config snapshots and manifests keep the `experiments/<slug>/_internal/configs/` "
      "suffix beneath that selected subtree."),
     ("capabilities/code-test.md",
-     "When invoked from a `standard+` `autopilot-code` stage cycle, write verification "
+     "When invoked from a `team` `autopilot-code` stage cycle, write verification "
      "evidence only to the test node's declared outputs and write scope."),
     ("capabilities/analyze-project.md",
      "writes structured artifacts to `$AGENT_ARTIFACT_OUTPUT_DIR/analysis_project/`. Invoke it"),
@@ -119,7 +119,7 @@ CAPABILITY_CYCLE_CONTRACTS = [
         "node's declared outputs under `AGENT_ARTIFACT_OUTPUT_DIR`.",
     )),
     ("capabilities/code-test.md", (
-        "When invoked from a `standard+` `autopilot-code` stage cycle, write verification "
+        "When invoked from a `team` `autopilot-code` stage cycle, write verification "
         "evidence only to the test node's declared outputs and write scope.",
         "the resolver applies the test node's declared outputs and write scope.",
     )),

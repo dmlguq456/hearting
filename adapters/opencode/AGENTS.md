@@ -52,7 +52,7 @@ feature's source, tests and README: known scope, focused checks; no shared
 contract change, long resource work, artifact handoff or independent verifier.
 Read/edit/check/reply; recorded automatically without task/compose/finish/capability-info calls.
 Compose before scope grows. Work whose direction is clear opens with `--shape
-solo|staged --capability <kind>` (§0.2.1). Other work starts with:
+solo|team --capability <kind>` (§0.2.1). Other work starts with:
 
 ```
 hearting run capability-route compose --start --prompt-file <task>
@@ -67,7 +67,7 @@ for plans, reviews, versions and target references.
 
 Use the receipt's `runtime` command prefixes. `hearting run <utility>` uses
 `AGENT_HOME`, else the installed release. Flags are hints; honor a shape the
-person or a frame already chose, using `--shape staged --capability
+person or a frame already chose, using `--shape team --capability
 <kind> --graph <stage,…>` for person-named stages (§0.2.1). Refusals name missing inputs.
 Before unapproved material work, present the §0.4 intent card (진행 / 수정 /
 중단). Peer requests need only compose's `[경로]` line and scope, except for

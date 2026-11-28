@@ -49,7 +49,7 @@ binds `direct`, `quick`, and `standard+`; only the acting owner differs.
 2. **write only inside the open cycle.** Every durable artifact goes under
    `<cycle_dir>/artifacts/apply-log/...` (`AGENT_ARTIFACT_OUTPUT_DIR`).
    `artifact_producer.py` owns cycle output paths and shared revisions.
-3. **stage workers join, never fork.** `standard+` stage workers receive
+3. **stage workers join, never fork.** `team` stage workers receive
    `AGENT_ARTIFACT_CAMPAIGN_ID`/`CYCLE_ID`/`PRODUCER_ID`/`CYCLE_DIR`/`OUTPUT_DIR`
    from the owner (dispatch env pass-through) and call `begin --node <id>`
    on the same route, which resumes the owner's open cycle.
