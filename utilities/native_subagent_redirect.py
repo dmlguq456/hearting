@@ -24,12 +24,14 @@ never stops a start. Two windows are left where both can run: a hook ended from 
 harness's timeout) between the registration and its refusal line, and a compose that fails after registering
 without writing such a receipt.
 
-The one worker taken is a live Claude owner the session supervisor runs detached, proven by its row and announced
-session, on a route sealing no native stage fallback, whose launch lets it run its wait (`_supervised_owner`,
+The one worker taken is a live Claude owner the session supervisor runs detached, still on the route it was launched
+on, proven by its row and the session its supervisor bound to that attempt, on a route sealing no native stage
+fallback, whose launch and current mode let it run its wait with nothing else deciding Bash (`_supervised_owner`,
 `_wait_allowed`; its own launch layers count only when they decide the call). It starts in its own environment, so
-the leg stops with it (`capabilities/unit.md`), and is told that wait, to repeat until the answer comes. A start
-whose route compose closed (the governor's wait, a usage limit right after registration) lets the native call run.
-Every other worker (stage, review, sub-session, foreground-scoped, a unit route's leg, Codex's `-c`) stays native.
+the leg stops with it (`capabilities/unit.md`), and is told that wait, to run again only while its receipt says the
+leg still runs. A start whose route compose closed (the governor's wait, a usage limit right after registration)
+lets the native call run; a registered leg that was stopped is refused as ended. Every other worker (stage, review,
+sub-session, foreground-scoped, a unit route's leg, Codex's `-c`) stays native.
 
 OpenCode is not intercepted (`adapters/opencode/ADAPTATION.md`).
 
@@ -38,6 +40,7 @@ Usage (stdin: the harness payload):
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -246,10 +249,12 @@ def _hook_matches(harness: str, matcher, tools: set) -> bool:
         return True
 
 
-def _rules_decide(settings: dict, tools: str = "Agent|Task") -> bool:
-    """A Claude deny or ask rule names the subagent tool (or `tools`): it applies whatever a hook returns."""
+def _rules_decide(settings: dict, glob_of: str = "") -> bool:
+    """A Claude deny or ask rule names the subagent tool: it applies whatever a hook returns. For `glob_of` (the Bash
+    a worker's wait runs) a rule counts whose tool name, read as Claude's tool-name glob, matches it (`Ba*`)."""
     permissions = settings.get("permissions") if isinstance(settings.get("permissions"), dict) else {}
-    return any(isinstance(rule, str) and re.match(rf"\s*({tools})\s*(\(|$)", rule)
+    return any(isinstance(rule, str) and (fnmatch.fnmatchcase(glob_of, rule.split("(", 1)[0].strip()) if glob_of
+                                          else re.match(r"\s*(Agent|Task)\s*(\(|$)", rule))
                for kind in ("deny", "ask") for rule in permissions.get(kind) or [])
 
 
@@ -339,36 +344,41 @@ def _worker_layer(flag: str, values: list[str]) -> bool:
     return "?" not in rules and not {rule.split("(")[0] for rule in rules} & {"Agent", "Task"}
 
 
-def _wait_allowed(argv: list[str], cwd: str) -> bool:
+def _wait_allowed(argv: list[str], cwd: str, mode) -> bool:
     """The owner can run its wait (`_worker_command`) unprompted: its launch's own allow rule for it in a mode that
-    applies it, and no Bash deny or ask rule in its launch or a settings file the hook reads (no bare Bash grant)."""
+    applies it and is the mode the call runs in (`mode`, the payload's), and no Bash deny or ask rule, by name or
+    tool-name glob, in its launch or a settings file the hook reads (no bare Bash grant)."""
     from parent_next_directive import worker_utility
     home = os.environ["AGENT_HOME"]
     return (bool(home) and shlex.quote(home) == home
-            and _given(argv, ("--permission-mode",)) in (["bypassPermissions"], ["acceptEdits"])
+            and mode in ("bypassPermissions", "acceptEdits") and _given(argv, ("--permission-mode",)) == [mode]
             and f"Bash({worker_utility(home, 'capability-route.py')} *)" in _given(argv, _TOOL_FLAGS[:2])
             and not any(rule.split("(")[0] in ("Bash", "?") for rule in _given(argv, _TOOL_FLAGS[2:]))
             and not any(_rules_decide(settings, "Bash") for _, settings in _decision_sources("claude", cwd)))
 
 
-def require_sole_decision(harness: str, tool: str, cwd: str, worker: bool = False) -> None:
+def require_sole_decision(harness: str, tool: str, cwd: str, worker: bool = False, mode=None) -> None:
     """`Skip` unless this hook is the only decision on the call it can see: the harness runs matching hooks
     side by side and applies deny/ask rules after them, so another decision would come after the start. For the
-    owner's call (`worker`) the layers its launch adds count only when they decide it, and its wait must run."""
+    owner's call (`worker`) the layers its launch adds count only when they decide it, and its wait must run: a hook on
+    Bash decides that wait as one on the call would (Hearting's own pass a worker), so it is judged the same way."""
     argv = _harness_argv()[1:]
     for index, arg in enumerate(argv):
         if arg.split("=", 1)[0] in _LAUNCH_LAYERS[harness] or (harness == "codex" and re.match(r"-[cp].", arg)):
             if not worker or not _worker_layer(arg.split("=", 1)[0], _values(argv, index)):
                 raise Skip("launch-layer")
-    if worker and not _wait_allowed(argv, cwd):
+    if worker and not _wait_allowed(argv, cwd, mode):
         raise Skip("wait-not-allowed")
     if harness == "claude" and (_home(harness) / "remote-settings.json").exists():
         raise Skip("server-managed-settings")      # the copy of settings an organization's server manages
     path, name = _REGISTRATION[harness]
-    ours = {handler.get("command") for group in _json(ROOT / "adapters" / harness / path)["hooks"]["PreToolUse"]
-            if name in str(group.get("matcher")).split("|") for handler in group["hooks"]}
+    groups = _json(ROOT / "adapters" / harness / path)["hooks"]["PreToolUse"]
+    ours = {handler.get("command") for group in groups if name in str(group.get("matcher")).split("|")
+            for handler in group["hooks"]}
+    own = {handler.get("command") for group in groups for handler in group["hooks"]} - ours if worker else set()
     # Codex also picks `spawn_agent` hooks by the alias `Agent` (core/src/tools/hook_names.rs).
-    tools, registered = {tool} | ({"Agent", "Task"} if harness == "claude" else {"Agent"}), 0
+    tools = {tool} | ({"Agent", "Task"} if harness == "claude" else {"Agent"}) | ({"Bash"} if worker else set())
+    registered = 0
     for hooks, settings in _decision_sources(harness, cwd):
         if harness == "claude" and _rules_decide(settings):
             raise Skip("another-decision")
@@ -381,6 +391,8 @@ def require_sole_decision(harness: str, tool: str, cwd: str, worker: bool = Fals
             # started.
             every_tool = group.get("matcher") in (None, "", "*")
             for handler in group.get("hooks") or []:
+                if isinstance(handler, dict) and handler.get("command") in own:
+                    continue
                 if not (isinstance(handler, dict) and handler.get("type", "command") == "command"
                         and handler.get("command") in ours):
                     rule = handler.get("if") if isinstance(handler, dict) else None
@@ -397,30 +409,33 @@ def require_sole_decision(harness: str, tool: str, cwd: str, worker: bool = Fals
 
 def _supervised_owner(session: str) -> None:
     """`Skip` unless the caller is a live Claude owner the session supervisor runs detached (its registry row; the
-    environment only names it) on its route, this hook's Claude session the one it announced, the route sealing no
-    native stage fallback (whose evidence would be lost), and a leg started here launching detached too (the receipt
-    comes back at once, the leg stops with the owner: `dispatch-reap-watch.py`). Anything else stays native."""
+    environment only names it), whose current route is still the one it was launched on (`owner_route_binding`: an
+    adopted continuation moves it on; with no binding there is none to adopt), this hook's Claude session the one its
+    supervisor bound to that very attempt (`dispatch_owner_input`), the route sealing no native stage fallback (whose
+    evidence would be lost), and a leg started here launching detached too (the receipt comes back at once, the leg
+    stops with the owner: `dispatch-reap-watch.py`). Anything else stays native."""
     from dispatch_contract import attempt_governed_process_quiescence, row_is_subsession
     from dispatch_lifecycle import DETACHED, select_launch_lifecycle
+    from dispatch_owner_input import bound_input_thread
     from dispatch_registry_cache import registry_view
+    from owner_route_binding import CURRENT_ROUTE_STATUSES, resolve_owner_route_lifecycle
     route = json.loads(Path(os.environ["AGENT_ROUTE_FILE"]).read_text(encoding="utf-8"))
     capability, route_id = route.get("capability"), route["route_id"]
     if any(hop.get("fallback_hop") == "native-subagent" and hop.get("candidates")
            for node in route["nodes"] for hop in node.get("fallback_hops") or []):
         raise Skip("native-stage-fallback")
-    record, error = registry_view(Path(os.environ["AGENT_DISPATCH_JOBS"])).completion_attempt(
-        os.environ["AGENT_DISPATCH_ATTEMPT_ID"])
+    jobs, attempt = os.environ["AGENT_DISPATCH_JOBS"], os.environ["AGENT_DISPATCH_ATTEMPT_ID"]
+    record, error = registry_view(Path(jobs)).completion_attempt(attempt)
     meta = {**record.completion_metadata(), "_status": record.status} if record is not None and not error else {}
-    with open(meta.get("log_file") or os.devnull, "rb") as log:   # the session its supervisor announced first
-        announced = [row.get("session_id") for row in map(_last_json, log.read(65536).decode("utf-8", "replace")
-                     .splitlines()) if row.get("type") == "dispatch.supervisor.session"]
+    current, status = resolve_owner_route_lifecycle(jobs, owner_attempt_id=attempt)
     if not (isinstance(capability, str) and capability.strip() and capability != "unit"
             and route_id and os.environ.get("AGENT_ROUTE_ID") == route_id
             and os.environ.get("AGENT_DISPATCH_COMPLETION_MODE") == "supervised" and meta.get("_status") in {"open", "running"}
             and meta.get("harness") == "claude" and meta.get("worker_type") == "owner" and not row_is_subsession(meta)
-            and meta.get("launch_lifecycle") == DETACHED and route_id in {meta.get("route_id"), meta.get("owner_route_id")}
-            and announced == [session] and attempt_governed_process_quiescence(meta).state == "live"
-            and select_launch_lifecycle() == DETACHED):
+            and meta.get("launch_lifecycle") == DETACHED and attempt_governed_process_quiescence(meta).state == "live"
+            and (status == "owner-route-binding-absent" or status in CURRENT_ROUTE_STATUSES
+                 and current.route_file == str(Path(os.environ["AGENT_ROUTE_FILE"]).resolve()))
+            and bound_input_thread(jobs, attempt) == session and select_launch_lifecycle() == DETACHED):
         raise Skip("not-the-supervised-owner")
 
 
@@ -473,13 +488,20 @@ def _last_json(text: str) -> dict:
     return {}
 
 
+def _stopped(receipt: dict) -> bool:
+    """A registered leg the person or its parent stopped (the start's typed cancellation receipt)."""
+    result = receipt.get("result") if isinstance(receipt.get("result"), dict) else {}
+    return bool(result.get("stopped") or result.get("cancellation_requested"))
+
+
 def registered(receipt: dict, worker: bool = False) -> bool:
     """The start receipt says Hearting holds the call: running, waiting for a worker, or already ended. A worker's
     start that follows no attempt holds nothing: compose closed that route (`_close_unstarted_record_free`: the
-    governor's wait, or a leg stopped at a usage limit right after its registration; no later start is armed)."""
+    governor's wait, or a leg stopped at a usage limit right after its registration; no later start is armed). A
+    registered leg that was stopped is held: that stop stands."""
     held = receipt.get("state") in {"running", "completed"} or bool(receipt.get("registered_attempts"))
-    return bool(receipt.get("route_id")) and (held or (bool(receipt.get("auto_resume")) if worker else
-                                                       receipt.get("state") == "waiting-capacity" or bool(receipt.get("result"))))
+    return bool(receipt.get("route_id")) and (held or (bool(receipt.get("auto_resume")) or _stopped(receipt) if worker
+                                                       else receipt.get("state") == "waiting-capacity" or bool(receipt.get("result"))))
 
 
 def start(harness: str, call: dict, depth: str, cwd: str, worker: bool = False) -> dict | None:
@@ -506,11 +528,12 @@ def start(harness: str, call: dict, depth: str, cwd: str, worker: bool = False) 
 
 
 def _worker_command(command: str) -> str:
-    """The receipt's `capability-route.py start …` on the owner's launch release, as its allow rules name it."""
+    """The receipt's `capability-route.py start …` on the owner's launch release, as its allow rules name it (the
+    string the wait's own running receipt gives again: `work_start._advance_unit`)."""
     from parent_next_directive import worker_utility
     if Path((argv := shlex.split(command))[1]).name != "capability-route.py" or argv[2] != "start":
         raise ValueError(f"not a start command: {command}")
-    return f"{worker_utility(os.environ['AGENT_HOME'], 'capability-route.py')} {shlex.join(argv[2:])}"
+    return worker_utility(os.environ["AGENT_HOME"], "capability-route.py", command)
 
 
 def reason_for(receipt: dict, depth: str, harness: str = "", worker: bool = False) -> str:
@@ -522,11 +545,14 @@ def reason_for(receipt: dict, depth: str, harness: str = "", worker: bool = Fals
     if receipt.get("state") == "completed" and str(receipt.get("summary") or "").strip():
         return f"{head} It has already finished; its answer:\n{str(receipt['summary']).strip()}\nDo not call it again."
     ended, command = receipt.get("state") == "completed" or receipt.get("result"), receipt.get("resume_command")
+    if worker and _stopped(receipt):   # stopped before its answer: nothing to read and nothing to run
+        return f"{head} It has already ended with nothing to read. Do not call it again."
     if worker:   # no notice reaches a worker: the receipt's own command, in the form its allow rules let it run
         run = _worker_command(command if ended else receipt.get("parent_next_command") or command + " --wait")
         return (f"{head} It has already ended; read its result once with: {run} Do not call it again." if ended else
                 f"{head} No completion notice reaches a worker: run {run} to receive its answer. One run waits up to "
-                "ten minutes; while it brings no answer yet, run the same command again. Do not call the subagent again.")
+                "nine minutes; run it again only while its receipt says running and bounded-wait. Any other receipt "
+                "says why no answer came: read it. Do not call the subagent again.")
     if ended and str(command or "").strip():
         return f"{head} It has already ended; read its result once with: {command} Do not call it again."
     if ended or receipt.get("parent_next") == "end-turn":   # ended with no command to read it: a cancelled unit
@@ -552,7 +578,7 @@ def redirect(harness: str, payload: dict) -> str | None:
         if not os.path.isdir(cwd):
             return None
         require_shipped_definition(harness, call["name"] or DEFAULT_AGENT[harness], cwd)
-        require_sole_decision(harness, str(payload.get("tool_name") or ""), cwd, worker)
+        require_sole_decision(harness, str(payload.get("tool_name") or ""), cwd, worker, payload.get("permission_mode"))
     except BaseException:  # noqa: BLE001 -- any doubt or failure before the start lets the native call run
         return None
     try:

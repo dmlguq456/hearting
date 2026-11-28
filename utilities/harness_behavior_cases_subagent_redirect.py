@@ -67,9 +67,9 @@ Loaded by ``harness_behavior_scenarios.py`` (``_load_extra``).
     A supervised owner (quick, one session, started by compose, detached) calls its native subagent with the worker
     home's ``light`` name. The same hook, judging in the worker's home, starts it as a ``general/explore`` unit route
     below the owner's attempt; the call is refused with the wait in the form the owner's allow rules name, which the
-    owner runs (again while the receipt says the leg still runs) and which returns the answer (``Answer:``); a leg
-    that ended before the receipt was written brings the answer in the refusal itself (``answer_by``). No native
-    subagent request reaches the model. The times kept: the call to the refusal
+    owner runs (the receipt's own ``parent_next_command``, the same string, while it says the leg still runs) and
+    which returns the answer (``Answer:``); a leg that ended before the receipt was written brings the answer in the
+    refusal itself (``answer_by``). No native subagent request reaches the model. The times kept: the call to the refusal
     (``call_to_refusal_seconds``), to the leg's first request (``call_to_worker_request_seconds``) and to the wait
     result carrying the answer (``call_to_answer_seconds``). A Codex or OpenCode worker's call is not taken.
 
@@ -1076,9 +1076,12 @@ class SubagentRedirectWorkerScenario(OwnerCallsScenario):
                 command = re.search(r"run (\S.*? --wait) to receive its answer", last)
                 if not command:
                     return Reply("artifact: -\nverdict: BLOCKED\nblocker: no wait command came back")
+                ev["wait_command"] = command.group(1)
                 return Reply(shell=command.group(1))
-            if '"state": "running"' in last and '"parent_next": "bounded-wait"' in last and len(waits) < 8:
-                return Reply(shell=waits[-1])       # the window ended, the leg runs, the receipt says wait again
+            again = re.search(r'"parent_next_command": "([^"]+)"', last)
+            if '"state": "running"' in last and '"parent_next": "bounded-wait"' in last and again and len(waits) < 8:
+                ev.setdefault("receipt_commands", []).append(again.group(1))
+                return Reply(shell=again.group(1))   # the window ended, the leg runs: the receipt's own command
             self.marks.setdefault("answer", record["at"])
             ev.update(wait_result=last[-6000:], answer_by="wait")
             return Reply("artifact: -\nverdict: BLOCKED\nblocker: scenario probe only")
@@ -1168,6 +1171,7 @@ class SubagentRedirectWorkerScenario(OwnerCallsScenario):
                   and called.get("caller_attempt_id") == owner.get("attempt_id")
                   and ev.get("answer_by") in ("wait", "refusal")
                   and "Answer:" in ev.get("wait_result", "") and self.nonce in ev.get("wait_result", "")
+                  and all(again == ev.get("wait_command") for again in ev.get("receipt_commands", []))
                   and not self.native and not ev["leftover_processes"])
         return "pass" if ok else "fail"
 

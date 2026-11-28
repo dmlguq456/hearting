@@ -127,10 +127,12 @@ def entrypoint(agent_home, relative: str) -> str:
     return f"{root}/{relative}" if root else ""
 
 
-def worker_utility(agent_home, name: str) -> str:
+def worker_utility(agent_home, name: str, command: str = "") -> str:
     """A checked utility as a registered Claude worker's allow rules name it (`dispatch-headless.py`
-    `_allowlist_rules`, on its launch release), so a command built on it is one those rules let it run."""
-    return f"python3 {Path(str(agent_home)) / 'utilities' / name}"
+    `_allowlist_rules`, on its launch release), so a command built on it is one those rules let it run; given a
+    printed `<python> <root>/utilities/<name> …` command, that command on it (one string wherever it is printed)."""
+    utility = f"python3 {Path(str(agent_home)) / 'utilities' / name}"
+    return f"{utility} {shlex.join(shlex.split(command)[2:])}" if command else utility
 
 
 def registry_args(jobs) -> list[str]:

@@ -25,7 +25,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dispatch_contract  # noqa: E402
 import dispatch_lifecycle  # noqa: E402
+import dispatch_owner_input  # noqa: E402
 import native_subagent_redirect as redirect  # noqa: E402
+import owner_route_binding  # noqa: E402
 import session_identity  # noqa: E402
 
 SID = "native-subagent-session"
@@ -137,6 +139,28 @@ elif mode == "worker-closed":
         unit_attempt_id="att-x", result={"attempt_id": "att-x", "classification": "missing"},
         parent_next="bounded-wait", parent_next_command=CR + " start --route rt-0123456789abcdef --wait",
         resume_command=CR + " start --route rt-0123456789abcdef")
+elif mode == "worker-stopped":
+    # The leg registered and was stopped from Fleet before the first receipt (work_start's typed cancellation).
+    say(state="cancelled", unit_attempt_id="att-x", resume_command="", parent_next="inspect-receipt",
+        parent_next_command="", next_step="Inspect the unit cancellation receipt.",
+        result={"attempt_id": "att-x", "classification": "cancelled", "stopped": True, "required_action": "",
+                "recovery_command": ""})
+elif mode == "worker-cancelled":
+    # Its parent cancelled the registered leg; the stop is still settling (`termination-pending`).
+    say(state="termination-pending", unit_attempt_id="att-x", resume_command="", parent_next="inspect-receipt",
+        parent_next_command="", result={"attempt_id": "att-x", "classification": "pending",
+                                        "cancellation_requested": True, "state": "termination-pending",
+                                        "reason": "cancelled-by-parent", "required_action": "", "recovery_command": ""})
+elif mode == "worker-ended-at-once":
+    # The record-free leg stopped at once (`recorded_leg=False`): nothing follows an attempt, compose closed the route.
+    say(state="needs-attention", reason="unit-outcome-needs-inspection", unit_attempt_id="att-x",
+        result={"attempt_id": "att-x", "classification": "missing"}, parent_next="compose",
+        parent_next_command="cr compose ...", resume_command=CR + " start --route rt-0123456789abcdef")
+elif mode == "worker-finished":
+    # The leg ended before the receipt was written: its answer is in the receipt.
+    say(state="completed", unit_attempt_id="att-x", summary="Answer: the README says owner fixture (n0nce42)",
+        result={"attempt_id": "att-x", "classification": "success"}, parent_next="bounded-wait",
+        parent_next_command="", resume_command=CR + " start --route rt-0123456789abcdef")
 elif mode == "worker-registered":
     # The start raised after the adapter claimed a row: compose keeps that route open and the receipt its wait.
     say(state="needs-attention", reason="OSError", registered_attempts=["att-r"], parent_next="bounded-wait",
@@ -890,8 +914,10 @@ RECEIPT_CR = "/usr/bin/python3 /opt/hearting/current/utilities/capability-route.
 OWN = f"python3 {ROOT / 'utilities' / 'capability-route.py'}"                       # as the owner's allow rules name it
 WORKER_LINE = (f"Started as Hearting unit route {RID} (general/explore, light, no record). No completion notice "
                f"reaches a worker: run {OWN} start --route {RID} --jobs /s/jobs.log --wait to receive its answer. "
-               "One run waits up to ten minutes; while it brings no answer yet, run the same command again. "
-               "Do not call the subagent again.")
+               "One run waits up to nine minutes; run it again only while its receipt says running and bounded-wait. "
+               "Any other receipt says why no answer came: read it. Do not call the subagent again.")
+STOPPED_LINE = (f"Started as Hearting unit route {RID} (general/explore, light, no record). It has already ended with "
+                "nothing to read. Do not call it again.")
 
 
 @functools.cache
@@ -911,10 +937,11 @@ def allows(rules, command):
 
 
 class WorkerTest(Homes):
-    """The one worker whose call is taken (K, first fix): a live Claude owner the session supervisor runs detached,
-    proven by its registry row and the Claude session it announced, on a route sealing no native stage fallback,
-    whose own launch lets it run the wait it is told. Every other caller inside dispatch, and a start that holds
-    nothing once compose closed its route, stays native."""
+    """The one worker whose call is taken (K, second fix): a live Claude owner the session supervisor runs detached,
+    still on its launch route, proven by its registry row and the Claude session its supervisor bound to that
+    attempt, on a route sealing no native stage fallback, whose own launch and current mode let it run the wait it is
+    told with nothing else deciding Bash. Every other caller inside dispatch, and a start that holds nothing once
+    compose closed its route, stays native; a registered leg that was stopped is refused as ended."""
 
     def setUp(self):
         super().setUp()
@@ -922,8 +949,7 @@ class WorkerTest(Homes):
         self.fake.mkdir()
         (self.fake / "capability-route.py").write_text(FAKE_ROUTE)
         self.record = self.fake / "record.jsonl"
-        self.route = self.write(self.tmp / "route.json", json.dumps(
-            {"route_id": RID, "capability": "autopilot-code", "nodes": [{"id": "one-shot"}]}))
+        self.route = self.write(self.tmp / "route.json", json.dumps(self.route_doc()))
         self.log = self.write(self.tmp / "owner.jsonl", json.dumps(
             {"type": "dispatch.supervisor.session", "parent_attempt_id": "att-owner-1", "session_id": SID,
              "cwd": str(self.project)}) + "\n")
@@ -940,13 +966,16 @@ class WorkerTest(Homes):
                                           side_effect=lambda meta: mock.Mock(state=self.live)),
                         mock.patch.object(dispatch_lifecycle, "select_launch_lifecycle",
                                           side_effect=lambda *a, **k: self.lifecycle),
-                        mock.patch.object(redirect, "_harness_argv", return_value=self.argv())):
+                        mock.patch.object(redirect, "_harness_argv", return_value=self.argv()),
+                        # The fixture's route files are not sealed by the compiler; the lifecycle reads them as they are.
+                        mock.patch.object(owner_route_binding.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw)):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.addCleanup(self.end)
         self.ship("claude", "light")
         self.register("claude")
-        self.payload = {**claude(subagent_type="light"), "cwd": str(self.project)}
+        self.bind()
+        self.payload = {**claude(subagent_type="light"), "cwd": str(self.project), "permission_mode": "bypassPermissions"}
 
     def end(self):
         pid = Path(str(self.record) + ".pid")
@@ -956,15 +985,28 @@ class WorkerTest(Homes):
             except OSError:
                 pass
 
-    def row(self, status="running", **changes):
-        """The owner's registry row as its launch writes it (a value of None leaves the field out)."""
-        fields = {"attempt_id": "att-owner-1", "attempt_schema_version": "2", "dispatch_depth": "1",
+    def route_doc(self, route_id=RID, **changes):
+        """A route as the owner's launch binds it (its id, hash and the work it is on)."""
+        return {"route_id": route_id, "route_hash": "sha256:" + route_id, "capability": "autopilot-code",
+                "capability_mode": "dev", "cwd": "/w", "artifact_root": str(self.tmp / "artifacts"),
+                "nodes": [{"id": "one-shot"}], **changes}
+
+    def row(self, status="running", attempt="att-owner-1", **changes):
+        """The owner's registry row as a one-shot launch writes it, with no route binding (a value of None leaves the
+        field out)."""
+        fields = {"attempt_id": attempt, "attempt_schema_version": "2", "dispatch_depth": "1",
                   "worker_type": "owner", "harness": "claude", "transport": "headless",
                   "execution_surface": "registered-headless", "registered_worker": "1",
                   "fallback_hop": "same-harness-headless", "launch_lifecycle": "detached", "route_id": RID,
-                  "log_file": str(self.log), **changes}
+                  "route_hash": "sha256:" + RID, "log_file": str(self.log), **changes}
         meta = ",".join(f"{key}={value}" for key, value in fields.items() if value is not None)
         self.write(self.jobs, f"2026-11-28T00:00:00Z\t{status}\t/w\t/w\towner\t{meta}\n")
+
+    def bind(self, session=SID, attempt="att-owner-1"):
+        """The owner's input channel as its supervisor binds it before the first turn (`OwnerInput`: the Claude
+        session id, for this exact attempt and row)."""
+        dispatch_owner_input._path(self.jobs, attempt).unlink(missing_ok=True)
+        dispatch_owner_input.OwnerInput(self.jobs, attempt, session, "claude-next-turn", lambda *_: None)
 
     def rules(self):
         return headless()._allowlist_rules(ROOT, self.project, self.tmp / "artifacts", "owner")
@@ -1016,7 +1058,7 @@ class WorkerTest(Homes):
         self.assertEqual(self.records(), [])
 
     def test_who_is_not_the_supervised_owner_stays_native(self):
-        route = {"route_id": RID, "capability": "autopilot-code", "nodes": [{"id": "one-shot"}]}
+        route = self.route_doc()
         cases = (
             ("another Claude session in the owner's environment", {"payload": {"session_id": "another-session"}}),
             ("a row that has ended", {"status": "done"}),
@@ -1033,15 +1075,18 @@ class WorkerTest(Homes):
             ("a foreground-scoped owner", {"fields": {"launch_lifecycle": "foreground-scoped"}}),
             ("a leg that would launch foreground-scoped", {"lifecycle": "foreground-scoped"}),
             ("an unsupervised worker", {"env": {"AGENT_DISPATCH_COMPLETION_MODE": "poll"}}),
-            ("no session announced", {"fields": {"log_file": str(self.tmp / "missing.jsonl")}}),
+            ("no session its supervisor bound", {"unbind": True}),
             ("a native subagent inside it", {"payload": {"agent_id": "a-1"}}))
         for label, case in cases:
             self.write(self.route, json.dumps({**route, **case.get("route", {})}))
             self.write(self.jobs, "") if "row" in case else self.row(case.get("status", "running"), **case.get("fields", {}))
             self.live, self.lifecycle = case.get("live", "live"), case.get("lifecycle", "detached")
+            if case.get("unbind"):
+                dispatch_owner_input._path(self.jobs, "att-owner-1").unlink()
             with self.subTest(label), mock.patch.dict(os.environ, case.get("env", {})):
                 self.assertIsNone(redirect.redirect("claude", {**self.payload, **case.get("payload", {})}))
         self.assertEqual(self.records(), [])
+        self.bind()
         with self.assertRaises(redirect.Skip):
             redirect.caller("codex", codex(agent_type="light"), SID)  # a Codex worker's launch adds `-c` layers
         self.write(self.route, json.dumps(route))
@@ -1053,8 +1098,7 @@ class WorkerTest(Homes):
         hop = {"ordinal": 3, "fallback_hop": "native-subagent", "fleet_visibility": "degraded", "candidates": [
             {"harness": "claude", "transport": "headless", "execution_surface": "claude-subagent",
              "registered_worker": False, "status": "supported", "check_source": "fixture"}]}
-        route = {"route_id": RID, "capability": "autopilot-code",
-                 "nodes": [{"id": "impl-review", "dispatch_depth": 2, "fallback_hops": [hop]}]}
+        route = self.route_doc(nodes=[{"id": "impl-review", "dispatch_depth": 2, "fallback_hops": [hop]}])
         review = {**self.payload, "tool_input": {"description": "Review the change", "prompt": "Review the diff.",
                                                  "subagent_type": "general-purpose"}}
         lookup = {**self.payload, "tool_input": {"description": "Find the README purpose",
@@ -1071,7 +1115,7 @@ class WorkerTest(Homes):
     def test_a_start_that_holds_nothing_runs_natively_once(self):
         # A leg stopped at a usage limit right after its registration, and the governor's own refusal: compose
         # closed both routes, so the native call runs, and the hook neither starts again nor closes anything.
-        for mode in ("worker-closed", "worker-capacity"):
+        for mode in ("worker-closed", "worker-capacity", "worker-ended-at-once"):
             with self.subTest(mode), mock.patch.dict(os.environ, {"FAKE_MODE": mode}):
                 before = len(self.records())
                 self.assertIsNone(redirect.redirect("claude", self.payload))
@@ -1083,14 +1127,137 @@ class WorkerTest(Homes):
             self.assertIn(f"run {OWN} start --route {RID} --wait to receive its answer.",
                           redirect.redirect("claude", self.payload))
 
+    def test_only_the_session_its_supervisor_bound_to_this_attempt_is_the_owner(self):
+        # The attempt log's head proves nothing: a complete control line whose newline lies past the 64 KiB a reader
+        # takes, an announcement naming another attempt or missing its fields. The proof is the session the
+        # supervisor bound to this exact attempt and row (`dispatch_owner_input.bound_input_thread`).
+        event = {"type": "dispatch.supervisor.session", "parent_attempt_id": "att-owner-1", "session_id": SID,
+                 "cwd": str(self.project)}
+        line = json.dumps(event)
+
+        def control(pad):
+            return json.dumps({"type": "dispatch.supervisor.continuation-budget", "pad": "x" * pad}) + "\n"
+        head = control(65536 - 8 - len(control(0)) - len(line)) + line
+        self.assertEqual(len(head.encode()), 65528)                      # the line is whole inside the head ...
+        cut = head + " " * 32 + "\n"                                     # ... and its newline lies past it
+        self.row(attempt="att-other")
+        other = self.jobs.read_text()
+        self.row()
+        self.write(self.jobs, self.jobs.read_text() + other)
+        dispatch_owner_input.OwnerInput(self.jobs, "att-other", SID, "claude-next-turn", lambda *_: None)
+        mine, theirs = dispatch_owner_input._path(self.jobs, "att-owner-1"), dispatch_owner_input._path(self.jobs, "att-other")
+        self.bind()
+        bound = mine.read_text()
+        unbound = json.loads(bound) | {"thread_id": dispatch_owner_input.PLACEHOLDER_THREAD}
+        unbound.pop("generation")
+        for label, log, state in (
+                ("a whole control line whose newline lies past the head, no binding", cut, None),
+                ("an announcement naming another attempt, and its binding", line.replace("att-owner-1", "att-other") + "\n",
+                 theirs.read_text()),
+                ("an announcement missing its fields, and no session bound yet",
+                 json.dumps({"type": "dispatch.supervisor.session", "session_id": SID}) + "\n", json.dumps(unbound)),
+                ("a binding that cannot be read", line + "\n", "{")):
+            self.write(self.log, log)
+            mine.unlink(missing_ok=True)
+            if state is not None:
+                self.write(mine, state)
+            with self.subTest(label):
+                self.assertIsNone(redirect.redirect("claude", self.payload))
+        self.assertEqual(self.records(), [])
+        self.write(self.log, line + "\n")
+        self.write(mine, bound)                                           # the supervisor's own binding: taken
+        self.assertEqual(redirect.redirect("claude", self.payload), WORKER_LINE)
+        self.assertEqual(len(self.records()), 1)
+
+    def test_a_decision_on_the_owner_s_bash_or_another_mode_keeps_the_call_native(self):
+        # A rule or hook that decides the Bash the wait runs, or a mode the call does not run in, means the owner
+        # could not run its wait: the call stays native. Hooks on every tool are not counted (#1949), and Hearting's
+        # own hook on Bash lets a worker through (`route_presence_gate.exempt_session`).
+        accept = self.argv(mode="acceptEdits")
+        guard = {"matcher": "Bash", "hooks": [{"type": "command", "command": "my-bash-guard", "timeout": 5}]}
+        for label, groups, permissions, mode in (
+                ("a deny rule whose tool-name glob takes Bash", [], {"deny": ["Ba*"]}, "acceptEdits"),
+                ("an ask rule whose tool-name glob takes Bash", [], {"ask": ["Ba*"]}, "acceptEdits"),
+                ("a hook that names Bash", [guard], None, "acceptEdits"),
+                ("a hook whose pattern takes Bash", [{**guard, "matcher": "B.sh"}], None, "acceptEdits"),
+                ("the call runs in plan mode", [], None, "plan"),
+                ("its mode cannot be read", [], None, None)):
+            settings = {"hooks": {"PreToolUse": [ours("claude"), *groups]},
+                        **({"permissions": permissions} if permissions else {})}
+            self.write(self.claude_home / "settings.json", json.dumps(settings))
+            payload = {key: value for key, value in self.payload.items() if key != "permission_mode"}
+            with self.subTest(label), mock.patch.object(redirect, "_harness_argv", return_value=accept):
+                self.assertIsNone(redirect.redirect("claude", {**payload, **({"permission_mode": mode} if mode else {})}))
+        self.assertEqual(self.records(), [])
+        hearting = json.loads((ROOT / "adapters" / "claude" / "settings.json").read_text())["hooks"]["PreToolUse"]
+        every = {"matcher": "*", "hooks": [{"type": "command", "command": "my-every-tool-hook"}]}
+        self.write(self.claude_home / "settings.json", json.dumps({"hooks": {"PreToolUse": [*hearting, every]},
+                                                                  "permissions": {"deny": ["Bas"], "ask": ["Read"]}}))
+        with mock.patch.object(redirect, "_harness_argv", return_value=accept):
+            self.assertEqual(redirect.redirect("claude", {**self.payload, "permission_mode": "acceptEdits"}), WORKER_LINE)
+        self.assertEqual(len(self.records()), 1)
+
+    def test_a_route_the_owner_has_moved_on_from_keeps_the_call_native(self):
+        # An owner bound to its launch route adopts a continuation that seals a native stage fallback; its environment
+        # still names the launch route. Before a child adopts the successor the call is taken; after, it stays native
+        # (the lifecycle's current route, `owner_route_binding.resolve_owner_route_lifecycle`). A binding whose route
+        # cannot be read settles nothing: native. A one-shot owner with no binding has nothing to adopt (the others).
+        self.row(owner_route_file=str(self.tmp / "missing.json"), owner_route_id=RID, owner_route_hash="sha256:" + RID)
+        self.bind()
+        self.assertIsNone(redirect.redirect("claude", self.payload))
+        self.assertEqual(self.records(), [])
+        self.row(owner_route_file=str(self.route), owner_route_id=RID, owner_route_hash="sha256:" + RID)
+        self.bind()
+        hop = {"ordinal": 3, "fallback_hop": "native-subagent", "candidates": [
+            {"harness": "claude", "execution_surface": "claude-subagent", "status": "supported"}]}
+        successor = self.route_doc("rt-1111111111111111", advance_generation=1, owner_attempt_id="att-owner-1",
+                                   source_route_id=RID, source_route_hash="sha256:" + RID,
+                                   source_route_supersession={"from_route_id": RID, "from_route_hash": "sha256:" + RID},
+                                   nodes=[{"id": "impl-review", "dispatch_depth": 2, "fallback_hops": [hop]}])
+        later = self.write(self.tmp / "route-2.json", json.dumps(successor))
+        binding = owner_route_binding.OwnerRouteBinding
+        owner_route_binding.publish_owner_route_advance(
+            self.jobs, owner_attempt_id="att-owner-1", source=binding(str(self.route), RID, "sha256:" + RID),
+            target=binding(str(later), successor["route_id"], successor["route_hash"]), from_generation=0, to_generation=1)
+        self.assertIn("(general/explore, light, no record)", redirect.redirect("claude", self.payload))
+        child = {"attempt_id": "att-child-1", "parent_attempt_id": "att-owner-1", "attempt_schema_version": "2",
+                 "dispatch_depth": "2", "registered_worker": "1", "execution_surface": "registered-headless",
+                 "worker_type": "stage", "route_file": str(later), "route_id": successor["route_id"],
+                 "route_hash": successor["route_hash"], "route_node": "impl-review", "capability": "autopilot-code",
+                 "capability_mode": "dev", "artifact_root": successor["artifact_root"], "launch_started": "1"}
+        self.write(self.jobs, self.jobs.read_text() + "2026-11-28T00:00:01Z\topen\t/w\t/w\tchild\t"
+                   + ",".join(f"{key}={value}" for key, value in child.items()) + "\n")
+        self.assertEqual(owner_route_binding.default_owner_route_file(), str(later.resolve()))
+        self.assertIsNone(redirect.redirect("claude", self.payload))
+        self.assertEqual(len(self.records()), 1)
+
+    def test_a_registered_leg_that_was_stopped_is_refused_as_ended(self):
+        # Stopped from Fleet after its registration, or cancelled by its parent: that stop stands. The call is refused
+        # with the stopped line before any command is built (the receipt has none), and nothing runs natively.
+        for mode in ("worker-stopped", "worker-cancelled"):
+            with self.subTest(mode), mock.patch.dict(os.environ, {"FAKE_MODE": mode}):
+                before = len(self.records())
+                self.assertEqual(redirect.redirect("claude", self.payload), STOPPED_LINE)
+                self.assertEqual(len(self.records()), before + 1)
+
+    def test_a_leg_that_had_already_finished_answers_in_the_refusal(self):
+        # The receipt already holds the answer: the refusal carries it, the owner is given no command to run (no Bash
+        # call), and the native call is refused (no native request).
+        with mock.patch.dict(os.environ, {"FAKE_MODE": "worker-finished"}):
+            line = redirect.redirect("claude", self.payload)
+        self.assertIn("It has already finished; its answer:\nAnswer: the README says owner fixture (n0nce42)", line)
+        self.assertNotIn("capability-route.py", line)
+        self.assertNotIn(" run ", line)
+        self.assertEqual(len(self.records()), 1)
+
     def test_the_worker_launch_s_own_layers_decide_nothing(self):
         import dispatch_terminal_commit
-        redirect.require_sole_decision("claude", "Agent", str(self.project), True)
+        redirect.require_sole_decision("claude", "Agent", str(self.project), True, "bypassPermissions")
         with self.assertRaises(redirect.Skip):
             redirect.require_sole_decision("claude", "Agent", str(self.project))   # a session's judgment as before
         with mock.patch.object(dispatch_terminal_commit, "load_active_cleanup_scope", return_value=object()), \
                 self.assertRaises(redirect.Skip):                    # the park hook refuses in the terminal cleanup
-            redirect.require_sole_decision("claude", "Agent", str(self.project), True)
+            redirect.require_sole_decision("claude", "Agent", str(self.project), True, "bypassPermissions")
 
     def test_a_launch_layer_that_could_decide_the_call_keeps_it_native(self):
         (self.tmp / "with-claude" / ".claude").mkdir(parents=True)
@@ -1111,9 +1278,9 @@ class WorkerTest(Homes):
     def test_the_owner_s_line_names_a_command_it_may_run_and_says_to_repeat_the_wait(self):
         running = {"route_id": "rt-1", "state": "running", "parent_next": "end-turn",
                    "resume_command": f"{RECEIPT_CR} start --route rt-1"}
-        self.assertIn(f"run {OWN} start --route rt-1 --wait to receive its answer. One run waits up to ten minutes; "
-                      "while it brings no answer yet, run the same command again.",
-                      redirect.reason_for(running, "light", "claude", worker=True))
+        self.assertIn(f"run {OWN} start --route rt-1 --wait to receive its answer. One run waits up to nine minutes; "
+                      "run it again only while its receipt says running and bounded-wait. Any other receipt says why "
+                      "no answer came: read it.", redirect.reason_for(running, "light", "claude", worker=True))
         ended = {"route_id": "rt-1", "state": "completed", "resume_command": f"{RECEIPT_CR} start --route rt-1"}
         self.assertEqual(redirect.reason_for(ended, "light", "claude", worker=True),
                          "Started as Hearting unit route rt-1 (general/explore, light, no record). It has already "

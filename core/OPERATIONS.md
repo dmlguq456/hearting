@@ -1729,10 +1729,12 @@ taken it waits in Hearting's queue and does not fall back to the native call, an
 after that comes back through the existing wait and notices. Without a receipt saying Hearting holds the call the
 native call runs, and the hook leaves every start it began to finish; a hook ended from outside between the
 registration and its line, or a compose that fails after registering without such a receipt, can leave both running. One worker
-form is taken the same way, judged in its own home: a live Claude owner the session supervisor runs detached, proven by its
-registry row and the Claude session it announced, on a route sealing no native stage fallback, whose launch lets it run
-the wait its line gives (repeated until the answer comes); a start whose route compose closed runs natively
-(`capabilities/unit.md`, A worker that starts a unit route). Every other worker (stage, review, sub-session,
+form is taken the same way, judged in its own home: a live Claude owner the session supervisor runs detached, still on its
+launch route, proven by its registry row and the Claude session its supervisor bound to that attempt, on a route sealing no
+native stage fallback, whose launch and current mode let it run the wait its line gives with nothing else deciding Bash; it
+runs that wait again only while the receipt says the leg still runs, and the receipt gives the same string. A start whose
+route compose closed runs natively; a registered leg that was stopped is refused as ended (`capabilities/unit.md`, A worker
+that starts a unit route). Every other worker (stage, review, sub-session,
 foreground-scoped, a unit route's leg, Codex), a call inside a native subagent and every OpenCode subagent call run natively.
 
 A registered worker (owner, stage worker or unit worker) may open a unit route too. Its leg is a depth-1 leg of
