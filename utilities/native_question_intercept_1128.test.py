@@ -137,6 +137,20 @@ class SameQuestionTest(Base):
                     self.assertEqual(self.open_ids(harness), [cli["id"]])
                     self.done(harness)
 
+    def test_a_native_question_asked_again_on_the_cli_is_that_question(self):
+        """The descriptions travel in their own field (#1908), so the native record's text is the
+        question itself and the CLI's own same-question check finds it."""
+        for harness in HARNESSES:
+            for when in ("this prompt", "next prompt"):
+                with self.subTest(harness=harness, when=when):
+                    native = self.the_id(redirect.decide(harness, payloads()[harness]))
+                    if when == "next prompt":
+                        self.next_prompt(harness)
+                    cli, _ = self.f.ask(harness, SID, text="Start now?", choices=["Proceed", "Edit", "Stop"])
+                    self.assertEqual(cli["id"], native)
+                    self.assertEqual(self.open_ids(harness), [native])
+                    self.done(harness)
+
     def test_an_earlier_native_record_with_its_descriptions_in_the_text_is_the_same(self):
         # what the builder wrote before #1908 moved the descriptions to `choice_descriptions`
         earlier = "Start now?\n- Proceed: Start the work\n- Edit: Change the plan\n- Stop: Do not start"
