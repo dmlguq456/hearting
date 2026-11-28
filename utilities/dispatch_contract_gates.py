@@ -26,7 +26,7 @@ from session_identity import session_label
 from route_identity import registered_node_identity
 from dispatch_attempt_policy import committed_outcome, verdict_pass, terminal_conflict_pending
 from route_authority import depth1_supported_harnesses
-from route_form import one_shot_review_route
+from route_form import one_shot_review_route, one_shot_test_node
 from stage_session_contract import load_manifest
 
 from dispatch_contract_base import (
@@ -630,6 +630,15 @@ def completion_marker_gate(
         )
         if readiness.state != "ready":
             blocked.append((dep, readiness))
+    test = one_shot_test_node(route)
+    if test is not None and route_node == test["id"]:
+        # The middle cell's test judges the work its reviews passed: each review needs its current, exact PASS (the
+        # judgment `Next ready` makes), so a pass kept from before the owner's last change never starts it. A team
+        # route's test still proceeds past a superseded predecessor, as above.
+        waiting = {dep for dep, _readiness in blocked}
+        missing += [dep for dep in _route_module().owner_terminal_prerequisites(
+            route, node, jobs or (resolve_dispatch_state_root(agent_home) / "jobs.log"),
+            registry_lines=registry_lines) if dep not in missing and dep not in waiting]
     if missing:
         # A marker beside a resource stage that is not current names its own step (never `revise`).
         raise DispatchContractError(

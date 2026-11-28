@@ -3168,18 +3168,23 @@ def main(argv: list[str] | None = None) -> int:
                 producer_generation=producer_generation,
                 current_attempt_ids=producer_current_attempt_ids))
 
-        if reusable_peers and not (route.get("capability") == "autopilot-design"
-                                   and args.parallel_group == "visual-verify"):
+        solo_review_group = bool(reusable_peers) and not (route.get("capability") == "autopilot-design"
+                                                          and args.parallel_group == "visual-verify")
+        if solo_review_group:
             # A solo review group reuses a passed leg only when no sealed batch of it was left unfinished. A
             # start cut short (a member reserved but never claimed, or absent from the registry) is resumed
             # whole, as it was before a passed leg could be reused. Look for that batch first, and reuse the
             # passed leg only when there is none.
+            def unfinished_probe(preview):
+                return unfinished_for(admit_pending({}, preview=preview)[0], {}) is not None
             try:
-                probe_admissions, _ = admit_pending({}, preview=True)
-                unfinished_probe = unfinished_for(probe_admissions, {})
-            except BatchError:
-                unfinished_probe = None
-            if unfinished_probe is not None:
+                resume_whole = unfinished_probe(True)
+            except (BatchError, DispatchContractError, DISPATCH_NODE.DispatchNodeError, ValueError, OSError,
+                    subprocess.SubprocessError):
+                # A preview that could not read the history has shown nothing: the real read looks for that batch
+                # (its own failure is what `main` reports), and the passed legs stay reused when it finds none.
+                resume_whole = unfinished_probe(False)
+            if resume_whole:
                 reusable_peers = {}
         round_admissions, round_errors = admit_pending(reusable_peers)
         replay_budget_errors = []
@@ -3215,6 +3220,14 @@ def main(argv: list[str] | None = None) -> int:
                 frozenset() if next_generation else admission.current_attempt_ids)
             for admission in round_admissions.values()
         )) | producer_historical_attempts
+        if solo_review_group and reusable_peers:
+            # A solo review group's start that reuses passed legs continues their sealed batch: its other members
+            # (a leg that ended without a verdict) are known prior bindings of the legs it starts anew, not
+            # unproven ones. Another group's start (design's `visual-verify`) keeps its own binding proof.
+            historical_batch_attempts |= frozenset(
+                str(member.get("attempt_id")) for peer in reusable_peers.values()
+                for member in peer["manifest"].get("members", ())
+                if str(member.get("route_node")) not in reusable_peers)
         prior_input = unfinished_input or (None if partial is not None or reusable_peers else prior_batch_input(
             jobs, route, nodes, args.parallel_group,
             os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", ""), args.prompt_text,
