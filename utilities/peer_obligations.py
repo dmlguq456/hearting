@@ -1920,9 +1920,18 @@ def _current_session_notice_bindings(message):
     matches = list(_session_notice_delivery_bindings(message))
     count = 1 if binding.get("schema") == "retained-runtime-notice-v1" else len(binding.get("records") or ())
     import session_notice
+
+    def answer_current(record):
+        # The same first-write permission the native queue checks for an answer.
+        if "answer_binding" not in record["receipt"]:
+            return True
+        import human_wait_state
+        return human_wait_state.message_answer_submission_current(record["receipt"]["answer_binding"])
+
     if (not matches or len(matches) != count
             or any(record.get("state") not in pending.OPEN_STATES
                    or not session_notice.notice_is_current(record)
+                   or not answer_current(record)
                    or record_recipient_binding(record, storage, harness=recipient.get("harness"))
                       != (recipient.get("harness"), recipient.get("session_id"))
                    for _store, _duty, record, _root, storage, _delivery in matches)):
