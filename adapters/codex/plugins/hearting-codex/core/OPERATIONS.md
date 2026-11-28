@@ -3166,8 +3166,8 @@ concurrent starts cannot claim the same shell or subdivide a stale layout.
 Names longer than Herdr's 32-character limit are explained before any placement
 or launch action, so a refused name leaves no extra pane.
 A start that opened its pane by splitting a pane of the reference tab then
-arranges that tab once with the same `pane tidy` arrangement, after it releases the
-workspace claim (tidy takes it itself); an already matching grid moves nothing.
+arranges that tab once with the same `pane tidy` arrangement inside its own
+workspace claim (tidy re-enters it); an already matching grid moves nothing.
 Its outcome ends the same receipt line as `layout=tidied|unchanged|unconfirmed:<note>`,
 and a tidy that cannot run leaves the start result as it is. The new pane's
 split-cwd and launcher preparation finish under one fixed

@@ -110,15 +110,16 @@ class StartArrangesItsTabTest(_Isolated):
                               "--cwd", str(self.tmp)])
         return code, output.getvalue().strip().splitlines()
 
-    def test_a_split_start_arranges_the_callers_tab_once_after_its_claim(self):
+    def test_a_split_start_arranges_the_callers_tab_once_inside_its_claim(self):
         code, lines = self.start()
         self.assertEqual(code, 0, lines)
         self.assertEqual(len(lines), 1, lines)  # still the one receipt line
         self.assertTrue(lines[0].startswith("started=true agent=codex name=new pane=w1:pNew"), lines)
         self.assertTrue(lines[0].endswith(" layout=tidied"), lines)
         (near, held), = self.tidies
-        self.assertEqual((near.pane, near.surface.name, held), ("w1:pOld", "herdr", []))
-        self.assertEqual(self.events, [("lock", "w1"), ("unlock", "w1"), ("tidy", "w1:pOld")])
+        # Inside the start's own claim (tidy re-enters it): no other start reads the layout between.
+        self.assertEqual((near.pane, near.surface.name, held), ("w1:pOld", "herdr", ["w1"]))
+        self.assertEqual(self.events, [("lock", "w1"), ("tidy", "w1:pOld"), ("unlock", "w1")])
 
     def test_an_arranged_or_refused_tidy_reports_once_and_keeps_the_start(self):
         for result, line in (
@@ -145,14 +146,11 @@ class StartArrangesItsTabTest(_Isolated):
     def test_a_tmux_start_uses_the_same_tidy(self):
         surface = SimpleNamespace(name="tmux")
         args = SimpleNamespace(placement="split", beside="%3@/tmp/tmux-fixture/default")
-        with contextlib.redirect_stdout(io.StringIO()) as output:
-            code = peer._start_then_tidy(args, surface, "fixture-session", lambda: print(
-                "started=true agent=claude name=x pane=%4@/tmp/tmux-fixture/default surface=tmux") or 0)
-        self.assertEqual(code, 0)
-        (near, held), = self.tidies
-        self.assertEqual((near.surface, near.pane, held), (surface, args.beside, []))
-        self.assertEqual(output.getvalue().strip(), "started=true agent=claude name=x "
-                         "pane=%4@/tmp/tmux-fixture/default surface=tmux layout=tidied")
+        self.assertEqual(peer._tidy_after_start(args, True, surface), " layout=tidied")
+        (near, _held), = self.tidies
+        self.assertEqual((near.surface, near.pane), (surface, args.beside))
+        tmux_receipt = Path(peer.__file__).read_text().split("def _tmux_started", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn("_tidy_after_start(args, True, surface)", tmux_receipt)
 
     def test_the_start_target_records_its_window_server(self):
         recorded = []

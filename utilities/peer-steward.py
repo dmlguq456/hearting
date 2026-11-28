@@ -1759,49 +1759,27 @@ def _start_request(args):
         return _start_in_pane(args)
     # Hold the workspace claim until native start settles, including shell reuse.
     # A second start then reads the new layout instead of splitting the old cell.
-    return _start_then_tidy(args, _herdr_surface(), workspace, lambda: _start_in_pane(args))
+    with terminal_surface.workspace_lock(_herdr_surface(), workspace):
+        return _start_in_pane(args)
 
 
-def _start_then_tidy(args, surface, workspace, start):
-    """Run ``start`` under the workspace claim, then arrange the tab it split.
+def _tidy_after_start(args, started, surface):
+    """`` layout=...`` for the receipt of a start that split a pane of the reference tab.
 
-    The arrangement is the same `pane tidy`, run after the claim is released (tidy
-    takes it itself) and only when this start opened its pane by splitting a pane of
-    that tab. Its outcome ends the one receipt line as ``layout=tidied|unchanged|
-    unconfirmed:<note>``; a tidy that cannot run leaves the start result as it is."""
-    import io
-    output = io.StringIO()
-    try:
-        with terminal_surface.workspace_lock(surface, workspace), contextlib.redirect_stdout(output):
-            code = start()
-    except BaseException:
-        print(output.getvalue(), end="")
-        raise
-    text, layout = output.getvalue(), _tidy_after_start(args, code, surface)
-    if layout:
-        lines = text.splitlines(keepends=True)
-        for index in range(len(lines) - 1, -1, -1):
-            if lines[index].startswith("started="):
-                end = "\n" if lines[index].endswith("\n") else ""
-                lines[index] = lines[index].rstrip("\n") + " " + layout + end
-                break
-        text = "".join(lines)
-    print(text, end="")
-    return code
-
-
-def _tidy_after_start(args, code, surface):
-    """``layout=...`` for a start that split a pane of the reference tab, else ``""``."""
-    if code != 0 or getattr(args, "placement", None) != "split" or not args.beside:
+    The arrangement is the same `pane tidy`, run once inside the start's own workspace
+    claim (tidy re-enters it), so no other start reads the layout in between. Its
+    outcome ends the one receipt line as ``layout=tidied|unchanged|unconfirmed:<note>``;
+    a tidy that cannot run leaves the start result as it is."""
+    if not started or getattr(args, "placement", None) != "split" or not args.beside:
         return ""
     try:
         result = terminal_surface.tidy_panes(
             near=terminal_surface.Near(surface, pane=args.beside, same_tab=True))
     except Exception as exc:  # noqa: BLE001 - the started session stays as it is
-        return f"layout=unconfirmed:pane-tidy-unconfirmed:{type(exc).__name__}"
+        return f" layout=unconfirmed:pane-tidy-unconfirmed:{type(exc).__name__}"
     if result.notes:
-        return f"layout=unconfirmed:{result.notes[0]}"
-    return "layout=tidied" if result.changed else "layout=unchanged"
+        return f" layout=unconfirmed:{result.notes[0]}"
+    return " layout=tidied" if result.changed else " layout=unchanged"
 
 
 def _start_tmux_request(args):
@@ -1824,7 +1802,8 @@ def _start_tmux_request(args):
         print(f"started=false reason=pane-layout-unavailable agent={args.kind} name={args.name} "
               f"pane={args.pane or '-'}")
         return 1
-    return _start_then_tidy(args, surface, workspace, lambda: _start_in_tmux(args, surface))
+    with terminal_surface.workspace_lock(surface, workspace):
+        return _start_in_tmux(args, surface)
 
 
 def _start_in_tmux(args, surface):
@@ -1943,7 +1922,8 @@ def _tmux_started(args, surface, agent, start_verify, cwd_note):
           f"permission_mode={mode} session_id={sid or '-'} managed={managed}"
           + (f" ready=false reason={trust_wait}" if trust_wait else "")
           + cwd_note + " surface=tmux"
-          + (f" start_verify={start_verify}" if start_verify else ""))
+          + (f" start_verify={start_verify}" if start_verify else "")
+          + _tidy_after_start(args, True, surface))
     return 0
 
 
@@ -2195,6 +2175,7 @@ def _start_in_pane(args):
         + (f" tui_scoped={tui_scoped}" if tui_scoped else "")
         + (f" start_verify={start_verify}" if start_verify else "")
         + (f" placement=project-workspace workspace={workspace}" if workspace else "")
+        + _tidy_after_start(args, started, _herdr_surface())
     )
     return 0 if started else 1
 
