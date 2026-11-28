@@ -662,9 +662,9 @@ def _observe_role(harness: str, session_id: str) -> dict:
                              if t_sid else "unknown"),
                 **({"unresolved": True} if target.get("unresolved") else {}),
                 "owed": _pending_count(module, t_harness, t_sid)})
-        try:  # `_role_flagged` from the rows, targets and end observation already read
-            flagged = bool(collector.role_flag(harness, session_id, sessions=rows, _targets=resolved,
-                                               observation=observation))
+        try:  # `_role_flagged` from what is already read; no targets, no flag question
+            flagged = bool(resolved) and bool(collector.role_flag(
+                harness, session_id, sessions=rows, _targets=resolved, observation=observation))
         except Exception:  # noqa: BLE001 - an unknown flag adds nothing
             flagged = False
     _lengthen_shared_prefixes(targets)
@@ -747,42 +747,24 @@ def _label(name: str) -> str:
 
 
 def waiting_targets(observation: dict, waiting_since=None, now: float | None = None,
-                    *, style="check", exclude=()) -> list[str]:
+                    *, style="check") -> list[str]:
     """Live targets waiting for their next step with no request queued (``_waiting``), longest
     first, with the open routes each parents itself (``open_routes``; left out when unread):
-    ``check`` ``[b2] 182 min (3 open routes)``, ``notice`` ``[b2] 3 h · 3 routes``, ``start``
-    only those that parent none, ``[c3] 95 min``. One seen waiting just now has no time."""
+    ``check`` ``[b2] 182 min (3 open routes)``, ``notice`` ``[b2] 3 h · 3 routes``. One seen
+    waiting just now has no time."""
     now = _now() if now is None else now
     rows = []
     for t in observation.get("targets") or ():
-        routes = t.get("open_routes")
-        known = {t.get("name"), (t.get("harness"), t.get("session_id"))}  # `exclude`: names or (harness, sid)
-        if not _waiting(t) or _queued_for(t) or known & set(exclude) or style == "start" and routes != 0:
+        if not _waiting(t) or _queued_for(t):
             continue
+        routes = t.get("open_routes")
         minutes = int(max(0.0, now - float((waiting_since or {}).get(str(t.get("session_id")), now))) // 60)
         span = f" {minutes // 60} h" if style == "notice" and minutes >= 120 else f" {minutes} min" if minutes else ""
-        if isinstance(routes, int) and style != "start":
+        if isinstance(routes, int):
             span += (f" ({routes} open route{'' if routes == 1 else 's'})" if style == "check"
                      else f" · {routes} route{'' if routes == 1 else 's'}" if routes else " · none")
         rows.append((-minutes, _label(t["name"]) + span))
     return [text for _key, text in sorted(rows, key=lambda row: row[0])]
-
-
-def start_waiting_line(harness: str, session_id: str, exclude=()) -> str:
-    """After a steward's successful ``peer-steward start``: the targets it already has that
-    are idle now (the just-started session excluded), else "". Reads only; never blocks."""
-    try:
-        if not session_id or not _role_held(harness, session_id)["held"] \
-                or not _role_flagged(harness, session_id):  # cheap gate before the observation
-            return ""
-        seen = _observe_role(harness, session_id)
-        duty = _store().get(duty_id(harness, session_id)) or {}
-        waiting = waiting_targets(seen, (duty.get("observation") or {}).get("waiting_since"),
-                                  style="start", exclude=exclude) if seen.get("flagged") else []
-    except Exception:  # noqa: BLE001 - the session is already open; this line is only a hint
-        return ""
-    return ("already-waiting=" + ",".join(waiting) + " (sessions you supervise that are idle now)"
-            if waiting else "")
 
 
 def _streams_tails(seen: dict, waiting_since, now) -> list[str]:

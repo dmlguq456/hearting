@@ -1566,61 +1566,6 @@ class SupervisedPromptContractTest(_TmpRootMixin, unittest.TestCase):
             self.assertEqual(peer_steward.cmd_start(args), 1)
         retain.assert_called_once()
 
-    def test_a_started_session_is_followed_by_the_stewards_waiting_sessions_only_when_there_are_some(self):
-        args = peer_steward.build_parser().parse_args(
-            ["start", "n1", "--kind", "codex", "--beside", "w1:p0"])
-
-        def started(_args):
-            print("started=true agent=codex name=n1 pane=w1:p1 permission_mode=auto session_id=sid-n1 "
-                  "managed=- surface=tmux")
-            return 0
-
-        for line in ("already-waiting=[b2] 42 min,[c3] (sessions you supervise that are idle now)", ""):
-            check = SimpleNamespace(start_waiting_line=mock.Mock(return_value=line))
-            out = io.StringIO()
-            with self.subTest(line=line), \
-                 mock.patch.object(peer_steward, "_start_request", side_effect=started), \
-                 mock.patch.object(peer_steward, "_current_session_identity", return_value=("sid-a", "claude")), \
-                 mock.patch.object(peer_steward, "_steward_check_module", return_value=check), \
-                 contextlib.redirect_stdout(out):
-                self.assertEqual(peer_steward.cmd_start(args), 0)
-            printed = out.getvalue().splitlines()
-            self.assertTrue(printed[0].startswith("started=true"))
-            self.assertEqual(printed[1:], [line] if line else [])
-            check.start_waiting_line.assert_called_once_with("claude", "sid-a", exclude={("codex", "sid-n1")})
-        with mock.patch.object(peer_steward, "_start_request", return_value=1), \
-             mock.patch.object(peer_steward, "_retain_start_failure"), \
-             mock.patch.object(peer_steward, "_steward_check_module") as module:
-            self.assertEqual(peer_steward.cmd_start(args), 1)
-        module.assert_not_called()  # a failed start says nothing more
-
-    def test_the_handoff_reads_the_new_pane_and_id_from_the_started_line_only(self):
-        import session_tidy_runner
-        args = peer_steward.build_parser().parse_args(
-            ["start", "n1", "--kind", "codex", "--beside", "w1:p0"])
-        tricky = "already-waiting=[docs pane=w1:docs session_id=sid-docs ready] 42 min (sessions you supervise ...)"
-
-        def started(_args, sid="sid-n1"):
-            print("steward=limited repo=demo holders=a,b limit=2\nsteward-count=2 limit=2 policy=new-grants-limited\n"
-                  "holder=claude:sid-x liveness=live reason=counted last_activity=- activity_basis=role-marker")
-            print(f"started=true agent=codex name=n1 pane=w1:p1 permission_mode=auto session_id={sid} "
-                  "managed=- surface=tmux")
-            return 0
-
-        for sid, exclude in (("sid-n1", {("codex", "sid-n1")}), ("-", {"n1"})):
-            check = SimpleNamespace(start_waiting_line=mock.Mock(return_value=tricky))
-            out = io.StringIO()
-            with self.subTest(sid=sid), \
-                 mock.patch.object(peer_steward, "_start_request", side_effect=lambda a: started(a, sid)), \
-                 mock.patch.object(peer_steward, "_current_session_identity", return_value=("sid-a", "claude")), \
-                 mock.patch.object(peer_steward, "_steward_check_module", return_value=check), \
-                 contextlib.redirect_stdout(out):
-                self.assertEqual(peer_steward.cmd_start(args), 0)
-            self.assertTrue(out.getvalue().rstrip().endswith(tricky))
-            self.assertEqual(session_tidy_runner._start_receipt_fields(out.getvalue()),
-                             {"started": "true", "pane": "w1:p1", "session_id": sid})
-            check.start_waiting_line.assert_called_once_with("claude", "sid-a", exclude=exclude)
-
 
 class SharedDaemonCodexStartTest(_TmpRootMixin, unittest.TestCase):
     """Exercise the real steward start path with Codex's shared defaults."""

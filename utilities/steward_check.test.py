@@ -2583,26 +2583,6 @@ class StewardStreamsTest(CheckBase):
         self.assertTrue(text.startswith(alone), (alone, text))
         self.assertLessEqual(len(text), session_notice.MAX_TEXT)
 
-    def test_start_names_targets_already_waiting_only_for_a_steward(self):
-        self.seen = {"targets": [dict(target("b2", state="idle"), open_routes=0),
-                                 dict(target("c3", state="unused"), open_routes=0),
-                                 dict(target("e5", state="idle"), open_routes=2),  # waits on its own routes
-                                 target("f6", state="idle"),  # count unread: not known to be free
-                                 dict(target("n1", state="unused"), open_routes=0), target("d4")],
-                     "pending_messages": 0, "open_work": [], "flagged": True}
-        self.register()
-        duty = self.duty()
-        self.store.update(duty["id"], observation={**duty["observation"],
-                                                   "waiting_since": {"sid-b2": T0 - 42 * 60}})
-        with mock.patch.object(SC, "_now", return_value=T0):
-            self.assertEqual(SC.start_waiting_line(HARNESS, SID, exclude={"n1", "sid-n1"}),
-                             "already-waiting=[b2] 42 min,[c3] (sessions you supervise that are idle now)")
-            self.seen["flagged"] = False  # not a steward: no line
-            self.assertEqual(SC.start_waiting_line(HARNESS, SID, exclude={"n1"}), "")
-            self.seen["flagged"] = True
-            self.seen["targets"] = [dict(target("n1", state="unused"), open_routes=0), target("d4")]
-            self.assertEqual(SC.start_waiting_line(HARNESS, SID, exclude={"n1"}), "")  # nobody else waits
-
     def test_an_idle_target_waiting_on_its_own_routes_is_counted_from_the_registry(self):
         import peer_steward_native
 
@@ -2629,18 +2609,14 @@ class StewardStreamsTest(CheckBase):
                 mock.patch.object(SC, "_now", return_value=T0):
             self.register()
             out = self.check(T0)
-            line = SC.start_waiting_line(HARNESS, SID)
             with (self.tmp / "jobs.log").open("a") as file:
                 file.write("missing columns\n")  # an incomplete registry: names, no counts
             broken = self.check(T0)
-            broken_line = SC.start_waiting_line(HARNESS, SID)
             self.flagged = False  # no steward flag: the main output, letter for letter
             unflagged = self.check(T0)
         self.assertIn(" parented_routes=2\n", out)
         self.assertIn("\nwaiting=[b2] (3 open routes),[c3] (0 open routes)\n", out)
-        self.assertEqual(line, "already-waiting=[c3] (sessions you supervise that are idle now)")
         self.assertIn("pending_messages=0 undelivered_notices=0 open_work=0\nwaiting=[b2],[c3]\n", broken)
-        self.assertEqual(broken_line, "")  # only a confirmed zero is free
         self.assertIn("pending_messages=0 undelivered_notices=0 open_work=0\nnext_due_in_minutes=", unflagged)
         self.assertNotIn("waiting=", unflagged)
 
@@ -2652,14 +2628,14 @@ class StewardStreamsTest(CheckBase):
         out = self.check(T0)
         self.assertIn("pending_messages=0 undelivered_notices=0 open_work=1\nnext=", out)
         self.assertNotIn("waiting=", out)
-        flagged = {"targets": [], "pending_messages": 0, "open_work": ["backlog"], "parented_routes": 18,
-                   "flagged": True}  # a flagged steward with no targets and a backlog
+        flagged = {"targets": [target("d4")], "pending_messages": 0, "open_work": ["backlog"],
+                   "parented_routes": 18, "flagged": True}  # a flagged steward with a backlog
         self.seen = flagged
         self.assertIn("pending_messages=0 undelivered_notices=0 open_work=1 parented_routes=18\nnext=",
                       self.check(T0 + 60))
         idle_done = {**flagged, "targets": [target("a", state="done")], "open_work": []}
         for seen, action, main in (
-                ({**flagged, "open_work": []}, "release-if-idle", SC.TEXT_RELEASE_IF_IDLE),
+                ({**flagged, "targets": [], "open_work": []}, "release-if-idle", SC.TEXT_RELEASE_IF_IDLE),
                 (idle_done, "tidy-and-release", SC.TEXT_TIDY_AND_RELEASE.format(count=1, names="a")),
                 ({**flagged, "targets": [target("d4")], "open_work": []}, "run-steward-check", SC.TEXT_RUN_CHECK)):
             with self.subTest(action):
@@ -2671,15 +2647,45 @@ class StewardStreamsTest(CheckBase):
         self.assertEqual(SC._notice_text("", {**flagged, "flagged": False}, "assign-next", "k", {}, T0),
                          text[:-len(" | You parent 18 open routes.")])
 
-    def test_a_started_session_is_left_out_by_harness_and_id_when_its_id_is_known(self):
-        self.seen = {"targets": [dict(target("n1", state="unused", harness="codex", sid="sid-new"), open_routes=0),
-                                 dict(target("n1", state="idle", harness="opencode", sid="sid-old"), open_routes=0)],
-                     "pending_messages": 0, "open_work": [], "flagged": True}
-        self.register()
-        with mock.patch.object(SC, "_now", return_value=T0):
-            self.assertEqual(SC.start_waiting_line(HARNESS, SID, exclude={("codex", "sid-new")}),
-                             "already-waiting=[n1] (sessions you supervise that are idle now)")
-            self.assertEqual(SC.start_waiting_line(HARNESS, SID, exclude={"n1"}), "")  # no id yet: by name
+
+class StewardStreamsFlagTest(_NativeStewardWorld):
+    """A flagged steward with no targets is not asked for its flag: no holder process probe,
+    no registry count, the main output. Read for real from a marker and native records."""
+
+    HOLDER_PID = 4194399
+
+    def checked(self, name, *, with_target):
+        import dispatch_contract
+        from fleet.collectors import steward
+        env, ledger, _log = self.world(name, herdr_answers=False)
+        marker = ledger / "peer-steward" / "claude" / f"{self.HOLDER}.json"
+        data = json.loads(marker.read_text())
+        explicit = {"harness": "unknown", "session_id": None, "name": "-", "kind": "explicit",
+                    "source": "explicit", "ts": "2026-11-13T00:00:00Z"}
+        data["targets"] = {"-": explicit, **({"worker": data["targets"]["worker"]} if with_target else {})}
+        Path(env["AGENT_DISPATCH_JOBS"]).write_text(
+            "2026-11-28T00:00:00Z\topen\t/r\t/w\ttest\tattempt_id=att-h,dispatch_depth=1,worker_type=owner,"
+            f"parent_sid={self.HOLDER},parent_completion_delivery=claude-parent-runtime,owner_route_id=rt-h\n")
+        with mock.patch.dict(os.environ, env, clear=True):
+            context = steward._peer_message_module()._steward_process_context()
+            data["session_process"] = {**context, "pid": self.HOLDER_PID, "pid_start": "777"}
+            marker.write_text(json.dumps(data))
+            out = io.StringIO()
+            with mock.patch.object(dispatch_contract, "process_identity_disposition",
+                                   return_value="alive") as probe, \
+                    mock.patch.object(SC, "_open_work", return_value=(["backlog"], [])):
+                self.assertEqual(SC.cmd_check(HARNESS, self.HOLDER, now=T0, out=out), 0)
+        holder = sum(1 for call in probe.call_args_list if call.args[:1] == (self.HOLDER_PID,))
+        return out.getvalue(), holder
+
+    def test_no_targets_means_no_flag_question_and_the_main_output(self):
+        out, probes = self.checked("no-targets", with_target=False)
+        self.assertEqual(probes, 0)
+        self.assertIn("\npending_messages=0 undelivered_notices=0 open_work=1\nnext=open: backlog", out)
+        self.assertNotIn("parented_routes", out)
+        out, _probes = self.checked("one-target", with_target=True)  # a steward with targets: as before
+        self.assertIn(" open_work=1 parented_routes=1\n", out)
+
 
 if __name__ == "__main__":
     unittest.main()

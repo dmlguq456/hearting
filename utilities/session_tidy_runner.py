@@ -1687,10 +1687,8 @@ def _supervised_line(*, started="false", pane="-", session_id="-", source="-",
 
 
 def _start_receipt_fields(text):
-    """Fields of the ``started=`` receipt line only; a later hint line never supplies them."""
-    line = next((ln for ln in (text or "").splitlines() if ln.strip().startswith("started=")), "")
     return {key: value for key, value in
-            re.findall(r"(?:^|\s)(started|pane|session_id)=([^\s]+)", line)}
+            re.findall(r"(?:^|\s)(started|pane|session_id)=([^\s]+)", text or "")}
 
 
 def _handoff_source_cwd(steward, seat, harness, sid):
