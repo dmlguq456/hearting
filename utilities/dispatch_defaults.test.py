@@ -126,6 +126,110 @@ class DispatchDefaultsV3Tests(unittest.TestCase):
             errors = D.validate(config, capmap)
             self.assertTrue(any(fragment in error for error in errors), (key, errors))
 
+    def write_policy(self, td, allocation_lines):
+        path = Path(td) / "dispatch-defaults.yaml"
+        path.write_text(
+            "schema_version: 3\nharnesses:\n  enabled: [claude, codex]\nprofiles:\n"
+            + "".join(
+                f"  {profile}:\n    primary: [claude, codex]\n    relief: []\n    last_resort: []\n    promote_relief_below: 0\n"
+                for profile in ("deep", "balanced-deep", "light", "mini")
+            )
+            + "allocation:\n  strategy: balanced\n  window: 30\n" + allocation_lines + "capabilities:\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def test_an_empty_flow_mapping_reads_as_an_empty_mapping(self):
+        # 2026-11-27: a hand-cleared `depth_affinity: {}` read as the string
+        # "{}" and made the whole user policy invalid for every dispatch.
+        for text in ("{}", "{ }", "{ \t}", "{}   # cleared"):
+            parsed = D.parse_yaml_subset(f"allocation:\n  depth_affinity: {text}\n")
+            self.assertEqual(parsed["allocation"]["depth_affinity"], {}, text)
+        self.assertEqual(D.parse_yaml_subset("profiles:\n  deep: []\n")["profiles"]["deep"], [])
+        with tempfile.TemporaryDirectory() as td:
+            path = self.write_policy(td, "  depth_affinity: {}\n  depth_affinity_weight: 0.85\n")
+            config, warnings = D.load_validated(str(path), D.default_topology_path())
+            self.assertEqual(warnings, [])
+            self.assertEqual(D.query_allocation(config)["depth_affinity"], {})
+            result = subprocess.run(
+                [sys.executable, str(MODULE), "allocation", "--config", str(path)],
+                text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("depth_affinity=\n", result.stdout)
+
+    def validate_cli(self, path):
+        return subprocess.run(
+            [sys.executable, str(MODULE), "validate", "--config", str(path)],
+            text=True, capture_output=True,
+        )
+
+    def test_an_empty_mapping_in_a_scalar_cell_is_named_not_a_traceback(self):
+        # `{}` reads as a mapping; a scalar or required cell holding one must
+        # fail with the cell's existing error (exit 65), like the string "{}"
+        # did before, not with a TypeError from a set lookup.
+        cases = [
+            (lambda text: text.replace("schema_version: 3\n", "schema_version: {}\n"),
+             "schema_version must be an integer, got {}"),
+            (lambda text: text.replace("  strategy: balanced\n", "  strategy: {}\n"),
+             "allocation.strategy must be one of"),
+            (lambda text: text.replace("capabilities:\n", "capabilities:\n  autopilot-code:\n    frame: {}\n"),
+             "invalid affinity value for autopilot-code.frame: {}"),
+            (lambda text: text.replace("  window: 30\n", "  window: 30\n  depth_affinity:\n    owner: {}\n"),
+             "allocation.depth_affinity values must name known harnesses"),
+        ]
+        capmap = D.load_topology_capabilities(D.default_topology_path())
+        with tempfile.TemporaryDirectory() as td:
+            path = self.write_policy(td, "")
+            valid = path.read_text(encoding="utf-8")
+            for edit, fragment in cases:
+                text = edit(valid)
+                self.assertNotEqual(text, valid, fragment)
+                errors = D.validate(D.parse_yaml_subset(text), capmap)
+                self.assertTrue(any(fragment in error for error in errors), (fragment, errors))
+                path.write_text(text, encoding="utf-8")
+                result = self.validate_cli(path)
+                self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
+                self.assertIn(fragment, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_line_indented_under_an_empty_mapping_is_refused_with_its_line(self):
+        allocation = "schema_version: 3\nallocation:\n  strategy: balanced\n  depth_affinity: {}\n"
+        # A sibling at the same depth, a blank line and comments (even an
+        # indented one) read normally after `key: {}`.
+        parsed = D.parse_yaml_subset(allocation + "\n    # nothing to add\n  # note\n  window: 30\ncapabilities: {}\n")
+        self.assertEqual(parsed["allocation"], {"strategy": "balanced", "depth_affinity": {}, "window": 30})
+        self.assertEqual(parsed["capabilities"], {})
+        # A deeper line no longer lands in the enclosing mapping.
+        for nested in ("    window: 30\n", "\n    window: 30\n"):
+            with self.assertRaises(D.DefaultsConfigError) as caught:
+                D.parse_yaml_subset(allocation + nested)
+            lineno = (allocation + nested).splitlines().index("    window: 30") + 1
+            self.assertIn(f"line {lineno}: ", str(caught.exception))
+            self.assertIn("empty `{}` mapping", str(caught.exception))
+        with tempfile.TemporaryDirectory() as td:
+            path = self.write_policy(td, "  depth_affinity: {}\n")
+            text = path.read_text(encoding="utf-8").replace("  window: 30\n", "").replace(
+                "  depth_affinity: {}\n", "  depth_affinity: {}\n    window: 30\n")
+            path.write_text(text, encoding="utf-8")
+            result = self.validate_cli(path)
+            self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
+            self.assertIn("is indented under an empty `{}` mapping", result.stderr)
+
+    def test_a_wrong_optional_allocation_key_still_fails_the_whole_file(self):
+        # The `{}` read changes nothing else: a wrong optional allocation value
+        # still fails the file and names every error, as on main.
+        with tempfile.TemporaryDirectory() as td:
+            path = self.write_policy(
+                td, "  depth_affinity_weight: 1.2\n  depth_affinity:\n    owner: claude\n    worker: gemini\n")
+            with self.assertRaises(D.DefaultsConfigError) as caught:
+                D.load_validated(str(path), D.default_topology_path())
+            self.assertIn("allocation.depth_affinity values must name known harnesses", str(caught.exception))
+            self.assertIn("allocation.depth_affinity_weight must be a number from 0.0 to 1.0", str(caught.exception))
+            result = self.validate_cli(path)
+            self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
+            self.assertNotIn("ignored", result.stdout + result.stderr)
+
     def test_a_harness_left_out_of_a_profile_is_normal_not_a_finding(self):
         # "This profile does not use that harness" (for example OpenCode absent
         # from deep) is a valid choice, never an error or a warning.
@@ -667,6 +771,33 @@ class DispatchDefaultsV4Tests(unittest.TestCase):
             path.write_text("schema_version: 4\n odd: indentation\n")
             self.assertEqual(D.load_user_rules_opencode(str(path)), "carry")
             self.assertEqual(D.load_user_rules_opencode(str(Path(temporary) / "absent.yaml")), "carry")
+
+    def test_a_nested_opencode_key_does_not_override_off_in_a_rejected_file(self):
+        # 2026-11-28: a line under `key: {}` fails the parse, and the line scan
+        # then read `note:` / `opencode: carry` as the switch, carrying the
+        # user's rules into OpenCode despite an explicit off.
+        broken = (self.V3_TEXT.replace("schema_version: 3\n", "schema_version: 4\n")
+                  .replace("  window: 30\n", "  depth_affinity: {}\n    window: 30\n"))
+        deep_line = broken.splitlines().index("    window: 30") + 1
+        nested = "  note:\n    opencode: carry\n"
+        cases = (
+            ("user_rules:\n  opencode: off\n" + nested, "off"),
+            ("user_rules.opencode: off\nuser_rules:\n" + nested, "off"),
+            ("user_rules: opencode: off\n", "off"),
+            ("user_rules:\n" + nested + "  opencode: off\n", "off"),
+            ("user_rules:\n  opencode: on\n  note:\n    opencode: off\n", "carry"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "dispatch-defaults.yaml"
+            for switch, expected in cases:
+                with self.subTest(switch=switch):
+                    path.write_text(broken + switch, encoding="utf-8")
+                    result = subprocess.run(
+                        [sys.executable, str(MODULE), "validate", "--config", str(path)],
+                        text=True, capture_output=True)
+                    self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
+                    self.assertIn(f"line {deep_line}: ", result.stderr)
+                    self.assertEqual(D.load_user_rules_opencode(str(path)), expected)
 
     def test_user_config_path_follows_the_override(self):
         self.assertEqual(D.user_config_path({"DISPATCH_DEFAULTS_CONFIG": "/x/defaults.yaml"}),

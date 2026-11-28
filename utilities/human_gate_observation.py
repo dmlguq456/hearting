@@ -956,7 +956,7 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None, owner_liveness=None,
         if only_source in ("S2", "S3"):
             raise _SkipSource
         import human_wait_state
-        for record in human_wait_state.read_signals(now=instant):
+        for record in human_wait_state.read_signals(now=instant, health=health):
             message = record.get("mode") == "message"
             add({"id": record["id"], "source": "S4", "kind": "message" if message else "decision",
                  "question": None if message else record.get("question"), "choices": [], "recommendation": None,
