@@ -291,7 +291,10 @@ def format_row(row: dict) -> str:
         f"attempt={row.get('attempt_id') or '-'} event={row.get('event_id')} "
         f"{_field_segment(row)}"
     )
-    return "\n".join([line, *raw_headroom_lines(row.get("capacity_raw_headroom") or {})])
+    raw = _fmt_map(row.get("capacity_raw_headroom") or {})
+    if raw != "-":
+        line += f" raw={raw}"
+    return line
 
 
 def summarize(rows: list[dict]) -> dict:
