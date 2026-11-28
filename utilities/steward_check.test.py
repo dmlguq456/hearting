@@ -2519,5 +2519,173 @@ class LabRegressionTest(CheckBase):
                 self.assertEqual(self.tick(labs), int(index in (0, 5)))
 
 
+class StewardStreamsTest(CheckBase):
+    """The holder hears how many open routes it parents and which targets are idle, each with the
+    open routes it parents itself, open record or not. Facts only: no instruction is added."""
+
+    def test_check_lists_waiting_targets_without_open_records_and_the_routes_held(self):
+        b2, c3, d4 = dict(target("b2", state="idle"), open_routes=3), target("c3"), target("d4")
+        self.seen = {"targets": [b2, c3, d4], "pending_messages": 0, "open_work": [], "parented_routes": 18,
+                     "flagged": True}
+        self.register()
+        self.check(T0)
+        self.seen["targets"] = [b2, dict(target("c3", state="done"), open_routes=0), d4]
+        self.check(T0 + 87 * 60)
+        out = self.check(T0 + 182 * 60)
+        self.assertIn("pending_messages=0 undelivered_notices=0 open_work=0 parented_routes=18\n", out)
+        self.assertIn("\nwaiting=[b2] 182 min (3 open routes),[c3] 95 min (0 open routes)\n", out)
+        self.assertNotIn("[d4]", out.split("waiting=")[1])  # a working target is not waiting
+        self.seen["targets"] = [target("b2", state="idle")]  # its count unread: the name alone
+        self.assertIn("\nwaiting=[b2] 200 min\n", self.check(T0 + 200 * 60))
+        self.seen = {"targets": [d4], "pending_messages": 0, "open_work": [], "parented_routes": None,
+                     "flagged": True}
+        out = self.check(T0 + 210 * 60)
+        self.assertNotIn("waiting=", out)
+        self.assertNotIn("parented_routes", out)
+
+    def test_the_periodic_notice_ends_with_routes_held_and_idle_targets(self):
+        self.seen = {"targets": [dict(target("b2", state="idle"), open_routes=3),
+                                 dict(target("c3", state="idle"), open_routes=0), target("d4")],
+                     "pending_messages": 0, "open_work": [], "parented_routes": 18, "flagged": True}
+        self.register()
+        self.step(T0 + INTERVAL)
+        self.assertEqual(self.notice()["text"],
+                         SC.TEXT_RUN_CHECK + " | You parent 18 open routes; idle: [b2] · 3 routes, [c3] · none.")
+        since = {"sid-b2": T0 - 182 * 60, "sid-c3": T0 - 95 * 60}
+        self.assertEqual(SC._notice_text(SC.TEXT_RUN_CHECK, self.seen, "run-steward-check", "k", since, T0),
+                         SC.TEXT_RUN_CHECK
+                         + " | You parent 18 open routes; idle: [b2] 3 h · 3 routes, [c3] 95 min · none.")
+        one = {**self.seen, "targets": [target("d4")], "parented_routes": 1}
+        self.assertEqual(SC._notice_text(SC.TEXT_RUN_CHECK, one, "run-steward-check", "k", {}, T0),
+                         SC.TEXT_RUN_CHECK + " | You parent 1 open route.")
+        for word in ("hand", "assign", "move"):  # the closing piece states facts only
+            self.assertNotIn(word, self.notice()["text"].split(" | ", 1)[1].lower())
+
+    def test_a_full_notice_shortens_the_closing_piece_and_keeps_every_existing_word(self):
+        seen = {"targets": [target("b2", state="idle"), target("c3", state="idle")],
+                "pending_messages": 0, "open_work": [], "parented_routes": 18, "flagged": True}
+        since = {"sid-b2": T0 - 182 * 60, "sid-c3": T0 - 95 * 60}
+        middle = " | You parent 18 open routes; idle: [b2] 3 h, +1 more."
+        filler = session_notice.MAX_TEXT - len(middle) - len(SC.TEXT_RUN_CHECK + " | LAB: ")
+        line = "LAB: " + "x" * filler
+        existing = SC.TEXT_RUN_CHECK + " | " + line
+        text = SC._notice_text(SC.TEXT_RUN_CHECK, seen, "run-steward-check", "k", since, T0, line)
+        self.assertEqual(text, existing + middle)
+        self.assertEqual(len(text), session_notice.MAX_TEXT)
+        line += "x" * (len(middle) - len(" | You parent 18 open routes.") + 1)  # too little room left
+        self.assertEqual(SC._notice_text(SC.TEXT_RUN_CHECK, seen, "run-steward-check", "k", since, T0, line),
+                         SC.TEXT_RUN_CHECK + " | " + line)
+        many = {"targets": [target(f"t{i}", state="idle") for i in range(8)], "pending_messages": 0,
+                "open_work": ["x" * 200 + str(i) for i in range(10)], "parented_routes": 18, "flagged": True}
+        with mock.patch.object(SC, "_streams_tails", return_value=[]):
+            alone = SC._notice_text("", many, "assign-next", "k", {}, T0)
+        text = SC._notice_text("", many, "assign-next", "k", {}, T0)
+        self.assertTrue(text.startswith(alone), (alone, text))
+        self.assertLessEqual(len(text), session_notice.MAX_TEXT)
+
+    def test_an_idle_target_waiting_on_its_own_routes_is_counted_from_the_registry(self):
+        import peer_steward_native
+
+        def owner(attempt, parent, status="open"):
+            meta = dict(attempt_id=attempt, dispatch_depth="1", worker_type="owner", parent_sid=parent,
+                        parent_completion_delivery="claude-parent-runtime", owner_route_id="rt-" + attempt)
+            return (f"2026-11-28T00:00:00Z\t{status}\t/r\t/w\ttest\t"
+                    + ",".join(f"{k}={v}" for k, v in meta.items()) + "\n")
+
+        (self.tmp / "jobs.log").write_text(
+            owner("a1", SID) + owner("a2", SID) + owner("b1", "sid-b2") + owner("b2", "sid-b2")
+            + owner("b3", "sid-b2") + owner("c1", "sid-c3", status="done"))
+        collector = SimpleNamespace(
+            role_targets=lambda h, s, **kw: [{"name": n, "harness": "codex", "session_id": "sid-" + n}
+                                             for n in ("b2", "c3")],
+            _registry_sessions=lambda: [], _peer_message_module=lambda: None,
+            role_flag=lambda h, s, **kw: self.flagged)
+        with mock.patch.object(SC, "_observe_role", side_effect=REAL_OBSERVE), \
+                mock.patch.object(SC, "_collector", return_value=collector), \
+                mock.patch.object(peer_steward_native, "native_agent",
+                                  return_value={"result": {"agent": {"agent_status": "idle"}}}), \
+                mock.patch.object(SC, "_end_observation", return_value=None), \
+                mock.patch.object(SC, "_open_work", return_value=([], [])), \
+                mock.patch.object(SC, "_now", return_value=T0):
+            self.register()
+            out = self.check(T0)
+            with (self.tmp / "jobs.log").open("a") as file:
+                file.write("missing columns\n")  # an incomplete registry: names, no counts
+            broken = self.check(T0)
+            self.flagged = False  # no steward flag: the main output, letter for letter
+            unflagged = self.check(T0)
+        self.assertIn(" parented_routes=2\n", out)
+        self.assertIn("\nwaiting=[b2] (3 open routes),[c3] (0 open routes)\n", out)
+        self.assertIn("pending_messages=0 undelivered_notices=0 open_work=0\nwaiting=[b2],[c3]\n", broken)
+        self.assertIn("pending_messages=0 undelivered_notices=0 open_work=0\nnext_due_in_minutes=", unflagged)
+        self.assertNotIn("waiting=", unflagged)
+
+    def test_an_unflagged_holder_and_the_release_notices_keep_the_main_text(self):
+        idle = dict(target("b2", state="idle"), open_routes=0)
+        self.seen = {"targets": [idle], "pending_messages": 0, "open_work": ["backlog"],
+                     "parented_routes": 1, "flagged": False}
+        self.register()
+        out = self.check(T0)
+        self.assertIn("pending_messages=0 undelivered_notices=0 open_work=1\nnext=", out)
+        self.assertNotIn("waiting=", out)
+        flagged = {"targets": [target("d4")], "pending_messages": 0, "open_work": ["backlog"],
+                   "parented_routes": 18, "flagged": True}  # a flagged steward with a backlog
+        self.seen = flagged
+        self.assertIn("pending_messages=0 undelivered_notices=0 open_work=1 parented_routes=18\nnext=",
+                      self.check(T0 + 60))
+        idle_done = {**flagged, "targets": [target("a", state="done")], "open_work": []}
+        for seen, action, main in (
+                ({**flagged, "targets": [], "open_work": []}, "release-if-idle", SC.TEXT_RELEASE_IF_IDLE),
+                (idle_done, "tidy-and-release", SC.TEXT_TIDY_AND_RELEASE.format(count=1, names="a")),
+                ({**flagged, "targets": [target("d4")], "open_work": []}, "run-steward-check", SC.TEXT_RUN_CHECK)):
+            with self.subTest(action):
+                text = SC._notice_text(main, seen, action, "k", {}, T0)
+                tail = " | You parent 18 open routes." if action == "run-steward-check" else ""
+                self.assertEqual(text, " ".join(main.split()) + tail)
+        text = SC._notice_text("", flagged, "assign-next", "k", {}, T0)
+        self.assertTrue(text.endswith(" | You parent 18 open routes."), text)
+        self.assertEqual(SC._notice_text("", {**flagged, "flagged": False}, "assign-next", "k", {}, T0),
+                         text[:-len(" | You parent 18 open routes.")])
+
+
+class StewardStreamsFlagTest(_NativeStewardWorld):
+    """A flagged steward with no targets is not asked for its flag: no holder process probe,
+    no registry count, the main output. Read for real from a marker and native records."""
+
+    HOLDER_PID = 4194399
+
+    def checked(self, name, *, with_target):
+        import dispatch_contract
+        from fleet.collectors import steward
+        env, ledger, _log = self.world(name, herdr_answers=False)
+        marker = ledger / "peer-steward" / "claude" / f"{self.HOLDER}.json"
+        data = json.loads(marker.read_text())
+        explicit = {"harness": "unknown", "session_id": None, "name": "-", "kind": "explicit",
+                    "source": "explicit", "ts": "2026-11-13T00:00:00Z"}
+        data["targets"] = {"-": explicit, **({"worker": data["targets"]["worker"]} if with_target else {})}
+        Path(env["AGENT_DISPATCH_JOBS"]).write_text(
+            "2026-11-28T00:00:00Z\topen\t/r\t/w\ttest\tattempt_id=att-h,dispatch_depth=1,worker_type=owner,"
+            f"parent_sid={self.HOLDER},parent_completion_delivery=claude-parent-runtime,owner_route_id=rt-h\n")
+        with mock.patch.dict(os.environ, env, clear=True):
+            context = steward._peer_message_module()._steward_process_context()
+            data["session_process"] = {**context, "pid": self.HOLDER_PID, "pid_start": "777"}
+            marker.write_text(json.dumps(data))
+            out = io.StringIO()
+            with mock.patch.object(dispatch_contract, "process_identity_disposition",
+                                   return_value="alive") as probe, \
+                    mock.patch.object(SC, "_open_work", return_value=(["backlog"], [])):
+                self.assertEqual(SC.cmd_check(HARNESS, self.HOLDER, now=T0, out=out), 0)
+        holder = sum(1 for call in probe.call_args_list if call.args[:1] == (self.HOLDER_PID,))
+        return out.getvalue(), holder
+
+    def test_no_targets_means_no_flag_question_and_the_main_output(self):
+        out, probes = self.checked("no-targets", with_target=False)
+        self.assertEqual(probes, 0)
+        self.assertIn("\npending_messages=0 undelivered_notices=0 open_work=1\nnext=open: backlog", out)
+        self.assertNotIn("parented_routes", out)
+        out, _probes = self.checked("one-target", with_target=True)  # a steward with targets: as before
+        self.assertIn(" open_work=1 parented_routes=1\n", out)
+
+
 if __name__ == "__main__":
     unittest.main()
