@@ -407,7 +407,8 @@ def reason_for(receipt: dict, depth: str, harness: str = "") -> str:
     if ended and str(command or "").strip():
         return f"{head} It has already ended; read its result once with: {command} Do not call it again."
     if ended or receipt.get("parent_next") == "end-turn":   # ended with no command to read it: a cancelled unit
-        idle = " If this session is idle by then, it comes with the next message." if waiting and harness == "claude" else ""
+        idle = (" If this session went idle before the queued worker started, the notice comes with the next message."
+                if waiting and harness == "claude" else "")
         return (f"{head} Its answer, or what stopped it, comes back to this session as a completion notice.{idle} "
                 "Do not call it again; go on with other work or end the turn.")
     command = receipt.get("parent_next_command") or receipt.get("resume_command") or ""
