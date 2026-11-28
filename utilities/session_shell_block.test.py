@@ -109,7 +109,7 @@ assert(!text.includes('SENT_BEFORE')&&text.includes('ANSWER_ME'),text);
 assert.deepEqual(block.sent().map(r=>r.map(x=>x.text).join('')),['✓ answer sent'],JSON.stringify(block.sent()));
 block.enter();
 text=JSON.stringify(block.detail({budget:8,columns:40}));
-assert(text.includes('ANSWER_ME')&&text.includes('▸'),text);
+assert(text.includes('ANSWER_ME')&&text.includes('▶'),text);
 block.leave();
 const words=Array.from({length:20},(_,i)=>[{text:'WORD_'+i}]);
 block.update([{id:'c',revision:'r2',answerable:true,questions:[{id:'q',question:'Which?',choices:['CHOICE_0','CHOICE_1'],display:{body:words}}]}]);
@@ -284,7 +284,7 @@ let now=Date.now();Date.now=()=>now;
  const y=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
  y.update([a]);y.enter();y.input(Buffer.from('\r'));await tick();
  y.update([{...a,revision:'r2'}]);assert.deepEqual(lines(y),[]);assert(shown(y).includes('FIRST_Q'));
- y.enter();assert(JSON.stringify(y.detail()).includes('▸'),'it can be chosen again');
+ y.enter();assert(JSON.stringify(y.detail()).includes('▶'),'it can be chosen again');
  // A refused answer keeps the person on it with its word.
  const z=create({changed(){},answer:async()=>({state:'unknown',reason:'refused-here'}),action(){}});
  z.update([a,n]);z.enter();z.input(Buffer.from('\r'));await tick();
@@ -423,16 +423,16 @@ c.update([{id:'q',revision:'r1',answerable:true,request_state:'open',questions:[
  display:{head:[{text:'Q_HEAD'}],body,options:[[{text:'1 '},{text:'A'}],[{text:'2 '},{text:'B'}]]}}]}]);c.enter();
 const draw=()=>c.detail({budget:7,columns:40}).map(r=>r.map(x=>x.text).join(''));
 const has=(rows,s)=>rows.some(x=>x.includes(s));
-assert(has(draw(),'▸ 1 A'));
+assert(has(draw(),'▶ 1 A'));
 for(let i=0;i<5;i++)c.input(Buffer.from('\x1b[5~'));
 let rows=draw();assert(has(rows,'BODY_LINE_0'),rows.join('\n'));
 assert(has(draw(),'BODY_LINE_0'),'the page stays on a later paint');
 for(let i=0;i<5;i++)c.input(Buffer.from('\x1b[6~'));
-rows=draw();assert(has(rows,'▸ 1 A')&&has(rows,'2 B'),rows.join('\n'));
+rows=draw();assert(has(rows,'▶ 1 A')&&has(rows,'2 B'),rows.join('\n'));
 for(let i=0;i<5;i++)c.input(Buffer.from('\x1b[5~'));
 // ↓ moves the choice and brings it back onto the page; a number does the same.
-c.input(Buffer.from('\x1b[B'));rows=draw();assert(has(rows,'▸ 2 B'),rows.join('\n'));
-for(let i=0;i<5;i++)c.input(Buffer.from('\x1b[5~'));c.input(Buffer.from('1'));rows=draw();assert(has(rows,'▸ 1 A'),rows.join('\n'));
+c.input(Buffer.from('\x1b[B'));rows=draw();assert(has(rows,'▶ 2 B'),rows.join('\n'));
+for(let i=0;i<5;i++)c.input(Buffer.from('\x1b[5~'));c.input(Buffer.from('1'));rows=draw();assert(has(rows,'▶ 1 A'),rows.join('\n'));
 for(let i=0;i<5;i++)c.input(Buffer.from('\x1b[5~'));c.input(Buffer.from('\r'));
 setImmediate(()=>{assert.deepEqual(sent,[{question_id:'q',revision:'r1',answers:{a:['A']}}]);console.log('PASS');});"""
         result=subprocess.run(['node','-e',code,str(ROOT/'utilities/session-shell/block-input.cjs')],

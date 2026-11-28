@@ -484,12 +484,12 @@ class PanelAndTables(unittest.TestCase):
 
     def test_a_called_row_that_is_not_running_is_drawn_with_its_mark_in_the_table_and_the_popup(self):
         from fleet.explorer.style import normalize_style
-        # 11-19 (review of #1742, N5): the table's mark is told by its color key as well as its glyph (`queued` and `blocked` are both
-        # `●`, and only the key tells them apart); the panel's row carries its own key for the same marker
+        # 11-19 (review of #1742, N5): the table's mark is told by its color key as well as its glyph; the panel's row carries its own
+        # key for the same marker. (11-27: `blocked` waits on the person and reads `◑`; `queued` keeps `●`.)
         keys = {"dead": ("g_dead", "g_dead"), "queued": ("g_work_off", "g_work_off"), "blocked": ("g_blocked", "g_blocked"),
                 "unknown": ("dim", "g_stale")}
         seen = {}
-        for state, mark, word in (("dead", "✕", "dead"), ("queued", "●", "queued"), ("blocked", "●", "blocked"), ("unknown", "◌", "unknown")):
+        for state, mark, word in (("dead", "✕", "dead"), ("queued", "●", "queued"), ("blocked", "◑", "blocked"), ("unknown", "◌", "unknown")):
             world = World(self)
             rec, path = world.staged()
             world.owner(rec, path)
@@ -516,7 +516,7 @@ class PanelAndTables(unittest.TestCase):
             self.assertEqual({"dead": "dead", "queued": "idle", "blocked": "blocked", "unknown": "stale"}[state], unit["marker"], (state, unit))
             self.assertEqual(keys[state][1], session_panel.called_rows([unit], NOW)[0]["glyph_key"], (state, unit))
             self.assertEqual("route 1 ⠏1", labels["claude\0" + SID], state)
-        self.assertNotEqual(seen["queued"], seen["blocked"])         # the same `●`, told apart by the color alone
+        self.assertNotEqual(seen["queued"], seen["blocked"])         # told apart by the color as well as the glyph
 
 
 if __name__ == "__main__":
