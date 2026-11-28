@@ -4,6 +4,7 @@ resumes itself once and tells its session."""
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
+from itertools import product
 import json
 import sys
 import tempfile
@@ -666,6 +667,41 @@ class ReceiptAndNoticeTest(unittest.TestCase):
             self.assertIn("the parent's replacement start needs attention", text)
             self.assertIn("state needs-attention", text)
             self.assertNotIn("answer another session sent", text)
+
+    def test_a_resume_that_needs_attention_reports_its_receipt_and_carries_no_command(self):
+        # The closure review's cases: an owner receipt that asks for an inspection while its next_action is the
+        # same command, and a long Korean path, under which a carried command outgrew the store's 2,048 bytes.
+        import dispatch_session_sweep as sweep
+        receipts = ({"state": "needs-attention", "reason": "replacement-input-unproven",
+                     "required_action": "inspect-preparation", "next_action": "same-command", "retry_when": ""},
+                    {"state": "needs-attention", "reason": "replacement-launch-timeout",
+                     "required_action": "inspect-preparation"},
+                    {"state": "needs-attention", "reason": "unit-outcome-needs-inspection",
+                     "required_action": "compose-again"})
+        for parts, receipt in product(([], ["한" * 68] * 4), receipts):
+            with self.subTest(long=bool(parts), reason=receipt["reason"]), tempfile.TemporaryDirectory() as tmp:
+                jobs = Path(tmp, *parts) / "jobs.log"
+                jobs.parent.mkdir(parents=True, exist_ok=True)
+                jobs.write_text("")
+                path = C.record_path(jobs, PAUSE["route_id"], PAUSE["retry_at"])
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({"state": "armed", "route_id": PAUSE["route_id"], "jobs": str(jobs),
+                                            "retry_at": PAUSE["retry_at"],
+                                            "route_file": str(jobs.parent / f"{PAUSE['route_id']}.json")}))
+                clock = [RETRY_EPOCH - 120]
+                done = SimpleNamespace(returncode=0, stdout=json.dumps(receipt) + "\n")
+                with mock.patch.dict("os.environ", {"CLAUDE_CODE_SESSION_ID": "sid-7"}, clear=True):
+                    C.run(path, sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+                          now=lambda: clock[0], cleared=lambda record: False, follow=lambda path: None,
+                          call=lambda argv, **kw: done)
+                self.assertEqual(json.loads(path.read_text())["state"], "resumed")
+                claimed, _ = sweep.sweep_deliver(jobs.parent, "claude-parent-runtime", "sid-7")
+                self.assertEqual(len(claimed), 1)   # stored, the long path too
+                text = sweep.delivery_context([(jobs.parent, claimed)])
+                self.assertIn(f"resumed after the usage limit reset: state needs-attention, reason {receipt['reason']}",
+                              text)
+                self.assertNotIn("capability-route.py", text)
+                self.assertIn("required_action=report-to-user", text)
 
 
 if __name__ == "__main__":
