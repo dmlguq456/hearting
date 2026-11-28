@@ -581,12 +581,12 @@ def _prefill_live_inboxes(root, *, deadline_ns, expected_root_identity=None):
     folded_edge_digest = None
     if time.monotonic_ns() < deadline_ns:
         try:
-            from dispatch_seat_handover import lineage_graph
+            from dispatch_seat_handover import lineage_graph, notice_edges
             from peer_read_context import PeerReadContext
             # The runner keeps full observations by contract; only the sweep's
             # effect groups opt into the compact read.
             graph = lineage_graph(read_context=PeerReadContext())
-            folded_edge_digest = inbox.edge_digest(getattr(graph, "edges", ()) or ())
+            folded_edge_digest = inbox.edge_digest(notice_edges(graph))
         except (OSError, ValueError, TypeError):
             folded_edge_digest = None  # unknown edges keep the generation key
         if time.monotonic_ns() >= deadline_ns:

@@ -2189,6 +2189,8 @@ def _fold_ledger(seat: Seat) -> None:
     handovers = [(index, row) for index, row in enumerate(lines)
                  if row.get("event") in {"handover", "succession"}]
     keep_relation_indices = {index for index, _row in handovers[-HANDOVER_KEEP_ROWS:]}
+    # A route handed here (``source=assign``) has no other record; such rows are never folded away.
+    keep_relation_indices.update(index for index, row in handovers if row.get("source") == "assign")
     latest_role_rows, latest_watch_rows = {}, {}
     release_rows = []
     for index, item in enumerate(lines):
