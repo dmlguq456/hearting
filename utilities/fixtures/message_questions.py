@@ -370,7 +370,7 @@ globalThis.__fixtureSpawn = (exe, args, options) => {
 const {AgentHarnessGuards} = await import(pathToFileURL(process.env.FIX_GUARDS).href);
 const sid = cfg.sid, dir = process.cwd(), messages = cfg.history || [], systems = [], tools = [], log = [];
 const calls = {prompt: 0, promptAsync: 0};
-let hooks, n = 0, turns = 0, k = 0;
+let hooks, n = messages.length, turns = 0, k = 0;   // new ids follow a replayed history's
 const deferredTurns = [];
 const sdk = (data, status = 200) => ({data, error: undefined, response: {ok: true, status}});
 const root = {id: sid, projectID: "project_fixture", directory: dir, slug: "fixture-root", title: "fixture",
@@ -409,6 +409,7 @@ const session = {
     const row = {info: {id, role: "user", sessionID: sid, time: {created: Date.now()}}, parts: args.body.parts};
     await hooks["chat.message"]({sessionID: sid, messageID: id}, {message: row.info, parts: args.body.parts});
     messages.push(row);
+    if (cfg.loseSave) throw new Error("fixture-lost-save-response");   // saved, and the response lost
     return sdk(row);
   },
   promptAsync: async (args) => {
@@ -474,8 +475,8 @@ for (const step of cfg.steps || []) {
 if (deferredTurns.length) throw new Error("fixture still has deferred turns");
 hooks.dispose?.({silent: true});
 await settle();
-process.stdout.write(JSON.stringify({systems, tools, calls, log, history: messages.map(m => ({id: m.info.id, role: m.info.role,
-  text: (m.parts || []).map(p => p.text || "").join("")}))}), () => process.exit(0));
+process.stdout.write(JSON.stringify({systems, tools, calls, log, native: messages, history: messages.map(m => ({id: m.info.id,
+  role: m.info.role, text: (m.parts || []).map(p => p.text || "").join("")}))}), () => process.exit(0));
 """
 
     def opencode_plugin_session(self, sid, cfg, *, origin=True):
@@ -487,10 +488,11 @@ process.stdout.write(JSON.stringify({systems, tools, calls, log, history: messag
         (``idle``, ``idle:hold``, ``turn``, ``status:<type>``, ``tick`` for the plugin's own carrier timer,
         ``tool``, ``call:<name>``, ``text:<id>``, ``image:<id>``, ``answer:<id>``,
         ``arm``), ``v2`` (the OpenCode 2 host), ``deferTurn`` (accept the resume before starting
-        the turn), ``personBetween``, ``deadResume`` and ``failGuidance``. A deferred turn starts after
-        idle processing, or at the ``turn`` step after ``idle:hold``. Returns the system
-        context of every model call, the tool results, the session history and the count after
-        each step."""
+        the turn), ``personBetween``, ``deadResume``, ``failGuidance``, ``loseSave`` (an OpenCode 1
+        save persists and its response is lost) and ``history`` (native messages to start from, such
+        as an earlier run's ``native``). A deferred turn starts after idle processing, or at the
+        ``turn`` step after ``idle:hold``. Returns the system context of every model call, the tool
+        results, the session history (``native`` as the host keeps it) and the count after each step."""
         if not self.node:
             raise unittest.SkipTest("Node is unavailable for the OpenCode plugin fixture")
         root = Path(tidy.__file__).resolve().parents[1]

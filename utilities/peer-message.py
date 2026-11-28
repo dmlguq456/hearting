@@ -467,8 +467,9 @@ def _display_time(value):
     return float(value) if type(value) in (int, float) and math.isfinite(value) else 0.0
 
 
-def _display_resolve(text, recipient):
-    """``{ref, old_text, entry, transfer}`` for a form-2 ``text`` that this recipient was sent.
+def _display_resolve(text, recipient, ref=None):
+    """``{ref, old_text, entry, transfer}`` for a form-2 ``text`` that this recipient was sent
+    (with ``ref``, only as that sealed message: the courier that sent it names it).
 
     A sender seals a form-2 text only when no other message to this recipient with the same
     visible text is still unreceived (`_prepare_peer_message`), so at most one candidate is
@@ -479,7 +480,8 @@ def _display_resolve(text, recipient):
     if (not isinstance(text, str) or not looks_like_display_text(text)
             or not _valid_transfer_endpoint(recipient)):
         return None
-    found = _display_candidates(_display_variants(text), recipient)
+    found = [item for item in _display_candidates(_display_variants(text), recipient)
+             if ref in (None, item["ref"])]
     if not found:
         return None
     pick = min(found, key=lambda item: item["order"])
@@ -2820,14 +2822,13 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
             and receiver_reads_display(recipient)):
         if producer_binding is None and sender.get("harness") in _DISPLAY_HARNESSES:
             display = {"kind": "peer"}
-        elif (producer_binding is not None and display_line
-              and not (private_body and recipient.get("harness") in ("codex", "opencode"))):
-            # Every carrier of a row pastes `pasted_text(row)` and the row settles on its own ref
-            # (the Codex queue on `delivery-peer-<ref>` and the exact text it sent), so the receipt
-            # marker lines stay in the sealed text the agent gets. The marker lines a Codex queue
-            # retirement reads back are in the completion carrier's own items, never in a row.
-            # A secret answer keeps the pointer form there: an OpenCode tool boundary appends a
-            # row's sealed text to the tool result its TUI draws; Codex keeps its earlier form.
+        elif (producer_binding is not None and display_line and recipient.get("harness") != "codex"
+              and not (private_body and recipient.get("harness") == "opencode")):
+            # Codex keeps the full runtime text in its own queue: its delivery recovery reads the
+            # receipt marker lines from the thread's input history (`codex_queue_delivery`), and
+            # the one-line form has none. A person's window there still reads the full text.
+            # OpenCode's tool boundary and OpenCode 2 idle delivery paste a row's sealed text, which
+            # for the one-line form is the whole old text: a secret answer to OpenCode takes the pointer form.
             display = {"kind": "runtime", "line": display_line}
     body_hash = hashlib.sha256(body.rstrip("\n").encode("utf-8")).hexdigest()
     request_seal = dict(request["seal"]) if request is not None else None
@@ -4598,7 +4599,7 @@ def _request_receiver_guidance(text, recipient):
     return ("Peer request %s update (read only; nothing to answer). Details: `%s`" % (request_id, show))
 
 
-def receiver_guidance(text="", recipient=None, *, cwd=None):
+def receiver_guidance(text="", recipient=None, *, cwd=None, ref=None):
     """Return ordinary peer guidance, plus an exact accept command only for a live handoff.
 
     This is a read-only hint. ``accept_handoff`` repeats the same receiver check
@@ -4606,11 +4607,14 @@ def receiver_guidance(text="", recipient=None, *, cwd=None):
 
     For a form-2 text the sealed sender, reply address and ref (a runtime text: its whole
     sealed text) lead the guidance: this is the agent-only path for what the window omits.
+    With ``ref`` the text must stand for that sealed message, else ``ValueError``.
     """
     try:
-        resolved = _display_resolve(text, recipient)
+        resolved = _display_resolve(text, recipient, ref)
     except UnsupportedPendingSchema:
         resolved = None
+    if resolved is None and ref is not None:
+        raise ValueError("peer-display-unresolved")
     if resolved is not None:
         inner = _plain_receiver_guidance(resolved["old_text"], recipient, cwd=cwd)
         return "\n\n".join(part for part in (_display_agent_block(resolved), inner) if part)
@@ -4768,7 +4772,7 @@ def _plain_receiver_guidance(text, recipient, *, cwd=None, name_sender=False):
         return guidance
 
 
-def receiver_guidance_once(text="", recipient=None, *, cwd=None, deferred=None):
+def receiver_guidance_once(text="", recipient=None, *, cwd=None, deferred=None, ref=None):
     """``receiver_guidance`` without repeating the fixed text the session already holds.
 
     Only the fixed ordinary guidance is withheld when it equals the one delivered just
@@ -4781,7 +4785,7 @@ def receiver_guidance_once(text="", recipient=None, *, cwd=None, deferred=None):
     The fixed text counts as delivered only once it went out. With ``deferred`` (a list) the
     record is appended there and the caller applies it with ``commit_receiver_guidance``
     after its output was flushed; without it the record is written at once."""
-    guidance = receiver_guidance(text, recipient, cwd=cwd)
+    guidance = receiver_guidance(text, recipient, cwd=cwd, ref=ref)
     if (not guidance or not isinstance(recipient, dict) or recipient.get("harness") == "opencode"
             or guidance != _ordinary_receiver_guidance()):
         return guidance
@@ -4800,15 +4804,15 @@ def receiver_guidance_once(text="", recipient=None, *, cwd=None, deferred=None):
         return guidance
 
 
-def receiver_guidance_parts(text="", recipient=None, *, cwd=None):
+def receiver_guidance_parts(text="", recipient=None, *, cwd=None, ref=None):
     """``receiver_guidance_once`` split for a carrier that keeps a secret answer apart (the OpenCode
     plugin): ``{"guidance": ..., "secret": ...}``. ``secret`` is the guidance when it is the agent-only
     text of a secret answer's row (``_secret_answer_agent_text``: a pointer's full text, or a one-line
     form's whole old text), which that carrier holds until a model call has read it; ``guidance`` is
     any other guidance, kept as before. One of the two is always empty."""
-    guidance = receiver_guidance_once(text, recipient, cwd=cwd)
+    guidance = receiver_guidance_once(text, recipient, cwd=cwd, ref=ref)
     try:
-        resolved = _display_resolve(text, recipient)
+        resolved = _display_resolve(text, recipient, ref)
         if resolved is not None:
             ref = resolved["ref"]
         else:
@@ -5439,14 +5443,11 @@ def cmd_context(args):
 
 
 def _courier_shown(row):
-    """What the OpenCode plugin courier pastes for ``row`` and looks for in the session history
-    (``shown``): the same text a session-shell paste carries (`pasted_text`). None when the row's
-    sealed record cannot be read this time: the courier then sends nothing for it this pass, since
-    the sealed text would not match a visible text it may already have sent."""
-    try:
-        return pasted_text(row, strict=True)
-    except ValueError:
-        return None
+    """``shown`` in the OpenCode 1 courier's list: the text a session-shell paste carries for ``row``
+    (`pasted_text`), or None when the row has none or its seal is not verified this time: the
+    courier then pastes the sealed text, and a write it made with ``shown`` waits for a later pass."""
+    shown = pasted_text(row)
+    return shown if shown != row.get("text") else None
 
 
 def cmd_pending(args):
@@ -5478,14 +5479,11 @@ def cmd_pending(args):
             if not row or row.get("state") != "pending" \
                     or not _same_transfer_session(pending_delivery_recipient(row), recipient):
                 return 1
-            shown = _courier_shown(row)
-            if shown is None:
-                return 1
             reserved = reserve_pending_herdr(reserve_ref, recipient,
                 receipt="opencode-prompt-inflight", claimant=claimant)
             if not reserved:
                 return 1
-            print(json.dumps(dict(reserved, shown=shown), ensure_ascii=False))
+            print(json.dumps(reserved, ensure_ascii=False))
             return 0
         transition_ref = begin_ref or release_ref
         row = _read_pending(transition_ref)
@@ -5499,12 +5497,11 @@ def cmd_pending(args):
         if release_ref:
             return 0 if release_pending_herdr_claim(
                 row, receipt="opencode-prompt-reservation-released") else 1
-        shown = _courier_shown(row)
-        begun = shown is not None and begin_pending_write(row, recipient=recipient,
+        begun = begin_pending_write(row, recipient=recipient,
                                     receipt="opencode-prompt-inflight", claimant=claimant)
         if not begun:
             return 1
-        print(json.dumps(dict(begun, shown=shown), ensure_ascii=False))
+        print(json.dumps(begun, ensure_ascii=False))
         return 0
     if not claim_ref and not queued_ref and not resuming_ref and not received_ref:
         # The OpenCode idle callback itself owns delivery. Listing is side-effect

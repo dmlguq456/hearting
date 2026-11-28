@@ -1338,15 +1338,12 @@ if (process.env.FIXTURE_BARE_NATIVE_ORIGIN === "1") {
                         "FIXTURE_DISABLE_INTERVALS": "1" if disable_intervals else "0",
                         "FIXTURE_PENDING_COMMAND_TIMEOUT_MS": str(pending_command_timeout_ms),
                         "FIXTURE_SELECTION_SID": selection_sid})
-            def listed(row):   # as the `pending` command lists it: with the text the courier pastes
-                shown = pm._courier_shown(row)
-                return dict(row, shown=shown) if shown is not None else row
             if pending_ref:
-                env["FIXTURE_PENDING_ROW"] = json.dumps(listed(pm._read_pending(pending_ref)))
+                env["FIXTURE_PENDING_ROW"] = json.dumps(pm._read_pending(pending_ref))
             else:
                 rows = pm.pending_messages({"harness": "opencode", "session_id": "ses_A"})
                 if len(rows) == 1:
-                    env["FIXTURE_PENDING_ROW"] = json.dumps(listed(rows[0]))
+                    env["FIXTURE_PENDING_ROW"] = json.dumps(rows[0])
                 else:
                     env.pop("FIXTURE_PENDING_ROW", None)
             if pane_id:

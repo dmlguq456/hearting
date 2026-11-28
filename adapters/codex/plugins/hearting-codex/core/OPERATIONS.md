@@ -3340,8 +3340,8 @@ evidence keeps the complete body inline; SID-less panes remain inline until
 session binding. Helper file reads and model-readable access are separate
 observations. One runtime delivery takes a payload on every harness: a body
 holding a secret question's answer that gets no one-line display form (to
-Codex and OpenCode none at all; an OpenCode tool boundary appends a row's sealed
-text to the tool result its TUI draws)
+OpenCode none at all, since its tool boundary and OpenCode 2 idle delivery paste
+a row's sealed text)
 shows the window only a pointer to its private payload (`private-answer`).
 Each carrier that takes the row gives the agent the verified full text in an
 agent-only place before the row settles: the Claude and Codex prompt hooks and
@@ -3459,7 +3459,7 @@ pending row; nothing is guessed.
 |---|---|---|---|
 | Claude | The prompt stores/reuses a ref bound to sender, recipient session and body digest. With a session-shell attachment the host takes it (`status` → `inject`) only while its own screen shows an idle, empty, unfocused input; otherwise the existing hook context carries it, mid-turn included. | The exact receiving callback acknowledges the bound ref. Context output alone is not receipt. | An already armed exact owner/watch `asyncRewake` hook wakes on exit 2. Draft, question, approval, busy or unknown stays pending for the shell host's next idle input or the next native callback. |
 | Codex | The exact thread queue accepts one sealed ref and returns its `client_message_id`; an active turn takes it as a steer. An interrupted thread restarts only from its shell host's idle, empty, unfocused input. | The exact message in the bound thread history confirms consumption. | Uses the existing queue and hook path; no transcript inference. Without a shell attachment an interrupted thread stays queued. |
-| OpenCode | With a session-shell attachment the host takes it as for Claude. The plugin's idle callback may also take its own pending row through the current client; the existing `rpc_claim` lets exactly one side send. | Only an error-free completed assistant message whose `parentID` is that ID in the same SID marks it received. | `promptAsync` continues the plugin-persisted message by ID. Busy, question, permission, child, ambiguous history or SID change cannot consume it. |
+| OpenCode | With a session-shell attachment the host takes it as for Claude. The plugin's idle callback may also take its own pending row through the current client; the existing `rpc_claim` lets exactly one side send. Its OpenCode 1 save pastes the visible form a session-shell paste carries only with that ref's own full text already read for the resume it starts, else the sealed text, and finds the message by the ID the save returned; OpenCode 2's prompt returns no ID, so its delivery pastes the sealed text. | Only an error-free completed assistant message whose `parentID` is that ID in the same SID marks it received. | `promptAsync` continues the plugin-persisted message by ID. Busy, question, permission, child, ambiguous history or SID change cannot consume it. |
 
 A Claude or OpenCode window outside the session shell receives no typed input
 from Hearting: its pending row is read at that session's next native callback
