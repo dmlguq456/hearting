@@ -1717,6 +1717,20 @@ whose report is empty, says no review was done or declares nothing is not finish
 notice path serves all three harnesses. The launching session need not be an owner: this section does not change which work is direct, solo or staged
 (`core/WORKFLOW.md` §0.2.1).
 
+A native subagent call (Claude `Agent`, Codex `spawn_agent`) made by a person's session is taken by the
+`PreToolUse` hook as this route (`utilities/native_subagent_redirect.py`) only when that is certain, decided once
+before anything is registered: the definition the harness picks for the name is Hearting's shipped one or its
+built-in, the call carries nothing a brief cannot, and nothing else decides the same call, no other hook or
+permission rule and no layer on the harness's command line (`capabilities/unit.md`, A native subagent call). The
+agent name picks the depth, the call's prompt is the brief and `--ephemeral` keeps no record. Once the start receipt
+says Hearting holds the call (running, waiting for a free worker, or ended) the call itself is refused with one line
+naming the route and the receipt's own way back (a completion notice, or its bounded-wait command); with every slot
+taken it waits in Hearting's queue and does not fall back to the native call, and a usage limit or failed start
+after that comes back through the existing wait and notices. Without a receipt saying Hearting holds the call the
+native call runs, and the hook leaves every start it began to finish; a hook ended from outside between the
+registration and its line, or a compose that fails after registering without such a receipt, can leave both running. A registered worker's call, a call inside a native subagent and every OpenCode subagent call
+run natively.
+
 A registered worker (owner, stage worker or unit worker) may open a unit route too. Its leg is a depth-1 leg of
 its own route, so no depth number stands in the way: a chain of workers each starting another is bounded by the
 worker governor's cap and start budget, and the start it cannot fit is refused in the governor's refusal form
