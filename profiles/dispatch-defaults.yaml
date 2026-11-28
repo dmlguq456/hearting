@@ -23,16 +23,18 @@
 #     strategy: balanced
 #     window: 30                       # last exact registered attempts
 #     usage_gate_used_percent: 85
-#     depth_affinity: {owner: claude, worker: codex}
+#     depth_affinity:                  # block mapping; `depth_affinity: {}` clears it
+#       owner: claude
+#       worker: codex
 #     depth_affinity_weight: 0.65
 #     owner_order: [claude, opencode, codex] # v3/v4; owners only, within eligibility/band
 #     usage_headroom_exponent: 2
 #     harness_weights:                 # optional; block mapping only (an inline
 #       opencode: 0.3                  # {a: 1} map is not parsed); 0 < w <= 1,
 #                                      # default 1.0; `balanced` strategy only
-#       design: {codex: 1.0}           # a field name overrides that field's row of the
-#       docs: 0.5                      # registry's field_harness_weights (block = cells;
-#                                      # one number switches the row off: equal cells cancel)
+#       design:                        # a field name overrides that field's row of the
+#         codex: 1.0                   # registry's field_harness_weights (block = cells;
+#       docs: 0.5                      # one number switches the row off: equal cells cancel)
 #   confirmation:                      # SD-123: post-frame direction gate
 #     mode: hybrid                     # hybrid | both | post-frame-only
 #   steward:                           # SD-122 (9): peer-session steward
