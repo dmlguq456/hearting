@@ -293,26 +293,28 @@ def _any_name(_name: str) -> bool:
     return True
 
 
-def _folder_place(path: Path, wanted: Callable[[str], Any]) -> Place:
-    """One folder the index scan opens, read the way the scan walks it:
-    ``("dir", ((name, inode), ...))`` for the non-hidden real sub-folders
-    ``wanted`` keeps (a symlink is never one), or ``("link",)`` / ``("absent",)``
-    (missing or not a folder) where the scan walks nothing. The scan walks only
-    what this returns, and a begin's reuse check reads the same place through it
-    again, so both judge a folder alike. One `scandir` (`d_type`, `d_ino`)."""
-
-    try:
-        mode = os.lstat(path).st_mode
-    except (FileNotFoundError, NotADirectoryError):
-        return ("absent",)
-    if stat.S_ISLNK(mode):
-        return ("link",)
-    if not stat.S_ISDIR(mode):
-        return ("absent",)
+def _listing(path: Path) -> List[Tuple[Path, int]]:
+    """The children ``path.iterdir()`` lists, each with the inode the same listing gives."""
     with os.scandir(path) as entries:
-        return ("dir", tuple(sorted((entry.name, entry.inode()) for entry in entries
-                                    if not entry.name.startswith(".") and wanted(entry.name)
-                                    and entry.is_dir(follow_symlinks=False))))
+        return [(path / entry.name, entry.inode()) for entry in entries]
+
+
+def _folder_place(path: Path, wanted: Callable[[str], Any]) -> Place:
+    """One folder the index scan opens, judged by the walk's own calls in their
+    order: ``is_dir()`` (which follows a link, so a link whose target cannot be
+    reached raises as it always has) before ``is_symlink()``, for the folder and
+    for each listed non-hidden name ``wanted`` keeps. ``("dir", ((name, inode),
+    ...))`` holds the sub-folders the walk takes; ``("absent",)`` / ``("link",)``
+    walk nothing. A begin's reuse check calls this same read again
+    (`_seen_place`), so both judge a folder alike and raise alike."""
+
+    if not path.is_dir():
+        return ("absent",)
+    if path.is_symlink():
+        return ("link",)
+    return ("dir", tuple(sorted((child.name, inode) for child, inode in _listing(path)
+                                if not child.name.startswith(".") and wanted(child.name)
+                                and child.is_dir() and not child.is_symlink())))
 
 
 def _seen_place(seen: Optional[Places], path: Path, read: Callable[[], Place]) -> Place:

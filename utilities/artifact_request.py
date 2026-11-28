@@ -126,10 +126,22 @@ def execution_dir(root, record, *, anchor=None):
     return _safe(root, Path(anchor) / Path(*EXECUTIONS) / record["cycle_id"])
 
 
+def _execution_listing(root, directory):
+    """`members`' read of a request's execution folder inside its `strict` boundary:
+    a symlinked component refused, then ``is_dir()`` and the listing."""
+    parent = _safe(root, Path(directory) / Path(*EXECUTIONS))
+    return parent, sorted(locator._listing(parent)) if parent.is_dir() else []
+
+
+def _walked(path):
+    """`members`' exclusion of one listed name, in its order, outside that boundary."""
+    return not (not locator._CYCLE_ID.fullmatch(path.name) or path.is_symlink() or not path.is_dir())
+
+
 def _execution_place(root, directory):
-    """The request's execution folder as `locator._folder_place` reads it (cycle-ID
-    names only), refusing a symlinked component like every request read."""
-    return locator._folder_place(_safe(root, Path(directory) / Path(*EXECUTIONS)), locator._CYCLE_ID.fullmatch)
+    """Both reads again: the place a begin's reuse check compares (`locator.iter_cycle_dirs`)."""
+    return ("dir", tuple((path.name, inode) for path, inode in _execution_listing(root, directory)[1]
+                         if _walked(path)))
 
 
 def members(root, directory, *, strict=True, include_deleted=False, _seen=None):
@@ -147,15 +159,17 @@ def members(root, directory, *, strict=True, include_deleted=False, _seen=None):
     frame = locator.read_cycle_record(root, identity) if identity else None
     if not frame or frame.get("route_capability") != route_plan.CAPABILITY:
         return
-    parent = (directory / Path(*EXECUTIONS)).absolute()
     try:
-        place = locator._seen_place(_seen, parent, partial(_execution_place, root, directory))
+        parent, listed = _execution_listing(root, directory)
     except (OSError, ValueError, locator.LocatorError) as exc:
         if strict:
             raise locator.LocatorError("request-members-unreadable", str(directory)) from exc
         return
-    for name, _inode in place[1] if place[0] == "dir" else ():
-        path = parent / name
+    walked = []
+    for path, inode in listed:
+        if not _walked(path):
+            continue
+        walked.append((path.name, inode))
         record = locator.read_cycle_record(root, path.name)
         try:
             if record and (include_deleted or not record.get("deleted_at")) and execution_dir(root, record, anchor=directory) == path:
@@ -165,6 +179,8 @@ def members(root, directory, *, strict=True, include_deleted=False, _seen=None):
         except (OSError, ValueError, KeyError, locator.LocatorError) as exc:
             if strict:
                 raise locator.LocatorError("request-binding-invalid", str(path)) from exc
+    if _seen is not None:   # every listed name judged: what a begin's reuse check reads again
+        _seen[parent] = (partial(_execution_place, root, directory), ("dir", tuple(walked)))
 
 
 def owning_scope(root, target):

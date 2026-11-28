@@ -22,6 +22,7 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import ast
 import contextlib
+import errno
 import importlib.util
 import io
 import json
@@ -939,6 +940,37 @@ class ScanCountTest(F.ProducerTestBase, IndexEquivalenceMixin):
                     self.assertEqual(P.read_cycle_record(self.root, cid)["state"], "dropped")
 
 
+@contextlib.contextmanager
+def _unreachable_target(test):
+    """A folder whose parent this user cannot search (the third review's host), or a skip
+    where search permission does not bind (root)."""
+    with tempfile.TemporaryDirectory() as base:
+        locked = Path(base) / "locked"
+        target = locked / "target"
+        target.mkdir(parents=True)
+        locked.chmod(0o600)
+        try:
+            try:
+                os.stat(target)
+            except PermissionError:
+                pass
+            else:
+                test.skipTest("search permission does not bind this user (root)")
+            yield target
+        finally:
+            locked.chmod(0o700)
+
+
+def _is_dir_raises(path):
+    """What the walk's own ``Path.is_dir()`` (it follows a link) does there: raise the read
+    error (Python 3.12), or answer False (3.13+, `os.path.isdir`)."""
+    try:
+        path.is_dir()
+    except PermissionError:
+        return True
+    return False
+
+
 class BeginScansItsCampaignOnceTest(F.ProducerTestBase, IndexEquivalenceMixin):
     """A begin that opens a cycle in an existing campaign scans that campaign
     once: its read-only index precheck hands its scan to the same begin's index
@@ -1016,6 +1048,8 @@ class BeginScansItsCampaignOnceTest(F.ProducerTestBase, IndexEquivalenceMixin):
             rows, mapping, status, rescanned, skipped, _ = loc._plan_update(root, ids)
         except loc.LocatorError as exc:
             return ("refused", exc.code, exc.detail)
+        except OSError as exc:   # the walk raises a folder it cannot read as it is
+            return ("raised", type(exc).__name__, exc.errno, exc.filename)
         finally:
             self._counting = True
         return ("ok", status, rescanned, skipped, *loc.render_indexes(mapping, rows))
@@ -1033,6 +1067,9 @@ class BeginScansItsCampaignOnceTest(F.ProducerTestBase, IndexEquivalenceMixin):
                 got = real_prepare(root, ids, **kwargs)
             except loc.LocatorError as exc:
                 self.assertEqual(("refused", exc.code, exc.detail), want)
+                raise
+            except OSError as exc:
+                self.assertEqual(("raised", type(exc).__name__, exc.errno, exc.filename), want)
                 raise
             self.assertEqual(("ok", got.status, got.rescanned, got.skipped), want[:4])
             self.prepared.append(got)
@@ -1057,6 +1094,9 @@ class BeginScansItsCampaignOnceTest(F.ProducerTestBase, IndexEquivalenceMixin):
                 got = real_update(root, ids, **kwargs)
             except loc.LocatorError as exc:
                 self.assertEqual(("refused", exc.code, exc.detail), want)
+                raise
+            except OSError as exc:
+                self.assertEqual(("raised", type(exc).__name__, exc.errno, exc.filename), want)
                 raise
             finally:
                 self.update_scans.append(self.scans[start:])
@@ -1337,14 +1377,24 @@ class BeginScansItsCampaignOnceTest(F.ProducerTestBase, IndexEquivalenceMixin):
         finally:
             adm._release_lock(self.root, fd)
 
-    def _hand_write_begin(self, first, write, *, slug=None, lands_after=None, refused=None, journal=False):
-        self.post_prepare, self.lands_after = write, lands_after
+    def _hand_write_begin(self, first, write, *, slug=None, lands_after=None, refused=None, journal=False,
+                          raised=None, before_precheck=False):
+        if before_precheck:
+            self.pre_prepare = write
+        else:
+            self.post_prepare = write
+        self.lands_after = lands_after
         self.update_scans.clear()
         self.same_order.clear()
         kwargs = {"slug": slug, "campaign_id": first["campaign_id"], "_reconcile": False,
                   **({"journal_target": True} if journal else {})}
         try:
             with self._against_main():
+                if raised is not None:   # an OS error main's walk raises as it is
+                    with self.assertRaises(OSError) as caught:
+                        self._begin(**kwargs)
+                    self.assertEqual(caught.exception.errno, raised)
+                    return None
                 if refused is None:
                     result = self._begin(**kwargs)[2]
                     self.assertEqual(result["layout"], "journal" if journal else "cycle")
@@ -1354,7 +1404,7 @@ class BeginScansItsCampaignOnceTest(F.ProducerTestBase, IndexEquivalenceMixin):
                 self.assertEqual(caught.exception.code, refused)
                 return None
         finally:
-            self.post_prepare = self.lands_after = None
+            self.pre_prepare = self.post_prepare = self.lands_after = None
 
     def _then(self, first, then, refused=None):
         """What follows: the campaign's next begin (after its root reconcile), or a locked repair."""
@@ -1550,6 +1600,101 @@ class BeginScansItsCampaignOnceTest(F.ProducerTestBase, IndexEquivalenceMixin):
             self._then(first, then)
         self._each_scene(scene)
 
+    def test_republished_index_markdown_alone_rescans(self):
+        # Only INDEX.md changes: a title retitled and republished, no folder moved or added
+        # (the journal path adds none), so INDEX.json reads the same as at the precheck.
+        def scene(journal, then, tag):
+            first = self._begin(slug="md-slot", campaign_key=f"once-md-only-{tag}")[2]   # stays open
+            record_path = P.cycle_record_path(self.root, first["cycle_id"])
+            title = f"republished while {tag} begins"
+            same = {}
+
+            def retitle_and_republish():
+                before = self._index_bytes()
+                record = json.loads(record_path.read_text(encoding="utf-8"))
+                spare = record_path.with_name(record_path.name + ".hand")
+                spare.write_text(json.dumps({**record, "title": title}, indent=2, sort_keys=True) + "\n",
+                                 encoding="utf-8")
+                os.replace(spare, record_path)   # an editor's atomic save
+                loc.rebuild_indexes(self.root)   # the begin holds the admission lock
+                after = self._index_bytes()
+                same.update(json=before[0] == after[0], md=before[1] == after[1])
+            self._hand_write_begin(first, retitle_and_republish, journal=journal)
+            self.assertEqual(same, {"json": True, "md": False})
+            self.assertEqual(self.update_scans, [[Path(first["cycle_dir"]).parent.name]])
+            self.assertEqual(loc.parse_index_markdown(self._index_bytes()[1])[first["cycle_id"]]["title"], title)
+            self._then(first, then)
+        self._each_scene(scene)
+
+    # -- each folder judged by the walk's own calls (third review) ------------------------
+    # The walk asks `is_dir()` of the campaign, `cycles` and each entry before `is_symlink()`,
+    # following a link as it always has: a link right under a campaign whose target's parent
+    # cannot be searched raises there (Python 3.12), and every reader, the precheck and the
+    # update say so as main does.
+    def _sealed_with_status(self, key):
+        route, route_file, result = self._begin(campaign_key=key)
+        self.write_output(result)
+        self.write_output(result, "status.md", b"# status\n")   # a legacy cycle page
+        self.close(route, route_file)
+        P.finalize(self.root, cycle_id=result["cycle_id"])
+        (Path(result["cycle_dir"]).parent / "campaign.md").unlink()   # an older campaign without its own page
+        return result
+
+    def test_link_to_an_unreachable_target_reads_as_on_main(self):
+        import artifact_campaign_documents
+        import artifact_reader
+        first = self._sealed_with_status("once-unreachable-readers")
+        camp_dir = Path(first["cycle_dir"]).parent
+
+        def readers():
+            status = C.status(self.root, camp_dir)
+            document = artifact_campaign_documents.campaign_status(camp_dir)
+            try:
+                buckets = sorted(path.relative_to(self.root).as_posix()
+                                 for path, _ in artifact_reader.cycle_bucket_dirs(self.root, "plans"))
+            except OSError as exc:
+                buckets = (type(exc).__name__, exc.errno, exc.filename)
+            return ((status["closable"], status.get("close_refusal", {}).get("reason")),
+                    (document["status"], document.get("path") and Path(document["path"]).name), buckets)
+
+        reachable = readers()
+        self.assertEqual(reachable[:2], ((True, None), ("known", "status.md")))
+        with _unreachable_target(self) as target:
+            link = camp_dir / "unreachable-link"
+            link.symlink_to(target)
+            try:
+                got = readers()
+            finally:
+                link.unlink()
+            if _is_dir_raises(target):   # main: each reader meets the read error
+                self.assertEqual(got, ((False, "campaign-directory-unreadable"), ("unknown", None),
+                                       ("PermissionError", errno.EACCES, str(link))))
+            else:                        # main on 3.13+: the link is not a folder there
+                self.assertEqual(got, reachable)
+        self.assertEqual(readers(), reachable)
+
+    def test_link_to_an_unreachable_target_in_a_begin_answers_as_main(self):
+        # Before the precheck, main's precheck raises; right after it, main's update raises.
+        def scene(journal, then, tag):
+            for before_precheck in (True, False):
+                with self.subTest(before_precheck=before_precheck):
+                    first = self._sealed_with_status(f"once-unreachable-{tag}-{before_precheck}")
+                    camp_dir = Path(first["cycle_dir"]).parent
+                    link = camp_dir / "unreachable-link"
+                    with _unreachable_target(self) as target:
+                        raises = _is_dir_raises(target)
+                        try:
+                            self._hand_write_begin(first, lambda: link.symlink_to(target), journal=journal,
+                                                   raised=errno.EACCES if raises else None,
+                                                   before_precheck=before_precheck)
+                            if raises:   # no update after the precheck raised; else scanned again into it
+                                self.assertEqual(self.update_scans, [] if before_precheck else [[camp_dir.name]])
+                        finally:
+                            if link.is_symlink():
+                                link.unlink()
+                    self._then(first, then)
+        self._each_scene(scene)
+
 
 class BeginBesideARequestTest(Q.S.SourceRepoStartBase):
     """`BeginScansItsCampaignOnceTest`'s second-review scenes in a campaign holding a request.
@@ -1636,6 +1781,70 @@ class BeginBesideARequestTest(Q.S.SourceRepoStartBase):
                     away.rename(internal)
                 self._locked(lambda: loc.rebuild_indexes(self.root))
         self._each_scene(scene)
+
+    def test_request_members_boundary_is_main_s(self):
+        # `members` refuses an execution folder it cannot list inside its `strict` boundary
+        # (`request-members-unreadable`; lenient: nothing), raises an entry it cannot judge as it
+        # is (outside that boundary), and asks `is_symlink()` before `is_dir()`, so a linked
+        # execution is skipped without following it. A begin's update answers as main.
+        import artifact_request
+        frame, execution, folder = self._request()
+        executions, internal = folder.parent, folder.parents[1]
+        frame_dir = folder.parents[2]
+        mode = executions.stat().st_mode & 0o777
+
+        def moved_to_a_link(path):
+            away = path.with_name("." + path.name + "-away")
+
+            def change():
+                path.rename(away)
+                path.symlink_to(away.name)
+
+            def undo():
+                if path.is_symlink():
+                    path.unlink()
+                    away.rename(path)
+            return change, undo
+
+        def outcome(strict):
+            try:
+                return ("members", [path.name for path in artifact_request.members(self.root, frame_dir, strict=strict)])
+            except loc.LocatorError as exc:
+                return ("refused", exc.code)
+            except OSError as exc:
+                return ("raised", type(exc).__name__, exc.errno)
+
+        unreadable = ("refused", "request-members-unreadable")
+        with _unreachable_target(self) as target:
+            raises = _is_dir_raises(target)   # and `is_symlink()` alike: both raise on 3.12
+            linked = executions / ("cyc_" + "0" * 32)
+            unjudged = ("raised", "PermissionError", errno.EACCES) if raises else ("members", [])
+            cases = {   # name -> (change, undo, main strict, main lenient, main's refusal in a begin)
+                "internal-link": (*moved_to_a_link(internal), unreadable, ("members", []), unreadable[1]),
+                "executions-link": (*moved_to_a_link(executions), unreadable, ("members", []), unreadable[1]),
+                "executions-unlisted": (lambda: executions.chmod(0o000), lambda: executions.chmod(mode),
+                                        unreadable, ("members", []), unreadable[1]),
+                "executions-unsearchable": (lambda: executions.chmod(0o400), lambda: executions.chmod(mode),
+                                            unjudged, unjudged, errno.EACCES if raises else None),
+                "linked-execution": (lambda: linked.symlink_to(target),
+                                     lambda: linked.unlink() if linked.is_symlink() else None,
+                                     ("members", [folder.name]), ("members", [folder.name]), None),
+            }
+            self.assertEqual((outcome(True), outcome(False)), (("members", [folder.name]),) * 2)
+            for name, (change, undo, strict, lenient, refused) in cases.items():
+                with self.subTest(case=name):
+                    change()
+                    try:
+                        self.assertEqual((outcome(True), outcome(False)), (strict, lenient))
+                    finally:
+                        undo()
+                    try:   # the same change right after a begin's precheck
+                        self._hand_write_begin(frame, change, **({"raised": refused} if isinstance(refused, int)
+                                                                 else {"refused": refused}))
+                    finally:
+                        undo()
+                        self._locked(lambda: loc.rebuild_indexes(self.root))
+                    self.assertEqual((outcome(True), outcome(False)), (("members", [folder.name]),) * 2)
 
 
 _WRITER_FUNCTIONS = ("_write_cycle_record", "_write_campaign", "_write_cycle_binding", "_publish_event")
