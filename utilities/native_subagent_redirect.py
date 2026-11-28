@@ -8,7 +8,8 @@ that is not certain leaves the native call exactly as it was, with nothing print
   renders for the user's models) or the harness's built-in, and the call carries nothing a brief cannot.
 - Nothing else decides the same call: no other hook or permission rule in a configuration the hook reads,
   no layer added on the harness's command line, and Hearting's own hook registered exactly once.
-- The caller is a person's session: not a registered worker, not a native subagent (unknown counts as not).
+- The caller is a person's session or a registered Claude worker that is no unit route's leg, and not a native
+  subagent (unknown counts as not).
 
 Then the hook runs, as a session that typed it would,
 
@@ -23,6 +24,13 @@ never stops a start. Two windows are left where both can run: a hook ended from 
 harness's timeout) between the registration and its refusal line, and a compose that fails after registering
 without writing such a receipt.
 
+A worker runs the start in its own environment, as its shell would, so the leg hangs below it and stops with it
+(`capabilities/unit.md`, A worker that starts a unit route). Its line gives the receipt's wait command (a worker
+gets no completion notice), and a start the governor refuses holds nothing: no later start is armed inside a
+worker and compose closes that route, so the native call runs. The layers Hearting's own worker launch adds on
+the command line count only when they decide the call (`_worker_layer`). A Codex worker is left native: its
+launch adds `-c` configuration this hook does not judge.
+
 OpenCode is not intercepted (`adapters/opencode/ADAPTATION.md`).
 
 Usage (stdin: the harness payload):
@@ -33,6 +41,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -294,12 +303,49 @@ def _harness_argv() -> list[str]:
     raise OSError("no harness process above this hook")
 
 
-def require_sole_decision(harness: str, tool: str, cwd: str) -> None:
+def _values(argv: list[str], index: int) -> list[str]:
+    """What the flag at `index` was given: after its `=`, or the arguments up to the next flag."""
+    if "=" in argv[index]:
+        return [argv[index].split("=", 1)[1]]
+    values = []
+    for arg in argv[index + 1:]:
+        if arg.startswith("-"):
+            break
+        values.append(arg)
+    return values
+
+
+def _worker_layer(flag: str, values: list[str], payload: dict) -> bool:
+    """A layer Hearting's Claude worker launch adds (`claude-session-supervisor.py`) that leaves this call alone:
+    the park hook alone, letting this very call through (it refuses only in the worker's terminal cleanup); added
+    folders that hold no `.claude`; tool rules that name no subagent tool."""
+    if flag == "--settings" and len(values) == 1:
+        settings = json.loads(values[0])
+        [group] = settings["hooks"]["PreToolUse"]
+        park = str(ROOT / "adapters" / "claude" / "hooks" / "registered-parent-park.py")
+        if (set(settings) != {"hooks"} or set(settings["hooks"]) != {"PreToolUse"}
+                or [shlex.split(handler["command"]) for handler in group["hooks"]] != [[park]]):
+            return False
+        done = subprocess.run(group["hooks"][0]["command"], shell=True, input=json.dumps(payload),
+                              capture_output=True, text=True, timeout=10)
+        return done.returncode == 0 and not done.stdout.strip()
+    if flag == "--add-dir":
+        return bool(values) and not any((Path(value) / ".claude").exists() for value in values)
+    if flag in ("--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools"):
+        return bool(values) and not any(re.match(r"(Agent|Task)(\(|$)", rule)
+                                        for value in values for rule in re.split(r"[\s,]+", value))
+    return False
+
+
+def require_sole_decision(harness: str, tool: str, cwd: str, worker_payload: dict | None = None) -> None:
     """`Skip` unless this hook is the only decision on the call it can see: the harness runs matching hooks
-    side by side and applies deny/ask rules after them, so another decision would come after the start."""
-    for arg in _harness_argv()[1:]:
+    side by side and applies deny/ask rules after them, so another decision would come after the start. For a
+    worker's call (`worker_payload`) the layers its launch adds count only when they decide it."""
+    argv = _harness_argv()[1:]
+    for index, arg in enumerate(argv):
         if arg.split("=", 1)[0] in _LAUNCH_LAYERS[harness] or (harness == "codex" and re.match(r"-[cp].", arg)):
-            raise Skip("launch-layer")
+            if worker_payload is None or not _worker_layer(arg.split("=", 1)[0], _values(argv, index), worker_payload):
+                raise Skip("launch-layer")
     if harness == "claude" and (_home(harness) / "remote-settings.json").exists():
         raise Skip("server-managed-settings")      # the copy of settings an organization's server manages
     path, name = _REGISTRATION[harness]
@@ -324,15 +370,23 @@ def require_sole_decision(harness: str, tool: str, cwd: str) -> None:
 
 # --- Who calls --------------------------------------------------------------------------------------------
 
-def _is_registered_worker(harness: str, payload: dict, session: str) -> bool:
-    """Registered workers and native subagents keep their own behavior (the question redirect's test). A
-    sub-session record that cannot be read counts as a native subagent: nothing is certain about it."""
-    import session_tidy as tidy
-    if (tidy.is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower()
-            in {"owner", "worker", "auxiliary", "reviewer"} or bool(payload.get("agent_id"))):
-        return True
+def caller(harness: str, payload: dict, session: str) -> str:
+    """`session` (a person's) or `worker` (a registered Claude worker: `AGENT_DISPATCH_CHILD=1` with its attempt
+    id); `Skip` for a native subagent, a unit route's leg (its calls stay native, so legs do not chain by
+    themselves), any other worker (the question redirect's test) or what cannot be told. A sub-session record
+    that cannot be read counts as a native subagent: nothing is certain about it."""
     import session_identity
-    return session_identity.known_sub_session_root(harness, session) != session
+    import session_tidy as tidy
+    if payload.get("agent_id") or session_identity.known_sub_session_root(harness, session) != session:
+        raise Skip("native-subagent")
+    if (harness == "claude" and os.environ.get("AGENT_DISPATCH_CHILD") == "1"
+            and re.fullmatch(r"att-[A-Za-z0-9._-]+", os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", ""))):
+        if json.loads(Path(os.environ["AGENT_ROUTE_FILE"]).read_text(encoding="utf-8")).get("capability") in (None, "unit"):
+            raise Skip("unit-route-leg")
+        return "worker"
+    if tidy.is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower() in {"owner", "worker", "auxiliary", "reviewer"}:
+        raise Skip("worker")
+    return "session"
 
 
 def brief(call: dict) -> str:
@@ -368,16 +422,20 @@ def _last_json(text: str) -> dict:
     return {}
 
 
-def registered(receipt: dict) -> bool:
-    """The start receipt says Hearting holds the call: running, waiting for a worker, or already ended."""
-    return bool(receipt.get("route_id")) and (receipt.get("state") in {"running", "waiting-capacity", "completed"}
+def registered(receipt: dict, worker: bool = False) -> bool:
+    """The start receipt says Hearting holds the call: running, waiting for a worker, or already ended. A
+    worker's start that only waits for a slot holds nothing: no later start is armed inside a worker, and
+    compose closes that route (`capability-route.py` `_close_unstarted_record_free`)."""
+    held = {"running", "completed"} | (set() if worker else {"waiting-capacity"})
+    return bool(receipt.get("route_id")) and (receipt.get("state") in held
                                               or bool(receipt.get("registered_attempts") or receipt.get("result")))
 
 
-def start(harness: str, call: dict, depth: str, cwd: str) -> dict | None:
-    """Run the start as a session would; its receipt when Hearting holds the call, else None. The hook returns
-    once the receipt is written and never stops the start: the compose process finishes on its own."""
-    env = compose_env(harness, call["session"])
+def start(harness: str, call: dict, depth: str, cwd: str, worker: bool = False) -> dict | None:
+    """Run the start as the caller would (a worker in its own environment); its receipt when Hearting holds the
+    call, else None. The hook returns once the receipt is written and never stops the start: the compose process
+    finishes on its own."""
+    env = dict(os.environ) if worker else compose_env(harness, call["session"])
     with tempfile.TemporaryFile() as given, tempfile.TemporaryFile() as out:
         # Files, not pipes: no write waits on the start, and a worker it launches holds nothing the harness
         # waits on.
@@ -392,12 +450,13 @@ def start(harness: str, call: dict, depth: str, cwd: str) -> dict | None:
             out.seek(0)
             receipt = _last_json(out.read().decode("utf-8", "replace"))
             if receipt.get("state") or ended:
-                return receipt if registered(receipt) else None
+                return receipt if registered(receipt, worker) else None
             time.sleep(POLL_SECONDS)
 
 
-def reason_for(receipt: dict, depth: str, harness: str = "") -> str:
-    """The refusal line: the route, and how its answer reaches this session (the receipt's own directive)."""
+def reason_for(receipt: dict, depth: str, harness: str = "", worker: bool = False) -> str:
+    """The refusal line: the route, and how its answer reaches this session (the receipt's own directive; a
+    worker gets no completion notice, so its line gives the receipt's wait command)."""
     waiting = receipt.get("state") == "waiting-capacity"
     head = (f"{'Queued' if waiting else 'Started'} as Hearting unit route {receipt['route_id']} ({UNIT}, {depth}, "
             "no record)." + (" It waits for a free worker and does not run natively." if waiting else ""))
@@ -406,11 +465,13 @@ def reason_for(receipt: dict, depth: str, harness: str = "") -> str:
     ended, command = receipt.get("state") == "completed" or receipt.get("result"), receipt.get("resume_command")
     if ended and str(command or "").strip():
         return f"{head} It has already ended; read its result once with: {command} Do not call it again."
-    if ended or receipt.get("parent_next") == "end-turn":   # ended with no command to read it: a cancelled unit
+    if (ended or receipt.get("parent_next") == "end-turn") and not worker:   # ended with no command: a cancelled unit
         idle = " If this session is idle by then, it comes with the next message." if waiting and harness == "claude" else ""
         return (f"{head} Its answer, or what stopped it, comes back to this session as a completion notice.{idle} "
                 "Do not call it again; go on with other work or end the turn.")
     command = receipt.get("parent_next_command") or receipt.get("resume_command") or ""
+    if worker and not command:
+        return f"{head} It has already ended with nothing to read. Do not call it again."
     return (f"{head} No completion notice reaches this session: run this once to receive its answer: {command} "
             "Do not call it again.")
 
@@ -422,19 +483,18 @@ def redirect(harness: str, payload: dict) -> str | None:
     try:
         sys.path.insert(0, str(UTILITIES))
         call = normalized(harness, payload)
-        if _is_registered_worker(harness, payload, call["session"]):
-            return None
+        worker = caller(harness, payload, call["session"]) == "worker"
         depth = depth_for(harness, call)
         cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) and payload.get("cwd") else os.getcwd()
         if not os.path.isdir(cwd):
             return None
         require_shipped_definition(harness, call["name"] or DEFAULT_AGENT[harness], cwd)
-        require_sole_decision(harness, str(payload.get("tool_name") or ""), cwd)
+        require_sole_decision(harness, str(payload.get("tool_name") or ""), cwd, payload if worker else None)
     except BaseException:  # noqa: BLE001 -- any doubt or failure before the start lets the native call run
         return None
     try:
-        receipt = start(harness, call, depth, cwd)
-        return None if receipt is None else reason_for(receipt, depth, harness)
+        receipt = start(harness, call, depth, cwd, worker)
+        return None if receipt is None else reason_for(receipt, depth, harness, worker)
     except BaseException:  # noqa: BLE001 -- a start that cannot be read registered nothing this hook knows of
         return None
 

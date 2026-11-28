@@ -75,7 +75,8 @@ open(base + ".pid", "w").write(str(os.getpid()))
 brief = "" if mode == "no-read" else sys.stdin.read()
 record = {"argv": sys.argv[1:], "brief": brief,
           "env": {k: os.environ.get(k) for k in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "OPENCODE_SESSION_ID",
-                                                  "AGENT_DISPATCH_CALLER_HARNESS", "AGENT_CAPACITY_RESUME_CHAIN")}}
+                                                  "AGENT_DISPATCH_CALLER_HARNESS", "AGENT_CAPACITY_RESUME_CHAIN")},
+          "worker": {k: os.environ.get(k) for k in ("AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_ATTEMPT_ID")}}
 with open(base, "a") as fh:
     fh.write(json.dumps(record) + "\n")
 
@@ -114,6 +115,16 @@ elif mode == "refused":
     raise SystemExit(64)
 elif mode == "garbage":
     print("not json")
+elif mode == "worker-running":
+    # A leg a worker started: no notice carrier, so the receipt names its bounded wait.
+    say(state="running", unit_attempt_id="att-x", parent_next="bounded-wait",
+        parent_next_command="cr start --route rt-0123456789abcdef --wait",
+        resume_command="cr start --route rt-0123456789abcdef")
+elif mode == "worker-capacity":
+    # The governor refused a worker's start: no row, no resume armed, the route already closed by compose.
+    say(state="waiting-capacity", reason="launch-capacity-wait", required_action="resume-after-capacity",
+        parent_next="bounded-wait", parent_next_command="cr start --route rt-0123456789abcdef --wait",
+        retry_at="2099-01-01T00:00:00Z")
 '''
 
 
@@ -803,6 +814,154 @@ class ClaudeHookTest(Base):
                 out = self.run_hook(["--redirect"], payload, "Started as Hearting unit route rt-1")
                 self.assertEqual(out["permissionDecisionReason"], reason)
                 self.assertFalse(self.called.exists())       # the redirect never ran: nothing started
+
+
+PARK = str(ROOT / "adapters" / "claude" / "hooks" / "registered-parent-park.py")
+WORKER = {"AGENT_DISPATCH_CHILD": "1", "AGENT_DISPATCH_ATTEMPT_ID": "att-owner-1", "AGENT_SESSION_ROLE": "worker",
+          "AGENT_DISPATCH_DEPTH": "1", "CLAUDE_CODE_SESSION_ID": "worker-session", "AGENT_DISPATCH_CALLER_HARNESS": "claude",
+          "AGENT_HOME": str(ROOT)}   # a worker carries the release it runs from; the park hook finds itself by it
+WORKER_LINE = ("Started as Hearting unit route rt-0123456789abcdef (general/explore, light, no record). No completion "
+               "notice reaches this session: run this once to receive its answer: cr start --route rt-0123456789abcdef "
+               "--wait Do not call it again.")
+
+
+class WorkerTest(Homes):
+    """A registered Claude worker's call is taken as a person's session's is (K): the same judgment in the worker's
+    home, the layers its own launch adds deciding nothing; it starts in the worker's own environment and is told
+    the wait command. A unit route's leg, a native subagent inside a worker, a Codex worker, and a start the
+    governor refuses to a worker stay native."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake = self.tmp / "fake"
+        self.fake.mkdir()
+        (self.fake / "capability-route.py").write_text(FAKE_ROUTE)
+        self.record = self.fake / "record.jsonl"
+        self.route = self.write(self.tmp / "route.json", json.dumps({"capability": "autopilot-code"}))
+        for patcher in (mock.patch.object(redirect, "UTILITIES", self.fake),
+                        mock.patch.dict(os.environ, {**WORKER, "AGENT_ROUTE_FILE": str(self.route),
+                                                     "FAKE_RECORD": str(self.record), "FAKE_MODE": "worker-running"}),
+                        mock.patch.object(session_identity, "known_sub_session_root", return_value=SID),
+                        mock.patch.object(redirect, "_harness_argv", return_value=self.argv())):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(self.end)
+        self.ship("claude", "light")
+        self.register("claude")
+        self.payload = {**claude(subagent_type="light"), "cwd": str(self.project)}
+
+    def end(self):
+        pid = Path(str(self.record) + ".pid")
+        if pid.is_file():
+            try:
+                os.killpg(int(pid.read_text()), signal.SIGKILL)
+            except OSError:
+                pass
+
+    def argv(self, *extra, park=PARK):
+        """The command line Hearting's Claude worker launch gives (`claude-session-supervisor.py`)."""
+        settings = {"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": park,
+                                                                          "timeout": 10}]}]}}
+        return ["claude", "-p", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config",
+                '{"mcpServers":{}}', "--session-id", SID, "--settings", json.dumps(settings),
+                "--add-dir", str(self.tmp / "artifacts"), "--add-dir", str(self.tmp / "runtime"),
+                "--output-format", "stream-json", "--verbose", "--model", "opus", "--effort", "xhigh",
+                "--disallowedTools", "Monitor,ScheduleWakeup,CronCreate,Edit(//x/core/**)",
+                "--permission-mode", "bypassPermissions",
+                "--allowedTools", "Bash(python3 /x/capability-route.py *),Bash(/x/capability-route.py)", *extra]
+
+    def records(self):
+        return [json.loads(line) for line in self.record.read_text().splitlines()] if self.record.is_file() else []
+
+    def test_a_worker_s_call_starts_in_its_own_environment_and_is_told_the_wait_command(self):
+        self.assertEqual(redirect.redirect("claude", self.payload), WORKER_LINE)
+        [record] = self.records()
+        self.assertEqual(record["worker"], {"AGENT_DISPATCH_CHILD": "1", "AGENT_DISPATCH_ATTEMPT_ID": "att-owner-1"})
+        # The worker's own identity, as its shell carries it; nothing arms a later start for it.
+        self.assertEqual(record["env"], {"CLAUDE_CODE_SESSION_ID": "worker-session", "CODEX_THREAD_ID": None,
+                                         "OPENCODE_SESSION_ID": None, "AGENT_DISPATCH_CALLER_HARNESS": "claude",
+                                         "AGENT_CAPACITY_RESUME_CHAIN": None})
+
+    def test_a_start_the_governor_refuses_to_a_worker_runs_natively(self):
+        with mock.patch.dict(os.environ, {"FAKE_MODE": "worker-capacity"}):
+            self.assertIsNone(redirect.redirect("claude", self.payload))
+            receipt = redirect.start("claude", redirect.normalized("claude", self.payload), "light", str(self.project))
+        self.assertEqual(receipt["state"], "waiting-capacity")      # the same receipt holds a session's call
+        self.assertEqual(len(self.records()), 2)
+
+    def test_who_inside_a_worker_stays_native(self):
+        unit_route = self.write(self.tmp / "unit-route.json", json.dumps({"capability": "unit"}))
+        for label, env, payload in (
+                ("a unit route's leg", {"AGENT_ROUTE_FILE": str(unit_route)}, self.payload),
+                ("a route that cannot be read", {"AGENT_ROUTE_FILE": str(self.tmp / "missing.json")}, self.payload),
+                ("no attempt id", {"AGENT_DISPATCH_ATTEMPT_ID": ""}, self.payload),
+                ("a native subagent inside it", {}, {**self.payload, "agent_id": "a-1"})):
+            with self.subTest(label), mock.patch.dict(os.environ, env):
+                self.assertIsNone(redirect.redirect("claude", payload))
+        with mock.patch.object(session_identity, "known_sub_session_root", return_value="another-root"):
+            self.assertIsNone(redirect.redirect("claude", self.payload))
+        with self.assertRaises(redirect.Skip):
+            redirect.caller("codex", codex(agent_type="light"), SID)  # a Codex worker's launch adds `-c` layers
+        self.assertEqual(redirect.caller("claude", self.payload, SID), "worker")
+        self.assertEqual(self.records(), [])
+
+    def test_the_worker_launch_s_own_layers_decide_nothing(self):
+        redirect.require_sole_decision("claude", "Agent", str(self.project), self.payload)
+        with self.assertRaises(redirect.Skip):
+            redirect.require_sole_decision("claude", "Agent", str(self.project))   # a session's judgment as before
+        jobs = {"AGENT_DISPATCH_COMPLETION_MODE": "supervised", "AGENT_DISPATCH_JOBS": str(self.tmp / "s/jobs.log")}
+        with mock.patch.dict(os.environ, jobs):                  # supervised, no cleanup scope: the park hook passes
+            redirect.require_sole_decision("claude", "Agent", str(self.project), self.payload)
+            with mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": ""}), self.assertRaises(redirect.Skip):
+                redirect.require_sole_decision("claude", "Agent", str(self.project), self.payload)   # it refuses
+
+    def test_a_launch_layer_that_could_decide_the_call_keeps_it_native(self):
+        (self.tmp / "with-claude" / ".claude").mkdir(parents=True)
+        park = json.loads(self.argv()[self.argv().index("--settings") + 1])
+        other = {"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "my-refusal"}]}]}}
+        for argv in (self.argv("--settings", json.dumps(other)), self.argv(park="my-wrap " + PARK),
+                     self.argv("--settings", json.dumps({**park, "permissions": {"deny": ["Agent"]}})),
+                     self.argv("--settings", "/x/settings.json"), self.argv("--add-dir", str(self.tmp / "with-claude")),
+                     self.argv("--disallowedTools", "Agent"), self.argv("--allowedTools=Task(Explore)"),
+                     self.argv("--disallowedTools", "Read", "Agent(light)"), self.argv("--agents", "{}"),
+                     self.argv("--plugin-dir", "/x"), self.argv("--setting-sources", "user"), self.argv("--add-dir")):
+            with self.subTest(argv=argv[-2:]), mock.patch.object(redirect, "_harness_argv", return_value=argv):
+                self.assertIsNone(redirect.redirect("claude", self.payload))
+        self.assertEqual(self.records(), [])
+
+    def test_the_worker_s_line_always_names_a_command(self):
+        line = redirect.reason_for({"route_id": "rt-1", "state": "running", "parent_next": "end-turn",
+                                    "resume_command": "cr start --route rt-1"}, "light", "claude", worker=True)
+        self.assertIn("run this once to receive its answer: cr start --route rt-1 ", line)
+        self.assertNotIn("completion notice,", line)
+        ended = {"route_id": "rt-1", "state": "cancelled", "result": {"stopped": True}, "resume_command": ""}
+        self.assertEqual(redirect.reason_for(ended, "light", "claude", worker=True),
+                         "Started as Hearting unit route rt-1 (general/explore, light, no record). It has already "
+                         "ended with nothing to read. Do not call it again.")
+        done = {"route_id": "rt-1", "state": "completed", "summary": "Answered: x"}
+        self.assertEqual(redirect.reason_for(done, "light", "claude", worker=True),
+                         redirect.reason_for(done, "light", "claude"))
+
+    def test_a_session_s_lines_are_as_before_byte_for_byte(self):
+        head = "as Hearting unit route rt-1 (general/explore, light, no record)."
+        notice = (" Its answer, or what stopped it, comes back to this session as a completion notice.{} Do not call "
+                  "it again; go on with other work or end the turn.")
+        for receipt, line in (
+                ({"state": "running", "parent_next": "end-turn"}, "Started " + head + notice.format("")),
+                ({"state": "waiting-capacity", "parent_next": "end-turn"},
+                 "Queued " + head + " It waits for a free worker and does not run natively." + notice.format(
+                     " If this session is idle by then, it comes with the next message.")),
+                ({"state": "running", "parent_next": "bounded-wait", "parent_next_command": "cr w"},
+                 "Started " + head + " No completion notice reaches this session: run this once to receive its "
+                 "answer: cr w Do not call it again."),
+                ({"state": "completed", "summary": "A"}, "Started " + head + " It has already finished; its answer:"
+                 "\nA\nDo not call it again."),
+                ({"state": "completed", "resume_command": "cr r"}, "Started " + head + " It has already ended; read "
+                 "its result once with: cr r Do not call it again."),
+                ({"state": "cancelled", "result": {"stopped": True}, "resume_command": ""},
+                 "Started " + head + notice.format(""))):
+            with self.subTest(receipt=receipt):
+                self.assertEqual(redirect.reason_for({"route_id": "rt-1", **receipt}, "light", "claude"), line)
 
 
 if __name__ == "__main__":

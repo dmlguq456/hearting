@@ -63,6 +63,14 @@ Loaded by ``harness_behavior_scenarios.py`` (``_load_extra``).
     run. Exit 2 is the control: the harnesses read it (with stderr) as a block, so the native subagent must
     not run; the shared redirect never returns it, and Codex's runner turns the bridge's own failures into 0.
 
+``subagent-redirect-worker`` (Claude)
+    A registered owner (quick, one session, started by compose) calls its native subagent with the worker home's
+    ``light`` name. The same hook, judging in the worker's home, starts it as a ``general/explore`` unit route below
+    the owner's attempt; the call is refused with the receipt's wait command, which the owner runs and which returns
+    the answer (``Answer:``). No native subagent request reaches the model. The times kept: the call to the refusal
+    (``call_to_refusal_seconds``), to the leg's first request (``call_to_worker_request_seconds``) and to the wait
+    result carrying the answer (``call_to_answer_seconds``). A Codex or OpenCode worker's call is not taken.
+
 Everything stays in the fixture root; no user config is read or written.
 """
 from __future__ import annotations
@@ -86,7 +94,7 @@ import harness_behavior_cases_b as cb  # noqa: E402
 import harness_behavior_cases_e as ce  # noqa: E402
 from harness_behavior_cases_e import TERMINAL_STATES, registry_rows, _base  # noqa: E402
 import harness_behavior_cases_unit_route as unit  # noqa: E402
-from harness_behavior_cases_unit_nested import _report_shell  # noqa: E402
+from harness_behavior_cases_unit_nested import OwnerCallsScenario, _report_shell, worker_processes  # noqa: E402
 
 # The subagent tool each harness offers, as the model sees it (evidence; the first seen is kept).
 SPAWN_SCHEMAS: dict = {}
@@ -1023,7 +1031,144 @@ class SubagentRedirectCostScenario(SubagentRedirectScenario):
         return "pass" if ok else "fail"
 
 
+class SubagentRedirectWorkerScenario(OwnerCallsScenario):
+    name = "subagent-redirect-worker"
+    summary = ("A registered Claude owner calls its native subagent: the hook starts it as a general/explore unit "
+               "route below the owner, the call is refused with the wait command, and the owner's wait brings the answer.")
+    SHAPES = ("worker-call",)
+
+    def __init__(self):
+        super().__init__()
+        self.nonce = uuid.uuid4().hex[:8]
+        self.owner = f"SUBREDIR-OWNER-{self.nonce}"
+        self.sub = f"SUBREDIR-WSUB-{self.nonce}"
+        self.native = []          # times a native subagent request reached the model
+        self.marks = {}           # what happened when, on the fixture's clock
+        self.release = threading.Event()      # the leg's last answer waits until the owner holds the refusal line
+
+    def prepare(self, run):
+        super().prepare(run)
+        # As in a person's home: a native call that runs keeps the shipped alias the model hook injects.
+        shipped = (_base().SOURCE / "adapters/claude/config/models.conf").read_text(encoding="utf-8")
+        run.home.env["CLAUDE_NATIVE_SUBAGENT_MODEL"] = re.search(r"(?m)^CFG_TIER_LIGHT_MODEL=(\S+)", shipped).group(1)
+
+    def script(self, run):
+        ev = run.evidence
+
+        def owner_turn(record, earlier):
+            shells, last = _shells_with(earlier, self.owner), record["last_text"]
+            if not any(s.startswith("spawn:") for s in shells):
+                self.marks.setdefault("call", record["at"])
+                ev["owner_subagent_tool"] = sorted(set(record.get("tools") or ()) & SPAWN_TOOL_NAMES)
+                return Reply(shell=spawn_call("light", f"{self.sub}: {QUESTION}",
+                                              description="Find the fixture README purpose"))
+            waits = [s for s in shells if " start --route " in s and "--wait" in s]
+            if not waits:
+                self.marks.setdefault("refusal", record["at"])
+                ev["refusal"] = last[-1500:]
+                self.release.set()
+                if "It has already finished; its answer:" in last:   # the leg ended before the receipt was written
+                    self.marks.setdefault("answer", record["at"])
+                    ev.update(wait_result=last[-6000:], answer_by="refusal")
+                    return Reply("artifact: -\nverdict: BLOCKED\nblocker: scenario probe only")
+                command = re.search(r"run this once to receive its answer: (\S.*? --wait)", last)
+                if not command:
+                    return Reply("artifact: -\nverdict: BLOCKED\nblocker: no wait command came back")
+                return Reply(shell=command.group(1))
+            if '"state": "completed"' not in last and len(waits) < 8:
+                return Reply(shell=waits[-1])                       # one wait is one start window: wait again
+            self.marks.setdefault("answer", record["at"])
+            ev.update(wait_result=last[-6000:], answer_by="wait")
+            return Reply("artifact: -\nverdict: BLOCKED\nblocker: scenario probe only")
+
+        def unit_worker(record, earlier):
+            target, shell = _report_shell(record, ANSWER_HEAD, "{head}\n\n- README.md:1 says `owner fixture` "
+                                                               f"({self.nonce})\n")
+            self.marks.setdefault("worker", record["at"])
+            if not any("report.md" in s for s in _shells_with(earlier, self.sub) if s):
+                return Reply(shell=shell)
+            return Reply(f"artifact: {target}\nverdict: PASS\nblocker: none", gate=self.release)
+
+        def answer(record, earlier):
+            text = record["text"]
+            if unit.side_request(record):
+                return Reply("TITLE: fixture worker subagent\nNOW: fixture")
+            if "Dispatch metadata:" in text and self.owner in text:
+                return owner_turn(record, earlier)
+            if "Dispatch metadata:" in text and self.sub in text:
+                return unit_worker(record, earlier)
+            if self.sub in text:
+                self.native.append(record["at"])
+                return Reply(f"native subagent answer {self.nonce}")
+            return Reply("OK")
+        return answer
+
+    def start_owner(self, run, shape):
+        task = run.home.root / "task-owner.md"
+        task.write_text(f"{self.owner}: hand a lookup to a light subagent, then report.\n", encoding="utf-8")
+        env = run.home.env
+        command = [sys.executable, str(_base().SOURCE / "utilities" / "capability-route.py"),
+                   "compose", "--start", "--shape", "solo", "--intensity", "quick",
+                   "--capability", "autopilot-code", "--capability-mode", "dev",
+                   "--pin", f"owner={run.harness}", "--prompt-file", str(task),
+                   "--cwd", str(run.home.workspace), "--artifact-root", env["AGENT_ARTIFACT_ROOT"],
+                   "--jobs", env["AGENT_DISPATCH_JOBS"], "--unassigned", "--slug", "hb-owner-subagent"]
+        done = subprocess.run(command, env=env, cwd=str(run.home.workspace), text=True, capture_output=True,
+                              timeout=300, stdin=subprocess.DEVNULL)
+        return {"exit": done.returncode, "stdout_tail": done.stdout[-600:], "stderr_tail": done.stderr[-600:]}
+
+    def drive(self, run):
+        if run.harness != "claude":
+            run.note("only a Claude worker's call is taken (a Codex worker's launch adds -c layers; OpenCode is "
+                     "not intercepted)")
+            return "not-applicable"
+        try:
+            return self.run_worker_call(run, run.evidence)
+        finally:
+            self.release.set()
+
+    def run_worker_call(self, run, ev):
+        self.jobs = Path(run.home.env["AGENT_DISPATCH_JOBS"])
+        ev["owner_start"] = self.start_owner(run, "worker-call")
+        wait_for(lambda: any(r.get("worker_type") == "owner" for r in registry_rows(self.jobs)), 120, 1)
+        wait_for(lambda: len(registry_rows(self.jobs)) >= 2
+                 and all(r["status"] in TERMINAL_STATES for r in registry_rows(self.jobs)), self.OWNER_SECONDS, 3)
+        wait_for(lambda: all(r["status"] in TERMINAL_STATES for r in registry_rows(self.jobs))
+                 and any(r.get("worker_type") == "owner" for r in registry_rows(self.jobs)), 120, 3)
+        time.sleep(5)
+        rows = registry_rows(self.jobs)
+        owner = next((r for r in rows if r.get("worker_type") == "owner"), None)
+        called = (explore_rows(self.jobs) or [None])[-1]
+        keys = ("status", "attempt_id", "caller_attempt_id", "dispatch_depth", "worker_type", "unit", "model_profile",
+                "harness", "failure_class", "note", "artifact_root")
+        ev["owner"] = {k: (owner or {}).get(k) for k in keys}
+        ev["called"] = {k: (called or {}).get(k) for k in keys}
+        call = self.marks.get("call")
+        for label in ("refusal", "worker", "answer"):
+            if call and label in self.marks:
+                ev[f"call_to_{label}_seconds" if label != "worker" else "call_to_worker_request_seconds"] = round(
+                    self.marks[label] - call, 1)
+        ev["native_subagent_requests"] = len(self.native)
+        ev["leftover_processes"] = worker_processes(run)
+        run.note(f"owner={ev['owner'].get('status')}; leg={ev['called'].get('status')}/"
+                 f"{ev['called'].get('failure_class')} below owner="
+                 f"{bool(called) and called.get('caller_attempt_id') == (owner or {}).get('attempt_id')}; "
+                 f"refused={STARTED in ev.get('refusal', '')}; native={len(self.native)}; "
+                 f"call-to-refusal={ev.get('call_to_refusal_seconds')}s; "
+                 f"call-to-answer={ev.get('call_to_answer_seconds')}s; answer by {ev.get('answer_by')}")
+        if not owner or "call" not in self.marks:
+            return "inconclusive"
+        ok = bool(called and STARTED in ev.get("refusal", "") and " --wait" in ev.get("refusal", "")
+                  and "completion notice," not in ev.get("refusal", "")
+                  and called["status"] == "done" and called.get("failure_class") == "pass"
+                  and called.get("caller_attempt_id") == owner.get("attempt_id")
+                  and ev.get("answer_by") == "wait"
+                  and "Answer:" in ev.get("wait_result", "") and self.nonce in ev.get("wait_result", "")
+                  and not self.native and not ev["leftover_processes"])
+        return "pass" if ok else "fail"
+
+
 SCENARIOS = [SubagentHookSeamScenario, SubagentHookSeamV2Scenario, SubagentRedirectScenario,
              SubagentRedirectNoAnswerScenario, SubagentRedirectCapacityScenario, SubagentRedirectUntouchedScenario,
              SubagentRedirectFaultsScenario, SubagentRedirectOtherHookScenario, SubagentRedirectUsageLimitScenario,
-             SubagentRedirectCostScenario]
+             SubagentRedirectCostScenario, SubagentRedirectWorkerScenario]

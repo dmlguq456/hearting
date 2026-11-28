@@ -456,6 +456,13 @@ the old line (no `--redirect`, 15 s) and redirects nothing until Claude's settin
 settings. Measured in isolated TUIs (`harness_behavior_cases_subagent_redirect.py`): the hook sees `Agent`
 with `description`, `prompt`, `subagent_type`; a hook that exits 1, is killed, prints garbage or runs past
 its timeout lets the native call run; exit 2 blocks it (the redirect always exits 0).
+A registered worker's call (K) is judged the same way in its masked home. The worker launch's own command
+line layers count only if they decide the call: its `--settings` holds only `registered-parent-park.py`, which the
+hook runs once on the call and goes on only when it prints nothing (it refuses only in the worker's terminal
+cleanup); each `--add-dir` folder holds no `.claude`; `--allowedTools`/`--disallowedTools` name neither `Agent` nor
+`Task`. The start runs in the worker's environment (the leg hangs below it) and the line gives the receipt's wait
+command. A user hook that matches every tool (`*`) in the copied user settings keeps a worker's call native, as it
+keeps a session's.
 
 ## Native Subagent Default Model (2026-07-23)
 

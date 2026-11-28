@@ -63,8 +63,9 @@ receipt names.
 
 Hand wide reading, searching, and copying into a given template to a record-free lookup worker
 (`utilities/capability-route.py compose --start --unit general/explore --ephemeral --prompt-file
-<brief>`, then the wait its receipt prints; `capabilities/unit.md`), or to the harness's light-tier
-subagents where that start is refused; compare, design, judge, and verify yourself. What a helper
+<brief>`, then the wait its receipt prints; `capabilities/unit.md`). Naming the harness's `light`
+subagent starts that route where Hearting can (the refused call names the wait to run) and runs
+natively where it cannot; compare, design, judge, and verify yourself. What a helper
 gathers is evidence, not a passed check. Wait for outside CI or a release with one blocking command (for example
 `gh pr checks <n> --watch` under the lease above), not a repeated sleep.
 

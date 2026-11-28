@@ -35,12 +35,13 @@
   worker does not create a separate chain handoff output. Ledger updates and
   compaction state remain separate from that runtime handoff.
 
-Native helper support inside a sub-session is checked separately from registered
-dispatch and never changes the gate:
+A native helper inside a sub-session (on Claude, the call that runs natively when it
+cannot start as a unit route: `capabilities/unit.md`, A native subagent call) is checked
+separately from registered dispatch and never changes the gate:
 
 | Runtime | Runtime support | Local route-owned projection | Checked fallback |
 |---|---|---|---|
-| Claude Code | native subagent | supported (`claude-subagent`) | registered headless, then inline |
+| Claude Code | native subagent where its call cannot start as a unit route | supported (`claude-subagent`) | registered headless, then inline |
 | Codex | native subagent | supported (`codex-native-subagent`) | registered headless, then inline |
 | OpenCode | native agents | no route-owned dispatch-depth-2 evidence yet | registered headless where eligible, otherwise inline |
 
