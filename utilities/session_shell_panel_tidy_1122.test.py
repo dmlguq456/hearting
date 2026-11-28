@@ -83,13 +83,14 @@ const SHOWN=[
 '│   · —       TBD  —     시험용 나중 일 둘 │',
 '│   · —       TBD  —     시험용 나중 일 셋 │',
 '│ ──────────────────────────────────────── │',
-'│  MODEL  Opus 5.5 xhigh                   │',
-'│  CTX    ━━━━──── 41%                     │',
+'│  MODEL  Opus 5.5 xhigh      ━━━━──── 41% │',
 '│  TITLE  시험용 세션                      │',
 '│  NOW    시험용 NOW 한 줄               › │',
 '│                                          │',
 '│ ╭─ 1 QUESTIONS ───────────────────── ›─╮ │'];
-assert.deepEqual(ls.slice(1,15).map(l=>l.replace(/ +│$/,' │')),SHOWN.map(l=>l.replace(/ +│$/,' │')),ls.join('\n'));
+// 11-27 (the person: "패널에서 MODEL + CTX를 그냥 한줄로 고치자. CTX 단어도 필요 없을듯. 라우팅이랑 일관성을 맞추자는것", then
+// "게이지는 놔두고"): the gauge and percent end the MODEL row at the right edge; no CTX row.
+assert.deepEqual(ls.slice(1,14).map(l=>l.replace(/ +│$/,' │')),SHOWN.map(l=>l.replace(/ +│$/,' │')),ls.join('\n'));
 assert(ls.every(l=>cells(l)===44),ls.join('\n'));
 // The lower sections: the name and `›` at the right end, no rule; an item one cell in; the box's `›` at the end of its top line.
 const at=re=>ls.findIndex(l=>re.test(l));
@@ -99,9 +100,9 @@ assert(/^│  ← \[77\] 시험용 메시지 7 +09:07 │$/.test(ls[m+1])&&e===m
 // The lines in the whole picture: the REPO and SESSION heads, the two boxes' lines, the rule over the last row. No other.
 const lined=ls.map((l,i)=>[i,l]).filter(([,l])=>/─{5}/.test(l)).map(([i,l])=>i);
 assert(lined.every(i=>/^│ (REPO|SESSION) |^│ [╭│╰]|^┌|^└|^│ ─+ │$/.test(ls[i])),lined.map(i=>ls[i]).join('\n'));
-// 11-26 (panel B): the one rule left over the rows is the SESSION rule right above MODEL; none between CTX and TITLE.
+// 11-26 (panel B): the one rule left over the rows is the SESSION rule right above MODEL; none between MODEL and TITLE (11-27: no CTX row).
 const rules=ls.map((l,i)=>/^│ ─+ │$/.test(l)?i:-1).filter(i=>i>=0);
-assert(rules.length===2&&/^│  MODEL /.test(ls[rules[0]+1])&&rules[1]>=ls.length-3&&at(/^│  CTX /)+1===at(/^│  TITLE /),'no line between CTX and TITLE\n'+ls.join('\n'));
+assert(rules.length===2&&/^│  MODEL /.test(ls[rules[0]+1])&&rules[1]>=ls.length-3&&at(/^│  MODEL /)+1===at(/^│  TITLE /)&&at(/^│  CTX /)<0,'no line between MODEL and TITLE\n'+ls.join('\n'));
 """)
 
     def test_the_indent_is_one_cell_and_a_value_is_cut_by_the_old_rule_in_the_cells_left(self):
@@ -110,7 +111,9 @@ for(const width of [59,44,40,36,34,30,26]){
  const v=drawW({width,height:60,question:true,routes:1,messages:3,mem:2,status:status(),backlog:backlog()}),ins=lines(v).map(l=>l.slice(2,-2));
  const lead=re=>{const l=ins.find(s=>re.test(s));assert(l,width+' '+re+'\n'+ins.join('\n'));return l.length-l.trimStart().length;};
  const label=width-4>=30;
- for(const re of label?[/^ *REPO /,/^ *PEERS /,/^ *MODEL /,/^ *CTX /,/^ *TITLE /,/^ *NOW /]:[/^ *REPO /,/^ *\[e9\]/,/^ *Opus 5\.5/,/^ *ctx 41%/,/^ *시험용 세션/])assert.equal(lead(re),1,width+' '+re);
+ for(const re of label?[/^ *REPO /,/^ *PEERS /,/^ *MODEL /,/^ *TITLE /,/^ *NOW /]:[/^ *REPO /,/^ *\[e9\]/,/^ *Opus 5\.5/,/^ *시험용 세션/])assert.equal(lead(re),1,width+' '+re);
+ // 11-27: the context reading ends the MODEL row (no CTX row, no `ctx` word of its own).
+ assert(ins.some(s=>/^ (MODEL  )?Opus 5\.5.* 41%$/.test(s))&&!ins.some(s=>/^ *(CTX|ctx) /.test(s)),width+'\n'+ins.join('\n'));
  assert.equal(lead(/^ *STATUS/),1,String(width));assert.equal(lead(/^ *BACKLOG/),1,String(width));
  // 11-26 (panel B): STATUS lists no items (its head alone); BACKLOG's chosen items stand two cells in; the SESSION head is a bare rule with no indent (like the old head); REPO is a row one cell in.
  assert(!ins.some(s=>/^ *! 시험용|^ *· 시험용 (정할|하는)/.test(s)),'no STATUS item rows '+width);
@@ -232,13 +235,18 @@ for(const w of [44,36,32,30])for(const [sel,whole] of [[LONG,'GPT-5.5-codex-max 
  assert.equal(ls.length,h,tag);assert(ls.every(l=>cells(l)===w),tag);
  assert(!a.some(s=>/SESSION/.test(s)),'no SESSION word\n'+tag);
  const m=a.findIndex(s=>/^ MODEL |^ GPT|^ Opus/.test(s));assert(m>0,'MODEL row stands\n'+tag);
- if(w>=36)assert(a[m].includes(whole),'value whole where it fits\n'+tag);
+ // 11-27: the gauge and percent end the row (this backend sends one gauge, `━━━━──── 41%`); where the value and it do not both fit
+ // the effort goes first, then the model name is cut beside the gauge.
+ const label=w-4>=30?7:0,fits=1+label+cells(whole)+1+12<=w-4;
+ assert(/ ━━━━──── 41%$/.test(a[m].trimEnd()),'the gauge and percent end the MODEL row\n'+tag);
+ if(w>=36)assert(fits?a[m].includes(whole):!a[m].includes('xhigh')&&a[m].includes(whole.slice(0,6)),'value whole where it fits\n'+tag);
  if(/^─+$/.test(a[m-1]))ruled++;else bare++;
 }
 assert(ruled>0&&bare>0,ruled+' '+bare);
 // The reviewer's picture: 32 wide, 14 high, a long model name: the MODEL row keeps the name whole.
+// (11-27: the gauge and percent end that row, so the name is cut there beside them, never merged into the head.)
 {const a=inside(drawW({width:32,height:14,question:true,mem:3,selected:LONG,status:status(),backlog:backlog()}));
- assert(!a.some(s=>/SESSION/.test(s))&&a.some(s=>s.includes('GPT-5.5-codex-max xhigh')),a.join('\n'));}
+ assert(!a.some(s=>/SESSION/.test(s))&&a.some(s=>/^ GPT-5\.5-codex… ━━━━──── 41%$/.test(s.trimEnd())),a.join('\n'));}
 """)
 
     def test_the_session_head_stays_and_the_rows_give_way_in_the_order_they_did(self):
@@ -252,8 +260,8 @@ for(let h=70;h>=12;h--){
  assert(!a.some(s=>/SESSION/.test(s)),'no SESSION word '+h+'\n'+ls.join('\n'));
  const mi=a.findIndex(s=>/^ MODEL /.test(s));assert(mi>0,'MODEL row stands '+h+'\n'+ls.join('\n'));
  const ruled=/^─+$/.test(a[mi-1]);
- // The only rules besides the one over MODEL are the one above the quota/USAGE row and the last row's: none between CTX and TITLE.
- const ci=a.findIndex(s=>/^ CTX /.test(s)),ti=a.findIndex(s=>/^ TITLE /.test(s));assert(ci>0&&ti===ci+1,h+'\n'+ls.join('\n'));
+ // The only rules besides the one over MODEL are the one above the quota/USAGE row and the last row's: none between MODEL and TITLE (11-27: no CTX row).
+ const ti=a.findIndex(s=>/^ TITLE /.test(s));assert(ti===mi+1&&!a.some(s=>/^ CTX /.test(s)),h+'\n'+ls.join('\n'));
  assert(!a.some(s=>/^ GIT |^ ! 시험용|^  [!·] 시험용 (정할|하는)/.test(s)),'no GIT row, no STATUS items '+h+'\n'+ls.join('\n'));
  seen.push({h,ruled,bItems:a.filter(s=>/^  · /.test(s)).length,heads:a.filter(s=>/^ (STATUS|BACKLOG)\b/.test(s)).length,repo:a.some(s=>/^ REPO /.test(s)),title:ti>0});
 }
