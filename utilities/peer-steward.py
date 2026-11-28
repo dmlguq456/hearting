@@ -9274,6 +9274,7 @@ def cmd_continue(args):
 
     seat = _booked_seat(req)[1]
     seq_before = int(req.get("prompt_seq", 0) or 0)
+    bound_here = not transfer_ref       # a ref this call prepares, not one handed by an earlier ask
     if transfer_ref:
         row = peer_message._read_pending(transfer_ref)
     else:
@@ -9282,15 +9283,20 @@ def cmd_continue(args):
         recipient = {"harness": harness, "session_id": new_sid, "name": None,
                      "pane_id": pane}
         try:
+            # The row carries its booking's origin, so each carrier asks that booking whether it
+            # still sends this row (`continue_origin_sends`); a row with no origin keeps its rule.
             _body, transfer_ref = peer_message.prepare_peer_message(
                 text, sender, recipient, defer=True, with_trailer=False,
-                receipt="session-tidy-continue")
+                receipt="session-tidy-continue", tidy_origin=clear.continue_origin(req))
             row = peer_message._read_pending(transfer_ref)
         except (OSError, ValueError):
             clear.release_unsent_continue(req)
             return finish("unverified", "continue-transfer-unavailable", native_ref=None)
     if not clear.bind_continue_transfer(req, transfer_ref):
-        return finish("skipped", "continue-claim-changed", native_ref=transfer_ref)
+        # A cancel took the claim first: nothing was written for it, so its ledger row ends
+        # released; a ref this call prepared stays unbound and no carrier hands it over.
+        clear.release_unsent_continue(req)
+        return finish("skipped", "continue-claim-changed", native_ref=None if bound_here else transfer_ref)
 
     if harness == "codex":
         try:
@@ -9305,6 +9311,13 @@ def cmd_continue(args):
             verify, outcome, reason = "native-queue-unverified", "queued", result.get("reason")
     elif harness == "claude":
         verify, outcome, reason = _continue_claude_prompt(target, pane, new_sid, transfer_ref, text)
+        if verify == "native-pending" and outcome == "queued":
+            # Writing appeared in the box between the look above and the typing: the claim and
+            # the ref go back together while no carrier took the row, so the person's next prompt
+            # does not carry the continue and the helper asks again. A taken row stays as it is.
+            hold = clear.hold_continue_for_input(req, str(reason or ""), ref=transfer_ref)
+            if hold:
+                return finish(hold, reason if hold == "queued" else "superseded", native_ref=None)
     else:
         # The OpenCode idle plugin owns the next native delivery.
         # It will retain this exact no-trailer ref until the booked SID consumes it.
@@ -9321,8 +9334,10 @@ def _continue_claude_prompt(target, pane, sid, ref, text):
 
     A fresh Claude session after /clear reaches no hook boundary until something is
     typed, so leaving the ref for the hook leaves the window empty. The guards are the
-    idle Claude prompt path of `cmd_prompt`; any refusal keeps the ref pending for the
-    hook. A sent ref is never released, so the hook cannot deliver it a second time.
+    idle Claude prompt path of `cmd_prompt`; a refusal keeps the ref pending for the
+    hook, and `cmd_continue` takes it back with its claim when the refusal is the input
+    box's and no carrier took it (`hold_continue_for_input`). A sent ref is never
+    released, so the hook cannot deliver it a second time.
     """
     reason, proof = _native_idle_prompt_guard(target, "claude", sid, pane)
     if reason:

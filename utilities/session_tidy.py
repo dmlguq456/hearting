@@ -4546,6 +4546,37 @@ def cmd_tidy(args) -> int:
     return code
 
 
+def cancel_report_line(cancelled: str) -> str:
+    """The one line the session shows the user after ``cancel``, from its ``cancel=`` words."""
+    t = _ui_translator()
+    fields = str(cancelled or "").split()
+    if "cancel=booking" in fields:
+        return t("tidy.say.cancelled_after_compact" if "compact=sending" in fields else "tidy.say.cancelled")
+    if "cancel=continue" in fields:
+        on_its_way = "handed=native" in fields or "continue=sending" in fields
+        return t("tidy.say.cancelled_continue_handed" if on_its_way else "tidy.say.cancelled_continue")
+    return t("tidy.say.nothing_to_cancel")
+
+
+def cmd_cancel(args) -> int:
+    """``/session-tidy 취소``: cancel this window's booked /compact and its continue (no card, no
+    memory work; ``session_tidy_clear.cancel_booking`` decides)."""
+    if is_worker():
+        print("cancel=none reason=worker")
+        return 0
+    caller = resolve_caller(args.harness, args.session_id, args.cwd or os.getcwd())
+    if caller is None:
+        print("cancel=none reason=no-seat")
+        print("say=" + cancel_report_line("cancel=none"))
+        return 0
+    import session_tidy_clear as clear
+    seat, harness, sid = caller
+    line = clear.cancel_booking(session_seat(seat, harness, sid))
+    print(line)
+    print("say=" + cancel_report_line(line))
+    return 0
+
+
 def reply_card_markers(nonce: str) -> tuple[str, str]:
     """First and last line of a card written as the reply to one automatic tidy request."""
     return f"[[session-tidy card {nonce}]]", f"[[session-tidy card end {nonce}]]"
@@ -4823,6 +4854,12 @@ def build_parser() -> argparse.ArgumentParser:
     tidy.add_argument("--no-continue", action="store_true", help="as enqueue --no-continue (정리하고 끝)")
     tidy.add_argument("--handoff", metavar="TARGET", help="then deliver the card to this peer (인계)")
     tidy.set_defaults(func=cmd_tidy)
+    cancel = sub.add_parser("cancel", help="cancel this window's booked /compact and its continue (취소); "
+                                           "writes no card")
+    cancel.add_argument("--harness", choices=HARNESSES)
+    cancel.add_argument("--session-id")
+    cancel.add_argument("--cwd")
+    cancel.set_defaults(func=cmd_cancel)
     handoff = sub.add_parser("handoff", help="deliver this seat's card to a peer session")
     handoff.add_argument("target", nargs="?")
     handoff.add_argument("transfer_ref", nargs="?")
