@@ -474,7 +474,8 @@ class CensusHeaderTests(unittest.TestCase):
         version, freshness = "v3.50.3-20-gad247e2b6", "02:38"
         vm = ExplorerViewModel(census=census, system={"install": {"version": version},
                                                       "usage_api": {"freshness": freshness}})
-        expected = ("⠏ 0 working  ● 0 idle  ● 0 answer needed   hearting "
+        # (11-27: the census as recorded keeps `●` for the answer wait; it is drawn `◑`.)
+        expected = ("⠏ 0 working  ● 0 idle  ◑ 0 answer needed   hearting "
                     "v3.50.3-20-gad247e2b6 · unmanaged  02:38")
         width = cell_width(expected) + 1
         frame, trace = ef.trace_draw(draw, vm, NavState(view="OVERVIEW", scope="-"), width, 45)
@@ -504,7 +505,7 @@ class CensusHeaderTests(unittest.TestCase):
 
         self.assertTrue(row.startswith(" hosts ⌂ gpu-a 1/1"), row)
         self.assertTrue(row.rstrip().endswith(
-            "⠏ 0 working  ● 0 idle  ● 0 answer needed   hearting " + version +
+            "⠏ 0 working  ● 0 idle  ◑ 0 answer needed   hearting " + version +
             " · unmanaged  " + freshness), row)
         self.assertEqual(ef.frame_violations(frame, trace, 120, 45), [])
 
@@ -519,7 +520,7 @@ class CensusHeaderTests(unittest.TestCase):
         version = vm.system["install"]["version"]
 
         self.assertTrue(row.startswith("⌂ base +2"), row)
-        self.assertIn("⠏ 3 ● 5 ● 2", row)
+        self.assertIn("⠏ 3 ● 5 ◑ 2", row)
         self.assertIn(version, row)
         self.assertIn("hearting " + version + " · unmanaged", row)
         self.assertTrue(row.rstrip().endswith(freshness), row)
@@ -541,7 +542,7 @@ class CensusHeaderTests(unittest.TestCase):
 
         self.assertEqual(len(states), 18)
         self.assertTrue(row.startswith("⌂ gpu-a +4"), row)
-        for fragment in ("⠏ 15", "● 2", "● 1", version, "hearting " + version + " · unmanaged", freshness):
+        for fragment in ("⠏ 15", "● 2", "◑ 1", version, "hearting " + version + " · unmanaged", freshness):
             self.assertIn(fragment, row)
         self.assertTrue(row.rstrip().endswith(freshness), row)
         self.assertEqual(cell_width(row), 80)
@@ -606,7 +607,7 @@ class CensusHeaderTests(unittest.TestCase):
         self.assertIn("+4", row)
         self.assertIn("⠏ 15", row)
         self.assertIn("● 2", row)
-        self.assertIn("● 1", row)
+        self.assertIn("◑ 1", row)
         self.assertIn("hearting " + version + " · unmanaged", row)
         self.assertTrue(row.rstrip().endswith(freshness), row)
         self.assertEqual(vm.hosts[0]["name"], host_name)
@@ -693,7 +694,7 @@ class CensusHeaderTests(unittest.TestCase):
         frame, trace = ef.trace_draw(draw, vm, NavState(view="OVERVIEW", scope="-"), 80, 45)
         row = frame.text_rows()[0]
 
-        self.assertIn("⠏ 12 ● 34 ● 56", row)
+        self.assertIn("⠏ 12 ● 34 ◑ 56", row)
         self.assertIn(version, row)
         self.assertIn("hearting " + version + " · unmanaged", row)
         self.assertTrue(row.rstrip().endswith(freshness), row)

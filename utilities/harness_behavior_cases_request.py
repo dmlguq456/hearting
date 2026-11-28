@@ -155,7 +155,8 @@ def _route_box_rows(screen, layout):
 
 def panel_request_lines(screen, titles, marks, *, layout):
     """The route box's request lines of the given marks whose title is a recorded request title
-    (whole, or cut with ``…``), each as ``mark [tag] title · state``. ``titles`` is one title or several.
+    (whole, or cut with ``…``), each as ``mark [tag] title · state`` (a closed one ``✓ → [tag] title · state``, its
+    direction after its result). ``titles`` is one title or several.
 
     A request reads on one row (``← [b2] codex GPT 5.5 high 검토 제목 9c4f7d · open  2m``, the title cut on a
     narrow panel) or, beside the native area with rows to spare, as a route's doer: its head row (``← [b2]
@@ -178,28 +179,41 @@ def panel_request_lines(screen, titles, marks, *, layout):
             if len(row) < 2 or row[0] not in marks or row[1] != " ":
                 continue
             mark, rest = row[0], row[2:].strip()
-            tag = REQUEST_TAG.match(rest)
-            who = tag.group(0) if tag else ""
-            after = rest[tag.end():].strip() if tag else rest
-            title, state = None, ""
-            if " · " in after:
-                # (`→ [c2] other-repo · title · state` with no harness between: the split nearest the front that ends in a title.)
-                pieces = after.split(" · ")
-                title, state = next(((shown, " · ".join(pieces[k:])) for k in range(1, len(pieces))
-                                     for shown in [_title_after(" · ".join(pieces[:k]), titles)] if shown), (None, ""))
-            elif who or in_request_zone:
-                below = []
-                for under in rows[at + 1:at + 3]:
-                    if not (under.startswith("  ") and under[2:].strip()):
-                        break
-                    below.append(under[2:].strip())
-                if below:
-                    words, state = below[0].split(" · ", 1) if " · " in below[0] else (below[0], below[1] if len(below) > 1 else "")
-                    title = " ".join(words.split()) if _title_matches(words, titles) else None
-            if title is None:
+
+            def read(rest, at=at):
+                """``(who, title, state)`` of the row's words after its mark, or None where no recorded title stands."""
+                tag = REQUEST_TAG.match(rest)
+                who = tag.group(0) if tag else ""
+                after = rest[tag.end():].strip() if tag else rest
+                title, state = None, ""
+                if " · " in after:
+                    # (`→ [c2] other-repo · title · state` with no harness between: the split nearest the front that ends in a title.)
+                    pieces = after.split(" · ")
+                    title, state = next(((shown, " · ".join(pieces[k:])) for k in range(1, len(pieces))
+                                         for shown in [_title_after(" · ".join(pieces[:k]), titles)] if shown), (None, ""))
+                elif who or in_request_zone:
+                    below = []
+                    for under in rows[at + 1:at + 3]:
+                        if not (under.startswith("  ") and under[2:].strip()):
+                            break
+                        below.append(under[2:].strip())
+                    if below:
+                        words, state = below[0].split(" · ", 1) if " · " in below[0] else (below[0], below[1] if len(below) > 1 else "")
+                        title = " ".join(words.split()) if _title_matches(words, titles) else None
+                return None if title is None else (who, title, state)
+
+            # 11-27: a closed request keeps its direction after its result (`✓ → [b2] …`), read with the mark. An older record
+            # drew none, and its title may itself begin with an arrow (`✓ → Move patch · final answer`): the arrow is the
+            # direction only where the words after it still read as a recorded title, else it is the title's own first word.
+            way = rest[0] if mark in "✓✕" and rest[:2] in ("→ ", "← ") else ""
+            parsed = read(rest[2:].strip()) if way else None
+            if parsed is None:
+                way, parsed = "", read(rest)
+            if parsed is None:
                 continue
+            who, title, state = parsed
             state = re.split(r"\s{2,}", state.strip())[0]
-            found.append(" ".join(part for part in (mark, who, title) if part) + (" · " + state if state else ""))
+            found.append(" ".join(part for part in (mark, way, who, title) if part) + (" · " + state if state else ""))
     return found
 
 
