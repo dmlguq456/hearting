@@ -904,9 +904,11 @@ class RouteScopeNoteTest(unittest.TestCase):
                 interview = self.scoped(legs, scope)
                 with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "en"}):
                     block = FI.pending_question_block(interview).split("\n")
-                at = block.index("- Both (recommended): " + interview["questions"][0]["options"][0]["means"])
+                # 11-27 (design 가): the option's name, then what choosing it does, then the line.
+                at = block.index("- Both (recommended)")
+                self.assertEqual(block[at + 1], "  " + interview["questions"][0]["options"][0]["means"])
                 note = self.TEXT[("en", scope)].format(n=legs)
-                self.assertEqual(block[at + 1] == "  " + note, legs > 1)
+                self.assertEqual(block[at + 2] == "  " + note, legs > 1)
                 self.assertEqual(sum(line.strip() == note for line in block), int(legs > 1))
                 without = copy.deepcopy(interview)
                 del without["route_proposals"]
