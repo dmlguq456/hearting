@@ -61,9 +61,13 @@ python3 tools/run-tests.py --select tools/install/installer_runtime.test.py
 
 To run one utility or script outside the suites, do not just point HOME at a
 temporary folder: the path variables a worker carries (`AGENT_RUNTIME_DIR`,
-`AGENT_ARTIFACT_ROOT`, `HEARTING_*`, …) still reach the real project. From a
-scratch project directory, run it as `python3 tools/run-tests.py --direct-run
-python3 -I -B <checkout>/utilities/x.py …`, which drops every one of them.
+`AGENT_ARTIFACT_ROOT`, `HEARTING_*`, …) still reach the real project. Create an
+empty scratch project directory outside every checkout and run from there:
+`python3 tools/run-tests.py --direct-run python3 -I -B
+<checkout>/utilities/x.py …`, which drops every one of them. The working
+directory still decides the project root even under `--direct-run`, so a run
+started inside a checkout reaches that checkout's real `.agent_reports` and
+`.agent_runtime`.
 
 For installation changes, `./tools/install/runtime-activation.test.sh` is the
 activation suite. Packaged activation refuses a dirty working tree, so run the
