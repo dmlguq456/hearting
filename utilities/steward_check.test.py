@@ -770,16 +770,35 @@ class StewardCheckRemainingWorkTest(CheckBase):
         self.assertNotIn("[b]", sent["text"])  # an ended session gets no assignment
         self.assert_no_stop_advice(sent["text"])
 
-    def test_a_target_with_a_queued_peer_request_is_not_told_to_resend(self):
+    def test_a_queued_peer_request_alone_does_not_wake_the_steward(self):
         owed = dict(target("e7", state="idle"), owed=1)
         self.seen = {"targets": [owed], "pending_messages": 0}
         self.register()
         self.step(T0 + INTERVAL)
+        self.assertEqual(self.notify.call_count, 1)
+        self.assertNotIn("queued, not yet delivered", self.notice()["text"])
+        self.step(T0 + 2 * INTERVAL)
+        self.assertEqual(self.notify.call_count, 1)  # unchanged: quiet
+
+    def test_a_working_target_with_a_queued_request_is_checked_again(self):
+        owed = dict(target("e7", state="working"), owed=1)
+        self.seen = {"targets": [owed], "pending_messages": 0}
+        self.register()
+        self.step(T0 + INTERVAL)
+        self.deliver_and_ack()
+        self.step(T0 + INTERVAL + 100)
+        self.step(T0 + 2 * INTERVAL + 100)
+        self.assertEqual(self.notify.call_count, 2)  # a working target keeps the interval
+
+    def test_a_queued_peer_request_is_not_named_as_the_stewards_work(self):
+        owed = dict(target("e7", state="idle"), owed=1)
+        self.seen = {"targets": [owed], "pending_messages": 0, "open_work": ["next slice"]}
+        self.register()
+        self.step(T0 + INTERVAL)
         sent = self.notice()
         self.assertEqual(sent["required_action"], "assign-next")
-        self.assertIn("[e7] 1 peer request(s) queued, not yet delivered → do not resend",
-                      sent["text"])
-        self.assertNotIn("follow up", sent["text"])
+        self.assertIn("open: next slice → assign or do now", sent["text"])
+        self.assertNotIn("queued, not yet delivered", sent["text"])
 
     def test_remaining_work_is_sent_again_every_interval(self):
         self.seen = {"targets": [target("e7", state="idle")], "pending_messages": 0,

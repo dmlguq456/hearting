@@ -1000,7 +1000,10 @@ by Claude, Codex and OpenCode.
 
 When there is nothing to choose — both frame legs return valid, equal
 proposals (a one-leg frame needs only its one valid proposal), no start
-approval is in scope, no part needs the repository prepared, the proposal stays
+approval is in scope, no part needs the repository prepared, and every
+`read_notes` entry is one of the harmless kinds (`kept:`, `blocks:`,
+`section-8-heading-missing`, `card-copy-kept`; any other note keeps the person
+asked), the proposal stays
 inside the intent's `안 할 것`, and no brief's section 7 lists a
 question only the user can answer — the runtime records that interview itself as
 the depth-0 session's on-behalf answer (`supervisor`, basis
