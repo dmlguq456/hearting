@@ -1,7 +1,7 @@
 """11-21 (design C), 11-22 (a question stands on the question screens only): the status popup opens on a list.
 
 For the generated campaign page (its first line is the marker) the popup's first screen is a list: the head,
-`하는 중` (three, then `all N ›`), every other heading as a folded line with its count, and
+`하는 중` (three, then `all N ▸`), every other heading as a folded line with its count, and
 `full document ›`. The chosen line, the opened groups and items are the popup's own state; `full document ›` is the screen the popup
 always had (Fleet's lines and the whole document), Esc or Enter going back to the list. Any other document (a hand-written page, none, an
 unreadable or cut one) draws the rows it always drew.
@@ -108,7 +108,7 @@ const own=lines(opened).slice(opened.at,opened.at+opened.span);
 out.item_first=own[0];out.item_span=opened.span;
 out.item_rest_indent=own.slice(1).every(l=>l.startsWith('  ')&&!l.startsWith('   '));
 out.item_fits=own.every(l=>W.measure(l)<=60);
-out.item_whole=own.map((l,i)=>i===0?l.replace(/^> /,''):l.trim()).join('').replace(/ /g,'')===entries.find(e=>e.key===item.key).text.replace(/ /g,'');
+out.item_whole=own.map((l,i)=>i===0?l.replace(/^▶ /,''):l.trim()).join('').replace(/ /g,'')===entries.find(e=>e.key===item.key).text.replace(/ /g,'');
 out.item_ends_cut=own[0].endsWith('…')||own[own.length-1].endsWith('…');
 out.item_text_once=lines(opened).filter(l=>l.includes('RUN_ONE_END')).length;
 out.item_tinted=opened.rows.slice(opened.at,opened.at+opened.span).every(r=>r.some(p=>p.tint));
@@ -128,7 +128,7 @@ st=state();list.press(st,list.layout(entries,st),G.key);
 const doneKey=list.layout(entries,st).marks.find(m=>m.key.startsWith('i:')&&m.group===G.group).key;st.sel=doneKey;
 const reread=list.layout(entries,st);out.reread_same=[reread.sel===doneKey,reread.fellBack];
 const gone=list.layout(entries.filter(e=>e.key!==doneKey),st);out.reread_gone=[gone.sel===list.layout(entries.filter(e=>e.key!==doneKey),state()).sel,gone.fellBack];
-out.reread_open_kept=lines(gone).some(l=>l.includes('›')===false&&l.includes('▾'));
+out.reread_open_kept=lines(gone).some(l=>l.includes('▸')===false&&l.includes('▾'));
 // a screen with nothing to choose
 const none=list.layout([{rows:[[{text:'x'}]]}],state());out.none=[none.sel,none.marks.length,none.rows.length];
 out.hits=list.hits(list.layout(entries,state())).slice(0,2);
@@ -292,12 +292,12 @@ class ListLogicTest(unittest.TestCase):
         self.assertFalse([line for line in first if '기다리는' in line or line.lstrip().startswith('!')])     # no question here (11-22)
         run = first.index('하는 중 5')
         at = run
-        self.assertTrue(first[run + 1].startswith('> RUN_ONE 일 하나입니다'), first[run:run + 4])
+        self.assertTrue(first[run + 1].startswith('▶ RUN_ONE 일 하나입니다'), first[run:run + 4])
         self.assertTrue(first[run + 1].endswith('…'))                    # cut to the width; the whole text is under it when opened
         self.assertEqual(first[run + 2:run + 4], ['  RUN_TWO 일 둘 · #12 · 기록 2', '  RUN_THREE 일 셋 · 기록 1'])
-        self.assertEqual(first[run + 4], '  all 5 ›')
+        self.assertEqual(first[run + 4], '  all 5 ▸')
         self.assertFalse([line for line in first if 'RUN_FOUR' in line or 'DONE_ONE' in line or 'LATER_ONE' in line])
-        self.assertEqual([line for line in first if line.lstrip().startswith('›')], ['  › 최근에 끝난 것 2', '  › 나중에 할 것 1'])
+        self.assertEqual([line for line in first if line.lstrip().startswith('▸')], ['  ▸ 최근에 끝난 것 2', '  ▸ 나중에 할 것 1'])
         self.assertEqual(first[-1], '  full document ›')
         self.assertEqual(out['tinted'], [at + 1])
         self.assertEqual(out['first_sel'].split(':')[0], 'i')
@@ -306,21 +306,21 @@ class ListLogicTest(unittest.TestCase):
         self.assertEqual(out['walk'][-1], 'full')
         self.assertEqual(len(out['walk']), 7)
         self.assertTrue(out['up_at_top'])
-        # Enter: a heading opens (and folds), `all N ›` opens the whole running list, an item its whole text, `full document ›` the document.
+        # Enter: a heading opens (and folds), `all N ▸` opens the whole running list, an item its whole text, `full document ›` the document.
         self.assertEqual(out['group_press'], 'fold')
-        self.assertIn('  ▾ 최근에 끝난 것 2'.replace('  ▾', '> ▾'), out['group_open'])
+        self.assertIn('  ▾ 최근에 끝난 것 2'.replace('  ▾', '▶ ▾'), out['group_open'])
         self.assertTrue(any('DONE_ONE' in line for line in out['group_open']))
         self.assertIn('    앞서 끝난 기록 1,392개는 접어 둠.', out['group_open'])
         self.assertEqual(out['group_closed'], 0)
         self.assertTrue(any('RUN_FIVE' in line for line in out['all_open']))
-        self.assertIn('> all 5 ▾', out['all_open'])
+        self.assertIn('▶ all 5 ▾', out['all_open'])
         # A cut item opens in place of its row: the whole words, folded in the width, the `> ` on the first row and the words' own column
         # on the rest, the row not shown a second time; opened again it is one row again. An item that was not cut has nothing to open.
         self.assertTrue(out['item_cut_has_text'])
         self.assertEqual(out['item_press'], 'item')
         self.assertGreaterEqual(out['item_more'], 2)
         self.assertEqual(out['item_span'], out['item_more'] + 1)
-        self.assertTrue(out['item_first'].startswith('> RUN_ONE 일 하나입니다'), out['item_first'])
+        self.assertTrue(out['item_first'].startswith('▶ RUN_ONE 일 하나입니다'), out['item_first'])
         self.assertTrue(out['item_rest_indent'] and out['item_fits'] and out['item_whole'] and out['item_tinted'], out)
         self.assertFalse(out['item_ends_cut'], out)                      # nothing is cut any more
         self.assertEqual(out['item_text_once'], 1, out)                  # the same words are not on the screen twice
@@ -719,7 +719,7 @@ fast = None
 SCENARIO = r"""
 const checks={};
 const rowsOf=s=>{const b=box(s);return b?b.rows.slice(1,-1).map(l=>l.replace(/^│\s?/,'').replace(/\s*│.*$/,'')):[];};
-const chosen=s=>rowsOf(s).filter(l=>l.startsWith('> '));
+const chosen=s=>rowsOf(s).filter(l=>l.startsWith('▶ '));
 const shows=word=>s=>rowsOf(s).some(l=>l.includes(word));
 const frame=s=>box(s)?box(s).rows:[];
 (async()=>{try{
@@ -742,12 +742,12 @@ const frame=s=>box(s)?box(s).rows:[];
   checks.item_first=chosen(r.s)[0];checks.item_last_count=rowsOf(r.s).filter(l=>l.includes('RUN_ONE_LAST')).length;
   checks.item_head_count=rowsOf(r.s).filter(l=>l.includes('RUN_ONE 일 하나입니다')).length;checks.item_cut_left=rowsOf(r.s).some(l=>l.endsWith('…'));
   checks.item_more=rowsOf(r.s).length-rowsBefore;
-  checks.item_rest=rowsOf(r.s)[rowsOf(r.s).findIndex(l=>l.startsWith('> '))+1];
+  checks.item_rest=rowsOf(r.s)[rowsOf(r.s).findIndex(l=>l.startsWith('▶ '))+1];
   await key('\r');await until(s=>!shows('RUN_ONE_LAST')(s),'the item closed');checks.item_closed_rows=rowsOf(await screen()).length-rowsBefore;
   // Enter on an item that was not cut changes nothing.
   await key('\x1b[B');const shortSel=rowsOf(await screen());await key('\r',300);checks.short_same=JSON.stringify(rowsOf(await screen()))===JSON.stringify(shortSel);
   await key('\x1b[A');
-  // Down to `all 5 ›`: Enter shows the whole running list.
+  // Down to `all 5 ▸`: Enter shows the whole running list.
   for(let i=0;i<3;i++)await key('\x1b[B',120);
   checks.at_all=chosen(await screen());
   await key('\r');r=await until(shows('RUN_FIVE'),'all of the running list');checks.all_open=chosen(r.s);
@@ -924,32 +924,32 @@ class PtyTest(unittest.TestCase):
         self.assertTrue(any(row.startswith('하는 중 5') for row in rows), rows)
         self.assertFalse([row for row in rows if '기다리는' in row or row.lstrip().startswith('!')], rows)       # no question line (11-22)
         self.assertEqual(len(c['first_chosen']), 1, c)
-        self.assertTrue(c['first_chosen'][0].startswith('> RUN_ONE 일 하나입니다'), c)
+        self.assertTrue(c['first_chosen'][0].startswith('▶ RUN_ONE 일 하나입니다'), c)
         self.assertIn('STATUS', c['title'])
         self.assertIn('Enter open', c['keys'])
         self.assertIn('←→ section', c['keys'])                          # the popups' own keys row
         # The choice moves with the arrows, Tab and Shift+Tab.
-        self.assertTrue(c['down'][0].startswith('> RUN_TWO'), c)
-        self.assertTrue(c['tab'][0].startswith('> RUN_THREE'), c)
-        self.assertTrue(c['up'][0].startswith('> RUN_TWO'), c)
-        self.assertTrue(c['shift_tab'][0].startswith('> RUN_ONE 일 하나입니다'), c)
+        self.assertTrue(c['down'][0].startswith('▶ RUN_TWO'), c)
+        self.assertTrue(c['tab'][0].startswith('▶ RUN_THREE'), c)
+        self.assertTrue(c['up'][0].startswith('▶ RUN_TWO'), c)
+        self.assertTrue(c['shift_tab'][0].startswith('▶ RUN_ONE 일 하나입니다'), c)
         # An item opens its whole text under it, and closes.
-        self.assertTrue(c['item_first'].startswith('> RUN_ONE 일 하나입니다'), c)                  # the row is the words, folded: marked on its first row
+        self.assertTrue(c['item_first'].startswith('▶ RUN_ONE 일 하나입니다'), c)                  # the row is the words, folded: marked on its first row
         self.assertEqual((c['item_last_count'], c['item_head_count'], c['item_cut_left']), (1, 1, False), c)   # nothing twice, nothing cut
         self.assertGreaterEqual(c['item_more'], 1, c)
         self.assertTrue(c['item_rest'].startswith('  ') and not c['item_rest'].startswith('   '), c)  # the words' own column
         self.assertEqual(c['item_closed_rows'], 0, c)                                     # again: one row, as before
         self.assertTrue(c['short_same'], c)                                              # an item that was not cut has nothing to open
-        # `all N ›`, a folded heading: Enter opens in place, again folds.
-        self.assertIn('all 5 ›', c['at_all'][0])
+        # `all N ▸`, a folded heading: Enter opens in place, again folds.
+        self.assertIn('all 5 ▸', c['at_all'][0])
         self.assertIn('all 5 ▾', c['all_open'][0])
-        self.assertIn('› 최근에 끝난 것 2', c['at_group'][0])
+        self.assertIn('▸ 최근에 끝난 것 2', c['at_group'][0])
         self.assertIn('▾ 최근에 끝난 것 2', c['group_open'][0])
         self.assertTrue(c['group_notes'], c)
         # ←→ are still the sections.
         self.assertNotIn('STATUS', c['right_title'].split('─')[1] if '─' in c['right_title'] else c['right_title'])
         self.assertTrue(c['right_not_list'], c)
-        self.assertTrue(c['left_chosen'] and c['left_chosen'][0].startswith('> RUN_ONE 일 하나입니다'), c)        # a fresh list
+        self.assertTrue(c['left_chosen'] and c['left_chosen'][0].startswith('▶ RUN_ONE 일 하나입니다'), c)        # a fresh list
         self.assertTrue(c['press_open'], c)
         # `full document ›` is the screen the popup always had; Fleet is asked for only then; Esc and Enter go back, Esc again closes.
         self.assertIn('full document ›', c['at_full'][0])
@@ -964,11 +964,11 @@ class PtyTest(unittest.TestCase):
         self.assertIn('full document ›', c['esc_back_chosen'][0])                          # on the line it left
         self.assertTrue(c['enter_back'] and c['esc_closed'], c)
         # A document that changes under the popup.
-        self.assertTrue(c['before_edit'][0].startswith('> RUN_TWO'), c)
+        self.assertTrue(c['before_edit'][0].startswith('▶ RUN_TWO'), c)
         self.assertIn('DONE_ONE', c['on_done'][0])
         self.assertIn('DONE_ONE', c['after_edit'][0], c)                                    # the same words keep the choice
         self.assertTrue(c['group_still_open'], c)                                           # the group stays open by its name
-        self.assertTrue(c['reworded'][0].startswith('> RUN_ONE_EDITED'), c)             # a line gone: the top
+        self.assertTrue(c['reworded'][0].startswith('▶ RUN_ONE_EDITED'), c)             # a line gone: the top
         self.assertTrue(c['reworded_top'], c)
         self.assertEqual(c['vm_while_listing'], 0, c)
         self.assertEqual(c['refleet_on_full'], 1, c)                                      # the full document read again asks Fleet's lines again

@@ -576,7 +576,7 @@ class SessionOpenPath(unittest.TestCase):
         self.assertEqual((state.scope, state.opened), ("-", "e8"))
         frame = draw(self.vm, state, 140, 45, beat=1)
         link = _hit(frame, ("page", "session", "e8"))
-        self.assertEqual("".join(cell[0] for cell in frame.cells[link.y][link.x0:link.x1]), "(open ▸)")
+        self.assertEqual("".join(cell[0] for cell in frame.cells[link.y][link.x0:link.x1]), "(open ›)")
         self.assertEqual("".join(cell[0] for cell in frame.cells[link.y][link.x0 - 7:link.x0]).strip(),
                          "PAGE")
         self.assertEqual([hit.action for hit in frame.hits if hit.action[:1] == ("page",)],

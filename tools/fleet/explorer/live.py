@@ -1929,7 +1929,7 @@ def _question_records(snapshot, session_rows, session_index, now, routes=(), res
             "open_tag": session["tag"] if session else None,
             "pane": session["pane"] if session else None,
             "pane_server": session.get("pane_server") if session else None,
-            "marker": "◌" if owner_state == "none" else "◑" if source == "S2" else "●",
+            "marker": "◌" if owner_state == "none" else "◑",
             "node": _text(item.get("node")),
             "since_at": _clock_or_date(item.get("since"), now),
             "route_id": route_id,
@@ -1946,9 +1946,8 @@ def _question_records(snapshot, session_rows, session_index, now, routes=(), res
         questions.append(record)
         if session and not older and not record["sent"]:
             session["ask"] = "answer needed"
-            marker = "◑" if source == "S2" else "●"
-            if session.get("answer_wait_marker") != "●":
-                session["answer_wait_marker"] = marker
+            # 11-27 (the eight marks): every answer wait reads ``◑`` (an older record's ``●`` is read the same way).
+            session["answer_wait_marker"] = "◑"
 
     total = waits.get("total")
     if isinstance(total, bool) or not isinstance(total, int) or total < 0:
@@ -3903,7 +3902,7 @@ def _detail_sections(rows, session_index, accepted_detail, now, resolver=None):
 
 def route_marker_state(route):
     """The one route marker every Fleet route row draws: ``working`` (⠏), ``idle`` (● waits),
-    ``blocked`` (● answer), ``dead`` (✕), ``done`` (✓) or ``stale`` (◌ no response).
+    ``blocked`` (◑ answer), ``dead`` (✕), ``done`` (✓) or ``stale`` (◌ no response).
 
     Spec rule 27: while anything of the route runs, its owner or a worker, it reads as
     working. A route its reader found with nothing running reads as no response and never
@@ -4040,6 +4039,118 @@ def _panel_stage(stage, box=None):
     return row
 
 
+def _panel_route_record(route, route_nodes):
+    """One route's bounded record for the shell panel (``session_route_status`` hands one per route)."""
+    row = {key: str(route.get(key) or "")[:320] for key in
+           ("id", "title", "state", "shape", "worker_stage", "outcome", "repo", "capability", "field")}
+    # Each stage's box in Fleet's route detail (verdict, time, unit, output, rounds note).
+    boxes = {}
+    for group in (route_nodes or {}).get(route.get("id")) or ():
+        for item in (group.get("detail") or ()) if isinstance(group, Mapping) else ():
+            if isinstance(item, Mapping) and item.get("n"):
+                boxes.setdefault(str(item["n"]), item)
+    row["stages"] = [_panel_stage(stage, boxes.get(str(stage.get("name") or "")))
+                     for stage in (route.get("stages") or ())[:16]]
+    # The unfolded route's kind, owner and doer lines, as ROUTES reads them: the
+    # same record values, bounded; nothing here is collected a second time.
+    for key in ("mode", "intensity", "profile", "age", "worker_unit", "resume"):
+        if isinstance(route.get(key), str) and route[key]:
+            row[key] = route[key][:64]
+    row["legs"] = len(route.get("legs") or ())
+    # The route's chain (``frame ✓ → code``), the legs Fleet already reads: name and state only.
+    row["chain"] = [[str(leg[0])[:24], str(leg[1])[:12]] for leg in (route.get("legs") or ())[:6]
+                    if isinstance(leg, (list, tuple)) and len(leg) >= 2]
+    # The note right of the detail band (``detail_after``), as Fleet's route detail reads it.
+    from .pages import _route_after
+    nodes = tuple((route_nodes or {}).get(route.get("id")) or ())
+    after = route["detail_after"] if "detail_after" in route else _route_after(route, nodes)
+    if isinstance(after, str) and after.strip():
+        row["after"] = after.strip()[:200]
+    gauge = route.get("owner_gauge")
+    if isinstance(gauge, (list, tuple)) and gauge and isinstance(gauge[0], (int, float)):
+        row["owner_ctx_pct"] = round(gauge[0], 1)
+    context = route.get("owner_context")
+    if (row.get("owner_ctx_pct") is None and isinstance(context, (list, tuple)) and context
+            and type(context[0]) is int):
+        row["owner_ctx_tokens"] = context[0]
+    row["worker_contexts"] = [
+        {"stage": str(item.get("stage") or "")[:64], "harness": str(item.get("harness") or "")[:32],
+         **({"model": str(item["model"][0])[:64]} if isinstance(item.get("model"), (list, tuple))
+            and item["model"] and item["model"][0] else {}),
+         **({"ctx_pct": round(item["context"], 1)} if isinstance(item.get("context"), (int, float)) else {}),
+         # The attempt Fleet chose, so the shell finds this very job again (spec E9 rule 43).
+         **({"attempt": item["attempt"]} if isinstance(item.get("attempt"), str) and 0 < len(item["attempt"]) <= 128 else {})}
+        for item in (route.get("worker_contexts") or ())[:8] if isinstance(item, dict)]
+    row["stage_more"] = max(0, len(route.get("stages") or ()) - 16)
+    if type(route.get("result_at")) in (int, float):
+        row["result_at"] = route["result_at"]
+    row["worker"] = _worker_pieces(route.get("worker"))
+    row["owner"] = _owner_text(route)
+    pair = route.get("model")
+    if isinstance(pair, (list, tuple)) and pair and isinstance(pair[0], str) and pair[0]:
+        row["owner_model"] = pair[0][:64]
+    visibility = route.get("visibility")
+    if isinstance(visibility, dict) and visibility.get("schema") == "route_visibility_v1" and visibility.get("route_id") == row["id"]:
+        row["visibility"] = {"summary": str(visibility.get("summary") or "")[:160],
+                             "next": str(visibility.get("next") or "")[:120],
+                             "lines": [[str(line[0])[:12], str(line[1])[:200], str(line[2])[:8]]
+                                       for line in (visibility.get("lines") or ())[:14]
+                                       if isinstance(line, (list, tuple)) and len(line) == 3]}
+        # Already bounded by the shared reader. Keep its codes intact;
+        # presentation translates them, never reinterprets report prose.
+        codes = visibility.get("codes")
+        if isinstance(codes, dict) and codes.get("schema") == "route_visibility_codes_v1":
+            row["visibility"]["codes"] = codes
+    # 11-27: the leg band of the route page's frame and its head's first words (``repo/ › [tag] ›``), as Fleet draws them, so the
+    # shell's first screen for a route draws that frame from the panel's values in the cells its reading fills.
+    row["bands"] = _panel_bands(nodes)
+    # (the label of the record's own `repo`, whole: Fleet's head writes it whole and cuts the head at the frame's rule, as
+    # the first screen does; a cut here would move the tag and drop the `/`)
+    from .tables import repo_rule_label
+    row["head_repo"] = repo_rule_label(row["repo"] or None)
+    row["session_tag"] = str(route.get("session_tag") or "")[:16]
+    return row
+
+
+PANEL_BANDS = 6        # legs the panel carries; a route with more has none (its first screen stays the panel's box)
+
+
+def _panel_bands(groups):
+    """The leg band of Fleet's route page as the panel carries it: each leg's name, state, verdict, kind, its lines and the
+    title of its panel, bounded (two lines of eight pieces, a title of ten; a piece 80 cells and its key 24), and for a leg
+    the values of its stage line as Fleet counts them (`pages.current_leg_values` over the leg's whole detail: the stage
+    that matters now, its place, how many are done of how many). Only values of their own shape are carried: a text that
+    is not a string, a line that is not a list, is left out. A route of more than ``PANEL_BANDS`` legs carries none."""
+    from .pages import current_leg_values
+    groups = [group for group in (groups if isinstance(groups, (list, tuple)) else ()) if isinstance(group, Mapping)]
+    if len(groups) > PANEL_BANDS:
+        return []
+
+    def text(value, limit):
+        return value[:limit] if isinstance(value, str) else ""
+
+    def pieces(items, limit):
+        return [[item[0][:80], item[1][:24] if isinstance(item[1], str) else ""]
+                for item in (items if isinstance(items, (list, tuple)) else ())
+                if isinstance(item, (list, tuple)) and len(item) >= 2 and isinstance(item[0], str)][:limit]
+
+    bands = []
+    for group in groups:
+        lines = group.get("lines") if isinstance(group.get("lines"), (list, tuple)) else ()
+        band = {"n": text(group.get("n"), 64), "st": text(group.get("st"), 16), "verdict": text(group.get("verdict"), 16),
+                "kind": text(group.get("kind"), 8), "lines": [pieces(line, 8) for line in lines[:2] if isinstance(line, (list, tuple))],
+                "title": pieces(group.get("title"), 10)}
+        detail = group.get("detail") if isinstance(group.get("detail"), (list, tuple)) else ()
+        if detail and all(isinstance(item, Mapping) for item in detail):
+            at, stage, done, total = current_leg_values(detail)
+            # (Fleet's own words for it, `str(n or name)` (`None` for a parallel pair, as Fleet writes it); a value of another shape is none)
+            name = stage.get("n") or stage.get("name")
+            band["stage"] = {"n": (str(name) if name is None or isinstance(name, (str, int, float)) else "")[:64],
+                             "st": stage.get("st") if isinstance(stage.get("st"), str) else "", "at": at, "done": done, "of": total}
+        bands.append(band)
+    return bands
+
+
 def session_route_status(snapshot, now=None, *, include_details=False, records_out=None):
     """Question-free labels from the same route records OVERVIEW consumes. ``records_out`` (a list) receives the
     ``(rows, index)`` session records this call worked out, for a caller that needs them again in the same pass."""
@@ -4088,67 +4199,7 @@ def session_route_status(snapshot, now=None, *, include_details=False, records_o
         records = []
         # Spec rule 23: every current route (the panel shows them all, scrolling in place).
         for route in selected:
-            row = {key: str(route.get(key) or "")[:320] for key in
-                   ("id", "title", "state", "shape", "worker_stage", "outcome", "repo", "capability", "field")}
-            # Each stage's box in Fleet's route detail (verdict, time, unit, output, rounds note).
-            boxes = {}
-            for group in (route_nodes or {}).get(route.get("id")) or ():
-                for item in (group.get("detail") or ()) if isinstance(group, Mapping) else ():
-                    if isinstance(item, Mapping) and item.get("n"):
-                        boxes.setdefault(str(item["n"]), item)
-            row["stages"] = [_panel_stage(stage, boxes.get(str(stage.get("name") or "")))
-                             for stage in (route.get("stages") or ())[:16]]
-            # The unfolded route's kind, owner and doer lines, as ROUTES reads them: the
-            # same record values, bounded; nothing here is collected a second time.
-            for key in ("mode", "intensity", "profile", "age", "worker_unit", "resume"):
-                if isinstance(route.get(key), str) and route[key]:
-                    row[key] = route[key][:64]
-            row["legs"] = len(route.get("legs") or ())
-            # The route's chain (``frame ✓ → code``), the legs Fleet already reads: name and state only.
-            row["chain"] = [[str(leg[0])[:24], str(leg[1])[:12]] for leg in (route.get("legs") or ())[:6]
-                            if isinstance(leg, (list, tuple)) and len(leg) >= 2]
-            # The note right of the detail band (``detail_after``), as Fleet's route detail reads it.
-            from .pages import _route_after
-            nodes = tuple((route_nodes or {}).get(route.get("id")) or ())
-            after = route["detail_after"] if "detail_after" in route else _route_after(route, nodes)
-            if isinstance(after, str) and after.strip():
-                row["after"] = after.strip()[:200]
-            gauge = route.get("owner_gauge")
-            if isinstance(gauge, (list, tuple)) and gauge and isinstance(gauge[0], (int, float)):
-                row["owner_ctx_pct"] = round(gauge[0], 1)
-            context = route.get("owner_context")
-            if (row.get("owner_ctx_pct") is None and isinstance(context, (list, tuple)) and context
-                    and type(context[0]) is int):
-                row["owner_ctx_tokens"] = context[0]
-            row["worker_contexts"] = [
-                {"stage": str(item.get("stage") or "")[:64], "harness": str(item.get("harness") or "")[:32],
-                 **({"model": str(item["model"][0])[:64]} if isinstance(item.get("model"), (list, tuple))
-                    and item["model"] and item["model"][0] else {}),
-                 **({"ctx_pct": round(item["context"], 1)} if isinstance(item.get("context"), (int, float)) else {}),
-                 # The attempt Fleet chose, so the shell finds this very job again (spec E9 rule 43).
-                 **({"attempt": item["attempt"]} if isinstance(item.get("attempt"), str) and 0 < len(item["attempt"]) <= 128 else {})}
-                for item in (route.get("worker_contexts") or ())[:8] if isinstance(item, dict)]
-            row["stage_more"] = max(0, len(route.get("stages") or ()) - 16)
-            if type(route.get("result_at")) in (int, float):
-                row["result_at"] = route["result_at"]
-            row["worker"] = _worker_pieces(route.get("worker"))
-            row["owner"] = _owner_text(route)
-            pair = route.get("model")
-            if isinstance(pair, (list, tuple)) and pair and isinstance(pair[0], str) and pair[0]:
-                row["owner_model"] = pair[0][:64]
-            visibility = route.get("visibility")
-            if isinstance(visibility, dict) and visibility.get("schema") == "route_visibility_v1" and visibility.get("route_id") == row["id"]:
-                row["visibility"] = {"summary": str(visibility.get("summary") or "")[:160],
-                                     "next": str(visibility.get("next") or "")[:120],
-                                     "lines": [[str(line[0])[:12], str(line[1])[:200], str(line[2])[:8]]
-                                               for line in (visibility.get("lines") or ())[:14]
-                                               if isinstance(line, (list, tuple)) and len(line) == 3]}
-                # Already bounded by the shared reader. Keep its codes intact;
-                # presentation translates them, never reinterprets report prose.
-                codes = visibility.get("codes")
-                if isinstance(codes, dict) and codes.get("schema") == "route_visibility_codes_v1":
-                    row["visibility"]["codes"] = codes
-            records.append(row)
+            records.append(_panel_route_record(route, route_nodes))
         for sid in info["ids"]:
             details[str(_get(info["session"], "harness")) + "\0" + sid] = records
     return result, details

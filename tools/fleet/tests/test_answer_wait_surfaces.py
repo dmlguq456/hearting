@@ -494,7 +494,7 @@ try {
         self.assertEqual(vm.system["answer_waits"], {"state": "complete", "total": 2, "older": 1})
         by_tag = {row["tag"]: row for row in vm.sessions}
         self.assertEqual(by_tag["a1"]["ask"], "answer needed")
-        self.assertEqual(by_tag["a1"]["answer_wait_marker"], "●")
+        self.assertEqual(by_tag["a1"]["answer_wait_marker"], "◑")      # 11-27: every answer wait reads ◑
         self.assertIsNone(by_tag["b1"]["ask"])
         records = [dict(item) for item in vm.questions]
         self.assertEqual({item["tag"] for item in records},

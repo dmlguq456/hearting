@@ -204,8 +204,8 @@ const answer=JSON.parse(fs.readFileSync(process.argv[2],'utf8')),b=board.fromAns
 const text=r=>r.map(p=>p.text).join('');
 const fresh=()=>{const t={sel:'',fold:new Set(),items:new Set(),more:{}},bs=board.newState();board.prepare(b,bs,t);return {t,bs};};
 const screen=({t,bs},width=96)=>list.layout(board.entries(b,bs,{width}),t,{width}).rows.map(text);
-const chosen=st=>screen(st).find(l=>l.startsWith('> '))||'';
-const items=st=>screen(st).filter(l=>/^(> |  )  (FIX|TASK|NOTE|TBD) /.test(l)).map(l=>l.slice(4).trim());
+const chosen=st=>screen(st).find(l=>l.startsWith('▶ '))||'';
+const items=st=>screen(st).filter(l=>/^(▶ |  )  (FIX|TASK|NOTE|TBD) /.test(l)).map(l=>l.slice(4).trim());
 """
 
 
@@ -241,7 +241,7 @@ const st=fresh(),s=screen(st);
 assert.deepEqual([s[0],...s.slice(2,5)],['Sample backlog','8 total · FIX 3 · TASK 3 · TBD 1 · NOTE 1','group [Kind] Area Date · showing 8 · Discuss 2','']);
 assert.match(s[1],/^updated (2026-)?11-26 09:30$/);
 // the first group open, the others folded with their counts, in the order FIX, TASK, TBD, NOTE
-assert.deepEqual(s.filter(l=>/[▾›] (FIX|TASK|TBD|NOTE) \d/.test(l)).map(l=>l.trim().replace(/^> /,'')),['▾ FIX 3','› TASK 3','› TBD 1','› NOTE 1']);
+assert.deepEqual(s.filter(l=>/[▾▸] (FIX|TASK|TBD|NOTE) \d/.test(l)).map(l=>l.trim().replace(/^▶ /,'')),['▾ FIX 3','▸ TASK 3','▸ TBD 1','▸ NOTE 1']);
 // inside a group the newest first; Discuss and Waiting stand before the title, Ready does not
 assert.deepEqual(items(st),['FIX   2026-11-25  Questions  Discuss  Sample question popup forgets the answer','FIX   2026-11-24  Routing             Sample route resume loses its stage',
   'FIX   2026-11-20  No area             Sample same title']);
@@ -269,10 +269,10 @@ const st=fresh();
 board.setAxis(b,st.bs,st.t,'area');
 let s=screen(st);
 assert(s.includes('group Kind [Area] Date · showing 8 · Discuss 2'));
-assert.deepEqual(s.filter(l=>/^(> |  )[▾›] /.test(l)).map(l=>l.slice(2)),['▾ panel 2','› Questions 1','› Routing 2','› Workers 1','› No area 2']);
+assert.deepEqual(s.filter(l=>/^(▶ |  )[▾▸] /.test(l)).map(l=>l.slice(2)),['▾ panel 2','▸ Questions 1','▸ Routing 2','▸ Workers 1','▸ No area 2']);
 assert.deepEqual(items(st),['TASK  2026-11-26  panel               Sample panel head hides the count','TASK  —           panel      Waiting  Sample undated job']);
 board.setAxis(b,st.bs,st.t,'date');s=screen(st);
-assert.deepEqual(s.filter(l=>/^(> |  )[▾›] /.test(l)).map(l=>l.slice(2)),['▾ 2026-11-26 3','› 2026-11-25 1','› 2026-11-24 1','› 2026-11-20 1','› No date 2']);
+assert.deepEqual(s.filter(l=>/^(▶ |  )[▾▸] /.test(l)).map(l=>l.slice(2)),['▾ 2026-11-26 3','▸ 2026-11-25 1','▸ 2026-11-24 1','▸ 2026-11-20 1','▸ No date 2']);
 // the same date in the document's order
 assert.deepEqual(items(st).map(l=>l.replace(/ +/g,' ')),['TASK 2026-11-26 panel Sample panel head hides the count','NOTE 2026-11-26 Routing Sample routing note to keep',
   'TASK 2026-11-26 Workers Discuss Sample worker leg runs twice']);
@@ -284,7 +284,7 @@ assert.equal(board.setAxis(b,st.bs,st.t,'kind'),false);                     // t
     def test_t_filters_by_state_and_every_group_stands_open(self):
         self.node(r"""
 const st=fresh(),seen=[];
-for(let i=0;i<5;i++){board.cycleFilter(b,st.bs,st.t);const s=screen(st);seen.push([s[3],items(st).length,s.filter(l=>l.includes('›')&&!l.includes('full document')).length]);}
+for(let i=0;i<5;i++){board.cycleFilter(b,st.bs,st.t);const s=screen(st);seen.push([s[3],items(st).length,s.filter(l=>l.includes('▸')&&!l.includes('full document')).length]);}
 assert.deepEqual(seen,[
   ['group [Kind] Area Date · showing 2 of 8 · Discuss 2 · state Discuss',2,0],
   ['group [Kind] Area Date · showing 1 of 8 · Discuss 2 · state Ready',1,0],

@@ -143,9 +143,11 @@ const cases={
 };
 (async()=>{for(const [name,test] of Object.entries(cases)){await test(current);let failed=false;try{await test(previous.exports);}catch{failed=true;}assert(failed,'baseline must fail '+name);console.log('NEW_CASE '+name+' current=PASS baseline=FAIL');}
  // 11-22: a choice-only question's rows are as before where the popup is roomy; short of rows its choices now stay and the words page.
- for(const columns of [96,56,17])for(const budget of [24]){const draw=create=>JSON.stringify(setup(create,{free_text:false}).rows(columns,budget),(k,v)=>k==='choiceIndex'?undefined:v).replace(' · t text','');assert.equal(draw(current),draw(previous.exports));}
+ // (11-27: the baseline's place marks, `› ` before the question and `▸` before the choice, read as today's `▶`.)
+ const marks=s=>s.replace(/^\[\[\{"text":"› "/,'[[{"text":"▶ "').replace(/\{"text":"▸"/g,'{"text":"▶"');
+ for(const columns of [96,56,17])for(const budget of [24]){const draw=create=>JSON.stringify(setup(create,{free_text:false}).rows(columns,budget),(k,v)=>k==='choiceIndex'?undefined:v).replace(' · t text','');assert.equal(draw(current),marks(draw(previous.exports)));}
  for(const columns of [96,56,17])for(const budget of [24])for(const keys of ['', '\r']){
-  const draw=create=>{const x=setup(create);x.b.leave();x.b.update([{id:'decision',revision:'one',answerable:true,answer_kind:'decision',questions:[{id:'q',question:'Decision'}]}],'',{});x.b.enter();x.b.input(Buffer.from(keys));return JSON.stringify(x.rows(columns,budget),(k,v)=>k==='choiceIndex'?undefined:v).replace(' · t text','');};assert.equal(draw(current),draw(previous.exports));
+  const draw=create=>{const x=setup(create);x.b.leave();x.b.update([{id:'decision',revision:'one',answerable:true,answer_kind:'decision',questions:[{id:'q',question:'Decision'}]}],'',{});x.b.enter();x.b.input(Buffer.from(keys));return JSON.stringify(x.rows(columns,budget),(k,v)=>k==='choiceIndex'?undefined:v).replace(' · t text','');};assert.equal(draw(current),marks(draw(previous.exports)));
  }
  const x=setup(current);assert.deepEqual((await x.send('2\r')).answers.q,['v2']);
  const y=setup(current);y.b.input(Buffer.from('a'.repeat(4096)+'한\x7fZ'));assert.equal((await y.send('\r')).answers.q[0],'a'.repeat(4095)+'Z');
@@ -412,7 +414,7 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]+'/bloc
                         (case/'state').write_text('working' if index % 2 == 0 else 'idle')
                         waitfor(lambda rows: any(prompt in row for row in rows))
                         send('\x1d')
-                        waitfor(lambda rows: any('▸ 2  Item 2' in row for row in rows))
+                        waitfor(lambda rows: any('▶ 2  Item 2' in row for row in rows))
                         for key in keys:
                             if key == 'click-write':
                                 click('│ › ')
@@ -421,7 +423,7 @@ const assert=require('node:assert/strict'),create=require(process.argv[1]+'/bloc
                             else:
                                 send(key)
                         rows = screen()
-                        actual = [int(m.group(1)) for row in rows if (m := re.search(r'▸ ([123])  Item', row))]
+                        actual = [int(m.group(1)) for row in rows if (m := re.search(r'▶ ([123])  Item', row))]
                         self.assertEqual(actual, mark, (layout, keys, rows))
                         before = (case/'answers').read_text().splitlines() if (case/'answers').exists() else []
                         send('\r')
