@@ -313,9 +313,18 @@ def require_sole_decision(harness: str, tool: str, cwd: str) -> None:
         for group in (hooks.get("PreToolUse") or []) if isinstance(hooks, dict) else []:
             if not isinstance(group, dict) or not _hook_matches(harness, group.get("matcher"), tools):
                 continue
+            # A group on every tool (matcher none, empty or `*`) decides nothing about this call, unless a handler's
+            # own `if` (Claude: one permission rule) names the tool or cannot be read as one tool name; a matcher
+            # that names or patterns the tool still decides. Where such a hook would refuse or ask, the route has
+            # started.
+            every_tool = group.get("matcher") in (None, "", "*")
             for handler in group.get("hooks") or []:
                 if not (isinstance(handler, dict) and handler.get("type", "command") == "command"
                         and handler.get("command") in ours):
+                    rule = handler.get("if") if isinstance(handler, dict) else None
+                    named = rule.split("(", 1)[0].strip() if isinstance(rule, str) else ""
+                    if every_tool and (rule is None or (named.isidentifier() and named not in tools)):
+                        continue
                     raise Skip("another-decision")
                 registered += 1
     if registered != 1:
