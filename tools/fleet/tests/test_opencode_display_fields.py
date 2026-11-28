@@ -89,7 +89,9 @@ def assert_primary_context_pipeline(case, env, records):
             case.assertEqual(sess.session_id, row["session_id"])
             case.assertEqual(sess.context_window_tokens, row["policy"]["effective_window_tokens"])
             case.assertIsNone(sess.context_display_window_tokens)
-            case.assertIsNone(sess.ctx_pct, "an unknown v2 trigger must stay unknown")
+            # An unknown trigger reads usage against the declared window:
+            # 450,000 of 900,000 (twice) and 200,000 of 1,000,000.
+            case.assertEqual(sess.ctx_pct, (50, 50, 20)[i])
             case.assertEqual(sess.session_input_tokens, 9999999)
             sessions.append(sess)
         assert_opencode_context_surface(case, sessions, [(50, .9), (50, .9), (20, 1.0)])
@@ -97,8 +99,8 @@ def assert_primary_context_pipeline(case, env, records):
         # request, whose own updated time still controls policy acceptance.
         first = records[0]
         for active, completed, late, expected in (
-                (0, True, False, (0, .9)), (None, True, False, (None, .9)),
-                (0, False, True, (None, None))):
+                (0, True, False, (0, .9)), (None, True, False, (50, .9)),
+                (0, False, True, (50, .9))):
             observed = observation(first["session_id"])
             if late:
                 observed["messages"][0]["started"] -= 3000
@@ -113,8 +115,10 @@ def assert_primary_context_pipeline(case, env, records):
             sess = sessions[0]
             opencode.enrich(sess)
             if late:
-                case.assertIsNone(sess.context_window_tokens,
-                                  "new session metadata cannot freshen an older assistant's policy")
+                # A record whose request is older still lends its measured
+                # window; only its trigger-bearing fields need the exact pairing.
+                case.assertEqual(sess.context_window_tokens, 900000,
+                                 "the record's window still stands for an older request")
             assert_opencode_context_surface(case, [sess], [expected])
 
 
@@ -183,11 +187,14 @@ def assert_primary_request_cases(case, env, cases):
                 opencode.enrich(sess)
                 case.assertEqual(db.read_bytes(), before, "native reader modified its fixture DB")
                 case.assertEqual(sess.session_id, row["session_id"])
-                case.assertEqual(sess.context_window_tokens, item["window"])
+                # A null recorded window falls back to the model catalogue.
+                window = (item["window"] or row["policy"]["effective_window_tokens"]
+                          or opencode._model_ctx_limit(
+                              request["model"].get("id"), request["model"].get("providerID")))
+                case.assertEqual(sess.context_window_tokens, window)
                 case.assertIsNone(sess.context_display_window_tokens)
-                case.assertIsNone(sess.ctx_pct)
-                window = item["window"]
                 expected = (round(message["tokens"]["total"] * 100 / window), window / 1000000) if window else (None, None)
+                case.assertEqual(sess.ctx_pct, expected[0])
                 assert_opencode_context_surface(case, [sess], [expected])
                 results.append({"case": item["name"], "saved_window": row["policy"]["effective_window_tokens"],
                                 "native_event_seq": native_seq,
