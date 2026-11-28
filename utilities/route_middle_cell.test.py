@@ -202,7 +202,7 @@ class Cell(FORM.FormFixtures):
         recipe = R.TOPO.resolve_recipe(registry, "autopilot-code", "dev")
         self.assertEqual(recipe["one_shot_review"], {
             "node": "impl-review", "inputs": ["source-diff"], "model_profile": "deep", "owner_model_profile": "balanced",
-            "fallback_hops": ["same-harness-headless", "cross-harness-headless"]})
+            "fallback_hops": ["same-harness-headless", "cross-harness-headless"], "verify_node": "test"})
         # no native or inline hop in the chain: a registered reviewer is the only one that can close this review
         for hop in ("inline", "native-subagent"):
             bad = json.loads(json.dumps(recipe))

@@ -480,6 +480,13 @@ def admit_round(route, node, jobs, *, owner_attempt_id=None, exclude_slug=None, 
          worker_type=meta.get("worker_type") or node.get("worker_type") or "review") == "verdict"), None)
  superseded = bool(last_verdict_id and any(
      last_verdict_id in (revision.get("supersedes") or ()) for revision in dependency_revisions))
+ # A solo route's verification node whose last verdict passed other bytes than the source now holds: the owner
+ # changed the work after it (a failing test it fixed), so the next start judges the change, never replays it.
+ from route_form import one_shot_review_node_ids
+ judged = next((meta.get("_review_subject_digest") or meta.get("review_subject_digest")
+                for status, meta in reversed(classified_rows) if meta.get("attempt_id") == last_verdict_id), None)
+ moved = bool(source_subject_digest and judged and judged != source_subject_digest and not unmet
+              and node.get("id") in one_shot_review_node_ids(route))
  return RoundAdmission(
   budget=budget,
   auto_revisions=auto_revisions if record_auto_revisions else (),
@@ -491,7 +498,7 @@ def admit_round(route, node, jobs, *, owner_attempt_id=None, exclude_slug=None, 
   # Supersession is selection authority even after its allowance is spent:
   # exhausted fresh work must not be mistaken for a current exact replay.
   requires_next_round=(budget.state != "review-correction-required"
-                       and (unmet or superseded or budget.closure_check_used)),
+                       and (unmet or superseded or budget.closure_check_used or moved)),
   source_subject_digest=source_subject_digest,
   source_subject_manifest=source_subject_manifest,
  )

@@ -1349,18 +1349,30 @@ def _next_ready_start_lines(receipt: dict, jobs: str) -> list[str]:
                 if (route.get("route_hash") != route_hash(route) or route["route_hash"] != meta["route_hash"]
                         or route.get("route_id") != meta["route_id"]):
                     continue
+                from route_form import one_shot_review_route, one_shot_test_node
+                import review_round_cap
+                test = one_shot_test_node(route)
+                blocking = one_shot_review_route(route) and (
+                    meta.get("note") == review_round_cap.REVIEW_BLOCKING_NOTE
+                    or any(_child_note(jobs, other) == review_round_cap.REVIEW_BLOCKING_NOTE
+                           for other in receipt.get("children") or []))
+                if test is not None and meta.get("route_node") != test["id"] and not blocking:
+                    # The middle cell from `strong`: once every review leg passes on the current source, the
+                    # test is what remains; its start is the next step (the start gate still decides).
+                    owner = next(n for n in route["nodes"] if n.get("id") == "one-shot")
+                    missing = dispatch_stage_advance.ROUTE.owner_terminal_prerequisites(route, owner, Path(jobs))
+                    if test["id"] in missing and not set(missing) & set(test.get("depends_on") or ()):
+                        lines.append("Next ready: " + worker_bootstrap.route_start_command(route_file, test["id"]))
                 completed = dispatch_stage_advance.completed_nodes(Path(jobs), route["route_id"])
                 started = dispatch_stage_advance.started_nodes(Path(jobs), route["route_id"], route["route_hash"])
                 for node in dispatch_stage_advance.runnable_successors(route, completed, started):
-                    from route_form import one_shot_review_route
+                    if test is not None and node.get("id") == test["id"]:
+                        continue  # decided above, on current markers (a marker kept from an earlier round is not)
                     if one_shot_review_route(route) and node.get("id") == "one-shot":
                         # The middle cell: the review is done; the owner's end is its own final handoff, unless
                         # a verdict blocks (then the verdict text above is the instruction). A review group is
                         # one batch: any blocking leg blocks it.
-                        import review_round_cap
-                        if any(_child_note(jobs, other) == review_round_cap.REVIEW_BLOCKING_NOTE
-                               for other in receipt.get("children") or []) or (
-                                meta.get("note") == review_round_cap.REVIEW_BLOCKING_NOTE):
+                        if blocking:
                             lines.append("Next ready: nothing to start; the independent review has finished and "
                                          "blocks. Follow the Review FAIL instruction above; do not return a final "
                                          "handoff before you have.")
