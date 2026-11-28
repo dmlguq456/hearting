@@ -433,6 +433,36 @@ tier leaves it where it is. Read it as an explicit pin, not as "the mini tier". 
 native subagent spawn resolves its model through the native-subagent default
 below.
 
+## A Native Subagent Call Becomes a Unit Route (H1)
+
+The same `Agent|Task` registration runs `hooks/subagent-model-default.sh --redirect` (timeout
+180 s). The model policy below decides first; a call it lets through goes to
+`utilities/native_subagent_redirect.py`, which decides once, before anything is registered, whether
+Hearting takes it (`capabilities/unit.md`, A native subagent call). Once the start receipt holds it
+(running, waiting for a free worker, or ended) the native call is refused with the route's line; Claude
+shows it to the model after `PreToolUse:Agent hook error:`. Certain means: the definition Claude picks for
+the name is Hearting's shipped one apart from the rendered `model`/`effort`/profile lines, or a built-in (a
+project `.claude/agents/` file, found walking up from the working directory, wins over the user's,
+https://code.claude.com/docs/en/sub-agents#choose-the-subagent-scope; any other file whose frontmatter
+names it, in any YAML form, counts); no other `PreToolUse` hook matches `Agent`/`Task` in the user,
+project, local or managed settings or an installed plugin, because matching hooks run in parallel
+(https://code.claude.com/docs/en/hooks#hook-handler-fields), and Hearting's own command, compared exactly,
+is registered once; no deny/ask rule names `Agent`/`Task`, because those apply whatever a hook returns
+(https://code.claude.com/docs/en/permissions#precedence-among-rules-hooks-and-mods); and the `claude`
+process that runs the hook (read from `/proc`) was started without `--settings`, `--agents`, `--add-dir`,
+`--plugin-dir`, `--setting-sources` or a tool rule. Skill or subagent frontmatter hooks and server-managed
+settings are not visible to the hook; the hook reads what it can, and a host without `/proc` keeps every
+call native. One script holds the policy and the redirect because how two hooks on one matcher combine a
+deny with an `updatedInput` was not verified. A call queued behind a full worker slot (`Queued as …`) starts from the runtime's capacity resume after the
+session's turn ended; `dispatch-owner-rewake.py` arms on the attempts that exist at that turn's end, so an
+idle session gets the answer with its next turn (measured: the queued worker ran about two minutes after the
+line, the answer came with the next prompt). When Hearting does not take the call, nothing is printed by
+that step and the model default below applies as before. A session opened before this registration keeps
+the old line (no `--redirect`, 15 s) and redirects nothing until Claude's settings watcher reloads the hook
+settings. Measured in isolated TUIs (`harness_behavior_cases_subagent_redirect.py`): the hook sees `Agent`
+with `description`, `prompt`, `subagent_type`; a hook that exits 1, is killed, prints garbage or runs past
+its timeout lets the native call run; exit 2 blocks it (the redirect always exits 0).
+
 ## Native Subagent Default Model (2026-07-23)
 
 Native Claude subagent spawns (Agent/Task tool) no longer silently inherit the
