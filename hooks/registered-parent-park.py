@@ -74,6 +74,27 @@ def main() -> int:
             return 0
     except Exception:
         return deny("cleanup-scope: authority unavailable")
+    return carry_owner_input(registry, parent_attempt, payload)
+
+
+def carry_owner_input(registry: Path, attempt: str, payload: dict[str, Any]) -> int:
+    """Hand queued owner corrections to the running turn beside this main-thread tool's
+    result (OPERATIONS §5.10); the supervisor confirms the read or requeues them."""
+    if payload.get("agent_id") or not payload.get("tool_use_id"):
+        return 0
+    try:
+        from dispatch_contract import supervisor_lease_path
+        state = json.loads(supervisor_lease_path(registry, attempt).with_suffix(".input.json").read_text())
+        if not state.get("in_turn") or not any(
+                item.get("state") == "queued" for item in state.get("requests", [])):
+            return 0
+        import dispatch_owner_input
+        text = dispatch_owner_input.take_in_turn(registry, attempt, str(payload["tool_use_id"]))
+    except Exception:
+        return 0
+    if text:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                                 "additionalContext": text}}, separators=(",", ":")))
     return 0
 
 

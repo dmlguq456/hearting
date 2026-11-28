@@ -727,7 +727,8 @@ def claude_command(
     for path in args.add_dir:
         command += ["--add-dir", path]
     if stream:
-        command += ["--input-format", "stream-json"]
+        # Hook events let the supervisor see a tool hook's in-turn input received.
+        command += ["--input-format", "stream-json", "--include-hook-events"]
     command += ["--output-format", "stream-json", "--verbose"]
     if args.model:
         command += ["--model", args.model]
@@ -817,10 +818,37 @@ class ClaudeStreamSession:
         # fixed deadline its lease is sized for.
         self.idle_reset = False
         self.owner_activity = None
+        self.carried, self.answered, self._asked, self._returned = set(), set(), {}, {}
+
+    def observe_in_turn(self, value: dict[str, Any]) -> None:
+        """Read evidence for in-turn input: `carried` ids from a received PreToolUse hook
+        output; `answered` main-thread tools whose non-error result a new reply followed."""
+        kind, message = value.get("type"), value.get("message")
+        if kind == "system" and value.get("subtype") == "hook_response":
+            if (value.get("hook_event"), value.get("outcome"), value.get("exit_code", 0)) == (
+                    "PreToolUse", "success", 0):
+                self.carried |= OwnerInput.carried_ids(value.get("stdout"))
+            return
+        if (kind not in {"assistant", "user"} or value.get("parent_tool_use_id") is not None
+                or not isinstance(message, dict) or not isinstance(message.get("content"), list)):
+            return
+        blocks = [b for b in message["content"] if isinstance(b, dict)]
+        if kind == "assistant":
+            for tool, asked in list(self._returned.items()):
+                if message.get("id") and message.get("id") != asked:
+                    self.answered.add(tool)
+                    del self._returned[tool]
+            self._asked.update({b["id"]: message.get("id") for b in blocks
+                                if b.get("type") == "tool_use" and isinstance(b.get("id"), str)})
+            return
+        self._returned.update({b["tool_use_id"]: self._asked[b["tool_use_id"]] for b in blocks
+                               if b.get("type") == "tool_result" and b.get("is_error") is not True
+                               and isinstance(b.get("tool_use_id"), str) and b["tool_use_id"] in self._asked})
 
     def run_turn(self, prompt: str, timeout: float) -> tuple[dict[str, Any], int]:
         if self.closed or self.process.stdin is None or self.process.stdout is None:
             raise SubmissionNotStarted("claude-stream-closed")
+        self.carried, self.answered, self._asked, self._returned = set(), set(), {}, {}
         turn_uuid = str(uuid.uuid4())
         payload = {
             "type": "user",
@@ -881,6 +909,8 @@ class ClaudeStreamSession:
                 except (UnicodeDecodeError, ValueError):
                     continue
                 parsed_event = True
+                if isinstance(value, dict):
+                    self.observe_in_turn(value)
                 progress = isinstance(value, dict) and claude_payload_progress(value, turn_uuid)
                 if self.owner_activity is not None and self.owner_activity.expired(
                     payload_progress=progress
@@ -1527,8 +1557,12 @@ def main(argv: list[str] | None = None) -> int:
                 turn_kwargs["ordinary_owner_turn"] = True
             if args.runtime_harness == "opencode":
                 turn_kwargs["owner_input"] = control
+            # Only an ordinary stream turn lets the owner's tool hook carry queued input.
+            in_turn = pending_handoff_intent is None and stream_session is not None
             if pending_handoff_intent is None:
                 next_prompt = control.prepare(next_prompt)
+            if in_turn:
+                control.open_in_turn(str(turn_ordinal))
             result, process_rc = run_turn(
                 args,
                 session_id,
@@ -1537,6 +1571,8 @@ def main(argv: list[str] | None = None) -> int:
                 stream_session=stream_session,
                 **turn_kwargs,
             )
+            if in_turn:
+                control.settle_in_turn(stream_session.carried, stream_session.answered)
             usage_row = turn_token_usage(args, turn_ordinal, turn_transport, result)
             if usage_row is not None:
                 emit(usage_row)

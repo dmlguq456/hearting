@@ -895,5 +895,88 @@ class OwnerFinishCorrectionRegressionTest(OwnerInputTest):
                 self.assertEqual(result.get('delivery_timing'), 'next-owner-turn')
 
 
+class InTurnInputTest(unittest.TestCase):
+    """A Claude owner's tool hook carries queued input into the running turn (OPERATIONS §5.10)."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.jobs = Path(self.temp.name) / 'jobs.log'
+        self.attempt = ATTEMPT
+        lease = supervisor_lease_path(self.jobs, self.attempt)
+        self.jobs.write_text(owner_row(lease))
+        held = hold_supervisor_lease(self.jobs, self.attempt, lease)
+        held.__enter__()
+        self.addCleanup(held.__exit__, None, None, None)
+        self.events = []
+        self.control = I.OwnerInput(self.jobs, self.attempt, 'session-1', 'claude-next-turn', self.events.append)
+
+    def requests(self):
+        return {item['id']: item for item in json.loads(I._path(self.jobs, self.attempt).read_text())['requests']}
+
+    def take(self, tool):
+        return I.take_in_turn(self.jobs, self.attempt, tool)
+
+    def test_only_an_open_turn_takes_and_only_what_one_context_holds_whole(self):
+        I.submit(self.jobs, self.attempt, 'small one', 'small')
+        self.assertEqual(self.take('toolu-1'), '')
+        self.control.open_in_turn('1')
+        I.submit(self.jobs, self.attempt, 'x' * 9000, 'big')
+        I.submit(self.jobs, self.attempt, 'after the big one', 'after')
+        self.assertEqual(self.take(''), '')
+        text = self.take('toolu-1')
+        hook = json.dumps({'hookSpecificOutput': {'additionalContext': text}})
+        self.assertEqual(I.OwnerInput.carried_ids(hook), {'small'})
+        items = self.requests()
+        self.assertEqual((items['small']['state'], items['small']['mode'], items['small']['tool_use_id'],
+                          items['small']['turn_id']), ('sending', 'in-turn', 'toolu-1', '1'))
+        # Nothing overtakes a correction too large for one hook context: both wait for the prompt.
+        self.assertEqual([items['big']['state'], items['after']['state']], ['queued', 'queued'])
+        self.assertIn('a queued correction can ride', I.inspect(self.jobs, self.attempt)['delivery_notice'].lower())
+
+    def test_settlement_accepts_only_a_confirmed_read_and_requeues_the_rest(self):
+        self.control.open_in_turn('1')
+        I.submit(self.jobs, self.attempt, 'read me', 'read')
+        self.take('toolu-1')
+        I.submit(self.jobs, self.attempt, 'the hook output was dropped', 'unread')
+        self.take('toolu-2')
+        self.control.settle_in_turn({'read', 'unread'}, {'toolu-1'})
+        items = self.requests()
+        self.assertEqual((items['read']['state'], items['read']['turn_id']), ('accepted', '1'))
+        self.assertEqual((items['unread']['state'], items['unread']['reason']), ('queued', 'in-turn-unread'))
+        I.submit(self.jobs, self.attempt, 'filed after the window closed', 'late')
+        self.assertEqual(self.take('toolu-3'), '')
+        self.control.started('1')
+        self.control.completed('1')
+        prompt = self.control.prepare('next owner turn')
+        self.assertEqual(prompt.count('the hook output was dropped'), 1)
+        self.assertNotIn('read me', prompt)
+        self.assertEqual(self.requests()['read']['state'], 'turn-completed')
+
+    def test_a_failed_settlement_write_is_retried_before_the_next_prompt(self):
+        # #1890 R2 red 6: one failed queue write must not strand a correction known unread.
+        self.control.open_in_turn('1')
+        I.submit(self.jobs, self.attempt, 'retry me', 'retry')
+        self.take('toolu-1')
+        real, failed = I._write, []
+
+        def fail_once(path, value):
+            if not failed:
+                failed.append(path)
+                raise OSError('EIO')
+            return real(path, value)
+
+        with mock.patch.object(I, '_write', fail_once):
+            self.control.settle_in_turn(set(), set())
+        self.assertEqual(self.requests()['retry']['state'], 'sending')
+        self.assertIn('dispatch.supervisor.input-notice-pending', [event['type'] for event in self.events])
+        self.assertIn('retry me', self.control.prepare('next owner turn'))
+        self.control.started('2')
+        self.control.completed('2')
+        states = [event['state'] for event in self.requests()['retry']['events']]
+        self.assertEqual(states[-1], 'turn-completed')
+        self.assertNotIn('delivery-unknown', states)
+
+
 if __name__ == '__main__':
     unittest.main()

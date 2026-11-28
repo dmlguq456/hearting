@@ -25,6 +25,8 @@ import route_authority
 
 PLACEHOLDER_THREAD = "pending-native-session"
 ROOT = Path(__file__).resolve().parents[1]
+# One tool-hook context, held whole under Claude Code's 10,000-character hook limit (PG-47).
+IN_TURN_CHARS = 8000
 
 
 class InputError(ValueError):
@@ -236,6 +238,9 @@ def _public(value, *, live=False, reachable=None, owner_phase=None, metadata=Non
                             "refuses it, it waits for the next owner turn."),
             "phase-unavailable": "Queued corrections may wait for the next owner turn."}.get(
                 timing, "Queued corrections are delayed until the next owner turn.")
+    if value["transport"] == "claude-next-turn":
+        lead = ("A queued correction can ride the Claude owner's next tool call in its running "
+                "turn; one whose read the supervisor cannot confirm waits for the next owner turn.")
     notice = (lead + " An owner parked on its children gets that turn at its next wait checkpoint, "
               "within about 30 seconds, and the children keep running; an owner waiting only on "
               "resources gets it within seconds. A serial sub-session chain starts no further "
@@ -692,6 +697,24 @@ def blocked_owner_answers(jobs, attempt):
     return kept
 
 
+def take_in_turn(jobs, attempt, tool_use):
+    """A Claude tool hook takes the leading queued input one hook context holds whole into
+    the ordinary turn its supervisor opened; that supervisor settles it (`settle_in_turn`)."""
+    with _locked(jobs, attempt) as (path, value):
+        if not tool_use or not value or not value.get("in_turn") or not value.get("accepting"):
+            return ""
+        taken = []
+        for item in (item for item in value["requests"] if item["state"] == "queued"):
+            if len(OwnerInput.text(taken + [item])) > IN_TURN_CHARS:
+                break
+            taken.append(item)
+            _transition(item, "sending", mode="in-turn", thread_id=value["thread_id"],
+                        turn_id=value["in_turn"], tool_use_id=tool_use)
+        if taken:
+            _write(path, value)
+        return OwnerInput.text(taken)
+
+
 def initialize_owner_input(jobs, attempt, transport):
     """Open input admission for a registered owner before its consumer exists.
 
@@ -733,12 +756,15 @@ class OwnerInput:
                 elif (item["state"] == "queued" and value.get("thread_id") != thread_id
                       and not first_binding):
                     _transition(item, "undelivered", reason="owner-thread-changed")
+            value.pop("in_turn", None)
             value.update(thread_id=thread_id, transport=transport, accepting=True,
                          generation=self.generation)
             _write(path, value)
         self.thread_id = thread_id
         self.active_turn = ""
         self.prepared = []
+        self.in_turn = ""
+        self.unsettled = None
         self.inflight = {}
         self.next_poll = 0.0
         self.notify_unresolved()
@@ -788,7 +814,57 @@ class OwnerInput:
                 "\n".join(json.dumps({"id": i["id"], "text": i["text"]}, ensure_ascii=False)
                           for i in items) + "\n</owner-corrections>")
 
+    @staticmethod
+    def carried_ids(stdout):
+        """Request ids in a tool hook's `additionalContext`, one `text` line each."""
+        try:
+            context = json.loads(stdout)["hookSpecificOutput"]["additionalContext"]
+            return {json.loads(line)["id"] for line in str(context).splitlines()
+                    if line.startswith('{"id": ')}
+        except (TypeError, ValueError, KeyError):
+            return set()
+
+    def open_in_turn(self, turn):
+        """Let this ordinary turn's tool hook carry queued input (`take_in_turn`)."""
+        with self.state() as (path, value):
+            value["in_turn"] = turn
+            _write(path, value)
+        self.in_turn = turn
+
+    def settle_in_turn(self, carried, answered):
+        """Accept what the stream shows read (hook output received, then a reply after that
+        tool's result); requeue the rest. A failed write is retried at prepare or close."""
+        self.unsettled = (self.in_turn, set(carried), set(answered))
+        self.in_turn = ""
+        try:
+            self._settle()
+        except Exception as exc:
+            self.emit({"type": "dispatch.supervisor.input-notice-pending", "attempt_id": self.attempt,
+                       "reason": type(exc).__name__})
+
+    def _settle(self):
+        if self.unsettled is None:
+            return
+        turn, carried, answered = self.unsettled
+        moved = {"accepted": [], "queued": []}
+        with self.state() as (path, value):
+            value.pop("in_turn", None)
+            for item in value["requests"]:
+                if (item["state"], item.get("mode"), item.get("turn_id")) == ("sending", "in-turn", turn):
+                    if item["id"] in carried and item.get("tool_use_id") in answered:
+                        _transition(item, "accepted", thread_id=self.thread_id, turn_id=turn)
+                    else:
+                        _transition(item, "queued", reason="in-turn-unread")
+                    moved[item["state"]].append(item["id"])
+            _write(path, value)
+        self.unsettled = None
+        for state, ids in moved.items():
+            if ids:
+                self.emit({"type": "dispatch.supervisor.input", "attempt_id": self.attempt,
+                           "request_ids": ids, "state": state, "mode": "in-turn", "turn_id": turn})
+
     def prepare(self, prompt):
+        self._settle()
         items = self.take("next-turn")
         self.prepared = [i["id"] for i in items]
         return prompt + self.text(items)
@@ -855,6 +931,7 @@ class OwnerInput:
 
     def close(self):
         try:
+            self._settle()
             with self.state() as (path, value):
                 value["accepting"] = False
                 for item in value["requests"]:
