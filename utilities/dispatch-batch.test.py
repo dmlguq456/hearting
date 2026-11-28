@@ -4373,18 +4373,20 @@ class DispatchBatchTest(unittest.TestCase):
         self.assertEqual(receipt["state"], "idempotent-mixed")
         self.assertEqual((receipt["admitted"], receipt["existing"]), (1, 1))
 
-    def restart_receipt(self, *, review_group, claimed="1"):
+    def restart_receipt(self, *, review_group, claimed="1", status="open", note=""):
         """`--action start` again for a group whose first leg ended `PASS` on the current source and whose
-        second leg is still running (`claimed="0"`: reserved but never claimed, the start was cut short),
-        both of one sealed batch: the exit code and the receipt it prints."""
+        second leg is still running (`claimed="0"`: reserved but never claimed, the start was cut short;
+        `status="done"` with a dead-worker `note`: it ended without a verdict), both of one sealed batch:
+        the exit code and the receipt it prints."""
         self._configure_lab_review()           # capped review legs: each restarted leg is admitted a round
         stack, assignments = self.common_patches()
         output = io.StringIO()
         passed, running = self.legs(assignments)
+        self.running_attempt = running["attempt_id"]
         self.write_existing(passed, status="done", note="completed-marker,failure_class=pass", live_identity=False,
                             group_key="parallel_group")
-        self.write_existing(running, group_key="parallel_group", claimed=claimed,
-                            live_identity=claimed == "1")
+        self.write_existing(running, group_key="parallel_group", claimed=claimed, status=status, note=note,
+                            live_identity=claimed == "1" and status == "open")
         self.jobs.write_text(self.jobs.read_text(encoding="utf-8").replace(
             "route_id=rt-fixture,", "route_id=rt-fixture,route_hash=" + self.route["route_hash"] + ","), encoding="utf-8")
         state = self.base / "state"
@@ -4457,6 +4459,72 @@ class DispatchBatchTest(unittest.TestCase):
             receipts[review_group] = (rc, receipt, reserve.call_count)
         self.assertNotEqual(receipts[True][1].get("reason"), "prior-attempt-still-live", receipts[True])
         self.assertEqual(receipts[True], receipts[False])
+
+    def test_a_restart_after_the_other_leg_died_without_a_verdict_starts_only_that_leg(self):
+        # The owner's wake text says to start a review leg that ended without a verdict again. A solo review
+        # group that reuses its passed leg reserves one new attempt for the dead leg only and reports the passed
+        # leg as reused; the dead row of the batch it continues is a known prior binding, not an unproven one.
+        # A group without reuse prints the receipt it printed before (the sealed batch replayed, nothing reserved).
+        receipts = {}
+        for review_group in (False, True):
+            self.tearDown()
+            self.setUp()
+            rc, receipt, popen, reserve = self.restart_receipt(
+                review_group=review_group, status="done", note="dead-worker-fail,failure_class=fail")
+            receipts[review_group] = (rc, receipt, reserve)
+        rc, receipt, reserve = receipts[True]
+        self.assertNotEqual(receipt.get("reason"), "batch-prior-binding-unproven", receipt)
+        self.assertEqual(reserve.call_count, 1, receipt)
+        self.assertEqual([leg["node"] for leg in reserve.call_args.args[2]], ["independent-verify-alternative"])
+        self.assertEqual(self.reused_nodes, ["independent-verify"])
+        reasons = {leg["node"]: leg.get("reason") for leg in receipt.get("legs", [])}
+        self.assertEqual(reasons.get("independent-verify"), "reused-current-completion", receipt)
+        rc, receipt, reserve = receipts[False]
+        self.assertEqual((rc, receipt.get("state"), receipt.get("reason")), (70, "partial-failure", None), receipt)
+        reserve.assert_not_called()
+
+    def test_a_preview_that_cannot_read_the_history_leaves_the_judgment_to_the_real_read(self):
+        # The preview looks for a sealed batch left unfinished before a passed leg is reused. A preview that could not
+        # read the history (any refusal `main` catches, raised to the preview only) has shown nothing: the real read
+        # looks for that batch. Found (the other leg reserved, never claimed): the batch resumes whole with that leg's
+        # own attempt. Not found: the passed leg stays reused and the other leg's admission decides (a death without a
+        # verdict: its next attempt; still running: refused, nothing reserved). Every receipt is the one a readable
+        # preview gives; a real read that fails too is the refusal `main` reports.
+        real = BATCH.DISPATCH_NODE.admit_round
+
+        def preview_raises(error, real_too=False):
+            def admit(*args, **kwargs):
+                if real_too or kwargs.get("record_auto_revisions") is False:
+                    raise error
+                return real(*args, **kwargs)
+            return admit
+
+        def restart(side_effect, **kwargs):
+            self.tearDown()
+            self.setUp()
+            with mock.patch.object(BATCH.DISPATCH_NODE, "admit_round", side_effect=side_effect):
+                rc, receipt, _popen, reserve = self.restart_receipt(**kwargs)
+            reserved = [leg["attempt_id"] for leg in reserve.call_args.args[2]] if reserve.called else []
+            return rc, receipt.get("state"), receipt.get("reason"), reserve.call_count, reserved, self.running_attempt
+
+        dead = {"status": "done", "note": "dead-worker-fail,failure_class=fail"}
+        for error in (BATCH.DISPATCH_NODE.DispatchNodeError("review-source-snapshot-raced"),
+                      OSError("fixture preview read"), BATCH.subprocess.SubprocessError("fixture preview probe")):
+            with self.subTest(type(error).__name__):
+                unclaimed = restart(preview_raises(error), review_group=True, claimed="0")
+                self.assertEqual(unclaimed, restart(real, review_group=True, claimed="0"))
+                self.assertEqual(unclaimed[3:5], (1, [unclaimed[5]]), unclaimed)          # the same leg's own attempt
+                died = restart(preview_raises(error), review_group=True, **dead)
+                self.assertEqual(died, restart(real, review_group=True, **dead))
+                self.assertEqual(died[3], 1, died)
+                self.assertNotEqual(died[4], [died[5]], died)                              # the dead leg's next attempt
+                self.assertEqual(self.reused_nodes, ["independent-verify"])
+                running = restart(preview_raises(error), review_group=True)
+                self.assertEqual(running, restart(real, review_group=True))
+                self.assertEqual(running[:4], (78, "blocked", "prior-attempt-still-live", 0), running)
+                refused = restart(preview_raises(error, real_too=True), review_group=True, **dead)
+                self.assertEqual((refused[0], refused[3]), (65, 0), refused)
+                self.assertEqual(refused[2], getattr(error, "reason", "batch-validation-failed"), refused)
 
     def test_terminal_failed_duplicate_is_not_reported_as_existing(self):
         stack, assignments = self.common_patches()

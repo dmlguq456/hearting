@@ -18,6 +18,22 @@ import sys
 
 LEGACY_NORMAL_HARNESSES = {"claude", "codex"}
 DISPATCHABLE_HARNESSES = {"claude", "codex", "opencode"}
+
+
+def _member(value, choices):
+    """Set membership for a hand-written cell; an unhashable value is not a member.
+
+    `{}` and `[]` parse as a mapping/list where a scalar belongs. Reading them
+    as "not this version/affinity" reaches the same invalid-value path as any
+    other wrong value, instead of raising TypeError from the set lookup. Every
+    hashable value keeps exactly its previous result.
+    """
+    try:
+        return value in choices
+    except TypeError:
+        return False
+
+
 KNOWN_HARNESSES = DISPATCHABLE_HARNESSES
 AFFINITY_VALUES = {"claude", "codex", "opencode", "diverse"}
 MODEL_PROFILES = ("deep", "balanced-deep", "balanced", "light", "mini")
@@ -204,7 +220,7 @@ def merge_capability_baseline(config, capmap, baseline=None):
             if stage_name not in capmap[cap_name]:
                 continue
             value = stagemap[stage_name]
-            if value not in AFFINITY_VALUES:
+            if not _member(value, AFFINITY_VALUES):
                 continue
             if value != "diverse" and value not in enabled:
                 continue
@@ -663,7 +679,7 @@ def policy_warnings(config):
     version = config.get("schema_version")
     enabled = _enabled_harnesses(config)
     profiles = config.get("profiles")
-    if version in {3, 4} and isinstance(profiles, dict):
+    if _member(version, {3, 4}) and isinstance(profiles, dict):
         for name in MODEL_PROFILES:
             policy = profiles.get(name)
             if not isinstance(policy, dict):
@@ -758,7 +774,7 @@ def normalize_policy(config):
     version = result.get("schema_version")
     enabled = _enabled_harnesses(result)
     profiles = result.get("profiles")
-    if version in {3, 4} and isinstance(profiles, dict):
+    if _member(version, {3, 4}) and isinstance(profiles, dict):
         for name in MODEL_PROFILES:
             policy = profiles.get(name)
             if not isinstance(policy, dict):
@@ -863,7 +879,7 @@ def query_stage_affinity(config, capability, stage):
 
 
 def query_owners(config):
-    if config.get("schema_version") in {3, 4}:
+    if _member(config.get("schema_version"), {3, 4}):
         return list((config.get("harnesses") or {}).get("enabled", []))
     return config.get("depth1_owner", [])
 
@@ -880,7 +896,7 @@ def current_enabled_harnesses(config=None):
             config = load_and_validate(default_config_path(), default_topology_path())
         except (OSError, ValueError) as exc:
             raise DefaultsConfigError(f"defaults-invalid:{exc}") from exc
-    if config.get("schema_version") in {3, 4}:
+    if _member(config.get("schema_version"), {3, 4}):
         return tuple(query_owners(config))
     return tuple(sorted(DISPATCHABLE_HARNESSES))
 
@@ -912,7 +928,7 @@ def query_profile_policy(config, profile):
     profile = EXCEPTION_PROFILE_POLICY.get(profile, profile)
     if profile not in MODEL_PROFILES:
         raise DefaultsConfigError(f"unknown model profile: {profile!r}")
-    if config.get("schema_version") not in {3, 4}:
+    if not _member(config.get("schema_version"), {3, 4}):
         return {
             "primary": list(query_owners(config)),
             "relief": [],
@@ -1004,7 +1020,7 @@ def query_field_weights(config, field, table):
 def query_allocation(config):
     neutral = {"depth_affinity": {}, "depth_affinity_weight": 0.5, "usage_headroom_exponent": 1}
     allocation = config.get("allocation")
-    if config.get("schema_version") in {2, 3, 4} and isinstance(allocation, dict):
+    if _member(config.get("schema_version"), {2, 3, 4}) and isinstance(allocation, dict):
         result = {
             "strategy": allocation["strategy"],
             "window": allocation["window"],
@@ -1074,7 +1090,7 @@ def query_no_progress_minutes(config):
 
 
 def query_opencode_policy(config):
-    if config.get("schema_version") in {3, 4}:
+    if _member(config.get("schema_version"), {3, 4}):
         policies = [query_profile_policy(config, profile) for profile in MODEL_PROFILES]
         if all("opencode" not in policy["primary"] for policy in policies):
             return "quality-banded"
