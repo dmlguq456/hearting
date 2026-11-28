@@ -3011,6 +3011,10 @@ A repeated watch and rearm restore the existing target relation without creating
 another watch. Taking the role also fills in this session's pending watches.
 Their next-action directive uses the same supported wake carrier as the first
 arm. An unresolved target remains visible as unknown in the steward check.
+A target whose own window `start`, `watch` or `wait` recorded (pane and the server it
+was seen on) is no longer listed once a complete census of that server, read on that
+server alone, confirms the pane is gone and the session is not live elsewhere; an
+entry with no recorded server, a tmux pane or an unanswered census keeps it listed.
 Workflow status joins the route's registered owner and its exact liveness,
 including the first running stage before any stage completion journal entry.
 This is a read-only projection and does not turn process liveness into completion.
@@ -3153,8 +3157,8 @@ detached key commands may lack the caller's terminal context. Hearting does
 not register keys or change user configuration.
 
 Supervision keeps one tab per supervisor: a peer start from the supervisor's
-pane opens the supervised session inside that tab, and `pane tidy` puts the
-`⚑` pane at the top left. Fleet shows the arrangement without changing it. The
+pane opens the supervised session inside that tab and then arranges that tab once
+as `pane tidy` does, which puts the `⚑` pane at the top left. Fleet shows the arrangement without changing it. The
 WHERE cell of a session's main row names its pane: Herdr `<workspace>:<tab>·<pane>`
 from the pane observation Fleet already reads, or tmux
 `<session>:<window>.<pane>` from one `list-panes` on the server `$TMUX` names
@@ -3175,7 +3179,11 @@ contract above, and `start` holds the workspace claim through launch so
 concurrent starts cannot claim the same shell or subdivide a stale layout.
 Names longer than Herdr's 32-character limit are explained before any placement
 or launch action, so a refused name leaves no extra pane.
-The start completes placement without a post-start pane move. The new pane's
+A start that opened its pane by splitting a pane of the reference tab then
+arranges that tab once with the same `pane tidy` arrangement inside its own
+workspace claim (tidy re-enters it); an already matching grid moves nothing.
+Its outcome ends the same receipt line as `layout=tidied|unchanged|unconfirmed:<note>`,
+and a tidy that cannot run leaves the start result as it is. The new pane's
 split-cwd and launcher preparation finish under one fixed
 five-minute monotonic deadline, including a stable foreground-shell snapshot after bootstrap,
 before its single start request; caller-provided panes keep their existing path.
@@ -3192,7 +3200,12 @@ its own newly split pane only when the same shell is agent-free and its visible
 screen is unchanged from the stable snapshot recorded before native start.
 Retirement protects busy sessions, open forms, drafts, unknown process identity
 and unconfirmed shell return; it sends no repeated exit, forced kill or forced
-close. The same runner completes delayed Claude background-work confirmation
+close. Claude's own faint composer suggestion (`Try "…"`) is an empty input, not a
+draft; with a bright first letter, only when the screen shows the cursor block (reverse
+video) on that letter. Without that evidence (an older shell host) such a line stays a draft. A pending result ends its line with
+one `detail=` saying what releases it (send or clear the draft, answer the dialog,
+wait for the turn, close a window whose agent could not be confirmed); it names no
+new command or step. The same runner completes delayed Claude background-work confirmation
 on the booked foreground lifetime using exit-and-stop-tasks, without backgrounding
 the session, with live-dialog and foreground checks before input.
 An accepted retirement keeps the agent PID/start and shell PID/start observed
@@ -3793,7 +3806,19 @@ Clear and retire retain their checked foreground/form/draft and successor safety
 For wrapped Claude and Codex panes, target foreground discovery reuses the same
 attachment join as caller discovery. Its lifetime is the inner native PID/birth;
 the outer owner remains the physical carrier. Prompt, handoff and each retire
-effect recheck that same attachment and native selection. A returned shell and
+effect recheck that same attachment and native selection. A seat whose native has
+not taken its first prompt has no selected session (`-`) on every adapter: its
+attachment record and births are its identity, its `unknown` turn is no turn (the
+first prompt's start hook selects a session and so changes the booked attachment),
+and the empty composer and form checks still decide. The readiness projection, the
+command and the retained runner read that same booked seat; the screen and the wait
+reason are read on the booked pane and attachment, so a name and a pane id wait alike.
+Right before the first key the host is asked again for the booked attachment: a turn
+or a selection that arrived meanwhile, a key it took since the screen was read (another
+`epoch`), an open shell editor, or a box it does not read empty (for an unselected
+seat, whose box it does not read, that same screen) sends nothing and the request waits again,
+while a stop after a sent key keeps the exit requested with the keys sent. A native
+that proves a session the attachment does not name stays unverified. A returned shell and
 the original native lifetime's exit still govern cleanup, independently of
 wrapper process names or foreground process counts.
 An owned retire request without a recorded native lifetime can settle as

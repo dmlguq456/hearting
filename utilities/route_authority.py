@@ -3439,11 +3439,30 @@ def anchored_capacity_failure(text: str) -> bool:
     return False
 
 
+def _assistant_json_line(line: str) -> bool:
+    """An assistant message can quote a limit; it is not the CLI's terminal line."""
+    if not line.startswith("{"):
+        return False
+    try:
+        obj = json.loads(line)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(obj, dict):
+        return False
+    if obj.get("type") == "assistant" or obj.get("role") == "assistant":
+        return True
+    message = obj.get("message")
+    return isinstance(message, dict) and message.get("role") == "assistant"
+
+
 def scan_anchored_death(text: str) -> tuple[str, str] | None:
     """Inspect only terse terminal CLI lines, never completion-report prose: the last
     three non-empty lines, each at most 200 characters once colors are removed."""
     for line in [line.strip() for line in text.splitlines() if line.strip()][-3:]:
-        if len(ANSI_RE.sub("", line)) > 200:
+        clean = ANSI_RE.sub("", line)
+        if len(clean) > 200:
+            continue
+        if _assistant_json_line(clean):
             continue
         death = scan_death(line)
         if death:
