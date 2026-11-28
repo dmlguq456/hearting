@@ -9539,6 +9539,8 @@ def build_parser():
     p_request.add_argument("--rev", default=None, help="label of this revision; a new label supersedes")
     p_request.add_argument("--cancel", action="store_true")
     p_request.add_argument("--reason", default=None)
+    p_request.add_argument("--route", action="append", default=None, metavar="ROUTE_ID",
+                           help="also hand this route you hold to the receiver (repeatable; same harness)")
     p_request.set_defaults(func=cmd_request)
 
     p_report = sub.add_parser("report", help="report on a request you received (final unless --partial)")
