@@ -48,20 +48,8 @@ _PATHS_SPEC.loader.exec_module(INSTALL_PATHS)
 
 def _herdr_env_for_server(server, environ=None):
     """Carry an inherited socket only when its HERDR_SESSION owner still matches."""
-    selected = server or "default"
-    env = dict(os.environ if environ is None else environ)
-    socket_owner = env.get("HERDR_SESSION") or "default"
-    if socket_owner != selected:
-        env.pop("HERDR_SOCKET_PATH", None)
-    if selected == "default":
-        env.pop("AGENT_HERDR_SESSION", None)
-        if env.get("HERDR_SESSION") not in {None, "", "default"}:
-            env.pop("HERDR_SESSION", None)
-    else:
-        env["AGENT_HERDR_SESSION"] = selected
-        if env.get("HERDR_SESSION") not in {None, "", selected}:
-            env.pop("HERDR_SESSION", None)
-    return env
+    import herdr_observation
+    return herdr_observation.endpoint_env(server, environ)
 
 
 _PERMISSION_FLAGS = {
@@ -862,8 +850,13 @@ _ANSI_TOKEN = re.compile(r"\x1b\[([0-9;?]*)([A-Za-z])|\x1b\][^\x07\x1b]*(?:\x07|
 
 def _screen_lines(raw):
     """The visible screen as lines of `(char, faint)` cells: SGR faint (`2`) tracked,
-    every other escape sequence dropped. A dim line is a placeholder or a suggestion."""
-    lines, cells, faint = [], [], False
+    every other escape sequence dropped. A dim line is a placeholder or a suggestion.
+
+    A cell drawn in reverse video (SGR `7`, the block a TUI draws as its cursor) is
+    `(char, faint, True)`: the one piece of cursor evidence an ANSI capture carries.
+    Colour operands (`38;2;R;G;B`, `38;5;N`, likewise 48/58) are not SGR codes: their
+    `2` or `5` is no faint, as in session_tidy_native.Snapshot."""
+    lines, cells, faint, reverse = [], [], False, False
     for match in _ANSI_TOKEN.finditer(raw or ""):
         params, final, char = match.group(1), match.group(2), match.group(3)
         if char is not None:
@@ -871,18 +864,28 @@ def _screen_lines(raw):
                 lines.append(cells)
                 cells = []
             elif char != "\r":
-                cells.append((" " if char == "\u00a0" else char, faint))
+                cell = (" " if char == "\u00a0" else char, faint)
+                cells.append(cell + (True,) if reverse else cell)
         elif final == "m":
-            for code in (params.split(";") if params else ["0"]):
-                if code in ("0", ""):
-                    faint = False
+            codes = iter(params.split(";") if params else ["0"])
+            for code in codes:
+                if code in ("38", "48", "58"):
+                    mode = next(codes, None)
+                    for _ in range(3 if mode == "2" else 1 if mode == "5" else 0):
+                        next(codes, None)
+                elif code in ("0", ""):
+                    faint = reverse = False
                 elif code == "2":
                     faint = True
                 elif code == "22":
                     faint = False
+                elif code == "7":
+                    reverse = True
+                elif code == "27":
+                    reverse = False
     lines.append(cells)
     return lines
 
 
 def _plain(cells):
-    return "".join(ch for ch, _ in cells)
+    return "".join(cell[0] for cell in cells)
