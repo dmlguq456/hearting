@@ -120,12 +120,11 @@ for(const width of [37,40,80]){
  const model={selected:[{text:'Native selected'},{text:' high'}],session_title:'Preserve the approved task',answerable:true,wait:'◑답 대기 1',route_count:1,
   routes:[{id:'r',title:'Exact route',state:'working',kind:'working',flow:'implement › verify ●',paint:{glyph:{text:'⠏'},harness:{text:'claude'}}}]};
  const v=view.render({width,height:width===80?12:30,side:width<80,model,sid:'exact',configuration:{},
-  // 11-15: the question's summary (its first row, its choices on one row); the whole of it reads in the popup.
-  brief:()=>({count:1,label:'QUESTIONS',rows:[[{text:'◑ '},{text:'Where should this result go?'}],[{text:'  '},{text:'1 Current project'}]],
-   one:[[{text:'◑ '},{text:'Where should this result go?'}]],line:[{text:'Where should this result go?'}],choices:1})});
+  // 11-15: the question's summary (11-28: each wait one row, its first line); the whole of it reads in the popup.
+  brief:()=>({count:1,label:'QUESTIONS',waits:[{word:'answer below',line:[{text:'Where should this result go?'}],answerable:false}]})});
  const text=v.rows.map(r=>r.map(s=>s.text).join(''));
  assert(text.some(s=>s.includes('Native selected high')));assert(text.some(s=>s.includes('Exact route')));
- assert(text.some(s=>s.includes('Where should')));assert(text.some(s=>s.includes('1 QUESTIONS')));
+ assert(text.some(s=>s.includes('◑ answer below · Where')));assert(text.some(s=>s.includes('1 QUESTIONS')));
  // Nothing opens in place any more (11-15), and no row shows `→`.
  assert(!text.some(s=>s.includes('→')));
  assert(text[0].startsWith('┌'));assert(text.at(-1).endsWith('┘'));
@@ -211,7 +210,7 @@ const model={head:[{text:'[e9] '},{text:'project'},{text:' (topic 🚧 3)'}],sel
  jobs:[{text:'>_'},{text:' running: '},{text:'pytest'}],quota:[{text:'5h 23%'},{text:' │ '},{text:'7d 60%'}],route_count:6,
  routes:Array.from({length:6},(_,i)=>route('r'+i,'ROUTE_'+i)),messages:[{way:'←',who:'[e7]',text:'MESSAGE_ONE',at:1},{way:'→',who:'[73]',text:'MESSAGE_TWO',at:2}]};
 // 11-15: the question's summary under its head row; the whole of it reads in the popup.
-const question={count:1,label:'QUESTIONS',rows:[[{text:'◑ '},{text:'Q head'}],[{text:'  '},{text:'1 yes · 2 no'}]],one:[[{text:'◑ '},{text:'Q head'}]],line:[{text:'Q head'}],choices:2};
+const question={count:1,label:'QUESTIONS',waits:[{word:'answer below',line:[{text:'Q head'}],answerable:false}]};
 const paint=(width,height,side,q)=>view.render({width,height,side,model,sid:'exact',configuration:{},
  brief:()=>q}).rows.map(r=>r.map(s=>s.text).join(''));
 for(const [width,height,side] of [[40,30,true],[80,20,false]]){
@@ -228,7 +227,7 @@ for(const [width,height,side] of [[40,30,true],[80,20,false]]){
 for(const [width,side,low] of [[40,true,14],[80,false,10]])for(let height=low;height<=24;height+=2){
  const rows=paint(width,height,side,question),text=rows.join('\n');
  assert(rows.length<=height,width+'x'+height);
- for(const want of ['1 QUESTIONS','◑ Q head'])assert(text.includes(want),'question row lost at '+width+'x'+height+'\n'+text);
+ for(const want of ['1 QUESTIONS','◑ answer below · Q head'])assert(text.includes(want),'question row lost at '+width+'x'+height+'\n'+text);
  for(const want of ['project','fixture high','42%','SESSION_TITLE'])assert(text.includes(want),width+'x'+height+' lost '+want+'\n'+text);
  // Spec rules 23, 31 (v4.36.4's order, the route box again): the messages fold to one row (the newest
  // stays) before the route box scrolls; 11-20: the messages section goes before the route box does.
@@ -408,7 +407,7 @@ const model={head:[p('[e9] '),p('project'),{text:' (topic 🚧 3)',dim:true}],se
  quota:[p('5h 23% │ 7d 60%')],route_count:3,routes:[0,1,2].map(route),styles:{dim:{dim:true},lvl_y:{foreground:186},g_spin:{foreground:230},g_work_off:{foreground:150,dim:true},g_blocked:{foreground:217},g_dead:{foreground:217,bold:true}},
  session_title:'SESSION_TITLE',now:'NOW_LINE',messages:[1,2,3].map(at=>({way:'←',who:'[e7]',text:'MESSAGE_'+at,at}))};
 // 11-15: the question's summary under its label row; the whole of it reads in the popup.
-const question={count:1,label:'QUESTIONS',rows:[[p('◑ '),p('Q_HEAD')],[p('  '),p('1 A · 2 B')]],one:[[p('◑ '),p('Q_HEAD')]],line:[p('Q_HEAD')],choices:2};
+const question={count:1,label:'QUESTIONS',waits:[{word:'answer below',line:[p('Q_HEAD')],answerable:false}]};
 const paint=(o={})=>view.render({width:40,height:o.height||30,side:true,sid:'s',harness:'claude',configuration:o.cfg||{},model:{...model,...o.model},state:o.state,frame:o.frame,since:o.since,
  settings:o.settings,brief:()=>o.q||null});
 const text=v=>v.rows.map(r=>r.map(x=>x.text).join(''));
@@ -497,7 +496,7 @@ for(const s of rows)assert.equal(cells(s),40,s);
 // in the rows inside; messages are dim, the route box plain. (No question answerable here: the box's line is dim.)
 const asked=paint({state:'working',q:question,model:{answerable:true},height:39});rows=text(asked);
 const qTop=rows.findIndex(s=>/^│ ╭─ 1 QUESTIONS ─+ ›─╮ │$/.test(s)),ra=rows.findIndex(s=>s.includes('╭─ 3 ROUTE ')),mq=rows.findIndex(s=>s.startsWith('│ MESSAGES'));
-assert(qTop>0&&rows[qTop+1].startsWith('│ │ ◑ Q_HEAD')&&rows[qTop+2].startsWith('│ │   1 A · 2 B')&&/^│ ╰─+╯ │$/.test(rows[qTop+3])&&ra===qTop+4&&mq>ra&&rows.at(-2).includes('7d 60%')
+assert(qTop>0&&rows[qTop+1].startsWith('│ │ ◑ answer below · Q_HEAD')&&/^│ ╰─+╯ │$/.test(rows[qTop+2])&&ra===qTop+3&&mq>ra&&rows.at(-2).includes('7d 60%')
  &&rows.some(s=>/^│ │ \S ROUTE_0 {24}│ │$/.test(s)),rows.join('\n'));
 const border=(i,ch)=>asked.rows[i].find(x=>x.text.startsWith(ch));
 assert.equal(asked.rows[qTop].find(x=>x.text==='1').foreground,174);assert.equal(asked.rows[qTop].find(x=>x.text==='QUESTIONS').dim,true);
@@ -505,7 +504,7 @@ assert.equal(asked.rows[qTop+1].find(x=>x.text==='◑').foreground,174);
 assert.equal(asked.rows[mq].find(x=>x.text.includes('MESSAGES')).dim,true);assert.notEqual(border(ra,'╭').dim,true);
 
 // A press on any of its rows opens the question popup.
-assert.deepEqual(asked.hits.filter(h=>h.action==='question').map(h=>h.row),[qTop,qTop+1,qTop+2,qTop+3]);
+assert.deepEqual(asked.hits.filter(h=>h.action==='question').map(h=>h.row),[qTop,qTop+1,qTop+2]);
 assert(asked.rows[qTop].filter(x=>/^[╭─╮ ]+$/.test(x.text)&&x.text.trim()).every(x=>x.dim===true&&x.role==='messages'),'a question not answered here leaves its box line dim');
 for(const s of rows)assert.equal(cells(s),40,s);
 // Short of rows (spec rule 23): two rows fold to one and messages fold to one row
@@ -1398,7 +1397,7 @@ const route={id:'a',title:'ROUTE_A',kind:'working',tool:'apply_patch',agents:1,k
  paint:{glyph:p('⠏')}};
 const rows=v=>v.rows.map(r=>r.map(s=>s.text).join(''));
 // A working route the height (a question) dropped from the panel: nothing turns.
-const q={count:1,label:'QUESTIONS',rows:[[p('◑ '),p('Q_HEAD')],[p('  '),p('1 YES · 2 NO')]],one:[[p('◑ '),p('Q_HEAD')]],line:[p('Q_HEAD')],choices:2};
+const q={count:1,label:'QUESTIONS',waits:[{word:'answer below',line:[p('Q_HEAD')],answerable:false}]};
 // (11-15: the waiting question's `◑` blinks on the breath's beat: its cell is the only moving one.)
 for(const [width,height,side] of [[40,8,true],[80,6,false]]){
  const r=view.render({width,height,side,state:'idle',model:{routes:[route],route_count:1},brief:()=>q});
@@ -1482,15 +1481,14 @@ assert(oneRow>0,'the probe reaches the one-row form');
         script = r'''
 const assert=require('node:assert/strict'),view=require(process.argv[1]),models=JSON.parse(process.argv[2]);
 // 11-15: the question's summary under its label row (the editor, focused or not, reads in the popup).
-const question={count:1,label:'QUESTIONS',rows:[[{text:'◑ '},{text:'REVIEW1463: 결과를 어디에 둘까요?'}],[{text:'  '},{text:'1 현재 프로젝트 (추천) · 2 다른 폴더'}]],
- one:[[{text:'◑ '},{text:'REVIEW1463: 결과를 어디에 둘까요?'}]],line:[{text:'REVIEW1463: 결과를 어디에 둘까요?'}],choices:2};
+const question={count:1,label:'QUESTIONS',waits:[{word:'answer below',line:[{text:'REVIEW1463: 결과를 어디에 둘까요?'}],answerable:false}]};
 const routes=[{id:'r',title:'REVIEW1463_ROUTE',state:'blocked',kind:'blocked',paint:{glyph:{text:'◑'}}}];
 const paint=(width,height,side,focused,model)=>view.render({width,height,side,fill:false,focused,sid:'s',configuration:{},
  model:{...model,answerable:true,routes,route_count:1},brief:()=>question})
  .rows.map(r=>r.map(p=>p.text).join(''));
 for(const [width,height,side,focused] of [[80,14,false,false],[80,14,false,true],[35,21,true,false],[35,26,true,false],[80,10,false,false]]){
  const rows=paint(width,height,side,focused,models.short);
- for(const want of ['REVIEW1463_TITLE','REVIEW1463_JOB','1 QUESTIONS','◑ REVIEW1463'])
+ for(const want of ['REVIEW1463_TITLE','REVIEW1463_JOB','1 QUESTIONS','◑ answer below · REVIEW'])
   assert(rows.some(s=>s.includes(want)),`${width}x${height} focused=${focused} lost ${want}\n`+rows.join('\n'));
  const branch=rows.findIndex(s=>s.includes('(values-'));
  if(width===35&&height===26)assert(branch>=0,'a roomy side panel keeps the Git words\n'+rows.join('\n'));
@@ -1852,7 +1850,7 @@ const more=[...messages,message('←','[52]','08:10','두 번째 검토 — 줄�
  message('→','[73]','08:20','PR 출판 요청 두 번째',7,'전달됨'),message('←','[e7]','08:30','설치 끝',8)];
 const noted=[oneShot,staged,waiting].map(r=>r===waiting?r:{...r,paint:{...r.paint,now:'now step'}});   // (the third has no NOW, so no NOW row)
 const six=[...Array(6)].map((_,i)=>{const r=noted[i%3];return {...r,id:'s'+i,title:r.title+' '+(i+1)};});
-const QUESTION={count:1,label:'QUESTIONS',rows:[[P('◑ '),P('Q_HEAD')],[P('  '),P('1 A · 2 B')]],one:[[P('◑ '),P('Q_HEAD')]],line:[P('Q_HEAD')],choices:2};
+const QUESTION={count:1,label:'QUESTIONS',waits:[{word:'answer below',line:[P('Q_HEAD')],answerable:false}]};
 const paint=(routes,height,o={})=>view.render({width:40,height,side:true,fill:true,model:{...head,messages:o.messages||more,routes,route_count:routes.length,answerable:!!o.q,...(o.model||{})},
  state:'idle',configuration:{},brief:()=>o.q||null}).rows.map(r=>r.map(p=>p.text).join(''));
 const rule=rows=>rows.findIndex(s=>s.startsWith('│ MESSAGES'));
@@ -1865,7 +1863,7 @@ assert(q0>0&&blank(full[q0-1])&&/^│ 1 QUESTIONS +› │$/.test(full[q0])&&ful
 assert([1,2,3].every(k=>/^│  [←→] \[/.test(full[m+k]))&&m+4===full.length-3&&/^│ ─+ │$/.test(full.at(-3))&&full.slice(rb+1,m).every(blank)&&full.at(-2).includes('7d 66%'),full.join('\n'));
 // With a question the summary stands in the QUESTIONS box, between its top line and the route box (11-15: right above it).
 const asked=paint([oneShot,staged],44,{q:QUESTION,messages}),q=asked.findIndex(s=>s.includes('1 QUESTIONS '));
-assert(q>2&&blank(asked[q-1])&&asked[q+1].startsWith('│ │ ◑ Q_HEAD')&&asked[q+2].startsWith('│ │   1 A · 2 B')&&/^│ ╰─+╯ │$/.test(asked[q+3])&&asked[q+4].startsWith('│ ╭─ 2 ROUTE ─')&&rule(asked)>bottom(asked),asked.join('\n'));
+assert(q>2&&blank(asked[q-1])&&asked[q+1].startsWith('│ │ ◑ answer below · Q_HEAD')&&/^│ ╰─+╯ │$/.test(asked[q+2])&&asked[q+3].startsWith('│ ╭─ 2 ROUTE ─')&&rule(asked)>bottom(asked),asked.join('\n'));
 // No routes: no box stands (a section with no row to show inside is its head row), and the parting row still stands above the first section.
 const none=paint([],30,{model:{routes_known:true}});
 assert(none.filter(s=>s.includes('╭')).length===0&&/1 QUESTIONS/.test(none[first(none)])&&!none.join('').includes('ROUTE')&&blank(none[first(none)-1])&&first(none)>0&&rule(none)>first(none),none.join('\n'));
@@ -2183,8 +2181,8 @@ const model={tag:'[e9]',repo:[p('hearting/')],git_side:[p('popup-2 ✓')],select
  messages:[{way:'←',who:'[e7]',text:'CI 초록, 병합해도 됩니다'},{way:'→',who:'[73]',text:'설치 확인 부탁'},{way:'←',who:'[12]',text:'답 기다립니다'},{way:'←',who:'[52]',text:'정리 끝'}],
  memory_items:[{tier:'durable',kind:'decision',age:'10m',text:'패널 접힘은 아래 두 줄'},{tier:'durable',kind:'fact',age:'1h',text:'팝업은 Fleet 표'}],
  quota:[p('5h 18%'),p(' │ '),p('7d 64%')]};
-const brief=()=>({count:2,label:'QUESTIONS',rows:[[p('◑ 패널을 접었을 때의 모양을 어느 안으로 구현할까요?')],[p('  1 아래 두 줄 (추천) · 2 넓힌 옆 띠 · +2')]],
- one:[[p('◑ 패널을 접었을 때의 모양을 어느 안으로')]],line:[p('패널을 접었을 때')],choices:4});
+// (11-28: each wait one row; the second goes first when rows run short.)
+const brief=()=>({count:2,label:'QUESTIONS',waits:['패널을 접었을 때의 모양을 어느 안으로 구현할까요?','색인을 가나다 순으로 둘까요?'].map(t=>({word:'answer below',line:[p(t)],answerable:false}))});
 const paint=height=>pv.render({width:44,height,side:true,model,native:{},state:'working',sid:'s',harness:'claude',frame:0,brief,sent:()=>[]});
 // (11-16: with room QUESTIONS is a thin rounded box, its name in the top line; short of rows the box's two lines go and the section reads as a head row and its rows.)
 const HEADS=[['QUESTIONS',/^│ ╭─ 3 QUESTIONS ─+ ›─╮ │$|^│ 3 QUESTIONS +› │$/],['ROUTE',/^│ ╭─ 4 ROUTE ─+(?: [↑↓] \d+ more)? ›─╮ │$|^│ ╭─ 4 ROUTE ─+ ›─╮ │$/],
@@ -2202,7 +2200,7 @@ for(const [height,rowsOf] of [[46,{QUESTIONS:2,MESSAGES:3,MEM:2}],[20,{QUESTIONS
  // QUESTIONS: the summary's rows (the guide line stands under them while there is room), the others: their rows.
  // (With room, in the box: its content rows `│ │ … │ │`, its bottom line the section's last row.)
  const boxed=height===46,summary=sec.QUESTIONS.rows.filter(s=>!/입력창에 답/.test(s)&&!s.startsWith('│ ╰'));
- assert.equal(summary.length,rowsOf.QUESTIONS,label);assert(summary[0].startsWith(boxed?'│ │ ◑ 패널을':'│ ◑ 패널을'),label);
+ assert.equal(summary.length,rowsOf.QUESTIONS,label);assert(summary[0].startsWith(boxed?'│ │ ◑ answer below · 패널을':'│ ◑ answer below · 패널을'),label);
  assert.equal(rows[sec.QUESTIONS.head].startsWith('│ ╭'),boxed,label);assert.equal(sec.QUESTIONS.rows.at(-1).startsWith('│ ╰'),boxed,label);
  assert.equal(sec.QUESTIONS.rows.some(s=>/입력창에 답/.test(s)),height===46,label);
  for(const name of ['MESSAGES','MEM'])assert.equal(sec[name].rows.length,rowsOf[name],name+' '+label);
@@ -2260,8 +2258,7 @@ const model={tag:'[e9]',repo:[p('hearting/')],git_side:[p('popup-2 ✓')],select
  session_title:'질문·route 팝업',now:'그리는 중',wait:'◑답 대기 3',wait_guide:'1 QUESTIONS · 입력창에 답',route_label:'route 1',route_count:1,route_total:1,
  routes:[{id:'a',title:'질문 팝업 구현',kind:'working',state:'working',shape:'one-shot-owner',stages:[],elapsed:'23m',paint:{glyph:p('⠏')}}],
  memory_items:[{tier:'durable',kind:'decision',age:'10m',text:'패널 접힘은 아래 두 줄'}],quota:[p('5h 18%'),p(' │ '),p('7d 64%')]};
-const brief=()=>({count:3,label:'QUESTIONS',rows:[[p('◑ 패널을 접었을 때의 모양을 어느 안으로 구현할까요?')],[p('  1 아래 두 줄 (추천) · 2 넓힌 옆 띠 · +2')]],
- one:[[p('◑ 패널을 접었을 때의 모양을 어느 안으로')]],line:[p('패널을 접었을 때')],choices:4});
+const brief=()=>({count:3,label:'QUESTIONS',waits:[{word:'answer below',line:[p('패널을 접었을 때의 모양을 어느 안으로 구현할까요?')],answerable:false}]});
 const paint=(height,width)=>pv.render({width,height,side:true,model,native:{},state:'working',sid:'s',harness:'claude',frame:0,brief,sent:()=>[]});
 for(let h=5;h<=60;h++)for(let w=12;w<=60;w++){
  const v=paint(h,w),rows=v.rows.map(r=>r.map(x=>x.text).join('')),label=h+'x'+w+'\n'+rows.join('\n');
@@ -2283,18 +2280,19 @@ assert(/^│  REPO +hearting\/ \(popup-2 ✓\)/.test(rows[1])&&/^│ 3 QUESTIONS
 
     def test_the_question_to_answer_here_reads_in_red_letters(self):
         # 11-15 (the person: "빨간 틴트 안에 다시 검은 틴트는 못생겼는데" / "그냥 질문은 글자 자체를 붉은 색으로 하는
-        # 정도로하자"; it replaces panel polish 1's button): in the open panel's QUESTIONS section the question a
-        # press answers here, now, stands on no ground of its own (no fill, no chips): its words and its
-        # choices' row (`1 파일 · 2 표준 출력 (추천) · 3 둘 다`, the ` · ` dim) are in the answer wait's red
-        # (`accent`, 174 / 131), never dimmed, no weight added; `↵ 답하기 · Ctrl+]` stands in rose at the right
-        # under them; a press on any of its rows opens the question popup. A wait answered elsewhere, the
-        # answers on their way and the guide line are never red. Short of rows the action row goes first,
-        # then the choices, the first row to the last (heights 5-60 × widths 12-60). Eight colors keep the
-        # red, mono and NO_COLOR the weight; no `▌` bar anywhere. A panel shade keeps its own ground.
-        # 11-16: with room the section is a thin rounded box (its rows at the box's inner width): its line is the
-        # rose (`accent-line`) and blinks where a question is answerable here, the letters inside stand still; a
-        # question answered elsewhere leaves the line dim. Short of rows the box's two lines go and the letters
-        # blink again as before.
+        # 정도로하자"): in the open panel's QUESTIONS section what a press answers here, now, stands on no ground of its
+        # own (no fill, no chips). 11-28 (the person: "선지는 미리 보기를 날리고 … 앞에 답 대기를 붉은 색으로 쓴다던지해서
+        # 답 보냄과 표현 일관성을 맞추되 구분이 되게끔"): each wait is one row in the sent line's form, `◑ 답 대기 · <its first
+        # line>`: the word in the answer wait's red (`accent`, 174 / 131), the ` · ` dim, the words in the body color (no
+        # weight, never red); no choices row. Three rows at most, the last ending in the hidden count (`+2`, dim);
+        # `↵ 답하기 · Ctrl+]` stands in rose at the right under them. A press on a wait's row opens on it, on a sent line on
+        # that answer's question, anywhere else in the box as before. A wait answered elsewhere, the answers on their way
+        # and the guide line are never red (but the `◑` of one not answered here). Short of rows the extra rows go first
+        # (the third, the second), then the action row; the first row to the last; short of cells the words before the
+        # word (heights 5-60 × widths 12-60). Eight colors keep the red, mono and NO_COLOR the weight; a panel shade
+        # keeps its own ground. 11-16: with room the section is a thin rounded box: its line is the rose
+        # (`accent-line`) and blinks where a question is answerable here, the letters inside stand still; short of
+        # rows the box's two lines go and the word blinks again as before.
         script = r"""
 const assert=require('node:assert/strict'),pv=require(process.argv[1]);
 const p=(text,extra={})=>({text,...extra});
@@ -2305,84 +2303,97 @@ const model={tag:'[e9]',repo:[p('hearting/')],selected:[p('Opus 5.5')],context_s
  routes:[{id:'a',title:'휠 입력 시험',kind:'dead',state:'dead',shape:'one-shot-owner',stages:[],elapsed:'3m',paint:{glyph:p('✕')}}],
  messages:[{way:'←',who:'[73]',text:'설치 확인 끝났습니다'}],memory_items:[{tier:'durable',kind:'decision',age:'10m',text:'패널 접힘은 아래 두 줄'}],
  quota:[p('5h 18%'),p(' │ '),p('7d 64%')]};
-const choice=(answerable=true)=>({count:1,label:'QUESTIONS',answerable,
- rows:[[p('◑ ',{foreground:217}),p('로그를 어느 쪽에 남길까요? 지금 둘 중 하나',{foreground:253})],
-  [p('  ',styles.dim),p('1 ',styles.dim),p('파일',{foreground:253}),p(' · ',styles.dim),p('2 ',styles.dim),p('표준 출력',{foreground:253}),p(' (추천)',styles.dim),
-   p(' · ',styles.dim),p('3 ',styles.dim),p('둘 다',{foreground:253})]],
- one:[[p('◑ ',{foreground:217}),p('로그를 어느 쪽에 남길까요?',{foreground:253})]],line:[p('로그를 어느 쪽에 남길까요?',{foreground:253})],choices:3});
-const there={...choice(false),rows:[[p('◑ '),p('다른 세션의 질문')],[p('  '),p('그 창에서 답',styles.dim)]],choices:0};
-const sent=()=>[[p('✓ 답 보냄',{foreground:150}),p(' · ',styles.dim),p('2 표준 출력',{foreground:253})]];
+const TITLES=['로그를 어느 쪽에 남길까요? 지금 둘 중 하나','색인을 가나다 순으로 둘까요?','표지 그림을 어느 계절로 그릴까요?','판권 면의 한 줄은?','범례를 모을까요?'];
+const choice=(answerable=true,n=1)=>({count:n,label:'QUESTIONS',answerable,
+ waits:TITLES.slice(0,n).map((t,i)=>({word:answerable?'답 대기':'다른 창에서 답',answerable,open:'S4:w'+i+'@r',line:[p(t,{foreground:253})]}))});
+const there=choice(false);
+const sent=()=>[Object.assign([p('✓ 답 보냄',{foreground:150}),p(' · ',styles.dim),p('표준 출력',{foreground:253})],{open:'S4:s@r'})];
 const paint=(o={})=>pv.render({width:o.width||44,height:o.height||30,side:o.folded?false:true,fill:!o.folded,folded:!!o.folded,
  model:{...model,...(o.model||{})},state:'idle',sid:'s',harness:'claude',frame:0,brief:()=>o.q,sent:o.sent||(()=>[]),configuration:o.cfg||{},background:o.background||''});
 const str=r=>r.map(x=>x.text).join('');
 const inside=r=>r.slice(3,-3);// (a row's content between the box's two walls)
 const grounds=v=>v.rows.map(r=>r.some(x=>x.background!==undefined));
 const red=x=>x.foreground===174&&x.dim!==true;
-// (a) 256 colors: the head, the sent line, then three rows; no ground anywhere, the words red.
+const bodyInk=x=>x.foreground===253&&x.dim!==true&&x.bold!==true&&x.role!=='accent';
+const act=(v,i)=>v.hits.filter(h=>h.row===i).map(h=>h.action);
+// (a) 256 colors: the head, the sent line, the wait's row, the action row; no ground anywhere, no choices row.
 {const v=paint({q:choice(),sent,width:48}),rows=v.rows.map(str),head=rows.findIndex(r=>/^│ ╭─ 1 QUESTIONS ─+ ›─╮ │$/.test(r));
- assert(head>0,rows.join('\n'));assert(/^│ │ ✓ 답 보냄 · 2 표준 출력 +│ │$/.test(rows[head+1])&&/^│ ╰─+╯ │$/.test(rows[head+5]),rows.join('\n'));
+ assert(head>0,rows.join('\n'));assert(/^│ │ ✓ 답 보냄 · 표준 출력 +│ │$/.test(rows[head+1])&&/^│ ╰─+╯ │$/.test(rows[head+4]),rows.join('\n'));
  assert(!grounds(v).some(Boolean),rows.join('\n'));
- const at=[head+2,head+3,head+4];
- // The first row: `◑` and the words in the body color (11-16, the person: "질문 바운더리만 붉게 하고, 내용은 흰색으로"), no weight added.
- const first=inside(v.rows[at[0]]);assert(str(first).startsWith('◑ 로그를 어느 쪽에 남길까요? 지금'),str(first));
- const bodyInk=x=>x.foreground===253&&x.dim!==true&&x.bold!==true&&x.role!=='accent';
- assert(first.filter(x=>x.text.trim()).every(bodyInk),JSON.stringify(first));
- // The choices: one row of words, the names in the body color, the numbers in the question's rose (11-17), the ` · ` and `(추천)` dim.
- assert(rows[at[1]].startsWith('│ │   1 파일 · 2 표준 출력 (추천) · 3 둘 다'),rows[at[1]]);
- const ch=inside(v.rows[at[1]]);
- assert(ch.filter(x=>/파일|표준 출력|둘 다/.test(x.text)).every(bodyInk)&&ch.filter(x=>/^\d $/.test(x.text)).every(x=>x.foreground===174&&x.role==='accent'&&x.dim!==true)&&ch.filter(x=>x.text===' · ').every(x=>x.dim===true),JSON.stringify(ch));
- assert(ch.filter(x=>x.text===' (추천)').every(x=>x.dim===true),JSON.stringify(ch));
+ // The wait's row: the word red, the joint dim, the words in the body color (11-16: never red inside the box), no weight.
+ const w=inside(v.rows[head+2]);assert(str(w).startsWith('◑ 답 대기 · 로그를 어느 쪽에 남길까요?'),str(w));
+ assert(w[0].text==='◑ 답 대기'&&red(w[0])&&w[0].role==='accent'&&w[0].bold!==true,JSON.stringify(w[0]));
+ assert(w[1].text===' · '&&w[1].dim===true,JSON.stringify(w[1]));
+ assert(w.slice(2).filter(x=>x.text.trim()).every(bodyInk),JSON.stringify(w));
+ // No row of the box is a choices row (the popup alone shows the choices).
+ assert(!rows.some(r=>/^│ (?:│ )? *1 \S/.test(r)),rows.join('\n'));
  // The action at the right, in rose.
- assert(rows[at[2]].endsWith('↵ 답하기 · Ctrl+] │ │'),rows[at[2]]);
- assert(inside(v.rows[at[2]]).filter(x=>x.text.trim()).every(x=>x.foreground===174),JSON.stringify(v.rows[at[2]]));
+ assert(rows[head+3].endsWith('↵ 답하기 · Ctrl+] │ │'),rows[head+3]);
+ assert(inside(v.rows[head+3]).filter(x=>x.text.trim()).every(x=>x.foreground===174),JSON.stringify(v.rows[head+3]));
  // The box's line is the rose and blinks (the answer is wanted here); the letters inside stand still.
  const line=v.rows[head].filter(x=>/^[╭─╮ ]+$/.test(x.text)&&x.text.trim());
  assert(line.length&&line.every(x=>x.role==='accent-line'&&x.blink===true),JSON.stringify(line));
- assert(!v.rows.slice(head+1,head+5).flat().some((x,i)=>x.blink===true&&!/^[│╰╯─ ]+$/.test(x.text)),JSON.stringify(v.rows.slice(head+1,head+5)));
- assert(v.rows[head+5].filter(x=>/^[╰─╯]+$/.test(x.text)).every(x=>x.role==='accent-line'&&x.blink===true),JSON.stringify(v.rows[head+5]));
- // A press on any of its rows (and the head and the bottom line) opens the question popup.
- for(const i of [head,...at,head+5])assert(v.hits.some(h=>h.row===i&&h.action==='question'),String(i));
- // The sent line keeps its own colors, not red.
+ assert(!v.rows.slice(head+1,head+4).flat().some(x=>x.blink===true&&!/^[│╰╯─ ]+$/.test(x.text)),JSON.stringify(v.rows.slice(head+1,head+4)));
+ assert(v.rows[head+4].filter(x=>/^[╰─╯]+$/.test(x.text)).every(x=>x.role==='accent-line'&&x.blink===true),JSON.stringify(v.rows[head+4]));
+ // A press on the sent line opens that answer's question, on the wait's row that wait; the head, the action row and the bottom line as before.
+ assert.deepEqual(act(v,head+1),['question:S4:s@r']);assert.deepEqual(act(v,head+2),['question:S4:w0@r']);
+ for(const i of [head,head+3,head+4])assert.deepEqual(act(v,i),['question'],String(i));
+ // The sent line keeps its own colors, not red: the two rows differ by their word and its color.
  assert(v.rows[head+1].find(x=>x.text==='✓ 답 보냄').foreground===150&&!inside(v.rows[head+1]).some(red));
  // The messages' and memories' rows are not red: the question reads apart from them.
  for(const r of v.rows.filter(r=>/\[73\]|패널 접힘/.test(str(r))))assert(!r.some(red),str(r));}
-// (b) A wait answered elsewhere, the sent line alone, no question: nothing red but the count, no action row.
+// (a2) Five waiting: three rows, the third ending in the hidden count, each row opening its own wait.
+{const v=paint({q:choice(true,5),width:60}),rows=v.rows.map(str),at=rows.findIndex(r=>r.includes('◑ 답 대기 · 로그를'));
+ assert(rows[at+1].includes('◑ 답 대기 · 색인을')&&rows[at+2].includes('◑ 답 대기 · 표지 그림을')&&/ \+2 │ │$/.test(rows[at+2])&&rows[at+3].includes('↵'),rows.join('\n'));
+ assert(!rows.some(r=>/판권|범례/.test(r)),rows.join('\n'));
+ assert(inside(v.rows[at+2]).find(x=>x.text==='+2').dim===true);
+ assert.deepEqual([0,1,2].map(k=>act(v,at+k)[0]),['question:S4:w0@r','question:S4:w1@r','question:S4:w2@r']);}
+// (b) A wait answered elsewhere, the sent line alone, no question: nothing red but the count (and the `◑` of a wait), no action row.
 for(const q of [there,null]){const v=paint({q,sent}),rows=v.rows.map(str);
  assert(!grounds(v).some(Boolean)&&!rows.join('').includes('↵'),JSON.stringify(q));
- for(const r of v.rows.filter(r=>/다른 세션의 질문|그 창에서 답/.test(str(r))))assert(!inside(r).filter(x=>x.text!=='◑').some(red),str(r));
+ for(const r of v.rows.filter(r=>/로그를|다른 창에서 답/.test(str(r))))assert(!inside(r).filter(x=>x.text!=='◑').some(red),str(r));
  // The box's line is dim (nothing here to answer), and does not blink.
  const top=v.rows.find(r=>/^│ ╭─ 1 QUESTIONS/.test(str(r))),line=top.filter(x=>/^[╭─╮ ]+$/.test(x.text)&&x.text.trim());
  assert(line.length&&line.every(x=>x.dim===true&&x.role==='messages'&&x.blink!==true),JSON.stringify(q)+JSON.stringify(line));
  assert(!v.rows.flat().some(x=>x.role==='accent-line'),JSON.stringify(q));}
-// (c) Eight colors: the words in the terminal's red; mono and NO_COLOR: by weight; no bar, no ground.
-// (11-16: inside the box the letters are the body color, never red or bold; the box's line carries the weight.)
-for(const [cfg,m,look] of [[{theme:'mono'},{},x=>x.bold!==true&&x.foreground==null],[{},{colors:8,styles:{...styles,g_blocked:{foreground:1}}},x=>x.foreground!==1&&x.bold!==true],[{},{no_color:true},x=>x.bold!==true]]){
- const v=paint({q:choice(),cfg,model:m}),rows=v.rows.map(str);
+// (c) Eight colors: the word in the terminal's red; mono and NO_COLOR: the word by weight; the words never red or bold.
+for(const [cfg,m,word] of [[{theme:'mono'},{},x=>x.bold===true&&x.foreground==null],[{},{colors:8,styles:{...styles,g_blocked:{foreground:1}}},x=>x.foreground===1],[{},{no_color:true},x=>x.bold===true]]){
+ const v=paint({q:choice(),sent,cfg,model:m}),rows=v.rows.map(str);
  assert(!grounds(v).some(Boolean)&&!rows.join('').includes('▌'),JSON.stringify(cfg)+'\n'+rows.join('\n'));
- const r=v.rows.find(r=>str(r).includes('◑ 로그를'));assert(inside(r).filter(x=>/로그/.test(x.text)).every(look),JSON.stringify([cfg,m,r]));}
-// (d) A light face: the deep rose; a shade keeps the panel's own ground under the red words.
-{const v=paint({q:choice(),cfg:{theme:'light'}}),r=v.rows.find(r=>str(r).includes('◑ 로그를'));
- assert(inside(r).filter(x=>/로그/.test(x.text)).every(x=>x.foreground===237)&&!grounds(v).some(Boolean),JSON.stringify(r));}
-{const v=paint({q:choice(),cfg:{shade:'medium'},background:'dark'}),r=v.rows.find(r=>str(r).includes('◑ 로그를'));
+ const r=v.rows.find(r=>str(r).includes('◑ 답 대기 · 로그를'));assert(word(inside(r)[0]),JSON.stringify([cfg,m,r]));
+ assert(inside(r).filter(x=>/로그/.test(x.text)).every(x=>x.bold!==true&&x.foreground!==1),JSON.stringify([cfg,m,r]));
+ // The sent line's word is another word: the two rows tell apart without a hue.
+ assert(rows.some(s=>s.includes('✓ 답 보냄 · 표준 출력')),rows.join('\n'));}
+// (d) A light face: the deep rose word, the deep body words; a shade keeps the panel's own ground.
+{const v=paint({q:choice(),cfg:{theme:'light'}}),r=v.rows.find(r=>str(r).includes('◑ 답 대기 · 로그를'));
+ assert(inside(r)[0].foreground===pv.FACES.light.accent&&inside(r).filter(x=>/로그/.test(x.text)).every(x=>x.foreground===237)&&!grounds(v).some(Boolean),JSON.stringify(r));}
+{const v=paint({q:choice(),cfg:{shade:'medium'},background:'dark'}),r=v.rows.find(r=>str(r).includes('◑ 답 대기 · 로그를'));
  assert(inside(r).every(x=>x.background===235)&&inside(r).filter(x=>/로그/.test(x.text)).every(x=>x.foreground===253),JSON.stringify(r));}
-// (e0) Short of rows (19; 11-27: 20 before the CTX row joined the MODEL row): the plain section, no box lines; its red letters blink again as before.
-{const v=paint({q:choice(),height:19,sent}),rows=v.rows.map(str),at=rows.findIndex(r=>r.includes('◑ 로그를'));
+// (e0) Short of rows (19): the plain section, no box lines; the word blinks again as before, the words stand still.
+{const v=paint({q:choice(),height:19,sent}),rows=v.rows.map(str),at=rows.findIndex(r=>r.includes('◑ 답 대기 · 로그를'));
  assert(rows.some(r=>/^│ 1 QUESTIONS +› │$/.test(r))&&!rows.some(r=>/╭─ 1 QUESTIONS/.test(r))&&at>0,rows.join('\n'));
- assert(v.rows[at].filter(x=>/로그/.test(x.text)).every(x=>red(x)&&x.blink===true),JSON.stringify(v.rows[at]));}
-// (e) Short of rows: the action row goes first, then the choices; the first row stays to the last.
+ const word=v.rows[at].find(x=>x.text==='◑ 답 대기');assert(red(word)&&word.blink===true,JSON.stringify(v.rows[at]));
+ assert(v.rows[at].filter(x=>/로그/.test(x.text)).every(x=>bodyInk(x)&&x.blink!==true),JSON.stringify(v.rows[at]));}
+// (e) Short of rows: the extra rows go first (the third, then the second), then the action row; the first row stays to the last.
+// Short of cells the words are cut (`…`) before the word: from 17 cells the word stands whole in every row it has.
 // Every height 5-60 at every width 12-60 keeps its rows within the panel, each as wide.
 const kinds=new Set();
 for(let h=5;h<=60;h++)for(let w=12;w<=60;w++){
- const v=paint({q:choice(),height:h,width:w,sent}),rows=v.rows.map(str),label=h+'x'+w+'\n'+rows.join('\n');
+ const v=paint({q:choice(true,3),height:h,width:w,sent}),rows=v.rows.map(str),label=h+'x'+w+'\n'+rows.join('\n');
  assert(rows.length<=h&&rows.every(r=>cells(r)===w),label);
- const at=rows.findIndex(r=>r.includes('◑ 로'));
+ const at=rows.findIndex(r=>/◑ 답/.test(r));
  if(w>=20)assert(at>0,label);
  if(at<0)continue;
- const choices=/^│ (?:│ )?  1 /.test(rows[at+1]||''),action=(rows[at+(choices?2:1)]||'').includes('↵');
- assert(!action||choices,label);
- kinds.add(1+(choices?1:0)+(action?1:0));
+ let n=0;while(/◑ 답/.test(rows[at+n]||''))n++;
+ const action=(rows[at+n]||'').includes('↵');
+ assert(action||n===1,'the action row goes only after the extra rows\n'+label);
+ if(w>=17)for(let k=0;k<n;k++){const row=rows[at+k];assert(row.includes('◑ 답 대기'),label);
+  // The words go before the word: a row whose words were cut ends them in `…`, or shows the word alone.
+  const words=TITLES[k];assert(row.includes(words)||row.includes('…')||!row.includes(' · '),label);}
+ if(n<3&&w>=30)assert(rows[at+n-1].includes('+'+(3-n)),label);
+ kinds.add(n+(action?'+':''));
 }
-assert.deepEqual([...kinds].sort(),[1,2,3]);
+assert.deepEqual([...kinds].sort(),['1','1+','2+','3+']);
 // (f) The folded strip: one row, no ground, the wait red; the question's words are not on it.
 {const v=paint({q:choice(),folded:true,width:90,height:1}),r=v.rows[0];
  assert(!grounds(v).some(Boolean)&&r.find(x=>x.text==='◑답 대기 1').foreground===174&&!str(r).includes('로그를'),str(r));
@@ -2539,7 +2550,7 @@ const labStart=rows=>rows.findIndex(s=>/^│ (\d+ )?LAB( |$)/.test(s));
         # The sections stand QUESTIONS, the route box, MESSAGES, MEM.
         script = self.FIXTURE + self.LAB + r"""
 const sessions={count:3,counts:[[T('◑1')],[T('●2')]],rows:[1,2,3].map(i=>({glyph:[T('●')],tag:[T('['),T('7'+i),T(']')],title:[T('다른 세션 '+i)],age:[T(i+'m')]}))};
-const q={count:1,label:'QUESTIONS',rows:[[P('◑ '),P('조건을 계속 비교할까요?')],[P('  '),P('1 계속 · 2 멈춤')]],one:[[P('◑ '),P('조건을 계속 비교할까요?')]],line:[P('조건을 계속 비교할까요?')],choices:2};
+const q={count:1,label:'QUESTIONS',waits:[{word:'answer below',line:[P('조건을 계속 비교할까요?')],answerable:false}]};
 const items=[{tier:'durable',kind:'decision',age:'3m',text:'평가 조건을 같게 유지'}];
 for(const state of ['idle','working','blocked'])for(const folded of [false,true])for(const width of [40,32]){
  const at=extra=>view.render({width:folded?120:width,height:folded?1:60,side:!folded,fill:!folded,folded,frame:3,
@@ -2564,7 +2575,7 @@ for(const state of ['idle','working','blocked'])for(const folded of [false,true]
         script = self.FIXTURE + r"""
 const plain=v=>v.rows.map(r=>r.map(p=>p.text).join(''));
 const items=[{tier:'durable',kind:'decision',age:'3m',text:'평가 조건을 같게 유지'},{tier:'durable',kind:'lesson',age:'2h',text:'one fix per review finding'}];
-const q={count:1,label:'QUESTIONS',rows:[[P('◑ '),P('조건을 계속 비교할까요?')],[P('  '),P('1 계속 · 2 멈춤')]],one:[[P('◑ '),P('조건을 계속 비교할까요?')]],line:[P('조건을 계속 비교할까요?')],choices:2};
+const q={count:1,label:'QUESTIONS',waits:[{word:'answer below',line:[P('조건을 계속 비교할까요?')],answerable:false}]};
 const noted=[oneShot,staged].map(r=>({...r,paint:{...r.paint,now:'now step'}}));   // (11-17: a route's whole form carries its NOW row four cells in)
 const sections=(height,o={})=>plain(view.render({width:40,height,side:true,fill:true,model:{...head,routes:[noted[0],noted[1],noted[0]],route_count:3,memory_items:items,...(o.model||{})},
  state:'idle',configuration:{},brief:()=>o.q||null}));
@@ -3020,7 +3031,7 @@ const assert=require('node:assert/strict'),v=require(process.argv[1]);
 const styles={dim:{foreground:-1,dim:true},loc_repo:{foreground:253},lvl_y:{foreground:186},g_work:{foreground:150,bold:true},lvl_g:{foreground:150},g_dead:{foreground:217,bold:true}};
 const model={styles,colors:256,title:'Task',answerable:true,routes:[{id:'t',title:'Task',state:'working',kind:'working',paint:{glyph:{text:'⠏'}},stages:[{name:'execute',current:true,mark:'●'}]}],
  route_count:1,routes_known:true,messages:[{way:'←',who:'[e7]',text:'note',at:1}]};
-const q=()=>({count:1,label:'QUESTIONS',rows:[[{text:'◑ '},{text:'Which?'}],[{text:'  '},{text:'1 '},{text:'A',bold:true}]],one:[[{text:'◑ '},{text:'Which?'}]],line:[{text:'Which?'}],choices:1});
+const q=()=>({count:1,label:'QUESTIONS',waits:[{word:'answer below',line:[{text:'Which?'}],answerable:false}]});
 const paint=(cfg,background,extra={})=>v.render({width:40,height:24,side:true,model:{...model,...extra},configuration:cfg,background,brief:q});
 const text=r=>r.rows.map(row=>row.map(p=>p.text).join('')).join('\n');
 const base=paint({});

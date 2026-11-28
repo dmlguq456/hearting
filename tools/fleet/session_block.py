@@ -110,64 +110,12 @@ def question_state(item, *, own=True):
     return "open" if item.get("answerable") is True else unanswerable_state(item.get("reason"), own=own)
 
 
-def _cut(parts, room):
-    """``parts`` cut to ``room`` cells, ending in ``…`` when something was cut."""
-    if sum(cell_width(text) for text, _key in parts) <= room:
-        return list(parts)
-    out, used = [], 0
-    for text, key in parts:
-        kept = ""
-        for char in text:
-            if used + cell_width(char) > room - 1:
-                break
-            kept += char
-            used += cell_width(char)
-        if kept:
-            out.append((kept, key))
-        if kept != text:
-            break
-    return out + [("…", out[-1][1] if out else "dim")] if room >= 1 else []
-
-
-def _choice_brief(labels, room):
-    """The choices on one row (11-15 popup design A): `1 label (recommended) · 2 label … · +2`.
-
-    Whole choices first, the next one cut while four of its cells fit, then the count of the
-    choices left unseen. ``labels`` holds each choice's parts after its number.
-    """
-    if room < 1:
-        return []
-    out, used, shown = [], 0, 0
-    size = lambda parts: sum(cell_width(text) for text, _key in parts)
-    for at, parts in enumerate(labels):
-        gap = [(" · ", "dim")] if out else []
-        item = [*gap, (str(at + 1) + " ", "g_blocked"), *parts]
-        rest = len(labels) - at - 1
-        tail = size([(" · +" + str(rest), "dim")]) if rest else 0
-        if used + size(item) + tail <= room:
-            out += item; used += size(item); shown += 1
-            continue
-        lead = [*gap, (str(at + 1) + " ", "g_blocked")]
-        left = room - used - size(lead) - (size([(" · +" + str(rest), "dim")]) if rest else 0)
-        if left >= 4:
-            kept = lead + _cut(parts, left)
-            out += kept; used += size(kept); shown += 1
-        break
-    unseen = len(labels) - shown
-    if unseen:
-        more = [(" · +" + str(unseen) if out else "+" + str(unseen), "dim")]
-        if used + size(more) <= room or not out:
-            out += more
-    return _cut(out, room)
-
-
 def question_presentations(items, columns, *, native_wait=None, own=True, brief_columns=None):
     """Private display-only rows consumed by the local editor, not input proof.
 
     ``columns`` is the width the editor draws in (the question popup, 11-15); ``brief_columns``,
-    when given, the panel's own width inside its frame, for each question's two-row summary
-    (``brief``: its first row and its choices on one row, or its first two rows) and one-row
-    form (``brief_one``).
+    when given (the shell panel's), adds each waiting question's first line (``brief_line``) for
+    its one row in the panel (11-28; the panel cuts it at its own width).
     """
     listed = [(item, question) for item in items for question in item.get("questions") or ()]
     # Rule 5 (11-14): a sent answer is one dim line, never a box; `N · i/N` numbers the boxes.
@@ -238,41 +186,15 @@ def question_presentations(items, columns, *, native_wait=None, own=True, brief_
                        if state == "open" else [[(ui_text("fleet.session_block." + state), "dim")]],
         }
         if brief_columns is not None and state not in _SENT_STATES:
-            question["display"].update(_brief(question, choices, state, key, max(4, brief_columns - 2)))
+            question["display"]["brief_line"] = _brief_line(question)
     return items
 
 
-def _brief(question, choices, state, key, room):
-    """The panel's summary of one question (11-15 popup design A, E): `◑ ` and its text on one
-    row, then its choices on one row (`1 label (recommended) · 2 … · +2`); a question without
-    choices takes its first two rows instead. Not answerable here, the choices' row says where it
-    is answered (rule 54). The whole question reads in the popup."""
-    lead = [("◑ ", key)]
-    text = " ".join(line.strip() for line in str(question.get("question") or "?").splitlines() if line.strip()) or "?"
-    one = [*lead, *_cut([(text, "loc_repo")], room)]
-    if state == "open" and choices:
-        labels = []
-        for at, choice in enumerate(choices):
-            label = choice.get("label", choice.get("value", "?")) if isinstance(choice, dict) else choice
-            parts = [(" ".join(str(label).split()), "loc_repo")]
-            if question.get("recommended") == at:
-                parts.append((" (" + ui_text("fleet.session_block.recommended") + ")", "dim"))
-            labels.append(parts)
-        second = [("  ", "dim"), *_choice_brief(labels, room)]
-        rows = [one, second]
-    elif state != "open":
-        rows = [one, [("  ", "dim"), *_cut([(ui_text("fleet.session_block." + state), "dim")], room)]]
-    else:
-        wrapped = wrap_parts([(text, "loc_repo")], room)
-        rows = [[*lead, *wrapped[0]]]
-        if len(wrapped) > 1:
-            rest = [part for line in wrapped[1:] for part in line]
-            rows.append([("  ", "dim"), *_cut(rest, room)])
+def _brief_line(question):
+    """The panel's row of one waiting question (11-28, the person: "선지는 미리 보기를 날리고"): its
+    first line whole, after the panel's `◑ 답 대기 · `; its choices are the popup's alone."""
     first = next((line.strip() for line in str(question.get("question") or "?").splitlines() if line.strip()), "?")
-    return {"brief": rows, "brief_one": [one],
-            # The folded strip's row of what to do carries the question's first line whole, cut
-            # where its cells end; its choices follow where cells are left.
-            "brief_line": [(first, "loc_repo")]}
+    return [(first, "loc_repo")]
 
 
 def block_sections(values, *, columns, route="", received=(), human="", work="", gpu=""):

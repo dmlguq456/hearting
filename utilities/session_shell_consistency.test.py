@@ -218,9 +218,9 @@ for(const [width,height,side] of [[37,21,true],[80,14,false]])for(const state of
    routes:state==='start'?[]:[{title:'Current task',state:'working',stages:[{name:'inline',state:'active'}],visibility:{summary:'solo · test? · review? · CI?'}}]};
  const question=['question','focus','draft','restored'].includes(state);
  const args={width,height,side,model,native:{model:'fixture',effort:''},focused:['focus','draft'].includes(state),
-   // 11-15: the panel shows the question's summary (11-16: in the thin rounded QUESTIONS box); the editor (a draft too) reads in the popup.
-   brief:()=>question?{count:1,label:'QUESTIONS',rows:[[{text:'◑ '},{text:'Choose the destination'}],[{text:'  '},{text:'1 Current project'}]],
-     one:[[{text:'◑ '},{text:'Choose the destination'}]],line:[{text:'Choose the destination'}],choices:1}:null};
+   // 11-15: the panel shows the question's summary (11-16: in the thin rounded QUESTIONS box; 11-28: each wait one row, no choices
+   // row); the editor (a draft too) reads in the popup.
+   brief:()=>question?{count:1,label:'QUESTIONS',waits:[{word:'answer below',line:[{text:'Choose the destination'}],answerable:false}]}:null};
  const all=['claude','codex','opencode'].map(harness=>v.render({...args,harness}).rows.map(r=>r.map(p=>p.text).join('')));
  // Spec rule 29: the top border names the harness (Fleet's session-row head); every other row is the same.
  all.forEach((rows,i)=>assert(rows[0].includes(['claude','codex','opencode'][i]),state+' top border names its harness'));
@@ -229,7 +229,7 @@ for(const [width,height,side] of [[37,21,true],[80,14,false]])for(const state of
  const text=rows[0].join('\n');assert(!text.includes(id),state+' default exposes full ID');
  // Spec 2026-11-11: an unreported effort is left out, never painted as `?`.
  assert(text.includes('fixture')&&!text.includes('fixture · ?'),state+' model row');
- if(question){assert(text.includes('│ ╭─ 1 QUESTIONS ─')&&text.includes('│ │ ◑ Choose the destination')&&text.includes('│ │   1 Current project'),state+' question summary under its label');}
+ if(question){assert(text.includes('│ ╭─ 1 QUESTIONS ─')&&text.includes('│ │ ◑ answer below · Choose the')&&!text.includes('Current project'),state+' question summary under its label');}
  // Spec E9 rule 45: beside the native area the count leads its upper-case word.
  if(state!=='start')assert(text.includes(side?'1 ROUTE':'route 1')&&text.includes('Current task'),state+' route row missing');
  else assert(!/route/i.test(text),state+' a known-empty route list draws no box');

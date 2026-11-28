@@ -290,6 +290,11 @@ const frameLooks=()=>{const all=looks(),out=[];for(let y=0;y<rows;y++){const c=c
     if(c&&c.isBgPalette()&&[52,235].includes(c.getBgColor()))n++;}}checks.grounds_left=n;}
   await key('\r',400);checks.enter_swallowed=!(await screen()).some(l=>l.includes('DONE_draft1'));
   await key('more\r',300);s=await until(has('DONE_draft1more'),'the native draft submitted whole');
+  // 11-28 (the person: "답 보냄의 내용을 누르면 그것과 관련된게 여전히 뜨게끔"): a press on the sent line opens that answer's question
+  // to read (its words and the answer sent), not the question still waiting; Esc closes it.
+  {const sent=await at('✓ 답 보냄');await press(sent.x+2,sent.y);
+   s=await until(s=>!!box(s),'the popup by a press on the sent line');frames.sent_open=s;
+   await key('\x1b',300);s=await until(s=>!box(s),'the sent answer\'s popup closing on Esc');}
   // The other question: a text answer in Korean and a paste, kept when the popup closes.
   await key('draft2',150);
   await key('\x1d',200);s=await until(s=>!!box(s),'the popup for the text question');
@@ -457,11 +462,12 @@ class SessionShellPopupTest(unittest.TestCase):
         # inside, no editor box.
         panel = '\n'.join(frames['closed'])
         self.assertIn('╭─ 2 QUESTIONS ─', panel)
-        self.assertIn('│ │ ◑ 패널을 접었을 때의 모양을 어', panel)
         self.assertNotIn('……', panel)
-        # 11-15 ("그냥 질문은 글자 자체를 붉은 색으로"): the question to answer here reads in red letters: its
-        # choices one row of words (`1 label`, `+N` for the rest), `↵ 답하기 · Ctrl+]` under them at the right.
-        self.assertRegex(panel, r'│ │   1 아래 두 줄 \(다\) \(추천\) · \+3 ')
+        # 11-28 (the person: "선지는 미리 보기를 날리고 … 앞에 답 대기를 붉은 색으로"): each waiting question is one row,
+        # `◑ 답 대기 · <its first line>`, no choices row; `↵ 답하기 · Ctrl+]` under them at the right.
+        self.assertIn('│ │ ◑ 답 대기 · 패널을 접었을 때의', panel)
+        self.assertIn('│ │ ◑ 답 대기 · MESSAGES 구분선의', panel)
+        self.assertNotIn('아래 두 줄 (다)', panel)
         self.assertIn('↵ 답하기 · Ctrl+] │ │', panel)
         self.assertNotIn('╭─ ◑', panel)
         # Drawn in one synchronized frame; the native's output under it leaves it whole; closed,
@@ -497,6 +503,11 @@ class SessionShellPopupTest(unittest.TestCase):
         self.assertEqual(result['answers'], [{'question_id': 'popup-choice', 'revision': 'a' * 64,
                                               'answers': {'shape': ['넓힌 옆 띠 (가)']}}])
         self.assertIn('✓ 답 보냄 · 넓힌 옆 띠 (가)', '\n'.join(frames['answered']))
+        # 11-28: the press on the sent line opened that question with the answer sent, not the one still waiting.
+        opened = '\n'.join(frames['sent_open'])
+        self.assertIn('패널을 접었을 때의 모양을', opened)
+        self.assertIn('│ ✓ 답 보냄 · 넓힌 옆 띠 (가)', opened)
+        self.assertNotIn('MESSAGES 구분선의 색을', opened)
         self.assertTrue(checks['enter_swallowed'])
         self.assertIn('› 한글 답', '\n'.join(frames['draft_kept']))
         self.assertIn('│   붙여넣기', '\n'.join(frames['draft_kept']), 'Alt+Enter put a line break before the paste')

@@ -333,7 +333,7 @@ the clock (`render_cells._blink_phase`; `WAIT_BLINK` 10 spinner frames: the lit 
 second, the other through the odd one; 11-16, the person on v4.40.0: "점멸은 안하는데" — 174 and 131, an
 L* gap of 15, changing every 2.4 seconds on the breath's beat, did not read as a blink) and on the tick
 that turns it, which runs folded too and wakes for nothing while no answer waits. It is the red
-letters of the question answered here (its first row, its choices' row and `↵ answer · Ctrl+]`), the
+letters of the questions answered here (each waiting row's word `◑ 답 대기` and `↵ answer · Ctrl+]`), the
 `◑` of one answered elsewhere and the guide line's count (`1 QUESTIONS · answer below`, its count in
 the wait's red), and the folded strip's `◑답 대기 N`; never the head's state glyph, the section head's
 count, the route box, an answer on its way or anything in a popup. A beat writes those cells alone
@@ -542,27 +542,30 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   blinks between the two reds of the waiting blink (`FACES.*.waitBlink`, Fleet's one-second beat) and the letters
   inside stand still; a `◑` and a count of a wait answered elsewhere keep their own letter blink. A section with
   nothing to show inside it stays its head row, and short of rows the box's two lines go after the content rows
-  (the section then reads as below). A press anywhere on the box opens the question popup. The count is the answer wait's (the `◑답 대기 N` row is merged into
-  it, in the question's rose), then the answers sent (one line each, ten minutes from when it was sent),
-  the next question's summary (its first row `◑ …` and its choices on one row
-  `1 label (recommended) · 2 … · +2`, or its first two rows) and, for a wait
-  answered elsewhere, where (`1 QUESTIONS · answer below`). The question a press
-  answers here, now, was drawn in rose letters from 11-15 ("그냥 질문은 글자 자체를 붉은 색으로"); on 11-16 the person
-  took that back ("G1에서 질문 바운더리만 붉게 하고, 내용은 흰색으로 해"): the red is the box's line alone
-  (`accent`, 174 on a dark or unknown face, 131 on a light one), and its words, its `◑` and its choices row
-  inside the box are the body color (253 / 237), never dimmed and no weight added, on no ground of their own
-  (no fill, no chip, no bar); `↵ answer · Ctrl+]` keeps its rose at the right, the dim parts (the ` · `, the count, a
-  recommendation's mark, the answers sent, the guide line) their dim. Folded back to the plain section (short of
-  rows) the letters are red and blink as in 11-15. The
-  choices row is text, `1 label · 2 label` (the ` · ` and the count `+N` dim; short of cells
-  the last choices leave for their count, and where not even the first fits beside the count
-  it shows with its name cut by `…`, its number kept, the rest counted: the first choice always
-  shows), and under them `↵ answer · Ctrl+]` in rose at the right; a press on any of them opens
-  the question popup. Short of rows the action row goes first, then the choices; the first row
-  stays to the last. Eight colors, mono and `NO_COLOR` tell a question to answer here from the rest by the box
-  line's weight. Nothing else is red but the box's line, a wait answered elsewhere's `◑` and the guide line's
-  count (11-15: what waits blinks, above): not an answer on its way, not the guide line's words or
-  `질문 변경됨`.
+  (the section then reads as below). The count is the answer wait's (the `◑답 대기 N` row is merged into
+  it, in the question's rose), then the answers sent (one line each, ten minutes from when it was sent,
+  `✓ answer sent · <what was sent>`), the questions waiting here (one row each, in the editor's order) and,
+  for a wait answered elsewhere, where (`1 QUESTIONS · answer below`). 11-28 (the person: "선지는 미리 보기를
+  날리고 대기중인 선지는 구분이 좀 되게끔 (앞에 답 대기를 붉은 색으로 쓴다던지해서 답 보냄과 표현 일관성을 맞추되 구분이
+  되게끔)"): a waiting row reads as the sent line does, `◑ 답 대기 · <its first line>` (`◑ to answer` on an English
+  screen: the folded strip's word, `fleet.session_line.ANSWER_WAIT_WORDS`): the word in the answer wait's rose
+  (`accent`, 174 on a dark or unknown face, 131 on a light one; weight in mono and `NO_COLOR`), the ` · ` dim, the
+  line in the body color (253 / 237), never dimmed and no weight added, on no ground of their own (no fill, no chip,
+  no bar). A wait not answered here reads `◑ <where> · <its first line>`, its `◑` alone in the rose, its word dim.
+  The panel shows no choices: they are the popup's (the backend sends the panel each waiting question's first line,
+  `brief_line`). Three rows at most; more waiting, the last row shown ends in the hidden count (`+2`, dim; waits
+  answered elsewhere and answers sent are not in it). Short of cells the line is cut (`…`) before the word, which
+  stands whole while it fits. Under them `↵ answer · Ctrl+]` keeps its rose at the right. Inside the box the red
+  letters stand still while the box's line blinks (11-16, the person: "G1에서 질문 바운더리만 붉게 하고, 내용은 흰색으로
+  해": the line carries the red, the words the body color); folded back to the plain section (short of rows) the
+  word and the action row blink as in 11-15. Short of rows the extra rows go first (the third, then the second),
+  then the action row; the first row stays to the last. A press on a sent line opens that answer's question to read
+  (its words and the line, a secret `•••`, nothing read for it; Tab goes back to the waits; the answer cannot be
+  changed there), a press on a waiting row that question, a press anywhere else on the box the question popup as
+  before (the question it stood on). Eight colors, mono and `NO_COLOR` tell a question to answer here from the
+  rest by the box line's weight and by the two words. Nothing else is red but the box's line, the waiting word,
+  a wait answered elsewhere's `◑` and the guide line's count (11-15: what waits blinks, above): not an answer on
+  its way, not the guide line's words or `질문 변경됨`.
 - The route box (spec rules 23-25, 34, 36, 38, 43, 48, 57): the routes the statusline
   counts, then the recent results the producer keeps after them, then the requests
   this session sent (→) or received (←, `✓` closed) with their status and age, every
@@ -829,7 +832,7 @@ RESOURCES (11-18: its GPU rows, then its host rows and name; the idle count goes
 MESSAGES·MEM보다 먼저 자리를 받게") MESSAGES and MEM go down before any other section gives a row, in this order: MEM's
 every message takes the one-row form (`← [e7] text`; beside the native area every message has it since 11-26, the rows are still counted as two); MEM shows two records;
 MESSAGES two messages; MEM one record; MESSAGES one message (`+N` on its head counts the rest): from six rows (a record is one row since 11-20) down to two rows, then one;
-then the question's action row, its summary's second row and the guidance line;
+then the question's extra waiting rows (the third, then the second; 11-28), its action row and the guidance line;
 the structural rows (the SESSION head's own row, which then takes MODEL's value and row; 11-26, panel B: MODEL then stands on its own row and the rule over it on a row B's forms left; the question box's two border lines); then the
 route box's own steps (11-17: its zone rules are not among them, they stay while a row of the zone shows), every
 route at the same step (v4.36.4, spec rules 34 (b), 38,
@@ -948,7 +951,7 @@ in place; while no popup stands focus, `empty` and the native input frontier sta
 as they were.
 Put each answer choice on
 its own line, wrapping within that choice; every choice row leads with a
-two-cell column for the mark. 11-17 (the person: "질문이랑 선지가 잘 구분되게" and "구분선 위에 여백도 하나 두고"): a question with choices ends its words, then one empty row, then a thin line in the popup frame's own color (dim where the frame is bright), then its choices, each number bold in the question's rose (the `◑` mark's color) with two cells before the words; a question answered in words has neither the line nor the empty row. A question with choices always shows its choice rows, focused or not (11-22, the person: "선지가 선택이 안되고 그냥 글에 있는 경우도 있다는거야. 그게 거슬린다"): only the question's words page (`+N · more …`, PgUp/PgDn, the wheel read them), and the answer row stands beside the choices. Short of rows the popup gives up, in this order, the key hints, the empty row, the thin line, the words down to one row and the `more` line (never to none: PgUp/PgDn read them to the last row, and a screen that shows words always pages them), and last the choices, which slide beside those words to keep the highlighted one in sight with `+N · more choices · ↑↓`. Tighter still the words keep one row with the head's `+N` saying they page, and with one row left (a limit of 3 with an answer row, or of 2 without one) the choices stand alone and the head promises no words. A question with choices shows a choice row at every limit but 2 (the head and one row: with an answer row the answer row is that row, and without one the highlighted choice is). Fleet's unfolded question does the same for an item with one question (its words end in `… +N more lines` before a choice or the answer row is cut); an item with several questions keeps every question's choices, answer row and the submit line first, and the words of all its questions give way (each later question's words keep their first row and the `more` line). A session that registers a question lists what is to be chosen with `--choice`, never as words in the question's text. 11-27 (the person: "답변 선지가 클로드 네이티브 질문창이 좀 더 상세하네?", design 가): what a choice means stands on the rows under its name, from its name's first cell, dim (the popup's floor gray, on the chosen ground too), wrapping there and keeping the lines its asker wrote (an empty line between them is left out): a native option's `description` (one native question call with one choice to make; several questions, several picks or a preview stay one written listing), a frame option's `means` (a non-empty description first, once), or `questions ask --choice-description N=WORDS`. A choice and its words are one: ↑↓ and the number move by choice, and a press on its words picks it. The words take only rows the question would leave empty without them (review 2 of #1908): the popup and Fleet lay it out as the same question without words, row for row (names, `+N`, the answer, keys, notices, later questions, `submit`, the place it slides to), and the rows the popup could still grow by, or the page leaves empty, take the words: the highlighted choice's first, then the others from the top, a cut one ending in `…`. An older record, or words written into the text by hand, draws as before; the panel's summary row keeps the names alone. The panel's choices row (`1 label · 2 label`) wears the same rose on its numbers, and Fleet's unfolded question the same empty row, line and numbers. In the question popup ↑↓ move the chosen
+two-cell column for the mark. 11-17 (the person: "질문이랑 선지가 잘 구분되게" and "구분선 위에 여백도 하나 두고"): a question with choices ends its words, then one empty row, then a thin line in the popup frame's own color (dim where the frame is bright), then its choices, each number bold in the question's rose (the `◑` mark's color) with two cells before the words; a question answered in words has neither the line nor the empty row. A question with choices always shows its choice rows, focused or not (11-22, the person: "선지가 선택이 안되고 그냥 글에 있는 경우도 있다는거야. 그게 거슬린다"): only the question's words page (`+N · more …`, PgUp/PgDn, the wheel read them), and the answer row stands beside the choices. Short of rows the popup gives up, in this order, the key hints, the empty row, the thin line, the words down to one row and the `more` line (never to none: PgUp/PgDn read them to the last row, and a screen that shows words always pages them), and last the choices, which slide beside those words to keep the highlighted one in sight with `+N · more choices · ↑↓`. Tighter still the words keep one row with the head's `+N` saying they page, and with one row left (a limit of 3 with an answer row, or of 2 without one) the choices stand alone and the head promises no words. A question with choices shows a choice row at every limit but 2 (the head and one row: with an answer row the answer row is that row, and without one the highlighted choice is). Fleet's unfolded question does the same for an item with one question (its words end in `… +N more lines` before a choice or the answer row is cut); an item with several questions keeps every question's choices, answer row and the submit line first, and the words of all its questions give way (each later question's words keep their first row and the `more` line). A session that registers a question lists what is to be chosen with `--choice`, never as words in the question's text. 11-27 (the person: "답변 선지가 클로드 네이티브 질문창이 좀 더 상세하네?", design 가): what a choice means stands on the rows under its name, from its name's first cell, dim (the popup's floor gray, on the chosen ground too), wrapping there and keeping the lines its asker wrote (an empty line between them is left out): a native option's `description` (one native question call with one choice to make; several questions, several picks or a preview stay one written listing), a frame option's `means` (a non-empty description first, once), or `questions ask --choice-description N=WORDS`. A choice and its words are one: ↑↓ and the number move by choice, and a press on its words picks it. The words take only rows the question would leave empty without them (review 2 of #1908): the popup and Fleet lay it out as the same question without words, row for row (names, `+N`, the answer, keys, notices, later questions, `submit`, the place it slides to), and the rows the popup could still grow by, or the page leaves empty, take the words: the highlighted choice's first, then the others from the top, a cut one ending in `…`. An older record, or words written into the text by hand, draws as before; the panel shows no choices (11-28: its row of the question is its first line alone). Fleet's unfolded question has the same empty row, line and numbers. In the question popup ↑↓ move the chosen
 choice: its first row carries `▶` (11-27, the eight marks: the one mark of the place, as Fleet's open row and the settings'
 current line; `▸` is a closed group) in this session's harness color, bold, and
 every row of it (each row of a wrapped one) has its words bold in the bright
@@ -1150,8 +1153,8 @@ connected/total` (red while one has failed or needs authentication), at every
 panel height. No Hearting section is
 drawn inside OpenCode's sidebar. Panel placement never changes question authority.
 
-The current question's summary (its first row, and its choices on one row or
-its second row) and exact request state are readable in the panel before the
+Each waiting question's first line (one row each, three at most; 11-28) and
+exact request state are readable in the panel before the
 popup opens; the popup reads it whole (its body, a markdown table in it drawn as aligned
 columns by Fleet's one table rule, every choice, a text or secret answer, `i/N` with Tab). An empty questions section reserves no space. Retain choices and drafts
 by request ID, revision and question ID when moving with Tab or leaving focus.
@@ -1214,7 +1217,7 @@ sends an answer it has left their hands: while it travels (the existing answer
 record's `submitted`/`received`) the popup closes and the question is one line
 (`✓ answer sent · <what was sent>`, which stands for rule 53's chosen choice;
 `✓ answer sent` in the passing green of a route's `✓`, the `·` dim, what was sent
-in plain text, a secret `•••`),
+in plain text, a secret `•••`; 11-28: a press on it opens that question to read, its words and this line),
 `Ctrl+]` no longer stands on it, and every count above leaves it out (Fleet lists
 it as sent); the line stays ten minutes from when it was sent (11-16, the person: "답 보냄도 한
 5~10분은 유지하도록 해두자"; `SENT_KEEP_MS` in `block-input.cjs`), its session having the answer or not,

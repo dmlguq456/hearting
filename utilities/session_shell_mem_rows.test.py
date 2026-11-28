@@ -44,8 +44,8 @@ function model(o={}){
       paint:{glyph:t('⠏','g_spin'),harness:t('claude','hb_claude'),model_text:t('Opus 5.5','hb_claude'),ctx:t('52%','lvl_g'),gauge5:[t('━━━','lvl_g'),t('──'),t(' '),t('52%','lvl_g')]}}],
     messages:o.messages??MSG,memory_items:o.mem??MEM,...(o.model||{})};
 }
-const brief=()=>({count:1,answerable:true,choices:2,label:'QUESTIONS',rows:[[t('◑ ','g_blocked'),t('몇 건까지?','loc_repo')],[t('1 ','dim'),t('5건','loc_repo'),t(' · ','dim'),t('2 ','dim'),t('3건','loc_repo')]],
-  one:[[t('◑ ','g_blocked'),t('몇 건까지?','loc_repo')]],line:'몇 건까지?'});
+// (11-28: each waiting question one row, `◑ 답 대기 · <its first line>`; no choices row.)
+const brief=()=>({count:1,answerable:true,label:'QUESTIONS',waits:[{word:'답 대기',answerable:true,open:'S4:t@r',line:[t('몇 건까지?','loc_repo')]}]});
 const draw=(o={})=>view.render({width:o.width??50,height:o.height??60,side:true,model:model(o),state:'working',harness:'claude',frame:1000,since:990,brief,sent:()=>[],
   cellWidth:cells,configuration:{side_width:50,rule_motion:'rule',...(o.cfg||{})}});
 const lines=v=>v.rows.map(r=>r.map(p=>p.text).join(''));

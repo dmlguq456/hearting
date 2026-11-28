@@ -219,7 +219,8 @@ const create=require(process.argv[1]),rows=JSON.parse(process.argv[2]);
 const block=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});
 block.update(rows);block.enter();
 for(let n=1;n<rows.length;n++)block.input(Buffer.from('\t'));
-const line=JSON.stringify(block.summary().line);
+// (11-28: the panel's summary lists the waits in order; the question Tab stands on reads in the popup.)
+const line=JSON.stringify(block.detail({budget:40,columns:80}));
 console.log(JSON.stringify([block.summary().count,block.references().length,(line.match(/Question \d+ of \d+/)||[''])[0]]));"""
         result = subprocess.run([self.f.node, "-e", script, str(ROOT / "utilities/session-shell/block-input.cjs"),
                                  json.dumps(rows)], capture_output=True, text=True, timeout=60)

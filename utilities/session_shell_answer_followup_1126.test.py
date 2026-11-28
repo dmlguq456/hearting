@@ -575,7 +575,8 @@ class PrivateTmuxEdgesTest(unittest.TestCase):
             def ask(name, submitted=False):
                 number[0] += 1
                 item = f"fixture-{'submitted-' if submitted else ''}{number[0]}"
-                q = dict(id="q", question=f"{name} 장면 질문 {number[0]:02d}", free_text=True, choices=[])
+                # (11-28: the number first, so the panel's row `◑ 답 대기 · <its first line>` shows it however long the name is.)
+                q = dict(id="q", question=f"장면 질문 {number[0]:02d} {name}", free_text=True, choices=[])
                 fresh = qp.with_name("questions.next")       # replaced whole: the backend never reads half of it
                 fresh.write_text(json.dumps({sid: [dict(id=item, revision=f"{number[0]:064x}", answerable=True, questions=[q])]}))
                 os.replace(fresh, qp)

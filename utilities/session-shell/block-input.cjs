@@ -37,6 +37,9 @@ function oneKey(data){
 const wordChar=c=>/[\p{L}\p{N}\p{M}_]/u.test(c||'');
 module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=PASTE_IDLE,keyWait=PASTE_KEY_WAIT}) {
   let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null,answeredAt=0,escapedAt=0;
+  // 11-28 (the person: "답 보냄의 내용을 누르면 그것과 관련된게 여전히 뜨게끔"): a sent answer's line pressed on the panel opens its
+  // question to read (its words and the answer sent; a secret stays `•••`), until Tab, a press elsewhere or the popup closes.
+  let viewing=null;
   let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer,skipTail=false,changeArmed=false,pasteCR=false;
   // 11-26 (review 1861): a paste whose bytes stop for a second has stalled. It is not over: what comes after is still
   // its text (a line break, a tab, an Esc of its own). Only a key pressed then (`oneKey` with nothing after it for
@@ -70,7 +73,7 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
     return remote==='submitted'||local==='submitted'?'sent':null;
   };
   const flat=()=>items.filter(item=>!phase(item)).flatMap(item=>(item.questions||[]).map(question=>({item,question})));
-  const current=()=>frozen||flat()[index];
+  const current=()=>frozen||viewing||flat()[index];
   const text=(name,fallback)=>labels[name]||fallback;
   const span=(value,style='dim')=>({text:String(value),...(styles[style]||{dim:style==='dim'})});
   const choices=row=>row.item.answer_kind==='decision'?['approve','reject','defer']:row.question.choices||[];
@@ -182,6 +185,12 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
     }
     items=items.filter(item=>phase(item)!=='done');
     release();
+    // The sent answer being read stays while its line stands (its newest values); gone, the popup goes on as for a question that left.
+    if(viewing){
+      const again=items.find(item=>item.id===viewing.item.id&&phase(item)==='sent');
+      viewing=again?{item:again,question:(again.questions||[])[0]||{}}:null;
+      if(viewing){prune(flat());changed();return;}
+    }
     const listed=flat();
     const found=previous?listed.findIndex(row=>key(row.item)===key(previous.item)&&row.question.id===previous.question.id):-1;
     const firstOpen=listed.findIndex(row=>row.item.answerable===true&&!state(row.item).state);
@@ -197,23 +206,35 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
         state(listed[index].item).notice=text('changed','question changed · Tab next');changeArmed=true;
       }
     }
+    prune(listed);
+    changed();
+  }
+  function prune(listed){
     const active=new Set(listed.map(row=>key(row.item)));if(frozen)active.add(key(frozen.item));
+    for(const item of items)if(phase(item)==='sent')active.add(key(item));
     // Bounded volatile history, never a new question/answer store.
     for(const old of entries.keys())if(!active.has(old)&&entries.size>8)entries.delete(old);
-    changed();
   }
   // Ctrl+] opens on a question the person can answer now (11-14): when the one shown is not
   // (a receipt, a changed one), the first answerable one comes up instead.
-  function enter(){
-    focused=true;scroll=0;follow=true;answeredAt=0;escapedAt=0;changeArmed=false;
+  // 11-28: a press on one row of the panel's question box opens on that row's question (`open`, its `id@revision`):
+  // a wait's own, else a sent answer's to read; any other press (`open` empty) as before.
+  function enter(open=''){
+    focused=true;scroll=0;follow=true;answeredAt=0;escapedAt=0;changeArmed=false;viewing=null;
+    const sent=open&&items.find(item=>key(item)===open&&phase(item)==='sent');
+    if(sent){viewing={item:sent,question:(sent.questions||[])[0]||{}};changed();return;}
+    const at=open?flat().findIndex(r=>key(r.item)===open):-1;
+    if(at>=0){index=at;frozen=undefined;stale=false;}
     const row=current();
     if(!frozen&&(!row||!active(row))){const open=flat().findIndex(r=>active(r));if(open>=0)index=open;}
     changed();
   }
   function forgetPlaces(){for(const entry of entries.values())entry.caret={};}
-  function leave(){forgetPlaces();clearFullNotice(current());focused=false;escapedAt=0;changeArmed=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
+  function leave(){forgetPlaces();clearFullNotice(current());viewing=null;focused=false;escapedAt=0;changeArmed=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
   const seatOf=row=>row?key(row.item)+'\0'+row.question.id:null;
   function move(delta){
+    // From a sent answer being read, Tab goes back to the question it stood over.
+    if(viewing){viewing=null;delta=0;}
     const count=flat().length;index=(index+delta+count+1)%(count+1);
     moves++;changeArmed=false;forgetPlaces();seat=seatOf(flat()[index]);
     frozen=undefined;stale=false;scroll=0;follow=true;resetParser();changed();
@@ -316,6 +337,7 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
         const front=lead+shownChars.slice(one.start,at).join(''),rest=shownChars.slice(at,one.end).join('');
         tail.push(chosenRow([{...mark,text:front,caret:true},...(rest?[{...span(rest,'loc_repo'),answerRow:true}]:[])],true));
       }
+    }else if(phase(row.item)==='sent'){tail.push(sentLine(row.item));
     }else if(picked&&!choosing(row)){
       const selected=picked.map(v=>{if(row.question.secret)return '•'.repeat([...String(v)].length);const n=choices(row).findIndex(c=>value(c)===v);return (n>=0?String(n+1)+' · ':'')+v;});
       tail.push(chosenRow([span('▶ '+selected.join(', '),'loc_repo')],active(row)));
@@ -449,32 +471,34 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
   // text); the panel draws it where the question box stood, never boxed or filled. The answer
   // record's `sent` (secrets already hidden) comes first: when another place's claim won, it is
   // what was sent, not this panel's pick (review 1633, follow-up 3).
-  function sentLines(){
-    const label=(item,question,v)=>{
+  // One sent answer's line: `✓ answer sent · <what was sent>` (a secret `•••`), from the values the item carries (the
+  // backend hides a secret's) or this window's own; nothing is read for it. The panel's line and the popup's say the same.
+  function sentLine(item){
+    const label=(question,v)=>{
       const listed=item.answer_kind==='decision'?[]:question.choices||[];
       const choice=listed.find(c=>value(c)===v);
       return choice===undefined?undefined:String(typeof choice==='object'?choice.label||choice.value:v);
     };
-    return items.filter(item=>phase(item)==='sent').map(item=>{
-      const local=state(item),shown=[];
-      if(Array.isArray(item.sent)&&item.sent.length){
-        for(const v of item.sent.map(String)){
-          const named=(item.questions||[]).filter(q=>!q.secret).map(q=>label(item,q,v)).find(x=>x!==undefined);
-          shown.push(named??v);
-        }
-      }else for(const question of item.questions||[]){
-        for(const v of local.answers[question.id]||[]){
-          if(question.secret){shown.push('•••');continue;}
-          shown.push(label(item,question,v)??String(v));
-        }
+    const local=state(item),shown=[];
+    if(Array.isArray(item.sent)&&item.sent.length){
+      for(const v of item.sent.map(String)){
+        const named=(item.questions||[]).filter(q=>!q.secret).map(q=>label(q,v)).find(x=>x!==undefined);
+        shown.push(named??v);
       }
-      const said=shown.join(', ').replace(/\s+/g,' ').trim();
-      // This window's own reading keeps it from taking the answer: say so, in the words its messages carry.
-      const why=hold()==='screen-large'?text('hold_screen_large',''):'';
-      return [span(text('sent','✓ answer sent'),'lvl_g'),...(said?[span(' · '),span(said,'loc_repo')]:[]),
-        ...(why?[span(' · '),span(why,'dim')]:[])];
-    });
+    }else for(const question of item.questions||[]){
+      for(const v of local.answers[question.id]||[]){
+        if(question.secret){shown.push('•••');continue;}
+        shown.push(label(question,v)??String(v));
+      }
+    }
+    const said=shown.join(', ').replace(/\s+/g,' ').trim();
+    // This window's own reading keeps it from taking the answer: say so, in the words its messages carry.
+    const why=hold()==='screen-large'?text('hold_screen_large',''):'';
+    return [span(text('sent','✓ answer sent'),'lvl_g'),...(said?[span(' · '),span(said,'loc_repo')]:[]),
+      ...(why?[span(' · '),span(why,'dim')]:[])];
   }
+  // The panel's sent lines, each carrying its question (`open`: a press on it opens that question to read).
+  function sentLines(){return items.filter(item=>phase(item)==='sent').map(item=>Object.assign(sentLine(item),{open:key(item)}));}
   async function submit(){
     const row=current();if(!row)return;
     const local=state(row.item),id=row.question.id;
@@ -709,18 +733,21 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
     const now=Date.now(),fresh=answeredAt&&now-answeredAt<10000,closed=escapedAt&&now-escapedAt<1000;answeredAt=escapedAt=0;
     return data.length===1&&(!!fresh&&[0x1b,0x0d,0x0a].includes(data[0])||!!closed&&data[0]===0x1b);
   }
-  // 11-15 (popup design A): the panel's summary of the question Ctrl+] opens on (the one shown,
-  // else the first answerable one): how many there are, its two-row and one-row forms and its
-  // whole first line, from the backend's rows at the panel's width. The popup reads it whole.
-  // `answerable` (panel polish 1): it is one a press answers here, now (the panel paints it so).
+  // 11-15 (popup design A): the panel's summary of the questions waiting here: how many there are and
+  // (11-28, the person: "선지는 미리 보기를 날리고 … 앞에 답 대기를 붉은 색으로 쓴다던지해서 답 보냄과 표현 일관성을 맞추되")
+  // each waiting request's one row, `◑ to answer · <its first line>` (`답 대기`, the folded strip's word), in order: `word`,
+  // `line` (its first question's first line), `answerable` (a press answers it here, now; else `word` is where it is
+  // answered) and `open` (a press on its row opens on it). `answerable`: one of them is. The popup reads each whole.
   function summary(){
     const listed=flat();if(!listed.length)return null;
-    let row=current();
-    if(!row||!active(row)){const open=listed.find(r=>active(r));if(open)row=open;}
-    const view=(row||listed[0]).question.display||{};
-    const fallback=[[span('◑ ','g_blocked'),span((row||listed[0]).question.question||'?','loc_repo')]];
-    return {count:listed.length,label:text('questions','QUESTIONS'),rows:view.brief||fallback,one:view.brief_one||fallback.slice(0,1),
-      line:view.brief_line||fallback[0].slice(1),choices:choices(row||listed[0]).length,answerable:active(row||listed[0])};
+    const waiting=text('waiting','◑ to answer').replace(/^◑\s*/u,'');
+    const waits=items.filter(item=>!phase(item)&&(item.questions||[]).length).map(item=>{
+      const row={item,question:item.questions[0]},view=row.question.display||{},status=terminalState(row);
+      const first=String(row.question.question||'').split('\n').map(line=>line.trim()).find(Boolean)||'?';
+      return {word:active(row)?waiting:text(status==='open'?unanswerable(row):status,status),answerable:active(row),open:key(item),
+        line:view.brief_line||[span(first,'loc_repo')]};
+    });
+    return {count:listed.length,label:text('questions','QUESTIONS'),waits,answerable:waits.some(w=>w.answerable)};
   }
   return {answeredEscape,escaped(){escapedAt=Date.now();},get focused(){return focused;},get waitingForReceipt(){return waitingForReceipt();},
     // `pasting`: a paste stands (the panel's mouse reader leaves its bytes alone); `discarding`: the bulk of one a pressed

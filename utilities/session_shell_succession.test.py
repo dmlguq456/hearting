@@ -720,7 +720,8 @@ class SessionShellSuccessionTest(unittest.TestCase):
         window = self.window()
         first = window.wait_binding(); self.settle(window)
         (window.root/'question').write_text('1')
-        window.until('Pending demo question', 60); window.pump(.5)
+        # (11-28: the panel's row is `◑ 답 대기 · <its first line>`, cut at the panel's width: its first words are looked for.)
+        window.until('Pending demo', 60); window.pump(.5)
         self.assertTrue(window.status().get('empty'))
         native = process_row(window.native_pid())
         window.point('rel-b')
@@ -731,7 +732,7 @@ class SessionShellSuccessionTest(unittest.TestCase):
         window.pump(1.5)
         lines = window.screen()['lines']
         self.assertTrue(any('QUESTIONS' in row for row in lines), lines)
-        self.assertTrue(any('Pending demo question' in row for row in lines), lines)
+        self.assertTrue(any('Pending demo' in row for row in lines), lines)
         read_before = (window.root/'native-read').read_bytes()
         window.type(b'\x1d1\r')
         end = time.monotonic()+15
@@ -753,7 +754,7 @@ class SessionShellSuccessionTest(unittest.TestCase):
         window = self.window()
         first = window.wait_binding(); self.settle(window)
         (window.root/'question').write_text('1')
-        window.until('Pending demo question', 60); window.pump(.5)
+        window.until('Pending demo', 60); window.pump(.5)
         window.type(b'\x1d'); window.pump(.3)
         self.assertTrue(window.status()['focused'])
         window.point('rel-b'); window.pump(2.0)

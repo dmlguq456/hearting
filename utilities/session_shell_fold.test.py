@@ -101,8 +101,7 @@ const model={tag:'[e9]',styles,repo_side:[P('hearting','loc_repo')],selected:[P(
  routes:[{title:'패널 자동 접힘 기준 60칸',kind:'working',paint:{glyph:P('⠸','g_spin')}},{title:'표 칸 정리',kind:'working',paint:{glyph:P('⠸','g_spin')}},
   {title:'휠 입력 시험',kind:'dead',paint:{glyph:P('✕','g_dead')}}],
  messages:[message('→','[73]'),message('←','[e7]'),message('←','[52]'),message('←','[e7]')],lab:{count:'2',counts:[[P('실패 1','lvl_r')]],strip_attention:true}};
-const question=()=>({count:1,label:'QUESTIONS',rows:[[P('◑ ','g_blocked'),P('접힌 모양을 어느 안으로 할까요?','loc_repo')],[P('  ','dim'),P('1 ','dim'),P('아래 두 줄','loc_repo')]],
- one:[[P('◑ ','g_blocked'),P('접힌 모양을 어느 안으로 할까요?','loc_repo')]],line:[P('접힌 모양을 어느 안으로 할까요?','loc_repo')],choices:1,answerable:true});
+const question=()=>({count:1,label:'QUESTIONS',answerable:true,waits:[{word:'답 대기',answerable:true,open:'S4:f@r',line:[P('접힌 모양을 어느 안으로 할까요?','loc_repo')]}]});
 const strip=(o={},m={})=>v.render({width:160,height:1,folded:true,model:{...model,...m},state:'working',frame:3,harness:'claude',brief:question,...o});
 const text=r=>r.rows.map(row=>row.map(x=>x.text).join(''));
 const cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
@@ -190,7 +189,7 @@ assert(!('FOLD_ROWS' in d));
 assert.deepEqual([60,40,24,23,16,15,12,6,3,2,1].map(d.foldRows),[1,1,1,1,1,1,1,1,1,1,1]);
 const P=t=>({text:t});
 const model={tag:'[e9]',repo_side:[P('hearting')],selected:[P('Opus 5.5')],context_side:[P('━━── 58%')],wait:'◑답 대기 1',route_label:'route 1 ⠏1',route_count:1,routes:[{title:'run',kind:'working'}]};
-const draw=(m={})=>v.render({width:80,height:1,folded:true,model:{...model,...m},state:'idle',harness:'claude',brief:()=>({count:1,rows:[[P('◑ '),P('Q?')]],one:[[P('◑ '),P('Q?')]],line:[P('Q?')],choices:0})}).rows.map(r=>r.map(x=>x.text).join('').replace(/ +▴$/,''));
+const draw=(m={})=>v.render({width:80,height:1,folded:true,model:{...model,...m},state:'idle',harness:'claude',brief:()=>({count:1,waits:[{word:'답 대기',answerable:false,line:[P('Q?')]}]})}).rows.map(r=>r.map(x=>x.text).join('').replace(/ +▴$/,''));
 assert.deepEqual(draw(),['● [e9] hearting │ Opus 5.5 │ CTX ━━── 58% │ ◑답 대기 1 │ 1 ROUTE ⠏1']);
 assert.deepEqual(draw({wait:''}),['● [e9] hearting │ Opus 5.5 │ CTX ━━── 58% │ 1 ROUTE ⠏1']);
 """)

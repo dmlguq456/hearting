@@ -333,24 +333,14 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
   const clean=s=>String(s??'').replace(/[\x00-\x1f\x7f-\x9f]/g,' ');
   const measure=cellWidth|| (s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0));
   function clip(parts,limit){let out=[],used=0;for(const part of parts){let s='';for(const c of clean(part.text)){const w=measure(c);if(used+w>limit)break;s+=c;used+=w;}if(s)out.push({...part,text:s});if(used>=limit)break;}return {parts:out,used};}
-  // A question's choices row as one list of parts per choice (`1 `, then its words), its ` · `
-  // joints and a `+N` count left out.
-  function choiceItems(parts){
-    const items=[];
-    for(const part of parts){const s=clean(part.text);
-      if(/^(?: · )?\+\d+$/u.test(s)||s===' · ')continue;
-      if(/^\d+ $/.test(s))items.push([part]);else if(items.length)items.at(-1).push(part);}
-    return items;
-  }
   let inner=width-4,routeArea=null;const content=[],hits=[],edge=[];
   // 11-15: what waits for the person's answer blinks between two reds on Fleet's one-second beat (11-16; spec
   // rule 47's tick; not with `rule motion` off, mono, NO_COLOR, fewer than 256 colors or the settings).
   const waitBlinks=!settings&&cfg.rule_motion!=='off'&&model.no_color!==true&&cfg.theme!=='mono'&&(model.colors??256)>=256;
   const blinking=part=>waitBlinks&&part.role==='accent'?{...part,blink:true}:part;
-  // 11-15 (popup design A): the question the person would answer next, as its summary (the
-  // shell's editor reads it whole in the popup): `count` boxes, `rows` (its first row and its
-  // choices on one row, or its first two rows), `one` (its first row), `line` (its whole first
-  // line, for the folded strip), `choices` (how many).
+  // 11-15 (popup design A): the questions waiting here, as the editor sums them up (it reads each whole in the
+  // popup): `count` boxes, `waits` (11-28: each waiting request's word, first line, `answerable` and `open`),
+  // `answerable` (one of them is answered here, now).
   const summary=(()=>{if(typeof brief!=='function')return null;try{const b=brief();return b&&b.count>0?b:null;}catch{return null;}})();
   // `groups` names the statusline groups a row paints (head, git, context, wait, jobs, route, quota).
   const contentGroups=[];
@@ -1067,79 +1057,62 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return cut(lead,inner);
     };
     // QUESTIONS (11-15, popup design A): the answer wait's count leads the name (`3 QUESTIONS`, the
-    // `◑답 대기 N` row merged into it), then the answers on their way (one dim line each), the next
-    // question's summary (its first row and its choices on one row, or its first two rows) and, for
-    // a wait answered elsewhere, where (#1633). Ctrl+] or a press opens the question popup.
-    const accent=parts=>parts.flatMap(part=>{
-      const s=String(part.text??''),m=/^(\s*)([◑›])(.*)$/su.exec(s);
-      if(!m)return [part];
-      return [...(m[1]?[{...part,text:m[1]}]:[]),{...part,text:m[2],role:'accent'},...(m[3]?[{...part,text:m[3]}]:[])];
-    });
+    // `◑답 대기 N` row merged into it), then the answers on their way (one line each), the questions
+    // waiting here (one row each, three at most; 11-28) and, for a wait answered elsewhere, where (#1633).
+    // Ctrl+] or a press opens the question popup: a press on a sent line or a wait's row on that one (11-28).
     const waitCount=(()=>{const m=/(\S+)\s*$/u.exec(clean(model.wait||'').trim());return model.wait&&m?m[1]:'';})();
     const sentSource=typeof sent==='function'?sent()||[]:[];
-    const sentAt=()=>sentSource.map(row=>cut(row,inner));
+    // A row a press opens on its own question (`open`, the editor's `id@revision`) carries that action.
+    const opens=(row,open)=>open?Object.assign(row,{action:'question:'+open}):row;
+    const sentAt=()=>sentSource.map(row=>opens(cut(row,inner),row.open));
     const sentRows=sentAt();
     const questionCount=waitCount||(summary?String(summary.count):'');
     const asked=!!(summary||sentRows.length||model.wait||guide);
-    let briefTwo=true,keepGuide=true,keepSent=true,keepAction=true;
-    // 11-15 (the person: "빨간 틴트 안에 다시 검은 틴트는 못생겼는데" / "그냥 질문은 글자 자체를 붉은 색으로"): the
-    // question to answer here, now, reads apart from the messages' and memories' rows by its letters
-    // alone: its words (the first row, the second where there are no choices) and its choices' row are
-    // in the answer wait's red (`accent`, as its count and `◑`), never dimmed, no weight added, on no
-    // ground of their own; the choices' row is one line of words (`1 label · 2 label`, the ` · ` and
-    // `+N` dim). `↵ answer · Ctrl+]` stands in rose at the right under them. Short of rows the action
-    // row goes first, then the choices; the first row stays to the last. Eight colors keep the red;
-    // mono and NO_COLOR the weight. A wait answered elsewhere, the answers on their way and the guide
+    let titles=3,keepGuide=true,keepSent=true,keepAction=true;
+    // 11-15 (the person: "빨간 틴트 안에 다시 검은 틴트는 못생겼는데" / "그냥 질문은 글자 자체를 붉은 색으로"): what waits for
+    // an answer here reads apart by its letters alone, on no ground of their own. 11-28 (the person: "선지는 미리 보기를
+    // 날리고 대기중인 선지는 구분이 좀 되게끔 (앞에 답 대기를 붉은 색으로 쓴다던지해서 답 보냄과 표현 일관성을 맞추되 구분이
+    // 되게끔)"): each wait is one row in the sent line's form, `◑ 답 대기 · <its first line>`: the word in the answer
+    // wait's red (`accent`), the ` · ` dim, the words in the body color (no weight, never red); its choices are the
+    // popup's alone. Three rows at most; more waiting, the last row ends in the hidden count (`+2`, dim). `↵ answer ·
+    // Ctrl+]` stands in rose at the right under them. Short of rows the extra rows go first (the third, the second),
+    // then the action row; the first row stays to the last. Short of cells the words are cut before the word. Eight
+    // colors keep the red; mono and NO_COLOR the weight (and the words differ). A wait answered elsewhere and the guide
     // line are never red: what is red is what a press answers now.
     const here=!!summary&&summary.answerable===true;
     const red=part=>({...part,...(styles.g_blocked||{}),role:'accent',dim:false,bold:part.bold===true||model.no_color===true});
-    // 11-16 (the person: "G1에서 질문 바운더리만 붉게 하고, 내용은 흰색으로 해"): inside the box the red is the border's alone, the
-    // question's words, its choices and its `◑` are in the body color (folded back to the plain section they are red as before).
+    // 11-16 (the person: "G1에서 질문 바운더리만 붉게 하고, 내용은 흰색으로 해"): inside the box the words are in the body color.
     const body=part=>({...part,...(styles.loc_repo||{}),role:'',dim:false,bold:part.bold===true});
-    const ink=part=>boxedQuestions()?body(part):red(part);
-    // The choices as one row of words: the first one always shows (short of cells its name is cut with
-    // `…`, its number kept, the rest counted `+N`; narrower still the count gives way first).
-    const choiceLine=parts=>{
-      const lead=parts.length&&!clean(parts[0].text).trim()?[parts[0]]:[];
-      const items=choiceItems(parts).map(c=>c.map(part=>/^\d+ $/.test(clean(part.text))?red(part):part.dim===true?part:ink(part)));
-      const more=Math.max(0,...parts.map(part=>{const m=/^(?: · )?\+(\d+)$/u.exec(clean(part.text));return m?Number(m[1]):0;}));
-      const count=n=>n?[text(' · +'+n,'dim')]:[];
-      // The `…` of a cut name stands for its words: in their color, not the number's rose.
-      const cutItem=(item,room)=>cut(item,room).map((part,i,all)=>i===all.length-1&&part.text==='…'&&item[1]?{...item[1],text:'…'}:part);
-      for(let k=items.length;k>=1;k--){
-        const row=[...lead,...items.slice(0,k).flatMap((c,i)=>[...(i?[text(' · ','dim')]:[]),...c]),...count(items.length-k+more)];
-        if(size(row)<=inner)return row;
-      }
-      if(items.length)for(const rest of [count(items.length-1+more),[]]){
-        const room=inner-size(lead)-size(rest);
-        if(room>=2||!rest.length)return [...lead,...cutItem(items[0],Math.max(1,room)),...rest];
-      }
-      return [...lead,...count(more)];
-    };
     // `↵ answer · Ctrl+]` at the right; narrow, its first word alone.
     const actionRow=()=>{
       const words=t('answer_action','↵ answer · Ctrl+]'),first=words.split(' · ')[0];
       const shown=measure(words)<=inner?words:first,a=[{...text(shown,'g_blocked'),role:'accent'}];
       return [pad(inner-size(a)),...a];
     };
-    // 11-15 (the person: "대기 중인건 점멸을 시키자" / "질문만"): the red of what waits for the answer blinks:
-    // the question answered here (its rows' red letters), and for one answered elsewhere its `◑` and the
-    // guide line's count (in the wait's red). The sent answers' lines never blink.
-    // (A row the backend already cut to a wider panel ends in its own `…` part: that is taken off before the row is cut again.)
-    const recut=row=>size(row)>inner&&row.length>1&&clean(row.at(-1).text)==='…'?row.slice(0,-1):row;
-    const summaryRows=()=>{
-      const list=P(briefTwo?summary.rows:summary.one).map(row=>accent(recut(P(row))));
-      if(!here)return list.map(row=>cut(row,inner).map(blinking));
-      const out=list.map((row,i)=>i===1&&summary.choices>0?choiceLine(row):cut(row.map(part=>!clean(part.text).trim()?part:part.role==='accent'&&!boxedQuestions()?part:ink(part)),inner));
-      if(keepAction&&briefTwo)out.push(actionRow());
-      // 11-16 (the person: the box's border blinks, not the letters inside it): the letters of a question answered here
-      // stand still while the box carries the blink; folded back to the plain section they blink as before.
-      return boxedQuestions()?out:out.map(row=>row.map(blinking));
+    // 11-15 (the person: "대기 중인건 점멸을 시키자" / "질문만"): the red of what waits for the answer blinks: the word
+    // of a question answered here (11-16: inside the box the box carries the blink, the letters stand still), and for
+    // one answered elsewhere the guide line's count (in the wait's red). The sent answers' lines never blink.
+    // (One not answered here: its `◑` alone in the red, blinking, its word dim, as before.)
+    const waitRow=(w,more)=>{
+      const word=red(text('◑ '+w.word,'g_blocked')),mark=blinking(red(text('◑','g_blocked')));
+      const lead=w.answerable?[boxedQuestions()?word:blinking(word)]:[mark,text(' '+w.word,'dim')];
+      const count=more?[text('+'+more,'dim')]:[],joint=[text(' · ','dim')],room=inner-size(lead)-size(joint)-(count.length?size(count)+1:0);
+      // (Not a letter of the words left: the word alone.)
+      const words=cut(P(w.line).map(part=>body({...part,text:clean(part.text)})),Math.max(0,room)),some=words.some(part=>part.text!=='…'&&clean(part.text).trim());
+      const row=some?[...lead,...joint,...words]:cut(lead,inner-(count.length&&size(lead)+size(count)+1<=inner?size(count)+1:0));
+      return count.length&&size(row)+size(count)+1<=inner?[...row,pad(inner-size(row)-size(count)),...count]:row;
+    };
+    const waitRows=()=>{
+      const waits=summary.waits||[],shown=waits.slice(0,Math.max(1,titles));
+      const out=shown.map((w,i)=>opens(waitRow(w,i===shown.length-1?waits.length-shown.length:0),w.open));
+      // (Folded back to the plain section the action row's rose blinks with the word, as before.)
+      if(keepAction&&here)out.push(boxedQuestions()?actionRow():actionRow().map(blinking));
+      return out;
     };
     const guideRow=()=>{const m=/^(\d+)(.*)$/su.exec(guide);
       return cut(m?[blinking(red(text(m[1],'g_blocked'))),text(m[2],'dim')]:[text(guide,'dim')],inner);};
     const questionRows=()=>[...(keepSent?sentAt():[]),
-      ...(summary?summaryRows():[]),
+      ...(summary?waitRows():[]),
       ...(guide&&keepGuide?[guideRow()]:[])];
     // ROUTE (restored 11-15 from v4.36.4, the user's correction: "라우트도 비슷한 방식으로 팝업으로 뜨게"
     // asked for a popup on a press, not for the box to go): the route box as the person shaped it
@@ -2275,10 +2248,10 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const give=(can,apply,undo,family=null)=>{while(need()>budget&&can()){apply();gave.push({undo,family});}};
     const lowest=['MEM','MESSAGES'];
     // RESOURCES gives way first (it is the newest and the least needed of the bottom's sections): the GPU rows, then the host rows.
-    const choices=()=>JSON.stringify([keepSpacers,keepMulti,keepMetaGap,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent,take,kept,keepAction,
+    const choices=()=>JSON.stringify([keepSpacers,keepMulti,keepMetaGap,keepGit,keepOptional,keepQuota,titles,keepGuide,keepSent,take,kept,keepAction,
       keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepQuestionBox,keepUsageHead,keepLine,keepRouteRule,keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]);
     // The give-back's restore: the way back to a state `choices()` recorded.
-    const restore=json=>{const v=JSON.parse(json);[keepSpacers,keepMulti,keepMetaGap,keepGit,keepOptional,keepQuota,briefTwo,keepGuide,keepSent]=v;
+    const restore=json=>{const v=JSON.parse(json);[keepSpacers,keepMulti,keepMetaGap,keepGit,keepOptional,keepQuota,titles,keepGuide,keepSent]=v;
       Object.assign(take,v[9]);Object.assign(kept,v[10]);[keepAction,keepNow,keepWorkers,keepPlace,twoRows,routeLimit,messageOne,keepFootRule,keepQuestionBox,keepUsageHead]=v.slice(11,21);keepLine.splice(0,keepLine.length,...v[21]);keepRouteRule=v[22];[keepBoxEnd,nowTwo,keepCtxLine,resHosts,resGpus,keepCalled]=v.slice(23,29);};
     resGpus=resourceGpuTotal();
     give(()=>side&&resHosts>0&&resGpus>0,()=>{resGpus--;},()=>{resGpus++;});
@@ -2295,9 +2268,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     give(()=>kept.MESSAGES&&take.MESSAGES>2,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
     give(()=>kept.MEM&&take.MEM>1,()=>{take.MEM--;},()=>{take.MEM++;});
     give(()=>kept.MESSAGES&&take.MESSAGES>1,()=>{take.MESSAGES--;},()=>{take.MESSAGES++;});
-    // QUESTIONS: the action row, then the second row of the summary and the guide line.
+    // QUESTIONS (11-28): the extra waits' rows (the third, then the second), the action row, then the guide line.
+    give(()=>!!summary&&Math.min(titles,(summary.waits||[]).length)>1,()=>{titles=Math.min(titles,summary.waits.length)-1;},()=>{titles++;});
     give(()=>here&&keepAction,()=>{keepAction=false;},()=>{keepAction=true;});
-    give(()=>!!summary&&briefTwo,()=>{briefTwo=false;},()=>{briefTwo=true;});
     give(()=>keepGuide&&!!guide,()=>{keepGuide=false;},()=>{keepGuide=true;});
     give(()=>keepMetaGap,()=>{keepMetaGap=false;},()=>{keepMetaGap=true;});
     // (11-16: the QUESTIONS box's two border rows go after its content rows above, before the structural rows below.)
@@ -2451,7 +2424,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
         const key={key:here?'lvl_y':'dim',role:here?'accent-line':'messages',blink:here&&waitBlinks};
         const label=[...(questionCount?[{...text(questionCount,'g_blocked'),role:'accent'},text(' ')]:[]),{...text(summary?.label||'QUESTIONS','dim'),role:'title'}];
         add(boxTop(label,key,{action:'question',arrow:true}).parts,'question',s.groups);
-        for(const row of questionRowsIn())add(boxRow({parts:row},key).parts,'question');
+        for(const row of questionRowsIn())add(boxRow({parts:row},key).parts,row.action||'question');
         add(boxBottom(key).parts,'question');
         continue;
       }
@@ -2464,7 +2437,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
       const into=['MESSAGES','MEM'].includes(s.name)?(parts,action,groups)=>lower.push({parts,action,groups}):add;
       into(s.head(),s.action,s.groups);
-      sectionRows(s).forEach((row,i)=>into(row,s.rowAction?s.rowAction(i):s.action));
+      sectionRows(s).forEach((row,i)=>into(row,row.action||(s.rowAction?s.rowAction(i):s.action)));
     }
     // 11-16: the USAGE rows stand last in the lower block (the last harness's row, where it fits, on the last row below).
     // 11-26 (panel B; the person: "RESOURCES이나 USAGE에 구분선도 없어" / "패널네서 RESOURCES랑 USAGES 글자는 원래 위치로 두지?"): one still rule without

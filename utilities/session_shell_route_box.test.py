@@ -243,7 +243,7 @@ assert(/^← \[e7\] /.test(body[first])&&body[first].includes('검토 요청: �
         # another, the route box stays closed and whole (or gone), its hidden routes are counted on its
         # border, QUESTIONS keeps its head and first row, the last row (5h/7d, fold, gear) stands.
         self.node(self.HEAD + r"""
-const s=golden.scenes,q={count:1,label:'QUESTIONS',rows:[[P('◑ '),P('route 상자를 이대로 둘까요?')],[P('  '),P('1 네 · 2 아니오')]],one:[[P('◑ '),P('route 상자를 이대로 둘까요?')]],line:[P('route 상자를 이대로 둘까요?')],choices:2,answerable:true};
+const s=golden.scenes,q={count:1,label:'QUESTIONS',answerable:true,waits:[{word:'답 대기',answerable:true,open:'S4:r@r',line:[P('route 상자를 이대로 둘까요?')]}]};
 const model={...s.na,routes:[...s.na.routes,...s.da.routes],route_count:4,route_total:4,wait:'◑답 대기 1',answerable:true};
 let seen=0,boxes=0,scrolled=0;
 for(const side of [true,false])for(let height=8;height<=60;height+=side?1:4)for(let width=24;width<=60;width+=side?4:12){
@@ -253,7 +253,7 @@ for(const side of [true,false])for(let height=8;height<=60;height+=side?1:4)for(
  assert(rows.length<=height&&rows.every(r=>cells(r)===w),label);
  assert(v.hits.every(h=>h.row>0&&h.row<rows.length-1&&h.left>=0&&h.right<w),label);
  assert(/⚙   ▾ │$/.test(rows.at(-2)),label);
- if(height>=10&&w>=28){assert(rows.some(r=>/QUESTIONS/.test(r)),'the question head stays\n'+label);assert(rows.some(r=>r.includes('route 상자를')),'its first row stays\n'+label);}
+ if(height>=10&&w>=28){assert(rows.some(r=>/QUESTIONS/.test(r)),'the question head stays\n'+label);assert(rows.some(r=>r.includes('◑ 답 대기 · route')),'its first row stays\n'+label);}
  // (11-16: the QUESTIONS section is a thin box too: at most one box of its own, and the route box one of its own.)
  const tops=rows.filter(r=>/^│ ╭/.test(r)).length,bottoms=rows.filter(r=>/^│ ╰/.test(r)).length,routeTops=rows.filter(r=>/^│ ╭─ (?:\d+ ROUTE|route)/.test(r)).length;
  assert(tops===bottoms&&routeTops<=1&&tops-routeTops<=1,label);

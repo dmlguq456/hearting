@@ -124,16 +124,14 @@ b.input(Buffer.from('hello'));assert.equal(last(),'Enter send · Ctrl+J newline 
         text = lambda parts: "".join(part["text"] for part in parts)
         # 11-15 design F 12: the count leads `QUESTIONS`; F 1: one state word for one question.
         self.assertEqual(text(display["head"]), "◑ 3 QUESTIONS · 1/3 · 답 필요")
-        # The popup's text wraps at its own width; the panel's summary at the panel's.
+        # The popup's text wraps at its own width.
         self.assertTrue(all(sum(2 if ord(c) > 0x2e7f else 1 for c in text(row)) <= 72 for row in display["body"]))
-        self.assertEqual([text(row) for row in display["brief"]],
-                         ["◑ 패널을 접었을 때의 모양을 어느 안으로 구현할…", "  1 아래 두 줄 (다) (추천) · 2 넓힌 옆 띠 … · +2"])
-        self.assertEqual([text(row) for row in display["brief_one"]], ["◑ 패널을 접었을 때의 모양을 어느 안으로 구현할…"])
+        # 11-28 (the person: "선지는 미리 보기를 날리고"): the panel's row of a waiting question is its first line whole
+        # (the panel cuts it); no summary rows of its choices or of its second row are sent any more.
         self.assertEqual(text(display["brief_line"]), "패널을 접었을 때의 모양을 어느 안으로 구현할까요?")
-        # A question without choices takes its first two rows.
-        second = items[1]["questions"][0]["display"]["brief"]
-        self.assertEqual(text(second[0]), "◑ MESSAGES 구분선의 색을 지금 회색 그대로 둘까요")
-        self.assertTrue(text(second[1]).startswith("  , 한 단계 밝게"))
+        self.assertFalse({"brief", "brief_one"} & set(display))
+        self.assertEqual(text(items[1]["questions"][0]["display"]["brief_line"]),
+                         "MESSAGES 구분선의 색을 지금 회색 그대로 둘까요, 한 단계 밝게 할까요? 글로 적어 주세요.")
 
     def test_a_long_question_leaves_the_routes_and_messages_in_a_20_row_window(self):
         # Design "지금 모습에서 본 것": in a 20-row window the question box pushed out ROUTE and MESSAGES.
@@ -154,7 +152,7 @@ for(const [width,side] of [[52,true],[40,true],[90,false]]){
  // Both inputs a host ever gave: the editor's rows (before 11-15) and the summary (now).
  const r=v.render({width,height:20,side,model,state:'idle',harness:'claude',configuration:{},questions:o=>b.detail(o),brief:()=>b.summary(),sent:()=>b.sent()});
  const rows=r.rows.map(row=>row.map(p=>p.text).join('')),all=rows.join('\n');
- for(const want of [side?'4 ROUTE':'route 4','ROUTE_0','MESSAGE_3',side?'╭─ 3 QUESTIONS ─':'3 QUESTIONS','◑ 패널을'])assert(all.includes(want),width+' lost '+want+'\n'+all);
+ for(const want of [side?'4 ROUTE':'route 4','ROUTE_0','MESSAGE_3',side?'╭─ 3 QUESTIONS ─':'3 QUESTIONS','◑ to answer · 패널을'])assert(all.includes(want),width+' lost '+want+'\n'+all);
  assert(!/\bLAB\b/.test(all),all);
  assert(!/╭─ ▶ ◑|╭─ ◑/.test(all),'no question box in the panel\n'+all);
  assert(rows.filter(s=>/패널을|아래 두 줄|넓힌|지금 그대로|21칸/.test(s)).length<=2,all);
@@ -162,9 +160,11 @@ for(const [width,side] of [[52,true],[40,true],[90,false]]){
  // keeps the head row and its rows. A press on the head and on every row of either opens the popup.)
  // (11-17: the route box's zone rule no longer goes first, so a 20-row bottom layout may keep the section's thin box, as the side layout
  // does, and give the messages their one-row form instead; either form: the head row and its rows, or the box.)
- const q=rows.findIndex(s=>s.includes(side?'╭─ 3 QUESTIONS ─':'3 QUESTIONS')),boxed=side||rows[q].includes('╭'),last=boxed?rows.findIndex((s,i)=>i>q&&s.startsWith('│ ╰')):rows.findIndex(s=>s.includes('◑ 패널을'));
+ const q=rows.findIndex(s=>s.includes(side?'╭─ 3 QUESTIONS ─':'3 QUESTIONS')),boxed=side||rows[q].includes('╭'),last=boxed?rows.findIndex((s,i)=>i>q&&s.startsWith('│ ╰')):rows.findIndex(s=>s.includes('◑ to answer · 패널을'));
  assert(q>0&&last>q,all);
- for(let i=q;i<=last;i++)assert(r.hits.filter(h=>h.action==='question').some(h=>h.row===i),i+JSON.stringify(r.hits));
+ // (11-28: a wait's row opens on that wait, `question:<id@revision>`; the rest of the box as before.)
+ for(let i=q;i<=last;i++)assert(r.hits.filter(h=>/^question(:|$)/.test(h.action)).some(h=>h.row===i),i+JSON.stringify(r.hits));
+ assert(r.hits.some(h=>h.action==='question:q1@'+'a'.repeat(64)),JSON.stringify(r.hits));
 }
 console.log('ok');
 """, json.dumps(presented(76, 52), ensure_ascii=False), json.dumps(presented(76, 40), ensure_ascii=False),
