@@ -1428,6 +1428,20 @@ def _interview_questions(rows):
 AUTOMATIC_DIRECTION_DIR = "shards/frame/automatic"
 
 
+AUTOMATIC_DIRECTION_READ_NOTES = (
+    "leg-invalid",
+    "entry-approval-mismatch",
+    "extra-stage-not-compiled",
+    "ignored",
+)
+
+
+def _cut_read_note(row) -> bool:
+    """A compile cut or left a part out; only then a person must see the difference."""
+    return any(str(note).startswith(AUTOMATIC_DIRECTION_READ_NOTES)
+               for note in row.get("read_notes") or ())
+
+
 def _automatic_direction(route, rows, output):
     """`(interview, answers)` the runtime records itself when there is nothing to choose, else None.
 
@@ -1443,7 +1457,7 @@ def _automatic_direction(route, rows, output):
     single = len(rows) == 1 and rows[0]["proposal"] is not None
     if not (single or RP.proposals_equal(rows)) or any(_start_approval_keys(row) for row in rows):
         return None
-    if any(row.get("repository_preparation") or row.get("read_notes") for row in rows):
+    if any(row.get("repository_preparation") or _cut_read_note(row) for row in rows):
         return None   # a part the compile cut or left out is a difference only the person can see
     texts = []
     for row in rows:
