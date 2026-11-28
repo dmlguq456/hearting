@@ -4,6 +4,11 @@ Only a fixed allowlist of scalar metadata can reach disk.  Prompt text, answer
 choices, commands, arguments, denial reasons, model output, and tool payloads
 have no field in this schema.  Producers are observational and fail open.
 
+``call_ref`` is the private identity reference of a native question call that
+``utilities/native_question_redirect.py`` let through (a digest, no text).  It is
+written before the native question opens, so the same call again is told it is
+open there; the wait's own clear ends it.
+
 State lives below ``FLEET_INTERACTION_STATE_DIR`` when set, otherwise below
 ``${XDG_STATE_HOME:-~/.local/state}/agent-fleet/interactions``.
 """
@@ -27,6 +32,7 @@ WAIT_SOURCES = (
     "codex-permissionrequest",
     "codex-rollout",
     "codex-appserver",
+    "codex-question",
     "opencode-question",
     "opencode-form",
     "opencode-permission",
@@ -35,7 +41,7 @@ _BASE_KEYS = frozenset(
     ("schema_version", "harness", "session_id", "kind", "source", "waiting_since")
 )
 _OPTIONAL_ID_KEYS = ("request_id", "turn_id", "item_id")
-_ALLOWED_KEYS = _BASE_KEYS | frozenset(_OPTIONAL_ID_KEYS)
+_ALLOWED_KEYS = _BASE_KEYS | frozenset(_OPTIONAL_ID_KEYS) | {"call_ref"}
 _SAFE_KEY_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _STALE_SWEEP_SEC = 24 * 3600
 _CLOCK_SKEW_SEC = 60
@@ -93,7 +99,7 @@ def _number(value):
 
 
 def _encode(harness, session_id, kind, source, waiting_since, *,
-            request_id=None, turn_id=None, item_id=None):
+            request_id=None, turn_id=None, item_id=None, call_ref=None):
     if kind not in WAIT_KINDS or source not in WAIT_SOURCES or not _number(waiting_since):
         return None
     value = {
@@ -104,7 +110,8 @@ def _encode(harness, session_id, kind, source, waiting_since, *,
         "source": source,
         "waiting_since": float(waiting_since),
     }
-    for name, ref in (("request_id", request_id), ("turn_id", turn_id), ("item_id", item_id)):
+    for name, ref in (("request_id", request_id), ("turn_id", turn_id), ("item_id", item_id),
+                      ("call_ref", call_ref)):
         if ref is None:
             continue
         safe_ref = _safe_identity_ref(name, ref)
@@ -129,7 +136,7 @@ def _atomic_write(path, payload):
     if not _BASE_KEYS.issubset(payload) or not set(payload).issubset(_ALLOWED_KEYS):
         raise ValueError("interaction payload key set violates the allowlist")
     if any(_safe_identity_ref(name, payload[name]) != payload[name]
-           for name in _OPTIONAL_ID_KEYS if name in payload):
+           for name in (*_OPTIONAL_ID_KEYS, "call_ref") if name in payload):
         raise ValueError("interaction native identity ref is invalid")
     directory = os.path.dirname(path)
     _prepare_directory(directory)
@@ -176,15 +183,23 @@ def _remember_closed(current, status):
 
 
 def set_wait(session_id, harness, kind, source, now=None, *,
-             request_id=None, turn_id=None, item_id=None):
-    """Atomically publish one exact wait marker; every failure is observational."""
+             request_id=None, turn_id=None, item_id=None, call_ref=None):
+    """Atomically publish one exact wait marker; every failure is observational.
+
+    A marker with a ``call_ref`` and no request id was written just before its native
+    question opened; the wait that question then publishes is the same one and keeps
+    that reference and start time."""
     try:
+        previous = read_wait(session_id, harness)
+        if (call_ref is None and previous and previous.get("call_ref")
+                and previous["kind"] == kind and "request_id" not in previous):
+            call_ref, now = previous["call_ref"], previous["waiting_since"]
         waiting_since = time.time() if now is None else now
         payload = _encode(harness, session_id, kind, source, waiting_since,
-                          request_id=request_id, turn_id=turn_id, item_id=item_id)
+                          request_id=request_id, turn_id=turn_id, item_id=item_id,
+                          call_ref=call_ref)
         if payload is None:
             return False
-        previous = read_wait(session_id, harness)
         _atomic_write(sidecar_path(session_id, harness), payload)
         if previous and previous["waiting_since"] != payload["waiting_since"]:
             _remember_closed(previous, "replaced")
@@ -230,7 +245,7 @@ def read_wait(session_id, harness):
                 or not set(payload).issubset(_ALLOWED_KEYS)):
             return None
         if any(_safe_identity_ref(name, payload[name]) != payload[name]
-               for name in _OPTIONAL_ID_KEYS if name in payload):
+               for name in (*_OPTIONAL_ID_KEYS, "call_ref") if name in payload):
             return None
         if payload.get("schema_version") != SCHEMA_VERSION:
             return None

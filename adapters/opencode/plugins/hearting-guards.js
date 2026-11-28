@@ -4049,8 +4049,11 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       })
       if (result.status === 1) throw new Error((result.stdout || "").trim())
     }
-    // A native question becomes this session's Hearting question (utilities/native_question_redirect.py):
-    // the call is refused with the short reason; any failure there lets the native question through.
+    // A native question becomes this session's Hearting question (utilities/native_question_redirect.py),
+    // with its three outcomes: exit 1 + a line refuses the call (registered, already open natively,
+    // unknown); exit 0 lets it open (registration failed before any write, its native wait marked).
+    // A check that died or ran out of time after it began registering may have registered it, so it
+    // is refused once; one that died before then wrote nothing and lets the question open.
     // A child (task) session's question is its own: it is not the person's session, so it stays native.
     if (toolName === "question" && !knownChildSession(input.sessionID)
         && (await rootSessionId(ctx, input.sessionID || "")) === (input.sessionID || "")) {
@@ -4059,7 +4062,13 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
         encoding: "utf8",
         timeout: 8000,
       })
-      if (result.status === 1 && (result.stdout || "").trim()) throw new Error((result.stdout || "").trim())
+      const reason = (result.stdout || "").trim()
+      if (result.status === 1 && reason) throw new Error(reason)
+      if (result.status !== 0 && (result.stderr || "").includes("native-question-redirect: registering")) {
+        throw new Error("Hearting could not confirm whether this question was registered (its check did not "
+          + "finish). Make the same call again: it then names the Hearting question or lets the native "
+          + "question open (`hearting run questions ask` registers it too).")
+      }
     }
     // SD-11 stage-dispatch reminder (Claude PreToolUse[Skill]); delivered with the skill's result.
     const skill = skillToolID(toolName, output.args || {})

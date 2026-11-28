@@ -180,7 +180,8 @@ class RedirectTest(Base):
 
 
 class PassThroughTest(Base):
-    """A question the person cannot see is the only failure that matters: every doubt lets it through."""
+    """A question the person cannot see is the only failure that matters: a failure before any write,
+    with no same question read, lets it through (native_question_intercept_1128.test.py: the rest)."""
 
     def board_empty(self):
         self.assertEqual(list(Path(os.environ["XDG_STATE_HOME"]).rglob("*message*")), [])
@@ -196,6 +197,10 @@ class PassThroughTest(Base):
                     with contextlib.redirect_stdout(out):
                         code = redirect.main([flag], stdin=io.StringIO(json.dumps(payload)))
                     self.assertEqual((code, out.getvalue()), (0, ""))
+                    # it opens with its reference on the native wait; that wait's end ends it
+                    from fleet import interaction
+                    self.assertTrue(interaction.read_wait(SID, harness)["call_ref"])
+                    interaction.clear_wait(SID, harness)
 
     def test_a_waiting_hearting_question_stays_and_the_native_one_is_added_beside_it(self):
         """3a (11-28): registration no longer refuses beside another open question, so the native
@@ -246,7 +251,7 @@ class PassThroughTest(Base):
             self.assertIsNone(redirect.redirect("claude", claude_payload(agent_id="sub-1")))
             register.assert_not_called()
 
-    def test_other_tools_secrets_and_malformed_calls_are_left_alone(self):
+    def test_other_tools_and_malformed_calls_are_left_alone(self):
         cases = [("claude", {**claude_payload(), "tool_name": "Bash"}),
                  ("claude", {"session_id": SID, "tool_name": "AskUserQuestion", "tool_input": {}}),
                  ("claude", claude_payload([{"question": " ", "options": []}])),
@@ -254,9 +259,6 @@ class PassThroughTest(Base):
                  ("codex", {**codex_payload(), "tool_name": "update_plan"}),
                  ("opencode", {**opencode_payload(), "tool": "read"}),
                  ("claude", "not a payload"), ("claude", None)]
-        secret = codex_payload()
-        secret["tool_input"]["questions"][0]["isSecret"] = True
-        cases.append(("codex", secret))
         for harness, payload in cases:
             with self.subTest(harness=harness, payload=str(payload)[:60]), \
                  mock.patch.object(state, "register_message") as register:

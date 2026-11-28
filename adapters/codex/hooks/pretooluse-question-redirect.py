@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Codex PreToolUse(request_user_input): register the question as this thread's Hearting question
-and refuse the native call (utilities/native_question_redirect.py). When nothing was registered
-the native question goes through."""
+"""Codex PreToolUse(request_user_input[_async]): carry the outcome of
+utilities/native_question_redirect.py. A registered, already-open or unknown question is refused
+with its one line; a question that goes through (registration failed before any write, no same
+question read) carries its private reference on this thread's Fleet decision marker, so the shared
+wait list counts it until the native question's own PostToolUse or the next prompt clears it."""
 
 import os
 import sys
