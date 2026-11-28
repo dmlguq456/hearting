@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Claude PreToolUse(AskUserQuestion): carry the outcome of utilities/native_question_redirect.py.
 
-Registered (a new or the same open Hearting question) or unknown: the native call is refused with
-its one line. Otherwise the native question goes through and keeps its Fleet decision marker
+Registered (each of the call's questions a new or the same open Hearting question) or unknown: the
+native call is refused with its one line. Otherwise the native question goes through and keeps its Fleet decision marker
 (hooks/fleet-interaction-state.py)."""
 import importlib.util
 import io
