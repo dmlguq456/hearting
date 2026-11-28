@@ -3048,6 +3048,20 @@ def _advance_open(route, path, jobs, result, request, resume, *, wait, interview
                 "bounded-wait means run parent_next_command once."}
 
 
+def _unit_stop(row, capacity=False) -> str:
+    """How a unit turn's capacity end reads, or "". Any recorded capacity evidence reads the same broad way:
+    none of it tells a usage limit from a provider at capacity. `dead-usage-limit` alone is no evidence: the
+    early-death watcher also writes it for any retry exhaustion (a 503, a reset connection, a 401)."""
+    from dispatch_capacity_evidence import _LEGACY_QUOTA_NOTES
+    from dispatch_supervisor_terminal import _CODEX_CAPACITY_STRUCTURED_CODES as codes
+    notes = {"dead-capacity", *_LEGACY_QUOTA_NOTES} - {"dead-usage-limit"}
+    if (capacity or row.get("note") in notes or row.get("failure_class") == "capacity"
+            or row.get("api_status") == "429" or row.get("quota_window")
+            or row.get("provider_failure_kind") in {*codes, "provider.rate-limit", "provider.quota"}):
+        return "stopped for capacity (a usage limit or a provider at capacity)"
+    return ""
+
+
 def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock, resumed=False):
     """Start the one leg of a unit route, or report where it is; repeating this launches nothing twice.
 
@@ -3109,18 +3123,22 @@ def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock, re
             if step.get("reason") == "replacement-capacity-wait":
                 return _capacity_pause({**result, "result": outcome}, step, resume, unit=True)
             if step.get("state") == "needs-attention":
+                # Only the turn's stop and the step's reason go before the step's own instruction: whether
+                # the continuation launched is not settled here, so nothing is promised about it.
                 return {**result, "state": "needs-attention", "reason": step["reason"],
                         "result": outcome, "replacement_attention": [step],
                         "parent_next": "inspect-receipt", "parent_next_command": "",
-                        "next_step": step.get("retry_when") or step.get("next_step")
-                            or "Inspect the unit recovery receipt before continuing this route."}
+                        "next_step": f"The unit worker {_unit_stop(source, True)}; its recovery reported "
+                            f"{step['reason']}. " + (step.get("retry_when") or step.get("next_step")
+                            or "Inspect the unit recovery receipt before continuing this route.")}
         # Ordinary failed or missing results keep the existing inspection and compose path.
         command = _compose_again(route)
         return {**result, "state": "needs-attention", "reason": "unit-outcome-needs-inspection",
                 "result": outcome, "required_action": "compose-again", "parent_next": "compose",
                 "parent_next_command": command,
-                "next_step": "The unit worker ended without a pass. Read its result and report; to run the "
-                    "same unit again, run parent_next_command (a new route; this one stays as it ended)."}
+                "next_step": f"The unit worker {_unit_stop(source) or 'ended without a pass'}. Read its result and "
+                    "report; to run the same unit again, run parent_next_command (a new route; this one stays as "
+                    "it ended)."}
     if wait:
         return _wait_expired(result)
     status, metadata = _rows(jobs).get(aid, rows[aid])

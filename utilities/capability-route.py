@@ -2349,7 +2349,7 @@ def main():
                            launches=started.get("launches") if a.start else None),file=sys.stderr)
         if a.start:
             from start_receipt import print_next_line
-            print_next_line(started)
+            print_next_line(started, jobs=jobs)
         return 0
     if a.command=="correct":
         from dispatch_owner_input import submit, inspect, InputError
@@ -2494,7 +2494,7 @@ def main():
         result={**result, **compose_observations(route)}
         print(json.dumps(result,ensure_ascii=False))
         from start_receipt import print_next_line
-        print_next_line(result)
+        print_next_line(result, jobs=jobs)
         return 0
     if a.command=="compile":
         spec_read=(compose_spec_read(a.cwd,a.artifact_root,None) if a.spec_read is None else

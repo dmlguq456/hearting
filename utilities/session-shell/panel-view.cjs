@@ -2021,22 +2021,14 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // One harness's row within `room` cells: the windows from the first, each whole, going in the order the last row
     // gave them up (the reset times, 5h, the model windows from the last, 7d); a harness with none reported reads
     // `?`. `values` is false where only the name was left.
+    // 11-28: back to the order of the design the person approved on 11-13 (`7d │ fable` at 32 cells; the model values go at 26).
     const usageFit=(u,room)=>{
       const parts=painted(u.parts).filter(p=>p&&typeof p==='object'),groups=[];let current=[],sep=null;
       for(const part of parts){if(String(part.text)===' │ '){sep=sep||part;if(current.length)groups.push(current);current=[];}else current.push(part);}
       if(current.length)groups.push(current);
       const name=usageName(u),mark=text(name,'dim'),lead=pad=>[{...mark,role:'harness-name',harness:u.harness},text(' '.repeat(Math.max(1,pad)))];
-      const tries=[],kinds=usageKindsOf(u,groups.length);
+      const tries=[];
       if(!groups.length)tries.push([text('?','dim')]);
-      else if(kinds){
-        // 11-28 (review of #1911): the kinds the producer sent: the reset times go, then the model windows from the last; a window of
-        // time goes only where its row cannot hold them all (from the last, so 5h and 7d stay longest).
-        const join=gs=>gs.flatMap((g,i)=>i&&sep?[sep,...g.parts]:g.parts);
-        let left=groups.map((g,i)=>({kind:kinds[i],parts:g.filter(part=>!/^\(↻/.test(String(part.text)))}));
-        tries.push(join(groups.map(g=>({parts:g}))),join(left));
-        for(const kind of ['model','period'])while(left.filter(g=>g.kind===kind).length>(kind==='period'?1:0)){
-          const at=left.map(g=>g.kind).lastIndexOf(kind);left=left.filter((_,i)=>i!==at);tries.push(join(left));}
-      }
       else{
         const kind=g=>{const label=g.map(part=>String(part.text)).join('').trim().split(/\s+/)[0];return label==='7d'?'week':/^\d+[mhd]$/.test(label)?'window':'model';};
         const join=gs=>gs.flatMap((g,i)=>i&&sep?[sep,...g]:g);
@@ -2082,6 +2074,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const list=usageData,rows=list.map(usageGroupsOf),periods=[],models=[];
       usageLaid=null;
       if(rows.some(r=>!r))return null;
+      // 11-28 (the person, on v4.81.0: "usage에 상태 파악해라 진짜 최악이네"): the columns stand only where every row reports the same windows
+      // (the windows of time by name and order, the model windows by name), so no cell is left to fill: a window a harness does not report
+      // is never drawn as an unknown `?`. Otherwise each row is fitted on its own, as before 11-27 (its reset times, `│`, the buttons beside it).
+      const same=groups=>groups.map(g=>g.kind+' '+g.label).join('\n');
+      if(rows.some(groups=>same(groups)!==same(rows[0])))return null;
       for(const groups of rows){
         let prev=-1;
         for(const g of groups){

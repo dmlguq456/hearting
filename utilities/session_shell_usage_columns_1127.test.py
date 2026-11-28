@@ -6,6 +6,11 @@ order seen), each the same width in every row: its name left, the value right-al
 where some row has a reset time for it, a time column (`(↻ ?)` where a row has the value and no time). Short of cells the time columns go
 in every row together, then the model windows from the last; 5h and 7d stay side by side. The last row is not laid out again beside the
 buttons. The expected rows are the design's ``usage/A`` renders (PANEL-MEM-RESOURCES-USAGE-RENDERS-1127).
+
+11-28 (the person, on v4.81.0 with the windows the harnesses really report: "usage에 상태 파악해라 진짜 최악이네"): the columns stand only
+where every row reports the same windows. The design drew three rows with different windows (OpenCode no 5h, only Claude a model window)
+and filled the gaps with `?`; with real usage nine of fifteen cells were `?`. Where the windows differ each row is fitted on its own, as
+v4.80.0 drew it (``RealShapesTest``); the design's columns are checked on rows that report the same windows (``SHARED``).
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -28,21 +33,27 @@ SOURCES = {
     "codex": {"quota_windows": [("5h", 100, NOW + 100 * 60), ("7d", 12, None)], "model_quotas": []},
     "opencode": {"quota_windows": [("7d", 8, NOW + 86400)], "model_quotas": []},
 }
-# The design's `usage/A` (the head, the three rows, the buttons' row where the last row does not share it).
+# 11-28: the same windows in every row (5h, 7d, opus; Codex's 7d with no reset time), so the columns stand.
+SHARED = {
+    "claude": SOURCES["claude"],
+    "codex": {**SOURCES["codex"], "model_quotas": [("opus", 40)]},
+    "opencode": {"quota_windows": [("5h", 3, NOW + 2 * 3600), ("7d", 8, NOW + 86400)], "model_quotas": [("opus", 20)]},
+}
+# The design's `usage/A` (the head, the three rows, the buttons' row where the last row does not share it), on ``SHARED``.
 DESIGN = {
     36: ["│ USAGE                            │",
          "│ claude   5h   9%  7d  72%        │",
          "│ codex    5h 100%  7d  12%        │",
-         "│ opencode 5h    ?  7d   8%  ⚙   ▾ │"],
+         "│ opencode 5h   3%  7d   8%  ⚙   ▾ │"],
     44: ["│ USAGE                                    │",
          "│ claude   5h   9%  7d  72%  opus  86%     │",
-         "│ codex    5h 100%  7d  12%  opus    ?     │",
-         "│ opencode 5h    ?  7d   8%  opus    ?     │",
+         "│ codex    5h 100%  7d  12%  opus  40%     │",
+         "│ opencode 5h   3%  7d   8%  opus  20%     │",
          "│                                    ⚙   ▾ │"],
     60: ["│ USAGE                                                    │",
          "│ claude   5h   9%(↻ 45m)     7d  72%(↻ 3d 0h)  opus  86%  │",
-         "│ codex    5h 100%(↻ 1h 40m)  7d  12%(↻ ?)      opus    ?  │",
-         "│ opencode 5h    ?            7d   8%(↻ 1d 0h)  opus    ?  │",
+         "│ codex    5h 100%(↻ 1h 40m)  7d  12%(↻ ?)      opus  40%  │",
+         "│ opencode 5h   3%(↻ 2h 0m)   7d   8%(↻ 1d 0h)  opus  20%  │",
          "│                                                    ⚙   ▾ │"],
 }
 # The design's columns (the left border is column 1): where each window's name starts, where its value ends, where its time starts.
@@ -63,7 +74,7 @@ process.stdout.write(JSON.stringify(jobs.map(job=>{
 """
 
 
-def usage(sources=SOURCES, *, kinds=True):
+def usage(sources=SHARED, *, kinds=True):
     """The USAGE rows as the backend sends them (``usage_rows``: the parts and, 11-28, each window's kind)."""
     from fleet import palette, session_panel
     with mock.patch("time.time", return_value=NOW):
@@ -116,15 +127,14 @@ class UsageColumnsTest(unittest.TestCase):
                 self.assertEqual(len(line), width)
             self.assertNotIn(" 0%", "\n".join(lines))
 
-    def test_an_unknown_value_reads_a_dim_question_mark_and_a_missing_time_a_dim_one(self):
+    def test_a_missing_time_reads_a_dim_mark_and_no_value_is_made_up(self):
         drawn, = paint([{"model": usage(), "width": 60}])
         _at, lines, rows = section(drawn)
         marks = [part for row in rows for part in row if part["text"] in ("?", "(↻ ?)")]
-        self.assertEqual(sorted(part["text"] for part in marks), ["(↻ ?)", "?", "?", "?"])
+        # 11-28: the same windows in every row: no window is drawn as an unknown value; Codex's 7d has a value and no reset time.
+        self.assertEqual([part["text"] for part in marks], ["(↻ ?)"])
         self.assertTrue(all(part["dim"] for part in marks))
-        # Codex's 7d has a value and no reset time: `(↻ ?)`; OpenCode's 5h has no value: no time either.
         self.assertIn("12%(↻ ?)", lines[2])
-        self.assertNotIn("?(↻", lines[3])
         # The values keep their own colors (Fleet's levels) and the model window's name its own.
         from fleet import palette
         claude = rows[1]
@@ -132,10 +142,9 @@ class UsageColumnsTest(unittest.TestCase):
         self.assertEqual(next(p for p in claude if p["text"] == "9%")["fg"], palette.style_components("lvl_g")["foreground"])
         opus = next(p for p in claude if p["text"].startswith("opus"))
         self.assertFalse(opus["dim"])
-        self.assertTrue(all(p["dim"] for p in rows[2] if p["text"].startswith("opus")), "an unknown model value: its name dim")
 
     def test_short_of_cells_the_times_go_together_then_the_model_windows_from_the_last(self):
-        two = {**SOURCES, "claude": {**SOURCES["claude"], "model_quotas": [("opus", 86), ("sonnet", 40)]}}
+        two = {name: {**source, "model_quotas": [*source["model_quotas"], ("sonnet", 40)]} for name, source in SHARED.items()}
         drawn = paint([{"model": usage(two), "width": w} for w in (60, 44, 36, 80)])
         rows = [section(d)[1] for d in drawn]
         at60, at44, at36, at80 = rows
@@ -162,7 +171,7 @@ class UsageColumnsTest(unittest.TestCase):
 
 
 # Review of #1911 (fix 1, 11-28): windows of time the producers name freely (Codex's `4w` and `45s`, Zen Go's `wk` and `mo`) and two model
-# windows. The kinds come from the producer; a window of time with a value never gives way to a model window.
+# windows. The kinds come from the producer (the shared columns read them; a row fitted on its own keeps the 11-13 order).
 REVIEW = {
     "claude": {"quota_windows": [("5h", 9, NOW + 45 * 60), ("7d", 72, NOW + 3 * 86400)], "model_quotas": [("opus", 86), ("sonnet", 40)]},
     "codex": {"quota_windows": [("5h", 24, NOW + 100 * 60), ("7d", 41, None), ("4w", 55, None), ("45s", 50, None)], "model_quotas": []},
@@ -183,31 +192,13 @@ class UsageFix1Test(unittest.TestCase):
             rows = session_panel.usage_rows("claude", REVIEW["claude"])
         self.assertEqual([r["columns"] for r in rows], [["period", "period", "model", "model"], ["period", "period"], ["period", "period"]])
 
-    def test_no_window_of_time_with_a_value_leaves_the_screen(self):
-        drawn = paint([{"model": usage(REVIEW), "width": w} for w in (36, 44, 60)])
-        for width, d in zip((36, 44, 60), drawn):
-            _at, lines, _rows = section(d)
-            for name, source in REVIEW.items():
-                line = next(l for l in lines if l.startswith("│ " + name))
-                labels = [label for label, _used, _reset in source["quota_windows"]]
-                if (width, name) == (36, "codex"):
-                    # Four windows of time are more than 32 cells hold on one row (34 cells without a rule between them): the last
-                    # goes, 5h and 7d stay. (A decision for the person, in the report.)
-                    labels = labels[:3]
-                    self.assertNotIn("45s", line)
-                for label, used, _reset in source["quota_windows"]:
-                    if label in labels:
-                        self.assertRegex(line, r"(^|[ │]){} +{}%".format(label, used), (width, line))
-            # The model windows give way first: the second at 36 and 44, the first at none of these widths.
-            claude = next(l for l in lines if l.startswith("│ claude"))
-            self.assertEqual(("opus" in claude, "sonnet" in claude), (True, width == 60), (width, claude))
-
     def test_a_backend_that_names_no_kinds_draws_each_row_as_before(self):
-        d, = paint([{"model": usage(kinds=False), "width": 60}])
-        _at, lines, _rows = section(d)
-        self.assertEqual(lines[1:4], ["│ claude   5h 9%(↻ 45m) │ 7d 72%(↻ 3d 0h) │ opus 86%       │",
-                                      "│ codex    5h 100%(↻ 1h 40m) │ 7d 12%                      │",
-                                      "│ opencode 7d 8%(↻ 1d 0h)                            ⚙   ▾ │"])
+        # (11-28: so does a backend that names them where the rows report different windows, the design's own rows among them.)
+        for kinds, d in zip((False, True), paint([{"model": usage(SOURCES, kinds=kinds), "width": 60} for kinds in (False, True)])):
+            _at, lines, _rows = section(d)
+            self.assertEqual(lines[1:4], ["│ claude   5h 9%(↻ 45m) │ 7d 72%(↻ 3d 0h) │ opus 86%       │",
+                                          "│ codex    5h 100%(↻ 1h 40m) │ 7d 12%                      │",
+                                          "│ opencode 7d 8%(↻ 1d 0h)                            ⚙   ▾ │"], kinds)
 
     def test_a_taller_panel_never_hides_a_usage_value_or_moves_the_buttons(self):
         # Fix 2 (11-28, review of #1911): the buttons stand beside the last row where it fits there as it is, else on a row of their own,
@@ -249,6 +240,73 @@ class UsageFix1Test(unittest.TestCase):
                             self.assertTrue(any("opus  86%" in line for line in shown), (servers, width, height, shown))
                 # The person's form at 44 and 60: the buttons on a row of their own, at every height USAGE stands.
                 self.assertEqual(places, {"own row"}, (servers, width))
+
+
+# 11-28 (the person, on v4.81.0: "usage에 상태 파악해라 진짜 최악이네"): the windows the harnesses report today (their kinds and number; the
+# values made up): Claude a 7d and a model window, Codex a 7d alone, OpenCode 5h, wk and mo. The rows differ, so each is fitted on its own.
+REAL = {
+    "claude": {"quota_windows": [("7d", 54, NOW + 3 * 86400 + 3 * 3600)], "model_quotas": [("fable", 36)]},
+    "codex": {"quota_windows": [("7d", 62, NOW + 6 * 86400 + 3600)], "model_quotas": []},
+    "opencode": {"quota_windows": [("5h", 0, None), ("wk", 0, None), ("mo", 100, None)], "model_quotas": []},
+}
+# The USAGE rows v4.80.0 (2c4ec6661's panel-view.cjs) drew from the same input: the reset times, `│`, the buttons beside the last row.
+BEFORE = {
+    44: ["│ USAGE                                    │",
+         "│ claude   7d 54%(↻ 3d 3h) │ fable 36%     │",
+         "│ codex    7d 62%(↻ 6d 1h)                 │",
+         "│ opencode 5h 0% │ wk 0% │ mo 100%   ⚙   ▾ │"],
+    50: ["│ USAGE                                          │",
+         "│ claude   7d 54%(↻ 3d 3h) │ fable 36%           │",
+         "│ codex    7d 62%(↻ 6d 1h)                       │",
+         "│ opencode 5h 0% │ wk 0% │ mo 100%         ⚙   ▾ │"],
+    60: ["│ USAGE                                                    │",
+         "│ claude   7d 54%(↻ 3d 3h) │ fable 36%                     │",
+         "│ codex    7d 62%(↻ 6d 1h)                                 │",
+         "│ opencode 5h 0% │ wk 0% │ mo 100%                   ⚙   ▾ │"],
+    80: ["│ USAGE                                                                        │",
+         "│ claude   7d 54%(↻ 3d 3h) │ fable 36%                                         │",
+         "│ codex    7d 62%(↻ 6d 1h)                                                     │",
+         "│ opencode 5h 0% │ wk 0% │ mo 100%                                       ⚙   ▾ │"],
+    # 36: the last row cannot hold OpenCode's three windows beside the buttons: 5h goes first (the 11-13 order).
+    36: ["│ USAGE                            │",
+         "│ claude   7d 54% │ fable 36%      │",
+         "│ codex    7d 62%(↻ 6d 1h)         │",
+         "│ opencode wk 0% │ mo 100%   ⚙   ▾ │"],
+}
+
+
+class RealShapesTest(unittest.TestCase):
+    def test_rows_with_different_windows_read_as_v4_80_0_drew_them_and_no_window_is_made_up(self):
+        widths = sorted(BEFORE)
+        for width, drawn in zip(widths, paint([{"model": usage(REAL), "width": w} for w in widths])):
+            _at, lines, _rows = section(drawn)
+            self.assertEqual(lines, BEFORE[width], width)
+            self.assertNotIn("?", "".join(lines), width)
+            # The buttons stand beside the last harness row: no row of their own.
+            last = len(drawn["rows"]) - 2
+            self.assertEqual(sorted(h["action"] for h in drawn["hits"] if h["row"] == last), ["fold", "settings"], width)
+            self.assertTrue(lines[-1].startswith("│ opencode"), (width, lines))
+
+    def test_two_rows_alike_and_one_not_each_fit_on_its_own(self):
+        alike = {**SHARED, "claude": {**SHARED["claude"], "model_quotas": []}, "codex": {**SHARED["codex"], "model_quotas": []},
+                 "opencode": {"quota_windows": [("7d", 8, NOW + 86400)], "model_quotas": []}}
+        d, = paint([{"model": usage(alike), "width": 60}])
+        self.assertEqual(section(d)[1][1:], ["│ claude   5h 9%(↻ 45m) │ 7d 72%(↻ 3d 0h)                  │",
+                                             "│ codex    5h 100%(↻ 1h 40m) │ 7d 12%                      │",
+                                             "│ opencode 7d 8%(↻ 1d 0h)                            ⚙   ▾ │"])
+
+    def test_a_harness_reporting_no_window_reads_one_question_mark(self):
+        none = {**SHARED, "opencode": {"quota_windows": [], "model_quotas": []}}
+        for width, d in zip((36, 60), paint([{"model": usage(none), "width": w} for w in (36, 60)])):
+            lines = section(d)[1]
+            self.assertEqual("".join(lines).count("?"), 1, (width, lines))
+            self.assertRegex(lines[-1], r"^│ opencode \? +⚙   ▾ │$", width)
+
+    def test_a_backend_that_names_no_kinds_reads_as_v4_80_0_too(self):
+        widths = sorted(BEFORE)
+        for width, drawn in zip(widths, paint([{"model": usage(REAL, kinds=False), "width": w} for w in widths])):
+            lines = section(drawn)[1]
+            self.assertEqual(lines, BEFORE[width], width)
 
 if __name__ == "__main__":
     unittest.main()
