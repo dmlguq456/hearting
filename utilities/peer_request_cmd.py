@@ -161,6 +161,8 @@ def request(args, steward):
     if me is None:
         return _refuse("request=-", "sender-unknown")
     if _ID.fullmatch(args.target or ""):
+        if getattr(args, "route", None):
+            return _refuse("request=%s" % args.target, "route-needs-new-request")
         if getattr(args, "cancel", False):
             return _cancel(args, steward, me)
         return _revise(args, steward, me)
@@ -180,6 +182,15 @@ def request(args, steward):
     recipient = {"harness": identity["harness"], "session_id": sid}
     if recipient == me:
         return _refuse("request=-", "request-to-self")
+    routes = list(dict.fromkeys(getattr(args, "route", None) or ()))
+    holder = steward.peer_message.peer_alias(recipient["harness"], sid)
+    if routes:
+        # Nothing is sent or recorded unless the whole stream can move: checked here,
+        # then again under the writers' locks (record_route_assignment).
+        refusal = _route_refusal(me, recipient, routes)
+        if refusal:
+            return _refuse("request=-", refusal, 1, route=",".join(routes))
+        body += "\n\n" + _route_notes(me, holder, routes)
     title = args.title or body.strip().splitlines()[0]
     label = args.rev or ""
     record, reserved = pr.open_request(_endpoint(steward, me), _endpoint(steward, recipient),
@@ -196,15 +207,144 @@ def request(args, steward):
         committed.append(ref)
 
     refs = [pr.ref_for(request_id, 1, "request")]
+    assigned = None
+    if routes:
+        # Order: the ownership row first, then the seal. A seal that never happened
+        # takes the row back below; a sealed request is delivered and the row stays.
+        import dispatch_seat_handover as handover
+        try:
+            assigned = handover.record_route_assignment(
+                me["harness"], me["session_id"], recipient["harness"], sid, routes, request=request_id)
+        except (OSError, ValueError) as exc:
+            pr.abort(request_id, reserved["ref"])
+            return _refuse("request=-", _route_word(exc), 1, route=",".join(routes))
+    moved = "".join(" route=%s holder=%s" % (route, holder) for route in routes)
     rc, outcome, ref, via, why = _send(steward, _label(steward, recipient), body, recipient, seal,
                                        line, refs, commit, ref=reserved["ref"])
     if not committed:
-        pr.abort(request_id, reserved["ref"])
+        dropped = pr.abort(request_id, reserved["ref"])
+        if assigned and not (dropped and _withdraw(assigned)):
+            # Sealed after all (or not taken back): the request still arrives, so the route stays moved.
+            print("request=- delivery=refused reason=%s%s" % (why or "seal-failed", moved))
+            return rc or 5
         return _refuse("request=-", why or "seal-failed", rc or 5)
-    print("%s delivery=%s to=%s harness=%s via=%s reason=%s next=%s" % (
-        head, _delivery(outcome), steward.peer_message.peer_alias(recipient["harness"], sid),
-        recipient["harness"], via or "-", why or "-", _next_hint(via, why)))
+    print("%s delivery=%s to=%s harness=%s via=%s reason=%s next=%s%s" % (
+        head, _delivery(outcome), holder,
+        recipient["harness"], via or "-", why or "-", _next_hint(via, why), moved))
     return 0 if outcome in ("true", "queued") else rc
+
+
+# --- route hand-off (request --route) ----------------------------------------
+
+_ROUTE_NOTE_BYTES = 2048
+
+
+def _route_word(exc):
+    import dispatch_seat_handover as handover
+    if isinstance(exc, handover.RouteAssignmentRefused):
+        return str(exc)
+    return "registry-unreadable" if isinstance(exc, (handover.RegistryUnreadable, TypeError)) else "handover-unrecorded"
+
+
+def _route_refusal(me, recipient, routes):
+    """The refusal word for handing ``routes`` to ``recipient`` now, or ``""``."""
+    import dispatch_seat_handover as handover
+    import steward_check
+    if me["harness"] != recipient["harness"]:
+        return "harness-mismatch"  # first slice: same harness only
+    if steward_check._session_liveness(recipient["harness"], recipient["session_id"]) == "ended":
+        return "receiver-not-live"
+    try:
+        handover.route_assignment_bindings(me["harness"], me["session_id"], routes,
+                                           handover._default_jobs())
+    except (OSError, ValueError, TypeError) as exc:
+        return _route_word(exc)
+    return ""
+
+
+def _withdraw(row):
+    import dispatch_seat_handover as handover
+    try:
+        return handover.withdraw_route_assignment(row)
+    except (OSError, ValueError, KeyError):
+        return False
+
+
+def _route_notes(me, holder, routes):
+    """C: what the records say about each handed route, appended by the runtime.
+
+    Facts only (route, sealed intent, the person's words, the last sealed summary, who
+    now receives what, the sender's card); which instructions belong to this stream is
+    the receiver's reading. At most 2 KB per route, cut from the end."""
+    import dispatch_seat_handover as handover
+    jobs = handover._default_jobs()
+    rows = list(handover.latest_rows(jobs).values()) if jobs else []
+    try:
+        card = _card_line(me)
+    except Exception:  # noqa: BLE001 - the note is reference text; it never blocks the hand-off
+        card = ""
+    notes = []
+    for route in routes:
+        mine = [(status, meta) for status, meta in rows if handover.route_identity(meta)[0] == route]
+        try:
+            lines = _route_lines(route, mine)
+        except Exception:  # noqa: BLE001
+            lines = ["route %s · 기록을 읽지 못함" % route]
+        lines += [
+            "이제 %s가 받음: 완료 · 주의 알림 · start/correct/close" % holder] + ([card] if card else [])
+        data = "\n".join(lines).encode("utf-8")
+        notes.append(data[:_ROUTE_NOTE_BYTES].decode("utf-8", "ignore"))
+    return "--- handed route (runtime) ---\n" + "\n\n".join(notes)
+
+
+def _route_lines(route, mine):
+    import json
+    import work_intent
+    owners = [(status, meta) for status, meta in mine if meta.get("dispatch_depth") == "1"]
+    status, meta = owners[-1] if owners else ("-", {})
+    stage = next((m.get("route_node") for s, m in reversed(mine)
+                  if m.get("dispatch_depth") == "2" and s in ("open", "running")), None)
+    try:
+        doc = json.loads(Path(meta.get("owner_route_file") or meta.get("route_file")).read_text("utf-8"))
+    except (OSError, ValueError, TypeError):
+        doc = {}
+    intent = work_intent.route_intent(doc) if doc else {}
+    lines = ["route %s · %s · %s · stage %s" % (route, doc.get("capability") or meta.get("capability") or "-",
+                                               status, stage or meta.get("route_node") or "-")]
+    if intent.get("intent"):
+        lines.append("[의도] " + intent["intent"][:160])
+    if intent.get("original"):
+        lines.append('사용자 원문: "%s"' % intent["original"][:160])
+    last = "마지막 완료 요약: 없음"
+    for _status, owner in reversed(owners):
+        text = work_intent.sealed_summary(owner, owner.get("attempt_id", ""))
+        if text and doc.get("artifact_root"):
+            from dispatch_terminal_commit import terminal_slot
+            path = terminal_slot(Path(doc["artifact_root"]), route, owner["attempt_id"]) / work_intent.SUMMARY_NAME
+            artifact = next((item.split(":", 1)[1].strip() for item in text.splitlines()
+                             if item.startswith(("산출물:", "Artifact:"))), "-")
+            last = "마지막 완료 요약: %s · 산출물: %s" % (path, artifact)
+            break
+    return lines + [last]
+
+
+def _card_line(me):
+    """The sender's session card: path, update time and how many of the person's words it keeps."""
+    import time
+    import dispatch_seat_handover as handover
+    import session_card_format as card_format
+    import session_tidy as st
+    seat = handover._assignment_seat(me["harness"], me["session_id"])
+    path = st.card_json_path(seat) if seat else None
+    card = st.read_json(path) if path else None
+    if not isinstance(card, dict) or not isinstance(card.get("body"), str):
+        return ""
+    quoted = [line for key, _title, text in card_format._sections(card["body"])
+              if key == "user_request_quote" for line in text.splitlines() if line.strip()]
+    items = [line for line in quoted if re.match(r"\s*(?:[-*•]|\d+[.)])\s", line)] or quoted
+    when = time.strftime("%m-%d %H:%M", time.localtime(float(card.get("authored_at_epoch") or 0)))
+    return "감독 카드: %s (갱신 %s · 사용자 요구 원문 발췌 %d건) — 이 흐름에 맞는 것만 따르세요" % (
+        path, when, len(items))
 
 
 def _revise(args, steward, me):

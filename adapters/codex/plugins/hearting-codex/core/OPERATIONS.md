@@ -3708,7 +3708,13 @@ the detail in a file and give its path.
 **Peer requests.** A request for work is `peer-steward.py request <address> --body-file
 <file>` (a new `--rev` label supersedes the revision; `request <rq-id> --cancel` withdraws
 it); its answer is `report [<rq-id>] [--partial | --reject <why>] --result <line>`, and
-`show [<rq-id>]` prints the sealed body (no id: this session's open requests). The line
+`show [<rq-id>]` prints the sealed body (no id: this session's open requests).
+`request <address> --route <route-id>` (repeatable: one stream at a time) also hands routes
+the sender holds now to that live session of the same harness: their completions, attention
+notices and `start`/`correct`/`close` move to the receiver, the sender keeps its questions,
+requests, steward flag and every other route, and the runtime appends each handed route's
+recorded facts to the body. A route the sender does not hold now, a closed route, an ended
+receiver or another harness is refused with nothing sent or recorded. The line
 that reaches a conversation names the request; the body stays sealed and the model opens
 it with `show`. Delivery and work are separate: a receipt does not change a request's state;
 only a final or reject report, or the requester's cancel, closes it, and a partial report

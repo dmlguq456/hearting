@@ -1184,7 +1184,13 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             if len(exact_sessions) == 1:
                 owner = exact_sessions[0]
         owner_tag = None
-        for session in slot["sessions"]:
+        if owner is not None:
+            # A route handed to another session is shown under its holder (the parent edge the
+            # shared handover interpreter resolved), not under the session that launched it.
+            edge = _text(_get(owner, "_parent_edge_sid"))
+            if edge and edge != _text(_get(owner, "parent_sid")):
+                owner_tag = tag_by_sid.get(edge)
+        for session in slot["sessions"] if owner_tag is None else ():
             tag = _text(_get(session, "session_tag"))
             if tag in by_tag:
                 owner_tag = tag

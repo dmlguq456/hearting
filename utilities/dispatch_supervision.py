@@ -1130,8 +1130,9 @@ def _open_attempt_rows(jobs):
 def running_route_ids(jobs, candidates, session_id=None):
     """Which of the ``candidates`` route ids have a worker that works or waits on its own work now.
 
-    With ``session_id``, only routes that session launched count (an attempt whose
-    ``parent_sid`` is that session): another session's running route is not its hand-off.
+    With ``session_id``, only routes that session holds now count (the attempt's
+    ``effective_parent``: its launcher, or the session it was handed to): another
+    session's running route is not its hand-off.
 
     Read-only, from the same observer the stall notice uses: an open attempt of the route
     whose observation reads ``active``, or ``waiting`` on something other than a person
@@ -1142,6 +1143,7 @@ def running_route_ids(jobs, candidates, session_id=None):
     if not wanted:
         return set()
     from dispatch_contract import process_table_scan_scope
+    from dispatch_seat_handover import effective_parent
     running = set()
     try:
         jobs = Path(jobs).resolve(strict=True)
@@ -1150,7 +1152,7 @@ def running_route_ids(jobs, candidates, session_id=None):
                 route = metadata.get("owner_route_id") or metadata.get("route_id")
                 if route not in wanted or route in running:
                     continue
-                if session_id is not None and metadata.get("parent_sid") != session_id:
+                if session_id is not None and effective_parent(metadata, jobs) != session_id:
                     continue
                 observation = update_attempt_stall_observation(
                     jobs, metadata.get("attempt_id", ""), persist=False, row=(status, metadata))
