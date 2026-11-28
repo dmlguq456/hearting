@@ -1115,7 +1115,8 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':
 
 
 class CurrentDesignPeerSelectionTest(unittest.TestCase):
-    def _case_test_current_owner_closure_peer_precedes_round_admission(self, *, replacement_owner=False):
+    def _case_test_current_owner_closure_peer_precedes_round_admission(self, *, replacement_owner=False,
+                                                                       dead_primary=False):
         import importlib.util
         from types import SimpleNamespace
         import replica_batch_contract as BATCH_CONTRACT
@@ -1220,9 +1221,11 @@ class CurrentDesignPeerSelectionTest(unittest.TestCase):
                     "batch_perspective": member["perspective"],
                     "batch_parallel_leg_index": member["parallel_leg_index"],
                     "batch_leg_class": member["leg_class"], "batch_auxiliary_check": "-",
-                    "note": ("completed-review-blocking" if node["id"] == nodes[0]["id"]
+                    "note": ("dead-worker-fail" if node["id"] == nodes[0]["id"] and dead_primary
+                             else "completed-review-blocking" if node["id"] == nodes[0]["id"]
                              else "completed-marker"), "launch_claimed": "1",
-                    "failure_class": ("review" if node["id"] == nodes[0]["id"]
+                    "failure_class": ("fail" if node["id"] == nodes[0]["id"] and dead_primary
+                                      else "review" if node["id"] == nodes[0]["id"]
                                       else "fail" if replacement_owner else "pass"),
                     "launch_outcome": "reaped-before-publish",
                 }
@@ -1290,11 +1293,13 @@ class CurrentDesignPeerSelectionTest(unittest.TestCase):
 
             def admission(_route, node, _jobs, **_kwargs):
                 round_calls.append(node["id"])
+                # `dead_primary`: the primary ended without a verdict and is still the current physical attempt.
                 return SimpleNamespace(
                     budget=SimpleNamespace(next_round=3, cap=2, state="admit", round_kind="first",
                                             correction_round=False),
-                    requires_next_round=True,
-                    physical_attempt_ids=frozenset((attempts[0],)), current_attempt_ids=frozenset(),
+                    requires_next_round=not dead_primary,
+                    physical_attempt_ids=frozenset((attempts[0],)),
+                    current_attempt_ids=frozenset((attempts[0],)) if dead_primary else frozenset(),
                     prior_attempt_ids=frozenset((attempts[0],)), reviewed_input=None,
                     source_subject_digest="sha256:" + "c" * 64,
                 )
@@ -1450,6 +1455,13 @@ class CurrentDesignPeerSelectionTest(unittest.TestCase):
                 stack.enter_context(mock.patch.object(batch, "record_allocation_receipt", return_value=None))
                 stack.enter_context(mock.patch.object(batch, "record_degradation", return_value=None))
                 exit_code, receipt = public_start(group)
+                if dead_primary:
+                    # A solo review group continues the sealed batch of a leg it reuses; the design group's start
+                    # keeps its own binding proof: the dead primary is not taken as a proven prior binding.
+                    self.assertEqual((exit_code, receipt.get("reason")), (73, "batch-prior-binding-unproven"), receipt)
+                    self.assertEqual((reserved["calls"], spawned), ([], []))
+                    self.assertIn(original_fail_row, jobs.read_text(encoding="utf-8"))
+                    return
                 self.assertEqual(exit_code, 0, receipt)
                 self.assertEqual(receipt["newly_started"], 1, receipt)
                 self.assertEqual(receipt["existing"], 1, receipt)
