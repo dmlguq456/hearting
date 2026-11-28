@@ -329,6 +329,45 @@ class BoundCensusTest(unittest.TestCase):
         _census, seen = self.run_census(None, {"PATH": "/usr/bin", "HERDR_SESSION": "lab"})
         self.assertIsNone(seen["env"])
 
+    def test_a_default_census_keeps_the_default_servers_own_socket(self):
+        # Review 3: the socket stays when it is where Herdr finds its default server.
+        with tempfile.TemporaryDirectory(prefix="srl-") as config:
+            own = os.path.join(config, "herdr", "herdr.sock")
+            _census, seen = self.run_census("default", {
+                "PATH": "/usr/bin", "XDG_CONFIG_HOME": config, "HERDR_SOCKET_PATH": own})
+            self.assertEqual(seen["env"]["HERDR_SOCKET_PATH"], own)
+            _census, seen = self.run_census("default", {
+                "PATH": "/usr/bin", "XDG_CONFIG_HOME": config, "HERDR_SOCKET_PATH": "/run/lab.sock"})
+            self.assertNotIn("HERDR_SOCKET_PATH", seen["env"])
+
+
+class DefaultServerHandoverSeatTest(_Isolated):
+    """A handover booked from a default-server window keys the successor as its hooks do.
+
+    Review 3 of PR #1933: other Herdr calls keep the default server's inherited socket, so
+    the booked successor seat and the successor window's own hook name one seat ledger."""
+
+    def test_the_booked_successor_seat_is_the_successor_windows_hook_seat(self):
+        import session_tidy
+        socket = str(self.tmp / "herdr.sock")  # the default server's socket its panes inherit
+        os.environ.update({"HERDR_SOCKET_PATH": socket, "HERDR_PANE_ID": "w1:p3"})
+        mock.patch.object(peer, "_HERDR_SESSION", None).start()
+        peer._mark_seat_successor("w1:p5", "w1:p4", "claude", "new-sid")
+        requester = {"pane": "w1:p5", "server": "default", "harness": "claude", "session_id": "new-sid"}
+        with mock.patch("dispatch_seat_handover.record_retire_handover",
+                        return_value={"bindings": [{}]}) as handed:
+            got = peer._seat_handover({"pane": "w1:p4", "session_id": "old-sid", "harness": "codex"},
+                                      "new-sid", "claude", requester=requester,
+                                      accepted_at=__import__("time").time() + 60)
+        self.assertEqual(got, "1")
+        booked = handed.call_args.kwargs["successor_seat"]
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "w1:p5"}), \
+             mock.patch("pane_ownership.verified_pane", side_effect=lambda pane, *_a, **_k: pane):
+            hook = session_tidy.resolve_seat("claude", sid="new-sid", hook=True)
+        self.assertEqual((hook.pane, hook.socket_path), ("w1:p5", socket))
+        self.assertEqual((booked.pane, booked.key, booked.endpoint, booked.socket_path),
+                         (hook.pane, hook.key, hook.endpoint, hook.socket_path))
+
 
 class WatchKeepsTheStartServerTest(_Isolated):
     """`start → watch` on one pane keeps the server the pane was seen on (review 11-28)."""

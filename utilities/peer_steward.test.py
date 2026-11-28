@@ -3362,12 +3362,9 @@ class WatchTerminalReconcileTest(unittest.TestCase):
             "HERDR_SESSION": "fourth", "HERDR_SOCKET_PATH": "/fourth.sock"})
         self.assertNotIn("HERDR_SOCKET_PATH", back_to_default)
         self.assertNotIn("AGENT_HERDR_SESSION", back_to_default)
-        # A socket alone names no owner (it may be another server's): the default server
-        # keeps none and Herdr finds the default one itself (review 2 of PR #1933).
-        socket_only = module._herdr_env_for_server("default", {
+        same_default = module._herdr_env_for_server("default", {
             "AGENT_HERDR_SESSION": "fourth", "HERDR_SOCKET_PATH": "/default.sock"})
-        self.assertNotIn("HERDR_SOCKET_PATH", socket_only)
-        self.assertNotIn("AGENT_HERDR_SESSION", socket_only)
+        self.assertEqual(same_default["HERDR_SOCKET_PATH"], "/default.sock")
 
     def test_ensure_settles_an_ended_target_receipt_before_spawning_an_orphan_observer(self):
         with tempfile.TemporaryDirectory() as temporary:
