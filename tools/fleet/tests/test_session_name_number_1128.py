@@ -74,6 +74,14 @@ class SessionNameNumber(unittest.TestCase):
         for key in list(self.children):
             self.end(key)
 
+    def fresh(self):
+        """A new fixture for one subtest, whatever the previous one left: no child, record or number."""
+        self._reap()
+        session_tags._path().unlink(missing_ok=True)
+        sr._STEADY.clear()
+        sr._STEADY_UNCONFIRMED.clear()
+        self.agents = []
+
     def spawn(self, key, *argv):
         child = subprocess.Popen([sys.executable, "-c", HOLD, *argv], stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -130,6 +138,19 @@ class SessionNameNumber(unittest.TestCase):
 
     def rows(self):
         return session_tags._read(session_tags._path())
+
+    def codex(self, tag):
+        """A live Codex session whose id hashes to ``tag``."""
+        sid = next("synthetic-live-%s-%d" % (tag, n) for n in range(4096)
+                   if minted_tag("synthetic-live-%s-%d" % (tag, n)) == tag)
+        self.spawn("codex-" + tag)
+        child = self.children["codex-" + tag]
+        return Session(harness="codex", pid=child.pid, session_id=sid, proc_start=sr._proc_start(child.pid))
+
+    def stored(self, *rows):
+        """Rewrite the snapshot as another writer left it."""
+        session_tags._path().parent.mkdir(parents=True, exist_ok=True)
+        session_tags._path().write_text(json.dumps({"version": 1, "assignments": list(rows)}))
 
     def resumed_on_a_new_name(self):
         """OLD shows ``[8e]``; a new process resumes it under ``proj-72`` and reports it first."""
@@ -361,7 +382,7 @@ class SessionNameNumber(unittest.TestCase):
     def test_a_late_census_does_not_retire_a_newer_row_for_the_window_name(self):
         for change in ("pane", "reaffirm"):
             with self.subTest(change=change):
-                session_tags._path().unlink(missing_ok=True)
+                self.fresh()
                 self.spawn("q", "--resume", NEW)
                 self.record("q", NEW, "proj-8e")
                 self.spawn("p", "--resume", OLD)
@@ -379,7 +400,6 @@ class SessionNameNumber(unittest.TestCase):
                     self.fleet_pass(self.row("p", NEW))
                 self.assertEqual(session_tags.assigned_tag("claude", OLD), "72")
                 self.assertEqual(session_tags.assigned_tag("claude", NEW), "8e")
-                self.end("p")
 
     # --- only a record of this very process names it (review 3) ----------------------------------
     def test_a_record_without_its_process_start_does_not_take_a_number(self):
@@ -387,7 +407,7 @@ class SessionNameNumber(unittest.TestCase):
         cases += [(harness, True) for harness in ("codex", "opencode")]
         for harness, confirmed in cases:
             with self.subTest(harness=harness, confirmed=confirmed):
-                session_tags._path().unlink(missing_ok=True)
+                self.fresh()
                 self.spawn("p", "--resume", OLD)
                 child = self.children["p"]
                 start = sr._proc_start(child.pid)
@@ -402,13 +422,12 @@ class SessionNameNumber(unittest.TestCase):
                 session_tags.assign([])
                 self.assertEqual(session_tags.assigned_tag(harness, OLD), current)
                 self.assertNotEqual(session_tags.assigned_tag("claude", EARLIER), current)
-                self.end("p")
 
     # --- a held conversation is named only by the window #1849 chose (review 4) ------------------
     def test_a_held_conversation_takes_no_name_from_another_process(self):
         for other_sid in (OLD, NEW):
             with self.subTest(other=other_sid):
-                session_tags._path().unlink(missing_ok=True)
+                self.fresh()
                 self.spawn("viewer", "--resume", OLD)
                 self.record("viewer", OLD, "proj-82")
                 self.fleet_pass(self.row("viewer", OLD))
@@ -424,10 +443,6 @@ class SessionNameNumber(unittest.TestCase):
                 self.record("other", other_sid, "proj-91")
                 session_tags.assign(rows)
                 self.assertEqual(session_tags.assigned_tag("claude", NEW), "82")
-                for key in ("viewer", "held", "other"):
-                    self.end(key)
-                sr._STEADY.clear()
-                sr._STEADY_UNCONFIRMED.clear()
 
     # --- a retired earlier session hands its seat over (review 5) --------------------------------
     def test_a_retired_earlier_session_hands_its_seat_to_the_next_report(self):
@@ -456,6 +471,129 @@ class SessionNameNumber(unittest.TestCase):
         self.assertSame("p", EARLIER)
         self.assertIsNone(session_tags.assigned_tag("claude", NEW))
         self.assertEqual(self.address("8e"), EARLIER)
+
+    # --- review 2 (11-28): the seat, the process evidence, the owner of a number -----------------
+    def test_a_late_census_does_not_hand_a_newer_row_to_the_seat_successor(self):
+        for successor_stored in (True, False):
+            with self.subTest(successor_stored=successor_stored):
+                self.fresh()
+                self.resumed_on_a_new_name()
+                self.agents = [{"agent": "claude", "pane_id": "w:prior", "agent_session": {"kind": "id", "value": OLD}}]
+                self.fleet_pass(self.row("w", OLD))  # OLD = [72], [8e] held, at w:prior
+                own = None
+                if successor_stored:
+                    self.spawn("q", "--resume", NEW)
+                    self.record("q", NEW, "proj-33")
+                    self.fleet_pass(self.row("w", OLD), self.row("q", NEW))
+                    own = session_tags.assigned_tag("claude", NEW)
+                    self.assertNotIn(own, (None, "72", "8e"))
+                    self.end("q")
+                self.record("w", NEW, "proj-72")     # the census reads w resumed into NEW at w:seat ...
+                self.agents = [{"agent": "claude", "pane_id": "w:seat", "agent_session": {"kind": "id", "value": NEW}}]
+                child = self.children["w"]
+
+                def back():                          # ... then w goes back to OLD and reports it there
+                    self.record("w", OLD, "proj-72")
+                    session_tags.assign_observed("claude", OLD, pane_id="w:seat", pid=child.pid,
+                                                 proc_start=sr._proc_start(child.pid))
+                with self.stale_census(back):
+                    self.fleet_pass(self.row("w", NEW))
+                kept = self.rows()[("claude", OLD)]
+                self.assertEqual((kept["tag"], kept.get("held"), kept.get("pane_id")), ("72", ["8e"], "w:seat"))
+                self.assertEqual(session_tags.assigned_tag("claude", NEW), own)
+                self.assertEqual((self.address("72"), self.address("8e")), (OLD, OLD))
+
+    def test_a_start_time_from_another_record_does_not_retire_a_live_session(self):
+        self.spawn("q", "--resume", OLD)
+        self.record("q", OLD, "proj-72")
+        self.fleet_pass(self.row("q", OLD))
+        self.assertSame("q", OLD)
+        self.spawn("p")
+        p = self.children["p"]
+        self.path(self.children["q"]).write_text('{"pid": ')   # q's record is unreadable for a while
+        # a file under the reused PID p still names OLD and omits procStart
+        self.path(p).write_text(json.dumps({"pid": p.pid, "sessionId": OLD, "kind": "interactive"}))
+        session_tags.assign([])                      # OLD's row takes p's PID and start time
+        self.assertEqual(self.rows()[("claude", OLD)]["pid"], p.pid)
+        self.record("p", NEW, "proj-72")             # p now registers NEW, with its start time
+        session_tags.assign([])
+        self.assertEqual(session_tags.assigned_tag("claude", OLD), "72")
+        self.assertNotEqual(session_tags.assigned_tag("claude", NEW), "72")
+        self.assertEqual(self.address("72"), OLD)
+
+    def test_a_name_from_one_process_does_not_retire_a_session_of_another(self):
+        self.spawn("p2", "--resume", OLD)
+        self.record("p2", OLD, "proj-72")
+        self.fleet_pass(self.row("p2", OLD))
+        self.assertSame("p2", OLD)
+        self.spawn("p1", "--resume", NEW)
+        self.record("p1", NEW, "proj-72")            # p1 names NEW by the list's derived name ...
+        self.record("p2", NEW)                       # ... while p2 resumed NEW too, under no derived name
+        first = "%d.json" % self.children["p1"].pid
+        glob = Path.glob
+        with mock.patch.object(Path, "glob", lambda path, pattern: sorted(glob(path, pattern),
+                                                                          key=lambda f: f.name != first)):
+            session_tags.assign([])                  # p1's record is read first, p2's last
+        self.assertEqual(session_tags.assigned_tag("claude", OLD), "72")
+        self.assertNotEqual(session_tags.assigned_tag("claude", NEW), "72")
+        self.assertEqual(self.address("72"), OLD)
+
+    def test_a_held_number_taken_back_keeps_the_earlier_number_too(self):
+        self.resumed_on_a_new_name()
+        self.fleet_pass(self.row("w", OLD))          # OLD = [72], [8e] held
+        self.end("w")
+        self.spawn("p", "--resume", OLD)             # a new process named proj-8e reports OLD ...
+        self.record("p", OLD, "proj-8e")
+        self.observe("p", OLD)
+        self.record("p", NEW, "proj-8e")             # ... and resumes NEW in place before a full pass
+        codex = self.codex("72")
+        self.fleet_pass(self.row("p", NEW), codex)
+        self.assertSame("p", NEW)
+        self.assertEqual((self.address("72"), self.address("8e")), (NEW, NEW))
+        self.assertNotIn(session_tags.assigned_tag("codex", codex.session_id), (None, "72", "8e"))
+
+    def test_a_legacy_duplicate_number_has_one_owner_after_one_pass(self):
+        for names in (("proj-72", "proj-8e"), ("proj-8e", "proj-72")):
+            with self.subTest(names=names):
+                self.fresh()
+                rows = []
+                for n, (key, sid, name) in enumerate((("a", OLD, names[0]), ("b", NEW, names[1]))):
+                    self.spawn(key, "--resume", sid)
+                    self.record(key, sid, name)
+                    child = self.children[key]
+                    rows.append({"harness": "claude", "session_id": sid, "tag": "8e", "first_seen": 1000 + n,
+                                 "started_at": 1000 + n, "pid": child.pid, "proc_start": sr._proc_start(child.pid)})
+                self.stored(*rows)                   # an older writer left both on [8e]
+                self.fleet_pass(self.row("a", OLD), self.row("b", NEW))
+                self.assertEqual(self.address("8e"), OLD)
+                tags = {session_tags.assigned_tag("claude", sid) for sid in (OLD, NEW)}
+                self.assertEqual(len(tags - {None}), 2)
+
+    # --- accepted limit (user, 11-28 17:03): an earlier-version writer right after an install ------
+    def test_accepted_limit_an_earlier_version_census_drops_the_moved_off_number(self):
+        self.resumed_on_a_new_name()
+        self.fleet_pass(self.row("w", OLD))
+        self.assertEqual(self.address("8e"), OLD)
+        # An earlier version's full census rewrites the observed row without `held`.
+        self.stored(*({k: v for k, v in row.items() if k not in ("held", "proc_confirmed")}
+                      for row in self.rows().values()))
+        self.assertEqual(self.address("8e"), None)
+        codex = self.codex("8e")
+        self.assertEqual(session_tags.assign_observed("codex", codex.session_id), "8e")
+        self.assertEqual(self.address("8e"), codex.session_id)   # the remembered [8e] reaches it
+        self.assertSame("w", OLD)
+
+    def test_accepted_limit_an_earlier_version_report_overlaps_the_moved_off_number(self):
+        self.resumed_on_a_new_name()
+        self.fleet_pass(self.row("w", OLD))
+        codex = self.codex("8e")
+        # An earlier version's native report draws [8e] for a new session: it keeps `held` but ignores it.
+        self.stored(*self.rows().values(), {"harness": "codex", "session_id": codex.session_id, "tag": "8e",
+                                            "first_seen": 9e9, "started_at": 9e9})
+        self.assertEqual(self.address("8e"), None)   # fleet-tag-ambiguous: neither one receives it
+        self.fleet_pass(self.row("w", OLD), codex)
+        self.assertEqual(self.address("8e"), None)
+        self.assertSame("w", OLD)
 
 
 if __name__ == "__main__":

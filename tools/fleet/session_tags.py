@@ -166,7 +166,8 @@ def _inventory(sessions):
             if key not in viewers:
                 row = live.setdefault(key, {"harness": harness, "session_id": sid,
                                       "started_at": _started(harness, sid, session_registry._ms_to_sec(record.get("startedAt")))})
-                row.update(pid=pid, proc_start=start)
+                # Only a record that carries its start time confirms the row's process.
+                row.update(pid=pid, proc_start=start, proc_confirmed=record.get("procStart") is not None)
                 if harness == "claude" and not row.get("tag"):
                     row["tag"] = _claude_tag_candidate(sid)
             # The session list shows this window as `<folder>-<xx>`: Claude names an interactive
@@ -179,7 +180,8 @@ def _inventory(sessions):
                     and record.get("procStart") is not None
                     and (chosen.get(key) == (str(pid), str(start)) if key in viewers
                          else key not in viewers.values())):
-                named["_registered"] = tag if named.get("_registered", tag) == tag else ""
+                bundle = (tag, str(pid), str(start))   # the name with the process that bears it
+                named["_registered"] = bundle if named.get("_registered", bundle) == bundle else ""
     agents = list_agents()
     for agent in agents or []:
         identity = agent.get("agent_session") or {}
@@ -258,6 +260,8 @@ def assign_observed(harness, sid, *, pane_id=None, pid=None, proc_start=None):
     row.update({key: value for key, value in
                 (("pane_id", pane_id), ("pid", pid), ("proc_start", proc_start))
                 if value is not None})
+    if pid is not None and proc_start is not None:
+        row["proc_confirmed"] = True   # a native report names its own process
     if harness == "claude":
         from .session_handle import _claude_tag_candidate
         row["tag"] = _claude_tag_candidate(sid)
@@ -316,9 +320,9 @@ def _continuations(live, observed, lineage):
     return edges
 
 
-def _same_process(row, other):
-    return (bool(row.get("pid")) and row.get("proc_start") is not None
-            and (row.get("pid"), str(row.get("proc_start"))) == (other.get("pid"), str(other.get("proc_start"))))
+def _same_process(row, pid, start):
+    """``row`` was stored from a record or native report of this very process (PID and start time)."""
+    return row.get("proc_confirmed") is True and (str(row.get("pid")), str(row.get("proc_start"))) == (pid, start)
 
 
 def _renumber(row, tag, keep=()):
@@ -331,7 +335,7 @@ def _renumber(row, tag, keep=()):
         row.pop("held", None)
 
 
-def _follow_registered_names(live, observed, registered, stored, protected):
+def _follow_registered_names(live, observed, registered, stored, protected, owner):
     """Give a Claude window's session the number of the name the session list shows for it.
 
     ``registered`` is ``{key: xx}`` from the window's own live record (``<folder>-<xx>``, an
@@ -339,28 +343,29 @@ def _follow_registered_names(live, observed, registered, stored, protected):
     process registers, while a stored number follows the session id: a resume in a new process,
     an in-process resume, or a number drawn before the record named the session leave the two
     apart. The number moves to the name's only when no stored session holds or keeps it, or its
-    holder is this window's earlier session (same harness and process, not observed, no newer
-    row than this census read), which retires and hands its seat evidence over. A number the
-    session already published stays reserved for it (``held``) while it lives, so a remembered
-    address never names another session. A newer row (``protected``) is not this census's to
-    rename. Among windows sharing a name, the one Fleet stored first takes its number."""
+    holder is this window's earlier session (same harness, its row confirmed in the very process
+    that bears the name, not observed, no newer row than this census read), which retires and
+    hands its seat evidence and its numbers over. A number the session owned (``owner``: the
+    earliest stored row of a number) stays reserved for it (``held``) while it lives. A newer row
+    (``protected``) is not this census's to rename. Among windows sharing a name, the one Fleet
+    stored first takes its number."""
     for key in sorted((key for key, named in registered.items() if named and key in live
                        and key not in protected), key=lambda key: _order(live[key])):
-        row, named = live[key], registered[key]
+        row, (named, pid, start) = live[key], registered[key]
         holders = [other for other, kept in live.items() if other != key
                    and (kept.get("tag") == named and other in stored or named in _held(kept))]
         if (row.get("tag") == named and not holders) or any(
                 other in observed or other in protected or other[0] != key[0]
-                or not _same_process(live[other], row) for other in holders):
+                or not _same_process(live[other], pid, start) for other in holders):
             continue
-        keep = [row["tag"]] if key in stored and row.get("tag") else []
+        keep = [row["tag"]] if owner.get(row.get("tag")) == key else []
         for other in holders:
             earlier = live.pop(other)
             first = min(earlier, row, key=_order)
             row["first_seen"], row["started_at"] = first["first_seen"], first["started_at"]
             if row.get("pane_id") is None and earlier.get("pane_id") is not None:
                 row["pane_id"] = earlier["pane_id"]
-            keep += _held(earlier)
+            keep += _held(earlier) + ([earlier["tag"]] if owner.get(earlier.get("tag")) == other else [])
         _renumber(row, named, keep)
 
 
@@ -431,7 +436,11 @@ def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=
             # the earliest session it continues, and those ended ids retire.
             stored = set(old)
             for successor, predecessors in _continuations(live, observed, lineage).items():
-                if successor not in live:
+                # A newer row (``protected``) is not this census's to retire or hand over; a new
+                # successor waits for the next pass without a number rather than with a passing one.
+                if successor not in live or protected & {successor, *predecessors}:
+                    if successor not in old:
+                        live.pop(successor, None)
                     continue
                 chain = [live[key] for key in predecessors if key in live]
                 if not chain:
@@ -446,7 +455,12 @@ def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=
                     row["pane_id"] = chain[0]["pane_id"]
                 for key in predecessors:
                     live.pop(key, None)
-            _follow_registered_names(live, observed, registered, stored, protected)
+            # One owner per stored number, decided once before any name moves: the row that
+            # keeps it in allocation order (a legacy Claude duplicate's earliest row).
+            owner = {}
+            for key in sorted(stored & live.keys(), key=lambda key: (key not in old, *_order(live[key]))):
+                owner.setdefault(live[key].get("tag"), key)
+            _follow_registered_names(live, observed, registered, stored, protected, owner)
             taken = set()
             held = {tag for row in live.values() for tag in _held(row)}
             movable = sorted(live.items(), key=lambda item: (0 if item[0] in old else 1, *_order(item[1])))
@@ -456,7 +470,7 @@ def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=
             displaced = []
             for key, row in movable:
                 tag = row.get("tag")
-                if tag and tag not in taken and (key in old or tag not in held):
+                if tag and tag not in taken and (owner.get(tag) == key or tag not in held):
                     taken.add(tag)
                 else:
                     displaced.append(row)

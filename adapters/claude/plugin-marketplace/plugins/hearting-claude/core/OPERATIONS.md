@@ -1785,12 +1785,15 @@ Fleet collection also moves a live Claude window's number to the name the sessio
 list shows for it (`<folder>-<xx>`, `nameSource: derived`, read from that
 interactive process's own record with its start time; a window sent to the
 background names the held session from the window #1849 chose, and the held
-session keeps that number after the link ends). It moves only when no stored
-session holds or keeps that number, or its holder is the same window's earlier
-session (same process, not observed, not newer than the collection); a native
-report alone moves none. The number a session moved off stays reserved for
-it and still addresses it while it lives, so a remembered `[xx]` cannot reach
-another session. Legacy
+session keeps that number after the link ends). Windows try in the order Fleet
+first stored them, and stored rows and their kept numbers come first: a number
+moves only when no other stored session holds or keeps it, or its holder is the
+same window's earlier session (stored from a record or report of that same
+process, not observed, not newer than the collection); a native report alone
+moves none. The numbers a session owned stay reserved for it and address it
+while it lives; each takes one of the 256 numbers. Accepted limit: a Fleet of the
+earlier version still running right after an install rewrites rows without
+these reservations, and a later session can then draw a moved-off `[xx]`. Legacy
 Claude duplicates keep the earliest assignment and move later colliding rows.
 Normal start, native reports and collection attempt these reservations without
 waiting for a writer lock; allocation failure does not fail the observed work.
