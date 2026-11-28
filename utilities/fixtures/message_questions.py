@@ -14,6 +14,7 @@ import io
 from types import SimpleNamespace
 from pathlib import Path
 import tempfile
+import unittest
 from unittest import mock
 
 import human_wait_state as waits
@@ -228,7 +229,8 @@ class MessageQuestionFixture:
             name = "message_question_codex_hook"
         else:
             if not self.node:
-                raise RuntimeError("Node is unavailable for the OpenCode callback fixture")
+                # A host without node cannot run the plugin's own call: the OpenCode case is skipped, not failed.
+                raise unittest.SkipTest("Node is unavailable for the OpenCode callback fixture")
             # `chat.message` first asks the guidance its system context carries, with the very
             # Python call written in the plugin, then receives the text.
             plugin = (root / "adapters/opencode/plugins/hearting-guards.js").read_text(encoding="utf-8")
@@ -499,7 +501,7 @@ process.stdout.write(JSON.stringify({systems, tools, calls, log, history: messag
         context of every model call, the tool results, the session history and the count after
         each step."""
         if not self.node:
-            raise RuntimeError("Node is unavailable for the OpenCode plugin fixture")
+            raise unittest.SkipTest("Node is unavailable for the OpenCode plugin fixture")
         root = Path(tidy.__file__).resolve().parents[1]
         source = (root / "adapters/opencode/plugins/hearting-guards.js").read_text(encoding="utf-8")
         start = source.index("function ownNativePaneOrigin() {")
