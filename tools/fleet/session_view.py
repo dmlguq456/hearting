@@ -14,7 +14,7 @@ from pathlib import Path
 from . import gitinfo, titles, session_registry, context_policy, session_handle
 from .collectors import claude, codex, opencode, usage_cache
 from .model import Session
-from .token_budget import parse_codex_token_count, telemetry_from_explicit
+from .token_budget import parse_codex_token_count, telemetry_from_explicit, opencode_context_used_pct
 
 
 from .native_display import claude_callback as _claude_callback, percentage as _percentage, claude_percentage as _claude_percentage
@@ -153,9 +153,10 @@ def observe(harness, pid, proc_start, sid, *, previous=None, raise_unread=False,
             # A delayed callback must never borrow the newly selected session.
             return {}, [str(path) for path in paths if path]
         raw = _percentage((sess.context_policy or {}).get("raw_percentage"))
-        sess.ctx_pct = raw if raw is not None else telemetry_from_explicit(
-            adapter="opencode", active_context_tokens=sess.active_context_tokens,
-            context_window_tokens=sess.context_window_tokens).context_used_pct
+        policy = sess.context_policy if isinstance(sess.context_policy, dict) else (
+            {"effective_window_tokens": sess.context_window_tokens})
+        sess.ctx_pct = raw if raw is not None else opencode_context_used_pct(
+            sess.active_context_tokens, policy)
     if transcript:
         paths.append(transcript)
     # Native selection and policy are inputs even before their first record.
