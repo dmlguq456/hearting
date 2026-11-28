@@ -15,9 +15,9 @@ built-in system prompt verbatim (extracted from Claude Code 2.1.220) so the
 override changes only the model/effort pin, never behavior. `light`/`deep` are
 harness-owned types whose budgets align with the portable light/deep profiles.
 
-The kernel helper `memory-scout` stays hand-authored (harness-manifest kernel
-agent, guard-exempted); this generator owns only the catalog types. The shared
-renderer in `utilities/native_agents.py` plans, generates and checks them.
+No hand-authored agent ships beside them (`memory-scout` was retired: a call by
+that name starts a `general/explore` unit route, `capabilities/unit.md`). The
+shared renderer in `utilities/native_agents.py` plans, generates and checks them.
 """
 
 from __future__ import annotations
@@ -62,9 +62,9 @@ _BUILTIN_GP_DESCRIPTION = (
     "tries use this agent to perform the search for you."
 )
 
-# A person's session's call of a catalog agent starts a unit route (core/OPERATIONS.md §5.10c); the
-# same definition serves a registered worker, whose call runs natively, so the line names the session.
-_UNIT_ROUTE = (" In a person's session the call starts a read-only Hearting unit route "
+# A call of a catalog agent from a person's session or a supervised owner starts a unit route
+# (core/OPERATIONS.md §5.10c); the worker home builder renders the same definition, so the line names both.
+_UNIT_ROUTE = (" In a person's session or a supervised owner the call starts a read-only Hearting unit route "
                "(general/explore, {depth}) when that is certain, and otherwise runs natively.")
 
 CATALOG_AGENTS = {
@@ -144,11 +144,11 @@ def render(name: str, profile: Optional[str], cfg: Mapping[str, str]) -> tuple[s
 FORMAT = native_agents.Format(
     adapter="claude",
     kernel_names=(),
-    static_names=("memory-scout",),
+    static_names=(),
     shipped_relpath=lambda name: f"{name}.md",
     dest_name=lambda name: f"{name}.md",
     render=render,
-    collect_glob=None,  # the directory also holds the hand-written memory-scout.md
+    collect_glob="*.md",
 )
 
 

@@ -229,24 +229,20 @@ opencode_runtime_projection_check() {
     printf 'check=failed\nreason=opencode-hearting-missing\nopencode_home=%s\nexpected=%s\n' "$opencode_home" "$harness"
     return 69
   fi
-  # Kernel helper is the projection liveness probe: runtime team agents retired
-  # 2026-07-22 (재홈, CONVENTIONS §2.3) — memory-scout is the only projected native agent.
-  native_agent="$opencode_home/agents/memory-scout/memory-scout.md"
-  [ -f "$native_agent" ] || native_agent="$opencode_home/agents/memory-scout.md"
-  [ -f "$native_agent" ] || native_agent="$opencode_home/agent/memory-scout.md"
-  if [ ! -f "$native_agent" ]; then
-    printf 'check=failed\nreason=opencode-native-agents-missing\nopencode_home=%s\nexpected=%s|%s\n' "$opencode_home" "$opencode_home/agents/memory-scout/memory-scout.md" "$opencode_home/agents/memory-scout.md"
-    return 69
-  fi
+  # The command below is the projection liveness probe; the native agents are
+  # checked against the activation's own plan in the Python step (the depth
+  # agents are withheld when the selected models.conf makes their model
+  # main-session-only, so no fixed agent file can stand in).
   native_command="$opencode_home/commands/autopilot-code.md"
   [ -f "$native_command" ] || native_command="$opencode_home/command/autopilot-code.md"
   if [ ! -f "$native_command" ]; then
     printf 'check=failed\nreason=opencode-native-commands-missing\nopencode_home=%s\nexpected=%s|%s\n' "$opencode_home" "$opencode_home/commands/autopilot-code.md" "$opencode_home/command/autopilot-code.md"
     return 69
   fi
-  if ! python3 - "$ROOT" "$harness" "$opencode_home" <<'PY'
-import pathlib, re, sys
-sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "tools/install"))
+  if ! python3 - "$SELF_REAL" "$harness" "$opencode_home" <<'PY'
+import os, pathlib, re, sys
+# The checking code ships beside this script; this home's root below is only data for it.
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]).parents[3] / "tools/install"))
 import projector, runtime_activation
 home = pathlib.Path(sys.argv[3])
 state = projector.opencode_activation(home)
@@ -265,10 +261,35 @@ for filename in scan:
             issues.append(f"opencode-runtime-projection-exposes-claude-surface: {filename}")
     except (OSError, UnicodeError):
         issues.append(f"guard dependency unreadable: {filename}")
+# The agent part of the judgment `runtime status` makes: every agent file the plan for this home
+# expects is in place and readable, not a broken link (a plan whose models.conf withholds every agent
+# expects none). A home no activation recorded (a source install) needs a readable definition the
+# installer links (in agent/, or agents/ and its per-agent folder, which OpenCode also reads), unless
+# the renderer projects nothing for it because its models.conf withholds every agent the same way.
+agents = []
+try:
+    if state.get("mode"):
+        planned = [e for e in runtime_activation._desired_entries(
+            "opencode", state["mode"], pathlib.Path(state["source_root"]), root, state.get("active_revision"),
+            "global") if e["surface"] == "agent"]
+        if (runtime_activation._entries_healthy(planned)[0]
+                or not all(pathlib.Path(e["dest"]).is_file() for e in planned)):
+            agents.append("an agent file the plan expects is missing or a broken link")
+    else:
+        os.environ["AGENT_HOME"] = str(root)  # the installer's projection from this home's own root
+        if not any((home / folder / pathlib.Path(e["dest"]).name).is_file()
+                   for e in projector.plan(["opencode"])["opencode"]
+                   if pathlib.Path(e.get("dest", "")).parent == home / "agent"
+                   for folder in ("agent", "agents", "agents/" + pathlib.Path(e["dest"]).stem)):
+            if (runtime_activation._native_agent_entries("opencode", root, home)[0]  # the renderer's plan
+                    or not runtime_activation._agents_withheld_by_policy("opencode", root, home)):
+                agents.append("no agent definition where the installer links them")
+except (KeyError, runtime_activation.ActivationError) as exc:
+    agents.append(str(exc))
 print(f"guard_layout={layout['detail']}")
-if issues:
-    print("check=failed\nreason=opencode-guard-projection-invalid")
-    print("detail=" + "; ".join(issues))
+if issues or agents:
+    print("check=failed\nreason=" + ("opencode-guard-projection-invalid" if issues else "opencode-native-agents-missing"))
+    print("detail=" + "; ".join(issues or agents))
     sys.exit(1)
 PY
   then
@@ -279,11 +300,11 @@ PY
     return 69
   fi
   if rg -q 'adapters/claude|claude_setting|settings\.json|statusline\.sh|CLAUDE\.md|agent-modes|allowedTools|/\.claude/' \
-    "$native_agent" "$native_command" 2>/dev/null; then
+    "$native_command" 2>/dev/null; then
     printf 'check=failed\nreason=opencode-runtime-projection-exposes-claude-surface\nopencode_home=%s\n' "$opencode_home"
     return 69
   fi
-  printf 'runtime_projection=ok\nopencode_home=%s\nnative_agent=%s\nnative_command=%s\n' "$opencode_home" "$native_agent" "$native_command"
+  printf 'runtime_projection=ok\nopencode_home=%s\nnative_command=%s\n' "$opencode_home" "$native_command"
   return 0
 }
 

@@ -884,6 +884,56 @@ class NativeCommandTest(NativeCase):
         self.write.assert_called_once_with(99, (clear.CONTINUE_TEXT + "\r").encode())
         self.assertEqual(clear.read_reservation(self.seat.key)["continued"]["state"], "sent")
 
+    def held_claim_on_the_private_connection(self, second_look):
+        """The private connection claims the continue, then its second look answers ``second_look()``.
+        Returns (the command's result, the continuing session's seat)."""
+        req, path = self.book(continuing=True); self.prepare_transport()
+        looks = []
+
+        def ready(*_a):
+            looks.append(1)
+            return None if len(looks) == 1 else second_look()
+        result = self.run_command(req, path, continuing=True, ready=ready)
+        self.write.assert_not_called()
+        return result, st.session_seat(self.seat, "claude", "session-A")
+
+    def test_a_held_claim_stays_released_when_the_booking_then_ends(self):
+        # Scene 9 (round 4, yellow 1): the private connection let its claim go for a draft
+        # (`released`), and the continue was then settled (its window ended); the settle wrote
+        # `unverified` over the claim, so the person's own `이어서해` read as the tidy's claim.
+        result, caller = self.held_claim_on_the_private_connection(lambda: "draft")
+        self.assertEqual((result["continued"], result["reason"]), ("queued", "draft"))
+        claim_id = result["claim_id"]
+        self.assertEqual(st.tidy_claim_by_id(caller, claim_id)["state"], "released")
+        with st.seat_lock(self.seat.key):
+            held = clear.read_reservation(self.seat.key)
+            held["continued"]["deadline"] = time.time() - 1
+            clear._write_reservation(held)
+        self.assertEqual(clear.settle_unsent_continue("claude", "session-A"), 1)
+        self.assertEqual(clear.read_reservation(self.seat.key)["continued"]["state"], "skipped")
+        self.assertEqual(st.tidy_claim_by_id(caller, claim_id)["state"], "released")
+        st.run_hook("claude", "prompt", "session-A", cwd=self.cwd, prompt_text=clear.CONTINUE_TEXT)
+        self.assertEqual(st.prompt_state(caller)["source"], "real")
+
+    def test_a_claim_let_go_after_a_newer_booking_was_written_ends_released(self):
+        # Scene 9 (round 4, yellow 2): after the private connection's claim, a newer booking of the
+        # same session was written before its second look; the release stopped before the ledger,
+        # so the claim stayed `sending` and the person's own `이어서해` read as the tidy's claim.
+        def newer_booking_then_draft():
+            with st.seat_lock(self.seat.key):
+                old = clear.read_reservation(self.seat.key)
+                clear._write_reservation({**{key: old[key] for key in ("schema", "seat", "harness", "sid", "cwd")},
+                                          "nonce": "n3wer", "status": "reserved", "created": time.time(),
+                                          "deadline": time.time() + 600, "prompt_seq": old["prompt_seq"],
+                                          "card_generation": old["card_generation"], "continue_off": False})
+            return "draft"
+        result, caller = self.held_claim_on_the_private_connection(newer_booking_then_draft)
+        self.assertEqual((result["continued"], result["reason"]), ("skipped", "superseded"))
+        self.assertEqual(clear.read_reservation(self.seat.key)["nonce"], "n3wer")    # left as it is
+        self.assertEqual(st.tidy_claim_by_id(caller, result["claim_id"])["state"], "released")
+        st.run_hook("claude", "prompt", "session-A", cwd=self.cwd, prompt_text=clear.CONTINUE_TEXT)
+        self.assertEqual(st.prompt_state(caller)["source"], "real")
+
     def test_another_session_after_send_cannot_confirm_the_continue_prompt(self):
         req, path = self.book(continuing=True); self.prepare_transport()
         def sent(fd, text):

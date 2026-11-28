@@ -574,6 +574,23 @@ class OpenCodeGuardDiscoveryTest(unittest.TestCase):
         self.remove(self.js)
         self.assertEqual(activation.duplicate_sources("opencode"), [])
 
+    def test_packaged_uninstall_leaves_no_broken_installer_link(self):
+        # An older installer's link into an earlier packaged bundle, with no activation record (review
+        # R2 🔴1): refresh leaves it; uninstall removes it with the bundles it deletes.
+        report = self.run_activation("packaged")
+        older = Path(report["active_root"]).parent.parent / "older" / "source"
+        target = older / "adapters/opencode/agents/handmade/handmade.md"
+        target.parent.mkdir(parents=True)
+        target.write_text("# handmade\n")
+        (older / "harness-manifest.json").write_text("{}\n")
+        left = self.home / "agents/handmade.md"
+        left.symlink_to(target)
+        self.assertIn("unmanaged-extra:agents/handmade.md", activation.refresh("opencode")["duplicate_sources"])
+        self.assertTrue(left.is_symlink() and left.exists())
+        self.assertIn(str(left), activation.deactivate("opencode")["removed"])
+        self.assertFalse(older.exists())
+        self.assertFalse(left.exists() or left.is_symlink(), left)
+
 
 class ManagedCopyProjectionHealthTest(unittest.TestCase):
     def test_copy_health_requires_matching_regular_file_bytes_and_mode(self):
@@ -3407,6 +3424,48 @@ class NativeAgentRenderTest(unittest.TestCase):
     def lines(self, report):
         return "\n".join(report.get("report_lines", []))
 
+    def opencode_preflight(self, agent_home=REPO_ROOT, script=REPO_ROOT / "adapters/opencode/bin/preflight.sh"):
+        """`preflight.sh headless --check` against this home, with a stand-in `opencode` on PATH."""
+        stub = self.root / "bin" / "opencode"
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub.write_text("#!/bin/sh\necho 2.0.32\n", encoding="utf-8")
+        stub.chmod(0o755)
+        env = {**os.environ, "PATH": f"{stub.parent}{os.pathsep}{os.environ.get('PATH', '')}",
+               "AGENT_HOME": str(agent_home)}
+        return subprocess.run(["sh", str(script), "headless", "--check",
+                               str(REPO_ROOT)], env=env, capture_output=True, text=True, timeout=600)
+
+    # main before memory-scout retired: an older source that still ships its unpinned definition, and whose
+    # runtime_activation has no `_agents_withheld_by_policy`.
+    OLDER_SOURCE = "0ea6458b3"
+
+    def older_source(self):
+        """A copy of that main, made once per class from the checkout's history."""
+        cls = type(self)
+        if getattr(cls, "_older_source", None) is None:
+            archive = subprocess.run(["git", "-C", str(REPO_ROOT), "archive", self.OLDER_SOURCE], capture_output=True)
+            if archive.returncode != 0:
+                self.skipTest(f"needs commit {self.OLDER_SOURCE} in the checkout's history")
+            temporary = tempfile.TemporaryDirectory()
+            cls.addClassCleanup(temporary.cleanup)
+            subprocess.run(["tar", "-x", "-C", temporary.name], input=archive.stdout, check=True)
+            cls._older_source = Path(temporary.name)
+        return cls._older_source
+
+    def source_install(self, source):
+        """The v1 source installer from `source` (it records no activation); returns its agent/ links."""
+        import drivers.opencode as source_installer
+        version = mock.patch.dict(os.environ, {"OPENCODE_RUNTIME_VERSION": "1.19.0"})  # its v1 guard file
+        version.start()
+        self.addCleanup(version.stop)
+        with mock.patch.dict(os.environ, {"AGENT_HOME": str(source)}):
+            self.assertFalse(source_installer.install()["blocked"])
+        home = self.home("opencode")
+        self.assertFalse((home / ".harness/activation.json").exists())
+        installed = sorted((home / "agent").glob("*.md"))
+        self.assertTrue(installed)
+        return installed
+
     # -- T1 / T6: the verify condition ---------------------------------------
     def test_all_three_adapters_follow_the_user_models_and_never_touch_shipped_files(self):
         before = self.shipped_snapshot()
@@ -3424,13 +3483,8 @@ class NativeAgentRenderTest(unittest.TestCase):
                 self.assertEqual(models["deep"], "fixture-user-deep")
                 self.assertEqual(models["light"], "fixture-user-light")
                 self.assertEqual(models["balanced"], "fixture-user-light")
-                if runtime == "codex":
-                    scout = self.agent(runtime, "memory-scout")
-                    self.assertFalse(scout.is_symlink())
-                    self.assertEqual(self.model_of(scout), "fixture-user-light")
-                if runtime == "claude":
-                    # The hand-written definition is not generated and stays a shipped link.
-                    self.assertTrue(self.agent(runtime, "memory-scout").is_symlink())
+                self.assertEqual(sorted(self.installed_agents(runtime)),
+                                 sorted(f"{name}{self.EXT[runtime]}" for name in self.CATALOG))
         self.assertEqual(self.shipped_snapshot(), before)
 
     # -- T2: a copy equal to the shipped file projects the shipped files ------
@@ -3449,7 +3503,7 @@ class NativeAgentRenderTest(unittest.TestCase):
                                  if runtime == "opencode" else
                                  sorted(Path(e["dest"]).relative_to(self.home(runtime)).as_posix() for e in agents)
                                  if runtime == "codex" else [])
-                self.assertEqual(len(agents), 5)
+                self.assertEqual(len(agents), 4)
                 for entry in agents:
                     dest = Path(entry["dest"])
                     if runtime == "codex":
@@ -3519,21 +3573,160 @@ class NativeAgentRenderTest(unittest.TestCase):
 
     # -- T3: known defect 1 --------------------------------------------------
     def test_every_model_main_session_only_projects_no_agents_and_never_falls_back_to_shipped(self):
-        for runtime in ("codex", "claude"):
+        for runtime in ("codex", "claude", "opencode"):
             with self.subTest(runtime):
                 activation.activate(runtime, "linked", str(REPO_ROOT))
                 before = self.installed_agents(runtime)
                 self.assertIn(f"deep{self.EXT[runtime]}", before)
                 self.write_conf(runtime, {"CFG_MAIN_SESSION_ONLY_MODELS": " ".join(self.shipped_models(runtime))})
                 report = activation.refresh(runtime)
-                expected = ["memory-scout.md"] if runtime == "claude" else []
-                self.assertEqual(self.installed_agents(runtime), expected)
+                self.assertEqual(self.installed_agents(runtime), [])
                 text = self.lines(report)
                 for name in self.CATALOG:
                     self.assertIn(f"native agent {name} withheld", text)
-                if runtime == "codex":
-                    self.assertIn("native agent memory-scout withheld", text)
                 self.assertEqual(report["freshness"], "fresh", report)
+                if runtime == "codex":  # the mode files are still applied beside no agent file
+                    self.assertTrue((self.home("codex") / "agent-modes/plan/frame.md").is_symlink())
+                if runtime == "opencode":
+                    check = self.opencode_preflight()
+                    self.assertIn("check=ok", check.stdout, check.stdout + check.stderr)
+
+    def test_a_blank_or_broken_catalog_is_not_an_empty_surface_by_policy(self):
+        # No valid name, or a malformed entry, withholds nothing (review R2 🔴2): refresh fails and keeps
+        # the definitions it had and its record. A malformed entry beside a valid name whose model is
+        # withheld does not count either (review R3 🟡2).
+        for runtime in ("codex", "claude", "opencode"):
+            activation.activate(runtime, "linked", str(REPO_ROOT))
+            directory = self.home(runtime) / "agents"
+            before = {path.name: path.read_bytes() for path in directory.iterdir()}
+            record = activation._state_path(runtime).read_bytes()
+            self.assertIn(f"deep{self.EXT[runtime]}", before)
+            light = " ".join(self.shipped_models(runtime, ("CFG_TIER_LIGHT_MODEL",)))
+            for edits in ({"CFG_NATIVE_AGENT_CATALOG": " "}, {"CFG_NATIVE_AGENT_CATALOG": "broken-token"},
+                          {"CFG_NATIVE_AGENT_CATALOG": "light:light broken-token",
+                           "CFG_MAIN_SESSION_ONLY_MODELS": light}):
+                with self.subTest(runtime=runtime, **edits):
+                    self.write_conf(runtime, edits)
+                    with self.assertRaisesRegex(activation.ActivationError, "activation surfaces: agent"):
+                        activation.refresh(runtime)
+                    self.assertEqual({path.name: path.read_bytes() for path in directory.iterdir()}, before)
+                    self.assertEqual(activation._state_path(runtime).read_bytes(), record)
+
+    # -- T3a: an empty agent surface is not the policy's unless the plan says so (review 🔴2) ------
+    def test_a_plan_that_lost_its_rows_or_a_home_that_lost_its_files_is_not_fresh(self):
+        real_run = subprocess.run
+
+        def empty_plan(argv, *args, **kwargs):  # a renderer answering with a valid but empty envelope
+            if any(str(part).endswith("sync-native-agents.py") for part in argv[:2]):
+                return subprocess.CompletedProcess(argv, 0, json.dumps(
+                    {"schema": "hearting.native-agents/v1", "agents": [], "static_names": []}), "")
+            return real_run(argv, *args, **kwargs)
+        for runtime in ("codex", "claude", "opencode"):
+            with self.subTest(runtime):
+                activation.activate(runtime, "linked", str(REPO_ROOT))
+                activation._NATIVE_AGENT_PLANS.clear()
+                with mock.patch.object(activation.subprocess, "run", side_effect=empty_plan):
+                    with self.assertRaisesRegex(activation.ActivationError, "activation surfaces: agent"):
+                        activation.refresh(runtime)     # Codex: its mode files do not stand in
+                    self.assertEqual(activation.status(runtime)["freshness"], "missing")
+                activation._NATIVE_AGENT_PLANS.clear()
+                self.assertTrue((self.home(runtime) / "agents" / f"deep{self.EXT[runtime]}").exists())
+                for name in self.CATALOG:               # the plan is whole; the home lost its files
+                    # destructive-ok: reason=simulate a home that lost its projected agent files; boundary=agent leaves this test's activation wrote in its private runtime home
+                    self.agent(runtime, name).unlink()
+                self.assertEqual(activation.status(runtime)["freshness"], "missing")
+                if runtime == "opencode":
+                    check = self.opencode_preflight()
+                    self.assertEqual(check.returncode, 69, check.stdout)
+                    self.assertIn("reason=opencode-native-agents-missing", check.stdout)
+                    for name in self.CATALOG:           # every expected link now points at nothing (R2 🔴3)
+                        self.agent(runtime, name).symlink_to(self.root / "gone" / f"{name}.md")
+                    check = self.opencode_preflight()
+                    self.assertEqual(check.returncode, 69, check.stdout)
+                    self.assertIn("reason=opencode-native-agents-missing", check.stdout)
+                    for name in self.CATALOG:
+                        # destructive-ok: reason=drop the broken links this test made; boundary=agent leaves this test linked in its private runtime home
+                        self.agent(runtime, name).unlink()
+                self.assertEqual(activation.refresh(runtime)["freshness"], "fresh")
+
+    def test_a_source_install_with_no_activation_record_needs_its_agent_definitions(self):
+        # The v1 source installer records no activation (review R2 🔴3): the preflight still needs a
+        # readable definition where it links them, unless the selected models.conf withholds every agent.
+        installed = self.source_install(REPO_ROOT)
+        check = self.opencode_preflight()
+        self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+        for path in installed:
+            # destructive-ok: reason=simulate a source install that lost its agent links; boundary=agent leaves the fixture's installer linked in its private runtime home
+            path.unlink()
+        check = self.opencode_preflight()
+        self.assertEqual(check.returncode, 69, check.stdout)
+        self.assertIn("reason=opencode-native-agents-missing", check.stdout)
+        self.write_conf("opencode", {"CFG_MAIN_SESSION_ONLY_MODELS": " ".join(self.shipped_models("opencode"))})
+        check = self.opencode_preflight()
+        self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+
+    def test_an_older_source_whose_renderer_still_projects_a_definition_needs_it(self):
+        # Beside the case above: the policy excuses a lost definition only when the renderer projects none
+        # (review R3 🔴2). main's renderer still projects the unpinned memory-scout no models.conf withholds,
+        # so with every catalog model withheld the home that lost it fails as it did on main, whichever of
+        # the two sources the caller's AGENT_HOME names.
+        older = self.older_source()
+        installed = self.source_install(older)
+        self.assertIn("memory-scout.md", [path.name for path in installed])
+        for path in installed:
+            # destructive-ok: reason=simulate an older source install that lost its agent links; boundary=agent leaves the fixture's installer linked in its private runtime home
+            path.unlink()
+        self.write_conf("opencode", {"CFG_MAIN_SESSION_ONLY_MODELS": " ".join(self.shipped_models("opencode"))})
+        for agent_home in (REPO_ROOT, older):
+            with self.subTest(agent_home=str(agent_home)):
+                check = self.opencode_preflight(agent_home=agent_home)
+                self.assertEqual(check.returncode, 69, check.stdout + check.stderr)
+                self.assertIn("reason=opencode-native-agents-missing", check.stdout)
+
+    def test_the_check_runs_its_own_code_whatever_source_the_caller_names(self):
+        # The checking code ships with the script (review R3 🔴3); the home's source is only its data. A caller
+        # whose AGENT_HOME names main, whose runtime_activation predates the policy helper, still gets the
+        # judgment and its reason, through the script or the installer's link into this source.
+        installed = self.source_install(REPO_ROOT)
+        for path in installed:
+            # destructive-ok: reason=simulate a source install whose models.conf withholds every agent; boundary=agent leaves the fixture's installer linked in its private runtime home
+            path.unlink()
+        older = self.older_source()
+        entry = self.home("opencode") / "hearting/adapters/opencode/bin/preflight.sh"
+        self.assertTrue(entry.is_file())
+        for script in (REPO_ROOT / "adapters/opencode/bin/preflight.sh", entry):
+            with self.subTest(script=str(script)):
+                self.write_conf("opencode", {"CFG_MAIN_SESSION_ONLY_MODELS": " ".join(self.shipped_models("opencode"))})
+                check = self.opencode_preflight(agent_home=older, script=script)
+                self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+                self.assertIn("check=ok", check.stdout)
+                self.write_conf("opencode")
+                check = self.opencode_preflight(agent_home=older, script=script)
+                self.assertEqual(check.returncode, 69, check.stdout + check.stderr)
+                self.assertIn("reason=opencode-native-agents-missing", check.stdout)
+                self.assertNotIn("Traceback", check.stderr)
+
+    def nested_definition_only(self, source, leaf):
+        # main's preflight also took agents/<stem>/<leaf> (review R3 🔴1): a live definition there alone passes.
+        installed = self.source_install(source)
+        home = self.home("opencode")
+        kept = home / "agent" / leaf
+        self.assertIn(kept, installed)
+        nested = home / "agents" / kept.stem / leaf
+        nested.parent.mkdir(parents=True)
+        nested.symlink_to(kept.resolve())
+        for path in installed:
+            # destructive-ok: reason=leave only the nested definition of a source install; boundary=agent leaves the fixture's installer linked in its private runtime home
+            path.unlink()
+        self.assertTrue(nested.is_file())
+        check = self.opencode_preflight()
+        self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+
+    def test_an_older_source_install_keeps_its_definition_in_the_per_agent_folder(self):
+        self.nested_definition_only(self.older_source(), "memory-scout.md")
+
+    def test_a_source_install_keeps_its_definition_in_the_per_agent_folder(self):
+        self.nested_definition_only(REPO_ROOT, "light.md")
 
     # -- T3b: catalog entries removed from the selected config ---------------
     def test_catalog_entries_missing_from_the_selected_config_leave_no_definition(self):
@@ -3542,12 +3735,10 @@ class NativeAgentRenderTest(unittest.TestCase):
         self.assertTrue(general.is_file() and not general.is_symlink())
         self.write_conf("codex", {"CFG_NATIVE_AGENT_CATALOG": "deep:deep light:light"})
         report = activation.refresh("codex")
-        self.assertEqual(self.installed_agents("codex"), ["deep.toml", "light.toml", "memory-scout.toml"])
+        self.assertEqual(self.installed_agents("codex"), ["deep.toml", "light.toml"])
         text = self.lines(report)
         for name in ("general-purpose", "balanced"):
             self.assertIn(f"native agent {name} not-in-selected-catalog", text)
-        # memory-scout is a kernel helper: rendered whatever the catalog lists.
-        self.assertTrue(self.agent("codex", "memory-scout").exists())
         self.assertEqual(report["freshness"], "fresh", report)
 
     # -- T4: known defect 2 --------------------------------------------------
@@ -3575,7 +3766,7 @@ class NativeAgentRenderTest(unittest.TestCase):
             path = self.agent("codex", name)
             self.assertFalse(path.exists() or path.is_symlink(), path)
         self.assertIn("native agent deep withheld", self.lines(report))
-        for name in ("light", "balanced", "memory-scout"):
+        for name in ("light", "balanced"):
             self.assertTrue(self.agent("codex", name).exists(), name)
         self.assertEqual(mine.read_text(encoding="utf-8"), 'name = "mine"\n')
         self.assertTrue(theirs.is_symlink() and Path(os.readlink(theirs)) == outside)
@@ -3622,6 +3813,120 @@ class NativeAgentRenderTest(unittest.TestCase):
         report = activation.refresh("codex")
         self.assertEqual(deep.read_bytes(), edited)
         self.assertIn(str(deep), report["preserved"])
+
+    # -- a definition this source no longer ships (memory-scout) -------------
+    def test_reactivation_removes_a_retired_definition_only_on_its_exact_record(self):
+        old_source = self.root / "older-release"
+        (old_source / "harness-manifest.json").parent.mkdir(parents=True, exist_ok=True)
+        (old_source / "harness-manifest.json").write_text("{}\n", encoding="utf-8")
+        for runtime in ("claude", "codex", "opencode"):
+            with self.subTest(runtime):
+                activation.activate(runtime, "linked", str(REPO_ROOT))
+                # What an older release's activation left: a link to its file (Claude,
+                # OpenCode) or an activation-owned file (Codex), recorded as owned.
+                # The user then edited one, pointed one at another file of the activated
+                # source, and linked one more to an older release's file with no record.
+                state = activation._load_json(activation._state_path(runtime))
+                for name in ("memory-scout", "old-helper", "relinked", "handmade"):
+                    left = self.agent(runtime, name)
+                    self.assertFalse(left.exists() or left.is_symlink(), f"this source projects {name}")
+                    shipped = old_source / "adapters" / runtime / "agents" / left.name
+                    shipped.parent.mkdir(parents=True, exist_ok=True)
+                    shipped.write_text(f"old {name}\n", encoding="utf-8")
+                    if runtime == "codex" and name in ("memory-scout", "old-helper"):
+                        left.write_text(f"old {name}\n", encoding="utf-8")
+                        record = activation._entry(shipped, left, "agent", kind="render")
+                        record["content_sha256"] = hashlib.sha256(left.read_bytes()).hexdigest()
+                    else:
+                        left.symlink_to(shipped)
+                        record = activation._entry(shipped, left, "agent")
+                    if name != "handmade":
+                        state["owned_paths"].append(record)
+                activation._atomic_json(activation._state_path(runtime), state)
+                edited, relinked, handmade = (self.agent(runtime, name)
+                                              for name in ("old-helper", "relinked", "handmade"))
+                # destructive-ok: reason=replace the fixture's own planted leaves with the user's changes; boundary=two agent leaves this test created in its private runtime home
+                for leaf in (edited, relinked):
+                    leaf.unlink()
+                edited.write_text("my own helper\n", encoding="utf-8")
+                relinked.symlink_to(REPO_ROOT / "README.md")
+                report = activation.refresh(runtime)
+                scout = self.agent(runtime, "memory-scout")
+                self.assertFalse(scout.exists() or scout.is_symlink(), scout)
+                self.assertEqual(edited.read_text(encoding="utf-8"), "my own helper\n")
+                self.assertEqual(Path(os.readlink(relinked)), REPO_ROOT / "README.md")
+                self.assertTrue(handmade.is_symlink())
+                self.assertEqual(sorted(report["preserved"]), sorted([str(edited), str(relinked)]))
+                self.assertEqual(report["freshness"], "duplicate", report)
+                self.assertIn(f"unmanaged-extra:agents/{handmade.name}", report["duplicate_sources"])
+                self.assertIn(f"user-changed:agents/{relinked.name}", report["duplicate_sources"])
+                status = activation.status(runtime)
+                self.assertEqual((status["freshness"], status["preserved"]),
+                                 ("duplicate", report["preserved"]))
+                # destructive-ok: reason=the user removes the kept leaves before deactivating; boundary=three agent leaves this test created in its private runtime home
+                for leaf in (edited, relinked, handmade):
+                    leaf.unlink()
+                self.assertEqual(activation.status(runtime)["freshness"], "fresh")
+                self.assertEqual(sorted(self.installed_agents(runtime)),
+                                 sorted(f"{name}{self.EXT[runtime]}" for name in self.CATALOG))
+                activation.deactivate(runtime)
+
+    def test_a_link_no_activation_recorded_stays_on_refresh_and_leaves_with_uninstall(self):
+        # An older installer's links (review R2 🔴1): refresh names them and leaves them; uninstall
+        # removes them as main does, also the one into an earlier packaged bundle it deletes, so no
+        # broken link stays. A recorded link the user pointed at another shipped file stays theirs.
+        old_source = self.root / "older-release"
+        old_source.mkdir()
+        (old_source / "harness-manifest.json").write_text("{}\n", encoding="utf-8")
+        for runtime in ("claude", "codex", "opencode"):
+            with self.subTest(runtime):
+                activation.activate(runtime, "linked", str(REPO_ROOT))
+                bundle = activation.paths.harness_state_dir(runtime) / "bundles" / "older" / "source"
+                links = {}
+                for name, root in (("handmade", old_source), ("bundled", bundle), ("relinked", old_source)):
+                    target = root / "adapters" / runtime / "agents" / f"{name}{self.EXT[runtime]}"
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(f"old {name}\n", encoding="utf-8")
+                    (root / "harness-manifest.json").write_text("{}\n", encoding="utf-8")
+                    links[name] = self.agent(runtime, name)
+                    links[name].symlink_to(target)
+                state = activation._load_json(activation._state_path(runtime))
+                state["owned_paths"].append(activation._entry(
+                    Path(os.readlink(links["relinked"])), links["relinked"], "agent"))
+                activation._atomic_json(activation._state_path(runtime), state)
+                # destructive-ok: reason=the user repoints the fixture's own recorded link; boundary=one agent leaf this test created in its private runtime home
+                links["relinked"].unlink()
+                links["relinked"].symlink_to(next((REPO_ROOT / "adapters" / runtime / "agents")
+                                                  .rglob(f"light{self.EXT[runtime]}")))
+                status = activation.status(runtime)
+                self.assertEqual(status["freshness"], "duplicate")
+                for name in ("handmade", "bundled"):
+                    self.assertIn(f"unmanaged-extra:agents/{links[name].name}", status["duplicate_sources"])
+                report = activation.refresh(runtime)
+                self.assertTrue(all(link.is_symlink() and link.exists() for link in links.values()), links)
+                self.assertEqual(report["preserved"], [str(links["relinked"])])
+                result = activation.deactivate(runtime)
+                for name in ("handmade", "bundled"):
+                    self.assertFalse(links[name].exists() or links[name].is_symlink(), links[name])
+                    self.assertIn(str(links[name]), result["removed"])
+                self.assertFalse(bundle.exists())
+                self.assertEqual(result["preserved"], [str(links["relinked"])])
+                self.assertTrue(links["relinked"].is_symlink() and links["relinked"].exists())
+                # destructive-ok: reason=the user removes the kept link before the next runtime; boundary=one agent leaf this test created in its private runtime home
+                links["relinked"].unlink()
+
+    def test_a_link_no_activation_recorded_alone_is_named(self):
+        old_source = self.root / "older-release"
+        target = old_source / "adapters/codex/agents/handmade.toml"
+        target.parent.mkdir(parents=True)
+        target.write_text('name = "handmade"\n', encoding="utf-8")
+        (old_source / "harness-manifest.json").write_text("{}\n", encoding="utf-8")
+        activation.activate("codex", "linked", str(REPO_ROOT))
+        self.agent("codex", "handmade").symlink_to(target)
+        status = activation.status("codex")
+        self.assertEqual(status["freshness"], "duplicate")
+        self.assertIn("agents/handmade.toml", status["next_action"])
+        self.assertNotIn("runtime activate", status["next_action"])
 
     # -- T5 ------------------------------------------------------------------
     def test_deactivate_removes_rendered_files_and_keeps_user_files(self):

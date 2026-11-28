@@ -47,7 +47,7 @@ Owner execution posture (PG-34)
                               dispatch-headless.py``), on the fixture model only.
 
 Native custom agents (PG-28)
-    ``custom-agent-spawn``    the model spawns Hearting's ``memory-scout`` custom
+    ``custom-agent-spawn``    the model spawns Hearting's ``light`` custom
                               agent in the TUI and headless; discovery, the
                               sub-agent's shell step without an approval prompt,
                               and the result reaching the parent are measured.
@@ -1596,18 +1596,18 @@ def _port_open(port: int) -> bool:
 
 
 # --------------------------------------------------------------------------
-# PG-28: native custom agent (memory-scout), TUI and headless
+# PG-28: native custom agent (light; memory-scout until it was retired), TUI and headless
 # --------------------------------------------------------------------------
 
-AGENT_SIGNATURES = ("memory-scout custom agent", "memory scout", "Read-only memory")
+AGENT_SIGNATURES = ("breadth fan-out on a light execution budget",)
 
 
 class CustomAgentSpawnScenario(Scenario):
     name = "custom-agent-spawn"
-    summary = ("The model spawns Hearting's memory-scout custom agent (TUI and headless); "
+    summary = ("The model spawns Hearting's light custom agent (TUI and headless); "
                "discovery, its shell step without approval, and the result are measured.")
-    AGENT = "memory-scout"
-    FALLBACK = "memory-scout-fixture-model"
+    AGENT = "light"
+    FALLBACK = "light-fixture-model"
 
     def __init__(self):
         self.nonce = uuid.uuid4().hex[:8]
@@ -1716,7 +1716,7 @@ class CustomAgentSpawnScenario(Scenario):
     def drive(self, run):
         ev = run.evidence
         main, _sub, _shell = self.markers("tui")
-        run.prompt(f"{main} use the memory-scout agent")
+        run.prompt(f"{main} use the {self.AGENT} agent")
         run.wait_idle(10, 150)
         ev["tui"] = self.measure(run, "tui", 0)
         screen = run.tui.screen().lower()
@@ -1734,7 +1734,7 @@ class CustomAgentSpawnScenario(Scenario):
                            "bypassPermissions"],
                 "codex": [run.binary, "exec", "--skip-git-repo-check"],
                 "opencode": [run.binary, "run"]}[run.harness]
-        done = subprocess.run([*argv, f"{hmain} use the memory-scout agent"], env=run.home.env,
+        done = subprocess.run([*argv, f"{hmain} use the {self.AGENT} agent"], env=run.home.env,
                               cwd=str(run.home.workspace), text=True, capture_output=True,
                               timeout=240, stdin=subprocess.DEVNULL)
         time.sleep(3)

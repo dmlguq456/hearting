@@ -148,6 +148,118 @@ class FollowingCalledWorkTest(U.UnitLegBase):
         arm.assert_called_once()
 
 
+class CallerWaitWindowTest(U.UnitLegBase):
+    """One wait is one start window: when it ends while the leg a worker started still runs, the receipt gives the
+    same wait again (the running receipt's `parent_next_command`), and nothing is launched or composed anew. For a leg
+    a Claude worker started that wait is, to the character, the one its refusal line gave (`worker_utility`, the form
+    its allow rules name), and its window ends inside the Bash call it runs in; an ended receipt names no wait."""
+
+    def setUp(self):
+        super().setUp()
+        self.route, self.path = self.unit_route()
+        self.jobs = Path(self.root) / "jobs.log"
+        self.now, self.launches, self.windows = [1_000.0], [], []
+        self.home = str(HERE.parent)     # the release the owner runs from (its allow rules name it)
+        for patch in (mock.patch.object(W, "default_parent_session_id", return_value="parent"),
+                      mock.patch.object(W, "prepare_task_request", return_value=None),
+                      mock.patch.object(W, "join_selected_attempts", side_effect=self.join),
+                      mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": CALLER, "AGENT_HOME": self.home})):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def join(self, **kwargs):
+        self.windows.append(kwargs["timeout"])
+        self.now[0] += kwargs["timeout"]          # the whole window passes on the fixture's clock
+        return {"state": "timeout", "children": []}
+
+    def wait(self, wait=True):
+        return W.start_work(self.route, self.path, self.jobs, wait=wait, sleep=lambda seconds: None,
+                            run=lambda *args, **kwargs: self.launches.append(args), clock=lambda: self.now[0])
+
+    def legs(self, harness="claude", **leg):
+        caller = f"2026-11-17T00:00:00Z\trunning\t/w\t/w\towner\tattempt_id={CALLER},worker_type=owner,harness={harness}\n"
+        self.jobs.write_text(caller + self.leg_row(self.route, self.path, status="running", caller_attempt_id=CALLER,
+                                                   parent_completion_delivery="poll-fallback", **leg))
+
+    def test_a_claude_worker_s_wait_is_the_refusal_s_string_past_each_window(self):
+        import native_subagent_redirect as redirect
+        from start_receipt import next_line
+        self.legs()
+        refusal = redirect.reason_for(self.wait(wait=False), "light", "claude", worker=True)   # compose's receipt
+        told = refusal.split(" run ", 1)[1].split(" to receive its answer.", 1)[0]
+        del self.windows[:]
+        receipts = [self.wait() for _ in range(3)]
+        self.assertEqual(self.windows, [W.WORKER_WINDOW_SECONDS] * 3)    # each window ends inside its Bash call
+        self.assertLess(W.WORKER_WINDOW_SECONDS, int(_headless().HEADLESS_BASH_TIMEOUT_DEFAULTS["BASH_DEFAULT_TIMEOUT_MS"]) / 1000)
+        self.assertGreaterEqual(self.now[0] - 1_000.0, 2 * W.START_WINDOW_SECONDS)   # past the old window twice
+        rules = _headless()._allowlist_rules(Path(self.home), "/w", self.root, "owner")
+        for receipt in receipts:
+            self.assertEqual((receipt["state"], receipt["parent_next"]), ("running", "bounded-wait"))
+            self.assertEqual(receipt["parent_next_command"], told)                  # the same string, every time
+            self.assertTrue(next_line(receipt).endswith(": " + told))               # and the CLI's last line
+            self.assertTrue(any(told.startswith(rule[5:-3] + " ") for rule in rules if rule.endswith(" *)")))
+            self.assertIn("run parent_next_command again", receipt["next_step"])
+        self.assertEqual(self.launches, [])       # no new launch, no compose: the same route and attempt
+
+    def test_an_ended_receipt_names_no_wait(self):
+        from start_receipt import next_line
+        self.legs()
+        with mock.patch.object(W, "join_selected_attempts", return_value={"state": "ready", "children": []}):
+            with mock.patch.object(W, "_outcome", return_value={"attempt_id": "a", "classification": "success"}):
+                done = self.wait()
+            with mock.patch.object(W, "_outcome", return_value={"attempt_id": "a", "classification": "missing"}):
+                failed = self.wait()
+        self.assertEqual((done["state"], done["parent_next_command"]), ("completed", ""))
+        self.assertEqual(next_line(done), "next: the route is complete; report its result")
+        self.assertEqual((failed["state"], failed["parent_next"]), ("needs-attention", "compose"))
+        for receipt in (done, failed):
+            self.assertNotIn("bounded wait", next_line(receipt))
+
+    def test_a_leg_another_worker_started_keeps_the_receipt_s_own_form(self):
+        self.legs(harness="codex")
+        receipt = self.wait()
+        self.assertEqual(receipt["parent_next_command"], receipt["resume_command"] + " --wait")
+        self.assertEqual(self.windows, [W.START_WINDOW_SECONDS])
+
+    def test_a_leg_no_worker_started_keeps_the_bounded_fallback_handoff(self):
+        self.jobs.write_text(self.leg_row(self.route, self.path, status="running",
+                                          parent_completion_delivery="poll-fallback"))
+        receipt = self.wait()
+        self.assertEqual((receipt["state"], receipt["reason"]), ("needs-attention", "parent-wait-deadline"))
+        self.assertNotIn("parent_next_command", receipt)
+        self.assertEqual(self.launches, [])
+
+    def test_a_stopped_leg_s_receipt_is_held_and_refused_as_ended(self):
+        # The receipts `start_work` really writes for a registered leg stopped from Fleet or cancelled by its parent
+        # are held by the redirect (no native run) and refused before any command is built.
+        import native_subagent_redirect as redirect
+        import route_parent_close
+        cancelled = U.JOIN.CurrentDeliveryState(None, "", "", "", "done", "CANCELLED", True, 0, False,
+                                                cancelled=True, cancellation_requested=True)
+        stopped = U.JOIN.CurrentDeliveryState(None, "", "", "", "done", "", True, 0, False)
+        for state, row in ((cancelled, {"note": "cancelled-by-parent"}),
+                           (stopped, {"note": route_parent_close.STOP_NOTE, **route_parent_close.STOP_EVIDENCE})):
+            with self.subTest(row["note"]):
+                self.jobs.write_text(self.leg_row(self.route, self.path, status="done", caller_attempt_id=CALLER,
+                                                  launch_started="1", **row))
+                with mock.patch.object(W, "join_selected_attempts", return_value={"state": "ready"}), \
+                        mock.patch.object(W, "current_delivery_state", return_value=state):
+                    receipt = W.start_work(self.route, self.path, self.jobs, run=self.launches.append)
+                self.assertTrue(redirect.registered(receipt, worker=True), receipt)
+                self.assertTrue(redirect.reason_for(receipt, "light", "claude", worker=True).endswith(
+                    "It has already ended with nothing to read. Do not call it again."))
+        self.assertEqual(self.launches, [])
+
+
+def _headless():
+    """The Claude adapter's launcher, for the allow rules it really gives an owner (`_allowlist_rules`)."""
+    spec = importlib.util.spec_from_file_location("dispatch_headless_for_nested",
+                                                  HERE.parent / "adapters" / "claude" / "bin" / "dispatch-headless.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class CalledResultTest(U.UnitLegBase):
     """What a waiting caller reads: finished work comes back with its summary, a run that did no work does not."""
 

@@ -177,16 +177,6 @@ class SharedRendererTest(unittest.TestCase):
                 rows = by_name(run_plan(adapter, home))
                 self.assertNotIn("balanced", rows)
 
-    def test_codex_one_argument_call_keeps_shipped_meaning(self):
-        codex = load_formatter("codex")
-        cfg = shipped_cfg("codex")
-        self.assertEqual(codex.codex_config("memory-scout"), codex.codex_config("memory-scout", cfg))
-        model, effort, sandbox = codex.codex_config("memory-scout")
-        self.assertEqual((effort, sandbox), ("low", "read-only"))
-        self.assertEqual(model, cfg["CFG_TIER_LIGHT_MODEL"])
-        user = dict(cfg, CFG_TIER_LIGHT_MODEL="fixture-user-light")
-        self.assertEqual(codex.codex_config("memory-scout", user)[0], "fixture-user-light")
-
     def test_catalog_parser_rejects_malformed_top_and_empty_for_the_shipped_catalog(self):
         for bad in ("deep", "a:b:c", "deep:top"):
             with self.subTest(bad), self.assertRaises(SystemExit):
@@ -212,13 +202,8 @@ class SharedRendererTest(unittest.TestCase):
                 rows = by_name(plan)
                 self.assertTrue(plan["agents"])
                 for row in plan["agents"]:
-                    if row["model"] is None:
-                        # OpenCode's memory-scout pins no model and cannot be withheld.
-                        self.assertEqual(row["name"], "memory-scout")
-                        self.assertEqual(row["status"], "shipped")
-                    else:
-                        self.assertEqual(row["status"], "withheld", row)
-                        self.assertIn("main-session-only", row["reason"])
+                    self.assertEqual(row["status"], "withheld", row)
+                    self.assertIn("main-session-only", row["reason"])
                 self.assertIn("deep", rows)
 
     def test_user_models_render_with_the_user_model_in_the_content(self):
@@ -262,10 +247,15 @@ class SharedRendererTest(unittest.TestCase):
                 agents = native_agents.plan_agents(fmt, dict(shipped_cfg(adapter), CFG_NATIVE_AGENT_CATALOG=""))
                 self.assertEqual([a.name for a in agents], list(fmt.kernel_names))
 
-    def test_static_names_are_declared_for_hand_written_files(self):
-        self.assertEqual(load_formatter("claude").FORMAT.static_names, ("memory-scout",))
-        self.assertEqual(load_formatter("codex").FORMAT.static_names, ())
-        self.assertEqual(load_formatter("opencode").FORMAT.static_names, ())
+    def test_no_hand_written_or_kernel_agent_ships(self):
+        # memory-scout was retired: every shipped definition is a depth name of the catalog.
+        for adapter in ("claude", "codex", "opencode"):
+            with self.subTest(adapter):
+                fmt = load_formatter(adapter).FORMAT
+                self.assertEqual((fmt.static_names, fmt.kernel_names), ((), ()))
+                shipped = {path.name for path in (ROOT / "adapters" / adapter / "agents").iterdir()}
+                self.assertEqual({name.split(".")[0] for name in shipped},
+                                 {"balanced", "deep", "general-purpose", "light"})
 
 
 if __name__ == "__main__":

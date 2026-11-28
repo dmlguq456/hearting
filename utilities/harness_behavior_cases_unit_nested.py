@@ -23,7 +23,8 @@ The fixture model plays both workers from the markers their briefs carry.
 ``unit-route-nested-ephemeral``
     The first worker starts the second with the command its first instruction gives, `--ephemeral` and no
     `--artifact-root`: the second runs in the scratch root, counts under the project's governor, and its answer
-    reaches the first as the `Answer:` text of the wait result.
+    reaches the first as the `Answer:` text of the wait result. ``unit-route-nested-ephemeral-explore`` is the same
+    with the lookup unit (`general/explore`) as the second.
 
 ``unit-route-limit-ephemeral`` / ``unit-route-limit-ephemeral-only``
     The runaway chain again, every start after the first (or every start) record-free: the project's one
@@ -71,14 +72,14 @@ def _shells(earlier, mark):
     return [str(r["reply"].get("shell") or "") for r in earlier if mark in r["text"]]
 
 
-def _compose(run, brief, slug, *extra, ephemeral=False):
+def _compose(run, brief, slug, *extra, ephemeral=False, unit_name="qa/code-review"):
     """The compose command a session or worker runs; `ephemeral` is the first instruction's own form (nothing
     about roots or cwd given), plus the pin and slug the oracle needs."""
     where = (["--ephemeral"] if ephemeral else
              ["--cwd", str(run.home.workspace), "--artifact-root", run.home.env["AGENT_ARTIFACT_ROOT"], "--unassigned"])
     return " ".join([
         sys.executable, str(_base().SOURCE / "utilities" / "capability-route.py"), "compose", "--start",
-        "--unit", "qa/code-review", "--pin", f"worker={run.harness}", "--prompt-file", str(brief),
+        "--unit", unit_name, "--pin", f"worker={run.harness}", "--prompt-file", str(brief),
         *where, "--slug", slug, *extra])
 
 
@@ -105,6 +106,7 @@ class NestedScenario(unit.UnitRouteScenario):
     first_waits = True     # the first worker waits for the second's result before it ends
     second_held = False    # the second worker's last answer is held until the driver releases it
     child_ephemeral = False    # the first worker starts the second with --ephemeral (its first instruction's form)
+    child_unit = "qa/code-review"   # the unit of the second route
 
     # -- the fixture model ------------------------------------------------------------------------
     def script(self, run):
@@ -123,7 +125,7 @@ class NestedScenario(unit.UnitRouteScenario):
             wrote = any("report.md" in s for s in shells)
             if not composed:
                 return Reply(shell=_compose(run, run.home.root / "brief-child.md", "hb-unit-child",
-                                            ephemeral=self.child_ephemeral))
+                                            ephemeral=self.child_ephemeral, unit_name=self.child_unit))
             refused = bool(run.evidence.get("compose_refused")) or (composed and not waited and not wrote and (
                 "quick-headless-unavailable" in last or "Process exited with code 64" in last))
             if refused and not run.evidence.get("compose_refused"):
@@ -344,6 +346,12 @@ class NestedEphemeralScenario(NestedScenario):
     summary = ("A unit worker starts a second one with `--ephemeral`, the way its first instruction says: the second "
                "runs in the scratch root under the project's governor and its answer is the first's wait result.")
     child_ephemeral = True
+
+
+class NestedEphemeralExploreScenario(NestedEphemeralScenario):
+    name = "unit-route-nested-ephemeral-explore"
+    summary = "The same, with the lookup unit (`general/explore`) as the second worker."
+    child_unit = "general/explore"
 
 
 ANSWER = "HB-EPHEMERAL-ANSWER-9"
@@ -728,5 +736,6 @@ class OwnerCallsScenario(OwnerPublishRegisteredScenario):
         return "pass" if ok else "fail"
 
 
-SCENARIOS = [NestedScenario, CallerFirstScenario, NestedEphemeralScenario, EphemeralScenario, EphemeralLongScenario,
+SCENARIOS = [NestedScenario, CallerFirstScenario, NestedEphemeralScenario, NestedEphemeralExploreScenario,
+             EphemeralScenario, EphemeralLongScenario,
              EphemeralEmptyScenario, LimitScenario, LimitEphemeralScenario, LimitEphemeralOnlyScenario, OwnerCallsScenario]

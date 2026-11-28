@@ -14,7 +14,8 @@ dispatch-depth-2 workers selected by the compiled capability route
 (`capabilities/topologies.json` → `utilities/capability-route.py` →
 `utilities/worker_bootstrap.py`, which appends the unit BODY to the kernel and
 worker-type overlay). `family` is a grouping label; no runtime team agent exists on any
-harness. Per-harness native agents are kernel helpers only (e.g. `memory-scout`).
+harness. The per-harness native agents are the depth names of a native subagent call
+(`light`, `balanced`, `deep`, `general-purpose`; `capabilities/unit.md`, A native subagent call).
 
 ## Universal Review Stance
 

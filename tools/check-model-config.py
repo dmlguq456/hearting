@@ -31,16 +31,12 @@ CONFIG_SUFFIX = "config/models.conf"
 # Whole-file exemptions (generated projections, display palettes, tests, fixtures).
 EXEMPT_SUBSTRINGS = (
     "/config/models.conf",              # the SoT itself
-    "/agents/memory-scout.md",          # kernel helper (claude flat layout)
-    "/agents/memory-scout.toml",        # kernel helper (codex layout)
-    "/agents/memory-scout/",            # kernel helper (opencode dir layout); exact, no -evil lookalikes
     # Native subagent type catalog — GENERATED from each adapter's models.conf
     # by the three sync-native-agents.py generators and verified by generate.py
     # --check, so every model pin below is derived, not stray. The trailing "."
     # / "/" keeps lookalikes (light-evil.md) out. Covers the claude .md files,
     # their plugin-marketplace copies, the codex .toml files, and the opencode
-    # dir layout. Together with the memory-scout kernel helper above these are
-    # the ONLY agents exemptions.
+    # dir layout. These are the ONLY agents exemptions.
     "/agents/general-purpose.",
     "/agents/general-purpose/",
     "/agents/balanced.",
