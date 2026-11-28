@@ -2859,6 +2859,20 @@ append-only ledger below is the only record of them (SD-122 §13.37.2-(1)).
 Keep work in this session's route by default; start another interactive session
 (`peer-steward start`) only for long work that needs its own human answers or
 recovery, because each one adds a seat, a model context, and supervision.
+A steward may also run routes itself, and no count limits it. Handing work over is not
+unconditional: with only a couple of routes it keeps them even when their topics differ,
+because the receiving session has to read their context anew. When the work grows until
+the routes it holds fill this session's context, the default is to hand whole streams, with
+their instructions and next step, to another session, and to one that already holds a
+related stream if there is one; a stream is the routes on one worktree or branch, with the
+reviews of that branch's PR, and stays within one campaign and project. When a session it
+already supervises is open and waiting, handing a stream to it is a default as well, ahead
+of starting a new session, since it adds no seat. The next round of a PR, a fix or a
+review, stays with the session that holds its stream, and a route about to finish is not
+handed over. What counts as too much is the steward's call, since launch receipts and
+steward checks report only counts and waiting sessions as facts; the user decides how many
+sessions run. Those open-route counts are the registry's open owner rows, so a route can
+still count for a moment after it closes.
 
 **Optional session shell.** An opt-in PTY attachment supplies a collapsed status
 line, a read-only panel and guarded idle wake. Its exact-session transport and
