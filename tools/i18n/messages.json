@@ -2382,6 +2382,38 @@
    "en": "Stops each time a leg ends; the next leg starts when you say so.",
    "ko": "leg가 하나 끝날 때마다 멈춥니다. 다음 leg는 말씀하시면 시작합니다."
   },
+  "handover.refused.harness-mismatch": {
+   "en": "hand it to a session of the same harness",
+   "ko": "같은 하네스의 세션에 넘기세요"
+  },
+  "handover.refused.receiver-not-live": {
+   "en": "hand it to a session that is running now",
+   "ko": "지금 살아 있는 세션에 넘기세요"
+  },
+  "handover.refused.route-closed": {
+   "en": "this route cannot take a later request; start new work from the receiver",
+   "ko": "이 route는 다음 요청을 이어 받을 수 없습니다. 받는 세션이 새로 띄우세요"
+  },
+  "handover.refused.route-finishing": {
+   "en": "its result is still being settled or delivered; hand it over once it has arrived",
+   "ko": "결과가 아직 정산·배달 중입니다. 받은 뒤 다시 넘기세요"
+  },
+  "handover.refused.route-held-before": {
+   "en": "a session that held this route before cannot take it again",
+   "ko": "전에 이 route를 쥔 세션에는 다시 넘길 수 없습니다"
+  },
+  "handover.refused.route-multistep": {
+   "en": "only a one-step route moves; leave it here or let the receiver start new work",
+   "ko": "한 단계짜리 route만 넘어갑니다. 여기 두거나 받는 세션이 새로 띄우세요"
+  },
+  "handover.refused.route-not-held": {
+   "en": "only the session that holds the route now can hand it over",
+   "ko": "지금 그 route를 쥔 세션만 넘길 수 있습니다"
+  },
+  "handover.refused.route-running": {
+   "en": "hand it over after this round ends and you have read its result",
+   "ko": "이 차례가 끝나 결과를 읽은 뒤 다시 넘기세요"
+  },
   "install.entrance": {
    "en": "Results land in each project's `.agent_reports/`; open its `README.md` or run `hearting reports`.",
    "ko": "결과는 각 프로젝트의 `.agent_reports/`에 쌓입니다. 그 안의 `README.md`를 열거나 `hearting reports`를 실행하세요."

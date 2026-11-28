@@ -3724,14 +3724,17 @@ the detail in a file and give its path.
 it); its answer is `report [<rq-id>] [--partial | --reject <why>] --result <line>`, and
 `show [<rq-id>]` prints the sealed body (no id: this session's open requests).
 `request <address> --route <route-id>` (repeatable: one stream at a time) also hands routes
-the sender holds now to that session: their completions, attention notices and
+the sender holds to that session: their completions, attention notices and
 `start`/`correct`/`close` move to the receiver, the sender keeps its questions, requests,
 steward flag and every other route, and the runtime appends each handed route's recorded
-facts to the body. A route moves only while it runs with no completion or notice waiting,
-only to a session proven live on the same harness that has not held it, and together with the
-other open routes of its completion batch; anything else is refused with nothing sent or
-recorded. When the route moved but the request could not be sent, the line ends
-`note=undelivered`: the receiver holds the route, so send the text again with a plain `request`.
+facts to the body. A route is handed over after a round has ended and its result was read:
+only a one-step route its holder could `correct` now moves (closed on a PASS, nothing
+running, waiting to start or still being delivered), and only to a session proven live on the
+same harness that has not held it. Anything else is refused with nothing sent or recorded,
+and the line ends with `hint=` saying what to do instead (for a running route: after this
+round ends). When the route moved but the request could not be sent, the line ends
+`note=undelivered` (send the text again with a plain `request`) or `note=queued ref=<ref>`
+(the request is still on its way).
 The line that reaches a conversation names the request; the body stays sealed and the model opens
 it with `show`. Delivery and work are separate: a receipt does not change a request's state;
 only a final or reject report, or the requester's cancel, closes it, and a partial report
