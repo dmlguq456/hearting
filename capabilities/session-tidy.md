@@ -11,7 +11,7 @@ This is the portable capability contract for `session-tidy`. It defines runtime-
 | Group | `ops` |
 | Supported modes | `none` |
 | Portable meaning | Write a handoff card; tidy memory; compact the same session. |
-| Argument shape | `[정리] \| 정리만 \| 취소 \| 인계 <받을 세션>` |
+| Argument shape | `[정리] \| 정리만 \| 인계 <받을 세션>` |
 
 ## Invocation Semantics
 
@@ -174,14 +174,9 @@ Stop or UserPromptSubmit or a peer receive, asks once and ends; OpenCode has no 
 callback that asks again). Every harness reads the input box before the claim, so a draft or an
 open form holds the continue without binding it (15 seconds between asks while it does). A Claude
 continue is then typed only into an empty prompt, read again just before typing; a Codex or
-OpenCode continue starts its turn only over an empty input box, read again after the claim. Every
-path that finds the box holding writing (the read before the claim, the guard just before typing,
-Claude's private connection) ends the same way: no claim and no ref stay bound, so the person's
-next prompt does not carry the continue, and the helper asks again. A continue ref reaches the
-session only while its booking still sends it: each carrier that hands one over (Claude's prompt
-hook, the Codex queue, OpenCode's idle write) asks the booking's current record once, under the
-lock it takes the ref with, so a cancel, writing in the input box or a newer booking stops a ref no
-carrier has taken yet, and the row is left as it is. When the booked card
+OpenCode continue starts its turn only over an empty input box, read again after the claim.
+Claude's private connection holds a draft the same way, before or after its claim: no claim stays
+bound, and the helper asks again. When the booked card
 generation already reached the continuing session (that generation's receipt of the booked harness
 and session id; another card or session proves nothing), a continue that was not sent ends without
 a line; the line asking the person to type the continue appears only while the card still waits
@@ -198,16 +193,7 @@ session. A newer prompt, changed card, handoff, expired booking, changed SID or
 unavailable native callback leaves the booking pending or skipped under the
 existing result rules. `정리만` (`enqueue --no-clear`) keeps the window as it is
 and cancels a pending booking; `enqueue --no-continue` compacts without the
-continue action. `취소` (`cancel`) writes no card and queues no memory work: it
-stops what the window's booking would still type, a /compact not typed yet or
-the continue after a confirmed compaction. It decides and answers from the
-booking's current record under the booking's lock; a booking the same user
-turn's prompt already ended counts as cancelled by it, and that turn's own end
-books no new idle tidy (the next prompt does). A /compact or continue whose
-typing or handing already started cannot be taken back and may still arrive;
-the result line says only that. A continue claim let go before anything was typed
-is recorded as released even after a cancel, so the person's own `이어서해`
-counts as their prompt. Outside herdr or tmux the session prints the manual `/compact`
+continue action. Outside herdr or tmux the session prints the manual `/compact`
 command. A handoff compacts only the calling window, never the target, and that
 window does not continue from a card marked as handed off; failed delivery
 preserves the card for normal continuation.
@@ -292,15 +278,12 @@ and never rescan conversations on a rendering tick or create another store.
 ## Portable Procedure
 
 Modes are `정리` (default: compact this session and continue), `정리만` (keep
-this window as it is), `취소` (cancel this window's booked compaction and its
-continue), and `인계 <받을 세션>` (pass the card to an
+this window as it is), and `인계 <받을 세션>` (pass the card to an
 already-running peer; only this window may compact). Use
 `python3 $AGENT_HOME/utilities/session_tidy.py tidy`; add `--no-clear` for
 `정리만`, `--no-continue` when asked to stop after tidying, and
 `--handoff <받을 세션>` for a peer handoff. Card writing, queueing and optional
-handoff keep their existing one-call behavior. `취소` is
-`python3 $AGENT_HOME/utilities/session_tidy.py cancel` alone: no card is written.
-Reply with the command's `say=`
+handoff keep their existing one-call behavior. Reply with the command's `say=`
 line; report its `prompted=` line for handoff and do not retry an uncertain send.
 
 `정리만` / `--no-clear` saves the card and queues the existing memory work while

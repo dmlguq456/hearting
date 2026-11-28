@@ -121,7 +121,7 @@ NO_CARD_REASONS = frozenset({"card-taken", "idle-card-not-accepted"})
 # Continue skips the person caused (or chose) themselves, or that another automatic turn of the
 # same session made unnecessary by taking the card first: no result line for these.
 CONTINUE_QUIET = frozenset({"new-input", "draft", "card-changed", "handed-off", "no-card", "superseded", "off",
-                            "card-taken", "explicit-cancelled"})
+                            "card-taken"})
 # Idle skips that spend no request and leave the user-work interval open: an open registered route,
 # or the person's own screen at the due time (writing in the input box, an open question or
 # selection form). The session's next turn end books again; the person chose this for those two
@@ -329,72 +329,6 @@ def cancel(seat: "st.Seat") -> None:
             _write_reservation(req)
         else:
             _remove_reservation(seat.key)
-
-
-def cancel_booking(seat: "st.Seat") -> str:
-    """The tidy command's ``cancel``: stop what this window's booking would still type; no card is
-    written and no memory work is queued. The ``cancel=`` words ``session_tidy.py cancel`` prints:
-
-    ``cancel=booking``                  a booked /compact not typed yet: it is not typed;
-    ``cancel=booking compact=sending``  the /compact claim was already taken: its typing may not
-                                        stop, but nothing is typed after it (no second /compact, no
-                                        continue);
-    ``cancel=continue``                 the compaction was confirmed: its continue is not typed;
-    ``cancel=continue handed=native``   as above, but a continue already handed to the session's own
-                                        carrier (a Codex queue, OpenCode's idle plugin, a Claude prompt
-                                        hook) cannot be taken back and may still arrive with its next turn;
-    ``cancel=continue continue=sending`` as above, while the continue was being handed or typed;
-    ``cancel=none``                     nothing of this window's booking is left to type.
-
-    The decision, the write and the words come from the one current row read under the booking's
-    lock (the lock every claim, release and settle of this booking takes), never from an earlier
-    copy. A booking the same user turn's prompt already ended as ``new-input`` (the prompt that
-    asked for this cancel) is recorded as the explicit cancel it is. Every cancel stores that
-    turn's user prompt number (``cancelled.user_seq``) so the turn's own Stop books no new idle
-    tidy (``observe_idle_event``); the next real prompt books again. The booking stays on file as
-    ``cancelled`` (an idle booking keeps its event tombstone) and a continue as
-    ``skipped/explicit-cancelled``, so a claim released afterwards, the helper and the steward
-    all find nothing to send.
-    """
-    harness, sid = st.session_identity(seat)
-    initial = read_reservation(seat.key)
-    target = seat
-    if initial:
-        target = st.session_seat(_booked_seat(initial, seat.key), str(initial.get("harness") or ""),
-                                 str(initial.get("new_session") or initial.get("sid") or ""))
-    with st.session_state_lock(target):
-        req = read_reservation(seat.key)
-        if not req:
-            return "cancel=none"
-        frontier = st.real_prompt_frontier(seat, harness, sid) if harness and sid else None
-        user_seq = int((frontier or {}).get("sequence", 0) or 0)
-        now = st.now_epoch()
-        claim = req.get("clear_claim") if isinstance(req.get("clear_claim"), dict) else {}
-        held = req.get("continued") if isinstance(req.get("continued"), dict) else {}
-        ended = req.get("cancelled") if isinstance(req.get("cancelled"), dict) else {}
-        if req.get("status") == "reserved" or (
-                req.get("status") == "cancelled" and req.get("reason") == "new-input"
-                and (req.get("harness"), req.get("sid")) == (harness, sid)
-                and type(ended.get("prompt_seq")) is int and ended["prompt_seq"] == user_seq):
-            words = "cancel=booking" + (" compact=sending" if claim.get("state") == "sending" else "")
-            if req.get("status") == "reserved":
-                req["finished"] = now
-            req.update(status="cancelled", reason="explicit-cancelled")
-            req["cancelled"] = {**ended, "at": now, "user_seq": user_seq,
-                                "identity": (req.get("idle") or {}).get("identity") or req.get("event_identity")
-                                or (req.get("compact") or {}).get("identity")}
-        elif req.get("status") == "cleared" and held.get("state") in ("pending", "sending"):
-            words = ("cancel=continue handed=native" if held.get("transfer_ref")
-                     else "cancel=continue continue=sending" if held.get("state") == "sending"
-                     else "cancel=continue")
-            # An in-flight claim stays its steward's: its release, bind or settle now finds this
-            # row no longer ``sending`` and leaves it as it is.
-            req["continued"] = {**held, "state": "skipped", "reason": "explicit-cancelled", "finished": now}
-            req["cancelled"] = {**ended, "at": now, "user_seq": user_seq}
-        else:
-            return "cancel=none"
-        _write_reservation(req)
-        return words
 
 
 def _proc_start(pid: int) -> str:
@@ -668,12 +602,6 @@ def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provi
             old_idle.update(activity_event_id=event_id, activity_at=now)
             existing.update(idle=old_idle, status="cancelled", reason="new-activity", finished=now)
             _write_reservation(existing)
-            return "booking=skipped reason=not-rearmed"
-        # The tidy command's cancel covers the user turn it was given in: that turn's Stop, and a
-        # repeated one, book nothing; the next real prompt raises ``generation`` and books again.
-        ended = (existing or {}).get("cancelled") if isinstance((existing or {}).get("cancelled"), dict) else {}
-        if (existing and (existing.get("harness"), existing.get("sid")) == (harness, sid)
-                and type(ended.get("user_seq")) is int and ended["user_seq"] >= generation):
             return "booking=skipped reason=not-rearmed"
         # A claim's rows are appended in order; its last row says whether the request went out
         # (a claim released before the send leaves its earlier ``preparing``/``sending`` row).
@@ -1122,11 +1050,8 @@ def note_real_prompt_locked(seat: "st.Seat", harness: str, sid: str, sequence: i
     if (req.get("status") == "reserved" and req.get("origin") in ("idle", "compact")
             and req.get("harness") == harness and req.get("sid") == sid):
         req.update(status="cancelled", reason="new-input", finished=now)
-        # ``prompt_seq``: the prompt that ended it, so a cancel asked for by that same prompt
-        # (``cancel_booking``) can tell it is its own user turn.
-        req["cancelled"] = {"at": now, "prompt_seq": sequence,
-                            "identity": (req.get("idle") or {}).get("identity")
-                            or compact.get("identity") or req.get("event_identity")}
+        req["cancelled"] = {"at": now, "identity": (req.get("idle") or {}).get("identity")
+                             or compact.get("identity") or req.get("event_identity")}
         _write_reservation(req)
 
 
@@ -2032,70 +1957,6 @@ def bind_continue_transfer(claim, transfer_ref: str) -> bool:
     return True
 
 
-_FOLLOWUP_DIGESTS = frozenset(hashlib.sha256(text.encode("utf-8")).hexdigest()
-                              for text in (CONTINUE_TEXT, STATUS_ONLY_TEXT))
-
-
-def continue_ref_deliverable(row: dict) -> Optional[bool]:
-    """May a carrier hand this peer row to its session now? The one answer for the booked
-    continue, read from the booking files alone. Each carrier asks once, under the lock it takes
-    the ref with: Claude's prompt hook (its reservation), the Codex queue (``before_add``) and
-    OpenCode's idle write (``begin-write``). Nothing is written here; rows and bookings stay.
-
-    True only while all four hold:
-
-    1. the booking that bound this ref (``continued.transfer_ref``) is still the current booking
-       of that session: cleared, the row's harness and continuing session;
-    2. its claim still stands: the continue is being sent or was handed and waits (``sending`` /
-       ``pending``), not settled (sent, skipped, expired, unverified, failed);
-    3. it was not cancelled (``session_tidy.py cancel``);
-    4. the input box does not hold it: a held continue waits with no ref bound
-       (``hold_continue_for_input``), so its row fails 1.
-
-    False for a continue row no booking binds now (a cancel took the claim before the ref was
-    bound, the box held it, or a later booking replaced it). None for any other row, an ordinary
-    peer message or a plain no-trailer prompt: its carrier's own rule stands."""
-    if not isinstance(row, dict) or row.get("no_trailer") is not True:
-        return None
-    ref = row.get("ref")
-    sender = row.get("from") if isinstance(row.get("from"), dict) else {}
-    target = row.get("to") if isinstance(row.get("to"), dict) else {}
-    harness, sid = str(target.get("harness") or ""), str(target.get("session_id") or "")
-    if not isinstance(ref, str) or not ref or not harness or not sid:
-        return None
-    try:
-        paths = sorted(clear_dir().glob("*.json"))
-    except OSError:
-        return False
-    bound, related = [], False
-    for path in paths:
-        try:
-            if not path.is_file() or path.is_symlink():
-                continue
-        except OSError:
-            continue
-        req = read_reservation(path.stem)
-        if not req:
-            continue
-        held = req.get("continued") if isinstance(req.get("continued"), dict) else {}
-        if held.get("transfer_ref") == ref:
-            bound.append((req, held))
-        elif (req.get("harness") == harness == sender.get("harness")
-              and req.get("sid") == sender.get("session_id")
-              and sid in (req.get("sid"), req.get("new_session"))
-              and row.get("source_sha256") in _FOLLOWUP_DIGESTS):
-            related = True      # this booking's continue text, from its session: a continue row
-    if len(bound) != 1:
-        # No booking binds it now, or two name it and neither is provably the current one.
-        return False if bound or related else None
-    req, held = bound[0]
-    return (req.get("status") == "cleared" and req.get("harness") == harness       # 1
-            and str(req.get("new_session") or "") == sid
-            and held.get("state") in ("pending", "sending")                       # 2
-            and not req.get("cancelled") and held.get("reason") != "explicit-cancelled"   # 3
-            and not req.get("continue_off"))
-
-
 def observe_continue_receipt(harness: str, sid: str, transfer_ref: str = "") -> bool:
     """Settle a booked continue only after exact native history says it was received."""
     matches = []
@@ -2228,38 +2089,22 @@ def settle_unsent_continue(harness: str, sid: str, *, now: Optional[float] = Non
     return settled
 
 
-def release_unsent_continue(claim, *, unbind: bool = False):
-    """Return only this unsent claim to the same booking's pending state.
-
-    Every caller releases a claim whose write never started, so its ledger row ends ``released``
-    even when a cancel took the booking meanwhile: the booking stays cancelled (False), and the
-    person's own later ``이어서해`` reads as theirs, not as this claim (``matching_tidy_claim``).
-    ``unbind`` also drops the transfer ref this claim bound (``bind_continue_transfer``): the
-    continue waits with no ref, so no carrier hands that row over (``continue_ref_deliverable``),
-    and the helper asks again (``hold_continue_for_input``)."""
+def release_unsent_continue(claim):
+    """Return only this unsent claim to the same booking's pending state."""
     key = claim["seat"]["key"]
     harness = str(claim.get("harness") or "")
     target_sid = str(claim.get("new_session") or "")
     booked = _booked_seat(claim, key)
     target_seat = st.session_seat(booked, harness, target_sid)
-    claim_id = (claim.get("continued") or {}).get("claim_id")
-
-    def same(held):
-        if not unbind:
-            return held == claim.get("continued")
-        def unbound(c):
-            return {k: v for k, v in (c or {}).items() if k != "transfer_ref"}
-        return unbound(held) == unbound(claim.get("continued"))
     with st.session_state_lock(target_seat):
         req = read_reservation(key)
-        held = (req or {}).get("continued") if isinstance((req or {}).get("continued"), dict) else {}
-        mine = bool(req and req.get("nonce") == claim.get("nonce")
-                    and str(req.get("harness") or "") == harness
-                    and str(req.get("new_session") or "") == target_sid)
-        cancelled = bool(mine and claim_id and held.get("claim_id") == claim_id
-                         and held.get("state") == "skipped" and held.get("reason") == "explicit-cancelled")
-        if not cancelled and (not mine or not same(held) or held.get("state") != "sending"):
+        if (not req or req.get("nonce") != claim.get("nonce")
+                or req.get("continued") != claim.get("continued")
+                or (req.get("continued") or {}).get("state") != "sending"
+                or str(req.get("harness") or "") != harness
+                or str(req.get("new_session") or "") != target_sid):
             return False
+        held = req["continued"]
         recipient = st.session_seat(_booked_seat(req, key), harness, target_sid)
         st.record_tidy_claim(recipient, harness=harness,
                              sid=target_sid or "-", claim_id=str(held.get("claim_id") or ""),
@@ -2269,30 +2114,25 @@ def release_unsent_continue(claim, *, unbind: bool = False):
                              operation_id=str(req.get("operation_id") or ""),
                              sent_seq=int(held.get("sent_seq", 0) or 0), state="released",
                              target_sid=target_sid)
-        if cancelled:
-            return False
-        req["continued"] = {**held, "state": "pending"}
-        if unbind:
-            req["continued"].pop("transfer_ref", None)
+        req["continued"] = {**req["continued"], "state": "pending"}
         _write_reservation(req)
         return True
 
 
 def hold_continue_for_input(claim: Optional[dict], reason: str) -> Optional[str]:
-    """The one rule for a continue the input box holds back, on every path that reads it: a pane
-    read before the claim, the last guard before typing, and Claude's private connection.
+    """The one rule for a continue the input box holds back before anything is bound to it: the
+    pane read before the claim, and Claude's private connection before or after its claim.
 
     It waits unbound: no claim, no transfer ref, ``queued``, and the helper asks again after
-    ``CONTINUE_INPUT_RETRY_SEC`` (``_continue``). A claim taken before the refusal goes back to
-    pending, and so does a ref it bound; the row itself is left as it is: with no booking binding
-    it, no carrier hands it over (``continue_ref_deliverable``), and the next ask binds it again.
+    ``CONTINUE_INPUT_RETRY_SEC`` (``_continue``). A claim taken before the refusal (the private
+    connection's, which binds no ref) goes back to pending.
 
-    Returns ``"queued"``; ``"skipped"`` when the claim changed meanwhile (a cancel, a settle: the
-    caller answers ``superseded``); None for any reason that is not the input box's (the caller
-    keeps its existing result)."""
+    Returns ``"queued"``; ``"skipped"`` when the claim changed meanwhile (a settle: the caller
+    answers ``superseded``); None for any reason that is not the input box's (the caller keeps
+    its existing result)."""
     if reason not in CONTINUE_INPUT_WAIT:
         return None
-    if claim is not None and not release_unsent_continue(claim, unbind=True):
+    if claim is not None and not release_unsent_continue(claim):
         return "skipped"
     return "queued"
 

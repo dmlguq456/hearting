@@ -325,61 +325,6 @@ class IdleObserverTests(unittest.TestCase):
                 else:
                     self.assertEqual((held["nonce"], held["status"]), (first["nonce"], "skipped"))
 
-    def test_cancel_ends_an_idle_booking_and_a_turn_that_is_not_the_person_does_not_book_again(self):
-        clock = [1000.0]
-        with self.iso.patched_environ(self.extra), \
-             mock.patch.object(clear, "_ensure_helper", return_value=(True, "")), \
-             mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]):
-            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text="start work")
-            self.assertEqual(self.observe_claude(tokens=600000), "booking=scheduled")
-            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
-            first = clear.read_reservation(seat.key)
-            self.assertEqual(clear.cancel_booking(st.session_seat(seat, "claude", "sid-A")), "cancel=booking")
-            held = clear.read_reservation(seat.key)
-            self.assertEqual((held["status"], held["reason"]), ("cancelled", "explicit-cancelled"))
-            self.assertEqual(held["cancelled"]["identity"], first["idle"]["identity"])
-            clock[0] = first["idle"]["due_at"] + 1
-            with mock.patch.object(clear, "_run_idle_card_request",
-                                   side_effect=AssertionError("card request after cancel")):
-                self.assertEqual(clear._idle_due_and_request(seat.key, first["nonce"], lambda _s: None),
-                                 "superseded")
-            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text=self.PEER)
-            self.assertEqual(self.observe_claude(tokens=600000, event_id="peer-turn", now=clock[0]),
-                             "booking=skipped reason=not-rearmed")
-
-    def test_cancel_given_as_the_persons_prompt_covers_its_turn_and_the_next_prompt_books_again(self):
-        # RV-PR1931 (1): the prompt `/session-tidy 취소` ended the idle booking as `new-input` first,
-        # the command then answered `cancel=none`, and that same turn's Stop booked a new one. The
-        # cancel is now the one that ended it, and it covers its user turn: that turn's Stop (and a
-        # repeated one) books nothing, and the next real prompt books again.
-        clock = [1000.0]
-        with self.iso.patched_environ(self.extra), \
-             mock.patch.object(clear, "_ensure_helper", return_value=(True, "")), \
-             mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]):
-            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text="start work")
-            self.assertEqual(self.observe_claude(tokens=600000), "booking=scheduled")
-            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
-            caller = st.session_seat(seat, "claude", "sid-A")
-            first = clear.read_reservation(seat.key)
-            clock[0] += 60
-            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text="/session-tidy 취소")
-            self.assertEqual(clear.read_reservation(seat.key)["reason"], "new-input")   # the hook came first
-            self.assertEqual(clear.cancel_booking(caller), "cancel=booking")
-            held = clear.read_reservation(seat.key)
-            asked = st.real_prompt_frontier(seat, "claude", "sid-A")["sequence"]
-            self.assertEqual((held["nonce"], held["status"], held["reason"], held["cancelled"]["user_seq"]),
-                             (first["nonce"], "cancelled", "explicit-cancelled", asked))
-            for event_id in ("cancel-turn", "cancel-turn", "cancel-turn-again"):   # its Stop, repeated
-                self.assertEqual(self.observe_claude(tokens=600000, event_id=event_id, now=clock[0]),
-                                 "booking=skipped reason=not-rearmed")
-            self.assertEqual(clear.read_reservation(seat.key)["nonce"], first["nonce"])
-            self.assertEqual(clear.cancel_booking(caller), "cancel=none")
-            clock[0] += 60
-            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text="next real work")
-            self.assertEqual(self.observe_claude(tokens=600000, event_id="work-turn", now=clock[0]),
-                             "booking=scheduled")
-            self.assertNotEqual(clear.read_reservation(seat.key)["nonce"], first["nonce"])
-
     def test_route_free_session_keeps_the_normal_idle_window(self):
         from tools.fleet import collectors
         with self.iso.patched_environ(self.extra), \
@@ -1654,31 +1599,6 @@ class UnifiedIdleTests(unittest.TestCase):
             self.assertEqual(clear.read_reservation(seat.key)["status"], "cancelled")
             self.assertEqual(writes, [])
             self.assertEqual(result["cleared"], "skipped")
-
-    def test_cancel_between_the_compact_claim_and_its_last_check_types_nothing(self):
-        # RV-PR1931 (2): the cancel lands after the steward's claim and before its last check. The
-        # last check finds the cancel and types nothing; the reply says only that a claimed
-        # /compact may not stop (it said "already typed"), and a released claim does not revive it.
-        import session_tidy_runner as runner
-        clock = [1000.0]
-        with self.iso.patched_environ(self.extra), mock.patch.object(clear, "_start_helper", return_value=12345), \
-                mock.patch.object(runner, "start_detached", return_value=None), \
-                mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]):
-            sid = "private-cancel"
-            seat, req, _reply = self.accepted("claude", sid, clock)
-            path = clear.reservation_path(seat.key)
-            claim, why = clear.claim_clear(path, req["nonce"])
-            self.assertEqual(why, "")
-            line = clear.cancel_booking(st.session_seat(seat, "claude", sid))
-            self.assertEqual(line, "cancel=booking compact=sending")
-            self.assertEqual(st.cancel_report_line(line), st._ui_translator()("tidy.say.cancelled_after_compact"))
-            self.assertEqual(clear.recheck_idle_input(path, claim), (None, "superseded"))   # the last check
-            self.assertFalse(clear.release_unsent_compact(seat.key, req["nonce"], claim["clear_claim"]))
-            held = clear.read_reservation(seat.key)
-            self.assertEqual((held["status"], held["reason"]), ("cancelled", "explicit-cancelled"))
-            typed = mock.Mock(side_effect=AssertionError("typed after the cancel"))
-            self.assertEqual(clear.run_helper(seat.key, req["nonce"], wait=lambda *_: "idle", steward=typed,
-                                              sleep=lambda _s: None), "superseded")
 
     def test_card_then_native_compact_once_for_every_harness_even_with_agents(self):
         import session_tidy_runner as runner
