@@ -15,8 +15,10 @@ subagents do nothing here, and a secret question is left to its own surface.
 
 One native call may carry several questions; a Hearting question record holds one. A single
 plain question keeps its choices and its recommendation (a label ending `(권장)` or
-`(Recommended)`). Several questions, a multi-select question or a preview are written as one
-text question the person answers in words, with the options and their descriptions listed.
+`(Recommended)`), and each option's description goes with its choice (the board draws it under
+the choice's name; 11-27 design 가), not into the question's text. Several questions, a multi-select
+question or a preview are written as one text question the person answers in words, with the
+options and their descriptions listed.
 
 Usage (stdin: the harness payload):
   native_question_redirect.py --claude|--codex   print the PreToolUse deny JSON when registered
@@ -103,7 +105,9 @@ def _line(option: dict, number: int | None, *, detail: bool) -> str:
 
 
 def build(rows: list, *, detail: bool = True) -> dict:
-    """`{text, choices, recommend}` for one Hearting question (`recommend` is 1-based or None)."""
+    """`{text, choices, recommend, descriptions}` for one Hearting question (`recommend` is 1-based or
+    None; `descriptions` maps a choice to its option's description, None when there is none or
+    `detail` is off)."""
     only = rows[0] if len(rows) == 1 else None
     if (only is not None and not only["multi"] and 1 <= len(only["options"]) <= MAX_CHOICES
             and not any(option["preview"] for option in only["options"])):
@@ -112,10 +116,10 @@ def build(rows: list, *, detail: bool = True) -> dict:
         if len(set(labels)) == len(labels):
             recommend = next((index + 1 for index, option in enumerate(only["options"])
                               if _RECOMMENDED.search(option["label"])), None)
-            lines = [only["question"]]
-            described = [f"- {label}: {option['description']}" for label, option in
-                         zip(labels, only["options"]) if detail and option["description"]]
-            return {"text": "\n".join(lines + described), "choices": labels, "recommend": recommend}
+            described = {label: option["description"] for label, option in zip(labels, only["options"])
+                         if detail and option["description"]}
+            return {"text": only["question"], "choices": labels, "recommend": recommend,
+                    "descriptions": described or None}
     blocks = []
     for index, row in enumerate(rows, 1):
         title = (f"Q{index}. " if len(rows) > 1 else "") + row["question"]
@@ -124,7 +128,7 @@ def build(rows: list, *, detail: bool = True) -> dict:
         lines = [title] + [_line(option, number, detail=detail)
                            for number, option in enumerate(row["options"], 1)]
         blocks.append("\n".join(lines))
-    return {"text": "\n\n".join(blocks), "choices": [], "recommend": None}
+    return {"text": "\n\n".join(blocks), "choices": [], "recommend": None, "descriptions": None}
 
 
 def register(harness: str, session_id: str, rows: list, *, cwd: str | None = None) -> str:
@@ -146,6 +150,7 @@ def register(harness: str, session_id: str, rows: list, *, cwd: str | None = Non
                 harness, session_id, seat, built["text"], sequence=tidy.read_prompt_seq(seat),
                 choices=built["choices"],
                 recommended=built["recommend"] - 1 if built["recommend"] else None,
+                descriptions=built["descriptions"],
                 cwd=cwd, incarnation=incarnation, replace=False)
             return value["id"]
         except ValueError as exc:

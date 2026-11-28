@@ -192,6 +192,8 @@ let panelModel={},panelHits=[],settings,dragging=false;
 // The route box's place in its routes (spec rule 23: rows short, it scrolls in place under the wheel)
 // and the rows it takes on the panel, as the last paint drew them.
 let routeScroll=0,routeArea=null;
+// 11-27: the RESOURCES section opened by a press on its head (folded by another); this window's own while it is up, folded in a new one.
+let resourcesOpen=false;
 // Spec rule 49 (d), (f): the person's last fold choice while this window is up (`{folded:true}`
 // folded or `{folded:false}` opened by hand, at every width); without one `expanded` follows the width.
 let foldChoice=null;
@@ -453,7 +455,7 @@ function panelViewNow(){
   const model=stale?{...panelModel,stale}:panelModel;
   return panelView.render({width:panelColumns(),height:maxHeight(),side:geometry().side,
     model,native:displayValues,state:shown,sid,harness,frame:spinFrame(),since:motionSince(shown),sections:panelSections,configuration:displayConfiguration,
-    settings,routeScroll,focused:block.focused,cwd:process.cwd(),cellWidth,background:terminalBackground,folded:!expanded,
+    settings,routeScroll,focused:block.focused,cwd:process.cwd(),cellWidth,background:terminalBackground,folded:!expanded,resourcesOpen,
     brief:()=>block.summary(),sent:()=>block.sent()});
 }
 // One beat for everything that runs (Fleet's 100 ms spinner frame and its
@@ -904,7 +906,7 @@ function popupNow(){
   // The editor identifies the live draft, including its empty first cell.
   // Question text can also start with `› `; it is not an editor. (11-27: the question this popup is on and a picked
   // answer lead with `▶ `, the place's mark, so only the answer row's own `› ` lead is read here.)
-  const edit=block.typing?part=>part.caret===true:part=>String(part.text).startsWith('› ')&&String(part.text).length>2;
+  const edit=part=>block.editPart(part);
   const at=body.slice(0,view.body).findIndex(row=>Array.isArray(row)&&row.some(edit));
   if(at>=0){const parts=body[at],upto=parts.slice(0,parts.findIndex(edit)+1).map(part=>part.text).join('');
     view.cursor={row:view.frame.top+at+2,col:view.frame.left+3+Math.min(inner-1,cellWidth(upto))};}
@@ -1942,6 +1944,8 @@ function panelAction(action){
   // 11-15 (popup design E): a press on a section (its head or a row, beside or in the folded strip)
   // opens its popup over the window; nothing opens in place.
   if(action==='question'){openPopup('QUESTIONS');return;}
+  // 11-27: a press on the RESOURCES head opens its rows, or folds them again.
+  if(action==='resources'&&!settings){resourcesOpen=!resourcesOpen;queueDisplay();return;}
   if(action.startsWith('popup:')&&!settings){
     const [,name,...rest]=action.split(':');
     if(SECTIONS.includes(name)){openPopup(name,rest.join(':'),name==='ROUTE');return;}
