@@ -259,7 +259,10 @@ v2 operation/tombstone compaction and physical deletion are unsupported.
 
 ## Work-style records and exact label lookup (D-82)
 
-One record is one way the user works, in one or two sentences. Schema is
+One record is one way the user works, in one or two sentences. A direction
+that follows from a passing condition, such as a harness's usage, limit or
+credit left or its time to reset, is not a way of working. Write it as
+`mem add working decision …` so that it expires (core/MEMORY.md §7.1). Schema is
 unchanged: `tier=durable`, `scope=global` (`project` when it holds only for that
 project), `type=preference`, and the main session's declared storage purpose is
 `user-correction` (a stated purpose, not a CLI flag). Labels live in the
