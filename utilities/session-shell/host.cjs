@@ -1830,18 +1830,21 @@ async function releaseHeld(ref,cancel=false) {
   releasing=undefined;process.stdin.resume();rebuildDisplay();
 }
 // The native cells the form and draft judgments read (session_shell.screen_lines), as [text, dim]
-// runs per row, the whole viewport. A row ends at its last cell that is not a blank: no judgment
-// reads a blank at a row's end (each strips it and reads no brightness of a space), and carrying
-// them made every request grow with the window's width (11-27: a 121 × 537 window's empty screen
-// alone was 65 KB). A screen too large for one request is never cut: it is not read (`screen-large`).
+// runs per row, the whole viewport; a run in reverse video (a TUI's cursor block, the evidence
+// that a bright first cell is the cursor on a faint suggestion) is [text, dim, true]. A row ends
+// at its last cell that is not a blank: no judgment reads a blank at a row's end (each strips it
+// and reads no brightness of a space), and carrying them made every request grow with the
+// window's width (11-27: a 121 × 537 window's empty screen alone was 65 KB). A screen too large
+// for one request is never cut: it is not read (`screen-large`).
 function screenSnapshot() {
   const lines=[],buffer=terminal.buffer.active;
   for(let y=0;y<terminal.rows;y++){
     const line=buffer.getLine(buffer.viewportY+y),runs=[];
     for(let x=0;x<terminal.cols;x++){
       const cell=line?.getCell(x);if(!cell||!cell.getWidth())continue;
-      const dim=!!cell.isDim(),text=cell.getChars()||' ',previous=runs[runs.length-1];
-      if(previous&&previous[1]===dim)previous[0]+=text;else runs.push([text,dim]);
+      const dim=!!cell.isDim(),inverse=!!cell.isInverse(),text=cell.getChars()||' ',previous=runs[runs.length-1];
+      if(previous&&previous[1]===dim&&(previous[2]===true)===inverse)previous[0]+=text;
+      else runs.push(inverse?[text,dim,true]:[text,dim]);
     }
     while(runs.length){const run=runs[runs.length-1];run[0]=run[0].replace(/ +$/,'');if(run[0])break;runs.pop();}
     lines.push(runs);
