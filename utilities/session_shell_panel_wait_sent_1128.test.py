@@ -139,8 +139,8 @@ console.log('ok');
 
     def test_a_press_on_a_sent_line_opens_its_question_and_a_wait_row_its_own(self):
         # The editor opens on the row pressed (`enter(<id@revision>)`): a sent answer's question to read, its words and the
-        # answer sent; a wait's own question; nothing named, the question it would open on before. Tab from a sent answer goes
-        # back to the waits; a projection while it is read keeps it, and so does its line going (fix 1: it is the one pressed).
+        # answer sent; a wait's own question; nothing named, the question it would open on before. Board updates and Tab
+        # leave the read-only view in place, and a press on a wait switches to that question.
         items, labels = presented(69)
         self.node(r"""
 const assert=require('node:assert/strict'),dir=process.argv[1],create=require(dir+'/block-input.cjs');
@@ -152,14 +152,12 @@ const key=i=>items[i].id+'@'+items[i].revision;
 b.enter(key(0));let w=words();
 assert(b.focused&&w.includes('표지 색인 정리를 언제 넘길까요?')&&w.includes(labels.sent+' · 쉬는 때에만 넘김'),w);
 assert(!w.includes('[서브 호출')&&!w.includes('연못 지도'),w);
-// Its keys say where to go; Enter answers nothing (the answer has left the person's hands).
+// Its key hint is for closing. Enter answers nothing.
 b.input(Buffer.from('\r'));assert.equal(answered,0);
 // A projection while it is read keeps it on screen.
 b.update(JSON.parse(process.argv[2]),'',{labels,styles:{}});assert(b.focused&&words().includes('표지 색인 정리를 언제'),words());
-// Tab goes back to the question it stood over (the first wait).
-b.input(Buffer.from('\t'));w=words();assert(w.includes('[서브 호출')&&!w.includes('표지 색인 정리를 언제'),w);
-b.leave();
-// A wait's row opens on that wait.
+b.input(Buffer.from('\t'));assert(words().includes('표지 색인 정리를 언제'),words());
+// A wait's row opens on that wait, including from the sent view.
 b.enter(key(3));w=words();assert(w.includes('`docs/maps/`')&&!w.includes('[서브 호출'),w);b.leave();
 b.enter(key(2));w=words();assert(w.includes('[route 관문]'),w);b.leave();
 // Nothing named (the head, the action row, Ctrl+]) opens where it did before: the question it stood on, the first wait
@@ -168,11 +166,12 @@ b.enter('');w=words();assert(w.includes('[route 관문]'),w);b.leave();
 b.enter('S4:gone@'+'f'.repeat(64));w=words();assert(w.includes('[route 관문]'),w);b.leave();
 {const c=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});c.update(JSON.parse(process.argv[2]),'',{labels,styles:{}});
  c.enter('');const x=c.detail({budget:20,columns:72}).map(r=>r.map(p=>p.text).join('')).join('\n');assert(x.includes('[서브 호출'),x);}
-// Read while its line goes (received long ago, or gone from the board): it stays the answer pressed until Tab.
+// Read while its line goes: it stays the answer pressed, even in a read containing Tab and Enter together.
 b.enter(key(0));b.update(JSON.parse(process.argv[2]).filter((_,i)=>i!==0),'',{labels,styles:{}});w=words();
 assert(b.focused&&w.includes('표지 색인 정리를 언제')&&w.includes(labels.sent+' · 쉬는 때에만 넘김')&&!w.includes('[서브 호출'),w);
-// Tab then goes where Ctrl+] opens: the question it stood on (the route gate, as the press of nothing named above).
-b.input(Buffer.from('\t'));w=words();assert(w.includes('[route 관문]')&&!w.includes('표지 색인 정리를 언제'),w);b.leave();
+assert.equal(b.input(Buffer.from('\t\r')).length,0);assert.equal(words(),w);
+b.input(Buffer.from('\x1d'));assert(!b.focused);
+b.enter('');w=words();assert(w.includes('[route 관문]')&&!w.includes('표지 색인 정리를 언제'),w);b.leave();
 assert.equal(acted,0);assert.equal(answered,0);
 console.log('ok');
 """, json.dumps(items, ensure_ascii=False), json.dumps(labels, ensure_ascii=False))
@@ -207,28 +206,32 @@ def block_words(lang="ko"):
         return session_shell.block_labels(76)
 
 
-# Fix 1 (review of #1957): the editor's items for the reproductions (a sent answer S, waits written in words).
-FIX1 = r"""
+# The editor's items for the two reviews of #1957.
+EDITOR = r"""
 const assert=require('node:assert/strict'),dir=process.argv[1],create=require(dir+'/block-input.cjs');
 const labels=JSON.parse(process.argv[2]);
 const S={id:'S4:t:timing',revision:'b'.repeat(64),answerable:false,request_state:'submitted',sent:['쉬는 때에만 넘김'],
  questions:[{id:'when',question:'표지 색인 정리를 언제 넘길까요?',choices:['지금 바로','쉬는 때에만 넘김']}]};
 const W=(id,question)=>({id:'S4:t:'+id,revision:id[0].repeat(64),answerable:true,questions:[{id,question}]});
 const A=W('alpha','알파 질문에 글로 답해 주세요.'),B=W('beta','베타 질문에 글로 답해 주세요.'),C=W('cover','표지 글을 적어 주세요.');
+const firstChoice={...A,questions:[{...A.questions[0],choices:['첫 선지','둘째 선지']}]};
 const key=item=>item.id+'@'+item.revision;
 let answered=0;
 const make=()=>create({changed(){},answer:async()=>(answered++,{state:'submitted'}),action(){}});
 const put=(b,rows)=>b.update(JSON.parse(JSON.stringify(rows)),'',{labels,styles:{}});
 const words=b=>b.detail({budget:20,columns:72}).map(r=>r.map(p=>p.text).join('')).join('\n');
 const reading=(b,tag)=>{const w=words(b);assert(w.includes('표지 색인 정리를 언제')&&w.includes(labels.sent+' · 쉬는 때에만 넘김'),tag+'\n'+w);return w;};
+const press=(b,keys)=>assert.equal(b.input(Buffer.from(keys)).length,0,JSON.stringify(keys)+' reached native input');
+const close=b=>{press(b,'\x1d');assert(!b.focused);};
+const escape=async b=>{press(b,'\x1b');await new Promise(r=>setTimeout(r,35));assert(!b.focused);};
 const tick=()=>new Promise(r=>setImmediate(r));
 """
 
-class SentAnswerReadFix1Test(unittest.TestCase):
-    """Fix 1 of #1957: the review's reproductions, on the real editor."""
+class SentAnswerReadTest(unittest.TestCase):
+    """Both reviews' reproductions on the real editor."""
 
     def node(self, script):
-        result = subprocess.run(["node", "-e", FIX1 + script, str(SHELL), json.dumps(block_words(), ensure_ascii=False)],
+        result = subprocess.run(["node", "-e", EDITOR + script, str(SHELL), json.dumps(block_words(), ensure_ascii=False)],
                                 capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout
@@ -236,58 +239,168 @@ class SentAnswerReadFix1Test(unittest.TestCase):
     def test_a_sent_answer_read_stays_the_one_pressed_and_a_paste_reaches_no_question(self):
         # Review 🔴1: S read, a paste starts, S leaves the board, the rest of the paste and its end mark (whole, or split
         # across two reads), then Enter twice: no question's draft holds a letter and nothing is answered; the popup still
-        # shows S's words and its sent line. Rule A: only Tab, Esc/Ctrl+] or another press leave it.
+        # shows S's words and its sent line. Close it to check each waiting question's draft.
         self.node(r"""
 (async()=>{
  for(const end of [['\x1b[201~'],['\x1b[20','1~']]){
   answered=0;const b=make();put(b,[S,C,A]);b.enter(key(S));reading(b,'opened');
-  b.input(Buffer.from('\x1b[200~FRONT-'));put(b,[C,A]);
-  b.input(Buffer.from('CROSSED-TAIL'));for(const part of end)b.input(Buffer.from(part));
-  b.input(Buffer.from('\r'));await tick();b.input(Buffer.from('\r'));await tick();
+  press(b,'\x1b[200~FRONT-');put(b,[C,A]);
+  press(b,'CROSSED-TAIL');for(const part of end)press(b,part);
+  press(b,'\r');await tick();press(b,'\r');await tick();
   const tag=JSON.stringify(end);
   reading(b,tag);assert.equal(answered,0,tag);assert(!b.typing,tag);
-  // Every question the popup goes to holds no letter of the paste.
-  for(let i=0;i<3;i++){b.input(Buffer.from('\t'));const w=words(b);assert(!/FRONT|CROSSED/.test(w),tag+'\n'+w);}
+  close(b);
+  for(const wait of [C,A]){b.enter(key(wait));const w=words(b);assert(!/FRONT|CROSSED/.test(w),tag+'\n'+w);close(b);}
   assert.equal(answered,0,tag);
  }
  console.log('ok');})().catch(e=>{console.error(e);process.exit(1);});
 """)
 
     def test_a_sent_answer_read_keeps_its_line_past_ten_minutes(self):
-        # Review 🔴2③: S received, its ten minutes pass while it is read: painted again (no board) and after the next board
-        # it still shows its sent line; the panel's line has gone (`sent()` holds none).
+        # The panel keeps a pending delivery past ten minutes and expires a receipt at ten minutes from sending.
+        # The view keeps the sent line even after the panel drops it.
         self.node(r"""
 let T=1e12;Date.now=()=>T;
-const b=make();put(b,[S,C]);put(b,[{...S,request_state:'received'},C]);
-assert.equal(b.sent().length,1);b.enter(b.sent()[0].open);reading(b,'opened');
-T+=600001;reading(b,'painted again after ten minutes');assert.equal(b.sent().length,0);
-put(b,[{...S,request_state:'received'},C]);reading(b,'the next board');assert.equal(b.sent().length,0);
-b.input(Buffer.from('\t'));const w=words(b);assert(w.includes('표지 글을 적어')&&!w.includes('표지 색인 정리를 언제'),w);
+const b=make();put(b,[S,C]);
+T+=600001;assert.equal(b.sent().length,1,'a pending delivery stays listed');
+b.enter(b.sent()[0].open);reading(b,'opened while delivery was pending');
+put(b,[{...S,request_state:'received'},C]);reading(b,'received after ten minutes');assert.equal(b.sent().length,0);
+close(b);
+const quick=make();put(quick,[S,C]);put(quick,[{...S,request_state:'applied'},C]);
+assert.equal(quick.sent().length,1);quick.enter(quick.sent()[0].open);reading(quick,'opened after application');
+T+=599999;assert.equal(quick.sent().length,1);
+T+=1;reading(quick,'painted at ten minutes');assert.equal(quick.sent().length,0);
+put(quick,[{...S,request_state:'applied'},C]);reading(quick,'the next board');assert.equal(quick.sent().length,0);
+close(quick);quick.enter();const w=words(quick);assert(w.includes('표지 글을 적어'),w);close(quick);
 console.log('ok');
 """)
 
     def test_a_pressed_sent_answer_comes_before_a_changed_question_kept_with_its_draft(self):
         # Review 🔴2①: C typed to, C leaves the board (kept with its draft), the popup closed; a press on S's line shows S.
-        # Tab then shows C with its draft and the changed-question word, as Ctrl+] did before.
+        # Closing the view and reopening with Ctrl+] shows C, its draft and its changed-question word.
         self.node(r"""
 const b=make();put(b,[C,A,S]);b.enter('');b.input(Buffer.from('mydraft'));put(b,[A,S]);b.leave();
 b.enter(key(S));const w=reading(b,'pressed');assert(!w.includes('mydraft')&&!w.includes('표지 글을 적어'),w);
-b.input(Buffer.from('\t'));const back=words(b);
+close(b);b.enter();const back=words(b);
 assert(back.includes('표지 글을 적어')&&back.includes('mydraft')&&back.includes(labels.changed),back);
 console.log('ok');
 """)
 
-    def test_tab_from_a_sent_answer_goes_to_a_question_waiting(self):
-        # Review 🔴2②: standing on C, S opened, C leaves the board: Tab opens A (the first one to answer), never the
-        # "no question" screen while A and B wait. With no wait at all, the screen it showed before. A board reordered
-        # while S is read: Tab goes back to the question stood on.
+    def test_a_reopened_request_never_accepts_input_through_its_sent_view(self):
+        # Review A. The second case presses a still-listed sent line backed by a local submitted state and an open
+        # projection. When the first request returns open, the paste must still leave the open question's draft alone.
         self.node(r"""
-{const b=make();put(b,[A,B,C,S]);b.enter(key(C));b.enter(key(S));reading(b,'opened');put(b,[A,B,S]);
- b.input(Buffer.from('\t'));const w=words(b);assert(w.includes('알파 질문'),w);}
-{const b=make();put(b,[C,S]);b.enter(key(C));b.enter(key(S));put(b,[S]);
- b.input(Buffer.from('\t'));const w=words(b);assert(!w.includes('표지 색인 정리를 언제')&&!w.includes('질문'),w);assert(w.trim().length>0,w);}
-{const b=make();put(b,[A,B,C,S]);b.enter(key(B));b.enter(key(S));put(b,[C,A,B,S]);
- b.input(Buffer.from('\t'));const w=words(b);assert(w.includes('베타 질문'),w);}
+(async()=>{
+ for(const earlyOpen of [false,true]){
+  const gate={...A,answer_kind:'decision'},calls=[];
+  let finish;
+  const b=create({changed(){},answer(fields){calls.push(fields);return new Promise(r=>{finish=r;});},action(){}});
+  const question={id:'when',question:S.questions[0].question,
+    ...(earlyOpen?{choices:['first draft'],free_text:true}:{})};
+  const open={id:S.id,revision:S.revision,answerable:true,questions:[question]};
+  put(b,[open,gate]);b.enter();press(b,earlyOpen?'1':'first draft');press(b,'\r');
+  assert.equal(calls.length,1);assert.deepEqual(calls[0].answers,{when:['first draft']});
+  press(b,'\t');assert(words(b).includes('알파 질문'),words(b));
+  put(b,[gate,{...open,answerable:false,request_state:'submitted',sent:['first draft']}]);
+  close(b);
+  if(earlyOpen)put(b,[gate,open]);
+  b.enter(b.sent()[0].open);
+  const photo=words(b);assert(photo.includes(labels.sent+' · first draft'),photo);
+  press(b,'\x1b[200~FRONT-');put(b,[gate]);put(b,[gate,open]);
+  finish({state:'open',reason:'delivery refused'});await tick();
+  press(b,'CROSSED-TAIL\x1b[201~\r');await tick();
+  assert.equal(calls.length,1);assert(b.focused);assert(!b.typing);
+  // A fallback title's i/N follows the list. The question, answer and key line belong to the view.
+  assert.deepEqual(words(b).split('\n').slice(1),photo.split('\n').slice(1));
+  close(b);b.enter(key(open));const draft=words(b);
+  assert(!/FRONT|CROSSED-TAIL/.test(draft),draft);close(b);
+ }
+ console.log('ok');})().catch(e=>{console.error(e);process.exit(1);});
+""")
+
+    def test_a_sent_view_keeps_the_pressed_words_when_the_same_id_is_sent_again(self):
+        self.node(r"""
+for(const revision of [S.revision,'d'.repeat(64)]){
+ const b=make();put(b,[A,S]);b.enter(b.sent()[0].open);const photo=reading(b,'pressed');
+ put(b,[A]);
+ const again={...S,revision,sent:['다른 보낸 답'],questions:[{...S.questions[0],question:'다시 올린 질문'}]};
+ put(b,[A,again]);
+ assert(b.sent()[0].some(part=>part.text==='다른 보낸 답'));
+ press(b,'1ab\r');assert.equal(answered,0);assert.equal(words(b),photo);close(b);
+}
+console.log('ok');
+""")
+
+    def test_reading_keeps_the_locally_sent_record_through_other_questions(self):
+        # The board carries no sent value for this answer. Its local value backs the panel's line when it returns.
+        self.node(r"""
+(async()=>{
+ const b=make();
+ put(b,[C]);b.enter();press(b,'내가 보낸 값\r');await tick();assert(!b.focused);assert.equal(answered,1);
+ const sent={...C,answerable:false,request_state:'submitted'};
+ put(b,[sent]);b.enter(b.sent()[0].open);
+ const crowd=Array.from({length:12},(_,i)=>W('wait'+i,'다른 질문 '+i));put(b,crowd);
+ press(b,'\x1b[200~FOREIGN\x1b[201~\r');await tick();
+ const photo=words(b);assert(photo.includes('표지 글을 적어')&&photo.includes(labels.sent+' · 내가 보낸 값'),photo);
+ assert(!b.typing&&b.focused);assert.equal(answered,1);
+ put(b,[...crowd,sent]);assert.equal(b.sent()[0].map(part=>part.text).join(''),labels.sent+' · 내가 보낸 값');
+ close(b);})().catch(e=>{console.error(e);process.exit(1);});
+""")
+
+    def test_tab_enter_and_paste_keep_the_sent_view_and_reach_no_native_input(self):
+        self.node(r"""
+(async()=>{
+ for(const reads of [['\t'],['\t\r'],['\t','\x1b[200~FRONT-','TAIL\x1b[201~','\r'],['\x1b[Z','x1\r']]){
+  const b=make();put(b,[firstChoice,B,C,S]);b.enter(key(C));b.enter(b.sent()[0].open);
+  put(b,[firstChoice,B,S]);
+  const photo=reading(b,'C left the board');
+  for(const keys of reads)press(b,keys);
+  await tick();assert.equal(answered,0);assert.equal(words(b),photo);assert(b.focused&&!b.typing);
+  assert.equal(photo.split('\n').at(-1),labels.navigate.split(' · ').at(-1),photo);
+  assert(!photo.includes('Tab'),photo);await escape(b);
+ }
+ console.log('ok');})().catch(e=>{console.error(e);process.exit(1);});
+""")
+
+    def test_board_updates_under_the_sent_view_use_the_normal_question_position(self):
+        # The control follows the same board through the ordinary popup without pressing the sent line.
+        self.node(r"""
+(async()=>{
+ for(const [start,draft,boards,question,changed] of [
+   [C,'',[[A,B,S]],'베타 질문',true],
+   [C,'my draft',[[A,B,S]],'표지 글을 적어',true],
+   [C,'',[[S],[A,B,S]],'알파 질문',false],
+   [B,'',[[C,A,B,S]],'베타 질문',false],
+ ]){
+  const [view,plain]=[make(),make()];
+  for(const b of [view,plain]){put(b,[A,B,C,S]);b.enter(key(start));if(draft)press(b,draft);}
+  view.enter(view.sent()[0].open);
+  for(const board of boards){put(view,board);put(plain,board);}
+  const photo=reading(view,'kept during the board updates');
+  assert(!photo.includes(labels.changed)&&!photo.includes('my draft'),photo);
+  for(const b of [view,plain]){await escape(b);b.enter();}
+  const restored=words(view);assert.equal(restored,words(plain));
+  assert(restored.includes(question),restored);assert.equal(restored.includes(labels.changed),changed,restored);
+  if(draft)assert(restored.includes(draft),restored);
+  for(const b of [view,plain])close(b);
+ }
+ assert.equal(answered,0);
+ console.log('ok');})().catch(e=>{console.error(e);process.exit(1);});
+""")
+
+    def test_a_long_sent_question_can_still_be_scrolled(self):
+        self.node(r"""
+const lines=Array.from({length:18},(_,i)=>[{text:'질문 본문 '+(i+1)}]);
+const sent={...S,questions:[{...S.questions[0],display:{body:lines}}]};
+const b=make();put(b,[A,C,sent]);b.enter(key(C));b.enter(b.sent()[0].open);
+const first=()=>b.detail({budget:8,columns:72})[1][0].text;
+assert.equal(first(),'질문 본문 1');
+press(b,'\x1b[B');assert.equal(first(),'질문 본문 2');
+press(b,'\x1b[6~');assert.equal(first(),'질문 본문 6');
+put(b,[A,sent]);assert.equal(first(),'질문 본문 6');
+b.wheel(1);assert.equal(first(),'질문 본문 7');
+press(b,'\x1b[5~\x1b[A');assert.equal(first(),'질문 본문 2');
+assert.equal(answered,0);close(b);
 console.log('ok');
 """)
 
@@ -359,15 +472,24 @@ console.log('ok');
 """, styled_items([*waits, gone]))
 
     def test_a_wait_row_reads_its_first_line_that_draws(self):
-        # Review 🔴6: an empty line, a line of NUL, ESC and DEL alone, then the words: the row reads the words, from the
-        # backend's `brief_line` and from the editor's own fallback alike.
-        text = "\n\x00\x1b\x7f\n실제 질문 줄\n둘째 줄"
-        raw = {"id": "S4:t:ctl", "revision": "c" * 64, "answerable": True, "questions": [{"id": "ctl", "question": text}]}
-        presented_items = styled_items([json.loads(json.dumps(raw))], 69)
-        self.assertEqual(presented_items[0]["questions"][0]["display"]["brief_line"], [{"text": "실제 질문 줄", "key": "loc_repo"}])
-        for items in (presented_items, [raw]):
-            self.node(r"""
+        # Backend and editor fallback skip lines left blank after removing controls.
+        for text in (
+            "\n\x00\x1b\x7f\n실제 질문 줄",
+            "\n\x00 \x1b \x7f\x80\x9f\n실제 질문 줄",
+            "\n\r\n\x00\r실제 질문 줄",
+            "\n\u061c \u200f \u202e \u2069\n실제 질문 줄",
+            "\n\x00\x85실제\t 질문\u3000줄",
+        ):
+            with self.subTest(text=text):
+                raw = {"id": "S4:t:ctl", "revision": "c" * 64, "answerable": True,
+                       "questions": [{"id": "ctl", "question": text}]}
+                presented_items = styled_items([json.loads(json.dumps(raw))], 69)
+                line = presented_items[0]["questions"][0]["display"]["brief_line"]
+                self.assertEqual(line, [{"text": "실제 질문 줄", "key": "loc_repo"}])
+                for items in (presented_items, [raw]):
+                    self.node(r"""
 const b=create({changed(){},answer:async()=>({state:'submitted'}),action(){}});b.update(items,'',{labels,styles:{}});
+assert.equal(b.summary().waits[0].line.map(p=>p.text).join(''),'실제 질문 줄');
 const v=paint(b,69,{wait:labels.waiting+' 1'});assert(v.box[0].includes('◑ '+word+' · 실제 질문 줄'),v.all);
 console.log('ok');
 """, items)

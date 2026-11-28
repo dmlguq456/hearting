@@ -543,8 +543,9 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   inside stand still; a `◑` and a count of a wait answered elsewhere keep their own letter blink. A section with
   nothing to show inside it stays its head row, and short of rows the box's two lines go after the content rows
   (the section then reads as below). The count is the answer wait's (the `◑답 대기 N` row is merged into
-  it, in the question's rose), then the answers sent (one line each, ten minutes from when it was sent,
-  `✓ answer sent · <what was sent>`), the questions waiting here (one row each, in the editor's order) and,
+  it, in the question's rose), then the answers sent (one line each, `✓ answer sent · <what was sent>`, while
+  delivery is pending and, once received or applied, only until ten minutes after sending), the questions
+  waiting here (one row each, in the editor's order) and,
   for a wait answered elsewhere, where (`1 QUESTIONS · answer below`). 11-28 (the person: "선지는 미리 보기를
   날리고 대기중인 선지는 구분이 좀 되게끔 (앞에 답 대기를 붉은 색으로 쓴다던지해서 답 보냄과 표현 일관성을 맞추되 구분이
   되게끔)"): a waiting row reads as the sent line does, `◑ 답 대기 · <its first line>` (`◑ to answer` on an English
@@ -555,17 +556,17 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   the rose, its word dim. Only a request answered here has a row (fix 1): a display reference of one that has left this
   session's waits has none and is in no hidden count, and a changed question held with its draft changes no row's word.
   The panel shows no choices: they are the popup's (the backend sends the panel each waiting question's first line that
-  draws, `brief_line`; a line of control characters alone is blank). Three rows at most; more waiting, the last row shown
+  draws, `brief_line`; a line left blank after removing control characters is skipped). Three rows at most; more waiting, the last row shown
   ends in the hidden count (`+2`, dim; waits answered elsewhere and answers sent are not in it). Short of cells the
   line is cut (`…`) before the word, which stands whole while it fits. Under them `↵ answer · Ctrl+]` keeps its rose at the right. Inside the box the red
   letters stand still while the box's line blinks (11-16, the person: "G1에서 질문 바운더리만 붉게 하고, 내용은 흰색으로
   해": the line carries the red, the words the body color); folded back to the plain section (short of rows) the
   word and the action row blink as in 11-15. Short of rows the extra rows go first (the third, then the second),
-  then the action row; the first row stays to the last. A press on a sent line opens that answer's question to read
-  (its words and the line, a secret `•••`, nothing read for it; the answer cannot be changed there). It stays the answer
-  pressed, as it was, when the board changes and when its line leaves the panel (taken, ten minutes): it never moves on to
-  another question by itself; Tab goes to the question `Ctrl+]` would open, Esc/Ctrl+] closes it, a press on another
-  row opens that row's. A press on a waiting row opens that question, a press anywhere else on the box the question
+  then the action row; the first row stays to the last. A press on a sent line opens a read-only view of that question
+  and answer as they were when pressed (a secret stays `•••`). The view keeps that text when the board changes or
+  the line leaves the panel. Esc/Ctrl+] closes the view and a press on another panel row switches to that row.
+  ↑/↓, PgUp/PgDn and the wheel scroll long text. Other keys have no effect in the view.
+  A press on a waiting row opens that question, a press anywhere else on the box the question
   popup as before (the question it stood on). Eight colors, mono and `NO_COLOR` tell a question to answer here from the
   rest by the box line's weight and by the two words. Nothing else is red but the box's line, the waiting word,
   a wait answered elsewhere's `◑` and the guide line's count (11-15: what waits blinks, above): not an answer on
@@ -1217,16 +1218,14 @@ place is one dim guidance line beside the count saying where
 panel answers one. A blocked worker's wait is in no count or question block (the
 route row shows the route blocked), and it closes once the route closes or its
 parent holds the worker's exact acknowledged completion receipt. Once the person
-sends an answer it has left their hands: while it travels (the existing answer
-record's `submitted`/`received`) the popup closes and the question is one line
+sends an answer it has left their hands. The popup closes and the question is one line
 (`✓ answer sent · <what was sent>`, which stands for rule 53's chosen choice;
 `✓ answer sent` in the passing green of a route's `✓`, the `·` dim, what was sent
 in plain text, a secret `•••`; 11-28: a press on it opens that question to read, its words and this line),
 `Ctrl+]` no longer stands on it, and every count above leaves it out (Fleet lists
-it as sent); the line stays ten minutes from when it was sent (11-16, the person: "답 보냄도 한
-5~10분은 유지하도록 해두자"; `SENT_KEEP_MS` in `block-input.cjs`), its session having the answer or not,
-and goes at the first update or paint after that (no timer of its own), and a failed
-delivery brings the question back with its existing word. Until its session takes
+it as sent). The line stays while delivery is pending (`submitted`). Once received or applied it
+stays only until ten minutes after sending (`SENT_KEEP_MS` in `block-input.cjs`) and leaves on the
+next update or paint. A failed delivery brings the question back with its existing word. Until its session takes
 it, the line says so: `✓ answer sent · <what was sent> · awaiting delivery`, and,
 when its session rests (Fleet's idle, unused or stale) and only the person can let it in,
 why: a window whose shell runs an older release than its launch path names

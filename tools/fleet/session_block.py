@@ -194,7 +194,7 @@ def _brief_line(question):
     """The panel's row of one waiting question (11-28, the person: "선지는 미리 보기를 날리고"): its
     first line that draws (fix 1: a line of control characters alone is blank), after the panel's `◑ 답 대기 · `;
     its choices are the popup's alone."""
-    first = next(filter(None, map(_drawable, str(question.get("question") or "?").splitlines())), "?")
+    first = next(filter(str.strip, map(_drawable, str(question.get("question") or "?").splitlines())), "?")
     return [(first, "loc_repo")]
 
 

@@ -2,9 +2,6 @@
 // Local presentation and drafts only. The canonical questions API owns every effect.
 const {StringDecoder}=require('node:string_decoder');
 const {keyRows}=require('./panel-view.cjs');
-// 11-16 (the person: "답 보냄도 한 5~10분은 유지하도록 해두자"): a sent answer's line stays SENT_KEEP_MS after it
-// was sent, whether or not its session has it yet (it used to go at that receipt, within seconds); it
-// leaves at the first update or paint past that, on the path it always left by (no timer of its own).
 const SENT_KEEP_MS=10*60*1000;
 const ANSWER_FULL=Symbol('answer full');
 // Home and End as terminals send them: `ESC [ H/F`, SS3, and the `~` forms of tmux/screen and rxvt.
@@ -38,7 +35,7 @@ const wordChar=c=>/[\p{L}\p{N}\p{M}_]/u.test(c||'');
 module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=PASTE_IDLE,keyWait=PASTE_KEY_WAIT}) {
   let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null,answeredAt=0,escapedAt=0;
   // 11-28 (the person: "답 보냄의 내용을 누르면 그것과 관련된게 여전히 뜨게끔"): a sent answer's line pressed on the panel opens its
-  // question to read (its words and the answer sent; a secret stays `•••`), until Tab, a press elsewhere or the popup closes.
+  // question and answer as they were when pressed, until another press or the popup closes.
   let viewing=null;
   let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer,skipTail=false,changeArmed=false,pasteCR=false;
   // 11-26 (review 1861): a paste whose bytes stop for a second has stalled. It is not over: what comes after is still
@@ -161,7 +158,7 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
     heldTimer=undefined;const byte=held;held=-1;
     if(byte<0||!pasting||!focused)return;
     escape='';decoder=new StringDecoder('utf8');finishPaste();discardRest();
-    if(byte===0x0d){const row=current();if(row)enterKey(row);}
+    if(byte===0x0d){const row=current();if(row&&row!==viewing)enterKey(row);}
     else{leave();if(byte===0x1b)escapedAt=Date.now();}
     changed();
   }
@@ -188,20 +185,14 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
     release();
     const listed=flat();
     const found=previous?listed.findIndex(row=>key(row.item)===key(previous.item)&&row.question.id===previous.question.id):-1;
-    // Fix 1: the sent answer being read is the one pressed: its newest values while its line stands, and as it was once
-    // the line goes (taken, ten minutes). Only the person moves on from it (Tab, Esc/Ctrl+], another press).
-    if(viewing){
-      const again=items.find(item=>item.id===viewing.item.id&&phase(item)==='sent');
-      if(again)viewing={item:again,question:(again.questions||[])[0]||{}};
-      if(found>=0){index=found;frozen=undefined;stale=false;}prune(listed);changed();return;
-    }
     const firstOpen=listed.findIndex(row=>row.item.answerable===true&&!state(row.item).state);
     if(!focused&&previous&&state(previous.item).state&&firstOpen>=0){index=firstOpen;frozen=undefined;stale=false;scroll=0;follow=true;}
     else if(found>=0){index=found;frozen=undefined;stale=false;}
     else if(previous&&focused&&!state(previous.item).state&&(state(previous.item).drafts[previous.question.id]||Object.keys(state(previous.item).answers).length||Object.keys(state(previous.item).cursor).length)){
       frozen=previous;stale=true;state(previous.item).notice=text('changed','question changed · Tab next');
     }else{
-      frozen=undefined;stale=false;index=Math.min(index,Math.max(0,listed.length-1));scroll=0;follow=true;
+      frozen=undefined;stale=false;index=Math.min(index,Math.max(0,listed.length-1));
+      if(!viewing){scroll=0;follow=true;}
       // The question being read left with nothing typed to it and another stands in its place:
       // say so once, and the first Enter after only clears the word, never answers the new one.
       if(previous&&focused&&listed.length&&!state(previous.item).sending){
@@ -222,20 +213,25 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
   // 11-28: a press on one row of the panel's question box opens on that row's question (`open`, its `id@revision`):
   // a wait's own, else a sent answer's to read; any other press (`open` empty) as before.
   function enter(open=''){
-    focused=true;scroll=0;follow=true;answeredAt=0;escapedAt=0;changeArmed=false;viewing=null;
+    focused=true;scroll=0;follow=true;answeredAt=0;escapedAt=0;viewing=null;
     const sent=open&&items.find(item=>key(item)===open&&phase(item)==='sent');
-    if(sent){viewing={item:sent,question:(sent.questions||[])[0]||{}};changed();return;}
+    if(sent){
+      const local=state(sent),status=local.sending?'submitted':local.state||sent.request_state;
+      viewing={item:sent,question:(sent.questions||[])[0]||{},status,line:sentLine(sent)};
+      changed();return;
+    }
+    changeArmed=false;
     const at=open?flat().findIndex(r=>key(r.item)===open):-1;
     if(at>=0){index=at;frozen=undefined;stale=false;}
-    opening();changed();
+    const row=current();
+    if(!frozen&&(!row||!active(row))){const open=flat().findIndex(r=>active(r));if(open>=0)index=open;}
+    changed();
   }
-  function opening(){const row=current();if(!frozen&&(!row||!active(row))){const open=flat().findIndex(r=>active(r));if(open>=0)index=open;}}
   function forgetPlaces(){for(const entry of entries.values())entry.caret={};}
-  function leave(){forgetPlaces();clearFullNotice(current());viewing=null;focused=false;escapedAt=0;changeArmed=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
+  function leave(){forgetPlaces();clearFullNotice(under());viewing=null;focused=false;escapedAt=0;changeArmed=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
   const seatOf=row=>row?key(row.item)+'\0'+row.question.id:null;
   function move(delta){
-    // From a sent answer being read, Tab goes where Ctrl+] opens (fix 1): a question waiting, not a place the board left.
-    if(viewing){viewing=null;scroll=0;follow=true;resetParser();opening();changed();return;}
+    if(viewing)return;
     const count=flat().length;index=(index+delta+count+1)%(count+1);
     moves++;changeArmed=false;forgetPlaces();seat=seatOf(flat()[index]);
     frozen=undefined;stale=false;scroll=0;follow=true;resetParser();changed();
@@ -244,7 +240,7 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
   // The backend's word for a wait not answerable here (spec E9 rule 54); without one, the
   // session's own window below, where an answer always goes.
   function unanswerable(row){return row.item.answerable===true?'':row.item.answer_state||'answer_below';}
-  function active(row){return !stale&&row.item.answerable===true&&(!state(row.item).state||state(row.item).state==='open');}
+  function active(row){return row!==viewing&&!stale&&row.item.answerable===true&&(!state(row.item).state||state(row.item).state==='open');}
   function waitingForReceipt(){
     const row=current();
     return focused&&!!row&&!busy&&!stale&&['submitted','received','applied'].includes(state(row.item).state);
@@ -296,7 +292,7 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
     const keys=(pieces,rows)=>keyRows(pieces.flatMap(piece=>String(piece).split(' · ')),columns,{rows,cellWidth}).map(line=>[span(line)]);
     const row=current();if(!row)return focused?keys([help||text('navigate','Tab next · Esc/Ctrl+] back')],Math.max(1,budget)):[];
     const local=state(row.item),id=row.question.id,view=row.question.display;
-    const status=local.sending?'submitted':local.state||row.item.request_state||(row.item.answerable===true?'open':unanswerable(row));
+    const status=row===viewing?viewing.status:local.sending?'submitted':local.state||row.item.request_state||(row.item.answerable===true?'open':unanswerable(row));
     let head=view?.head||[span('◑ '+(index+1)+'/'+flat().length+' · '+text(status,status),'g_blocked')];
     if(view){head=head.map((part,i)=>i===3?span(text(status,status),status==='applied'?'lvl_g':status==='open'?'g_blocked':'dim'):part);}
     // 11-27 (the eight marks): the question this popup is on leads with `▶`, the place every list marks.
@@ -318,7 +314,8 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
     let content=lines();
     const tail=[];let keyLines=[];
     const picked=local.answers[id];
-    if(status==='open'&&writable(row)){
+    if(row===viewing)tail.push(viewing.line);
+    else if(status==='open'&&writable(row)){
       const shownChars=shownOf(local.drafts[id]||'',row.question.secret),rows=answerRows(shownChars,columns);
       answerColumns=columns;
       const live=focused&&!!local.typing[id],at=caretAt(local,id),home=rowOf(rows,at);
@@ -338,23 +335,23 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
         const front=lead+shownChars.slice(one.start,at).join(''),rest=shownChars.slice(at,one.end).join('');
         tail.push(chosenRow([{...mark,text:front,caret:true},...(rest?[{...span(rest,'loc_repo'),answerRow:true}]:[])],true));
       }
-    }else if(row===viewing){tail.push(sentLine(row.item));
     }else if(picked&&!choosing(row)){
       const selected=picked.map(v=>{if(row.question.secret)return '•'.repeat([...String(v)].length);const n=choices(row).findIndex(c=>value(c)===v);return (n>=0?String(n+1)+' · ':'')+v;});
       tail.push(chosenRow([span('▶ '+selected.join(', '),'loc_repo')],active(row)));
     }
-    const notice=local.notice?[span(local.notice===ANSWER_FULL?text('full','answer is full · 4,096 bytes'):local.notice,stale?'lvl_r':'dim')]:null;
+    const notice=row!==viewing&&local.notice?[span(local.notice===ANSWER_FULL?text('full','answer is full · 4,096 bytes'):local.notice,stale?'lvl_r':'dim')]:null;
     if(notice)tail.push(notice);
     if(focused){
       const ready=complete(row,formValues(row));
       const instruction=active(row)?(choosing(row)?text('choose','↑↓ choose · Enter send'):ready?text('send','Enter send'):text('text','type answer')):text(status,status);
       const editing=active(row)&&writable(row);
       const navigate=text(editing?'navigate_write':'navigate','Tab next · Esc/Ctrl+] back');
+      const close=String(navigate).split(' · ').at(-1);
       const writeHint=local.typing[id]?(choices(row).length?text('writing_choices','Enter send · Ctrl+J newline · ↑ choices'):text('writing','Enter send · Ctrl+J newline')):text('choose_write','↑↓ choose · type to write · Enter send');
       // 11-26 (review 1861): a paste stalled: what comes is still its text; the way out is a key pressed, Enter
       // (sends what came) or the closing key, named on the same row. PR 1871: while it still comes in, its Enter and
       // Esc are its own bytes, so the row says it is under way and that Enter sends once it stops (a frame late too).
-      const pieces=pasting&&stalled?[text('paste_stalled','paste stalled'),text('send','Enter send'),String(navigate).split(' · ').at(-1)]
+      const pieces=row===viewing?[close]:pasting&&stalled?[text('paste_stalled','paste stalled'),text('send','Enter send'),close]
         :pasting?[text('pasting','pasting · Enter sends once it stops')]
         :[...(active(row)?[writable(row)?writeHint:instruction]:[]),navigate];
       keyLines=keys(pieces,editing?1:Math.max(1,Math.max(2,budget)-2));
@@ -376,7 +373,7 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
     const space=Math.max(0,limit-1-footer.length);
     if(edit&&!space)return [head,...footer].slice(0,limit);
     // The reading hint names the keys that page the body.
-    const readingDown=focused&&local.typing[id]&&choices(row).length>0;
+    const readingDown=row!==viewing&&focused&&local.typing[id]&&choices(row).length>0;
     const readingWords=()=>choosing(row)?text('more_choose','more · PgUp/PgDn to read'):
       readingDown?text('more_down','more · ↓ to read'):
       !focused&&active(row)&&choices(row).length?text('more_page','more · focus and PgUp/PgDn to read'):
@@ -467,13 +464,8 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
       return chosenRow(number?[{...span('▶','harness'),bold:true,role:'choice-mark',...pick},span(' ',''),...first,...words]:[gap,...words]);
     });
   }
-  // Rule 5: one line per answer on its way, `✓ answer sent · <what was sent>` (11-15 panel polish
-  // 2: `✓ answer sent` in the passing green of a route's `✓`, the `·` dim, what was sent in plain
-  // text); the panel draws it where the question box stood, never boxed or filled. The answer
-  // record's `sent` (secrets already hidden) comes first: when another place's claim won, it is
-  // what was sent, not this panel's pick (review 1633, follow-up 3).
-  // One sent answer's line: `✓ answer sent · <what was sent>` (a secret `•••`), from the values the item carries (the
-  // backend hides a secret's) or this window's own; nothing is read for it. The panel's line and the popup's say the same.
+  // Use the answer record's `sent` first when another place's claim won (review 1633, follow-up 3).
+  // The record already hides secrets. The fallback uses this window's values, with secrets masked as `•••`.
   function sentLine(item){
     const label=(question,v)=>{
       const listed=item.answer_kind==='decision'?[]:question.choices||[];
@@ -537,7 +529,7 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
     local.typing[id]=false;delete local.caret[id];local.notice='';follow=true;
   }
   function clearFullNotice(row){
-    if(row&&state(row.item).notice===ANSWER_FULL)state(row.item).notice='';
+    if(row&&row!==viewing&&state(row.item).notice===ANSWER_FULL)state(row.item).notice='';
   }
   // A cursor without an answer is the default, not a choice the person made.
   // Clear it on the first accepted character, including paste or a clicked row.
@@ -608,7 +600,7 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
     local.caret[id]=i;return true;
   }
   function character(c){
-    const row=current(),local=row&&state(row.item),id=row?.question.id;
+    const row=current();
     goal=null;
     if(pasting){
       // 11-26: a pasted text goes in whole: its line breaks (CR, LF or CR LF, as terminals paste them) are
@@ -626,8 +618,9 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
       }
       return;
     }
-    clearFullNotice(row);
     if(c==='\x1d'||c==='\x1b'){leave();return;}
+    if(viewing)return;
+    clearFullNotice(row);
     if(c==='\t'){move(1);return;}
     // Ctrl+J (LF) puts a line break in a written answer; on a question answered only by a choice, and in a
     // secret, it is Enter, as before.
@@ -635,6 +628,7 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
     if(c==='\r'||c==='\n'){if(row)enterKey(row);return;}
     if(!row){if('rwfp'.includes(c))action(c);return;}
     if(!active(row))return;
+    const local=state(row.item),id=row.question.id;
     if(c==='\x01'||c==='\x05'){if(placing(row))place(row,c==='\x01'?'home':'end');return;}
     if(c==='\x17'||c==='\x15'||c==='\x0b'){if(placing(row)){if(c==='\x17')cutWord(row,-1);else cutLine(row,c==='\x15'?-1:1);}return;}
     if(c==='\x7f'||c==='\b'){
@@ -708,7 +702,7 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
             // 11-26: in a written answer of several rows ↑↓ go between its rows; from its first row ↑ goes to the
             // choices (or reads the question) and from its last ↓ reads on, as they did.
             else if((up||down)&&placing(row)&&vertical(row,up?-1:1)){/* the place moved a row */}
-            else if(up&&row&&state(row.item).typing[row.question.id]&&choices(row).length){state(row.item).typing[row.question.id]=false;delete state(row.item).caret[row.question.id];scroll=0;follow=true;}
+            else if(up&&row&&row!==viewing&&state(row.item).typing[row.question.id]&&choices(row).length){state(row.item).typing[row.question.id]=false;delete state(row.item).caret[row.question.id];scroll=0;follow=true;}
             else if((up||down)&&choosing(row)){const local=state(row.item),id=row.question.id,n=choices(row).length,at=cursorOf(row);
               if(down&&at===n-1&&writable(row))local.typing[id]=true;
               else{local.cursor[id]=at<0?0:Math.max(0,Math.min(n-1,at+(up?-1:1)));local.answers[id]=[value(choices(row)[local.cursor[id]])];}
@@ -745,7 +739,10 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
     const waiting=text('waiting','◑ to answer').replace(/^◑\s*/u,'');
     const waits=items.filter(item=>!phase(item)&&item.answerable===true&&(item.questions||[]).length).map(item=>{
       const row={item,question:item.questions[0]},view=row.question.display||{},status=terminalState(row);
-      const first=String(row.question.question||'').split('\n').map(line=>line.replace(/[\x00-\x1f\x7f-\x9f]/g,' ').trim()).find(Boolean)||'?';
+      const first=String(row.question.question||'').split(/[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]/u)
+        .map(line=>line.replace(/[\p{White_Space}\x1f]+/gu,' ').replace(/^ | $/g,'')
+          .replace(/[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu,''))
+        .find(line=>/[^ ]/.test(line))||'?';
       return {word:status==='open'?waiting:text(status,status),answerable:active(row),open:key(item),
         line:view.brief_line||[span(first,'loc_repo')]};
     });
@@ -756,7 +753,7 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
     // key ended is dropped (`swallow`, which the host asks first of every read).
     get pasting(){return pasting;},get stalled(){return pasting&&stalled;},get discarding(){return discarding;},swallow,
     get question(){return !!current();},
-    get typing(){const row=current();return focused&&!!row&&!!state(row.item).typing[row.question.id];},
+    get typing(){const row=current();return focused&&!!row&&row!==viewing&&!!state(row.item).typing[row.question.id];},
     enter,leave,update,input,detail:preview,summary,sent:sentLines,references,
     // Where the terminal's cursor stands in the popup: while writing the caret; else the draft row (`› ` and its
     // text). A choice's words (`choice-detail`) are never the editor, whatever they begin with (review of #1908).
