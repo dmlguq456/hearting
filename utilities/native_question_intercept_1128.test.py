@@ -372,6 +372,34 @@ class HookTest(Base):
         self.assertRegex(out.getvalue(), ID)
         self.assertEqual(err.getvalue().strip(), redirect.REGISTERING)
 
+    def test_a_registration_stuck_before_its_write_ends_inside_the_hook_timeout_as_a_pass(self):
+        """The real Codex entry and Claude hook processes, with the question store's write lock held
+        elsewhere: the 5 s budget gives up, the read-back finds nothing, the native wait is marked,
+        and the process ends well inside the harness's 10 s hook timeout (no second window)."""
+        import fcntl
+        root = state.state_root()
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        for name in (".projection.lock", ".cache-write.lock"):
+            lock = os.open(root / name, os.O_CREAT | os.O_RDWR, 0o600)
+            self.addCleanup(os.close, lock)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        env = {"HOME": os.environ["XDG_STATE_HOME"], "PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1",
+               "XDG_STATE_HOME": os.environ["XDG_STATE_HOME"]}
+        for harness, script in (("codex", ROOT / "adapters/codex/hooks/pretooluse-question-redirect.py"),
+                                ("claude", ROOT / "hooks/native-question-redirect.py")):
+            with self.subTest(harness=harness):
+                started = time.monotonic()
+                done = subprocess.run([sys.executable, str(script)], input=json.dumps(payloads()[harness]),
+                                      env=env, text=True, capture_output=True, timeout=30)
+                elapsed = time.monotonic() - started
+                self.assertEqual((done.returncode, done.stdout), (0, ""), done.stderr)
+                self.assertGreater(elapsed, redirect.BUDGET_SECONDS - 0.5)
+                self.assertLess(elapsed, 9)
+                wait = interaction.read_wait(SID, harness)
+                self.assertEqual((wait["source"], wait["call_ref"]),
+                                 (redirect._WAIT_SOURCE[harness], redirect._call_ref(harness, SID, payloads()[harness])))
+                self.assertEqual(state.message_questions(harness, SID), ({}, "ok"))
+
     def test_opencode_reads_three_outcomes_and_a_check_that_died_after_it_began_is_refused(self):
         node = self.f.node                                                   # found before the fixture hid PATH
         if not node:

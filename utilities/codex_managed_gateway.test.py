@@ -1583,7 +1583,8 @@ class ManagedGatewayTest(unittest.TestCase):
         self.assertEqual(received, request)
         marker = self.wait_interaction("thread-1", True)
         assert marker is not None
-        self.assertEqual(set(marker), GATEWAY.fleet_interaction._ALLOWED_KEYS)
+        # every native identity key; `call_ref` belongs only to a question the redirect let through
+        self.assertEqual(set(marker), GATEWAY.fleet_interaction._ALLOWED_KEYS - {"call_ref"})
         self.assertEqual(marker["source"], "codex-appserver")
 
         response = {
