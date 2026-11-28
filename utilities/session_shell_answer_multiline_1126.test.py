@@ -330,7 +330,7 @@ class PrivateTmuxScenesTest(unittest.TestCase):
                 return [json.loads(line)["answers"]["q"] for line in path.read_text().splitlines()] if path.exists() else []
 
             def popup(rows):
-                top = next(i for i, row in enumerate(rows) if "╭─ ›" in row)
+                top = next(i for i, row in enumerate(rows) if "╭─ ▶" in row)
                 bottom = next(i for i, row in enumerate(rows) if i > top and "╰─ QUESTIONS" in row)
                 return rows[top:bottom + 1]
 
@@ -393,7 +393,7 @@ class PrivateTmuxScenesTest(unittest.TestCase):
                 # Scene 3 (review 1861): a paste whose bytes stop for a second has stalled, not ended. The key row says
                 # so and names the way out; what comes after is still the paste's text. Esc pressed then closes the
                 # popup, Enter pressed sends what came, and the rest of that paste is never typed nor the native's.
-                shown = lambda rows: any("╭─ ›" in row for row in rows)  # noqa: E731
+                shown = lambda rows: any("╭─ ▶" in row for row in rows)  # noqa: E731
                 stalled = lambda rows: any("붙여넣기 멈춤" in row for row in rows)  # noqa: E731
 
                 def received():

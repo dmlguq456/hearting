@@ -35,7 +35,7 @@ function oneKey(data){
   const chars=[...text];return chars.length===1&&chars[0]!=='\ufffd'&&chars[0]>=' ';
 }
 const wordChar=c=>/[\p{L}\p{N}\p{M}_]/u.test(c||'');
-module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,keyWait=PASTE_KEY_WAIT}) {
+module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=PASTE_IDLE,keyWait=PASTE_KEY_WAIT}) {
   let focused=false,items=[],index=0,frozen,stale=false,busy=false,scroll=0,follow=true,moves=0,seat=null,answeredAt=0,escapedAt=0;
   let decoder=new StringDecoder('utf8'),escape='',pasting=false,escapeTimer,skipTail=false,changeArmed=false,pasteCR=false;
   // 11-26 (review 1861): a paste whose bytes stop for a second has stalled. It is not over: what comes after is still
@@ -239,7 +239,37 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
   }
   function complete(row,values){return row.item.answer_kind==='decision'?!!values[row.question.id]:(row.item.questions||[]).every(q=>values[q.id]);}
   function references(){return items.slice(0,8).map(item=>({id:item.id,revision:item.revision}));}
-  function preview({budget=10,columns=100}={}) {
+  // 11-27 (design 가; reviews of #1908): laid out as the same question without words, the rows the popup could still
+  // grow by take the words under the names shown: the highlighted choice's first, then from the top, a cut one ending `…`.
+  let pendingWords=null;
+  function preview(args){pendingWords=null;const rows=layout(args),given=pendingWords;pendingWords=null;return given?withWords(rows,given):rows;}
+  function withWords(rows,{options,full,limit,columns}){
+    let room=limit-rows.length;
+    if(room<=0)return rows;
+    const groups=[];
+    options.forEach((parts,i)=>{
+      if(/^\d+\s+$/.test(String(parts[0]?.text??'')))groups.push({names:[],words:[]});
+      if(groups.length)groups.at(-1)[full[i].some(part=>part.role==='choice-detail')?'words':'names'].push(full[i]);
+    });
+    const shown=groups.filter(group=>group.words.length&&rows.includes(group.names.at(-1)));
+    const lit=shown.find(group=>group.names.some(parts=>parts[0]?.text==='▶')),take=new Map();
+    for(const group of [...(lit?[lit]:[]),...shown.filter(group=>group!==lit)]){
+      const n=Math.min(group.words.length,room);if(!n)break;take.set(group,n);room-=n;
+    }
+    return rows.flatMap(parts=>{
+      const group=shown.find(one=>one.names.at(-1)===parts),n=group?take.get(group)||0:0;
+      if(!n)return [parts];
+      const said=group.words.slice(0,n);
+      if(n<group.words.length){
+        const cut=said[n-1].map(part=>({...part})),width=()=>cut.reduce((sum,part)=>sum+measure(String(part.text)),0);
+        let end=cut.length-1;
+        while(width()+1>columns&&end>=0){const chars=[...String(cut[end].text)];chars.pop();cut[end].text=chars.join('');if(!chars.length)end--;}
+        cut[Math.max(0,end)].text=String(cut[Math.max(0,end)].text)+'…';said[n-1]=cut;
+      }
+      return [parts,...said];
+    });
+  }
+  function layout({budget=10,columns=100}={}) {
     // Every key line is packed by the popup's one rule: broken between its ` · ` pieces, the closing key last.
     const keys=(pieces,rows)=>keyRows(pieces.flatMap(piece=>String(piece).split(' · ')),columns,{rows,cellWidth}).map(line=>[span(line)]);
     const row=current();if(!row)return focused?keys([help||text('navigate','Tab next · Esc/Ctrl+] back')],Math.max(1,budget)):[];
@@ -247,13 +277,16 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
     const status=local.sending?'submitted':local.state||row.item.request_state||(row.item.answerable===true?'open':unanswerable(row));
     let head=view?.head||[span('◑ '+(index+1)+'/'+flat().length+' · '+text(status,status),'g_blocked')];
     if(view){head=head.map((part,i)=>i===3?span(text(status,status),status==='applied'?'lvl_g':status==='open'?'g_blocked':'dim'):part);}
-    if(focused)head=[span('› ','g_blocked'),...head];
+    // 11-27 (the eight marks): the question this popup is on leads with `▶`, the place every list marks.
+    if(focused)head=[span('▶ ','g_blocked'),...head];
     const body=view?.body||[[span(row.question.question||'?','loc_repo')]];
     // Spec E9 rule 54: a wait not answerable here shows the backend's whole words for its
     // reason (never the machine reason); a send state of its own shows nothing more.
     const options=status!=='open'?(status===unanswerable(row)&&view?.options?view.options:[]):view?.options||(choices(row).length?choices(row).map((c,i)=>[span(`${i+1}  `,'g_blocked'),span(typeof c==='object'?c.label||c.value:c,'loc_repo')]):[[span(text('text','type answer'))]]);
     const selected=choosing(row)||focused&&writable(row)&&cursorOf(row)>=0;
-    const marked=status==='open'&&choices(row).length?highlight(options,selected?cursorOf(row):-1,!!selected,writable(row)):options;
+    const full=status==='open'&&choices(row).length?highlight(options,selected?cursorOf(row):-1,!!selected,writable(row)):options;
+    const marked=full.filter(parts=>!parts.some(part=>part.role==='choice-detail'));
+    if(marked.length<full.length)pendingWords={options,full,limit:Math.max(2,budget),columns};
     // 11-17 (the person: "질문이랑 선지가 잘 구분되게" / "구분선 위에 여백도 하나 두고"): a question with choices
     // ends its words with one empty row and a thin line (the frame's own color, dim where the frame is bright)
     // before its choices; a question answered in words has neither. Short of rows the empty row goes first.
@@ -285,7 +318,7 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
       }
     }else if(picked&&!choosing(row)){
       const selected=picked.map(v=>{if(row.question.secret)return '•'.repeat([...String(v)].length);const n=choices(row).findIndex(c=>value(c)===v);return (n>=0?String(n+1)+' · ':'')+v;});
-      tail.push(chosenRow([span('› '+selected.join(', '),'loc_repo')],active(row)));
+      tail.push(chosenRow([span('▶ '+selected.join(', '),'loc_repo')],active(row)));
     }
     const notice=local.notice?[span(local.notice===ANSWER_FULL?text('full','answer is full · 4,096 bytes'):local.notice,stale?'lvl_r':'dim')]:null;
     if(notice)tail.push(notice);
@@ -296,8 +329,10 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
       const navigate=text(editing?'navigate_write':'navigate','Tab next · Esc/Ctrl+] back');
       const writeHint=local.typing[id]?(choices(row).length?text('writing_choices','Enter send · Ctrl+J newline · ↑ choices'):text('writing','Enter send · Ctrl+J newline')):text('choose_write','↑↓ choose · type to write · Enter send');
       // 11-26 (review 1861): a paste stalled: what comes is still its text; the way out is a key pressed, Enter
-      // (sends what came) or the closing key, named on the same row.
+      // (sends what came) or the closing key, named on the same row. PR 1871: while it still comes in, its Enter and
+      // Esc are its own bytes, so the row says it is under way and that Enter sends once it stops (a frame late too).
       const pieces=pasting&&stalled?[text('paste_stalled','paste stalled'),text('send','Enter send'),String(navigate).split(' · ').at(-1)]
+        :pasting?[text('pasting','pasting · Enter sends once it stops')]
         :[...(active(row)?[writable(row)?writeHint:instruction]:[]),navigate];
       keyLines=keys(pieces,editing?1:Math.max(1,Math.max(2,budget)-2));
       tail.push(...keyLines);
@@ -357,7 +392,7 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
         else if(words.length>page)head=[...head,span(` +${words.length-page} ${choosing(row)?'PgUp/PgDn':readingDown?'↓':'↑↓'}`)];
       }else scroll=0;
       if(marked.length<=spare)return [head,...top,...marked,...f].slice(0,limit);
-      const size=spare>=2?spare-1:spare,lit=Math.max(0,marked.findIndex(parts=>parts[0]?.text==='▸'));
+      const size=spare>=2?spare-1:spare,lit=Math.max(0,marked.findIndex(parts=>parts[0]?.text==='▶'));
       const from=Math.max(0,Math.min(marked.length-size,lit-Math.floor(size/2)));
       return [head,...top,...marked.slice(from,from+size),...(spare>=2?[[span(`+${marked.length-size} · ${text('more_choices','more choices · ↑↓')}`)]]:[]),...f].slice(0,limit);
     }
@@ -367,7 +402,7 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
     // The highlighted choice comes onto the page when it changes (↑↓, a number);
     // PgUp/PgDn then read the body from its first row to its last, and the page
     // stays where the reading left it until the choice changes again.
-    const mark=choosing(row)?marked.findIndex(parts=>parts[0]?.text==='▸'):-1;
+    const mark=choosing(row)?marked.findIndex(parts=>parts[0]?.text==='▶'):-1;
     const lit=mark>=0?body.length+gap.length+mark:-1;
     if(follow&&lit>=0){if(lit<scroll)scroll=lit;else if(lit>=scroll+page)scroll=lit-page+1;}
     scroll=Math.max(0,Math.min(scroll,Math.max(0,content.length-page)));
@@ -382,7 +417,7 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
   // The option rows of one choice start with its number (`2 `); its wrapped rows
   // with spaces. Spec E9 rule 53: every option row leads with a two-cell column for the
   // mark (blank, so focusing shifts nothing). While ↑↓ choose, the chosen choice's first row
-  // carries `▸` in this session's harness color, bold, and every row of it (each row of a
+  // carries `▶` (11-27; `▸` before) in this session's harness color, bold, and every row of it (each row of a
   // wrapped one) has its words bold in the bright body color; every other choice reads dim
   // grey. Without color the mark and the weight alone tell them apart. 11-15 ("질문 선지 선택 효과를
   // 틴트로 해 명확하게"): every row of the chosen one is marked `tint`, so the popup lays the chosen ground
@@ -391,18 +426,22 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
   const chosenRow=(parts,on=true)=>on?parts.map(part=>({...part,tint:true})):parts;
   // 11-17: the number is the question's rose and bold on every row (the mark `◑`'s own color; where there is no
   // color, its weight tells it from the words), two cells before the words.
+  // 11-27 (design 가): a choice's words under its name (`choice-detail`) read dim on every row, the chosen
+  // choice's too (the popup draws them in its floor gray, on the chosen ground there); and a press on any
+  // row of a choice, its words' rows too, picks that choice.
   function highlight(options,at,choosing,canPick){
     let n=-1;
-    const bold=part=>({...part,bold:true});
+    const bold=part=>({...part,bold:true}),dim=part=>({...part,...(styles.dim||{dim:true}),bold:false});
     return options.map(parts=>{
       const lead=String(parts[0]?.text??''),number=/^(\d+)\s+$/.exec(lead);
       if(number)n=Number(number[1])-1;else if(lead.trim())n=-1;
       const [head,...rest]=number?[bold(parts[0]),...parts.slice(1)]:[null,...parts];
-      const first=head?[{...head,...(canPick?{choiceIndex:n}:{})}]:[];
-      if(!choosing||at<0)return [span('  ',''),...first,...rest];
-      if(n!==at)return [span('  ',''),...first,...rest.map(part=>({...part,...(styles.dim||{dim:true}),bold:false}))];
-      const words=rest.map(part=>({...part,...(styles.loc_repo||{}),bold:true,dim:false}));
-      return chosenRow(number?[{...span('▸','harness'),bold:true,role:'choice-mark'},span(' ',''),...first,...words]:[span('  ',''),...words]);
+      const pick=canPick&&n>=0?{choiceIndex:n}:{};
+      const first=head?[{...head,...pick}]:[],gap={...span('  ',''),...pick};
+      if(!choosing||at<0)return [gap,...first,...rest];
+      if(n!==at)return [gap,...first,...rest.map(dim)];
+      const words=rest.map(part=>part.role==='choice-detail'?dim(part):{...part,...(styles.loc_repo||{}),bold:true,dim:false});
+      return chosenRow(number?[{...span('▶','harness'),bold:true,role:'choice-mark',...pick},span(' ',''),...first,...words]:[gap,...words]);
     });
   }
   // Rule 5: one line per answer on its way, `✓ answer sent · <what was sent>` (11-15 panel polish
@@ -430,7 +469,10 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
         }
       }
       const said=shown.join(', ').replace(/\s+/g,' ').trim();
-      return [span(text('sent','✓ answer sent'),'lvl_g'),...(said?[span(' · '),span(said,'loc_repo')]:[])];
+      // This window's own reading keeps it from taking the answer: say so, in the words its messages carry.
+      const why=hold()==='screen-large'?text('hold_screen_large',''):'';
+      return [span(text('sent','✓ answer sent'),'lvl_g'),...(said?[span(' · '),span(said,'loc_repo')]:[]),
+        ...(why?[span(' · '),span(why,'dim')]:[])];
     });
   }
   async function submit(){
@@ -588,7 +630,7 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
     // stalled; such a read waits (`held`). A byte within the wait makes it the paste's own (a line break, an escape
     // sequence's start, a control character), read on with what came.
     if(held>=0){clearTimeout(heldTimer);heldTimer=undefined;data=Buffer.concat([Buffer.from([held]),data]);held=-1;}
-    else if(pasting&&focused&&oneKey(data)&&data.length===1&&(data[0]===0x1d||stalled&&(data[0]===0x0d||data[0]===0x1b))){
+    else if(pasting&&focused&&data.length===1&&oneKey(data)&&(data[0]===0x1d||stalled&&(data[0]===0x0d||data[0]===0x1b))){
       held=data[0];heldTimer=setTimeout(pressed,keyWait);changed();return Buffer.alloc(0);
     }
     for(let i=0;i<data.length;i++){
@@ -687,6 +729,9 @@ module.exports=function({changed,answer,action,cellWidth,pasteIdle=PASTE_IDLE,ke
     get question(){return !!current();},
     get typing(){const row=current();return focused&&!!row&&!!state(row.item).typing[row.question.id];},
     enter,leave,update,input,detail:preview,summary,sent:sentLines,references,
+    // Where the terminal's cursor stands in the popup: while writing the caret; else the draft row (`› ` and its
+    // text). A choice's words (`choice-detail`) are never the editor, whatever they begin with (review of #1908).
+    editPart(part){return this.typing?part.caret===true:part.role!=='choice-detail'&&String(part.text).startsWith('› ')&&String(part.text).length>2;},
     choose(at){const row=current();if(focused&&row){pick(row,at);changed();}},
     write(){const row=current();if(focused&&row&&active(row)&&writable(row)){state(row.item).typing[row.question.id]=true;changed();}},
     // The wheel over the popup reads the question on, a row at a time, as ↑↓ and PgUp/PgDn do.

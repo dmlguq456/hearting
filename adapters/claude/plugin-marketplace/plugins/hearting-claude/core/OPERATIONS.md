@@ -153,6 +153,17 @@ folder or initialize Git. Source-mutating worker scopes are refused before route
 registration or worktree preparation. Existing artifact-scope and parallel-overlap
 checks continue to bound cycle output writes. The route's sealed `source_commit=unversioned`
 is the runtime signal; a Git probe error is not equivalent to a non-Git folder.
+Its Codex profile keeps `/tmp` read-only, so a non-Git worker launch (all three
+harnesses) points `TMPDIR`, `TMP`, `TEMP` and `CLAUDE_CODE_TMPDIR` at one private
+`<TMPDIR or /tmp>/hearting-<uid>` folder by its real path (links resolved), grants
+only that path and records it in its launch input; a nested launch reuses the folder,
+and an owner recovery reuses the recorded path only while the write record holds that
+exact string and no link lies on it. The boundary is judged first, on the real path:
+a `TMPDIR` whose real path is inside the source or artifact root (through a link too)
+moves it to `/tmp/hearting-<uid>`; the worker keeps its inherited temp, as Git
+workers do, when that place is inside them too or the folder is not a directory of
+the launching uid, mode 0700, that it can write (a link, a looser mode, a read-only
+mount, a share showing another uid), and an existing folder is left as it is.
 When the non-Git source is exactly the canonical `HOME`, the generated default
 runtime may use only its exact project-hash child under the existing managed
 state `project-runtimes` namespace. Artifact overlap, namespace-parent aliases,
@@ -3266,7 +3277,9 @@ session. A registered question takes words beside its choices (11-22): the perso
 choice and add text, or send text alone, in the answer forms that already exist (`[value, text]`,
 text only), and the delivery to the asking session shows both; `questions answer --choice N` is
 unchanged. What is to be chosen is registered with `--choice`, not listed in the question's
-text. Existing question IDs, seat addresses and answer bindings remain valid;
+text; what a choice means may go under its name with `--choice-description N=WORDS` (11-27,
+optional, 1-based). A single native question call registers its options' descriptions the same
+way; those words are drawn only and are no part of any answer. Existing question IDs, seat addresses and answer bindings remain valid;
 legacy seat-only sources are read only for their matching session. The exact
 consumed receipt remains distinct from native gate approval. A queued answer or
 ordinary peer notice closes neither kind of wait. Direct input closes a message

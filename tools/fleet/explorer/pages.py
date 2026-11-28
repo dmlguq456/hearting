@@ -336,7 +336,7 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
         y += 1
         cursor, field = _field(grid, x, y, "PANE", right), [(str(pane), "soft")]
         if cursor + _width(field) + cell_width(link) > right - 1:
-            link = " ⏎"
+            link = " ›"          # 11-27 (the eight marks): the narrow link reads as every other "opens elsewhere" mark
     cursor = _segs(grid, cursor, y, field, right)
     if pane:
         open_x = grid.put(cursor, y, link, "hearting", limit=right)
@@ -346,11 +346,11 @@ def _session_page(grid, vm, tag, x, right, bottom, state=None):
     session_state = str(session.get("state") or "·")
     ask = bool(session.get("ask"))
     marker, marker_key = {"working": ("⠏", "spin"), "idle": ("●", "g_work_off"),
-                          "blocked": ("●", "g_blocked"), "dead": ("✕", "g_dead"),
+                          "blocked": ("◑", "g_blocked"), "dead": ("✕", "g_dead"),
                           "done": ("✓", "done")}.get(session_state, ("·", "dim"))
     if ask:
         # The answer wait's mark in the shell panel's rose, its word from the word list.
-        marker, marker_key = (session.get("answer_wait_marker") or "●", "g_blocked")
+        marker, marker_key = ("◑", "g_blocked")          # 11-27: an older record's ``●`` reads ``◑`` too
     word = (ui_text("fleet.session_panel.answer") if ask
             else {"dead": "ended", "done": "ended"}.get(session_state, session_state))
     value_x = _field(grid, x, y, "STATE", right)
@@ -581,14 +581,23 @@ def _peers_line(grid, vm, tag, x, y, right):
     return y + 1, {go for _text, _key, go in shown if go} - {tag}, tabbed
 
 
-def _route_page(grid, vm, ident, x, right, bottom, state, whole=False):
+def _route_page(grid, vm, ident, x, right, bottom, state, whole=False, frame_first=False):
+    """A route's page; returns the row under what it drew. ``frame_first`` (the shell popup's page where the whole of it fits the answer,
+    `session_shell._route_page_answer`) draws the frame first, to its content, then the route row, then what the page says about the route, so
+    the frame stands in the rows its first screen drew it in (`routePageFirst`). Else the page's own order: the summary, the visibility lines,
+    the route row, the frame (``whole``, the popup: every line, the frame to its content; Fleet's own screen: the frame to the window)."""
     route = next((item for item in vm.routes if str(item.get("id")) == ident), None)
     if route is None:
-        return
+        return None
     system = vm.system if hasattr(vm.system, "get") else {}
     summary = (system.get("task_summary", {}).get("by_route", {}).get(ident)
                if hasattr(system, "get") and hasattr(system.get("task_summary"), "get") else None)
+    # (The units a worker of this route called are not drawn on the route page: it reads as it did before the call.)
+    shown = ({key: value for key, value in route.items() if key != "called"},)
     y = 3
+    if frame_first:
+        y = draw_route_detail(grid, vm, route, x, grid.cols - x - 2, y, state, bottom=min(bottom, grid.rows - 6), fit=True) + 1
+        y = _draw_route_subset(grid, vm, shown, x, y, bottom, opened=ident, no_repo_group=True, view_key="route:" + ident, state=state) + 1
     if isinstance(summary, Mapping):
         for name, key in (("TODO", "lvl_y"), ("DOING", "g_spin_dim"), ("DONE", "done")):
             values = tuple(summary.get(name.casefold()) or ())
@@ -597,11 +606,11 @@ def _route_page(grid, vm, ident, x, right, bottom, state, whole=False):
                      "soft" if values else "dim", limit=right)
             y += 1
     y = _route_visibility_lines(grid, route.get("visibility"), x, right, y, bottom, whole)
-    # (The units a worker of this route called are not drawn on the route page: it reads as it did before the call.)
-    y = _draw_route_subset(grid, vm, ({key: value for key, value in route.items() if key != "called"},), x, y, bottom,
-                           opened=ident, no_repo_group=True, view_key="route:" + ident, state=state)
-    draw_route_detail(grid, vm, route, x, grid.cols - x - 2, y + 1, state,
-                      bottom=min(bottom, grid.rows - 6), fit=whole)
+    if frame_first:
+        return y
+    y = _draw_route_subset(grid, vm, shown, x, y, bottom, opened=ident, no_repo_group=True, view_key="route:" + ident, state=state)
+    return draw_route_detail(grid, vm, route, x, grid.cols - x - 2, y + 1, state,
+                             bottom=min(bottom, grid.rows - 6), fit=whole)
 
 
 _VISIBILITY_TONE = {"good": "done", "bad": "lvl_r", "mixed": "lvl_y", "info": "soft", "dim": "dim"}
@@ -1060,13 +1069,20 @@ def _loop_lanes(grid, pos, w, bottoms, row, stages, loops):
             row += 1
 
 
-def _current_leg(grid, x, y, stages, room):
-    """The stage that matters now, in its stage hue, then n/m and a thin progress rule."""
-    x0 = x
+def current_leg_values(stages):
+    """``(index, stage, done, total)``: the stage of a leg that matters now (an active or failed one, else the first not
+    done, else the last) and how many of its stages are done, as the leg band's stage line counts them (the producer hands
+    the panel these very values, `live._panel_bands`)."""
     cur = next((i for i, item in enumerate(stages) if item.get("st") in ("active", "failed")), None)
     if cur is None:
         cur = next((i for i, item in enumerate(stages) if item.get("st") != "done"), len(stages) - 1)
-    stage = stages[cur]
+    return cur, stages[cur], sum(1 for item in stages if item.get("st") == "done"), len(stages)
+
+
+def _current_leg(grid, x, y, stages, room):
+    """The stage that matters now, in its stage hue, then n/m and a thin progress rule."""
+    x0 = x
+    cur, stage, done, total = current_leg_values(stages)
     hue = _STAGE_HUE[cur % 5]
     name_style = ("r", 1, 0) if stage.get("st") == "failed" else (hue, 1, 0)
     if stage.get("st") == "active" and not getattr(grid, "beat", 1):
@@ -1078,10 +1094,9 @@ def _current_leg(grid, x, y, stages, room):
         mark, key = _STATE_MARK.get(stage.get("st"), ("·", "dim"))
         x = grid.put(x + 1, y, mark, key, limit=limit)
     x += 2
-    done = sum(1 for item in stages if item.get("st") == "done")
-    x = grid.put(x, y, "%d/%d" % (done, len(stages)), "soft", limit=limit) + 1
+    x = grid.put(x, y, "%d/%d" % (done, total), "soft", limit=limit) + 1
     cells = max(0, min(12, limit - x))
-    fill = round(cells * done / len(stages))
+    fill = round(cells * done / total)
     for i in range(cells):
         x = grid.put(x, y, "━" if i < fill else "─", (hue, 0, 0) if i < fill else ("d", 0, 1))
     return x

@@ -576,7 +576,9 @@ def request_rows(views, now, tag_of, doer_of=None, own_repo=None):
         status = (delivery_text
                   if side == "out" and state in ("open", "partial") and delivery in ("waiting", "sent", "delivered")
                   else work)
-        glyph = {"final": "✓", "rejected": "✕", "cancelled": "✕"}.get(state, "→" if side == "out" else "◂")
+        # 11-27 (the person: "방향만 다르면 화살표 방향만 반대로 하면 되는걸 왜 삼각형을써? 메시지는 안그러잖아"): a received
+        # request is `←`, the arrow a received message wears; only the direction differs from a sent one's `→`.
+        glyph = {"final": "✓", "rejected": "✕", "cancelled": "✕"}.get(state, "→" if side == "out" else "←")
         kind = ("request-rejected" if state in ("rejected", "cancelled")
                 else "request-done" if closed else "request-in" if side == "in" else "request-out")
         title = " ".join(str(record.get("title") or "").split())
@@ -616,7 +618,7 @@ def request_rows(views, now, tag_of, doer_of=None, own_repo=None):
         body = str(view.get("body") or "")
         body_lines = body.splitlines()
         rows.append({
-            "id": record["id"], "way": "→" if side == "out" else "◂", "glyph": glyph,
+            "id": record["id"], "way": "→" if side == "out" else "←", "glyph": glyph,
             "who": who, "title": title, "status": status, "age": _request_age(now - (record.get("updated") or now)),
             "kind": kind, "state": state, "side": side, "delivery": delivery or "",
             **({"status_head": waiting[1]} if waiting and status == waiting[0] else {}),
@@ -889,6 +891,41 @@ RESULT_SECONDS = 600
 PASSED = re.compile(r"(?i)pass(ed)?|success(ful)?|succeeded|ok|done|complete(d)?")
 
 
+def route_bands(items):
+    """Fleet's leg band for a route (``live._panel_bands``), as the first screen of its page draws it: text only, bounded.
+    A value not of its own shape (a text that is not a string, a line or a title that is not a list, a count that is not a
+    whole number) is left out, never written as text; a list of more legs than the producer carries is no band."""
+    def text(value, limit):
+        return re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", value)[:limit] if isinstance(value, str) else ""
+
+    # (a piece keeps its own spaces, which the band's lines lay their words by: only control characters go)
+    def pieces(parts, limit):
+        return [[text(part[0], 80), part[1][:24] if isinstance(part[1], str) else ""]
+                for part in (parts if isinstance(parts, (list, tuple)) else ())
+                if isinstance(part, (list, tuple)) and len(part) >= 2 and isinstance(part[0], str)][:limit]
+
+    def count(value):
+        return type(value) is int and 0 <= value <= 10 ** 6
+
+    rows = [item for item in (items if isinstance(items, list) else ()) if isinstance(item, dict)]
+    if len(rows) > 6:
+        return []
+    bands = []
+    for item in rows:
+        lines = item.get("lines") if isinstance(item.get("lines"), (list, tuple)) else ()
+        band = {"n": text(item.get("n"), 64), "st": text(item.get("st"), 16),
+                "verdict": text(item.get("verdict"), 16), "kind": text(item.get("kind"), 8),
+                "lines": [pieces(line, 8) for line in lines[:2] if isinstance(line, (list, tuple))],
+                "title": pieces(item.get("title"), 10)}
+        stage = item.get("stage")
+        if (isinstance(stage, dict) and isinstance(stage.get("n"), str) and all(count(stage.get(key)) for key in ("at", "done", "of"))
+                and 0 < stage["of"] and stage["done"] <= stage["of"]):
+            band["stage"] = {"n": text(stage["n"], 64), "st": text(stage.get("st"), 16), "at": stage["at"], "done": stage["done"],
+                             "of": stage["of"]}
+        bands.append(band)
+    return bands
+
+
 def presentation(values, view, harness, sid, columns, *, native_owned=(), display=None, now=None):
     """``display`` and ``now`` (the session's prompt display and the clock) let a finished
     route's result leave the ROUTE box after the person's next input or ten minutes."""
@@ -919,7 +956,9 @@ def presentation(values, view, harness, sid, columns, *, native_owned=(), displa
         visibility = row.get("visibility") if isinstance(row.get("visibility"), dict) else {}
         routes.append({**route_row(row, cells=route_gauge_cells(columns)), "id": clean(row.get("id")), "title": clean(row.get("title")),
                        "state": clean(row.get("state")), "state_label": state_label(row.get("state")), "stage": clean(row.get("worker_stage")),
-                       "stages": stages, "stage_more": row.get("stage_more", 0),
+                       "stages": stages, "stage_more": row.get("stage_more", 0), "bands": route_bands(row.get("bands")),
+                       # (the label whole, as Fleet's head writes it: its rule cuts it; the producer's is its bounded `repo` and `/`)
+                       "head_repo": sanitize_title(row.get("head_repo"))[:330], "session_tag": sanitize_title(row.get("session_tag"))[:16],
                        "visibility": route_evidence(visibility, unit=str(row.get("capability") or "") == "unit"),
                        "reason": clean(reason), "outcome": clean(row.get("outcome")),
                        "owner": owner_text, "owner_line": "" if runs_itself else owner_text,

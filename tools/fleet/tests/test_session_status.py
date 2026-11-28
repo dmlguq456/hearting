@@ -539,8 +539,8 @@ class ListTest(StatusTest):
         self.assertEqual(lines[:3], ["시험용 캠페인", "updated 11-15 11:02", "시험용 한 줄."])          # (how long ago is the title band's)
         self.assertEqual(lines[3], "")
         self.assertEqual(lines[4:8], ["하는 중 5", "  일 하나 · #11 · 기록 1", "  일 둘 · #12 · 기록 2", "  일 셋 · 기록 1"])
-        self.assertEqual(lines[8:12], ["  일 넷 · 기록 1", "  일 다섯 · 기록 1", "  all 5 ›", "    6시간 넘게 움직임 없는 열린 일 23개는 접어 둠."])
-        self.assertEqual(lines[12:], ["", "  › 최근에 끝난 것 1", "    11-21 끝난 일 · #1 · 기록 6", "    앞서 끝난 기록 1,392개는 접어 둠.", "",
+        self.assertEqual(lines[8:12], ["  일 넷 · 기록 1", "  일 다섯 · 기록 1", "  all 5 ▸", "    6시간 넘게 움직임 없는 열린 일 23개는 접어 둠."])
+        self.assertEqual(lines[12:], ["", "  ▸ 최근에 끝난 것 1", "    11-21 끝난 일 · #1 · 기록 6", "    앞서 끝난 기록 1,392개는 접어 둠.", "",
                                       "  full document ›"])
         self.assertFalse([line for line in lines if "!" in line.split(" ·")[0] and line.strip().startswith("!")])   # no `!` line: no question here
 
@@ -571,11 +571,11 @@ class ListTest(StatusTest):
         run = next(entry["group"] for entry in entries if entry.get("key", "").startswith("a:"))
         self.assertEqual(run, self.gid("하는 중"))
         running = [entry for entry in entries if entry.get("key", "").startswith("i:" + run)]
-        self.assertEqual([entry.get("when") for entry in running], [None, None, None, "open", "open"])   # three, then the rest on `all N ›`
-        self.assertEqual(text(by_key["a:" + run]["rows"][0]), "  all 5 ›")
+        self.assertEqual([entry.get("when") for entry in running], [None, None, None, "open", "open"])   # three, then the rest on `all N ▸`
+        self.assertEqual(text(by_key["a:" + run]["rows"][0]), "  all 5 ▸")
         self.assertEqual(text(by_key["a:" + run]["alt"][0]), "  all 5 ▾")
         head = next(entry for entry in entries if entry.get("key", "").startswith("g:"))
-        self.assertEqual((text(head["rows"][0]), text(head["alt"][0])), ("  › 최근에 끝난 것 1", "  ▾ 최근에 끝난 것 1"))
+        self.assertEqual((text(head["rows"][0]), text(head["alt"][0])), ("  ▸ 최근에 끝난 것 1", "  ▾ 최근에 끝난 것 1"))
         done = [entry for entry in entries if entry.get("group") == head["group"] and not entry.get("key", "g:").startswith("g:")]
         self.assertTrue(done and all(entry.get("when") == "open" for entry in done))     # the folded group's items and notes: open only
 
@@ -594,20 +594,20 @@ class ListTest(StatusTest):
         body = GENERATED + "\n## 나중에 할 것\n- 첫째\n- 둘째\n\n## 아무도 모르는 머리말\n- 하나\n덧말 하나\n"
         entries, _ = self.listing(body)
         heads = [text(entry["rows"][0]) for entry in entries if entry.get("key", "").startswith("g:")]
-        self.assertEqual(heads, ["  › 최근에 끝난 것 1", "  › 나중에 할 것 2", "  › 아무도 모르는 머리말 1"])      # the headings as written, the count of bullets
+        self.assertEqual(heads, ["  ▸ 최근에 끝난 것 1", "  ▸ 나중에 할 것 2", "  ▸ 아무도 모르는 머리말 1"])      # the headings as written, the count of bullets
         note = [entry for entry in entries if text(entry["rows"][0]) == "    덧말 하나"]
         self.assertEqual((len(note), note[0].get("when"), note[0]["rows"][0][-1][1]), (1, "open", "dim"))   # a note: dim, at the group's end
 
     def test_the_folded_group_with_nothing_in_it_still_stands_with_its_zero(self):
         entries, _ = self.listing(GENERATED.replace("## 최근에 끝난 것\n- 11-21 끝난 일 · #1 · 기록 6\n", "## 최근에 끝난 것\n"))
-        self.assertIn("  › 최근에 끝난 것 0", shown(entries))
+        self.assertIn("  ▸ 최근에 끝난 것 0", shown(entries))
 
     def test_a_second_heading_of_a_kind_is_a_folded_group_and_a_hand_written_near_spelling_is_read_the_same_way(self):
         body = GENERATED.replace("## 하는 중", "## 진행 중") + "\n## 진행 중\n- 또 하나\n"
         entries, _ = self.listing(body)
         lines = shown(entries)
         self.assertIn("진행 중 5", lines)
-        self.assertIn("  › 진행 중 1", lines)
+        self.assertIn("  ▸ 진행 중 1", lines)
 
     def test_a_table_a_code_fence_and_an_indented_line_are_left_to_the_full_document(self):
         body = GENERATED.replace("열린 일 23개는 접어 둠.\n", "열린 일 23개는 접어 둠.\n\n| 가 | 나 |\n|--|--|\n| 1 | 2 |\n\n```\n- 코드 안의 글머리\n## 코드 안의 머리말\n```\n  - 들여쓴 글머리\n")
@@ -655,7 +655,7 @@ class ListTest(StatusTest):
             self.assertEqual(items("하는 중")[-1], "  일 다섯 · 기록 1")
             self.assertEqual(len(items("최근에 끝난 것")), count, count)
             self.assertIn("하는 중 %d" % (count + 4), shown(entries))
-            self.assertIn("  all %d ›" % (count + 4), shown(entries))
+            self.assertIn("  all %d ▸" % (count + 4), shown(entries))
             self.assertFalse([line for line in shown(entries) if "more in the full document" in line])
             self.assertEqual(len({entry["key"] for entry in entries if entry.get("key")}), len([1 for entry in entries if entry.get("key")]))
 
@@ -663,7 +663,7 @@ class ListTest(StatusTest):
         body = GENERATED + "\n## Other\n- A\n\n## Other\n- B\n- A\n"
         entries, _ = self.listing(body)
         heads = [entry for entry in entries if entry.get("key", "").startswith("g:")]
-        self.assertEqual([text(entry["rows"][0]) for entry in heads], ["  › 최근에 끝난 것 1", "  › Other 1", "  › Other 2"])
+        self.assertEqual([text(entry["rows"][0]) for entry in heads], ["  ▸ 최근에 끝난 것 1", "  ▸ Other 1", "  ▸ Other 2"])
         keys = [entry["key"] for entry in entries if entry.get("key")]
         self.assertEqual(len(keys), len(set(keys)))                                  # every line that can be chosen has a key of its own
         ids = [entry["group"] for entry in heads]
@@ -798,7 +798,7 @@ class ListTest(StatusTest):
         entries, _ = self.listing(doc)
         lines = shown(entries)
         for part in ("alpha 캠페인", "updated 11-15 ", "알파 작업 중.", "하는 중 1",
-                     "  무언가를 고침 · #7 · v4.1.0 · 기록 3", "  › 최근에 끝난 것 1", "  full document ›"):
+                     "  무언가를 고침 · #7 · v4.1.0 · 기록 3", "  ▸ 최근에 끝난 것 1", "  full document ›"):
             self.assertTrue(any(line.startswith(part) or line == part for line in lines), (part, lines))
 
 

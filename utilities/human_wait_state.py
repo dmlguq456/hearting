@@ -37,6 +37,9 @@ _SAFE = re.compile(r"^[A-Za-z0-9._-]{1,200}$")
 _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:@/+\-=]{1,256}$")
 _SAFE_ROUTE_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CACHE_MAX_BYTES = 2 * 1024 * 1024
+# A route record's values for the first screen of its page (the leg band and the head's first words, `live._panel_route_record`):
+# the first to go where the route details would outweigh their share of the cache.
+_PANEL_PICTURE_KEYS = frozenset({"bands", "head_repo", "session_tag"})
 _DISPLAY_TTL = 180.0
 _REQUEST_TTL = 60.0
 # While a display wants routes the producer starts its next pass early on a change instead of
@@ -562,13 +565,58 @@ def _prune_selected(overlay, needed=1):
     return len(overlay) + needed <= _SELECTED_RESPONSE_MAX
 
 
+def choice_descriptions(question):
+    """Each choice's own words under its name, in choice order (`""` for none): what the board draws.
+
+    11-27 (the person: "답변 선지가 클로드 네이티브 질문창이 좀 더 상세하네?", design 가): an object choice's
+    `description`, else its `means`, then its `scope_note` on its own line unless already said; a registered
+    question's plain choices, its optional `choice_descriptions` (`{choice value: words}`). Display only."""
+    if not isinstance(question, dict):
+        return []
+    choices = question.get("choices") if isinstance(question.get("choices"), list) else []
+    given = question.get("choice_descriptions")
+    given = given if isinstance(given, dict) else {}
+    out = []
+    for choice in choices:
+        if isinstance(choice, dict):
+            words = next((value for value in (choice.get("description"), choice.get("means"))
+                          if isinstance(value, str) and value.strip()), "")
+        else:
+            words = given.get(choice) if isinstance(choice, str) else None
+        # The asker's lines stay (spaces made one, an empty line left out).
+        said = ("\n".join(" ".join(line.split()) for line in words.splitlines() if line.strip())
+                if isinstance(words, str) else "")
+        note = " ".join(choice.get("scope_note").split()) if (
+            isinstance(choice, dict) and isinstance(choice.get("scope_note"), str)) else ""
+        if note and note not in " ".join(said.split()):
+            said = said + "\n" + note if said else note
+        out.append(said)
+    return out
+
+
+def _message_choice_descriptions(choices, descriptions):
+    """The registered record's `choice_descriptions`: each given choice's words, in choice order, the
+    empty ones left out (None when none is left: the record then reads as it always did)."""
+    if descriptions is None:
+        return None
+    if (not isinstance(descriptions, dict) or any(key not in choices for key in descriptions)
+            or any(not isinstance(value, str) for value in descriptions.values())):
+        raise ValueError("question-choice-descriptions-invalid")
+    kept = {choice: descriptions[choice].strip() for choice in choices
+            if descriptions.get(choice, "").strip()}
+    return kept or None
+
+
 def register_message(harness, session_id, seat, text, *, sequence, choices=(),
-                     recommended=None, secret=False, cwd=None, incarnation=None, replace=True):
+                     recommended=None, secret=False, cwd=None, incarnation=None, replace=True,
+                     descriptions=None):
     """Register one explicit question on the caller's current prompt, without waiting.
 
     A new question replaces this session's earlier waiting one; the returned value then carries
     `replaced` (that question's id and text) so the caller can say so. `replace=False` leaves a
-    different open question in place and refuses instead (`question-open-elsewhere`)."""
+    different open question in place and refuses instead (`question-open-elsewhere`).
+    `descriptions` (`{choice value: words}`, optional) are the words the board draws under those
+    choices (`choice_descriptions`); they count toward the record's size and are never part of an answer."""
     import session_tidy as tidy
     if (tidy.is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower()
             in {"owner", "worker", "auxiliary", "reviewer"}):
@@ -586,8 +634,11 @@ def register_message(harness, session_id, seat, text, *, sequence, choices=(),
     if recommended is not None and (type(recommended) is not int
                                     or not 0 <= recommended < len(choices)):
         raise ValueError("question-recommendation-invalid")
+    described = _message_choice_descriptions(list(choices), descriptions)
     question = {"id": "message-response", "question": text, "choices": list(choices),
                 "recommended": recommended, "is_secret": bool(secret), "is_other": True, "required": True}
+    if described:
+        question["choice_descriptions"] = described
     detail = {"questions": [question]}
     if len(json.dumps(detail, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 4096:
         raise ValueError("question-detail-too-large")
@@ -1442,7 +1493,14 @@ def publish_cache(result: dict) -> bool:
     panels = result.get("route_panels", {})
     # Optional display detail must never crowd question truth out of this cache.
     # Missing detail is unknown; do not manufacture an empty-route observation.
-    if not isinstance(panels, dict) or len(json.dumps(panels, ensure_ascii=False).encode()) > _CACHE_MAX_BYTES // 4:
+    weight = lambda value: len(json.dumps(value, ensure_ascii=False).encode())
+    if isinstance(panels, dict) and weight(panels) > _CACHE_MAX_BYTES // 4:
+        # 11-27: the first screen's picture values go first, so the route details that fit before them still do
+        # (without them a route's first screen is the panel's box, as it was).
+        panels = {key: [{name: value for name, value in row.items() if name not in _PANEL_PICTURE_KEYS}
+                        if isinstance(row, dict) else row for row in rows] if isinstance(rows, list) else rows
+                  for key, rows in panels.items()}
+    if not isinstance(panels, dict) or weight(panels) > _CACHE_MAX_BYTES // 4:
         panels = {}
     value = {"schema_version": 3, "observed_at": observed_at,
              "complete": bool(result.get("complete")), "total": current_total,
@@ -3319,6 +3377,23 @@ def _workflow_gate_interview(binding, item):
         return None, "workflow-interview-unavailable:" + type(exc).__name__
 
 
+def _frame_gate_choice(interview, question, option):
+    """One frame interview option as the board's choice (label as value; `means` with the scope line as ever; its
+    own `description`; the scope line as `scope_note`, drawn once by `choice_descriptions`)."""
+    import frame_interview as FI
+    choice = {"value": option["label"], "label": option["label"]}
+    note = FI.route_scope_note(interview, question.get("id"), option["label"])
+    means = " ".join(part for part in (
+        option["means"] if isinstance(option.get("means"), str) else "", note) if part)
+    if means or isinstance(option.get("means"), str):
+        choice["means"] = means
+    if isinstance(option.get("description"), str) and option["description"].strip():
+        choice["description"] = option["description"].strip()
+    if note:
+        choice["scope_note"] = note
+    return choice
+
+
 def _workflow_gate_detail(binding, item):
     """Build selected-only questions from the current gate or its sealed interview."""
     route = binding["route"]
@@ -3372,14 +3447,7 @@ def _workflow_gate_detail(binding, item):
         for option in options:
             if not (isinstance(option, dict) and isinstance(option.get("label"), str)):
                 continue
-            choice = {"value": option["label"], "label": option["label"]}
-            # The card's own words, then the one line the runtime reads from the proposal's structure.
-            means = " ".join(part for part in (
-                option["means"] if isinstance(option.get("means"), str) else "",
-                FI.route_scope_note(interview, question.get("id"), option["label"])) if part)
-            if means or isinstance(option.get("means"), str):
-                choice["means"] = means
-            choices.append(choice)
+            choices.append(_frame_gate_choice(interview, question, option))
         entry = {"id": question["id"], "question": question["question"], "choices": choices,
                  # The existing frame answer validator accepts off-menu notes.
                  "is_other": True}

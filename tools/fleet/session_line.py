@@ -630,7 +630,9 @@ def context_detail_lines(detail):
 # Fleet #1514 (``explorer.live.route_marker_state``/``route_state_counts``/
 # ``_route_doer``): once those are on main, ``route_marker`` and ``route_doer``
 # below call them (the ``getattr`` lines) and this fallback goes unused.
-ROUTE_MARKS = {"working": "⠏", "idle": "●", "blocked": "●", "dead": "✕", "done": "✓", "stale": "◌"}
+# 11-27 (the eight marks): a route waiting on the person's answer reads ``◑``, as the panel head and Fleet's
+# QUESTIONS do; the waiting tally below counts idle and blocked together and keeps ``●``.
+ROUTE_MARKS = {"working": "⠏", "idle": "●", "blocked": "◑", "dead": "✕", "done": "✓", "stale": "◌"}
 _TALLY = (("running", "⠏"), ("waiting", "●"), ("stopped", "✕"))
 
 

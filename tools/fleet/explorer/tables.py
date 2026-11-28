@@ -822,15 +822,15 @@ def _session_unfold(grid, vm, x, use, y, session, c, now_shown=False, title_whol
     mine = [item for item in (vm.questions or ()) if item.get("session_tag") == tag]
     question = next((item for item in mine if not item.get("older")), mine[0] if mine else None)
     if question:
-        marker = str(question.get("marker") or "●")
+        marker = "◌" if question.get("marker") == "◌" else "◑"     # 11-27: an older record's ``●`` too
         lead = [(marker, "blocked"),
                 (" " + str(question_about(question)), "blocked"),
                 (" · waiting " + str(question.get("wait")) + " · ", "dim")]
         from .pages import _fit, _segs
         pane = question.get("pane")
-        link = "(open ▸)" if question.get("open_tag") and pane else ""
+        link = "(open ›)" if question.get("open_tag") and pane else ""
         if link and x_val + sum(_seg_width(text) for text, _k in lead) + 2 + _seg_width(link) > right:
-            link = "▸"                     # narrow: the question text gives way, the link stays whole
+            link = "›"                     # narrow: the question text gives way, the link stays whole
         room = right - x_val - (2 + _seg_width(link) if link else 0)
         cursor = _segs(grid, x_val, y, _fit(lead, room) if link else lead, right)
         if link:
@@ -845,13 +845,13 @@ def _session_unfold(grid, vm, x, use, y, session, c, now_shown=False, title_whol
 
 
 SESSION_OPEN_LABEL = "PAGE"
-SESSION_OPEN_LINK = "(open ▸)"
+SESSION_OPEN_LINK = "(open ›)"
 
 
 def _session_open_link(grid, x_lab, x_val, right, y, tag):
     """The unfolded row's way to its session page, whose HISTORY lists the seat's generations.
 
-    It takes the spacer row under ASK. Only a wholly drawn ``(open ▸)`` is a target: a
+    It takes the spacer row under ASK. Only a wholly drawn ``(open ›)`` is a target: a
     ``("page", "session", tag)`` hit, which the reducer opens on press (no tree drag).
     A spacer at or past the page's overflow probe row (``rows - 5``) stays blank, as before.
     """
@@ -873,7 +873,7 @@ def _draw_overview_route(grid, x, use, y, route, steward=False, repo_w=None, sho
         _recede_row(grid, y, x + IND + 1, x + use)
 
 
-_ROUTE_MARK = {"working": ("⠏", "g_spin"), "dead": ("✕", "g_dead"), "blocked": ("●", "g_blocked"),
+_ROUTE_MARK = {"working": ("⠏", "g_spin"), "dead": ("✕", "g_dead"), "blocked": ("◑", "g_blocked"),
                "done": ("✓", "grp_live"), "stale": ("◌", "dim"), "idle": ("●", "g_work_off"),
                "wait": ("·", "dim")}
 
@@ -1249,7 +1249,7 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
     # them, whenever the title keeps its room; otherwise the harness alone, as before.
     state = route_marker_state(route)
     marker, marker_key = {"working": ("⠏", "g_spin"), "dead": ("✕", "g_dead"),
-                          "blocked": ("●", "g_blocked"), "done": ("✓", "grp_live"),
+                          "blocked": ("◑", "g_blocked"), "done": ("✓", "grp_live"),
                           "stale": ("◌", "dim"), "wait": ("·", "dim")}.get(state, ("●", "g_work_off"))
     marker_key = harness_spin(marker_key, route.get("harness"))        # 11-18: the owner's harness names this line
     grid.put(x0, y, marker, marker_key)
@@ -1729,15 +1729,20 @@ def _split_reason(segments, room):
     return head, rest
 
 
+def answer_waits(session):
+    """Whether a session waits on the person's answer: the one judgment every session mark of Fleet reads (the session
+    table, the tree, the PEERS card). Its state, or the answer-wait marker the reader put on it (11-27: an older record's
+    ``●`` as well as ``◑``)."""
+    return session.get("state") == "blocked" or session.get("answer_wait_marker") in ("●", "◑")
+
+
 def session_marker(session):
     """The session row's state glyph and its color key."""
-    marker, marker_key = {"working": ("⠏", "spin"), "blocked": ("●", "blocked"),
+    marker, marker_key = {"working": ("⠏", "spin"), "blocked": ("◑", "blocked"),
                           "dead": ("✕", "dead"), "done": ("✓", "done")}.get(
                               session.get("state"), ("●", "idle"))
     marker_key = harness_spin(marker_key, session.get("harness"))      # 11-18: a working spinner in its harness's color
-    if session.get("answer_wait_marker") == "●":
-        marker, marker_key = "●", "blocked"
-    elif session.get("answer_wait_marker") == "◑":
+    if answer_waits(session):
         marker, marker_key = "◑", "blocked"
     return marker, marker_key
 
@@ -2005,7 +2010,7 @@ def draw_routes(grid, vm, state, x=34, y=3):
                     _draw_context_gauge(grid, x + cols["ctx"], y,
                                         body_context.get("context"), body_context.get("window"))
             if link:
-                grid.put(x + use - 6, y, "open ▸", "accent")
+                grid.put(x + use - 6, y, "open ›", "accent")
             _tint_row(grid, y, x - 1, right, 236)
             y += 1
             if reason_rest:
@@ -2192,10 +2197,13 @@ def _question_text(spec, envelope):
 
 
 def _question_choices(spec):
-    """``(value, label)`` for each choice, in native order; a value is what is sent."""
+    """``(value, label, words)`` for each choice, in native order; a value is what is sent, the words what the
+    board draws under its name (11-27, design 가: ``human_wait_state.choice_descriptions``, ``""`` for none)."""
     result = []
     choices = spec.get("choices", spec.get("options", ()))
-    for choice in choices if isinstance(choices, (list, tuple)) else ():
+    choices = list(choices) if isinstance(choices, (list, tuple)) else []
+    described = _choice_words(spec, choices)
+    for at, choice in enumerate(choices):
         if isinstance(choice, Mapping):
             value = choice.get("value")
             if value is None:
@@ -2204,8 +2212,38 @@ def _question_choices(spec):
         else:
             value = label = choice
         if isinstance(value, str) and value:
-            result.append((value, label if isinstance(label, str) else value))
+            result.append((value, label if isinstance(label, str) else value,
+                           described[at] if at < len(described) else ""))
     return result
+
+
+def _choice_words(spec, choices):
+    """The one reading of a choice's words (the panel's too), from the question record's owner."""
+    try:
+        import human_wait_state
+    except ImportError:
+        import sys
+        sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[3] / "utilities"))
+        import human_wait_state
+    given = spec.get("choice_descriptions")
+    return human_wait_state.choice_descriptions({"choices": [dict(c) if isinstance(c, Mapping) else c for c in choices],
+                                                 "choice_descriptions": dict(given) if isinstance(given, Mapping) else None})
+
+
+def _fit_choice_words(details, room, lit, width):
+    """The rows of words within ``room``: the chosen choice's (``lit``) first, then the others from the top, a cut
+    one's last row ending in ``…``."""
+    out = [[] for _rows in details]
+    order = ([lit] if lit is not None and 0 <= lit < len(details) else []) + [
+        at for at in range(len(details)) if at != lit]
+    for at in order:
+        take = min(len(details[at]), room)
+        if take:
+            out[at] = list(details[at][:take])
+            if take < len(details[at]):
+                out[at][-1] = _clip_cut(out[at][-1], width)
+        room -= take
+    return out
 
 
 def _question_actions(grid, x, right, y, items):
@@ -2221,8 +2259,9 @@ def _question_actions(grid, x, right, y, items):
     return cursor
 
 
-def _question_body(grid, question, private, state, x, right, bottom, y, open_item):
-    """The unfolded wait in place: full question, choices, typed answer, then the action line."""
+def _question_body(grid, question, private, state, x, right, bottom, y, open_item, words_room=0):
+    """The unfolded wait in place: full question, choices, typed answer, then the action line. ``words_room``: the
+    rows left empty without the choices' words; each row of words drawn moves the bottom on by one."""
     indent = x + 4
     width = max(1, right - indent)
 
@@ -2296,14 +2335,19 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
         qid = spec["id"]
         values = answers.get(qid, ()) if hasattr(answers, "get") else ()
         values = tuple(values) if isinstance(values, (list, tuple)) else ()
-        choices = _question_choices(spec)
+        rows = _question_choices(spec)
+        choices = [(value, label) for value, label, _words in rows]
+        # 11-27 (design 가): each choice's words under its name, from its name's first cell, wrapped there.
+        details = [[wrapped for said in words.splitlines() for wrapped in _wrap(said, max(1, right - indent - 5))]
+                   for _value, _label, words in rows]
         words = [wrapped for text in _question_text(spec, envelope).splitlines() or [""]
                  for wrapped in _wrap(text, width)]
-        return qid, values, choices, words, len(choices) + (1 if question_free_text_available(envelope, qid, values) else 0)
+        return (qid, values, choices, words,
+                len(choices) + (1 if question_free_text_available(envelope, qid, values) else 0), details)
 
     shapes = [_asked(spec) for spec in asked]
     for index, spec in enumerate(asked):
-        qid, values, choices, words, own = shapes[index]
+        qid, values, choices, words, own, details = shapes[index]
         secret = bool(spec.get("is_secret") or spec.get("isSecret"))
         free = question_free_text_available(envelope, qid, values)
         editing = bool(private.get("editing") and (private.get("editing_question_id") or qid) == qid)
@@ -2336,6 +2380,12 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
         # shown follow the place.
         answer_shown = min(len(answer_rows), max(1, bottom - y - len(choices) - 1 - later - min(len(words), 2)
                                                  - (1 if len(words) > 2 else 0))) if free else 0
+        # 11-27 (reviews of #1908): the words take only the rows left empty without them.
+        selection = question_mark(private, spec) if request_state == "open" else None
+        lit = (selection[0] if selection is not None and selection[0] >= 0 else
+               next((at for at, (value, _label) in enumerate(choices) if value in values), None))
+        details = _fit_choice_words(details, words_room, lit, max(1, right - indent - 5))
+        words_room -= sum(map(len, details))
         own = len(choices) + answer_shown
         gap = 2 if choices else 0
         room = bottom - y - own - 1 - later
@@ -2363,7 +2413,8 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
             selection = question_mark(private, spec) if request_state == "open" else None
             chosen = selection[0] == number - 1 if selection is not None else value in values
             selectable = can_draft and question_choice_click_allowed(envelope, qid, value, values)
-            mark = ("▸" if selection is not None else "●") if chosen else "○" if selectable else " "
+            # 11-27 (the eight marks): the place being chosen is ``▶``; a single answer's settled ``●`` and ``○`` stay.
+            mark = ("▶" if selection is not None else "●") if chosen else "○" if selectable else " "
             cursor = grid.put(indent, y, mark, "hearting" if chosen else "dim", limit=right)
             # The number is the question's rose and bold, as `◑` and the popup's numbers are (11-17).
             cursor = grid.put(cursor + 1, y, f"{number}  ", "lvl_r", limit=right)
@@ -2375,6 +2426,12 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
                 # The whole line answers: wherever on it the person presses.
                 grid.add_hit(y, x, right, ("question.choice", qid, value))
             y += 1
+            for detail in details[number - 1]:
+                grid.put(indent + 5, y, detail, "dim", limit=right)
+                if selectable:
+                    grid.add_hit(y, x, right, ("question.choice", qid, value))
+                y += 1
+                bottom += 1
         if not question_values_valid(envelope, qid, values):
             complete = False
         if free and y < bottom:
@@ -2445,8 +2502,25 @@ def _question_body(grid, question, private, state, x, right, bottom, y, open_ite
     return y + 1
 
 
-def draw_questions(grid, vm, state, x=34, y=3):
+def _choice_words_room(grid, vm, state, x, y):
+    """The rows the page leaves empty under all it draws for the same waits without the choices' words (review 2
+    of #1908): what an unfolded question's words may take."""
+    from .state import question_items
+    detail = getattr(state, "question_overlay", None) or {}
+    if not any(words for spec in question_items(detail.get("detail")) for *_v, words in _question_choices(spec)):
+        return 0
+    plain = CellGrid(grid.cols, grid.rows)
+    plain.trace, plain.beat = None, getattr(grid, "beat", 1)
+    draw_questions(plain, vm, state, x, y, words_room=0)
+    used = [hit.y for hit in plain.hits] + [row for row in range(plain.rows)
+                                            if any(cell != (" ", None, None) for cell in plain.cells[row][x - 1:])]
+    return max(0, grid.rows - 6 - max(used, default=y - 1))
+
+
+def draw_questions(grid, vm, state, x=34, y=3, words_room=None):
     """QUESTIONS: one line per wait; pressing it unfolds the question in place (C5)."""
+    if words_room is None:
+        words_room = _choice_words_room(grid, vm, state, x, y)
     use = max(0, grid.cols - x - 2)
     right, bottom = x + use + 1, grid.rows - 5
     from .grid import put_fit
@@ -2560,7 +2634,8 @@ def draw_questions(grid, vm, state, x=34, y=3):
         target = question.get("open_tag") or (tag if legacy else None)
         open_item = (("open pane", "hearting", ("pane", str(target), str(pane)))
                      if target and pane else None)
-        y = _question_body(grid, question, private, state, x, right, bottom, y, open_item)
+        y = _question_body(grid, question, private, state, x, right, bottom, y, open_item,
+                           words_room if private is not None else 0)
 
     for question in current_questions:
         if y >= bottom:

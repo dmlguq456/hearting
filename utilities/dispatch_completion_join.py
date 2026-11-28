@@ -80,7 +80,8 @@ from dispatch_attempt_policy import (
     DEFERRED_COMPLETION_NOTE, DEFERRED_COMPLETION_SOURCE, terminal_conflict_pending,
 )
 from dispatch_receipt_identity import (
-    CANONICAL_RECEIPT_KEYS, CANONICAL_CHILD_KEYS, canonical_receipt, receipt_digest, unseal_receipt,
+    CANONICAL_RECEIPT_KEYS, CANONICAL_CHILD_KEYS, canonical_receipt, receipt_digest, settled_parent_close,
+    unseal_receipt,
 )
 from dispatch_contract import (  # noqa: E402
     AUTOMATIC_RECEIPTLESS_CLASSIFIER,
@@ -1327,8 +1328,8 @@ def _child_note(jobs: str, child, key: str = "note") -> str | None:
 def _next_ready_start_lines(receipt: dict, jobs: str) -> list[str]:
     """`Next ready:` lines for an owner's depth-2 stage/review row that just finished; [] when unsure.
 
-    Only names the exact start command (or "run it yourself"); nothing is started. Any unreadable or
-    mismatched route/row leaves the receipt exactly as it was.
+    Only names the exact start or completion command (or "run it yourself" for the owner's own end); nothing
+    is started. Any unreadable or mismatched route/row leaves the receipt exactly as it was.
     """
     if not jobs:
         return []
@@ -1368,6 +1369,8 @@ def _next_ready_start_lines(receipt: dict, jobs: str) -> list[str]:
                                          "Act on its verdict as your task describes, then return your final handoff.")
                     elif worker_bootstrap._dispatchable_stage(node):
                         lines.append("Next ready: " + worker_bootstrap.route_start_command(route_file, node["id"]))
+                    elif step := worker_bootstrap.human_run_step(route, route_file, node):
+                        lines.append(f"Next ready: {step}")
                     else:
                         lines.append(f"Next ready: run {node['id']} yourself (per your Route steps).")
                 lines += _owner_handed_over_lines(route, route_file, meta.get("route_node"))
@@ -1476,8 +1479,7 @@ def completion_followup_text(receipt: dict, *, jobs: str, include_provider_failu
 
 
 def _completion_work_followup(receipt: dict, *, jobs: str) -> str:
-    if receipt.get("children") and all(child.get("reason") == "cancelled-by-parent"
-            and child.get("required_action") == "advance-completed" for child in receipt["children"]):
+    if settled_parent_close(receipt.get("children")):
         return ("Parent-requested close has settled. No harvest, next-stage launch, "
                 "route restart, or manual finalization is required.")
     # A submitted work request already owns preparation and continuation. Give
@@ -2043,7 +2045,7 @@ def receipt_with_delivery_observability(
     if not isinstance(raw_children, list):
         raise JoinContractError("delivery-receipt-children-invalid")
     children: list[dict[str, object]] = []
-    classifications: list[str] = []
+    from dispatch_receipt_identity import completion_classification
     for raw_child in raw_children:
         if not isinstance(raw_child, dict):
             raise JoinContractError("delivery-receipt-child-invalid")
@@ -2067,7 +2069,7 @@ def receipt_with_delivery_observability(
         child["status"] = state.status
         child["delivery_classification"] = classification
         child["required_action"] = choice.next_action
-        if classification == "attention":
+        if classification in {"attention", "cancelled"}:
             child["reason"] = choice.reason or "terminal-failure-or-unclosed"
         elif state.advanced:
             child["reason"] = "row-advanced"
@@ -2078,12 +2080,9 @@ def receipt_with_delivery_observability(
         else:
             child.pop("next_leg", None)
         children.append(child)
-        classifications.append(classification)
     projected = dict(receipt)
     projected["children"] = children
-    projected["delivery_classification"] = (
-        "success" if classifications and set(classifications) == {"success"} else "attention"
-    )
+    projected["delivery_classification"] = completion_classification(children)
     inherited_timing = receipt.get("delivery_timing")
     base_timing = (
         validate_delivery_timing(inherited_timing)
@@ -4029,8 +4028,8 @@ def current_delivery_state(
     import route_parent_close
     if snapshot is not None and route_parent_close.row_requested(snapshot.metadata, jobs):
         route_parent_close.recover_attempt(jobs, snapshot.metadata)
-        current = current_attempt_row(jobs, attempt_id)
-        settled = bool(current and route_parent_close.cancellation_settled(current.metadata, jobs))
+        current = current_attempt_row(jobs, attempt_id) or snapshot
+        settled = bool(route_parent_close.cancellation_settled(current.metadata, jobs))
         return CurrentDeliveryState(None, "", child_row_revision(current),
             hashlib.sha256(current.raw.encode()).hexdigest(), current.status, "CANCELLED",
             settled, 0 if settled else 1, False, settled, False, settled,
@@ -4545,11 +4544,10 @@ def _join_snapshot(
             import route_parent_close
             if route_parent_close.row_requested(row.metadata, jobs):
                 unverifiable_since.pop(row.attempt_id, None)
-                outcome = route_parent_close.recover_attempt(jobs, row.metadata)
+                route_parent_close.recover_attempt(jobs, row.metadata)
                 current = current_attempt_row(
                     jobs, row.attempt_id, registry_append_only=registry_append_only)
-                settled = bool(outcome and outcome.get("state") == "cancelled" and current
-                               and current.metadata.get("parent_close_settled") == "1")
+                settled = bool(current and route_parent_close.cancellation_settled(current.metadata, jobs))
                 pending = pending or not settled
                 closure_eligible[row.attempt_id] = settled
                 children.append({"attempt_id": row.attempt_id, "slug": row.slug,

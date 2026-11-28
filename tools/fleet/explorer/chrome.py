@@ -4,7 +4,7 @@ import math
 from collections.abc import Mapping
 from ..config import ui_text
 from .grid import CellGrid, cell_width, clip_cells
-from .tables import ROUTE_WORD, answer_wait_word, repo_label, route_count_label, route_tally
+from .tables import ROUTE_WORD, answer_wait_word, answer_waits, repo_label, route_count_label, route_tally
 from .style import steward_flag_key
 from ..palette import harness_spin
 
@@ -246,7 +246,7 @@ def _compact_status_parts(parts):
         status = _CENSUS_STATUS_KEYS.get(key)
         marker = token[:1]
         if ((status == "spin" and marker in _SPINNER_GLYPHS) or
-                (status in ("idle", "blocked") and marker == "●")):
+                (status == "idle" and marker == "●") or (status == "blocked" and marker == "◑")):
             found_status = True
             if compacted:
                 compacted.append((" ", None))
@@ -365,8 +365,11 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
         idle = sum(1 for item in sessions if item.get("state") == "idle")
         census_parts = [(f"⠏ {working}", "spin"), (" working", "dim"),
                         (f"  ● {idle}", "idle"), (" idle", "dim"),
-                        (f"  ● {blocked}", "blocked"), (" " + ui_text("fleet.session_panel.answer"), "dim"),
+                        (f"  ◑ {blocked}", "blocked"), (" " + ui_text("fleet.session_panel.answer"), "dim"),
                         ("   ", "branch_s")]
+    # 11-27 (the eight marks): the answer wait's count reads ``◑`` at every width, an older census's ``●`` as well.
+    census_parts = [(str(text).replace("●", "◑", 1), key) if key in ("blocked", "g_blocked") else (text, key)
+                    for text, key in census_parts]
     system = vm.system or {}
     fallback_install = system.get("install", {}) if isinstance(system, Mapping) else {}
     if not isinstance(fallback_install, Mapping):
@@ -464,7 +467,7 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
     if not state.usage_open:
         more_x = width - 9
         grid.put(more_x, 1, "u", "hearting", limit=width - 1)
-        grid.put(more_x + 1, 1, " more ▸", "dim", limit=width - 1)
+        grid.put(more_x + 1, 1, " more ›", "dim", limit=width - 1)
         x = 1
         limit = width - 12
         annotations = []
@@ -803,7 +806,7 @@ def draw_explorer(grid: CellGrid, vm, state):
         grid.put(count_x + 5, y, " ", "g_work_off", tint=234)
         grid.put(count_x + 6, y, f"●{idle}", "g_work_off", tint=234)
         grid.put(count_x + 8, y, " ", "g_blocked", tint=234)
-        grid.put(count_x + 9, y, f"●{blocked}", "g_blocked", tint=234)
+        grid.put(count_x + 9, y, f"◑{blocked}", "g_blocked", tint=234)
         grid.put(width - 1, y, " ", None, tint=234)
         y += 1
         tree_top = y
@@ -894,12 +897,10 @@ def draw_explorer(grid: CellGrid, vm, state):
             if session.get("steward"):
                 hx = grid.put(hx + 1, y, "⚑", steward_flag_key(session, lit=lit))
             status = session.get("state")
-            marker, marker_key = {"working": ("⠏", "g_spin_dim"), "blocked": ("●", "lvl_r_dim"),
+            marker, marker_key = {"working": ("⠏", "g_spin_dim"), "blocked": ("◑", "lvl_r_dim"),
                                   "dead": ("✕", "dead"), "done": ("✓", "done")}.get(
                                       status, ("●", "idle"))
-            if session.get("answer_wait_marker") == "●":
-                marker, marker_key = "●", "lvl_r_dim"
-            elif session.get("answer_wait_marker") == "◑":
+            if answer_waits(session):                                # 11-27: the session table's own judgment
                 marker, marker_key = "◑", "lvl_r_dim"
             grid.put(hx + 1, y, marker, harness_spin(marker_key, harness))      # 11-18: a working spinner in its harness's color
             if session_lit:
@@ -941,11 +942,14 @@ def draw_explorer(grid: CellGrid, vm, state):
                 label = route.get("tree_label") or route.get("title") or "·"
                 rh = route.get("harness") or "·"
                 label_x = branch_x + 3
+                # 11-27 (the eight marks): a route that waits on the person's answer reads `◑` whatever its
+                # activity word says (a live one that does not run reads `ended` there).
+                status = ("stale" if route.get("state") == "stale" else
+                          "blocked" if route.get("state") == "blocked" and route.get("activity") != "running" else
+                          route.get("activity", route.get("state")))
                 mark, mark_key = {"running": ("⠏", "g_spin_dim"), "working": ("⠏", "g_spin_dim"),
-                                  "blocked": ("●", "lvl_r_dim"), "stale": ("◌", "dim"),
-                                  "wait": ("·", "dim")}.get(
-                    "stale" if route.get("state") == "stale" else
-                    route.get("activity", route.get("state")), ("●", "idle"))
+                                  "blocked": ("◑", "lvl_r_dim"), "stale": ("◌", "dim"),
+                                  "wait": ("·", "dim")}.get(status, ("●", "idle"))
                 route_suffix = ": " + str(rh) + " " + mark
                 name_room = max(1, width - 1 - label_x - cell_width(route_suffix))
                 route_name = clip_cells(str(label), name_room)
