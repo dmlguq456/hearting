@@ -1530,6 +1530,13 @@ class DeathPatternTest(unittest.TestCase):
             with self.subTest(prose=prose[:30]):
                 self.assertIsNone(RA.scan_anchored_death(prose))
 
+    def test_an_assistant_message_quoting_a_limit_does_not_hide_the_auth_error(self):
+        log = "\n".join([
+            '{"type":"assistant","message":{"role":"assistant","content":"session limit reached"}}',
+            "APIError: 401 Unauthorized",
+        ])
+        self.assertEqual(RA.scan_anchored_death(log), ("auth", ""))
+
 
 class OneHomeTest(unittest.TestCase):
     """The old names are this module's judgments, not copies."""
