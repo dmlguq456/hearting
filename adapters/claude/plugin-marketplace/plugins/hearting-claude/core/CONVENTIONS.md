@@ -284,7 +284,14 @@ portable **unit catalog** at `roles/units/<family>/<unit>.md`. A unit is the sin
 declaration of one dispatchable behavior atom; its frontmatter binds the portable role
 name, worker type, floor, and I/O semantics (`roles/units/_schema.md` is the authoring
 contract). `family` is a grouping label only — no runtime team agent exists on any
-harness; per-harness native agents are reduced to kernel helpers (e.g. `memory-scout`).
+harness. The native agents Hearting ships (`light`, `balanced`, `deep`,
+`general-purpose`) are the depth names of a native subagent call, which the pre-tool
+hook starts as a `general/explore` unit route on Claude and Codex
+(`core/OPERATIONS.md` §5.10c) only when that is certain: a person's session, the
+definition the harness picks is Hearting's shipped one or a built-in, and nothing
+else decides the call (`capabilities/unit.md`, A native subagent call). A user's own
+definition of the name, another hook or permission rule, or a worker's call runs
+natively.
 
 Role binding rules:
 

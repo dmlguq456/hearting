@@ -1877,94 +1877,16 @@ check_codex_native_agent_projection() {
     cat /tmp/codex-sync-agents.err
   fi
 
-  for profile in memory-scout; do
-    agent="adapters/codex/agents/$profile.toml"
-    if [ ! -f "$agent" ]; then
-      fail_msg "$agent is missing"
-      continue
-    fi
-    if [ -L "$agent" ]; then
-      fail_msg "$agent must be a concrete adapter-owned Codex custom agent"
-    fi
-    if ! python3 - "$agent" >/tmp/codex-agent-toml.out 2>/tmp/codex-agent-toml.err <<'PY'
-import re
-import sys
-from pathlib import Path
-
-text = Path(sys.argv[1]).read_text(encoding="utf-8")
-for key in ("name", "description"):
-    if not re.search(rf'^{key} = "[^"]+"$', text, re.MULTILINE):
-        raise SystemExit(f"missing required Codex custom agent field: {key}")
-for key in ("model", "model_reasoning_effort", "sandbox_mode"):
-    if not re.search(rf'^{key} = "[^"]+"$', text, re.MULTILINE):
-        raise SystemExit(f"missing Codex custom agent runtime config field: {key}")
-if not re.search(r'^developer_instructions = """\n.+\n"""$', text, re.MULTILINE | re.DOTALL):
-    raise SystemExit("missing required Codex custom agent field: developer_instructions")
-PY
-    then
-      fail_msg "$agent must be valid Codex custom agent TOML"
-      cat /tmp/codex-agent-toml.err
-    fi
-    if [ "$profile" = "memory-scout" ]; then
-      if ! grep -Fq "core/MEMORY.md §7.4" "$agent"; then
-        fail_msg "$agent must reference core/MEMORY.md §7.4 as portable source"
-      fi
-    elif ! grep -Fq "roles/README.md" "$agent"; then
-      fail_msg "$agent must reference roles/README.md as portable source"
-    fi
-    if [ "$profile" != "memory-scout" ] && ! grep -Fq "adapters/codex/bin/preflight.sh role" "$agent"; then
-      fail_msg "$agent must reference the Codex role mapper"
-    fi
-    mapped_role=$(sed -n 's/^Codex role-map input: `\(.*\)`$/\1/p' "$agent" | head -n 1)
-    if [ "$profile" != "memory-scout" ] && { [ -z "$mapped_role" ] || ! adapters/codex/bin/role-map.sh "$mapped_role" >/tmp/codex-agent-role.out 2>/tmp/codex-agent-role.err; }; then
-      fail_msg "$agent must include a Codex role-map input that resolves through adapters/codex/bin/role-map.sh"
-      cat /tmp/codex-agent-role.err
-    fi
-    if ! grep -Fq "not a legacy compatibility Agent copy" "$agent" \
-      && ! grep -Fq "not a Claude Agent copy" "$agent"; then
-      fail_msg "$agent must state that it is not a legacy compatibility Agent copy"
-    fi
-  done
   for agent in adapters/codex/agents/*.toml; do
     [ -f "$agent" ] || continue
     profile=$(basename "$agent" .toml)
-    # memory-scout kernel helper + the generated native subagent type catalog
+    # the generated native subagent type catalog
     # (balanced/general-purpose/light/deep, CFG_NATIVE_AGENT_CATALOG).
-    case " memory-scout balanced general-purpose light deep " in
+    case " balanced general-purpose light deep " in
       *" $profile "*) ;;
       *) fail_msg "$agent is not an approved Codex native agent projection" ;;
     esac
   done
-
-  if python3 - "$ROOT" adapters/codex/agents/memory-scout.toml <<'PY'
-import importlib.util
-import sys
-import tomllib
-from pathlib import Path
-
-root = Path(sys.argv[1])
-agent_path = root / sys.argv[2]
-spec = importlib.util.spec_from_file_location(
-    "codex_native_agent_resolver", root / "adapters/codex/bin/sync-native-agents.py")
-resolver = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(resolver)
-expected_model, expected_effort, expected_sandbox = resolver.codex_config("memory-scout")
-agent = tomllib.loads(agent_path.read_text(encoding="utf-8"))
-if agent.get("model") != expected_model:
-    raise SystemExit(f"memory-scout model {agent.get('model')!r} != configured {expected_model!r}")
-if (expected_effort, expected_sandbox) != ("low", "read-only"):
-    raise SystemExit("memory-scout shipped profile must remain low-effort and read-only")
-PY
-  then
-    :
-  else
-    fail_msg "Codex memory-scout model must match its configured native profile"
-  fi
-  if ! grep -Fq 'model_reasoning_effort = "low"' adapters/codex/agents/memory-scout.toml \
-    || ! grep -Fq 'sandbox_mode = "read-only"' adapters/codex/agents/memory-scout.toml \
-    || ! grep -Fq 'Never run memory mutation commands' adapters/codex/agents/memory-scout.toml; then
-    fail_msg "Codex memory-scout must be low-cost read-only custom agent projection"
-  fi
 
   bad=$(rg -n "adapters/opencode|opencode_setting|$CLAUDE_NATIVE_SURFACE_PATTERN" adapters/codex/agents 2>/dev/null || true)
   if [ -n "$bad" ]; then
@@ -1974,8 +1896,8 @@ PY
   # Runtime team agents retired 2026-07-22 (재홈, CONVENTIONS §2.3): the per-team boundary
   # prose (QA read-only/depth-one, external-adversary independence, dev write preflight,
   # mixed role-map input sets) re-homed into roles/units/** unit contracts, which
-  # tools/check-unit-config.py guards. The only per-toml assertion left here is the
-  # memory-scout kernel helper above plus the must-not-exist negatives.
+  # tools/check-unit-config.py guards. The only per-toml assertions left here are the
+  # approved-name list above plus the must-not-exist negatives.
   if ! grep -Fq 'model_reasoning_effort' adapters/codex/README.md \
     || ! grep -Fq 'parity caveat' adapters/codex/README.md \
     || ! grep -Fq 'structural plus install-path validation' adapters/codex/README.md \
@@ -2728,49 +2650,16 @@ check_opencode_native_agent_projection() {
     cat /tmp/opencode-sync-agents.err
   fi
 
-  # OpenCode native agent domain: the kernel helper memory-scout plus the generated
-  # native subagent type catalog (general-purpose/light/deep, CFG_NATIVE_AGENT_CATALOG).
-  for profile in memory-scout; do
-    agent="adapters/opencode/agents/$profile/$profile.md"
-    if [ ! -f "$agent" ]; then
-      fail_msg "$agent is missing"
-      continue
-    fi
-    if ! grep -Fq "core/MEMORY.md" "$agent" || ! grep -Fq "§7.4" "$agent"; then
-      fail_msg "$agent must reference core/MEMORY.md §7.4 as portable source"
-    fi
-    if grep -Fq '<portable-role>' "$agent"; then
-      fail_msg "$agent must not leave placeholder OpenCode role-map input"
-    fi
-    if ! grep -Fq "mode: subagent" "$agent"; then
-      fail_msg "$agent must declare OpenCode-native subagent mode"
-    fi
-    if ! grep -Fq "not a non-OpenCode Agent copy" "$agent"; then
-      fail_msg "$agent must state that it is not a non-OpenCode Agent copy"
-    fi
-  done
+  # OpenCode native agent domain: the generated native subagent type catalog
+  # (balanced/general-purpose/light/deep, CFG_NATIVE_AGENT_CATALOG).
   for dir in adapters/opencode/agents/*; do
     [ -d "$dir" ] || continue
     profile=$(basename "$dir")
-    case " memory-scout balanced general-purpose light deep " in
+    case " balanced general-purpose light deep " in
       *" $profile "*) ;;
       *) fail_msg "$dir is not an approved OpenCode native agent projection" ;;
     esac
   done
-
-  # codex-adapter-parity audit P-18 (2026-07-04): read-only frontmatter assertion for the OpenCode
-  # memory-scout projection (mirrors the Codex model/reasoning/sandbox_mode/read-only-command check).
-  scout_agent="adapters/opencode/agents/memory-scout/memory-scout.md"
-  if [ -f "$scout_agent" ]; then
-    if ! grep -Fq 'task: false' "$scout_agent" \
-      || ! grep -Fq 'edit: false' "$scout_agent" \
-      || ! grep -Fq 'write: false' "$scout_agent" \
-      || ! grep -Fq 'task: deny' "$scout_agent" \
-      || ! grep -Fq 'edit: deny' "$scout_agent" \
-      || ! grep -Fq 'Never run memory mutation commands' "$scout_agent"; then
-      fail_msg "$scout_agent must be a read-only OpenCode subagent projection (tools/permission deny)"
-    fi
-  fi
 
   bad=$(rg -n "$CLAUDE_NATIVE_SURFACE_PATTERN" adapters/opencode/agents 2>/dev/null || true)
   if [ -n "$bad" ]; then
@@ -3297,8 +3186,6 @@ check_claude_native_agent_projection() {
     esac
 
     # explicit name-map: identity by default; declared renames only (never silent).
-    # memory-scout is an EXTRA agent (present in both adapters, exempt from the roles/README.md
-    # unit-catalog table check_role_catalog owns) but still requires this completeness projection.
     # (재홈 2026-07-22: the codex-review-team → external-adversary rename died with the teams.)
     target=$name
 

@@ -34,9 +34,10 @@ role=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr '_-' '  ' | awk '{$1
 # Runtime team agents are retired (재홈 2026-07-22, core/CONVENTIONS.md §2.3):
 # dispatchable behavior lives in the portable unit catalog (roles/units/), and a
 # pipeline-stage alias resolves to its portable ROLE, never to a native team
-# agent. The only remaining Codex native agent is the kernel helper
-# (memory-scout); native_agent_path is emitted only when that concrete file
-# actually exists, so retired team tomls can never be re-emitted here.
+# agent. The Codex native agents left are the catalog depth names (light,
+# balanced, deep, general-purpose), which no role maps to; native_agent_path is
+# emitted only when that concrete file actually exists, so retired team tomls
+# can never be re-emitted here.
 pipeline_stage=""
 portable_model_role=""
 native_agent=""

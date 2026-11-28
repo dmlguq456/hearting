@@ -30,6 +30,7 @@ from fleet.token_budget import (  # noqa: E402
     context_policy_snapshot,
     context_policy_used_pct,
     find_codex_rollout,
+    opencode_context_used_pct,
     parse_codex_token_count,
     policy_band,
     telemetry_from_codex_session,
@@ -105,6 +106,26 @@ class PureTelemetryTest(unittest.TestCase):
         self.assertEqual(context_policy_used_pct(799_999, policy), 99)
         self.assertEqual(context_policy_used_pct(800_000, policy), 100)
         self.assertEqual(context_policy_used_pct(900_000, policy), 100)
+
+    def test_opencode_reads_the_declared_window_when_the_trigger_is_unknown(self):
+        unknown = context_policy_snapshot(
+            source="opencode-native-v2-context", effective_window_tokens=1_000_000,
+            output_allowance_tokens=384_000, session_id=SID,
+            reason="native-v2-compaction-behavior-unverified")
+        self.assertEqual(unknown["state"], "unknown")
+        self.assertEqual(opencode_context_used_pct(30_000, unknown), 3)
+        self.assertEqual(opencode_context_used_pct(710_000, unknown), 71)
+        self.assertEqual(opencode_context_used_pct(0, unknown), 0)
+        self.assertEqual(opencode_context_used_pct(1_000_000, unknown), 100)
+        self.assertIsNone(opencode_context_used_pct(None, unknown))
+        self.assertIsNone(opencode_context_used_pct(30_000, {**unknown, "effective_window_tokens": None}))
+        self.assertIsNone(opencode_context_used_pct(30_000, {**unknown, "effective_window_tokens": 0}))
+        # An applied trigger is still the exact reading; Claude/Codex keep the trigger-only rule.
+        applied = context_policy_snapshot(
+            source="opencode-native-chat-params", effective_window_tokens=1_000_000,
+            applied_trigger_tokens=500_000, enabled=True, enforced=True, session_id=SID)
+        self.assertEqual(opencode_context_used_pct(250_000, applied), 50)
+        self.assertEqual(context_policy_used_pct(30_000, unknown), None)
 
     def test_disabled_unknown_and_zero_trigger_never_invent_a_percentage(self):
         disabled = context_policy_snapshot(
@@ -315,9 +336,11 @@ class CollectorSemanticsTest(unittest.TestCase):
                 else:
                     os.environ["OPENCODE_MODELS"] = old_models
             self.assertEqual(sess.active_context_tokens, 25_000)
-            self.assertIsNone(sess.context_window_tokens)
+            # The record carries no window; the model catalogue's 100,000 is
+            # the display denominator (25,000 / 100,000).
+            self.assertEqual(sess.context_window_tokens, 100_000)
             self.assertIsNone(sess.context_display_window_tokens)
-            self.assertEqual(sess.ctx_pct, None)
+            self.assertEqual(sess.ctx_pct, 25)
             self.assertEqual(sess.context_policy["state"], "unknown")
             self.assertEqual(sess.session_total_tokens, 95_000)
 
@@ -359,8 +382,8 @@ class CollectorSemanticsTest(unittest.TestCase):
                 else:
                     os.environ["OPENCODE_MODELS"] = old_models
             self.assertEqual(sess.active_context_tokens, 0)
-            self.assertIsNone(sess.context_window_tokens)
-            self.assertIsNone(sess.ctx_pct)
+            self.assertEqual(sess.context_window_tokens, 100_000)
+            self.assertEqual(sess.ctx_pct, 0)
 
     def test_unfinished_zero_row_is_neither_a_reading_nor_cumulative_input(self):
         con = sqlite3.connect(":memory:")

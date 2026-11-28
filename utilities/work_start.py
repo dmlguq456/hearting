@@ -35,7 +35,7 @@ from dispatch_registry_cache import demand_replacement_rows, registry_scope_acti
 from route_authority import caller_identity as interactive_parent_identity, default_parent_session_id
 import route_authority
 from codex_managed_dispatch import ManagedDispatchError, probe_managed_codex_parent
-from parent_next_directive import correction_command, entrypoint, parent_next, resume_command
+from parent_next_directive import correction_command, entrypoint, parent_next, resume_command, worker_utility
 from execution_access import ExecutionAccessError, prepare_task_request
 import owner_write_advisory as OWNER_WRITE_ADVISORY
 import route_plan as RP
@@ -55,6 +55,9 @@ _PRIOR_ART_MODULE = None
 # The first frame leg's prompt waits this long, from the scan's start, for the advisory list.
 PRIOR_ART_WAIT_SECONDS = 30
 START_WINDOW_SECONDS = 600
+# A Claude worker's wait runs inside one Bash call (10 minutes unless it asks for more, `dispatch-headless.py`):
+# its window ends first, leaving the call time to print the receipt.
+WORKER_WINDOW_SECONDS = 540
 # A concurrency-cap refusal (class-cap/global-cap) carries no timestamp
 # evidence to size a wait from -- this is the one bounded guess `--wait`
 # spends on it, matching the join timeout's own bound.
@@ -1107,15 +1110,15 @@ def _finish_launch(tail, result, *, in_flight=None):
     return tail["box"]["value"]
 
 
-def _wait_budget(result):
+def _wait_budget(result, worker=False):
     """What one `start --wait` call still has of its single start window.
 
     A replacement re-enters the same call, so its join spends only what the earlier capacity
     sleep and joins left instead of opening a new window (OpenCode r4: one call ran past its
-    caller's own timeout and returned nothing).
+    caller's own timeout and returned nothing). A leg a Claude worker started has the worker's shorter window.
     """
-    return max(0, START_WINDOW_SECONDS - result.get("capacity_waited_seconds", 0)
-               - result.get("join_waited_seconds", 0))
+    window = WORKER_WINDOW_SECONDS if worker else START_WINDOW_SECONDS
+    return max(0, window - result.get("capacity_waited_seconds", 0) - result.get("join_waited_seconds", 0))
 
 
 def _timed_join(result, clock, *, observe_only=False, **kwargs):
@@ -3097,13 +3100,15 @@ def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock, re
                     "launch_reason": reason, "unit_attempt_id": aid, "required_action": "resume-later",
                     "next_step": f"The unit worker did not start ({reason}); nothing ran. Run resume_command "
                         "again once the reason is cleared; it starts the same worker again."}
-    attempts = {aid}
+    attempts, caller = {aid}, rows[aid][1].get("caller_attempt_id")
+    # A leg a Claude worker started: its wait is the string its refusal line gave (`native_subagent_redirect`).
+    worker = bool(caller and os.environ.get("AGENT_HOME")) and rows.get(caller, ("", {}))[1].get("harness") == "claude"
     result.update(unit_attempt_id=aid, owner_started=False, **_wait_fields(attempts, rows, resume),
                   **_turn_fields(rows[aid][1], jobs))
     from dispatch_replacement import advance, death_kind, _capacity_wait as replacement_capacity_wait
     capacity = death_kind(["", rows[aid][0]], rows[aid][1], jobs=jobs) == "capacity"
     joined = _timed_join(result, clock, jobs=jobs, expected_attempts=attempts,
-                         timeout=_wait_budget(result) if wait and not capacity else 0,
+                         timeout=_wait_budget(result, worker) if wait and not capacity else 0,
                          recover=True, observe_only=not wait or capacity)
     result["observation"] = joined
     status, source = _rows(jobs).get(aid, rows[aid])
@@ -3115,20 +3120,21 @@ def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock, re
                     "result": {**outcome, "required_action": "", "recovery_command": ""},
                     "resume_command": "", "parent_next": "inspect-receipt", "parent_next_command": "",
                     "next_step": "Inspect the unit cancellation receipt."}
-        if outcome["classification"] == "success":
+        if outcome["classification"] == "success":   # a worker's wait ends here: nothing to run again
             return {**result, "state": "completed", "result": outcome, **_unit_summary(jobs, aid, sleep=sleep),
-                    **_turn_fields(_rows(jobs).get(aid, ("", {}))[1], jobs)}
+                    **_turn_fields(_rows(jobs).get(aid, ("", {}))[1], jobs),
+                    **({"parent_next_command": ""} if worker else {})}
         if capacity:
             step = (replacement_capacity_wait(jobs, aid, source)
                     if resumed else advance(jobs, aid, run=run, resume_capacity=True))
             if step.get("reason") == "replacement-capacity-wait" and wait and not resumed:
                 from capacity_auto_resume import _epoch
                 retry = _epoch(step.get("retry_at")) or clock() + CAPACITY_PROBE_SECONDS
-                delay = min(_wait_budget(result), max(0, retry - clock()))
+                delay = min(_wait_budget(result, worker), max(0, retry - clock()))
                 if delay > 0:
                     sleep(delay)
                     result["capacity_waited_seconds"] = result.get("capacity_waited_seconds", 0) + delay
-                if delay > 0 and _wait_budget(result) > 0:
+                if delay > 0 and _wait_budget(result, worker) > 0:
                     step = advance(jobs, aid, run=run, resume_capacity=True)
             if step.get("state") in {"running", "reused"}:
                 # Follow the admitted row with the remaining wait window, even if its result came back immediately.
@@ -3153,14 +3159,17 @@ def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock, re
                 "next_step": f"The unit worker {_unit_stop(source) or 'ended without a pass'}. Read its result and "
                     "report; to run the same unit again, run parent_next_command (a new route; this one stays as "
                     "it ended)."}
-    if wait:
-        return _wait_expired(result)
     status, metadata = _rows(jobs).get(aid, rows[aid])
+    if wait and not metadata.get("caller_attempt_id"):   # one wait is one start window: a worker waits again
+        return _wait_expired(result)
     directive, reason, _ = parent_next(metadata.get("parent_completion_delivery", ""), aid, agent_home=ROOT)
+    again = resume + " --wait"
+    again = worker_utility(os.environ["AGENT_HOME"], "capability-route.py", again) if worker else again
     return {**result, "state": "running", "parent_next": directive, "parent_next_reason": reason,
-            "parent_next_command": resume + " --wait" if directive == "bounded-wait" else "",
-            "next_step": "The unit worker runs as a separate attempt and its result comes back to this session "
-                "when it ends. Follow parent_next: end-turn means yield; bounded-wait means run "
+            "parent_next_command": again if directive == "bounded-wait" else "",
+            "next_step": "The wait window ended and the unit worker still runs; run parent_next_command again for "
+                "its answer." if wait else "The unit worker runs as a separate attempt and its result comes back to "
+                "this session when it ends. Follow parent_next: end-turn means yield; bounded-wait means run "
                 "parent_next_command once."}
 
 

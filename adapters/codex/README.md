@@ -339,8 +339,7 @@ the required Codex custom agent fields (`name`, `description`, and
 from `adapters/codex/config/models.conf` (the sole source of concrete Codex model
 IDs): the light tier for fast review/tool workers, the deep tier for fast
 implementation and deep/demanding workers, the light tier for balanced
-orchestration, and read-only sandboxing for QA, external-adversary, and memory-scout
-agents. The generated instructions also encode role-specific runtime boundaries
+orchestration, and read-only sandboxing for QA and external-adversary agents. The generated instructions also encode role-specific runtime boundaries
 such as QA read-only behavior, depth-one delegation, write preflight
 requirements, and external-adversary independence. Mixed or variable role
 profiles include `Codex role-map inputs` so the concrete role can be selected

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Generate Codex-native custom agent projections for kernel agents.
+"""Generate Codex-native custom agent projections from the models.conf catalog.
 
 Team agents are retired: former team behavior lives in the portable unit catalog
 (`roles/units/**`) and runs as dispatched depth-2 nodes, never as native agents.
-Only kernel helpers (`kernel.agents` in `harness-manifest.json`) project here.
+The catalog agents are the depth names a native subagent call gives (`light`,
+`balanced`, `deep`, `general-purpose`); no kernel helper ships (`kernel.agents`
+in `harness-manifest.json` is empty).
 
 This file holds the Codex spec text and body format; the shared renderer in
 `utilities/native_agents.py` plans, generates and checks them.
@@ -22,45 +24,14 @@ sys.path.insert(0, str(ROOT / "utilities"))
 
 import harness_manifest
 import native_agents
-from model_profile import load_config, resolve_profile_values
-
-
-MODELS_CONF = ROOT / "adapters" / "codex" / "config" / "models.conf"
-_CFG = load_config(MODELS_CONF)
-
-
-KERNEL_AGENTS = {
-    "memory-scout": {
-        "description": "Read-only memory scout for agent-initiated deep memory reconnaissance.",
-        "instructions": """You are the Codex-native memory-scout custom agent.
-This is adapter-owned output generated from core/MEMORY.md §7.4, not a Claude Agent copy.
-
-Contract:
-1. Read-only only. Do not edit files or write memory.
-2. Never run memory mutation commands such as mem add, mem note, mem consume, mem restore, mem delete, mem reinforce, mem merge, mem prune, mem graduate, or mem reattribute.
-3. Use <agent-home>/tools/memory/recall.sh first in the current cwd with --no-touch and narrow synonym and Korean/English variants.
-4. Read one selected hit with python3 <agent-home>/tools/memory/mem.py show <id> --no-touch, or a small ranked set with <agent-home>/tools/memory/recall.sh "<query>" --full --limit 3 --no-touch. These reads do not update access dates or lookup events and do not consume pending handoffs.
-5. If misses matter, expand to --all --no-touch, then --sessions. Never bypass the CLI with direct SQLite or dump.jsonl reads.
-6. Cross-check one live file/code fact when the memory result implies an actionable convention.
-
-Output at most 15 lines:
-- verdict: found / not-found / ambiguous
-- hits: up to 3 short quotes or paraphrases with record id / session pointer
-- apply: one line telling the main agent what to do now
-- check: one live-code or file cross-check line, or not checked with reason
-""",
-    }
-}
-
-# Backward-compatible alias for callers that patched/consumed the old constant name.
-EXTRA_AGENTS = KERNEL_AGENTS
+from model_profile import resolve_profile_values
 
 
 # Native subagent type catalog (CFG_NATIVE_AGENT_CATALOG in this adapter's
 # models.conf, name:portable-profile) — cross-harness parity with the Claude
 # catalog (adapters/claude/bin/sync-native-agents.py). Portable profiles resolve
 # through utilities/model_profile.py; the sandbox stays workspace-write (these
-# are general delegated workers, not the read-only memory-scout shape).
+# are general delegated workers).
 # Instructions are adapter-owned output, not a Claude Agent copy.
 CATALOG_SANDBOX = "workspace-write"
 
@@ -187,26 +158,6 @@ def toml_multiline(text: str) -> str:
     return text.replace('"""', '\\"\\"\\"')
 
 
-def codex_config(profile: str, cfg: Optional[Mapping[str, str]] = None) -> tuple[str, str, str]:
-    """Model, effort and sandbox of a kernel helper; `cfg` defaults to the shipped config."""
-    cfg = _CFG if cfg is None else cfg
-    key = "CFG_PROFILE_" + profile.upper().replace("-", "_")
-    tier, effort, sandbox = (cfg.get(key) or cfg["CFG_PROFILE_DEFAULT"]).split(":")
-    return cfg[f"CFG_TIER_{tier.upper()}_MODEL"], effort, sandbox
-
-
-def render_kernel_agent(name: str, spec: dict[str, str], cfg: Optional[Mapping[str, str]] = None) -> tuple[str, str]:
-    model, reasoning, sandbox = codex_config(name, cfg)
-    pinned = None if (cfg or {}).get(UNPINNED_KEY) else model
-    return f'''name = "{toml_string(name)}"
-description = "{toml_string(spec["description"])}"
-{model_line(model, cfg or {})}model_reasoning_effort = "{toml_string(reasoning)}"
-sandbox_mode = "{toml_string(sandbox)}"
-developer_instructions = """
-{toml_multiline(spec["instructions"])}"""
-''', pinned
-
-
 def render_catalog_agent(name: str, profile: str, cfg: Mapping[str, str]) -> tuple[str, str]:
     spec = CATALOG_AGENTS.get(name)
     if spec is None:
@@ -224,10 +175,7 @@ developer_instructions = """
 
 def render(name: str, profile: Optional[str], cfg: Mapping[str, str]) -> tuple[str, Optional[str]]:
     if profile is None:
-        spec = KERNEL_AGENTS.get(name)
-        if spec is None:
-            raise native_agents.RenderError(f"unknown kernel agent (no Codex projection defined): {name}")
-        return render_kernel_agent(name, spec, cfg)
+        raise native_agents.RenderError(f"no Codex kernel agent ships: {name}")
     return render_catalog_agent(name, profile, cfg)
 
 

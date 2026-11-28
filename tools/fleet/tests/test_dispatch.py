@@ -1261,7 +1261,7 @@ class OpenCodeContextTest(unittest.TestCase):
             con.commit()
             con.close()
 
-            # Without observed native compaction policy the catalogue window proves nothing.
+            # Without an observed policy the catalogue window is the display denominator.
             sess = Session(harness="opencode", pid=4242, cwd="/repo", proc_start="55")
             with mock.patch.dict(os.environ, {"OPENCODE_DB": db}, clear=True), \
                  mock.patch.object(opencode, "session_of_process",
@@ -1270,7 +1270,7 @@ class OpenCodeContextTest(unittest.TestCase):
                  mock.patch.object(opencode, "_model_ctx_limit", return_value=2_000_000):
                 opencode.enrich(sess)
             self.assertEqual(sess.active_context_tokens, 182740)   # input+output+cache
-            self.assertIsNone(sess.ctx_pct)
+            self.assertEqual(sess.ctx_pct, 9)
             self.assertEqual(sess.context_policy["state"], "unknown")
 
             # The plugin's exact chat.params record for this PID/start/session/model applies.
