@@ -114,9 +114,9 @@ Read the complete paper baseline before drafting mutations. A fast reviewer is s
 
 ### 4. Keep tracking metadata out of entries
 
-Move reviewer mappings, dependency tables, wording invariants, verification-gate instructions, and inline refine markers such as `<!-- memo: [REFINE-R2] ... -->` to `_internal/draft_meta.md` or `pipeline_summary.md`.
+Move reviewer mappings, dependency tables, wording invariants, verification-gate instructions, and inline refine markers such as `<!-- memo: [REFINE-R2] ... -->` to `draft/_internal/draft_meta.md` or `pipeline_summary.md`.
 
-Remove withdrawn, false-positive, or dropped mutations from the user-facing cheatsheet. Record the reason in `_internal/draft_meta.md` during drafting or `_internal/apply/apply_log.md` during application.
+Remove withdrawn, false-positive, or dropped mutations from the user-facing cheatsheet. Record the reason in `draft/_internal/draft_meta.md` during drafting or `_internal/apply/apply_log.md` during application.
 
 ### 5. Put paste order at the end as an ordered list
 
@@ -136,7 +136,7 @@ Collect all final checks at the end of the document. Do not repeat a verificatio
 
 ### 9. Isolate cycle metadata
 
-Keep changelog details, reviewer-to-mutation mappings, dependency tables, wording notes, refine markers, mutation counts, and tier statistics in `_internal/draft_meta.md`, never in the user-facing draft.
+Keep changelog details, reviewer-to-mutation mappings, dependency tables, wording notes, refine markers, mutation counts, and tier statistics in `draft/_internal/draft_meta.md`, never in the user-facing draft.
 
 ### 10. Optimize for readability
 
