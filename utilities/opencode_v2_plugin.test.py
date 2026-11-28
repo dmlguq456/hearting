@@ -2104,6 +2104,66 @@ try {
             self.assertEqual(recorded[0]["sessionID"], "ses_main")
             self.assertEqual(recorded[0]["args"]["questions"][0]["question"], "Which?")
 
+    def test_v2_subagent_call_runs_natively_and_starts_no_unit_route(self):
+        # OpenCode decides a subagent call inside the tool (its `subagent` permission, `ask` when no rule
+        # matches) and in other plugins' before-hooks, none of which this plugin can see, so it never starts
+        # the call as a unit route: the native subagent runs and no helper is spawned, even with one present.
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is unavailable for the V2 plugin module contract")
+        with tempfile.TemporaryDirectory() as tmp:
+            home, project, harness = Path(tmp) / "home", Path(tmp) / "project", Path(tmp) / "harness"
+            for directory in (home, project, harness / "core", harness / "utilities",
+                              harness / "adapters" / "opencode" / "bin"):
+                directory.mkdir(parents=True)
+            (harness / "core" / "CORE.md").write_text("fixture\n")
+            (harness / "adapters" / "opencode" / "bin" / "preflight.sh").write_text("exit 0\n")
+            seen = Path(tmp) / "seen.jsonl"
+            (harness / "utilities" / "native_subagent_redirect.py").write_text(
+                "import sys\n"
+                "open(%r, 'a').write('ran\\n')\n"
+                "print('Started as Hearting unit route rt-fixture (general/explore, light, no record).')\n"
+                "raise SystemExit(1)\n" % str(seen))
+            script = r"""
+import { pathToFileURL } from "node:url"
+const plugin = (await import(pathToFileURL(process.env.PLUGIN_PATH))).default
+const hooks = new Map()
+const ctx = {
+  location: { directory: process.env.TEMP_ROOT, project: { id: "fixture" } },
+  app: { log: async () => {} },
+  session: {
+    get: async ({ sessionID }) => ({ data: { id: sessionID, agent: "build", title: "Main", parentID: null } }),
+    prompt: async () => ({ data: null }), context: async () => ({ data: [] }),
+    hook: async (name, fn) => hooks.set("session." + name, fn),
+  },
+  tool: { hook: async (name, fn) => hooks.set("tool." + name, fn) },
+  shell: { hook: async (name, fn) => hooks.set("shell." + name, fn) },
+  event: { subscribe: async function* ({ signal }) {
+    await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }))
+  } },
+  permission: { hook: async (name, fn) => hooks.set("permission." + name, fn) },
+}
+const cleanup = await plugin.setup(ctx)
+const refusal = async (tool) => {
+  const event = { tool, sessionID: "ses_main",
+    input: { agent: "explore", description: "Find the panel rule", prompt: "Where is the panel rule?" } }
+  try { await hooks.get("tool.execute.before")(event); return "" } catch (error) { return String(error.message) }
+}
+try {
+  console.log(JSON.stringify({ subagent: await refusal("subagent"), task: await refusal("task") }))
+} finally { await cleanup() }
+"""
+            env = {**BASE_ENV, "PLUGIN_PATH": str(ROOT / "adapters/opencode/plugins/hearting-guards.js"),
+                   "TEMP_ROOT": str(project), "HOME": str(home), "AGENT_HOME": str(harness),
+                   "PYTHONDONTWRITEBYTECODE": "1", "XDG_STATE_HOME": str(home / ".state"),
+                   "XDG_CONFIG_HOME": str(home / ".config"), "XDG_DATA_HOME": str(home / ".data"),
+                   "XDG_CACHE_HOME": str(home / ".cache")}
+            result = subprocess.run([node, "--input-type=module", "-e", script], cwd=ROOT, env=env, text=True,
+                                    capture_output=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(json.loads(result.stdout.strip().splitlines()[-1]), {"subagent": "", "task": ""})
+            self.assertFalse(seen.exists())                  # no helper ran
+
     def test_v2_worker_and_main_sessions_both_record_a_spec_read(self):
         # GA-A5-013: the shared contract keeps the spec-read observation for every session;
         # the V2 worker branch skipped it (main 1 record, worker 0).
