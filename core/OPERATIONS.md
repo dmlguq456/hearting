@@ -2856,10 +2856,13 @@ append-only ledger below is the only record of them (SD-122 §13.37.2-(1)).
 Keep work in this session's route by default; start another interactive session
 (`peer-steward start`) only for long work that needs its own human answers or
 recovery, because each one adds a seat, a model context, and supervision.
-A steward may also run routes itself, and no count limits it. When it holds several
-independent flows, its default is to hand a whole flow — its routes, its instructions
-and its next step — to a session it already supervises, using a waiting one before
-starting another; the user decides how many sessions run.
+A steward may also run routes itself, and no count limits it. Handing routes to another
+session is a judgment, not a rule: a few routes stay here even when their topics
+differ, because the receiving session has to read their context anew. It is worth
+considering once the routes held grow to fill this session's context, some are far
+from the rest in kind or topic, and a supervised session already holds related routes
+or is waiting, so related routes gather in one session; use a waiting session before
+starting another, and the user decides how many sessions run.
 
 **Optional session shell.** An opt-in PTY attachment supplies a collapsed status
 line, a read-only panel and guarded idle wake. Its exact-session transport and

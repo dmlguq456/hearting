@@ -662,6 +662,9 @@ def _observe_role(harness: str, session_id: str) -> dict:
                 **({"unresolved": True} if target.get("unresolved") else {}),
                 "owed": _pending_count(module, t_harness, t_sid)})
     _lengthen_shared_prefixes(targets)
+    for target in targets:  # a waiting target may be waiting on routes it launched itself
+        if _waiting(target) and target.get("session_id"):
+            target["open_routes"] = _parented_routes(target["session_id"])
     pending = _pending_count(module, harness, session_id)
     work, decisions = _open_work(harness, session_id)
     lab = _observe_lab(cwds)
@@ -734,17 +737,23 @@ def _label(name: str) -> str:
 
 
 def waiting_targets(observation: dict, waiting_since=None, now: float | None = None,
-                    *, hours=False, exclude=()) -> list[str]:
-    """Live targets waiting for their next step with no request queued (``_waiting``),
-    longest first, each as ``[name] 182 min`` (``3 h`` with ``hours``) or bare when new."""
+                    *, style="check", exclude=()) -> list[str]:
+    """Live targets waiting for their next step with no request queued (``_waiting``), longest
+    first, with the open routes each parents itself (``open_routes``; left out when unread):
+    ``check`` ``[b2] 182 min (3 open routes)``, ``notice`` ``[b2] 3 h · 3 routes``, ``start``
+    only those that parent none, ``[c3] 95 min``. One seen waiting just now has no time."""
     now = _now() if now is None else now
-    since = waiting_since or {}
     rows = []
     for t in observation.get("targets") or ():
-        if not _waiting(t) or _queued_for(t) or {t.get("name"), t.get("session_id")} & set(exclude):
+        routes = t.get("open_routes")
+        if (not _waiting(t) or _queued_for(t) or {t.get("name"), t.get("session_id")} & set(exclude)
+                or style == "start" and routes != 0):
             continue
-        minutes = int(max(0.0, now - float(since.get(str(t.get("session_id")), now))) // 60)
-        span = f" {minutes // 60} h" if hours and minutes >= 120 else f" {minutes} min" if minutes else ""
+        minutes = int(max(0.0, now - float((waiting_since or {}).get(str(t.get("session_id")), now))) // 60)
+        span = f" {minutes // 60} h" if style == "notice" and minutes >= 120 else f" {minutes} min" if minutes else ""
+        if isinstance(routes, int) and style != "start":
+            span += (f" ({routes} open route{'' if routes == 1 else 's'})" if style == "check"
+                     else f" · {routes} route{'' if routes == 1 else 's'}" if routes else " · none")
         rows.append((-minutes, _label(t["name"]) + span))
     return [text for _key, text in sorted(rows, key=lambda row: row[0])]
 
@@ -758,7 +767,8 @@ def start_waiting_line(harness: str, session_id: str, exclude=()) -> str:
             return ""
         duty = _store().get(duty_id(harness, session_id)) or {}
         waiting = waiting_targets(_observe_role(harness, session_id),
-                                  (duty.get("observation") or {}).get("waiting_since"), exclude=exclude)
+                                  (duty.get("observation") or {}).get("waiting_since"),
+                                  style="start", exclude=exclude)
     except Exception:  # noqa: BLE001 - the session is already open; this line is only a hint
         return ""
     return ("already-waiting=" + ",".join(waiting) + " (sessions you supervise that are idle now)"
@@ -766,15 +776,15 @@ def start_waiting_line(harness: str, session_id: str, exclude=()) -> str:
 
 
 def _streams_tails(seen: dict, waiting_since, now) -> list[str]:
-    """The notice's closing piece, fullest first: routes held and waiting targets."""
+    """The notice's closing piece, fullest first: routes held and idle targets with theirs."""
     count = seen.get("parented_routes")
     held = (f"You parent {count} open route{'' if count == 1 else 's'}"
             if isinstance(count, int) and count > 0 else "")
-    waiting = waiting_targets(seen, waiting_since, now, hours=True)
+    waiting = waiting_targets(seen, waiting_since, now, style="notice")
     tails = []
     for shown in range(len(waiting), -1, -1):
         names = ", ".join(waiting[:shown]) + (f", +{len(waiting) - shown} more" if shown < len(waiting) else "")
-        part = ("waiting: " if held else "Waiting: ") + names if shown else ""
+        part = ("idle: " if held else "Idle: ") + names if shown else ""
         text = "; ".join(item for item in (held, part) if item)
         if text:
             tails.append(" | " + text + ".")

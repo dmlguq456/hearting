@@ -2520,43 +2520,50 @@ class LabRegressionTest(CheckBase):
 
 
 class StewardStreamsTest(CheckBase):
-    """The holder hears how many open routes it parents and which targets wait, open record or not."""
+    """The holder hears how many open routes it parents and which targets are idle, each with the
+    open routes it parents itself, open record or not. Facts only: no instruction is added."""
 
     def test_check_lists_waiting_targets_without_open_records_and_the_routes_held(self):
-        b2, c3, d4 = target("b2", state="idle"), target("c3"), target("d4")
+        b2, c3, d4 = dict(target("b2", state="idle"), open_routes=3), target("c3"), target("d4")
         self.seen = {"targets": [b2, c3, d4], "pending_messages": 0, "open_work": [], "parented_routes": 18}
         self.register()
         self.check(T0)
-        self.seen["targets"] = [b2, target("c3", state="done"), d4]
+        self.seen["targets"] = [b2, dict(target("c3", state="done"), open_routes=0), d4]
         self.check(T0 + 87 * 60)
         out = self.check(T0 + 182 * 60)
         self.assertIn("pending_messages=0 undelivered_notices=0 open_work=0 parented_routes=18\n", out)
-        self.assertIn("\nwaiting=[b2] 182 min,[c3] 95 min\n", out)
+        self.assertIn("\nwaiting=[b2] 182 min (3 open routes),[c3] 95 min (0 open routes)\n", out)
         self.assertNotIn("[d4]", out.split("waiting=")[1])  # a working target is not waiting
+        self.seen["targets"] = [target("b2", state="idle")]  # its count unread: the name alone
+        self.assertIn("\nwaiting=[b2] 200 min\n", self.check(T0 + 200 * 60))
         self.seen = {"targets": [d4], "pending_messages": 0, "open_work": [], "parented_routes": None}
-        out = self.check(T0 + 200 * 60)
+        out = self.check(T0 + 210 * 60)
         self.assertNotIn("waiting=", out)
         self.assertNotIn("parented_routes", out)
 
-    def test_the_periodic_notice_ends_with_routes_held_and_waiting_targets(self):
-        self.seen = {"targets": [target("b2", state="idle"), target("c3", state="idle"), target("d4")],
+    def test_the_periodic_notice_ends_with_routes_held_and_idle_targets(self):
+        self.seen = {"targets": [dict(target("b2", state="idle"), open_routes=3),
+                                 dict(target("c3", state="idle"), open_routes=0), target("d4")],
                      "pending_messages": 0, "open_work": [], "parented_routes": 18}
         self.register()
         self.step(T0 + INTERVAL)
         self.assertEqual(self.notice()["text"],
-                         SC.TEXT_RUN_CHECK + " | You parent 18 open routes; waiting: [b2], [c3].")
+                         SC.TEXT_RUN_CHECK + " | You parent 18 open routes; idle: [b2] · 3 routes, [c3] · none.")
         since = {"sid-b2": T0 - 182 * 60, "sid-c3": T0 - 95 * 60}
         self.assertEqual(SC._notice_text(SC.TEXT_RUN_CHECK, self.seen, "run-steward-check", "k", since, T0),
-                         SC.TEXT_RUN_CHECK + " | You parent 18 open routes; waiting: [b2] 3 h, [c3] 95 min.")
+                         SC.TEXT_RUN_CHECK
+                         + " | You parent 18 open routes; idle: [b2] 3 h · 3 routes, [c3] 95 min · none.")
         one = {**self.seen, "targets": [target("d4")], "parented_routes": 1}
         self.assertEqual(SC._notice_text(SC.TEXT_RUN_CHECK, one, "run-steward-check", "k", {}, T0),
                          SC.TEXT_RUN_CHECK + " | You parent 1 open route.")
+        for word in ("hand", "assign", "move"):  # the closing piece states facts only
+            self.assertNotIn(word, self.notice()["text"].split(" | ", 1)[1].lower())
 
     def test_a_full_notice_shortens_the_closing_piece_and_keeps_every_existing_word(self):
         seen = {"targets": [target("b2", state="idle"), target("c3", state="idle")],
                 "pending_messages": 0, "open_work": [], "parented_routes": 18}
         since = {"sid-b2": T0 - 182 * 60, "sid-c3": T0 - 95 * 60}
-        middle = " | You parent 18 open routes; waiting: [b2] 3 h, +1 more."
+        middle = " | You parent 18 open routes; idle: [b2] 3 h, +1 more."
         filler = session_notice.MAX_TEXT - len(middle) - len(SC.TEXT_RUN_CHECK + " | LAB: ")
         line = "LAB: " + "x" * filler
         existing = SC.TEXT_RUN_CHECK + " | " + line
@@ -2575,8 +2582,11 @@ class StewardStreamsTest(CheckBase):
         self.assertLessEqual(len(text), session_notice.MAX_TEXT)
 
     def test_start_names_targets_already_waiting_only_for_a_steward(self):
-        self.seen = {"targets": [target("b2", state="idle"), target("c3", state="unused"),
-                                 target("n1", state="unused"), target("d4")],
+        self.seen = {"targets": [dict(target("b2", state="idle"), open_routes=0),
+                                 dict(target("c3", state="unused"), open_routes=0),
+                                 dict(target("e5", state="idle"), open_routes=2),  # waits on its own routes
+                                 target("f6", state="idle"),  # count unread: not known to be free
+                                 dict(target("n1", state="unused"), open_routes=0), target("d4")],
                      "pending_messages": 0, "open_work": []}
         self.register()
         duty = self.duty()
@@ -2588,9 +2598,38 @@ class StewardStreamsTest(CheckBase):
             self.flagged = False  # not a steward: no line
             self.assertEqual(SC.start_waiting_line(HARNESS, SID, exclude={"n1"}), "")
             self.flagged = True
-            self.seen["targets"] = [target("n1", state="unused"), target("d4")]  # nobody else waits
-            self.assertEqual(SC.start_waiting_line(HARNESS, SID, exclude={"n1"}), "")
+            self.seen["targets"] = [dict(target("n1", state="unused"), open_routes=0), target("d4")]
+            self.assertEqual(SC.start_waiting_line(HARNESS, SID, exclude={"n1"}), "")  # nobody else waits
 
+    def test_an_idle_target_waiting_on_its_own_routes_is_counted_from_the_registry(self):
+        import peer_steward_native
+
+        def owner(attempt, parent, status="open"):
+            meta = dict(attempt_id=attempt, dispatch_depth="1", worker_type="owner", parent_sid=parent,
+                        parent_completion_delivery="claude-parent-runtime", owner_route_id="rt-" + attempt)
+            return (f"2026-11-28T00:00:00Z\t{status}\t/r\t/w\ttest\t"
+                    + ",".join(f"{k}={v}" for k, v in meta.items()) + "\n")
+
+        (self.tmp / "jobs.log").write_text(
+            owner("a1", SID) + owner("a2", SID) + owner("b1", "sid-b2") + owner("b2", "sid-b2")
+            + owner("b3", "sid-b2") + owner("c1", "sid-c3", status="done"))
+        collector = SimpleNamespace(
+            role_targets=lambda h, s, **kw: [{"name": n, "harness": "codex", "session_id": "sid-" + n}
+                                             for n in ("b2", "c3")],
+            _registry_sessions=lambda: [], _peer_message_module=lambda: None)
+        with mock.patch.object(SC, "_observe_role", side_effect=REAL_OBSERVE), \
+                mock.patch.object(SC, "_collector", return_value=collector), \
+                mock.patch.object(peer_steward_native, "native_agent",
+                                  return_value={"result": {"agent": {"agent_status": "idle"}}}), \
+                mock.patch.object(SC, "_end_observation", return_value=None), \
+                mock.patch.object(SC, "_open_work", return_value=([], [])), \
+                mock.patch.object(SC, "_now", return_value=T0):
+            self.register()
+            out = self.check(T0)
+            line = SC.start_waiting_line(HARNESS, SID)
+        self.assertIn(" parented_routes=2\n", out)
+        self.assertIn("\nwaiting=[b2] (3 open routes),[c3] (0 open routes)\n", out)
+        self.assertEqual(line, "already-waiting=[c3] (sessions you supervise that are idle now)")
 
 if __name__ == "__main__":
     unittest.main()
