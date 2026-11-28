@@ -89,12 +89,12 @@ class SessionMarkerTests(unittest.TestCase):
     def test_mapping(self):
         mark = tables.session_marker
         self.assertEqual(mark({"state": "working"}), ("⠏", "spin"))
-        self.assertEqual(mark({"state": "blocked"}), ("●", "blocked"))
+        self.assertEqual(mark({"state": "blocked"}), ("◑", "blocked"))
         self.assertEqual(mark({"state": "dead"}), ("✕", "dead"))
         self.assertEqual(mark({"state": "done"}), ("✓", "done"))
         self.assertEqual(mark({"state": "idle"}), ("●", "idle"))
         self.assertEqual(mark({}), ("●", "idle"))
-        self.assertEqual(mark({"state": "working", "answer_wait_marker": "●"}), ("●", "blocked"))
+        self.assertEqual(mark({"state": "working", "answer_wait_marker": "●"}), ("◑", "blocked"))   # 11-27: an older ● reads ◑
         self.assertEqual(mark({"state": "idle", "answer_wait_marker": "◑"}), ("◑", "blocked"))
 
 

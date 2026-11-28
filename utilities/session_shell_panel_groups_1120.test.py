@@ -193,7 +193,7 @@ assert(!view.memoryBody({model:{styles,memory_items:[{text:'a\u001b[31mb',body:'
 for(const status of [undefined,{word:'STATUS',has_doc:false},doc([]),doc(GROUPS)]){
   const ws=lines(draw({status,side:false,width:100,height:12,routes:3,messages:5}));
   assert(ws.some(l=>/^│ messages \+4 ─+ › │$/.test(l))&&ws.some(l=>/^│ ← \[75\] /.test(l)),JSON.stringify(status)+'\n'+ws.join('\n'));
-  assert(ws.some(l=>/^│ ╭─ route 3 /.test(l))&&ws.some(l=>/↓2 ─╯ │$/.test(l)),ws.join('\n'));}
+  assert(ws.some(l=>/^│ ╭─ route 3 /.test(l))&&ws.some(l=>/↓ 2 more ─╯ │$/.test(l)),ws.join('\n'));}
 // Short of rows the route box (the job that runs now) stays and the button stays on the first row: 100 x 8..14, one route.
 for(let h=8;h<=14;h++){
   const v=draw({status:doc(GROUPS),side:false,width:100,height:h,routes:1}),ws=lines(v);

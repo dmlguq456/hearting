@@ -366,7 +366,7 @@ def _model_picker(grid, x, y, right, items, current, chosen, labels, values, off
         item = found[index]
         on = _same_model(item, active)
         here = _same_model(item, current)
-        mark = "▸ " if editing and index == cursor else "  "
+        mark = "▶ " if editing and index == cursor else "  "    # 11-27: the place, as MODELS' own selected cell reads it
         cursor_x = grid.put(x - 2, yy, mark, "soft", limit=right)
         text = str(item)
         label = str(labels.get(item, ""))

@@ -1534,7 +1534,7 @@ class PtyRun:
         """Click four session targets ``clicks`` times each while snapshots keep refreshing.
 
         Targets: a tree session row (x < 32), an OVERVIEW session fold row, a repo page
-        session row (x >= 32, ``("scope", tag)``) and the unfolded row's ``(open ▸)`` link.
+        session row (x >= 32, ``("scope", tag)``) and the unfolded row's ``(open ›)`` link.
         A click is a press packet and, 50 ms later, a release packet at one cell, sent after a
         ``pause`` at human pace. Every dispatch's ``current`` flag is kept. A click whose press
         was not adopted (``current=False``: a refresh aged the hit map) changed nothing and is
@@ -1656,7 +1656,7 @@ class PtyRun:
             click("overview_fold", lambda: fold_hit(fold_tag), 4,
                   lambda st, want=want: st.get("opened") == want, records)
 
-        # (D) the unfolded row's (open ▸) link goes to the session page.
+        # (D) the unfolded row's (open ›) link goes to the session page.
         def link_hit():
             return next((hit for hit in hits(self.state())
                          if hit[3] == ["page", "session", fold_tag]), None)
