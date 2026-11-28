@@ -5819,6 +5819,8 @@ def grant_steward(harness, session_id, to, kind, ts, source=None, *, target_cwd=
             targets[key]["start_ts"] = start_ts
         if to.get("pane"):
             targets[key]["pane"] = to["pane"]
+            if isinstance(to.get("server"), str) and to["server"]:
+                targets[key]["server"] = to["server"]
         if len(targets) > _STEWARD_TARGETS_MAX:
             oldest = sorted(targets, key=lambda k: targets[k].get("ts") or "")
             for k in oldest[: len(targets) - _STEWARD_TARGETS_MAX]:

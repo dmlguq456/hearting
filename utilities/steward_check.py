@@ -626,6 +626,7 @@ def _observe_role(harness: str, session_id: str) -> dict:
     targets = []
     cwds = set()
     agents = ()
+    censuses = {}
     observation = _end_observation()
     if collector is not None:
         # Native registry rows only (as `_holder_cwd` and `grant_steward`): no Herdr agent list.
@@ -653,12 +654,15 @@ def _observe_role(harness: str, session_id: str) -> dict:
                     directories.add(agent["cwd"])
                 cwds.update(directories)
             state = (agent or {}).get("agent_status") or "unknown"
+            liveness = (_session_liveness(t_harness, t_sid, agents, observation)
+                        if t_sid else "unknown")
+            if liveness != "live" and _window_closed_target(target, censuses):
+                continue  # its own window closed and it lives nowhere else: it ended there
             targets.append({
                 "name": str(target.get("name") or (t_sid or "-")[:8]),
                 "harness": t_harness or "-", "session_id": t_sid,
                 "state": state,
-                "liveness": (_session_liveness(t_harness, t_sid, agents, observation)
-                             if t_sid else "unknown"),
+                "liveness": liveness,
                 **({"unresolved": True} if target.get("unresolved") else {}),
                 "owed": _pending_count(module, t_harness, t_sid)})
     _lengthen_shared_prefixes(targets)
@@ -667,6 +671,28 @@ def _observe_role(harness: str, session_id: str) -> dict:
     lab = _observe_lab(cwds)
     return {"targets": targets, "pending_messages": pending,
             "open_work": work, "user_decisions": decisions, "lab": lab}
+
+
+def _window_closed_target(target: dict, censuses: dict) -> bool:
+    """Whether the target's own Herdr window is gone in a complete census of its server.
+
+    `start` records the pane it opened and that pane's server (Herdr pane ids repeat
+    across servers; an entry from before the server was recorded is on the default
+    one, where `start` opens unless told otherwise). A tmux pane, an unanswered or
+    incomplete census, or a pane still listed keeps the target. One census per server
+    per check."""
+    pane, server = target.get("pane"), target.get("server") or "default"
+    if not isinstance(pane, str) or not pane or pane.startswith("%") or not isinstance(server, str):
+        return False
+    if server.startswith("tmux:"):
+        return False
+    try:
+        import herdr_observation
+        if server not in censuses:
+            censuses[server] = herdr_observation.pane_census(session=server)
+        return herdr_observation.confirms_absence(censuses[server], pane, endpoint=server)
+    except Exception:  # noqa: BLE001 - an unreadable census keeps the target listed
+        return False
 
 
 def _lengthen_shared_prefixes(targets: list) -> None:

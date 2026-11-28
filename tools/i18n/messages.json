@@ -2662,6 +2662,54 @@
    "en": "The session restarted while work was unfinished. Continue from the existing conversation and verify stopped background work before retrying it.",
    "ko": "재시작으로 끊겼습니다. 기존 대화에서 하던 일을 이어 가세요. 중단된 백그라운드 작업은 상태를 확인한 뒤 다시 실행하세요."
   },
+  "retire.wait.background": {
+   "en": "the session still has background work; run the same retire again after it finishes",
+   "ko": "세션에 아직 백그라운드 작업이 있습니다. 끝난 뒤 같은 retire를 다시 부르세요"
+  },
+  "retire.wait.changed": {
+   "en": "the session in that window changed after the request; run the same retire again to check the current one",
+   "ko": "요청 뒤 그 창의 세션이 바뀌었습니다. 같은 retire를 다시 부르면 지금 세션으로 다시 확인합니다"
+  },
+  "retire.wait.draft": {
+   "en": "the input box holds unsent text; send or clear it in that window, then run the same retire again",
+   "ko": "입력창에 쓰던 글이 있습니다. 그 창에서 글을 보내거나 지운 뒤 같은 retire를 다시 부르세요"
+  },
+  "retire.wait.draft-unknown": {
+   "en": "it is not known whether the input box is empty; close any popup or menu over it, then run the same retire again",
+   "ko": "입력창이 비어 있는지 알 수 없습니다. 그 위의 팝업·메뉴를 닫은 뒤 같은 retire를 다시 부르세요"
+  },
+  "retire.wait.exit": {
+   "en": "the exit was already requested and its result is not confirmed yet; run the same retire again shortly to read it",
+   "ko": "종료를 이미 요청했고 결과를 아직 확인하지 못했습니다. 잠시 뒤 같은 retire를 다시 부르면 결과를 읽습니다"
+  },
+  "retire.wait.foreground": {
+   "en": "the agent process in that window could not be confirmed, so no key was sent; if that session is finished, close its window by hand",
+   "ko": "그 창의 에이전트 프로세스를 확인하지 못해 아무 키도 보내지 않았습니다. 끝난 세션이면 창을 직접 닫으세요"
+  },
+  "retire.wait.form": {
+   "en": "a choice or confirmation dialog is open; answer or close it in that window, then run the same retire again",
+   "ko": "선택·확인 창이 열려 있습니다. 그 창에서 답하거나 닫은 뒤 같은 retire를 다시 부르세요"
+  },
+  "retire.wait.other": {
+   "en": "waiting on {reason}; run the same retire again once that has changed",
+   "ko": "기다리는 것: {reason}. 그것이 풀린 뒤 같은 retire를 다시 부르세요"
+  },
+  "retire.wait.screen": {
+   "en": "that window's screen could not be read ({reason}); run the same retire again once its input box shows",
+   "ko": "그 창의 화면을 읽지 못했습니다({reason}). 입력창이 보이게 된 뒤 같은 retire를 다시 부르세요"
+  },
+  "retire.wait.tmux": {
+   "en": "the tmux pane takes no keys now (a mode, input off or synchronized panes); leave that state, then run the same retire again",
+   "ko": "tmux 창이 지금 키를 받지 않습니다(모드·입력 꺼짐·동시 입력). 그 상태를 푼 뒤 같은 retire를 다시 부르세요"
+  },
+  "retire.wait.turn": {
+   "en": "the session is still in a turn or waiting for an answer; run the same retire again once it is idle",
+   "ko": "세션이 아직 일하는 중이거나 답을 기다립니다. 쉬는 상태가 되면 같은 retire를 다시 부르세요"
+  },
+  "retire.wait.work": {
+   "en": "work registered on that window is still open; run the same retire again after it settles",
+   "ko": "그 창에 맡긴 일이 아직 열려 있습니다. 그 일이 끝난 뒤 같은 retire를 다시 부르세요"
+  },
   "route.a.depends_on_work": {
    "en": "unconfirmed (depends on the work)",
    "ko": "미확인 (작업 의미에 따름)"

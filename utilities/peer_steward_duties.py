@@ -1096,6 +1096,26 @@ def _marker_remainder(cells, marker):
     return body, any((not faint) and ch.strip() for ch, faint in rest)
 
 
+def _claude_suggestion(cells):
+    """Whether a Claude input line holds only its own faint suggestion (`Try "…"`).
+
+    An empty composer draws the suggestion faint, with the cursor block (reverse
+    video, not faint) on its first letter: one bright cell right after the marker,
+    then faint text with no gap and nothing bright after it. Typed text is bright
+    throughout, so a typed letter with a faint completion after it has its cursor
+    on a second bright cell and stays a draft."""
+    text = _plain(cells)
+    start = len(text) - len(text.lstrip()) + 1
+    rest = list(cells[start:])
+    while rest and not rest[0][0].strip():
+        rest.pop(0)
+    while rest and not rest[-1][0].strip():
+        rest.pop()
+    if len(rest) < 2 or rest[0][1] or not rest[0][0].strip() or not rest[1][1] or not rest[1][0].strip():
+        return False
+    return all(faint or not ch.strip() for ch, faint in rest[1:])
+
+
 def _draft_state(harness, lines):
     """`empty` | `nonempty` | `unknown` for the input box of one harness's visible screen.
 
@@ -1108,7 +1128,7 @@ def _draft_state(harness, lines):
         if idx is None:
             return "unknown"
         body, bright = _marker_remainder(lines[idx], "\u276f")
-        if bright:
+        if bright and not _claude_suggestion(lines[idx]):
             return "nonempty"
         for cells in lines[idx + 1:]:
             if _RULE_LINE.match(_plain(cells)):
