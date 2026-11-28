@@ -66,6 +66,10 @@ class MessageQuestionFixture:
         seat = self.seat(harness, sid)
         signal = waits.register_message(harness, sid, seat, text,
             sequence=tidy.read_prompt_seq(seat), cwd=str(self.root), **kwargs)
+        # The shared store the running producer keeps; a question alone adds no answer record to it.
+        with waits._cache_write_lock():
+            if not waits._cache_path().exists():
+                waits._write_cache_value(waits._projection_or_new())
         return signal, waits.read_selected_request({"id": signal["id"], "harness": harness, "session_id": sid})
 
     def submit(self, envelope, text="PRIVATE-ANSWER-SENTINEL", action="fixture-action"):

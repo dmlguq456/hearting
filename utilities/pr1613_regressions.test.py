@@ -124,6 +124,13 @@ class ClosedQuestionTest(unittest.TestCase):
                 wire, _, _ = f.prepare(signal)
                 f.consume(signal, wire)
                 waits.record_closed_question(signal['id'], 'answered')
+                # Its answered row left the session's file (only the newest ended rows are kept),
+                # so the same registration writes it open again.
+                path = waits._questions_path(harness, 'session')
+                rows = waits._read_questions_file(path)
+                rows.pop(signal['id'])
+                waits._write(path, {'schema_version': 1, 'source': 'S4-questions', 'harness': harness,
+                                    'session_id': 'session', 'questions': rows})
                 f.ask(harness, 'session', 'B')
                 reopened, _ = f.ask(harness, 'session', 'A')
                 self.assertEqual((reopened['id'], reopened['lifecycle']), (signal['id'], 'open'))
