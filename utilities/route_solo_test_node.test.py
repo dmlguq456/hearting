@@ -240,34 +240,45 @@ class SoloTestNode(S2.Base):
                 self.assertIn("If the test fails, fix what it found in one pass", text)
                 self.assertIn("start the review group again with the same command", text)
 
-    def test_what_judges_after_the_test_is_read_from_the_admission_of_those_nodes_alone(self):
-        # The reviews come first unless every leg passed the source as it is now and the test's open FAIL judged other
-        # bytes; the first refusal among the admissions of what judges next is the answer. (The real census, a real
-        # registry and Git: review_source_subject_integration.test.py.)
+    def test_what_follows_the_test_is_read_from_the_owners_markers_and_the_tests_own_admission(self):
+        # "passed" is the owner's end reading every prerequisite's exact current marker; the rest is the test node's
+        # own admission (never a review leg's) and its open FAIL. (The real census, registry and Git:
+        # review_source_subject_integration.test.py.)
         route = self.solo("strong")
-        legs, test = ("impl-review", "impl-review-alternative"), RF.one_shot_test_node(route)
+        admitted = []
 
-        def judged(states, failed_on="d1", current="d1", stand=True, test_passed=False):
-            def admit(_route, node, _jobs, **_kwargs):
-                passed = test_passed if node["id"] == "test" else stand
-                return SimpleNamespace(budget=SimpleNamespace(state=states.get(node["id"], "admit"),
-                                                              verdict_rounds=1 if passed or node["id"] == "test" else 0),
-                                       requires_next_round=not passed, source_subject_digest=current)
-            failed = [] if failed_on is None else [(["t", "done"], {**failed_test(failed_on, "att-t")[1]})]
-            module = SimpleNamespace(admit_round=admit, prior_round_attempts=lambda *a, **k: failed)
-            with mock.patch("review_input._dispatch_node_module", return_value=module):
+        def judged(state="admit", failed_on="d1", current="d1", gaps=None, rows=()):
+            def admit(_route, node, _jobs, **kwargs):
+                admitted.append((node["id"], kwargs.get("exclude_attempt")))
+                return SimpleNamespace(budget=SimpleNamespace(state=state), source_subject_digest=current)
+            census = [*rows, *([] if failed_on is False else [(["t", "done"], failed_test(failed_on, "att-t")[1])])]
+            module = SimpleNamespace(admit_round=admit, prior_round_attempts=lambda *a, **k: census)
+            with mock.patch("review_input._dispatch_node_module", return_value=module), \
+                 mock.patch("capability_route_close.owner_terminal_prerequisites",
+                            return_value={"test": "completion-marker-absent"} if gaps is None else gaps):
                 return W.one_shot_test_next(route, "/jobs.log")
-        self.assertEqual(judged({}), {"state": "admit", "failed": failed_test("d1", "att-t")[1], "start": "impl-review"})
-        self.assertEqual(judged({}, current="d2")["start"], "test")              # the reviews passed the correction
-        self.assertEqual(judged({}, current="d2", stand=False)["start"], "impl-review")
-        self.assertEqual(judged({"impl-review-alternative": "exhausted"})["state"], "exhausted")   # a leg's rounds
-        self.assertEqual(judged({"impl-review-alternative": "exhausted"}, current="d2")["state"], "admit")
-        self.assertEqual(judged({"test": "exhausted"}, current="d2")["state"], "exhausted")
-        self.assertEqual(judged({"test": "verdictless-bound"}, failed_on=None)["state"], "verdictless-bound")
-        self.assertEqual(judged({"test": "exhausted"}, failed_on=None, test_passed=True)["state"], "passed")
-        self.assertEqual(test["id"], "test")
-        self.assertIn(legs[0], RF.one_shot_review_node_ids(route))
-        with mock.patch("review_input._dispatch_node_module", side_effect=OSError("unreadable")):
+        failed = failed_test("d1", "att-t")[1]
+        self.assertEqual(judged(), {"state": "admit", "failed": failed})
+        self.assertEqual(admitted, [("test", None)])                             # the test node's admission alone
+        self.assertEqual(judged(gaps={}), {"state": "passed", "failed": None})
+        self.assertEqual(judged(gaps={"impl-review": "completion-review-source-stale"}),
+                         {"state": "standing", "failed": None})                  # the owner's other gap: no claim
+        self.assertEqual(judged("exhausted")["state"], "exhausted")              # its open FAIL judged these bytes
+        self.assertEqual(judged("exhausted", current="d2")["state"], "verdictless-bound")
+        self.assertEqual(judged("exhausted", failed_on=None)["state"], "verdictless-bound")   # no digest: not now
+        self.assertEqual(judged("exhausted", failed_on=False)["state"], "verdictless-bound")
+        self.assertEqual(judged("verdictless-bound")["state"], "verdictless-bound")
+        for state in ("blocked-live", "blocked-unsettled"):
+            self.assertEqual(judged(state)["state"], state)
+        admitted.clear()
+        unclaimed = (["t", "open", "", "", "owner-test", "attempt_id=att-own,launch_claimed=0"],
+                     {"attempt_id": "att-own", "launch_claimed": "0"})
+        judged(rows=[unclaimed])
+        self.assertEqual(admitted, [("test", "att-own")])                        # as the same start leaves it out
+        with mock.patch("review_input._dispatch_node_module", side_effect=OSError("unreadable")), \
+             mock.patch("capability_route_close.owner_terminal_prerequisites", return_value={"test": "absent"}):
+            self.assertIsNone(W.one_shot_test_next(route, "/jobs.log"))
+        with mock.patch("capability_route_close.owner_terminal_prerequisites", side_effect=OSError("unreadable")):
             self.assertIsNone(W.one_shot_test_next(route, "/jobs.log"))
 
     def next_ready(self, route, notes, missing, node_id="impl-review"):
@@ -308,39 +319,45 @@ class SoloTestNode(S2.Base):
         route = self.solo("strong")
         stand = {"impl-review": None, "impl-review-alternative": None}
         failed = {**failed_test("d1", "att-t")[1], "log_file": ""}
-        cases = (({"state": "admit", "failed": failed, "start": "impl-review"},
+        wait = "The independent test is still running or its result has not settled; wait for that result."
+        cases = (({"state": "admit", "failed": failed},
                   ["Test FAIL att-t: the independent test of your work fails.", "start the reviews again", "impl-review"]),
-                 ({"state": "admit", "failed": failed, "start": "test"},
-                  ["Test FAIL att-t: the test failed on earlier work, and the reviews passed your change.", "--node test"]),
-                 ({"state": "exhausted", "failed": failed, "start": "impl-review"},
+                 ({"state": "exhausted", "failed": failed},
                   ["Test FAIL att-t: the test still fails", "Do not correct further", "end with `verdict: FAIL`."]),
-                 ({"state": "verdictless-bound", "failed": None, "start": "test"},
+                 ({"state": "verdictless-bound", "failed": failed},
                   ["Write in your report that the test could not reach a verdict, and do not report PASS."]),
-                 ({"state": "passed", "failed": None, "start": None},
-                  ["The independent test already passed your current work"]))
+                 ({"state": "passed", "failed": None}, ["The independent test already passed your current work"]),
+                 ({"state": "blocked-live", "failed": failed}, [wait]),
+                 ({"state": "blocked-unsettled", "failed": None}, [wait]),
+                 (None, ["The independent test's state could not be read; do not report PASS."]))
         import review_round_cap as ROUND
         test = RF.one_shot_test_node(route)
         for judged, said in cases:
-            with self.subTest(judged["state"], start=judged["start"]), \
-                    mock.patch.object(W, "one_shot_test_next", return_value=judged):
+            state = judged["state"] if judged else "unread"
+            with self.subTest(state), mock.patch.object(W, "one_shot_test_next", return_value=judged):
                 text, path = self.wake(route, reasons=stand)
                 refused = ROUND.recovery_fields(test["kind"], "exhausted", route=route, node=test, jobs="/jobs.log",
                                                 route_file=str(path))
                 for phrase in said:
                     self.assertIn(phrase, text)
-                    if judged["state"] != "admit":
-                        self.assertIn(phrase, refused["recovery_hint"])
+                    self.assertIn(phrase, refused["recovery_hint"])
                 self.assertEqual((refused["recovery_surface"], refused["next_action"]), ("owner-report", "owner-report"))
-                self.assertEqual(refused.get("required_action") == "use-current-pass", judged["state"] == "passed")
-                if judged["state"] != "admit":
-                    self.assertNotIn("stage-dispatch-fallback", text)
+                self.assertEqual(refused.get("required_action") == "use-current-pass", state == "passed")
+                self.assertEqual("stage-dispatch-fallback" in text, state == "admit")
+                self.assertEqual("verdict: FAIL" in text, state == "exhausted")
+                for absent in ("has not run", "has no verdict", "start it"):
+                    if state in {"unread", "blocked-live", "blocked-unsettled"}:
+                        self.assertNotIn(absent, text)
                 self.assertFalse(any(word in str(value) for value in refused.values()
                                      for word in ("owner-inline", "complete --inline")), refused)
         # an admission that cannot be read claims nothing: the refused start ends the owner without a FAIL it cannot see
         refused = ROUND.recovery_fields(test["kind"], "verdictless-bound", route=route, node=test, jobs=None)
-        self.assertNotIn("verdict: FAIL", refused["recovery_hint"])
+        self.assertEqual(refused["recovery_hint"], "The independent test's state could not be read; do not report PASS.")
+        # the test stands beside another missing prerequisite: no test sentence, the owner's other gap says the rest
+        with mock.patch.object(W, "one_shot_test_next", return_value={"state": "standing", "failed": None}):
+            self.assertEqual(W.one_shot_test_followup(route, "/route.json", "/jobs.log"), {})
         # nothing failed and a start is admitted: the wording of the cell's own state, with the test's start
-        with mock.patch.object(W, "one_shot_test_next", return_value={"state": "admit", "failed": None, "start": "test"}):
+        with mock.patch.object(W, "one_shot_test_next", return_value={"state": "admit", "failed": None}):
             text, path = self.wake(route, reasons=stand)
         self.assertIn("Your route's independent test has not run.", text)
         self.assertIn(f"`{W.route_start_command(path, 'test', jobs='/jobs.log')}`", text)

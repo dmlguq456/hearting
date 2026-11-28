@@ -1330,48 +1330,47 @@ def continuation_followup_fields(route, node, metadata, jobs, route_file):
 
 
 def one_shot_test_next(route, jobs):
-    """What admission accepts after the middle cell's test (from `strong`), read from `admit_round` and its census
-    alone: the test's handoff, its owner's end and its refused start all say this. The test alone judges next once
-    every review leg's last verdict passed the source as it is now, unless the test's unanswered FAIL judged those
-    same bytes (then the correction is reviewed first); otherwise the review group, then the test. `state`: "passed"
-    (the test's last verdict passed the source as it is now), the first refusal among those admissions, or "admit".
-    None when admission cannot be read."""
+    """What follows the middle cell's test (from `strong`), read from what already decides it. The owner's end reads
+    the exact current markers of its prerequisites: "passed" when none is missing, "standing" when the test's is there
+    but another is not. Otherwise the test node's own admission and census: its state, and the open FAIL `failed`. An
+    `exhausted` test whose open FAIL did not judge the source as it is now has no verdict on it ("verdictless-bound").
+    The row the same start registered and never launched is left out, as that start leaves it out. The review legs'
+    rounds and an unfinished batch are the review group start's to decide. None when this cannot be read."""
     import review_round_cap as ROUND
+    from capability_route_close import owner_executed_terminal, owner_terminal_prerequisites
+    from dispatch_contract import attempt_row_never_started
     from review_input import _dispatch_node_module
-    nodes, test = one_shot_review_nodes(route), one_shot_test_node(route)
+    test = one_shot_test_node(route)
     try:
+        gaps = owner_terminal_prerequisites(route, next(n for n in route["nodes"] if owner_executed_terminal(n)),
+                                            Path(jobs))
+        if test["id"] not in gaps:
+            return {"state": "standing" if gaps else "passed", "failed": None}
         node_module = _dispatch_node_module()
-        admitted = {n["id"]: node_module.admit_round(route, n, jobs, record_auto_revisions=False) for n in nodes}
-        rows = [(cols[1], meta) for cols, meta in node_module.prior_round_attempts(
-            jobs, route["route_id"], test["id"], route=route)]
-    except Exception:  # advisory text only: an unreadable admission claims nothing
+        rows = node_module.prior_round_attempts(jobs, route["route_id"], test["id"], route=route)
+        own = [meta.get("attempt_id") for cols, meta in rows if cols[1] == "open" and attempt_row_never_started(cols)]
+        admission = node_module.admit_round(route, test, jobs, exclude_attempt=own[0] if len(own) == 1 else None,
+                                            record_auto_revisions=False)
+    except Exception:  # advisory text only: an unreadable judgment claims nothing
         return None
-    standing = {key for key, admission in admitted.items()   # its last verdict passed the source as it is now
-                if admission.budget.verdict_rounds and not admission.requires_next_round}
-    if test["id"] in standing:
-        return {"state": "passed", "failed": None, "start": None}
-    failed = ROUND.open_blocking_verdict(rows, "test")
-    on_now = failed and failed.get("review_subject_digest") in (None, admitted[test["id"]].source_subject_digest)
-    after = [test] if standing >= set(admitted) - {test["id"]} and not on_now else nodes
-    refused = [admitted[n["id"]].budget.state for n in after
-               if admitted[n["id"]].budget.state in {"exhausted", "verdictless-bound"}]
-    return {"state": (refused or ["admit"])[0], "failed": failed,
-            "start": after[0].get("parallel_anchor") or after[0]["id"]}
+    failed = ROUND.open_blocking_verdict([(cols[1], meta) for cols, meta in rows], "test")
+    on_now = bool(failed) and failed.get("review_subject_digest") == admission.source_subject_digest
+    state = admission.budget.state
+    return {"state": "verdictless-bound" if state == "exhausted" and not on_now else state, "failed": failed}
 
 
 def one_shot_test_followup(route, route_file, jobs) -> dict:
-    """`one_shot_test_next` as continuation facts for the owner; empty when it admits a start and no FAIL is open."""
+    """`one_shot_test_next` as continuation facts for the owner ("unread" when it is None). Empty when the test stands
+    beside another missing prerequisite, or a start is admitted and no FAIL is open: the existing text says those."""
     import review_round_cap as ROUND
     judged = one_shot_test_next(route, jobs)
-    if judged is None or (judged["state"] == "admit" and not judged["failed"]):
+    if judged is not None and (judged["state"] == "standing" or judged["state"] == "admit" and not judged["failed"]):
         return {}
-    failed = judged["failed"] or {}
+    failed, anchor = (judged or {}).get("failed") or {}, one_shot_review_nodes(route)[0]
     return {"kind": "review", "owner_fixes": True, "test": True, "source": True, "target": "", "producer_command": "",
-            "state": judged["state"], "attempt": failed.get("attempt_id", ""),
+            "state": judged["state"] if judged else "unread", "attempt": failed.get("attempt_id", ""),
             "artifact": attempt_outcome(route, failed).get("artifact", "") if failed else "",
-            "retest": judged["start"] == one_shot_test_node(route)["id"],
-            "command": route_start_command(route_file, judged["start"], jobs=jobs) if judged["start"] else "",
-            "closure_spent": judged["state"] in {"exhausted", "verdictless-bound"},
+            "command": route_start_command(route_file, anchor.get("parallel_anchor") or anchor["id"], jobs=jobs),
             "corrections": ROUND.max_review_rounds(route["effective_intensity"]) - 1}
 
 
@@ -1416,28 +1415,30 @@ def continuation_followup_text(fields):
                     + " Then run the same start for the closure check: " + "; ".join(commands))
         return "\n".join(dict.fromkeys(filter(None, (continuation_followup_text(item) for item in fields))))
     if fields.get("kind") == "review" and fields.get("owner_fixes") and fields.get("test"):
-        report = bounded(fields.get("artifact")) if fields.get("artifact") else ""
+        # One sentence for each state of `one_shot_test_next`; a start command only where admission admits one.
+        state, report = fields.get("state"), bounded(fields.get("artifact")) if fields.get("artifact") else ""
         found, findings = (f" in {report}", f" from {report}") if report else ("", "")
-        if fields.get("state") == "passed":
+        if state == "passed":
             return ("The independent test already passed your current work; nothing is left to start. Return your "
                     "final handoff.")
-        if fields.get("closure_spent") and not fields.get("attempt"):
-            return ("The independent test can run no further round and has no verdict on your current work. Write in "
-                    "your report that the test could not reach a verdict, and do not report PASS.")
-        if fields.get("closure_spent"):
+        if state == "exhausted":
             allowed = ("the one correction allowed is" if fields.get("corrections", 1) == 1
                        else f"the {fields['corrections']} corrections allowed are")
             return (f"Test FAIL {fields['attempt']}: the test still fails, and {allowed} spent. Do not correct "
                     f"further. Write the remaining findings{findings} in your report and "
                     "end with `verdict: FAIL`.")
-        if fields.get("retest"):
-            return (f"Test FAIL {fields['attempt']}: the test failed on earlier work, and the reviews passed your "
-                    f"change. Start the test again with exactly: {command(fields['command'])}. Do not test it "
-                    "yourself and do not close it inline.")
-        return (f"Test FAIL {fields['attempt']}: the independent test of your work fails. Fix what it found{found} "
-                "in this worktree in one pass, run the same checks you ran before, commit, then start the reviews "
-                f"again with the same command: {command(fields['command'])}. The changed work is reviewed first and "
-                "tested again after the reviews pass. Do not test it yourself and do not close it inline.")
+        if state == "verdictless-bound":
+            return ("The independent test can run no further round and has no verdict on your current work. Write in "
+                    "your report that the test could not reach a verdict, and do not report PASS.")
+        if state == "admit":
+            return (f"Test FAIL {fields['attempt']}: the independent test of your work fails. Fix what it found{found} "
+                    "in this worktree in one pass, run the same checks you ran before, commit, then start the reviews "
+                    f"again with the same command: {command(fields['command'])}. The changed work is reviewed first "
+                    "and tested again after the reviews pass. Do not test it yourself and do not close it inline.")
+        if state == "unread":
+            return "The independent test's state could not be read; do not report PASS."
+        return ("The independent test is still running or its result has not settled; wait for that result. Do not "
+                "report PASS without it.")
     if fields.get("kind") == "review" and fields.get("owner_fixes"):
         if fields.get("closure_spent"):
             allowed = ("the one correction allowed is" if fields.get("corrections", 1) == 1

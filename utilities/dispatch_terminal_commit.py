@@ -2281,7 +2281,7 @@ def _middle_cell_review_sentence(route, route_file, reviews, missing, jobs):
     no_inline = (f"You cannot {'test' if what == 'independent test' else 'review'} your own work or close this "
                  f"{what.split()[-1]} inline; do not report PASS without it.")
     if what == "independent test":
-        # The one admission judgment the test's handoff and its refused start read: an open FAIL or no round left.
+        # What the test's handoff and its refused start say: an open FAIL, no round, running, or unreadable.
         fields = worker_bootstrap.one_shot_test_followup(route, route_file, jobs)
         if fields:
             return worker_bootstrap.continuation_followup_text(fields)
