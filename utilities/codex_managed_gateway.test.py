@@ -1583,8 +1583,7 @@ class ManagedGatewayTest(unittest.TestCase):
         self.assertEqual(received, request)
         marker = self.wait_interaction("thread-1", True)
         assert marker is not None
-        # every native identity key; `call_ref` belongs only to a question the redirect let through
-        self.assertEqual(set(marker), GATEWAY.fleet_interaction._ALLOWED_KEYS - {"call_ref"})
+        self.assertEqual(set(marker), GATEWAY.fleet_interaction._ALLOWED_KEYS)
         self.assertEqual(marker["source"], "codex-appserver")
 
         response = {
@@ -1615,6 +1614,27 @@ class ManagedGatewayTest(unittest.TestCase):
         )
         self.assertNotIn("PRIVATE QUESTION", persisted)
         self.assertNotIn("PRIVATE OPTION", persisted)
+
+    def test_a_question_the_redirect_let_through_becomes_the_request_wait_and_clears(self) -> None:
+        # The question redirect's PreToolUse published `codex-question` before the tool ran; the
+        # gateway's request replaces it and its answer clears it, as with no hook marker (11-28).
+        self.assertTrue(GATEWAY.fleet_interaction.set_wait(
+            "thread-1", "codex", "decision", "codex-question"))
+        self.server.emit_user_input(902)
+        self.client.wait_for(
+            lambda value: value.get("method") == "item/tool/requestUserInput"
+            and value.get("id") == 902
+        )
+        deadline = time.monotonic() + 5
+        marker = None
+        while time.monotonic() < deadline:
+            marker = GATEWAY.fleet_interaction.read_wait("thread-1", "codex")
+            if marker and marker.get("source") == "codex-appserver":
+                break
+            time.sleep(0.01)
+        self.assertEqual((marker["source"], marker["request_id"]), ("codex-appserver", 902))
+        self.client.respond(902, {"answers": {"choice": {"selected": ["Proceed"]}}})
+        self.wait_interaction("thread-1", False)
 
     def test_question_deadline_projection_preserves_identity_and_real_answers(self) -> None:
         # Current schema generated from the installed codex-cli 0.153.4:

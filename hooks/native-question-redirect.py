@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Claude PreToolUse(AskUserQuestion): carry the outcome of utilities/native_question_redirect.py.
 
-Registered (a new or the same open Hearting question), already open natively, or unknown: the
-native call is refused with its one line. Otherwise (registration failed before any write and no
-same question was read, or the call is not a person's question) the native question goes through
-with its Fleet decision marker (hooks/fleet-interaction-state.py), which keeps the call's private
-reference the redirect left on it."""
+Registered (a new or the same open Hearting question) or unknown: the native call is refused with
+its one line. Otherwise the native question goes through and keeps its Fleet decision marker
+(hooks/fleet-interaction-state.py)."""
 import importlib.util
 import io
 import json
@@ -27,14 +25,11 @@ def _decision_marker(raw: str) -> None:
 def main() -> int:
     raw = sys.stdin.read()
     try:
-        payload = json.loads(raw or "{}")
-    except ValueError:
-        payload = None
-    try:
         import native_question_redirect as redirect
-    except Exception:  # noqa: BLE001 -- nothing can be registered or written: the native question shows
-        redirect = None
-    reason = redirect.redirect("claude", payload) if redirect is not None else None  # never raises
+        payload = json.loads(raw or "{}")
+        reason = redirect.redirect("claude", payload)
+    except Exception:  # noqa: BLE001 -- a redirect that cannot run never affects the question
+        reason = None
     if reason is not None:
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                  "permissionDecisionReason": reason}},

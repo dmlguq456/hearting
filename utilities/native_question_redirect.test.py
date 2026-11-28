@@ -198,10 +198,6 @@ class PassThroughTest(Base):
                     with contextlib.redirect_stdout(out):
                         code = redirect.main([flag], stdin=io.StringIO(json.dumps(payload)))
                     self.assertEqual((code, out.getvalue()), (0, ""))
-                    # it opens with its reference on the native wait; that wait's end ends it
-                    from fleet import interaction
-                    self.assertTrue(interaction.read_wait(SID, harness)["call_ref"])
-                    interaction.clear_wait(SID, harness)
 
     def test_a_waiting_hearting_question_stays_and_the_native_one_is_added_beside_it(self):
         """3a (11-28): registration no longer refuses beside another open question, so the native

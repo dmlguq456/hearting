@@ -17,12 +17,13 @@ each hook carries it as it is:
 - pass: registration failed before anything was written (a shape a record cannot carry, no proven
   seat, a refused or failed write, this very registration already ended at this prompt, the budget
   ran out) and the session's questions were read
-  without a same one. The call's private identity reference goes onto the session's native wait
-  marker (`fleet.interaction`, no text) and the native question opens, counted as that wait; the
-  same call again is told it is open there. The marker's own clear ends the reference.
-- unknown: the question storage cannot be read, a write's result was lost and cannot be read
-  back, or the marker cannot be written. Nothing opens; the refusal says so once, and the same
-  call again reads as one of the other two.
+  without a same one. The native question opens, counted as the session's native wait: Claude's
+  hook and OpenCode's `question.asked` publish that marker as before, and Codex's is published
+  here as `codex-question` (`fleet.interaction`, no text). The marker is observation only; one that
+  cannot be written never holds the question back. The same call again is decided anew.
+- unknown: the question storage cannot be read, or a write's result was lost and cannot be read
+  back. Nothing opens; the refusal says so once, and the same call again reads as one of the
+  other two.
 
 Registered workers and native subagents do nothing here.
 
@@ -43,7 +44,6 @@ Usage (stdin: the harness payload):
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import os
 import re
@@ -57,14 +57,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 
 BUDGET_SECONDS = 5          # hook timeouts are 10 s (OpenCode 8 s); registration never waits longer
-SETTLE_SECONDS = 1          # then reading back what a failed registration left, and marking the native wait
+SETTLE_SECONDS = 1          # then reading back what a failed registration left (and Codex's wait marker)
 REGISTERING = "native-question-redirect: registering"
 MAX_CHOICES = 8
 _RECOMMENDED = re.compile(r"\s*[(（]\s*(?:권장|recommended)\s*[)）]\s*$", re.IGNORECASE)
 _PREVIEW_LIMIT = 240
 _TOOLS = {"claude": {"AskUserQuestion"}, "codex": {"request_user_input", "request_user_input_async"},
           "opencode": {"question"}}
-_WAIT_SOURCE = {"claude": "claude-asktool", "codex": "codex-question", "opencode": "opencode-question"}
 
 
 class Skip(Exception):
@@ -76,8 +75,8 @@ class Unfit(Exception):
 
 
 class Outcome(NamedTuple):
-    kind: str                   # "none" | "registered" | "native" | "pass" | "unknown"
-    reason: str | None = None   # the refusal line (registered, native, unknown)
+    kind: str                   # "none" | "registered" | "pass" | "unknown"
+    reason: str | None = None   # the refusal line (registered, unknown)
 
 
 def _text(value) -> str:
@@ -244,11 +243,6 @@ def reason_for(question_id: str) -> str:
             "End your turn now. The answer comes as a later prompt marked with this id.")
 
 
-def reason_native() -> str:
-    return ("This question is already open as a native question (Hearting could not register it); "
-            "the person answers it there. End your turn now.")
-
-
 def reason_unknown(why: str) -> str:
     return (f"Hearting could not confirm whether this question was registered ({why}). Make the same "
             "call again: it then names the Hearting question or lets the native question open "
@@ -273,13 +267,6 @@ def _budget(seconds: float):
             signal.signal(signal.SIGALRM, previous)
 
 
-def _call_ref(harness: str, session_id: str, payload: dict) -> str:
-    """The private identity reference of this exact call (a digest; no text leaves this process)."""
-    args = payload.get("args") if harness == "opencode" else payload.get("tool_input")
-    raw = json.dumps([harness, session_id, args], ensure_ascii=False, sort_keys=True, default=str)
-    return "nq-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
-
-
 def _interaction():
     sys.path.insert(0, str(ROOT / "tools"))
     from fleet import interaction
@@ -295,15 +282,9 @@ def decide(harness: str, payload, *, seconds: float = BUDGET_SECONDS, settle: fl
         if _is_registered_worker(payload):
             return Outcome("none")
         session_id, rows = _normalized(harness, payload)
-        ref = _call_ref(harness, session_id, payload)
         cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) and payload.get("cwd") else None
     except Exception:  # noqa: BLE001 -- not a question call of a person's session
         return Outcome("none")
-    try:
-        if (_interaction().read_wait(session_id, harness) or {}).get("call_ref") == ref:
-            return Outcome("native", reason_native())
-    except Exception:  # noqa: BLE001 -- an unreadable marker holds no reference
-        pass
     keys, seen = set(), {}
     try:
         with _budget(seconds):
@@ -315,7 +296,7 @@ def decide(harness: str, payload, *, seconds: float = BUDGET_SECONDS, settle: fl
             return Outcome("registered", reason_for(register(harness, session_id, rows, cwd=cwd, seen=seen)))
     except BaseException:  # noqa: BLE001 -- what it left is read back below
         pass
-    marked = False
+    checked = False
     try:
         with _budget(settle):
             if keys:
@@ -326,12 +307,12 @@ def decide(harness: str, payload, *, seconds: float = BUDGET_SECONDS, settle: fl
                 same = _same_open(found, keys)
                 if same:
                     return Outcome("registered", reason_for(same["id"]))
-            marked = _interaction().set_wait(session_id, harness, "decision", _WAIT_SOURCE[harness], call_ref=ref)
-            if not marked:
-                return Outcome("unknown", reason_unknown("its native wait cannot be marked"))
-            return Outcome("pass")
-    except BaseException:  # noqa: BLE001 -- the read-back itself failed or ran late
-        return Outcome("pass") if marked else Outcome("unknown", reason_unknown("its check did not finish"))
+            checked = True
+            if harness == "codex":      # Claude's hook and OpenCode's question.asked mark their own
+                _interaction().set_wait(session_id, harness, "decision", "codex-question")
+    except BaseException:  # noqa: BLE001 -- the read-back failed or ran late; a lost marker changes nothing
+        pass
+    return Outcome("pass") if checked else Outcome("unknown", reason_unknown("its check did not finish"))
 
 
 def redirect(harness: str, payload: dict, *, seconds: float = BUDGET_SECONDS) -> str | None:

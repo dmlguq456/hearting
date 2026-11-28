@@ -325,10 +325,10 @@ already open, whatever else the session waits on; the native call is refused wit
 line (the id, "end your turn"). Several questions, `multiSelect` and `preview` are written as
 one text question listing the options. Pass: registration failed before any write (a shape it
 cannot carry, no seat, a failed write, the 5 s budget inside the hook's 10 s) and no same
-question was read; the redirect leaves the call's private reference on the decision marker
-above, then the native question runs, and the same call again is told it is open there.
-Unknown (the question storage cannot be read, a lost write result cannot be read back, the
-marker cannot be written): the call is refused with that reason once. A registered worker or
+question was read; the native question runs with the decision marker above (a marker that
+cannot be written does not hold it back), and the same call again is decided anew. Unknown
+(the question storage cannot be read, a lost write result cannot be read back): the call is
+refused with that reason once. A registered worker or
 native subagent runs the native question as before. A hook the harness times out or that dies
 lets the native question open (outside Hearting's control). The frame-answer
 `PostToolUse(AskUserQuestion)` bridge is retired: a registered frame question is answered on

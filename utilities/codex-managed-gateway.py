@@ -1237,7 +1237,7 @@ class ManagedGateway:
             if pending:
                 if (
                     existing is None
-                    or existing.get("source") == "codex-appserver"
+                    or existing.get("source") in ("codex-appserver", "codex-question")
                 ):
                     fleet_interaction.set_wait(
                         thread_id,

@@ -2,9 +2,9 @@
 """A native question call has three outcomes, the same on all three harnesses (11-28, piece 3b).
 
 Registered (new or the same open question, whatever else the session waits on), pass (registration
-failed before any write and no same question was read: the native question opens with its private
-reference on the session's native wait marker, so it is counted and the same call again is told it
-is there), unknown (nothing opens; the refusal says so once and the same call again settles it).
+failed before any write and no same question was read: the native question opens, counted by its
+native wait marker, which only observes; the same call again is decided anew), unknown (nothing
+opens; the refusal says so once and the same call again settles it).
 """
 from __future__ import annotations
 import os, sys  # noqa: E401
@@ -35,6 +35,8 @@ SID = "native-intercept-session"
 OPTIONS = [("Proceed (Recommended)", "Start the work"), ("Edit", "Change the plan"), ("Stop", "Do not start")]
 HARNESSES = ("claude", "codex", "opencode")
 ID = re.compile(r"S4:[0-9a-f]{64}")
+MAIN_KEYS = frozenset({"schema_version", "harness", "session_id", "kind", "source", "waiting_since",
+                       "request_id", "turn_id", "item_id"})   # a marker's fields on main: no text, no reference
 
 
 def asked(questions_):
@@ -91,6 +93,18 @@ class Base(unittest.TestCase):
         (found,) = ID.findall(outcome.reason)
         return found
 
+    def native_wait_opens(self, harness):
+        """The passed question's marker as it opens: Claude's hook publishes its decision marker and
+        OpenCode's `question.asked` its request, as on main; the redirect published Codex's."""
+        if harness == "claude":
+            self.assertTrue(interaction.set_wait(SID, harness, "decision", "claude-asktool"))
+        elif harness == "opencode":
+            self.assertTrue(interaction.set_wait(SID, harness, "decision", "opencode-question", request_id="que_A"))
+        wait = interaction.read_wait(SID, harness)
+        self.assertEqual(wait["kind"], "decision")
+        self.assertLessEqual(set(wait), MAIN_KEYS)
+        return wait
+
 
 class RegisteredBesideOtherWaitsTest(Base):
     def test_another_question_a_native_wait_and_a_body_marker_never_send_the_call_native(self):
@@ -107,7 +121,6 @@ class RegisteredBesideOtherWaitsTest(Base):
                 self.assertEqual(self.open_ids(harness), sorted([earlier["id"], added]))
                 self.assertEqual(state._selected_entry(envelope)["draft"], "kept draft")
                 self.assertEqual(interaction.read_wait(SID, harness)["kind"], "permission")  # left as it was
-                self.assertNotIn("call_ref", interaction.read_wait(SID, harness))
                 # the same call again, at this prompt and the next, is that question
                 self.assertEqual(self.the_id(redirect.decide(harness, payloads()[harness])), added)
                 self.next_prompt(harness)
@@ -205,7 +218,6 @@ class SecretTest(Base):
             with self.subTest(harness=harness):
                 self.assertEqual(redirect.decide(harness, mixed[harness]).kind, "pass")
                 self.assertEqual(self.open_ids(harness), [])
-                self.assertTrue(interaction.read_wait(SID, harness)["call_ref"].startswith("nq-"))
                 self.done(harness)
 
 
@@ -224,31 +236,48 @@ class PassTest(Base):
         yield "budget", mock.patch.object(state, "register_message", side_effect=slow)
         yield "shape", None
 
-    def test_each_failure_before_a_write_opens_the_native_question_marked_and_counted(self):
+    def test_each_failure_before_a_write_passes_and_the_same_call_is_decided_again(self):
+        """Review 1 (11-28) reversed: while the failure lasts the same call passes again (never a
+        refusal); its native question closes with no answer and no end signal, its marker stays, and
+        the same call, its write back, is registered."""
         shapeless = asked([{"question": "Pick", "options": [{"label": " "}]}])
         for harness in HARNESSES:
             for name, patch in self.failures():
                 with self.subTest(harness=harness, failure=name):
                     payload = (shapeless if patch is None else payloads())[harness]
-                    with patch or contextlib.nullcontext():
-                        outcome = redirect.decide(harness, payload, seconds=1)
-                    self.assertEqual(outcome, redirect.Outcome("pass"))
+                    for _ in range(2):
+                        with patch or contextlib.nullcontext():
+                            self.assertEqual(redirect.decide(harness, payload, seconds=1), redirect.Outcome("pass"))
                     self.assertEqual(self.open_ids(harness), [])
-                    wait = interaction.read_wait(SID, harness)
-                    self.assertEqual((wait["kind"], wait["source"]),
-                                     ("decision", redirect._WAIT_SOURCE[harness]))
-                    self.assertEqual(wait["call_ref"], redirect._call_ref(harness, SID, payload))
+                    self.assertEqual(interaction.read_wait(SID, harness) is not None, harness == "codex")
+                    wait = self.native_wait_opens(harness)
                     for text in ("Start now", "Proceed", "Pick"):                # no text on the marker
                         self.assertNotIn(text, json.dumps(wait))
-                    # the same call again is told the native question is open there; nothing is added
-                    again = redirect.decide(harness, payload)
-                    self.assertEqual(again.kind, "native")
-                    self.assertIn("already open as a native question", again.reason)
-                    self.assertEqual(self.open_ids(harness), [])
-                    # the native question's own end ends the reference: the call registers again
-                    interaction.clear_wait(SID, harness, reason="answered")
                     if patch is not None:
                         self.the_id(redirect.decide(harness, payload))
+                        self.assertEqual(len(self.open_ids(harness)), 1)
+                        self.assertEqual(interaction.read_wait(SID, harness), wait)   # left as it was
+                    else:
+                        self.assertEqual(redirect.decide(harness, payload), redirect.Outcome("pass"))
+                    self.done(harness)
+
+    def test_a_marker_that_cannot_be_written_never_holds_the_question_back(self):
+        """The marker only observes (main: "Producers are observational and fail open"): Codex's pass
+        stands when its marker is refused, fails or runs late; no marker has more than main's fields."""
+        self.assertEqual(interaction._ALLOWED_KEYS, MAIN_KEYS)
+        for name, patch in (("refused", mock.patch.object(interaction, "set_wait", return_value=False)),
+                            ("fails", mock.patch.object(interaction, "_atomic_write", side_effect=OSError("read-only"))),
+                            ("late", mock.patch.object(interaction, "set_wait",
+                                                       side_effect=lambda *a, **k: time.sleep(5)))):
+            for harness in HARNESSES:
+                with self.subTest(harness=harness, case=name):
+                    started = time.monotonic()
+                    with mock.patch.object(state, "_write", side_effect=OSError("disk full")), patch:
+                        self.assertEqual(redirect.decide(harness, payloads()[harness], seconds=1, settle=0.5),
+                                         redirect.Outcome("pass"))
+                    self.assertLess(time.monotonic() - started, 4)
+                    self.assertIsNone(interaction.read_wait(SID, harness))
+                    self.assertEqual(self.open_ids(harness), [])
                     self.done(harness)
 
     def test_a_question_closed_and_asked_again_at_the_same_prompt_opens_natively(self):
@@ -260,7 +289,7 @@ class PassTest(Base):
                 first = self.the_id(redirect.decide(harness, payloads()[harness]))
                 state.close_message(harness, SID, self.f.seat(harness, SID).key, first)
                 self.assertEqual(redirect.decide(harness, payloads()[harness]), redirect.Outcome("pass"))
-                self.assertTrue(interaction.read_wait(SID, harness)["call_ref"])
+                self.assertEqual(interaction.read_wait(SID, harness) is not None, harness == "codex")
                 interaction.clear_wait(SID, harness, reason="answered")
                 self.next_prompt(harness)
                 self.assertNotEqual(self.the_id(redirect.decide(harness, payloads()[harness])), first)
@@ -282,7 +311,6 @@ class PassTest(Base):
                 self.assertEqual(redirect.decide("codex", payloads()["codex"]).kind, "pass")
             mine, total = listed()
             self.assertEqual((len(mine), total), (1, 1))
-            self.assertNotIn("call_ref", mine[0])                                # the reference stays private
             hook = ROOT / "adapters/codex/hooks/posttooluse-interaction-clear.py"
             done = subprocess.run([sys.executable, str(hook)], input=json.dumps({"session_id": SID}),
                                   env={**os.environ, "AGENT_SESSION_ROLE": ""}, text=True,
@@ -290,27 +318,21 @@ class PassTest(Base):
             self.assertEqual(done.returncode, 0, done.stderr)
             self.assertEqual(listed(), ([], 0))
 
-    def test_the_native_question_publishing_its_request_keeps_the_reference_and_time(self):
-        """OpenCode's `question.asked` (and Claude's decision marker) publish the wait the redirect
-        marked before the question opened: the reference and the start time stay, no replace."""
-        for harness in HARNESSES:
-            with self.subTest(harness=harness):
-                with mock.patch.object(state, "_write", side_effect=OSError("disk full")):
-                    self.assertEqual(redirect.decide(harness, payloads()[harness]).kind, "pass")
-                marked = interaction.read_wait(SID, harness)
-                with mock.patch.object(state, "record_closed_question") as closed:
-                    self.assertTrue(interaction.set_wait(SID, harness, "decision", marked["source"],
-                                                         request_id="que_1" if harness == "opencode" else None))
-                    closed.assert_not_called()
-                published = interaction.read_wait(SID, harness)
-                self.assertEqual((published["call_ref"], published["waiting_since"]),
-                                 (marked["call_ref"], marked["waiting_since"]))
-                self.assertEqual(redirect.decide(harness, payloads()[harness]).kind, "native")
-                # a permission is another wait and takes no reference
-                interaction.set_wait(SID, harness, "permission", "opencode-permission" if harness == "opencode"
-                                     else "claude-permission" if harness == "claude" else "codex-permissionrequest")
-                self.assertNotIn("call_ref", interaction.read_wait(SID, harness))
-                self.done(harness)
+    def test_another_form_on_opencode_never_refuses_the_first_call_or_takes_from_it(self):
+        """Review 2 (11-28): OpenCode question A passes, then an independent form B publishes its own
+        wait; A asked again is decided anew (registered once the write is back) and B's marker is B's."""
+        with mock.patch.object(state, "_write", side_effect=OSError("disk full")):
+            self.assertEqual(redirect.decide("opencode", payloads()["opencode"]), redirect.Outcome("pass"))
+        self.assertTrue(interaction.set_wait(SID, "opencode", "decision", "opencode-form", request_id="frm_B"))
+        form = interaction.read_wait(SID, "opencode")
+        self.assertEqual((form["source"], form["request_id"]), ("opencode-form", "frm_B"))
+        self.assertLessEqual(set(form), MAIN_KEYS)
+        with mock.patch.object(state, "_write", side_effect=OSError("disk full")):
+            self.assertEqual(redirect.decide("opencode", payloads()["opencode"]), redirect.Outcome("pass"))
+        self.the_id(redirect.decide("opencode", payloads()["opencode"]))
+        self.assertEqual(len(self.open_ids("opencode")), 1)
+        self.assertEqual(interaction.read_wait(SID, "opencode"), form)
+        self.done("opencode")
 
 
 class UnknownTest(Base):
@@ -349,24 +371,21 @@ class UnknownTest(Base):
                 self.assertIsNone(interaction.read_wait(SID, harness))
                 self.done(harness)
 
-    def test_a_native_wait_that_cannot_be_marked_or_a_check_that_runs_late_opens_nothing(self):
+    def test_a_check_that_runs_late_opens_nothing(self):
         def stuck(*args, **kwargs):
             time.sleep(5)
         for harness in HARNESSES:
-            for name, patch, why in (
-                    ("marker unwritable", mock.patch.object(interaction, "set_wait", return_value=False),
-                     "native wait cannot be marked"),
-                    ("read-back late", mock.patch.object(state, "message_questions", side_effect=stuck),
-                     "check did not finish")):
-                with self.subTest(harness=harness, case=name):
-                    started = time.monotonic()
-                    with mock.patch.object(state, "_write", side_effect=OSError("disk full")), patch:
-                        outcome = redirect.decide(harness, payloads()[harness], seconds=1, settle=0.5)
-                    self.assertLess(time.monotonic() - started, 4)
-                    self.assertEqual(outcome.kind, "unknown")
-                    self.assertIn(why, outcome.reason)
-                    self.assertEqual(self.open_ids(harness), [])
-                    self.done(harness)
+            with self.subTest(harness=harness):
+                started = time.monotonic()
+                with mock.patch.object(state, "_write", side_effect=OSError("disk full")), \
+                     mock.patch.object(state, "message_questions", side_effect=stuck):
+                    outcome = redirect.decide(harness, payloads()[harness], seconds=1, settle=0.5)
+                self.assertLess(time.monotonic() - started, 4)
+                self.assertEqual(outcome.kind, "unknown")
+                self.assertIn("check did not finish", outcome.reason)
+                self.assertIsNone(interaction.read_wait(SID, harness))
+                self.assertEqual(self.open_ids(harness), [])
+                self.done(harness)
 
 
 class HookTest(Base):
@@ -384,14 +403,17 @@ class HookTest(Base):
             self.assertEqual(hook.main(), 0)
         return json.loads(out.getvalue())["hookSpecificOutput"] if out.getvalue() else None
 
-    def test_claude_refuses_registered_native_and_unknown_and_passes_only_the_pass(self):
+    def test_claude_refuses_registered_and_unknown_and_passes_only_the_pass(self):
         payload = payloads()["claude"]
         self.assertRegex(self.claude(payload)["permissionDecisionReason"], ID)
         self.done("claude")
         self.assertIsNone(self.claude(payload, _write={"side_effect": OSError("disk full")}))
-        wait = interaction.read_wait(SID, "claude")                           # the decision marker, with the reference
-        self.assertEqual((wait["source"], wait["call_ref"]), ("claude-asktool", redirect._call_ref("claude", SID, payload)))
-        self.assertIn("already open as a native question", self.claude(payload)["permissionDecisionReason"])
+        wait = interaction.read_wait(SID, "claude")                           # its own decision marker, as on main
+        self.assertEqual((wait["kind"], wait["source"]), ("decision", "claude-asktool"))
+        self.assertLessEqual(set(wait), MAIN_KEYS)
+        # that native question closed with no answer or end signal; the same call, its write back, registers
+        self.assertRegex(self.claude(payload)["permissionDecisionReason"], ID)
+        self.assertEqual(len(self.open_ids("claude")), 1)
         self.done("claude")
         refused = self.claude(payload, message_questions={"return_value": ({}, "unknown")})
         self.assertEqual(refused["permissionDecision"], "deny")
@@ -440,8 +462,7 @@ class HookTest(Base):
                 self.assertGreater(elapsed, redirect.BUDGET_SECONDS - 0.5)
                 self.assertLess(elapsed, 9)
                 wait = interaction.read_wait(SID, harness)
-                self.assertEqual((wait["source"], wait["call_ref"]),
-                                 (redirect._WAIT_SOURCE[harness], redirect._call_ref(harness, SID, payloads()[harness])))
+                self.assertEqual(wait["source"], {"codex": "codex-question", "claude": "claude-asktool"}[harness])
                 self.assertEqual(state.message_questions(harness, SID), ({}, "ok"))
 
     def test_opencode_reads_three_outcomes_and_a_check_that_died_after_it_began_is_refused(self):

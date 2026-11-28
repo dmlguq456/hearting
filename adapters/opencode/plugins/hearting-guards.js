@@ -4050,8 +4050,8 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       if (result.status === 1) throw new Error((result.stdout || "").trim())
     }
     // A native question becomes this session's Hearting question (utilities/native_question_redirect.py),
-    // with its three outcomes: exit 1 + a line refuses the call (registered, already open natively,
-    // unknown); exit 0 lets it open (registration failed before any write, its native wait marked).
+    // with its three outcomes: exit 1 + a line refuses the call (registered, unknown); exit 0 lets it
+    // open (registration failed before any write; question.asked marks its wait as before).
     // A check that died or ran out of time after it began registering may have registered it, so it
     // is refused once; one that died before then wrote nothing and lets the question open.
     // A child (task) session's question is its own: it is not the person's session, so it stays native.
