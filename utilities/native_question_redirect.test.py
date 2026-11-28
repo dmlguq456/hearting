@@ -98,8 +98,9 @@ class RedirectTest(Base):
     def test_one_question_keeps_text_choices_and_the_recommended_choice(self):
         reason = redirect.redirect("claude", claude_payload())
         (question,) = self.registered("claude", reason)
-        self.assertTrue(question["question"].startswith("Start now?"))
-        self.assertIn("Change the plan", question["question"])             # each option's meaning travels with it
+        # 11-27 (design 가): each option's meaning travels with its choice, not in the text.
+        self.assertEqual(question["question"], "Start now?")
+        self.assertEqual(question["descriptions"], ["Start the work", "Change the plan", "Do not start"])
         self.assertEqual([questions._choice_label(c) for c in question["choices"]], ["Proceed", "Edit", "Stop"])
         self.assertEqual(question["recommended"], 0)
 
