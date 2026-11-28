@@ -402,39 +402,21 @@ def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cle
     quiet = (done.returncode == 0 and receipt.get("state") == "completed"
              and not receipt.get("next_leg") and _route_finished(record)
              and (not unit_advanced or handed_off))
-    # Why the resumed start stopped, and its own next action, as the receipt says them; the exact
-    # command too, for a notice too short to carry it.
-    why = {"result_reason": receipt.get("reason"),
-           "result_next_action": receipt.get("required_action") or receipt.get("next_action")}
-    from parent_next_directive import resume_command
     record.update(state="resumed", resumed_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                   exit_code=done.returncode, result_state=receipt.get("state"),
                   owner_attempt_id=receipt.get("owner_attempt_id"), **({"early": True} if early else {}),
-                  **{key: value for key, value in why.items() if value},
-                  resume_command=resume_command(record["route_file"], record["jobs"], agent_home=ROOT),
                   **({"notice": "skipped-route-completed"} if quiet else {}))
     if receipt.get("unit_attempt_id"):
         record["unit_attempt_id"] = receipt["unit_attempt_id"]
     _write(path, record)
     if not quiet:
-        _notify(record, receipt, capped=capped and not early, record_file=path)
+        _notify(record, receipt, capped=capped and not early)
     return 0
 
 
-def _fit(text: str, *tails: str) -> str:
-    """`text` and the first tail the notice keeps byte for byte (it folds whitespace and keeps
-    `MAX_TEXT` characters), else the last tail: an exact command, or where to read it."""
-    from session_notice import MAX_TEXT
-    for tail in tails:
-        if " ".join((text + tail).split()) == text + tail and len(text + tail) <= MAX_TEXT:
-            return text + tail
-    return text + tails[-1]
-
-
-def _notify(record: dict, receipt: dict, capped: bool = False, record_file=None) -> None:
-    """One notice to the session that owns the route; a resume that paused again says so, one whose
-    `start` failed, left no receipt or whose receipt's remedy is the same start carries that command,
-    and any other receipt that needs attention passes on its own next action."""
+def _notify(record: dict, receipt: dict, capped: bool = False) -> None:
+    """One notice to the session that owns the route; a resume that paused again says so, and
+    one whose `start` failed or left no receipt carries the command to run it again."""
     try:
         from parent_next_directive import resume_command
         from session_identity import identity
@@ -445,9 +427,6 @@ def _notify(record: dict, receipt: dict, capped: bool = False, record_file=None)
         state = receipt.get("state") or "unknown"
         again = state == "waiting-capacity"
         failed = not again and (record.get("exit_code") not in (None, 0) or not receipt.get("state"))
-        asked = receipt.get("required_action") or receipt.get("next_action")
-        rerun = not failed and state == "needs-attention" and (
-            receipt.get("required_action") == "resume-later" or receipt.get("next_action") == "same-command")
         why = {"launch-not-started": "started again after a launch that did not start",
                "launch-capacity": "started again after the worker start budget freed",
                "answer": "continued with the answer another session sent"}.get(record.get("cause"))
@@ -467,21 +446,14 @@ def _notify(record: dict, receipt: dict, capped: bool = False, record_file=None)
                 + (f", reason {receipt['reason']}" if state == "needs-attention" and receipt.get("reason") else "")
                 + (f", a question is waiting for the person: required action {receipt['required_action']}"
                    if state == "needs-interview" and receipt.get("required_action") else "")
-                + (f"; paused again until {receipt.get('retry_at', 'an unknown time')}" if again else ""))
-        where = receipt.get("receipt_file") or record_file
-        if failed or rerun:
-            lead = f"; start exited {record.get('exit_code')}, run it again" if failed else "; run the same start again"
-            text = _fit(text, f"{lead}: {resume_command(record['route_file'], record['jobs'], agent_home=ROOT)}",
-                        *([f"{lead}: resume_command in {where}"] if where else []),
-                        f"{lead}: resume_command in its start receipt or resume record")
-        elif state == "needs-attention" and asked:
-            text = _fit(text, *([f"; its receipt asks for {asked}: {receipt['receipt_file']}"]
-                                if receipt.get("receipt_file") else []), f"; its receipt asks for {asked}")
+                + (f"; paused again until {receipt.get('retry_at', 'an unknown time')}" if again else "")
+                + (f"; start exited {record.get('exit_code')}, run it again: "
+                   f"{resume_command(record['route_file'], record['jobs'], agent_home=ROOT)}" if failed else ""))
         if state == "completed" and receipt.get("unit_attempt_id") and receipt.get("summary"):
             summary = receipt["summary"]
             report = next((line for line in summary.splitlines() if line.startswith("Artifact: ")), "")
             text = f"{text}. {report} {summary}"
-        action = "report-pause" if again else "run-resume-command" if failed or rerun else "report-to-user"
+        action = "report-pause" if again else "run-resume-command" if failed else "report-to-user"
         notify(caller.harness, caller.session_id, key=f"capacity-resume:{record['route_id']}:{record['retry_at']}",
                subject="capacity resume", text=text, route_id=record["route_id"], jobs=record["jobs"],
                required_action=action)
