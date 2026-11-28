@@ -3010,15 +3010,17 @@ def check_route_assignment(sender_harness: str, sender_sid: str, receiver_harnes
     import route_parent_close
     import steward_check
     import unit_continue as UC
+    from capability_route_verify import verify_route
     from dispatch_attempt_policy import verdict_pass
+    from dispatch_completion_join import acknowledged_attempt_receipt
     from dispatch_notice_state import closed_outcome
+    from dispatch_terminal_commit import owner_completion_state
     from dispatch_registry_cache import registry_view
     from peer_read_context import PeerReadContext
     from work_start import follow_up_owner_route
     if sender_harness != receiver_harness:
         raise RouteAssignmentRefused("harness-mismatch")  # first slice: same harness only
-    if (_assignment_seat(receiver_harness, receiver_sid) is None or receiver_sid == sender_sid
-            or steward_check._session_liveness(receiver_harness, receiver_sid) != "live"):
+    if _assignment_seat(receiver_harness, receiver_sid) is None or receiver_sid == sender_sid:
         raise RouteAssignmentRefused("receiver-not-live")
     context, sender = PeerReadContext(), (sender_sid, sender_harness)
     graph, latest = _pass_lineage_graph(context), registry_view(Path(jobs)).handover_latest()
@@ -3026,6 +3028,8 @@ def check_route_assignment(sender_harness: str, sender_sid: str, receiver_harnes
     for route in dict.fromkeys(routes):
         mine = [(status, meta) for status, meta in latest.values() if route_identity(meta)[0] == route]
         turns = UC.chain(latest, route, UC.OWNER)
+        if mine and not turns and {_effective(m, jobs, read_context=context) for _s, m in mine if eligible_row(m)} == {sender}:
+            raise RouteAssignmentRefused("route-multistep", route)  # legs only (a frame pair), no owner turn
         if not turns or any(_effective(meta, jobs, read_context=context) != sender for _a, _s, meta in turns):
             raise RouteAssignmentRefused("route-not-held", route)
         _attempt, status, meta = turns[-1]
@@ -3034,10 +3038,11 @@ def check_route_assignment(sender_harness: str, sender_sid: str, receiver_harnes
             raise RouteAssignmentRefused("route-running", route)  # a turn runs or waits to start
         if doc and (not follow_up_owner_route(doc) or any(m.get("managed_sealed_batch_id") for _s, m in mine)):
             raise RouteAssignmentRefused("route-multistep", route)  # its completions could join a batch
-        try:
-            closed = closed_outcome(Path(meta.get("owner_route_file") or meta.get("route_file")), doc) if doc else None
-        except ValueError:
-            closed, doc = None, None  # another generation's closure is not this route's PASS
+        try:  # `correct`'s own route check first: a generation it cannot read takes no later turn
+            closed = closed_outcome(Path(meta.get("owner_route_file") or meta.get("route_file")), doc) \
+                if doc and verify_route(doc) else None
+        except (ValueError, KeyError, TypeError, OSError):
+            closed, doc = None, None  # an unreadable route, or another generation's closure
         attempts, parents = {m["attempt_id"] for _s, m in mine}, {m.get("parent_sid", "") for _s, m in mine}
         if doc and (not closed or _unsettled(jobs, parents | {sender_sid}, route, attempts)):
             raise RouteAssignmentRefused("route-finishing", route)  # its closure or a completion/notice is not in
@@ -3045,6 +3050,11 @@ def check_route_assignment(sender_harness: str, sender_sid: str, receiver_harnes
                 or closed.get("terminal_gate_proven") is not True or not verdict_pass(meta)
                 or meta.get("parent_close_requested") == "1" or route_parent_close.row_requested(meta, jobs)):
             raise RouteAssignmentRefused("route-closed", route)  # `correct` could not start its next turn
+        if owner_completion_state(jobs, status, meta).state not in {"complete", "not-applicable"} or (
+                meta.get("delivery_intent") == "1" and acknowledged_attempt_receipt(
+                    jobs, meta["attempt_id"], recipient_sid=sender_sid,
+                    parent_completion_delivery=meta.get("parent_completion_delivery", "")) is None):
+            raise RouteAssignmentRefused("route-finishing", route)  # its completion is not settled and acknowledged
         logical, before = {(_jobs_key(jobs), *route_identity(meta))}, set(parents)
         for ledger in graph.ledger_rows.values():
             for row in ledger:
@@ -3056,6 +3066,8 @@ def check_route_assignment(sender_harness: str, sender_sid: str, receiver_harnes
         if receiver_sid in before:
             raise RouteAssignmentRefused("route-held-before", route)
         held[route] = binding_of(jobs, meta)
+    if steward_check._session_liveness(receiver_harness, receiver_sid) != "live":
+        raise RouteAssignmentRefused("receiver-not-live")  # looked at last: right before the row is written
     return list(held.values()), last
 
 

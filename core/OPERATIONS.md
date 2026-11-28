@@ -2881,7 +2881,7 @@ The default remains off; Codex keeps native queue delivery.
 | Who talks with the user? | any dispatch depth 0 session: main, peer or steward (elsewhere also "supervisor"). |
 | Who runs the route? | its dispatch depth 1 `owner`, which coordinates dispatch depth 2 stages. |
 | Who keeps the owner alive and carries its input and results? | the runtime supervisor, a process rather than a session (§5.10a, §5.12). |
-| Who receives the result now? | the single `effective_parent`: the registered parent, or the last confirmed same-seat successor after a handover. |
+| Who receives the result now? | the single `effective_parent`: the registered parent, or the last confirmed same-seat successor after a handover, or the session a `request --route` handed that resting route to (its next turns register there). |
 | Who only observes? | a `watch` holder (Fleet ⚑ shows the steward relation); observation settles no stage result (S3). |
 | Who approves? | the person; the session that received the answer writes the release/approval record (S5). |
 | Who may perform parent-only route actions? | `route_authority.owns`: only the current `effective_parent` (the registered parent before handover); sending `correct` is not parent-only (§5.10a). |

@@ -33,7 +33,26 @@ import route_authority  # noqa: E402
 import session_tidy as st  # noqa: E402
 import steward_check  # noqa: E402
 from harness_capabilities import parent_completion  # noqa: E402
-from route_identity import route_hash  # noqa: E402
+from route_identity import route_hash, route_id_from_hash  # noqa: E402
+
+_ROUTE_SPEC = importlib.util.spec_from_file_location("capability_route_for_handover_test", str(_HERE / "capability-route.py"))
+capability_route = importlib.util.module_from_spec(_ROUTE_SPEC)
+_ROUTE_SPEC.loader.exec_module(capability_route)
+_TEMPLATE = {}
+
+
+def _template(root):
+    """One compiled solo route (`compose_route`, as `correct` reads them), made once per run."""
+    if not _TEMPLATE:
+        candidates = [{"harness": h, "transport": "headless", "surface": "registered-headless", "status": "supported",
+                       "probe_source": "fixture", "probe_time": "2026-11-14T00:00:00Z"} for h in ("claude", "codex", "opencode")]
+        _TEMPLATE.update(capability_route.compose_route(
+            capability="autopilot-code", capability_mode="dev", shape="solo", graph=None, slug="route-handover",
+            cwd=capability_route.ROOT, artifact_root=str(root), unassigned=True, dispatch_evidence=None,
+            registered_headless_evidence={"candidates": candidates},
+            selection_pins=capability_route._parse_selection_pins([], None), profile="deep",
+            work_request={"text": "template", "owner_harness": None}))
+    return dict(_TEMPLATE)
 
 _SPEC = importlib.util.spec_from_file_location("peer_steward_route_handover_test", str(_HERE / "peer-steward.py"))
 peer_steward = importlib.util.module_from_spec(_SPEC)
@@ -72,6 +91,7 @@ class Cases:
         self.caller = A
         self.liveness = {}
         self.alias_ready = True
+        self.ids = {}
         stack = contextlib.ExitStack()
         self.addCleanup(stack.close)
         for obj, name, value in (
@@ -103,14 +123,24 @@ class Cases:
         return {"status": "queued", "reason": "native-queue-accepted"}
 
     # --- fixtures
-    def route(self, name, *, closed=True, nodes=1, cycle=None, **outcome):
-        """A route file (one-shot unless ``nodes`` > 1) and, when ``closed``, its closure on a PASS."""
-        doc = {"route_id": "rt-" + name, "capability": "autopilot-code", "artifact_root": str(self.root / "artifacts"),
-               "nodes": [{"id": "one-shot"}] if nodes == 1 else [{"id": "frame"}, {"id": "frame-alternative"}],
-               "work_request": {"text": "의도: 로그인 오류 고치기\n\n- 사용자 원문: \"로그인이 안 돼요\"\n본문"}}
+    def route(self, name, *, closed=True, nodes=1, cycle=None, basis=None, **outcome):
+        """A compiled solo route (one-shot unless ``nodes`` > 1) and, when ``closed``, its closure on a PASS.
+
+        Tests name routes ``rt-<name>``; the real id is the hash form ``correct``'s route check needs, and
+        ``hand``/``body_of`` translate between the two."""
+        doc = dict(_template(self.root), artifact_root=str(self.root / "artifacts"), work_request={
+            "text": "의도: 로그인 오류 고치기\n\n- 사용자 원문: \"로그인이 안 돼요\"\n본문 " + name, "owner_harness": None})
+        if nodes > 1:
+            doc["nodes"] = [{"id": "frame"}, {"id": "frame-alternative"}]
         if cycle:
             doc["parent_cycle_id"] = cycle
+        if basis == "absent":
+            doc.pop("validation_basis", None)
+        elif basis is not None:
+            doc["validation_basis"] = dict(doc["validation_basis"], basis_version=basis)
         doc["route_hash"] = route_hash(doc)
+        doc["route_id"] = route_id_from_hash(doc["route_hash"])
+        self.ids["rt-" + name] = doc["route_id"]
         path = self.root / "routes" / ("rt-%s.json" % name)
         path.parent.mkdir(exist_ok=True)
         path.write_text(json.dumps(doc))
@@ -122,10 +152,11 @@ class Cases:
     def row(self, attempt, route, *, status="done", parent=A, depth="1", worker="owner", node="one-shot",
             doc=None, **extra):
         h = self.harness
+        rid = doc["route_id"] if doc else self.ids.get(route, route)
         meta = {"dispatch_depth": depth, "worker_type": worker, "attempt_id": attempt,
                 "parent_sid": parent, "parent_harness": h, "harness": h,
                 "parent_completion_delivery": parent_completion(h)["carrier"],
-                "route_id": route, "route_hash": doc["route_hash"] if doc else "sha256:" + route, "route_node": node,
+                "route_id": rid, "route_hash": doc["route_hash"] if doc else "sha256:" + route, "route_node": node,
                 "attempt_schema_version": "2", "failure_class": "pass", **extra}
         if doc is not None:
             meta["route_file"] = str(self.root / "routes" / (route + ".json"))
@@ -135,19 +166,38 @@ class Cases:
 
     def resting(self, name, **row):
         doc, _path = self.route(name)
-        return self.row("att-" + name, doc["route_id"], doc=doc, **row)
+        return self.row("att-" + name, "rt-" + name, doc=doc, **row)
+
+    def named(self, text):
+        for name, rid in self.ids.items():
+            text = text.replace(rid, name)
+        return text
 
     def hand(self, target, *routes, who=A, text="이 흐름을 맡아 주세요"):
         self.caller = who
-        args = argparse.Namespace(target=target, text=text, body_file=None, body_stdin=False, title=None,
-                                  rev=None, cancel=False, reason=None, route=list(routes) or None)
+        args = argparse.Namespace(target=target, text=text, body_file=None, body_stdin=False, title=None, rev=None,
+                                  cancel=False, reason=None, route=[self.ids.get(r, r) for r in routes] or None)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             rc = peer_steward.cmd_request(args)
-        return rc, out.getvalue().strip()
+        return rc, self.named(out.getvalue().strip())
 
     def refused(self, word, route, hint=None):
         return "request=- delivery=refused reason=%s route=%s%s" % (word, route, (" " + hint) if hint else "")
+
+    def receipt(self, attempt):
+        child = dict(attempt_id=attempt, status="done", readiness="ready", harness=self.harness,
+                     required_action="inspect-done-failure", reason="terminal-failure-or-unclosed")
+        return dict(schema_version=2, state="delivered", parent_attempt_id="att-parent",
+                    job_registry=str(self.jobs), children=[child])
+
+    def intent(self, attempt):
+        """The row columns of a completion the runtime intends to publish for ``attempt``."""
+        return {"delivery_intent": "1", "delivery_id": "delivery-" + attempt, "delivery_row_revision": "original",
+                "delivery_receipt_digest": pending._canonical_receipt_digest(self.receipt(attempt))}
+
+    def acked_by(self, sid):
+        return ("codex-native-prompt:" if self.harness == "codex" else "fixture-render:") + sid
 
     def holder(self, meta):
         return handover.effective_parent(meta, self.jobs)
@@ -159,7 +209,7 @@ class Cases:
 
     def body_of(self, request_id):
         ref = pr.load(request_id)["revisions"][0]["transfer_ref"]
-        return peer_message.read_peer_payload(ref)["body"]
+        return self.named(peer_message.read_peer_payload(ref)["body"])
 
     def nothing_written(self):
         sessions = st.state_root() / "sessions"
@@ -169,18 +219,18 @@ class Cases:
     def waiting(self, name, **record):
         directory = pending.record_directory(self.jobs.parent, A)
         directory.mkdir(parents=True, exist_ok=True)
+        record["route_id"] = self.ids.get(record.get("route_id"), record.get("route_id"))
         (directory / ("delivery-%s.json" % name)).write_text(json.dumps(record))
 
     def completion(self, meta):
-        h = self.harness
-        child = dict(attempt_id=meta["attempt_id"], status="done", readiness="ready", harness=h,
-                     required_action="inspect-done-failure", reason="terminal-failure-or-unclosed")
-        receipt = dict(schema_version=2, state="delivered", parent_attempt_id="att-parent",
-                       job_registry=str(self.jobs), children=[child])
-        return pending.create(root=self.jobs.parent, recipient_kind=parent_completion(h)["carrier"],
+        """The completion record the runtime publishes for ``meta`` (its exact identity and receipt)."""
+        import dispatch_completion_join as join
+        receipt = self.receipt(meta["attempt_id"])
+        route, node, parent = join.pending_record_identity(meta, self.jobs)
+        return pending.create(root=self.jobs.parent, recipient_kind=parent_completion(self.harness)["carrier"],
                               recipient_key=meta["parent_sid"], delivery_id="delivery-" + meta["attempt_id"],
                               session_generation="", session_generation_supported="0", attempt_ids=[meta["attempt_id"]],
-                              parent_attempt_id="att-parent", route_id=meta["route_id"], route_node=meta["route_node"],
+                              parent_attempt_id=parent, route_id=route, route_node=node,
                               receipt=receipt, receipt_digest=pending._canonical_receipt_digest(receipt),
                               row_revisions={meta["attempt_id"]: "original"})
 
@@ -224,14 +274,58 @@ class Cases:
                       "이제 [bb]가 받음: 완료 · 주의 알림 · start/correct/close", self.body_of(request_id))
 
     def test_a_completion_the_sender_already_received_is_not_received_again(self):
-        meta = self.resting("r1")
+        meta = self.resting("r1", **self.intent("att-r1"))
+        # Intended but not published yet: not resting.
+        self.assertEqual(self.hand(B, "rt-r1")[1], self.refused("route-finishing", "rt-r1", FINISHING_HINT))
+        self.nothing_written()
         self.completion(meta)
         self.assertEqual(self.sweep(A), ["att-r1"])       # claimed by the sender, not yet acknowledged
         self.assertEqual(self.hand(B, "rt-r1")[1], self.refused("route-finishing", "rt-r1", FINISHING_HINT))
         sweep_module.ack_delivered(self.jobs.parent, A, [pending.read(self.jobs.parent, A, "delivery-att-r1")],
-                                   acked_by="fixture-render")
+                                   acked_by=self.acked_by(A))
         self.assertEqual(self.hand(B, "rt-r1")[0], 0)
         self.assertEqual((self.sweep(B), self.sweep(A)), ([], []), "a received completion goes to nobody again")
+
+    def test_a_terminal_settlement_still_in_progress_is_not_resting(self):
+        import dispatch_terminal_commit as terminal
+        self.resting("r1")
+        state = terminal.CompletionState("pending", "route-closed")   # closure recorded, settlement not done
+        with mock.patch.object(terminal, "owner_completion_state", return_value=state):
+            self.assertEqual(self.hand(B, "rt-r1")[1], self.refused("route-finishing", "rt-r1", FINISHING_HINT))
+        self.nothing_written()
+
+    def test_a_route_correct_cannot_read_is_refused_and_a_legacy_one_moves(self):
+        newer, _ = self.route("newer", basis=100)          # a basis_version newer than this reader
+        self.row("att-newer", "rt-newer", doc=newer)
+        self.assertEqual(self.hand(B, "rt-newer")[1], self.refused(
+            "route-closed", "rt-newer", "hint=this route cannot take a later request; start new work from the receiver"))
+        self.nothing_written()
+        legacy, _ = self.route("legacy", basis="absent")    # an older record with no basis at all
+        self.row("att-legacy", "rt-legacy", doc=legacy)
+        self.assertEqual(self.hand(B, "rt-legacy")[0], 0)
+
+    def test_frame_legs_alone_read_as_a_multistep_route(self):
+        frame, _ = self.route("legs", nodes=2)
+        self.row("att-legs-a", "rt-legs", doc=frame, worker="frame", node="frame")
+        self.row("att-legs-b", "rt-legs", doc=frame, worker="frame", node="frame-alternative")
+        self.assertEqual(self.hand(B, "rt-legs")[1].split(" hint=")[0], self.refused("route-multistep", "rt-legs"))
+        self.nothing_written()
+
+    def test_a_turn_the_sender_starts_after_the_last_look_goes_once_to_the_receiver(self):
+        """A known limit, pinned: started in the milliseconds after the last look, the turn's completion goes to
+        the current holder once (sender 0, receiver 1, nothing twice)."""
+        self.resting("r1")
+        doc = json.loads((self.root / "routes" / "rt-r1.json").read_text())
+        real, started = handover._append_transition_row, []
+
+        def turn_starts_then_write(seat, row):
+            started.append(self.row("att-r1-late", "rt-r1", doc=doc, status="running"))  # A's `correct` lands here
+            real(seat, row)
+        with mock.patch.object(handover, "_append_transition_row", turn_starts_then_write):
+            self.assertEqual(self.hand(B, "rt-r1")[0], 0)
+        self.finish("att-r1-late")
+        self.completion(started[0])
+        self.assertEqual((self.sweep(A), self.sweep(B), self.sweep(B)), ([], ["att-r1-late"], []))
 
     def test_the_receivers_next_turn_reports_only_to_the_receiver(self):
         import work_start
@@ -265,7 +359,7 @@ class Cases:
         self.row("att-stage-2", "rt-stage", depth="2", worker="stage", node="execute", status="open")
         self.assertEqual(self.hand(B, "rt-stage")[1], self.refused("route-running", "rt-stage", RUNNING_HINT))
         self.resting("kept")
-        UC.submit(self.jobs, "rt-kept", "a later request that waits for a seat")   # kept, its turn not started
+        UC.submit(self.jobs, self.ids["rt-kept"], "a later request that waits for a seat")   # kept, its turn not started
         self.assertEqual(self.hand(B, "rt-kept")[1], self.refused("route-running", "rt-kept", RUNNING_HINT))
         self.nothing_written()
 
@@ -287,7 +381,7 @@ class Cases:
                  "gate": dict(outcome={"terminal_gate_proven": False}), "stopped": dict(row={"status": "cancelled"})}
         for name, case in cases.items():
             doc, _ = self.route(name, **case.get("outcome", {}))
-            self.row("att-" + name, doc["route_id"], doc=doc, **case.get("row", {}))
+            self.row("att-" + name, "rt-" + name, doc=doc, **case.get("row", {}))
         array, path = self.route("array")
         self.row("att-array", "rt-array", doc=array)
         path.write_text("[]")
@@ -335,6 +429,21 @@ class Cases:
         self.liveness[B] = lambda: next(looks, "ended")
         self.assertEqual(self.hand(B, "rt-r2")[1], self.refused(
             "receiver-not-live", "rt-r2", "hint=hand it to a session that is running now"))
+        self.nothing_written()
+        # It ends while the last check is still reading the route's closure: liveness is looked at after that.
+        import dispatch_notice_state
+        self.resting("r3")
+        self.liveness[B] = "live"
+        reads, real_closed = [], dispatch_notice_state.closed_outcome
+
+        def closure_read(path, route):
+            reads.append(path)
+            if len(reads) == 3:            # the check run right before the write
+                self.liveness[B] = "ended"
+            return real_closed(path, route)
+        with mock.patch.object(dispatch_notice_state, "closed_outcome", closure_read):
+            self.assertEqual(self.hand(B, "rt-r3")[1].split(" hint=")[0], self.refused("receiver-not-live", "rt-r3"))
+        self.assertEqual(len(reads), 3)
         self.nothing_written()
 
     def test_refusals_send_and_record_nothing(self):
@@ -507,7 +616,7 @@ class Cases:
         from dispatch_terminal_commit import terminal_slot
         h = self.harness
         meta = self.resting("r1")
-        slot = terminal_slot(self.root / "artifacts", "rt-r1", "att-r1")
+        slot = terminal_slot(self.root / "artifacts", self.ids["rt-r1"], "att-r1")
         slot.mkdir(parents=True)
         (slot / work_intent.SUMMARY_NAME).write_text(
             "%s autopilot-code · route rt-r1\n의도: 로그인\n산출물: /synthetic/report.md" % work_intent.summary_heads()[0])
@@ -519,12 +628,12 @@ class Cases:
         self.assertEqual(rc, 0, out)
         body = self.body_of(out.split()[0].split("=")[1])
         self.assertIn("마지막 완료 요약: %s · 산출물: /synthetic/report.md\n이제 [bb]가 받음: 완료 · 주의 알림 · "
-                      "start/correct/close\n" % (slot / work_intent.SUMMARY_NAME), body)
+                      "start/correct/close\n" % self.named(str(slot / work_intent.SUMMARY_NAME)), body)
         self.assertRegex(body, r"\n감독 카드: %s \(갱신 \d\d-\d\d \d\d:\d\d · 사용자 요구 원문 발췌 2건\) — "
                                r"이 흐름에 맞는 것만 따르세요$" % re.escape(str(card)))
         me = {"harness": h, "session_id": A}
         with mock.patch.object(peer_request_cmd, "_card_line", return_value="x" * 5000):
-            note = peer_request_cmd._route_notes(me, "[bb]", ["rt-r1"]).split("---\n", 1)[1]
+            note = self.named(peer_request_cmd._route_notes(me, "[bb]", [self.ids["rt-r1"]])).split("---\n", 1)[1]
         self.assertLessEqual(len(note.encode("utf-8")), peer_request_cmd._ROUTE_NOTE_BYTES)
         self.assertTrue(note.startswith("route rt-r1 · autopilot-code"))
         path = self.root / "routes" / "rt-r1.json"
@@ -532,7 +641,7 @@ class Cases:
         for changed in ({"route_id": "rt-elsewhere"}, {"work_request": {"text": "남의 글"}}, {"capability": "\ud800"}):
             with self.subTest(changed=sorted(changed)):
                 path.write_text(json.dumps(dict(doc, **changed)))
-                self.assertEqual(peer_request_cmd._route_notes(me, "[bb]", ["rt-r1"]), "")
+                self.assertEqual(peer_request_cmd._route_notes(me, "[bb]", [self.ids["rt-r1"]]), "")
 
 
 class ClaudePair(Cases, unittest.TestCase):
