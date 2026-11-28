@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""A correction filed while a Claude owner's turn runs reaches that turn, or the next one.
+"""A correction filed while a Claude owner's turn runs is shown there early and delivered next turn.
 
-The real supervisor drives a fake stream-json `claude` that runs the real
-PreToolUse hook from the supervisor's `--settings` and models what the model
-reads: a hook context is read only by a later main-thread reply, one over
-Claude Code's 10,000-character hook limit only as its 2,000-character preview.
+The real supervisor drives a fake `claude` that runs the real PreToolUse hook
+from the supervisor's `--settings`. The hook only shows a copy of queued
+corrections beside a tool result (OPERATIONS §5.10); the receipt follows the
+next-turn delivery alone, so every failure path keeps main's receipt.
 """
 
 from __future__ import annotations
@@ -30,13 +30,17 @@ from fixture_processes import unique_attempt_id  # noqa: E402
 PARENT = unique_attempt_id("att-in-turn-owner")
 
 FAKE_CLAUDE = r'''
-import json, os, select, subprocess, sys
+import errno, json, os, signal, subprocess, sys
 args = sys.argv[1:]
-trace, jobs, parent = os.environ['FAKE_TRACE'], os.environ['FAKE_JOBS'], os.environ['FAKE_PARENT']
+trace, jobs, parent, root = (os.environ[name] for name in ('FAKE_TRACE', 'FAKE_JOBS', 'FAKE_PARENT', 'FAKE_ROOT'))
 plan = json.loads(os.environ.get('FAKE_PLAN', '{}'))
 hook = json.loads(args[args.index('--settings') + 1])['hooks']['PreToolUse'][0]['hooks'][0]['command']
-hook_events = '--include-hook-events' in args
-sys.path.insert(0, os.path.join(os.environ['FAKE_ROOT'], 'utilities'))
+# The real hook in a process whose state write fails (EIO): its mark is lost.
+eio_hook = [sys.executable, '-c', 'import errno, runpy, sys; sys.path.insert(0, sys.argv[1] + "/utilities"); '
+            'import dispatch_owner_input as I\ndef fail(*_): raise OSError(errno.EIO, "EIO")\nI._write = fail; '
+            'sys.argv = sys.argv[2:]; runpy.run_path(sys.argv[0], run_name="__main__")',
+            root, root + '/hooks/registered-parent-park.py']
+sys.path.insert(0, os.path.join(root, 'utilities'))
 import dispatch_owner_input as I
 
 def log(**row):
@@ -47,11 +51,9 @@ def out(value):
     sys.stdout.write(json.dumps(value) + '\n')
     sys.stdout.flush()
 
-def ids_in(text, hook=True):
-    if hook and len(text) > 10000:
-        text = text[:2000]
+def ids_in(text):
     found = []
-    for line in text.splitlines():
+    for line in text.split('\n'):  # the generator's own line breaks, not U+2028
         try:
             item = json.loads(line)
         except ValueError:
@@ -60,98 +62,61 @@ def ids_in(text, hook=True):
             found.append(item['id'])
     return found
 
+def run_turn(prompt, uuid):
+    with open(trace, encoding='utf-8') as handle:
+        turn = 1 + sum('"turn-start"' in line for line in handle)
+    session = args[args.index('--resume' if '--resume' in args else '--session-id') + 1]
+    log(event='turn-start', turn=turn, prompt=prompt, session=session)
+    if '<owner-corrections>' in prompt:
+        log(event='read', turn=turn, ids=ids_in(prompt), noted='Already shown beside a tool result' in prompt)
+    with open(os.environ['AGENT_DISPATCH_COMPLETION_STATE_FILE'], encoding='utf-8') as handle:
+        delivered = json.load(handle)['delivered_attempt_ids']
+    for index, step in enumerate(plan.get(str(turn), []), 1):
+        tool = f'toolu-{turn}-{index}'
+        request = {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash', 'tool_input': {},
+                   'tool_use_id': tool, 'cwd': os.getcwd()}
+        if step.get('subagent'):
+            request['agent_id'] = 'agent-1'
+        if step.get('hook') != 'skip':
+            command = eio_hook if step.get('hook') == 'eio' else hook
+            done = subprocess.run(command, shell=isinstance(command, str), input=json.dumps(request),
+                                  capture_output=True, text=True, timeout=60,
+                                  env={**os.environ, 'AGENT_HOME': root, 'AGENT_DISPATCH_JOBS': jobs,
+                                       'AGENT_DISPATCH_ATTEMPT_ID': parent,
+                                       'AGENT_DISPATCH_COMPLETION_MODE': 'supervised'})
+            assert done.returncode == 0, done.stderr
+            context = (json.loads(done.stdout)['hookSpecificOutput'].get('additionalContext', '')
+                       if done.stdout.strip() else '')
+            if context:
+                log(event='shown', turn=turn, tool=tool, ids=ids_in(context))
+        for item in step.get('file', []):
+            I.submit(jobs, parent, 'correction ' + item, item)
+        if step.get('kill'):
+            os.kill(os.getppid(), signal.SIGKILL)
+            os._exit(0)
+        if step.get('close'):
+            os._exit(0)
+    final = os.environ.get('FAKE_FINAL_FIRST') == '1' or delivered
+    out({'type': 'assistant', 'parent_tool_use_id': None,
+         'message': {'id': f'msg-{turn}', 'content': [{'type': 'text', 'text': 'done'}]}})
+    out({'type': 'result', 'subtype': 'success', 'is_error': False, 'user_message_uuids': [uuid],
+         'result': 'artifact: -\nverdict: PASS\nblocker: none' if final else 'runtime_wait: registered-children'})
+    if os.environ.get('FAKE_VANISH_AFTER') == str(turn):
+        os.rename(sys.argv[0], sys.argv[0] + '.gone')  # the next turn's process cannot start
+
+if '--input-format' not in args:
+    run_turn(sys.stdin.read(), None)
+    sys.exit(0)
 buffer = b''
-def next_message():
-    global buffer
+while True:
     while b'\n' not in buffer:
         chunk = os.read(0, 65536)
         if not chunk:
-            return None
+            sys.exit(0)
         buffer += chunk
     line, buffer = buffer.split(b'\n', 1)
-    return json.loads(line)
-
-def stdin_waiting():
-    return b'\n' in buffer or bool(select.select([0], [], [], 0)[0])
-
-attached = []
-def reply(turn, message, content):
-    ids = [item for context in attached for item in ids_in(context)]
-    attached.clear()
-    if ids:
-        log(event='read', turn=turn, ids=ids, via='hook')
-    out({'type': 'assistant', 'parent_tool_use_id': None, 'message': {'id': message, 'content': content}})
-
-log(event='process-start', args=args)
-turn = 0
-while True:
-    payload = next_message()
-    if payload is None:
-        break
-    turn += 1
-    prompt = payload['message']['content'][0]['text']
-    log(event='turn-start', turn=turn, prompt=prompt)
-    if prompt.strip().startswith('<owner-corrections>'):
-        # #1890 R2 red 1: a UserPromptSubmit hook that blocks a correction sent on its own.
-        log(event='blocked', turn=turn)
-        out({'type': 'result', 'subtype': 'success', 'is_error': False, 'num_turns': 0,
-             'result': 'blocked', 'user_message_uuids': [payload.get('uuid')]})
-        continue
-    if '<owner-corrections>' in prompt:
-        log(event='read', turn=turn, ids=ids_in(prompt[prompt.index('<owner-corrections>'):], hook=False), via='prompt')
-    with open(os.environ['AGENT_DISPATCH_COMPLETION_STATE_FILE'], encoding='utf-8') as handle:
-        delivered = json.load(handle)['delivered_attempt_ids']
-    mid_turn = stopped = False
-    for index, step in enumerate(plan.get(str(turn), []), 1):
-        tool, sub = f'toolu-{turn}-{index}', bool(step.get('subagent'))
-        thread = 'toolu-task' if sub else None
-        use = [{'type': 'tool_use', 'id': tool, 'name': 'Bash', 'input': {}}]
-        if sub:
-            out({'type': 'assistant', 'parent_tool_use_id': thread, 'message': {'id': 'sub-' + tool, 'content': use}})
-        else:
-            reply(turn, f'msg-{turn}-{index}', use)
-        request = {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash', 'tool_input': {},
-                   'tool_use_id': tool, 'cwd': os.getcwd()}
-        if sub:
-            request['agent_id'] = 'agent-1'
-        done = subprocess.run(hook, shell=True, input=json.dumps(request), capture_output=True, text=True,
-                              timeout=60, env={**os.environ, 'AGENT_HOME': os.environ['FAKE_ROOT'],
-                                               'AGENT_DISPATCH_JOBS': jobs, 'AGENT_DISPATCH_ATTEMPT_ID': parent,
-                                               'AGENT_DISPATCH_COMPLETION_MODE': 'supervised'})
-        outcome = step.get('hook', 'success')
-        if hook_events and outcome != 'silent':
-            out({'type': 'system', 'subtype': 'hook_response', 'hook_id': tool, 'hook_name': 'PreToolUse:Bash',
-                 'hook_event': 'PreToolUse', 'output': done.stdout, 'stdout': done.stdout,
-                 'stderr': done.stderr, 'exit_code': done.returncode, 'outcome': outcome})
-        context = ''
-        if done.returncode == 0 and done.stdout.strip() and outcome != 'cancelled':
-            context = json.loads(done.stdout)['hookSpecificOutput'].get('additionalContext', '')
-        if context:
-            log(event='carried', turn=turn, tool=tool, ids=ids_in(context))
-        for item in step.get('file', []):
-            I.submit(jobs, parent, item.get('text') or 'd' * item['size'], item['id'])
-            log(event='filed', turn=turn, ids=[item['id']])
-        mid_turn = mid_turn or stdin_waiting()
-        error = bool(step.get('error'))
-        out({'type': 'user', 'parent_tool_use_id': thread, 'message': {'role': 'user', 'content': [
-            {'type': 'tool_result', 'tool_use_id': tool, 'content': 'ok', 'is_error': error}]}})
-        if context and not error and not sub:
-            attached.append(context)
-        if step.get('stop'):
-            stopped = True
-            break
-    if mid_turn:
-        log(event='mid-turn-write', turn=turn)
-    if not stopped:
-        reply(turn, f'msg-{turn}-final', [{'type': 'text', 'text': 'done'}])
-    final = os.environ.get('FAKE_FINAL_FIRST') == '1' or delivered
-    out({'type': 'result', 'subtype': 'success', 'is_error': False, 'user_message_uuids': [payload.get('uuid')],
-         'result': 'artifact: -\nverdict: PASS\nblocker: none' if final else 'runtime_wait: registered-children'})
-    if mid_turn:
-        # #1890 R2 red 5: a correction written mid-turn opens a late turn whose output comes first.
-        log(event='late-output', turn=turn)
-        out({'type': 'assistant', 'parent_tool_use_id': None, 'message': {'id': f'late-{turn}', 'content': [
-            {'type': 'text', 'text': 'x' * 180000}]}})
+    payload = json.loads(line)
+    run_turn(payload['message']['content'][0]['text'], payload.get('uuid'))
 '''
 
 FAKE_JOIN = r'''
@@ -198,8 +163,8 @@ def child_row() -> str:
     )
 
 
-def correction(request_id: str, size: int = 0) -> dict:
-    return {"id": request_id, "size": size} if size else {"id": request_id, "text": f"correction {request_id}"}
+# main's receipt for a correction a later prompt delivers.
+DELIVERED = [("queued", None), ("sending", "next-turn"), ("accepted", None), ("turn-completed", None)]
 
 
 class InTurnCorrectionTest(unittest.TestCase):
@@ -209,106 +174,122 @@ class InTurnCorrectionTest(unittest.TestCase):
         self.root = Path(temp.name)
         subprocess.run(["git", "init", "-q", str(self.root)], check=True)
         (self.root / ".agent_reports").mkdir()
-        self.claude = self.root / "fake_claude.py"
-        self.claude.write_text(textwrap.dedent(FAKE_CLAUDE), encoding="utf-8")
         self.join = self.root / "fake_join.py"
         self.join.write_text(textwrap.dedent(FAKE_JOIN), encoding="utf-8")
         self.runs = 0
 
-    def run_owner(self, plan: dict, *, child: bool = True) -> list[dict]:
+    def new_run(self, *, child: bool = True) -> None:
         self.runs += 1
-        base = self.root / f"run-{self.runs}"
-        base.mkdir()
-        self.jobs, self.trace = base / "jobs.log", base / "trace.jsonl"
-        lease = base / "supervisor-state" / f"{PARENT}.lease"
+        self.base = self.root / f"run-{self.runs}"
+        self.base.mkdir()
+        self.jobs, self.trace = self.base / "jobs.log", self.base / "trace.jsonl"
+        self.trace.touch()
+        self.claude = self.base / "fake_claude"
+        self.claude.write_text(f"#!{sys.executable}\n" + textwrap.dedent(FAKE_CLAUDE), encoding="utf-8")
+        self.claude.chmod(0o755)
+        lease = self.base / "supervisor-state" / f"{PARENT}.lease"
         self.jobs.write_text(owner_row(lease) + (child_row() if child else ""), encoding="utf-8")
+        self.child = child
+
+    def supervise(self, plan: dict, *, rc: int = 0, transport: str = "stream-json", extra=(), env=None) -> list[dict]:
         command = [
             sys.executable, str(SUPERVISOR), "--worktree", str(self.root), "--jobs", str(self.jobs),
-            "--parent-attempt-id", PARENT, "--state-file", str(base / "supervisor-state.json"),
-            "--lease-file", str(lease), "--add-dir", str(self.root),
-            "--claude-command", f"{sys.executable} {self.claude}",
+            "--parent-attempt-id", PARENT, "--state-file", str(self.base / "supervisor-state.json"),
+            "--lease-file", str(self.base / "supervisor-state" / f"{PARENT}.lease"),
+            "--add-dir", str(self.root), "--claude-command", str(self.claude),
             "--join-command", f"{sys.executable} {self.join}", "--join-timeout", "2",
-            "--join-interval", "0.02", "--turn-transport", "stream-json",
+            "--join-interval", "0.02", "--turn-transport", transport, *extra,
         ]
         env = {**os.environ, "AGENT_ARTIFACT_ROOT": str(self.root / ".agent_reports"),
                "FAKE_TRACE": str(self.trace), "FAKE_JOBS": str(self.jobs), "FAKE_PARENT": PARENT,
-               "FAKE_ROOT": str(ROOT), "FAKE_PLAN": json.dumps(plan)}
-        if not child:
+               "FAKE_ROOT": str(ROOT), "FAKE_PLAN": json.dumps(plan), **(env or {})}
+        if not self.child:
             env["FAKE_FINAL_FIRST"] = "1"
         result = subprocess.run(command, input="initial assignment", text=True, capture_output=True,
                                 env=env, timeout=120)
-        self.assertEqual(result.returncode, 0, result.stderr[-4000:] + result.stdout[-4000:])
+        self.assertEqual(result.returncode, rc, result.stderr[-4000:] + result.stdout[-4000:])
         return [json.loads(line) for line in self.trace.read_text(encoding="utf-8").splitlines()]
 
-    def receipt(self, request_id: str) -> dict:
+    def run_owner(self, plan: dict, *, child: bool = True, **kwargs) -> list[dict]:
+        self.new_run(child=child)
+        return self.supervise(plan, **kwargs)
+
+    def receipt(self, request_id: str = "C") -> dict:
         requests = json.loads(I._path(self.jobs, PARENT).read_text())["requests"]
         return next(item for item in requests if item["id"] == request_id)
 
+    def history(self, request_id: str = "C") -> list[tuple]:
+        return [(event["state"], event.get("mode") or event.get("reason"))
+                for event in self.receipt(request_id)["events"]]
+
     @staticmethod
-    def reads(trace: list[dict], request_id: str) -> list[tuple[int, str]]:
-        return [(row["turn"], row["via"]) for row in trace
+    def shown(trace: list[dict], request_id: str = "C") -> list[str]:
+        return [row["tool"] for row in trace if row["event"] == "shown" and request_id in row["ids"]]
+
+    @staticmethod
+    def reads(trace: list[dict], request_id: str = "C") -> list[tuple[int, bool]]:
+        return [(row["turn"], row["noted"]) for row in trace
                 if row["event"] == "read" and request_id in row["ids"]]
 
-    def test_a_correction_filed_in_the_first_turn_is_read_in_that_turn(self):
-        trace = self.run_owner({"1": [{"file": [correction("C")]}, {}]})
-        self.assertIn("--include-hook-events", trace[0]["args"])
-        self.assertEqual(self.reads(trace, "C"), [(1, "hook")])
-        item = self.receipt("C")
-        self.assertEqual(item["state"], "turn-completed")
-        self.assertEqual([(e["state"], e.get("mode"), e.get("turn_id")) for e in item["events"]][:3],
-                         [("queued", None, None), ("sending", "in-turn", "1"), ("accepted", None, "1")])
-        prompts = [row["prompt"] for row in trace if row["event"] == "turn-start"]
-        self.assertEqual(len(prompts), 2)
-        self.assertNotIn("correction C", prompts[1])
+    def test_a_first_turn_correction_is_shown_there_once_and_delivered_next_turn(self):
+        trace = self.run_owner({"1": [{"file": ["C"]}, {}, {}]})
+        # Shown beside the next tool result only, not again at the tool after it.
+        self.assertEqual(self.shown(trace), ["toolu-1-2"])
+        # Delivered once by the next prompt, which notes the earlier copy; main's receipt.
+        self.assertEqual(self.reads(trace), [(2, True)])
+        self.assertEqual(self.history(), DELIVERED)
+        self.assertEqual((self.receipt()["turn_id"], self.receipt()["shown"]), ("2", "toolu-1-2"))
+        self.assertIn("is also shown beside the claude owner's next tool result",
+                      I.inspect(self.jobs, PARENT)["delivery_notice"].lower())
 
-    def test_a_carry_the_stream_does_not_confirm_waits_for_the_next_turn(self):
-        cases = {
-            # The hook timed out after taking it: Claude Code discards the output.
-            "cancelled": ({"hook": "cancelled"}, [(2, "prompt")]),
-            # An errored tool: whether context rides it is not documented.
-            "tool-error": ({"error": True}, [(2, "prompt")]),
-            # A runtime without hook events: the model read it, so it may be read twice, never lost.
-            "no-hook-event": ({"hook": "silent"}, [(1, "hook"), (2, "prompt")]),
-            # A subagent's tool: its context is the subagent's, so the hook leaves it queued.
-            "subagent": ({"subagent": True}, [(2, "prompt")]),
-        }
-        for name, (step, expected) in cases.items():
+    def test_a_subagent_tool_or_no_later_tool_shows_no_copy(self):
+        for name, plan in {"subagent": {"1": [{"file": ["C"]}, {"subagent": True}]},
+                           "after-last-tool": {"1": [{}, {"file": ["C"]}]}}.items():
             with self.subTest(name):
-                trace = self.run_owner({"1": [{"file": [correction("C")]}, step]})
-                self.assertEqual(self.reads(trace, "C"), expected)
-                item = self.receipt("C")
-                self.assertEqual((item["state"], item["turn_id"]), ("turn-completed", "2"))
-                in_turn = [e for e in item["events"] if e.get("mode") == "in-turn"]
-                if name == "subagent":
-                    self.assertEqual(in_turn, [])
-                else:
-                    self.assertEqual(in_turn[0]["state"], "sending")
-                    self.assertIn("in-turn-unread", [e.get("reason") for e in item["events"]])
+                trace = self.run_owner(plan)
+                self.assertEqual(self.shown(trace), [])
+                self.assertEqual(self.reads(trace), [(2, False)])
+                self.assertEqual(self.history(), DELIVERED)
 
-    def test_a_turn_that_ends_right_after_the_tool_never_claims_the_read(self):
-        # No reply followed the tool, so the read is unconfirmed even though the hook
-        # output was received; the queued correction then opens the existing next turn.
-        trace = self.run_owner({"1": [{"file": [correction("C")]}, {"stop": True}]}, child=False)
-        self.assertEqual(self.reads(trace, "C")[0], (2, "prompt"))
-        item = self.receipt("C")
-        self.assertEqual((item["state"], item["turn_id"]), ("turn-completed", "2"))
+    def test_the_review_loss_paths_keep_it_queued_for_main_delivery(self):
+        with self.subTest("supervisor SIGKILL, then restart"):
+            trace = self.run_owner({"1": [{"file": ["C"]}, {"kill": True}]}, rc=-9)
+            self.assertEqual(self.shown(trace), ["toolu-1-2"])
+            self.assertEqual(self.receipt()["state"], "queued")
+            # The same attempt and session reattach, as the adapter does.
+            trace = self.supervise({}, extra=("--resume-session", trace[0]["session"]))
+            self.assertEqual(self.reads(trace), [(2, True)])
+            self.assertEqual(self.history(), DELIVERED)
+        with self.subTest("the hook's state write fails (EIO)"):
+            trace = self.run_owner({"1": [{"file": ["C"]}, {"hook": "eio"}, {}, {}]})
+            # The lost mark only shows it once more.
+            self.assertEqual(self.shown(trace), ["toolu-1-2", "toolu-1-3"])
+            self.assertEqual(self.reads(trace), [(2, True)])
+            self.assertEqual(self.history(), DELIVERED)
+        # The supervisor ends on these two in main as well, with main's receipt (handed back
+        # through the supervision notice): the copy leaves it exactly as a run whose hook
+        # showed nothing, and the hook never moved it out of `queued`.
+        for name, plan, kwargs, expected in (
+                ("turn exception (stdout closed mid-turn)", {"1": [{"file": ["C"]}, {"close": True}]},
+                 {"child": False, "rc": 70}, [("queued", None), ("undelivered", "supervisor-stopped")]),
+                ("next turn not started (SubmissionNotStarted)", {"1": [{"file": ["C"]}, {}]},
+                 {"rc": 70, "transport": "resume-process", "env": {"FAKE_VANISH_AFTER": "1"}},
+                 [("queued", None), ("sending", "next-turn"), ("delivery-unknown", "supervisor-stopped")])):
+            with self.subTest(name):
+                trace = self.run_owner(plan, **kwargs)
+                self.assertEqual((self.shown(trace), self.reads(trace)), (["toolu-1-2"], []))
+                self.assertEqual(self.history(), expected)
+                self.run_owner({turn: [{**step, "hook": "skip"} for step in steps]
+                                for turn, steps in plan.items()}, **kwargs)
+                self.assertEqual(self.history(), expected)
 
-    def test_a_correction_after_the_last_tool_goes_to_the_next_turn(self):
-        trace = self.run_owner({"1": [{}, {"file": [correction("C")]}]})
-        self.assertEqual(self.reads(trace, "C"), [(2, "prompt")])
-        item = self.receipt("C")
-        self.assertEqual((item["state"], item["turn_id"]), ("turn-completed", "2"))
-        self.assertFalse(any(e.get("mode") == "in-turn" for e in item["events"]))
-
-    def test_the_r2_losses_do_not_reproduce(self):
-        # red 1: a hook that blocks a correction sent on its own; red 5: a 65,536-byte
-        # correction next to a late correction turn's 180,000-byte output.
-        trace = self.run_owner({"1": [{"file": [correction("C"), correction("D", 65536)]}, {}]})
-        events = {row["event"] for row in trace}
-        self.assertFalse(events & {"blocked", "mid-turn-write", "late-output"}, trace)
-        self.assertEqual(self.reads(trace, "C"), [(1, "hook")])
-        self.assertEqual(self.reads(trace, "D"), [(2, "prompt")])
-        self.assertEqual([self.receipt(name)["state"] for name in "CD"], ["turn-completed"] * 2)
+    def test_the_reserved_last_turn_shows_no_copy(self):
+        trace = self.run_owner({"2": [{"file": ["C"]}, {}]}, extra=("--max-continuations", "1"))
+        prompts = [row["prompt"] for row in trace if row["event"] == "turn-start"]
+        self.assertIn("reserved", prompts[1])
+        self.assertEqual(self.shown(trace), [])
+        self.assertEqual(self.reads(trace), [(3, False)])
+        self.assertEqual(self.history(), DELIVERED)
 
 
 if __name__ == "__main__":

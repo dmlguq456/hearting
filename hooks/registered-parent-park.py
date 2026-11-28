@@ -74,22 +74,25 @@ def main() -> int:
             return 0
     except Exception:
         return deny("cleanup-scope: authority unavailable")
-    return carry_owner_input(registry, parent_attempt, payload)
+    return show_owner_input(registry, parent_attempt, payload)
 
 
-def carry_owner_input(registry: Path, attempt: str, payload: dict[str, Any]) -> int:
-    """Hand queued owner corrections to the running turn beside this main-thread tool's
-    result (OPERATIONS §5.10); the supervisor confirms the read or requeues them."""
+def show_owner_input(registry: Path, attempt: str, payload: dict[str, Any]) -> int:
+    """Show a copy of queued owner corrections beside this main-thread tool's result; the next
+    owner turn still delivers them (OPERATIONS §5.10). The reserved last turn shows none."""
     if payload.get("agent_id") or not payload.get("tool_use_id"):
         return 0
     try:
         from dispatch_contract import supervisor_lease_path
-        state = json.loads(supervisor_lease_path(registry, attempt).with_suffix(".input.json").read_text())
-        if not state.get("in_turn") or not any(
-                item.get("state") == "queued" for item in state.get("requests", [])):
+        with supervisor_lease_path(registry, attempt).with_suffix(".input.json").open("rb") as handle:
+            if b'"queued": 0,' in handle.read(1024):
+                return 0
+        import dispatch_budget_record
+        if any(row.get("purpose") == "terminal-handoff"
+               for row in dispatch_budget_record.read_rows(registry.parent, attempt)):
             return 0
         import dispatch_owner_input
-        text = dispatch_owner_input.take_in_turn(registry, attempt, str(payload["tool_use_id"]))
+        text = dispatch_owner_input.show_in_turn(registry, attempt, str(payload["tool_use_id"]))
     except Exception:
         return 0
     if text:

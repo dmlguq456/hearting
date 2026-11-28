@@ -895,8 +895,9 @@ class OwnerFinishCorrectionRegressionTest(OwnerInputTest):
                 self.assertEqual(result.get('delivery_timing'), 'next-owner-turn')
 
 
-class InTurnInputTest(unittest.TestCase):
-    """A Claude owner's tool hook carries queued input into the running turn (OPERATIONS §5.10)."""
+
+class InTurnCopyTest(unittest.TestCase):
+    """A Claude owner's tool hook shows a copy of queued input; the next turn delivers it (OPERATIONS §5.10)."""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -908,74 +909,97 @@ class InTurnInputTest(unittest.TestCase):
         held = hold_supervisor_lease(self.jobs, self.attempt, lease)
         held.__enter__()
         self.addCleanup(held.__exit__, None, None, None)
-        self.events = []
-        self.control = I.OwnerInput(self.jobs, self.attempt, 'session-1', 'claude-next-turn', self.events.append)
+        self.control = I.OwnerInput(self.jobs, self.attempt, 'session-1', 'claude-next-turn', lambda _: None)
 
-    def requests(self):
-        return {item['id']: item for item in json.loads(I._path(self.jobs, self.attempt).read_text())['requests']}
+    def hook(self, tool='toolu-1', route_id='', **extra):
+        request = {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash', 'tool_use_id': tool,
+                   'tool_input': {'command': extra.pop('command', 'true')}, 'cwd': self.temp.name, **extra}
+        done = subprocess.run([sys.executable, str(ROOT / 'hooks/registered-parent-park.py')],
+                              input=json.dumps(request), capture_output=True, text=True, timeout=60,
+                              env={**os.environ, 'AGENT_HOME': str(ROOT), 'AGENT_DISPATCH_JOBS': str(self.jobs),
+                                   'AGENT_DISPATCH_ATTEMPT_ID': self.attempt, 'AGENT_ROUTE_ID': route_id,
+                                   'AGENT_DISPATCH_COMPLETION_MODE': 'supervised'})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        output = json.loads(done.stdout)['hookSpecificOutput'] if done.stdout.strip() else {}
+        self.assertNotIn('permissionDecision', output)
+        return output.get('additionalContext', '')
 
-    def take(self, tool):
-        return I.take_in_turn(self.jobs, self.attempt, tool)
+    def item(self, request_id):
+        return next(i for i in json.loads(I._path(self.jobs, self.attempt).read_text())['requests']
+                    if i['id'] == request_id)
 
-    def test_only_an_open_turn_takes_and_only_what_one_context_holds_whole(self):
-        I.submit(self.jobs, self.attempt, 'small one', 'small')
-        self.assertEqual(self.take('toolu-1'), '')
-        self.control.open_in_turn('1')
-        I.submit(self.jobs, self.attempt, 'x' * 9000, 'big')
-        I.submit(self.jobs, self.attempt, 'after the big one', 'after')
-        self.assertEqual(self.take(''), '')
-        text = self.take('toolu-1')
-        hook = json.dumps({'hookSpecificOutput': {'additionalContext': text}})
-        self.assertEqual(I.OwnerInput.carried_ids(hook), {'small'})
-        items = self.requests()
-        self.assertEqual((items['small']['state'], items['small']['mode'], items['small']['tool_use_id'],
-                          items['small']['turn_id']), ('sending', 'in-turn', 'toolu-1', '1'))
-        # Nothing overtakes a correction too large for one hook context: both wait for the prompt.
-        self.assertEqual([items['big']['state'], items['after']['state']], ['queued', 'queued'])
-        self.assertIn('a queued correction can ride', I.inspect(self.jobs, self.attempt)['delivery_notice'].lower())
-
-    def test_settlement_accepts_only_a_confirmed_read_and_requeues_the_rest(self):
-        self.control.open_in_turn('1')
-        I.submit(self.jobs, self.attempt, 'read me', 'read')
-        self.take('toolu-1')
-        I.submit(self.jobs, self.attempt, 'the hook output was dropped', 'unread')
-        self.take('toolu-2')
-        self.control.settle_in_turn({'read', 'unread'}, {'toolu-1'})
-        items = self.requests()
-        self.assertEqual((items['read']['state'], items['read']['turn_id']), ('accepted', '1'))
-        self.assertEqual((items['unread']['state'], items['unread']['reason']), ('queued', 'in-turn-unread'))
-        I.submit(self.jobs, self.attempt, 'filed after the window closed', 'late')
-        self.assertEqual(self.take('toolu-3'), '')
-        self.control.started('1')
-        self.control.completed('1')
+    def deliver(self, turn):
         prompt = self.control.prepare('next owner turn')
-        self.assertEqual(prompt.count('the hook output was dropped'), 1)
-        self.assertNotIn('read me', prompt)
-        self.assertEqual(self.requests()['read']['state'], 'turn-completed')
+        self.control.started(turn)
+        self.control.completed(turn)
+        return prompt
 
-    def test_a_failed_settlement_write_is_retried_before_the_next_prompt(self):
-        # #1890 R2 red 6: one failed queue write must not strand a correction known unread.
-        self.control.open_in_turn('1')
-        I.submit(self.jobs, self.attempt, 'retry me', 'retry')
-        self.take('toolu-1')
-        real, failed = I._write, []
+    def test_a_copy_is_shown_once_and_the_next_turn_still_delivers_it(self):
+        self.assertIn(b'"queued": 0,', I._path(self.jobs, self.attempt).read_bytes()[:1024])
+        self.assertEqual(self.hook(), '')
+        I.submit(self.jobs, self.attempt, 'use the other dataset', 'C')
+        self.assertIn('use the other dataset', self.hook('toolu-1'))
+        self.assertEqual((self.item('C')['state'], self.item('C')['shown']), ('queued', 'toolu-1'))
+        self.assertEqual(self.hook('toolu-2'), '')
+        I.submit(self.jobs, self.attempt, 'and keep the seed', 'D')
+        self.assertEqual(self.hook('toolu-3', agent_id='agent-1'), '')
+        copy = self.hook('toolu-4')
+        self.assertIn('and keep the seed', copy)
+        self.assertNotIn('use the other dataset', copy)
+        prompt = self.deliver('2')
+        self.assertEqual((prompt.count('use the other dataset'), prompt.count('and keep the seed')), (1, 1))
+        self.assertEqual(prompt.count('Already shown beside a tool result in the previous turn: C, D.'), 1)
+        self.assertEqual([e['state'] for e in self.item('C')['events']],
+                         ['queued', 'sending', 'accepted', 'turn-completed'])
+        self.assertIn(b'"queued": 0,', I._path(self.jobs, self.attempt).read_bytes()[:1024])
 
-        def fail_once(path, value):
-            if not failed:
-                failed.append(path)
-                raise OSError('EIO')
-            return real(path, value)
+    def test_only_a_whole_context_within_the_utf16_limit_is_shown(self):
+        def correction(request_id, units):
+            base = len(I.OwnerInput.text([{'id': request_id, 'text': ''}]).encode('utf-16-le')) // 2
+            return '\U0001f600' * ((units - base) // 2) + 'a' * ((units - base) % 2)
+        I.submit(self.jobs, self.attempt, correction('over', 10001), 'over')
+        self.assertEqual(I.show_in_turn(self.jobs, self.attempt, 'toolu-1'), '')
+        self.assertNotIn('shown', self.item('over'))
+        self.assertIn(correction('over', 10001), self.deliver('1'))
+        I.submit(self.jobs, self.attempt, correction('fits', 10000), 'fits')
+        copy = I.show_in_turn(self.jobs, self.attempt, 'toolu-2')
+        self.assertEqual(len(copy.encode('utf-16-le')) // 2, 10000)
+        self.assertLess(len(copy), 6000)
+        self.assertEqual(self.item('fits')['shown'], 'toolu-2')
 
-        with mock.patch.object(I, '_write', fail_once):
-            self.control.settle_in_turn(set(), set())
-        self.assertEqual(self.requests()['retry']['state'], 'sending')
-        self.assertIn('dispatch.supervisor.input-notice-pending', [event['type'] for event in self.events])
-        self.assertIn('retry me', self.control.prepare('next owner turn'))
-        self.control.started('2')
-        self.control.completed('2')
-        states = [event['state'] for event in self.requests()['retry']['events']]
-        self.assertEqual(states[-1], 'turn-completed')
-        self.assertNotIn('delivery-unknown', states)
+    def test_a_lost_mark_only_shows_it_again(self):
+        I.submit(self.jobs, self.attempt, 'shown twice at most', 'C')
+        with mock.patch.object(I, '_write', side_effect=OSError(5, 'EIO')):
+            self.assertIn('shown twice at most', I.show_in_turn(self.jobs, self.attempt, 'toolu-1'))
+        self.assertEqual((self.item('C')['state'], self.item('C').get('shown')), ('queued', None))
+        self.assertIn('shown twice at most', I.show_in_turn(self.jobs, self.attempt, 'toolu-2'))
+        self.assertEqual(I.show_in_turn(self.jobs, self.attempt, 'toolu-3'), '')
+        self.assertEqual(self.deliver('1').count('shown twice at most'), 1)
+
+    def test_the_reserved_last_turn_and_a_cleanup_turn_show_no_copy(self):
+        import dispatch_budget_record as budget
+        I.submit(self.jobs, self.attempt, 'not in the last turn', 'C')
+        state = self.jobs.parent
+        self.assertEqual(budget.reserve(state, parent_attempt_id=self.attempt, route_id='r', route_hash='h',
+                                        ordinal=1, purpose='ordinary', klass='gross', remaining={}), (True, ''))
+        self.assertIn('not in the last turn', self.hook('toolu-1'))
+        I.submit(self.jobs, self.attempt, 'filed in the last turn', 'D')
+        self.assertEqual(budget.reserve(state, parent_attempt_id=self.attempt, route_id='r', route_hash='h',
+                                        ordinal=2, purpose='terminal-handoff', klass='reserved',
+                                        remaining={}), (True, ''))
+        self.assertEqual(self.hook('toolu-2'), '')
+        self.assertNotIn('shown', self.item('D'))
+        state.joinpath('supervisor-budget', self.attempt + '.jsonl').unlink()
+        claim = budget.claim_terminal_handoff(state, owner_attempt_id=self.attempt, route_hash='h',
+                                              child_attempt_ids=[], continuation_ordinal=0)
+        budget.convert_claim_to_prompt_intent(state, claim, prompt='cleanup', cleanup_scope=dict(
+            artifact_root=str(state), route_id='r', route_hash='h', owner_attempt_id=self.attempt,
+            terminal_commit_id='commit', allowed_write_roots=[str(state / 'partial.md')],
+            allowed_read_roots=[str(state)], allowed_operations=['partial-report', 'read', 'close-forward-recovery'],
+            allowed_recovery_targets=[]))
+        helper = f"python3 {ROOT / 'utilities/dispatch_terminal_commit.py'} cleanup-recover"
+        self.assertEqual(self.hook('toolu-3', route_id='r', command=helper), '')
+        self.assertNotIn('shown', self.item('D'))
 
 
 if __name__ == '__main__':

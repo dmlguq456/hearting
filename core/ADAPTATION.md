@@ -466,12 +466,10 @@ An interrupted close is continued by the existing execution observers. No
 adapter adds a cancellation command, reason requirement or approval step.
 
 Owner corrections are accepted independently of delivery. Codex active-turn
-steering is only accepted after a matching turn response. In an ordinary turn a
-Claude stream owner's PreToolUse hook carries queued input beside its next
-main-thread tool result (no cleanup turn, subagent tool or new input turn),
-accepted once the stream shows the hook output received (`--include-hook-events`)
-and a later model reply; anything else, and OpenCode input, is delivered on a
-later owner turn. An owner parked on model
+steering is only accepted after a matching turn response; Claude and OpenCode
+next-turn transports deliver on a later owner turn; a Claude owner's PreToolUse
+hook also shows a copy beside its next main-thread tool result in an ordinary
+turn, which changes no receipt. An owner parked on model
 children receives a queued correction at the next checkpoint of the same
 30-second join pieces that carry resource attention
 (`join_with_resource_attention`): the children are not delivered, keep running
