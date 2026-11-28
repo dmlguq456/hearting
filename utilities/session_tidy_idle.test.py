@@ -9,6 +9,7 @@ import os
 import contextlib
 from pathlib import Path
 import runpy
+import shutil
 import sqlite3
 import sys
 import unittest
@@ -268,6 +269,83 @@ class IdleObserverTests(unittest.TestCase):
                 held["nonce"], now=clock[0] + 3239)[1], "not-due")
             self.assertEqual(clear.validate_idle_request(clear.reservation_path(seat.key),
                 held["nonce"], now=clock[0] + 3241)[1], "")
+
+    def skip_at_due_for(self, clock, reason, *, released_claim=False):
+        """Book, reach the due time, and let the card request wait on ``reason`` until the
+        booking's deadline (the helper's own five-minute wait); return (seat, first booking)."""
+        st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text="start work")
+        self.observe_claude(tokens=600000, now=clock[0])
+        seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
+        first = clear.read_reservation(seat.key)
+        clock[0] = first["idle"]["due_at"] + 1
+        if released_claim:
+            # The look after the claim saw the writing: the claim goes back, nothing was sent.
+            claim, why = clear.claim_idle_card_request(clear.reservation_path(seat.key), first["nonce"])
+            self.assertEqual(why, "")
+            self.assertTrue(clear.release_unsent_idle_request(claim))
+
+        def wait_out(_sec):
+            clock[0] = first["deadline"] + 1
+        with mock.patch.object(clear, "_run_idle_card_request",
+                               return_value={"accepted": "queued", "reason": reason}):
+            self.assertEqual(clear._idle_due_and_request(seat.key, first["nonce"], wait_out), "skipped")
+        held = clear.read_reservation(seat.key)
+        self.assertEqual((held["status"], held["reason"]), ("skipped", reason))
+        return seat, first
+
+    def test_a_booking_skipped_for_the_persons_screen_is_booked_again_at_the_next_turn_end(self):
+        # 11-20, the person's answer "다시 예약한다": writing in the input box or an open question at
+        # the due time no longer leaves the session untidied until it is prompted again. The next
+        # turn end (here a peer message's turn, which is not the person) books the same interval
+        # again; a skip for any other reason keeps the old rule.
+        cases = (("draft", False, "booking=scheduled"), ("form-open", False, "booking=scheduled"),
+                 ("draft", True, "booking=scheduled"),
+                 ("not-idle-working", False, "booking=skipped reason=not-rearmed"),
+                 ("draft-unknown", False, "booking=skipped reason=not-rearmed"),
+                 ("shell-editor-open", False, "booking=skipped reason=not-rearmed"),
+                 ("screen-unknown", False, "booking=skipped reason=not-rearmed"))
+        for reason, released_claim, expected in cases:
+            clock = [1000.0]
+            with self.subTest(reason=reason, released_claim=released_claim), \
+                 self.iso.patched_environ(self.extra), \
+                 mock.patch.object(clear, "_ensure_helper", return_value=(True, "")), \
+                 mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]):
+                shutil.rmtree(self.iso.xdg_state / "hearting" / "session-tidy", ignore_errors=True)
+                seat, first = self.skip_at_due_for(clock, reason, released_claim=released_claim)
+                clock[0] += 1000
+                st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text=self.PEER)
+                self.assertEqual(self.observe_claude(tokens=600000, event_id="peer-turn", now=clock[0]),
+                                 expected)
+                held = clear.read_reservation(seat.key)
+                if expected == "booking=scheduled":
+                    self.assertNotEqual(held["nonce"], first["nonce"])
+                    self.assertEqual(held["status"], "reserved")
+                    self.assertEqual(held["idle"]["user_generation"], first["idle"]["user_generation"])
+                    self.assertEqual(held["idle"]["due_at"], clock[0] + 3240)
+                else:
+                    self.assertEqual((held["nonce"], held["status"]), (first["nonce"], "skipped"))
+
+    def test_cancel_ends_an_idle_booking_and_a_turn_that_is_not_the_person_does_not_book_again(self):
+        clock = [1000.0]
+        with self.iso.patched_environ(self.extra), \
+             mock.patch.object(clear, "_ensure_helper", return_value=(True, "")), \
+             mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]):
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text="start work")
+            self.assertEqual(self.observe_claude(tokens=600000), "booking=scheduled")
+            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-A")
+            first = clear.read_reservation(seat.key)
+            self.assertEqual(clear.cancel_booking(st.session_seat(seat, "claude", "sid-A")), "cancel=booking")
+            held = clear.read_reservation(seat.key)
+            self.assertEqual((held["status"], held["reason"]), ("cancelled", "explicit-cancelled"))
+            self.assertEqual(held["cancelled"]["identity"], first["idle"]["identity"])
+            clock[0] = first["idle"]["due_at"] + 1
+            with mock.patch.object(clear, "_run_idle_card_request",
+                                   side_effect=AssertionError("card request after cancel")):
+                self.assertEqual(clear._idle_due_and_request(seat.key, first["nonce"], lambda _s: None),
+                                 "superseded")
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text=self.PEER)
+            self.assertEqual(self.observe_claude(tokens=600000, event_id="peer-turn", now=clock[0]),
+                             "booking=skipped reason=not-rearmed")
 
     def test_route_free_session_keeps_the_normal_idle_window(self):
         from tools.fleet import collectors

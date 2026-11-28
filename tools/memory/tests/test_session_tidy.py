@@ -5201,6 +5201,132 @@ class ContinueHelperTest(TidyCase):
             self.assertEqual(clear.validate_request(path, req["nonce"]), (None, "superseded"))  # no second clear
 
 
+    # --- the card already reached the session: no "type the continue" line (11-16, 11-21) ---
+
+    NOTICE_TURN = ("<task-notification>\n<task-id>bg-1</task-id>\n<status>completed</status>\n"
+                   "<summary>Background command completed</summary>\n</task-notification>")
+
+    def compact_then(self, seat):
+        """The booked compaction's own hook (it starts the session's new card epoch)."""
+        with self.iso.patched_environ(self.extra):
+            st.run_hook("claude", "compact", "sid-A", cwd=str(self.cwd), phase="after",
+                        compact_summary="요약", compact_context={"trigger": "manual"})
+
+    def notice_turn_takes_the_card(self, seat):
+        shown = []
+        with self.iso.patched_environ(self.extra):
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text=self.NOTICE_TURN,
+                        emit=shown.append)
+            self.assertEqual(clear.continue_card_reason(self.booking(seat)), "card-taken")
+        self.assertIn("표식 쓰기", "".join(shown))            # the card rode the notice's turn
+
+    def test_a_continue_left_waiting_after_a_notice_turn_took_the_card_ends_without_the_type_it_line(self):
+        # 11-21 (v4.66.1): the card came with the first notice after the compaction, the continue
+        # waited (`peer-delivery-already-claimed`), and 15 minutes later the person was told to type
+        # 이어서해 although the session had already resumed with the card. Only a card still waiting
+        # gets that line.
+        held_ref = {"continued": "queued", "reason": "peer-delivery-already-claimed", "transfer_ref": "b" * 32}
+        for taken in (True, False):
+            with self.subTest(card_taken=taken):
+                self.calls = []
+                seat, req = self.booked()
+                self.assertEqual(self.run_helper(seat, req, cont=held_ref), "cleared")
+                self.assertEqual(self.booking(seat)["continued"]["state"], "pending")
+                self.compact_then(seat)
+                if taken:
+                    self.notice_turn_takes_the_card(seat)
+                self.expire(seat, continued=True)
+                with self.iso.patched_environ(self.extra):       # the next hook's one ask
+                    self.assertEqual(clear._continue(seat.key, req["nonce"],
+                                                     lambda *_a: self.fail("asked past the window")),
+                                     "cleared")
+                held = self.booking(seat)["continued"]
+                self.assertEqual((held["state"], held["reason"]), ("skipped", "expired"))
+                if taken:
+                    self.assertEqual(self.notices(seat), [])
+                else:
+                    self.assertEqual(len(self.notices(seat)), 1)
+                    self.assertIn("예약 시간", self.notices(seat)[0])
+                    self.assertIn("이어서해", self.notices(seat)[0])
+
+    def test_an_unconfirmed_continue_whose_turn_took_the_card_leaves_no_line(self):
+        seat, req = self.booked()
+
+        def typed_and_taken(_n):
+            self.compact_then(seat)
+            self.notice_turn_takes_the_card(seat)
+            return {"continued": "unverified", "reason": "submission-not-observed"}
+        self.assertEqual(self.run_helper(seat, req, cont=typed_and_taken), "cleared")
+        self.assertEqual(self.booking(seat)["continued"]["state"], "unverified")
+        self.assertEqual(self.notices(seat), [])
+
+    # --- `session_tidy.py cancel` (취소): stop what the booking would still type, write no card ---
+
+    def cancel_cli(self):
+        result = self.cli("cancel", "--harness", "claude", "--session-id", "sid-A", extra=self.extra)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.strip().splitlines()
+        return lines[0], (lines[1] if len(lines) > 1 else "")
+
+    def card_generation(self, seat):
+        with self.iso.patched_environ(self.extra):
+            return st.read_latest_card(st.session_seat(seat, "claude", "sid-A"))["generation"]
+
+    def test_cancel_stops_a_compact_not_typed_yet_and_writes_no_card(self):
+        seat, req = self.booked()
+        generation = self.card_generation(seat)
+        line, say = self.cancel_cli()
+        self.assertEqual(line, "cancel=booking")
+        self.assertEqual(say, "say=정리 예약을 취소했습니다. 이 창에 /compact를 입력하지 않습니다.")
+        held = self.booking(seat)
+        self.assertEqual((held["status"], held["reason"]), ("cancelled", "explicit-cancelled"))
+        self.assertEqual(self.card_generation(seat), generation)
+        self.assertEqual(self.run_helper(seat, req), "superseded")      # its helper ends by itself
+        self.assertEqual(self.calls, [])                                 # nothing typed
+        self.assertEqual(self.notices(seat), [])
+        self.assertEqual(self.cancel_cli(), ("cancel=none", "say=이 창에 취소할 정리 예약이 없습니다."))
+
+    def test_cancel_after_the_compact_was_typed_types_nothing_more(self):
+        seat, req = self.booked()
+        cancelled = []
+
+        def cancel_while_compacting(_sec):
+            if not cancelled:
+                cancelled.append(self.cancel_cli())
+                self.compact_then(seat)
+        with self.iso.patched_environ(self.extra):
+            outcome = clear.run_helper(seat.key, req["nonce"], wait=lambda *_a: "idle",
+                                       steward=self.compact_steward,
+                                       continuer=lambda *a: self.calls.append("continue") or {"continued": "true"},
+                                       sleep=cancel_while_compacting)
+        self.assertEqual(outcome, "superseded")
+        self.assertEqual(cancelled[0][0], "cancel=booking typed=compact")
+        self.assertIn("이미 입력한 /compact는 되돌릴 수 없지만", cancelled[0][1])
+        self.assertEqual(self.calls, [])                                 # no continue after it
+        self.assertEqual(self.booking(seat)["status"], "cancelled")
+
+    def test_cancel_after_the_compaction_stops_its_continue_quietly(self):
+        for verdict, line, say in (
+                ({"continued": "queued", "reason": "awaiting-native-receiver"}, "cancel=continue",
+                 "say=압축 뒤 이어서해 입력을 취소했습니다. 이 창에 아무것도 입력하지 않습니다."),
+                ({"continued": "queued", "reason": "peer-delivery-already-claimed", "transfer_ref": "c" * 32},
+                 "cancel=continue handed=native",
+                 "say=압축 뒤 이어서해를 더 입력하지 않습니다. 이미 세션에 넘긴 이어서해는 거둘 수 없어 "
+                 "다음 차례에 함께 갈 수 있습니다.")):
+            with self.subTest(line=line):
+                self.calls = []
+                seat, req = self.booked()
+                self.run_helper(seat, req, cont=verdict)
+                self.assertEqual(self.booking(seat)["continued"]["state"], "pending")
+                self.assertEqual(self.cancel_cli(), (line, say))
+                held = self.booking(seat)["continued"]
+                self.assertEqual((held["state"], held["reason"]), ("skipped", "explicit-cancelled"))
+                with self.iso.patched_environ(self.extra):
+                    self.assertEqual(clear._continue(seat.key, req["nonce"],
+                                                     lambda *_a: self.fail("continue after cancel")), "cleared")
+                self.assertEqual(self.notices(seat), [])
+
+
 class BackgroundAgentCompactTest(TidyCase):
     """A Claude window whose native background agents still run is compacted, never cleared."""
 

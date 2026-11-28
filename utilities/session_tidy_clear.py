@@ -121,7 +121,14 @@ NO_CARD_REASONS = frozenset({"card-taken", "idle-card-not-accepted"})
 # Continue skips the person caused (or chose) themselves, or that another automatic turn of the
 # same session made unnecessary by taking the card first: no result line for these.
 CONTINUE_QUIET = frozenset({"new-input", "draft", "card-changed", "handed-off", "no-card", "superseded", "off",
-                            "card-taken"})
+                            "card-taken", "explicit-cancelled"})
+# Idle skips that spend no request and leave the user-work interval open: an open registered route,
+# or the person's own screen at the due time (writing in the input box, an open question or
+# selection form). The session's next turn end books again; the person chose this for those two
+# screen reasons on 11-20 ("다시 예약한다"). Every send still passes the same checks, so the draft
+# and the question stay as they are. A box that cannot be read and the shell's own screens keep
+# the earlier rule.
+IDLE_REBOOK_REASONS = frozenset({"route-active", "route-observation-unavailable", "draft", "form-open"})
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +329,42 @@ def cancel(seat: "st.Seat") -> None:
             _write_reservation(req)
         else:
             _remove_reservation(seat.key)
+
+
+def cancel_booking(seat: "st.Seat") -> str:
+    """The tidy command's ``cancel``: stop what this window's booking would still type; no card is
+    written and no memory work is queued. The ``cancel=`` words ``session_tidy.py cancel`` prints:
+
+    ``cancel=booking``                a booked /compact not typed yet: it is not typed;
+    ``cancel=booking typed=compact``  the /compact was already typed and cannot be taken back,
+                                      but nothing is typed after it (no second /compact, no continue);
+    ``cancel=continue``               the compaction was confirmed: its continue is not typed;
+    ``cancel=continue handed=native`` as above, but a continue already handed to the session's own
+                                      carrier (a Codex queue, OpenCode's idle plugin, a Claude prompt
+                                      hook) cannot be taken back and may still arrive with its next turn;
+    ``cancel=none reason=sending``    the continue is being typed right now;
+    ``cancel=none``                   nothing of this window's booking is left to type.
+
+    The booking stays on file as ``cancelled`` (an idle booking keeps its event tombstone), so its
+    helper and the steward's claim, which recheck the booking under the same lock, end by themselves.
+    """
+    with st.seat_lock(seat.key):
+        req = read_reservation(seat.key)
+        if req and req.get("status") == "reserved":
+            claim = req.get("clear_claim") if isinstance(req.get("clear_claim"), dict) else {}
+            now = st.now_epoch()
+            req.update(status="cancelled", reason="explicit-cancelled", finished=now)
+            req["cancelled"] = {"at": now, "identity": (req.get("idle") or {}).get("identity")
+                                or req.get("event_identity") or (req.get("compact") or {}).get("identity")}
+            _write_reservation(req)
+            return "cancel=booking typed=compact" if claim.get("state") == "sending" else "cancel=booking"
+    held = (req or {}).get("continued") if isinstance((req or {}).get("continued"), dict) else {}
+    if not req or req.get("status") != "cleared" or held.get("state") not in ("pending", "sending"):
+        return "cancel=none"
+    if held.get("state") == "pending" and _finish_continue(seat.key, str(req.get("nonce") or ""),
+                                                           "skipped", "explicit-cancelled"):
+        return "cancel=continue handed=native" if held.get("transfer_ref") else "cancel=continue"
+    return "cancel=none reason=sending"
 
 
 def _proc_start(pid: int) -> str:
@@ -596,9 +639,14 @@ def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provi
             existing.update(idle=old_idle, status="cancelled", reason="new-activity", finished=now)
             _write_reservation(existing)
             return "booking=skipped reason=not-rearmed"
-        sent = [r for r in st._read_ledger_lines(seat) if r.get("event") == "tidy-claim"
-                and r.get("harness") == harness and r.get("sid") == sid and r.get("origin") == "idle"
-                and r.get("state") not in ("released", "superseded")
+        # A claim's rows are appended in order; its last row says whether the request went out
+        # (a claim released before the send leaves its earlier ``preparing``/``sending`` row).
+        claims = {}
+        for index, r in enumerate(st._read_ledger_lines(seat)):
+            if (r.get("event") == "tidy-claim" and r.get("harness") == harness and r.get("sid") == sid
+                    and r.get("origin") == "idle"):
+                claims[str(r.get("claim_id") or "") or ("row", index)] = r
+        sent = [r for r in claims.values() if r.get("state") not in ("released", "superseded")
                 and int(r.get("source_seq", r.get("sent_seq", -1))) >= generation]
         if sent:
             return "booking=skipped reason=not-rearmed"
@@ -641,7 +689,7 @@ def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provi
                 if (existing and existing.get("origin") == "idle"
                         and existing.get("harness") == harness and existing.get("sid") == sid
                         and generation <= int((existing.get("idle") or {}).get("user_generation", 0))
-                        and existing.get("reason") not in ("route-active", "route-observation-unavailable")):
+                        and existing.get("reason") not in IDLE_REBOOK_REASONS):
                     return "booking=skipped reason=not-rearmed"
                 card = st.read_latest_card(seat)
                 card_generation = int(card.get("generation", 0) or 0) if card else 0
@@ -2364,6 +2412,14 @@ def _finish_continue(seat_key: str, nonce: str, outcome: str, reason: str = "", 
                                  target_sid=str(req.get("new_session") or ""))
         _write_reservation(req)
     if outcome != "true" and not (outcome == "skipped" and reason in CONTINUE_QUIET):
+        taken = None
+        with contextlib.suppress(Exception):
+            taken = continue_card_reason(req)
+        if taken:
+            # The card already reached a turn of this session (a notice or result turn took it
+            # first, or the continue's own turn did): it resumed with it, so a line asking the
+            # person to type the continue would be wrong. Only a card still waiting gets one.
+            return True
         with contextlib.suppress(BaseException):
             if req.get("origin") == "idle" and held.get("kind") == "status-only":
                 notice = st._ui_translator()("tidy.continue.status_unverified")
