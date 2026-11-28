@@ -184,7 +184,7 @@ A_POPUP_60 = """\
 │      그림 옆에 이름을 붙입니다.                          │
 │ ▶ 2  관찰 기록                                           │
 │      잎의 색과 모양을 먼저 적습니다. 같은 종도 어디서 본 │
-│       것인지 구분할 수 있습니다.                         │
+│      것인지 구분할 수 있습니다.                          │
 │   3  이름만                                              │
 │   4  수정                                                │
 │      원하는 배열을 답에 적습니다.                        │
@@ -327,7 +327,7 @@ EDIT_POPUP = """\
 │      그림 옆에 이름을 붙입니다.                          │
 │   2  관찰 기록                                           │
 │      잎의 색과 모양을 먼저 적습니다. 같은 종도 어디서 본 │
-│       것인지 구분할 수 있습니다.                         │
+│      것인지 구분할 수 있습니다.                          │
 │   3  이름만                                              │
 │ ▶ 4  수정                                                │
 │      원하는 배열을 답에 적습니다.                        │
@@ -510,11 +510,18 @@ class RecordAndRedirect(Base):
             drawn.add(self.text(popup(self.native(harness), cols=64, keys=[DOWN])))
         self.assertEqual(drawn, {A_POPUP_60})
 
-    def test_several_questions_multi_select_or_a_preview_keep_the_listing_in_the_text(self):
+    def test_a_multi_select_or_a_preview_keeps_the_listing_in_the_text_and_several_are_one_each(self):
         many = {"questions": [{"question": QUESTION, "options": [{"label": l, "description": d} for l, d in OPTIONS]},
                               {"question": "두 번째?", "options": [{"label": "예"}, {"label": "아니요"}]}]}
-        cases = (("several", many),
-                 ("multi", {"questions": [{"question": QUESTION, "multiSelect": True,
+        # 11-28 (piece 3b, items): several questions are one question each, so each keeps its choices
+        reason = redirect.redirect("claude", {"session_id": SID, "tool_name": "AskUserQuestion", "tool_input": many})
+        first, second = (self.envelope("claude", found)["detail"]["questions"][0]
+                         for found in re.findall(r"S4:[0-9a-f]{64}", reason))
+        self.assertEqual((first["question"], first["choices"], first["recommended"]),
+                         (QUESTION, ["그림과 이름", "관찰 기록", "이름만", "수정"], 0))
+        self.assertEqual(first["choice_descriptions"][OPTIONS[1][0]], OPTIONS[1][1])
+        self.assertEqual((second["question"], second["choices"]), ("두 번째?", ["예", "아니요"]))
+        cases = (("multi", {"questions": [{"question": QUESTION, "multiSelect": True,
                                            "options": [{"label": l, "description": d} for l, d in OPTIONS]}]}),
                  ("preview", {"questions": [{"question": QUESTION, "options": [
                      {"label": l, "description": d, **({"preview": "견본 그림"} if not n else {})}

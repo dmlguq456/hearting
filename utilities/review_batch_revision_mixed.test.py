@@ -25,5 +25,8 @@ class CurrentDesignPeerSelection(CurrentDesignPeerSelectionTest):
     def test_replacement_owner_starts_only_primary_and_preserves_original_fail_peer(self):
         self._case_test_current_owner_closure_peer_precedes_round_admission(replacement_owner=True)
 
+    def test_a_dead_primary_beside_a_current_owner_closure_keeps_the_design_binding_refusal(self):
+        self._case_test_current_owner_closure_peer_precedes_round_admission(dead_primary=True)
+
 if __name__ == "__main__":
     unittest.main()

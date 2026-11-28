@@ -150,7 +150,7 @@ created: {YYYY-MM-DD}
      review raises the `intensity` to `standard`, not the shape: a `solo` leg
      at `standard` gets one independent review in the same route where its kind
      declares one (code does). Important or risk-bearing one-pass work raises it
-     further (`strong`+: more review legs) and stays `solo` where its kind declares one. Where the kind declares no one-shot review, work
+     further (`strong`+: more review legs and an independent test) and stays `solo` where its kind declares one. Where the kind declares no one-shot review, work
      that needs an independent review opens `staged`.
    - `multi-stage` → `staged`: the work does not fit one session — separable
      durable stages, several modules or adapters, a migration, or a direction

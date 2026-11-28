@@ -4131,6 +4131,7 @@ def cmd_watch_run(args):
     steward_pidfd = None
     wake_read = wake_write = None
     previous_usr1 = None
+    previous_wakeup = None
     wait_proc = None
     wait_pid = wait_start = None
     wait_log = paths.log
@@ -4147,6 +4148,13 @@ def cmd_watch_run(args):
         global _WATCH_WAKE_FD
         _WATCH_WAKE_FD = wake_write
         previous_usr1 = signal.signal(signal.SIGUSR1, _watch_wakeup_signal)
+        # Write the signal number from C as it arrives: a signal just before
+        # `select` cannot be left as pending bookkeeping with a lost pipe write.
+        previous_wakeup = None
+        try:
+            previous_wakeup = signal.set_wakeup_fd(wake_write)
+        except (ValueError, OSError):
+            pass
         # The parent blocks SIGUSR1 across spawn, so a retirement arriving
         # before this handler exists stays pending and wakes us after install.
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGUSR1})
@@ -4579,6 +4587,9 @@ def cmd_watch_run(args):
         })
         os._exit(0)
     finally:
+        if previous_wakeup is not None:
+            with contextlib.suppress(ValueError, OSError):
+                signal.set_wakeup_fd(previous_wakeup)
         for fd in (wait_pidfd, target_pidfd, steward_pidfd, wake_read, wake_write):
             if fd is not None:
                 with contextlib.suppress(OSError):

@@ -475,7 +475,10 @@ Schema v4 may also define an optional top-level `worker_account` mapping for
 `claude`, `codex`, and `opencode`. It selects only the worker's authentication
 source: a Claude config directory, a Codex home for `auth.json`, or an OpenCode
 V1 `XDG_DATA_HOME` for `opencode/auth.json`. Relative paths resolve from the
-launch cwd and `~` resolves from that launch's `HOME`. An omitted harness key
+launch cwd and `~` resolves from that launch's `HOME`. Quote a literal path
+that contains characters the narrow YAML subset reads specially (`{`, `}`,
+`[`, `]`, `: `) so it is read as one string; an unquoted `{}` reads as an
+empty mapping. An omitted harness key
 keeps the existing source. Model affinity and allocation remain independent.
 Worker settings, permissions, hooks, models, and plugins continue to come from
 the parent config source. Credential contents are not copied or edited; Codex
