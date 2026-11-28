@@ -18,7 +18,8 @@ wait (`launch-capacity-wait`, `report-capacity-wait`) is a pause too: nothing
 was created or failed, and the refusal names when a slot frees (`retry_at`).
 The record runs `start` then instead of handing the parent a capacity report.
 Inside an automatic resume no parent is waiting, so the first refusal of that
-`start` arms the next record the same way.
+`start` arms the next record the same way. A `start` no parent waits on sets
+`AGENT_CAPACITY_RESUME_CHAIN=0`: set means no parent; the value counts resumes.
 
 A BLOCKED owner whose answer another session sent (`answer-awaiting-parent`) is
 paused the same way: only the route's parent launches its continuation, so the

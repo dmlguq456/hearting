@@ -62,9 +62,15 @@ _BUILTIN_GP_DESCRIPTION = (
     "tries use this agent to perform the search for you."
 )
 
+# A person's session's call of a catalog agent starts a unit route (core/OPERATIONS.md §5.10c); the
+# same definition serves a registered worker, whose call runs natively, so the line names the session.
+_UNIT_ROUTE = (" In a person's session the call starts a read-only Hearting unit route "
+               "(general/explore, {depth}) when that is certain, and otherwise runs natively.")
+
 CATALOG_AGENTS = {
     "balanced": {
-        "description": "Execute an approved decision across multiple steps on the balanced budget.",
+        "description": ("Execute an approved decision across multiple steps on the balanced budget."
+                        + _UNIT_ROUTE.format(depth="balanced")),
         "body": """Carry out the approved execution scope and cite its decision handoff.
 Stop and return new important choices or uncertainty to the judgment owner.
 Do not make architecture or policy decisions, widen scope, or spawn further agents.
@@ -72,7 +78,7 @@ Report completed steps, verification and remaining gaps.
 """,
     },
     "general-purpose": {
-        "description": _BUILTIN_GP_DESCRIPTION,
+        "description": _BUILTIN_GP_DESCRIPTION + _UNIT_ROUTE.format(depth="balanced-deep"),
         "body": _BUILTIN_GP_PROMPT,
     },
     "light": {
@@ -80,7 +86,7 @@ Report completed steps, verification and remaining gaps.
             "Breadth fan-out subagent on the portable light budget. Default for "
             "parallel sweeps, audits, comparisons, and routine searches where "
             "several legs run at once. Prefer deep for a single hardest-leg "
-            "investigation."
+            "investigation." + _UNIT_ROUTE.format(depth="light")
         ),
         "body": _BUILTIN_GP_PROMPT + """
 
@@ -95,7 +101,7 @@ You run as one leg of a breadth fan-out on a light execution budget:
         "description": (
             "Deep investigation subagent on the portable deep budget. Single "
             "hardest-leg analysis: root cause, architecture, subtle correctness. "
-            "Prefer light for breadth fan-outs."
+            "Prefer light for breadth fan-outs." + _UNIT_ROUTE.format(depth="deep")
         ),
         "body": _BUILTIN_GP_PROMPT + """
 

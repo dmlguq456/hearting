@@ -61,6 +61,18 @@ class NestedEligibilityTest(unittest.TestCase):
              mock.patch.object(N.subprocess, "run", return_value=result):
             self.assertEqual(N.auth_check("codex"), (True, ""))
 
+    def test_codex_auth_accepts_an_api_key_status_line(self):
+        # Codex 0.171.0 prints an API key login this way (measured in an isolated home).
+        result = mock.Mock(returncode=0, stdout="API key configured - sk-fixt***-key\n"
+                           "Authentication is checked when you send a request.\n", stderr="")
+        with mock.patch.object(N.shutil, "which", return_value="/bin/codex"), \
+             mock.patch.object(N.subprocess, "run", return_value=result):
+            self.assertEqual(N.auth_check("codex"), (True, ""))
+        result = mock.Mock(returncode=0, stdout="Not logged in\n", stderr="")
+        with mock.patch.object(N.shutil, "which", return_value="/bin/codex"), \
+             mock.patch.object(N.subprocess, "run", return_value=result):
+            self.assertEqual(N.auth_check("codex"), (False, "auth-unavailable"))
+
     def test_codex_auth_still_requires_zero_exit_with_valid_status_line(self):
         result = mock.Mock(
             returncode=1,
