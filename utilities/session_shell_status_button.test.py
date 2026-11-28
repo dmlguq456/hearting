@@ -110,23 +110,21 @@ for(const [w,want] of [[120,/│ hearting │ Opus 5\.5 │ ctx 46% +STATUS \+2 
 
     def test_the_waiting_blink_moves_only_the_waiting_red_cells(self):
         self.node(r"""
-const here={count:1,label:'QUESTIONS',answerable:true,
- rows:[[p('◑ ',{foreground:217}),p('로그를 어느 쪽에 남길까요?',{foreground:253})],
-  [p('  ',styles.dim),p('1 ',styles.dim),p('파일',{foreground:253}),p(' · ',styles.dim),p('2 ',styles.dim),p('표준 출력',{foreground:253})]],
- one:[[p('◑ ',{foreground:217}),p('로그를 어느 쪽에 남길까요?',{foreground:253})]],line:[p('로그를 어느 쪽에 남길까요?')],choices:2};
-const there={...here,answerable:false,rows:[[p('◑ '),p('다른 세션의 질문')],[p('  '),p('그 창에서 답',styles.dim)]],choices:0};
+// (11-28: each waiting question one row, `◑ 답 대기 · <its first line>`; one not answered here `◑ <where> · …`.)
+const here={count:1,label:'QUESTIONS',answerable:true,waits:[{word:'답 대기',answerable:true,open:'S4:h@r',line:[p('로그를 어느 쪽에 남길까요?',{foreground:253})]}]};
+const there={count:1,label:'QUESTIONS',answerable:false,waits:[{word:'그 창에서 답',answerable:false,line:[p('다른 세션의 질문')]}]};
 const sent=()=>[[p('✓ 답 보냄',{foreground:150}),p(' · ',styles.dim),p('2 표준 출력',{foreground:253})]];
 const model={repo_side:[p('hearting')],wait:'◑답 대기 1',session_title:'점멸',route_label:'route 1',route_count:1,route_total:1,
  routes:[{id:'a',title:'휠 입력 시험',kind:'dead',state:'dead',shape:'one-shot-owner',stages:[],elapsed:'3m',paint:{glyph:p('✕')}}]};
 const red=(v,t)=>{const at=v.motion.at(t);return v.motion.cells.map((c,i)=>c.blink?at[i].foreground:null).filter(x=>x!==null);};
 // (a) A question to answer here: the lines of its box (11-16: the person's "붉은 바운더리") and nothing else move, the
-// letters inside it stand still (the first row, the choices' words, the action, the sent answer); 217 on the even
+// letters inside it stand still (the wait's row, the action, the sent answer); 217 on the even
 // seconds, 95 on the odd; the panel's frame, the route box and the head's state glyph never take part.
 for(const state of ['idle','blocked']){
  const v=render({q:here,sent,model,state,since:0,height:30}),rows=v.rows.map(str);
  const blink=v.motion.cells.filter(c=>c.blink),text=blink.map(c=>c.ch).join('');
- // The top line `╭─ … ─╮` (its name and count stand still), a wall pair for each of the four rows inside, the bottom line.
- assert(/^╭─+╮│{8}╰─+╯$/.test(text),state+' '+text);
+ // The top line `╭─ … ─╮` (its name and count stand still), a wall pair for each of the three rows inside, the bottom line.
+ assert(/^╭─+╮│{6}╰─+╯$/.test(text),state+' '+text);
  // Each blink cell stands where the row shows its glyph.
  for(const c of blink){let x=0,found=false;for(const part of v.rows[c.row])for(const ch of part.text){if(x===c.col&&ch===c.ch)found=true;x+=cells(ch);}
   assert(found,JSON.stringify(c));}

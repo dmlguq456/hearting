@@ -705,12 +705,13 @@ class Drawn(Base):
     def test_the_card_puts_each_choices_words_under_it(self):
         self.assertEqual(card(OPTIONS), A_CARD)
 
-    def test_the_sessions_summary_is_the_question_and_the_names(self):
+    def test_the_sessions_summary_is_the_question_alone(self):
+        # 11-28 (the person: "선지는 미리 보기를 날리고"): the panel's row of the question is its first line; the
+        # choices' names and words are the popup's alone.
         (item,) = board_items(self.native(), popup=60, panel=66)
-        brief = item["questions"][0]["display"]["brief"]
-        self.assertEqual(["".join(p["text"] for p in row) for row in brief],
-                         ["◑ 견본 도감의 첫 장을 어떻게 구성할까요?",
-                          "  1 그림과 이름 (recommended) · 2 관찰 기록 · 3 이름만 · +1"])
+        display = item["questions"][0]["display"]
+        self.assertEqual("".join(p["text"] for p in display["brief_line"]), "견본 도감의 첫 장을 어떻게 구성할까요?")
+        self.assertNotIn("brief", display)
 
 
 class Edges(Base):

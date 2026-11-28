@@ -160,11 +160,11 @@ class QuestionSplitTest(unittest.TestCase):
         # A wrapped choice's next rows are indented by the same three cells, in no color of their own.
         wrapped = [line[0] for line in view["options"] if not line[0]["text"].strip()]
         self.assertTrue(wrapped and all(w["text"] == "   " and w["key"] == "dim" for w in wrapped), wrapped)
-        # The panel's one row of choices: its numbers wear the rose too (its single space is kept: lines and places stay).
-        brief = presented()[2]["questions"][0]["display"]["brief"]
-        parts = [part for line in brief for part in line]
-        self.assertEqual([(p["text"], p["key"]) for p in parts if p["text"].strip() in ("1", "2")],
-                         [("1 ", "g_blocked"), ("2 ", "g_blocked")])
+        # 11-28 (the person: "선지는 미리 보기를 날리고"): the panel shows no row of choices any more; its row of the
+        # question is the question's first line alone (the numbers are the popup's).
+        display = presented()[2]["questions"][0]["display"]
+        self.assertNotIn("brief", display)
+        self.assertFalse(any(p["text"].strip() in ("1", "2") for p in display["brief_line"]))
 
     # -- the popup ----------------------------------------------------------------------------------------------
 

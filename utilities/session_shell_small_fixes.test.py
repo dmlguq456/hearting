@@ -133,50 +133,51 @@ const p=(text,extra={})=>({text,...extra});
 const styles={dim:{foreground:-1,dim:true},loc_repo:{foreground:253},g_blocked:{foreground:217},lvl_g:{foreground:150}};
 const model={tag:'[e9]',repo:[p('hearting/')],selected:[p('Opus 5.5')],wait:'◑답 대기 1',styles,labels:{answer_action:'↵ 답하기 · Ctrl+]'},
  session_title:'패널 손질',now:'그리는 중',route_label:'route 1',route_count:0};
-const choice=(first,n)=>({count:1,label:'QUESTIONS',answerable:true,
- rows:[[p('◑ ',{foreground:217}),p('로그를 어느 쪽에 남길까요?',{foreground:253})],
-  [p('  ',styles.dim),p('1 ',styles.dim),p(first,{foreground:253}),...[...Array(n-1)].flatMap((_,i)=>[p(' · ',styles.dim),p((i+2)+' ',styles.dim),p('둘 '+(i+2),{foreground:253})])]],
- one:[[p('◑ ',{foreground:217}),p('로그를 어느 쪽에 남길까요?',{foreground:253})]],line:[p('로그를 어느 쪽에 남길까요?',{foreground:253})],choices:n});
+// (11-28: each waiting question one row, `◑ 답 대기 · <its first line>`; the first of them is `first`, the rest `둘 2`, `둘 3`, ….)
+const wait=(first,n)=>({count:n,label:'QUESTIONS',answerable:true,
+ waits:[first,...[...Array(n-1)].map((_,i)=>'둘 '+(i+2))].map((x,i)=>({word:'답 대기',answerable:true,open:'S4:c'+i+'@r',line:[p(x,{foreground:253})]}))});
 const paint=(o)=>view.render({width:o.width,height:o.height||30,side:!o.folded,fill:!o.folded,folded:!!o.folded,
  model:{...model,...(o.model||{})},state:'idle',sid:'s',harness:'claude',frame:0,brief:()=>o.q,sent:()=>[],configuration:{},background:''});
 const firsts=['ＡＢＣＤＥＦ (추천)','파일','🙂🙂🙂 emoji label that is long','x'.repeat(80),'a','한글로 아주 긴 첫 선택지의 이름입니다'];
 """
 
-    def test_the_choices_row_always_shows_the_first_choice(self):
-        # Inner width 26 and a first choice `ＡＢＣＤＥＦ (추천)` left only `+3`. The first choice shows (its name cut
-        # with `…`, its number kept) and the rest are counted; never wider than the panel (Korean, full-width,
-        # emoji), heights 5-60 x widths 12-60. (11-15, "그냥 질문은 글자 자체를 붉은 색으로": the row is words in the
-        # answer wait's red on no ground of their own, not chips; the folded strip is one row with `◑답 대기 N` alone.)
+    def test_a_wait_row_keeps_its_word_and_cuts_its_words_first(self):
+        # 11-28 (the person: "선지는 미리 보기를 날리고 … 앞에 답 대기를 붉은 색으로"; it replaces the choices row's test): each
+        # waiting question is one row `◑ 답 대기 · <its first line>`. Short of cells its words are cut (`…`) and the word
+        # stands whole wherever it fits; the last row shown ends in the hidden count; no choices row; never wider than the
+        # panel (Korean, full-width, emoji), heights 5-60 x widths 12-60. The word is the answer wait's red, the words the
+        # body color, on no ground of their own; the folded strip is one row with `◑답 대기 N` alone.
         self.node(self.CHOICE + r"""
 let rows=0;
 for(const first of firsts)for(const n of [1,2,5]){
  for(let h=5;h<=60;h+=1)for(let w=12;w<=60;w++){
-  const v=paint({q:choice(first,n),height:h,width:w}),lines=v.rows.map(str),tag=h+'x'+w+' '+first+' '+n+'\n'+lines.join('\n');
+  const v=paint({q:wait(first,n),height:h,width:w}),lines=v.rows.map(str),tag=h+'x'+w+' '+first+' '+n+'\n'+lines.join('\n');
   assert(lines.length<=h&&lines.every(r=>cells(r)===w),tag);
-  const at=lines.findIndex(r=>r.includes('◑ 로그를'));
+  const at=lines.findIndex(r=>r.includes('◑ 답'));
+  if(at<0)continue;
   // (11-16: with room the section is a thin box, its rows between the box's two walls; short of rows the plain rows.)
-  if(at<0||!/^│ (?:│ )?  (1 |\+\d)/.test(lines[at+1]||''))continue;
-  const row=v.rows[at+1],line=lines[at+1],boxed=/^│ │ /.test(line),text=boxed?line.slice(6,-4):line.slice(4,-2);
-  assert(/^1 /.test(text),'the first choice, its number kept\n'+tag);
+  const line=lines[at],boxed=/^│ │ /.test(line),text=boxed?line.slice(4,-4):line.slice(2,-2),room=w-(boxed?8:4);
+  if(room>=9)assert(text.startsWith('◑ 답 대기'),'the word whole while it fits\n'+tag);
+  if(text.includes(' · '))assert(text.includes(first)||/…(?: +\+\d+)? *$/.test(text),'the words whole or cut with … before the word\n'+tag);
+  assert(!lines.some(r=>/^│ (?:│ )?  1 /.test(r)),'no choices row\n'+tag);
+  const row=v.rows[at];
   assert(row.every(x=>x.background===undefined),'no ground of its own\n'+tag);
-  assert(row.filter(x=>/[^\s·+\d│]/.test(x.text)).every(x=>x.foreground===(boxed?253:174)&&x.dim!==true),'its words in the body color inside the box (11-16), the answer wait\'s red in the plain section\n'+tag);
-  const first1=[...first].slice(0,1).join('');
-  if(w>=(boxed?20:16))assert(text.includes(first1)||first.length<1,'its name starts\n'+tag);
-  assert(text.includes(first)||text.includes('…'),'whole or cut with …\n'+tag);
-  if(n>1&&!text.includes('2 '))assert(/\+\d+/.test(line)||w<18,'the rest counted\n'+tag);
+  const word=row.find(x=>x.text==='◑ 답 대기');if(word)assert(word.role==='accent'&&word.dim!==true,'the word in the answer wait\'s red\n'+tag);
+  const joint=row.findIndex(x=>x.text===' · ');
+  if(joint>=0)assert(row.slice(joint+1).filter(x=>/[^\s│]/.test(x.text)&&!/^\+\d+$/.test(x.text)).every(x=>x.foreground===253&&x.role!=='accent'),'the words in the body color\n'+tag);
   rows++;
  }
 }
 assert(rows>5000,String(rows));
-// The folded strip is one row: `◑답 대기 1` stands, the question's words and choices do not.
+// The folded strip is one row: `◑답 대기 1` stands, the question's words do not.
 for(const first of firsts)for(const n of [1,2,4])for(let w=44;w<=120;w++){
- const v=paint({q:choice(first,n),folded:true,width:w,height:1}),lines=v.rows.map(str);
+ const v=paint({q:wait(first,n),folded:true,width:w,height:1}),lines=v.rows.map(str);
  assert(lines.length===1&&cells(lines[0])===w,w+'\n'+lines.join('\n'));
- assert(lines[0].includes('◑답 대기 1')&&!lines[0].includes('로그를')&&!lines[0].includes(' · 1 ')&&!lines[0].includes('둘 2'),w+'\n'+lines[0]);
+ assert(lines[0].includes('◑답 대기 1')&&!lines[0].includes('답 대기 ·')&&(first.length<4||!lines[0].includes(first.slice(0,4)))&&!lines[0].includes('둘 2'),w+'\n'+lines[0]);
 }
-// The case from the review: inner width 26, `ＡＢＣＤＥＦ (추천)`, three more choices (11-16: the box's walls take four
-// cells more, so the same inner width is a panel 34 wide).
-{const lines=paint({q:choice('ＡＢＣＤＥＦ (추천)',4),width:34}).rows.map(str);assert(lines.some(r=>/^│ │   1 ＡＢＣＤＥＦ.*\+3 +│ │$/.test(r)),lines.join('\n'));}
+// The review's narrow case (inner width 26 in a panel 34 wide): the word whole, the words cut, the third row ending in `+1`.
+{const lines=paint({q:wait('ＡＢＣＤＥＦ (추천)',4),width:34}).rows.map(str);
+ assert(lines.some(r=>/^│ │ ◑ 답 대기 · ＡＢ.*… +│ │$/.test(r))&&lines.some(r=>/^│ │ ◑ 답 대기 · 둘 3 +\+1 │ │$/.test(r)),lines.join('\n'));}
 """)
 
     def test_veil_row_turns_colon_form_sgr_gray_too(self):
@@ -234,7 +235,7 @@ for(const harness of ['claude','codex','opencode'])for(const [name,extra] of [['
  // No title and no NOW: no separate empty row stands under MODEL (11-27: its row ends in the context reading, no CTX row), the next thing
  // (the question's box) stands right under it.
  if(name==='none'){
-  const q={count:1,label:'QUESTIONS',answerable:true,rows:[[p('◑ ',{foreground:217}),p('어느 쪽?',{foreground:253})]],one:[[p('◑ ',{foreground:217}),p('어느 쪽?',{foreground:253})]],line:[p('어느 쪽?',{foreground:253})],choices:0};
+  const q={count:1,label:'QUESTIONS',answerable:true,waits:[{word:'답 대기',answerable:true,open:'S4:n@r',line:[p('어느 쪽?',{foreground:253})]}]};
   const asked=view.render({width:40,height:30,side:true,fill:true,model:{...base,wait:'◑답 대기 1',styles:{...styles,g_blocked:{foreground:217}}},state:'idle',sid:'s',harness,frame:0,brief:()=>q,sent:()=>[],configuration:{},background:''}).rows.map(str);
   const ctx=asked.findIndex(r=>/^│  MODEL .* 46% │$/.test(r));
   assert(ctx>0&&/^│ ╭/.test(asked[ctx+1])&&!asked.some(r=>/^│  CTX /.test(r)),'no separate empty row under MODEL without a title\n'+asked.join('\n'));

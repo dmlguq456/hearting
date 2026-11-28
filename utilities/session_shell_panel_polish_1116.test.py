@@ -58,9 +58,8 @@ function model(o={}){
     memory_items:o.mem===false?[]:[{kind:'decision',age:'10m',text:'접기 단추는 펼침 단추와 같은 자리',tier:'durable',scope:'project'},{kind:'lesson',age:'2h',text:'점멸은 1초 박자로',tier:'working',scope:'global'}],
     tidy_notice:o.tidy||'',tidy_quiet:o.quiet===true};
 }
-const brief=()=>({count:1,answerable:true,choices:2,label:'QUESTIONS',
-  rows:[[t('◑ ','g_blocked'),t('MESSAGES 몇 건까지 보일까요?','loc_repo')],[t('1 ','dim'),t('5건 (추천)','loc_repo'),t(' · ','dim'),t('2 ','dim'),t('3건','loc_repo')]],
-  one:[[t('◑ ','g_blocked'),t('MESSAGES 몇 건까지 보일까요?','loc_repo')]],line:'MESSAGES 몇 건까지 보일까요?'});
+// (11-28: each waiting question one row, `◑ 답 대기 · <its first line>`; no choices row.)
+const brief=()=>({count:1,answerable:true,label:'QUESTIONS',waits:[{word:'답 대기',answerable:true,open:'S4:t@r',line:[t('MESSAGES 몇 건까지 보일까요?','loc_repo')]}]});
 const draw=(o={})=>view.render({width:o.width??50,height:o.height??46,side:o.side??true,model:model(o),state:o.state||'working',harness:'claude',
   frame:o.frame??1000,since:o.since??990,brief:o.question===false?undefined:brief,sent:()=>[],cellWidth:cells,
   configuration:{side_width:50,rule_motion:o.motion||'rule',theme:o.theme||'terminal',position:o.position||'right'},folded:!!o.folded});

@@ -1272,6 +1272,9 @@ def block_labels(editor: int) -> dict:
         "more_page", "more_choices", "sent", "questions", "paste_stalled", "pasting")}
     # A sent answer this window has not taken because its screen is too large to read (host `lastHold`).
     labels["hold_screen_large"] = ui_text("peer.delivery.hold_screen_large")
+    # 11-28: each waiting question's row leads with the folded strip's word (`◑답 대기`, `◑ to answer`).
+    from fleet.session_line import answer_wait_word
+    labels["waiting"] = answer_wait_word()
     if editor < 64:
         # 11-26: a narrow popup keeps `Enter send` and the line-break key while an answer is written: its
         # closing key's word is short enough that the key packing leaves out `Tab next` (then `↑ choices`)

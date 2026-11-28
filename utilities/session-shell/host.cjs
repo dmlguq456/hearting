@@ -1172,7 +1172,8 @@ function followOpen(t){
 function openPopup(name,open='',page=false){
   epoch++;empty=false;actionLines=[];resetTableInput();
   heldStop(name);
-  if(name==='QUESTIONS'){table=null;block.enter();queueDisplay();return;}
+  // (11-28: a press on one row of the panel's question box opens on that row's question, `open`.)
+  if(name==='QUESTIONS'){table=null;block.enter(open);queueDisplay();return;}
   const was=table,pageFirst=name==='ROUTE'&&page===true&&!!open;
   // The routes popup opens with the pressed route unfolded, else the most pressing one.
   if(name==='ROUTE'&&!open)open=String((rankedRoutes()[0]||{}).id||'');
@@ -1946,7 +1947,7 @@ function panelAction(action){
   if(action==='defaults'&&settings){settings.value={...panelView.defaults};previewSettings();return;}
   // 11-15 (popup design E): a press on a section (its head or a row, beside or in the folded strip)
   // opens its popup over the window; nothing opens in place.
-  if(action==='question'){openPopup('QUESTIONS');return;}
+  if(action==='question'||action.startsWith('question:')){openPopup('QUESTIONS',action.slice(9));return;}
   // 11-27: a press on the RESOURCES head opens its rows, or folds them again.
   if(action==='resources'&&!settings){resourcesOpen=!resourcesOpen;queueDisplay();return;}
   if(action.startsWith('popup:')&&!settings){

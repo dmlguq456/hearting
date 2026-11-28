@@ -48,8 +48,8 @@ function model(o={}){
     messages:MSGS.slice(-(o.messages??5)),memory_items:MEMS.slice(0,o.mem??3),status_doc:o.status,
     ...(o.peers?{peers:{groups:[{steward:{tag:'e9',key:'hb_claude',me:true},members:[{tag:'d4',key:'hb_codex'}]}]}}:{})};
 }
-const brief=()=>({count:1,answerable:true,choices:2,label:'QUESTIONS',rows:[[t('◑ ','g_blocked'),t('시험용 질문?','loc_repo')],[t('1 ','dim'),t('가','loc_repo'),t(' · ','dim'),t('2 ','dim'),t('나','loc_repo')]],
-  one:[[t('◑ ','g_blocked'),t('시험용 질문?','loc_repo')]],line:'시험용 질문'});
+// (11-28: each waiting question one row, `◑ 답 대기 · <its first line>`; no choices row.)
+const brief=()=>({count:1,answerable:true,label:'QUESTIONS',waits:[{word:'답 대기',answerable:true,open:'S4:t@r',line:[t('시험용 질문?','loc_repo')]}]});
 const draw=(o={})=>view.render({width:o.width??44,height:o.height??60,side:o.side??true,model:model(o),state:'working',harness:'claude',frame:1000,since:990,
   brief:o.question?brief:undefined,sent:()=>[],cellWidth:cells,configuration:{side_width:o.width??44,rule_motion:'off',theme:'terminal',position:'right'}});
 const lines=v=>v.rows.map(str);
