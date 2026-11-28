@@ -742,10 +742,12 @@ def _queued_for(target: dict) -> int:
 
 
 def _remaining(observation: dict) -> bool:
-    """Whether open work, a user decision or a queued peer request remains for this role."""
+    """Whether open work, a user decision or a request for this role remains.
+
+    A peer request queued for a target is the runtime's delivery, not a next action
+    the steward can take; it no longer keeps the check awake."""
     return bool(observation.get("open_work")) or bool(observation.get("user_decisions")) \
-        or observation.get("pending_messages", 0) > 0 \
-        or any(_queued_for(t) > 0 for t in observation["targets"])
+        or observation.get("pending_messages", 0) > 0
 
 
 def _waiting(target: dict) -> bool:
@@ -820,11 +822,6 @@ def next_actions(observation: dict, waiting_since=None, now: float | None = None
     waiting = sorted((t for t in targets if _waiting(t) and not _queued_for(t)),
                      key=lambda t: waiting_since.get(str(t.get("session_id")), now))
     actions = []
-    for target in targets:
-        owed = _queued_for(target)
-        if owed:
-            actions.append(f"{_label(target['name'])} {owed} peer request(s) queued, not yet "
-                           "delivered → do not resend")
     for target in waiting:
         minutes = int(max(0.0, now - float(waiting_since.get(str(target.get("session_id")), now))) // 60)
         since = f" {minutes} min" if minutes else ""
@@ -872,8 +869,10 @@ def _quiet_signature(observation: dict) -> str:
 def _quiet(observation: dict) -> bool:
     """No live unfinished target: an unchanged state sends no further model turn. Open
     records alone do not repeat; a live unfinished target is checked every interval.
-    Unresolved targets remain visible, but only repeat when positively live."""
-    return not any(t["state"] != "done" and t["liveness"] != "ended"
+    Unresolved targets remain visible, but only repeat when positively live. A target
+    whose only outstanding row is a queued peer request is the runtime's delivery, not a
+    reason to wake the steward."""
+    return not any(t["state"] != "done" and t["liveness"] != "ended" and not _queued_for(t)
                    for t in observation["targets"]
                    if not t.get("unresolved") or t["liveness"] == "live")
 
