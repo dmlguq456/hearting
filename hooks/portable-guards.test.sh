@@ -2669,8 +2669,9 @@ mkdir -p "$TMP/opencode_headless_home/.config/opencode/agents" \
   "$TMP/opencode_headless_home/.config/opencode/plugins"
 ln -s "$ROOT" "$TMP/opencode_headless_home/.config/opencode/hearting"
 ln -s "$ROOT/opencode_setting/opencode-skills/autopilot-code" "$TMP/opencode_headless_home/.config/opencode/skills/autopilot-code"
-# The headless check probes the projected command; no native agent is required
-# (the catalog agents can be withheld by the selected models.conf).
+# A home no activation recorded needs an agent definition the installer links (a
+# selected models.conf that withholds every agent aside).
+ln -s "$ROOT/opencode_setting/opencode-agents/light/light.md" "$TMP/opencode_headless_home/.config/opencode/agents/light.md"
 ln -s "$ROOT/opencode_setting/opencode-commands/autopilot-code.md" "$TMP/opencode_headless_home/.config/opencode/commands/autopilot-code.md"
 ln -s "$ROOT/opencode_setting/opencode-plugins/hearting-guards.js" "$TMP/opencode_headless_home/.config/opencode/plugins/hearting-guards.js"
 # The fixture projects the OpenCode 1.x guard file; the launch generation is pinned
@@ -2691,6 +2692,7 @@ mkdir -p "$TMP/opencode_headless_config_home/.config/opencode/agent" \
   "$TMP/opencode_headless_config_home/.config/opencode/plugins"
 ln -s "$ROOT" "$TMP/opencode_headless_config_home/.config/opencode/hearting"
 # Singular-layout variant (command/ and agent/ folders).
+ln -s "$ROOT/opencode_setting/opencode-agents/light/light.md" "$TMP/opencode_headless_config_home/.config/opencode/agent/light.md"
 ln -s "$ROOT/opencode_setting/opencode-commands/autopilot-code.md" "$TMP/opencode_headless_config_home/.config/opencode/command/autopilot-code.md"
 ln -s "$ROOT/opencode_setting/opencode-plugins/hearting-guards.js" "$TMP/opencode_headless_config_home/.config/opencode/plugins/hearting-guards.js"
 if cli_absent opencode; then

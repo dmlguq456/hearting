@@ -240,7 +240,7 @@ opencode_runtime_projection_check() {
     return 69
   fi
   if ! python3 - "$ROOT" "$harness" "$opencode_home" <<'PY'
-import pathlib, re, sys
+import os, pathlib, re, sys
 sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "tools/install"))
 import projector, runtime_activation
 home = pathlib.Path(sys.argv[3])
@@ -261,16 +261,29 @@ for filename in scan:
     except (OSError, UnicodeError):
         issues.append(f"guard dependency unreadable: {filename}")
 # The agent part of the judgment `runtime status` makes: every agent file the plan for this home
-# expects is in place (a plan whose models.conf withholds every agent expects none).
+# expects is in place and readable, not a broken link (a plan whose models.conf withholds every agent
+# expects none). A home no activation recorded (a source install) needs a readable definition the
+# installer links (in agent/, or the agents/ folder OpenCode also reads), unless its models.conf
+# withholds every agent the same way.
 agents = []
-if state.get("mode"):
-    try:
-        planned = runtime_activation._desired_entries("opencode", state["mode"], pathlib.Path(state["source_root"]),
-                                                      root, state.get("active_revision"), "global")
-        if runtime_activation._entries_healthy([e for e in planned if e["surface"] == "agent"])[0]:
-            agents.append("an agent file the plan expects is missing")
-    except (KeyError, runtime_activation.ActivationError) as exc:
-        agents.append(str(exc))
+try:
+    if state.get("mode"):
+        planned = [e for e in runtime_activation._desired_entries(
+            "opencode", state["mode"], pathlib.Path(state["source_root"]), root, state.get("active_revision"),
+            "global") if e["surface"] == "agent"]
+        if (runtime_activation._entries_healthy(planned)[0]
+                or not all(pathlib.Path(e["dest"]).is_file() for e in planned)):
+            agents.append("an agent file the plan expects is missing or a broken link")
+    else:
+        os.environ["AGENT_HOME"] = str(root)  # the installer's projection from this home's own root
+        if not any((home / folder / pathlib.Path(e["dest"]).name).is_file()
+                   for e in projector.plan(["opencode"])["opencode"] for folder in ("agent", "agents")
+                   if pathlib.Path(e.get("dest", "")).parent == home / "agent"):
+            runtime_activation._native_agent_entries("opencode", root, home)  # the renderer's plan, for the policy
+            if not runtime_activation._agents_withheld_by_policy("opencode", root, home):
+                agents.append("no agent definition where the installer links them")
+except (KeyError, runtime_activation.ActivationError) as exc:
+    agents.append(str(exc))
 print(f"guard_layout={layout['detail']}")
 if issues or agents:
     print("check=failed\nreason=" + ("opencode-guard-projection-invalid" if issues else "opencode-native-agents-missing"))

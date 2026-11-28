@@ -367,6 +367,24 @@ class DefinitionTest(Homes):
         self.write(self.codex_home / "agents/other.toml", 'name = "memory\\u002Dscout"\ndescription = "m"\n')
         self.assertFalse(self.check("codex", "memory-scout"))             # Codex reads its TOML as TOML
 
+    def test_a_definition_behind_a_utf8_bom_is_the_user_s_definition(self):
+        # Claude reads past a leading BOM (review R2 🔴4): the escaped name behind it is the user's pick.
+        self.register("claude")
+        payload = {**claude(subagent_type="memory-scout"), "cwd": str(self.project)}
+        data = b'\xef\xbb\xbf---\nname: "memory\\x2dscout"\ndescription: Isolated definition.\n---\n'
+        for folder in (self.claude_home / "agents", self.project / ".claude/agents",
+                       self.tmp / "managed/.claude/agents"):
+            with self.subTest(folder=str(folder.relative_to(self.tmp))):
+                folder.mkdir(parents=True, exist_ok=True)
+                (folder / "different-filename.md").write_bytes(data)
+                self.assertFalse(self.check("claude", "memory-scout"))
+                with mock.patch.object(redirect, "start") as start, \
+                        mock.patch.object(session_identity, "known_sub_session_root", return_value=SID):
+                    self.assertIsNone(redirect.redirect("claude", payload))
+                start.assert_not_called()
+                (folder / "different-filename.md").unlink()
+        self.assertTrue(self.check("claude", "memory-scout"))
+
     def test_a_definition_that_cannot_be_read_leaves_the_call_native(self):
         # Not knowing whether a file defines the name is not knowing that nothing does (R37).
         self.register("claude")

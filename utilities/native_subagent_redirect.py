@@ -185,7 +185,7 @@ def _gives(harness: str, path: Path, name: str) -> bool:
     anywhere in that frontmatter. A file that cannot be read or parsed raises: not certain, so native."""
     if _is_shipped(harness, path, path.stem):
         return path.stem == name
-    text = path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8" if harness == "codex" else "utf-8-sig")  # Claude reads past a BOM
     if harness == "codex":
         found = tomllib.loads(text).get("name", path.stem)
         return isinstance(found, str) and found.strip() == name

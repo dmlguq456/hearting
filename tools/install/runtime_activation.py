@@ -918,14 +918,16 @@ def _run_native_agent_plan(
 
 def _agents_withheld_by_policy(runtime: str, active_root: Path, home: Path) -> bool:
     """The renderer's plan for this home withheld every agent its selected models.conf lists (a model the
-    file makes main-session-only). A plan missing a listed agent's row does not count."""
+    file makes main-session-only). A plan missing a listed agent's row, or a catalog that lists no valid
+    name or has a malformed entry, does not count."""
     plan = _NATIVE_AGENT_PLANS.get(_native_agent_plan_key(runtime, active_root, home))
     try:
         cfg, _ = model_config.resolve_config(runtime, runtime=home, source_root=active_root)
     except model_config.ModelConfigError:
         return False
-    listed = {name for name, _ in native_agents.catalog_tokens(cfg)[0]}
-    return bool(plan) and listed <= plan[3]
+    tokens, problems = native_agents.catalog_tokens(cfg)
+    listed = {name for name, _ in tokens}
+    return bool(plan) and bool(listed) and not problems and listed <= plan[3]
 
 
 def _linked_entries(
@@ -3507,18 +3509,20 @@ def _recover_transactions(runtime: str, scope: str = "global") -> None:
 
 
 def _trusted_owned(
-    runtime: str, state: Optional[dict], desired: List[dict], scope: str
+    runtime: str, state: Optional[dict], desired: List[dict], scope: str, uninstall: bool = False
 ) -> tuple[set, dict]:
     """Treat activation.json as untrusted input before using deletion paths."""
     # Profile activation adopts only links that resolve to a canonical harness
-    # manifest, and only where it projects (to replace them). A path it no
-    # longer wants is Hearting's only on its exact record below: a link with no
+    # manifest, and only where it projects (to replace them); uninstall takes
+    # every such link an older installer left. A path activation no longer
+    # wants is Hearting's only on its exact record below: a link with no
     # record, or one repointed elsewhere in an earlier root, stays the user's.
     home = paths.runtime_home(runtime, scope)
     wanted = {item["dest"] for item in desired}
     trusted = {
         str(path) for path in _discovered_harness_links(runtime, scope)
-        if str(path) in wanted and (runtime != "opencode" or not projector.opencode_guard_leaf(path, home))
+        if (uninstall or str(path) in wanted)
+        and (runtime != "opencode" or not projector.opencode_guard_leaf(path, home))
     }
     if runtime == "opencode":
         trusted.update(item["dest"] for item in desired if item.get("guard")
@@ -5002,7 +5006,7 @@ def deactivate(runtime: str, scope: str = "global", dry_run: bool = False) -> di
         )
     except ActivationError:
         desired = []
-    trusted, user_changed_items = _trusted_owned(runtime, state, desired, scope)
+    trusted, user_changed_items = _trusted_owned(runtime, state, desired, scope, uninstall=True)
     preserved = sorted(user_changed_items)
     desired_by_dest = {item["dest"]: item for item in desired}
     replaced_installer_symlink_targets = state.get("replaced_installer_symlink_targets") or {}
