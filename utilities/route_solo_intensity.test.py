@@ -4,7 +4,7 @@ legs its kind declares, with the one start command its task gives; the cells bel
 
 Real compose and verify. The legs are the registry's own implementation-review group (the one a `staged` route
 realizes); the anchor takes the cell's review model so `strong` never reviews more shallowly than `standard`.
-There is no independent test node here (that is the next piece).
+The independent test node that follows the legs (S3) has its own tests in `route_solo_test_node.test.py`.
 """
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
@@ -154,8 +154,11 @@ class SoloIntensity(Base):
                                   route["owner_dispatch_depth"], route["max_dispatch_depth"],
                                   route["registered_headless_policy"], route["owner_model_profile"]),
                                  (intensity, "solo", "one-shot-owner", 1, 2, "serial-attempt", "balanced"))
-                *reviews, owner = route["nodes"]
+                *reviews, test, owner = route["nodes"]
                 self.assertEqual([(n["id"], n["model_profile"], n["perspective"]) for n in reviews], list(legs))
+                self.assertEqual((test["id"], test["unit"], test["model_profile"], test["depends_on"], test["inputs"],
+                                  [hop["fallback_hop"] for hop in test["fallback_hops"]]),
+                                 ("test", "qa/test", "light", [n["id"] for n in reviews], ["source-diff"], HOPS))
                 for review in reviews:
                     self.assertEqual((review["unit"], review["kind"], review["dispatch_depth"], review["depends_on"],
                                       review["completion_gate"], review["leg_class"], review["inputs"],
@@ -166,14 +169,14 @@ class SoloIntensity(Base):
                     self.assertEqual([hop["fallback_hop"] for hop in review["fallback_hops"]], HOPS)
                 self.assertEqual((owner["id"], owner["unit"], owner["dispatch_depth"], owner["terminal"],
                                   sorted(owner["depends_on"])), ("one-shot", "_kernel/owner", 1, True,
-                                                                  sorted(n["id"] for n in reviews)))
+                                                                  sorted(n["id"] for n in [*reviews, test])))
                 self.assertFalse(owner.get("fallback_hops"))
                 self.assertEqual(len({path for n in reviews for path in n["outputs"]}), len(reviews))   # disjoint reports
                 self.assertEqual(route["continuation_budget"]["review_round_cap"], CAP[intensity])
-                self.assertEqual(route["continuation_budget"]["declared_nodes"], len(legs) + 1)
+                self.assertEqual(route["continuation_budget"]["declared_nodes"], len(legs) + 2)
                 self.assertEqual(route["human_gates"], [])              # a decided shape has no frame pair
                 self.assertTrue(RF.one_shot_owner(route) and RF.starts_depth2_nodes(route) and RF.one_shot_review_route(route))
-                self.assertEqual(RF.one_shot_review_node_ids(route), [n["id"] for n in reviews])
+                self.assertEqual(RF.one_shot_review_node_ids(route), [n["id"] for n in [*reviews, test]])
                 self.assertEqual(RF.route_form(route), "solo")
                 self.assertFalse(RF.alone_without_stages(route))
 
@@ -202,16 +205,16 @@ class SoloIntensity(Base):
     def test_a_signal_and_an_explicit_intensity_meet_at_the_higher(self):
         route = self.compose(shape="solo", signals=["shared-contract"], intensity="strong", slug="s2-signal")
         self.assertEqual((route["effective_intensity"], self.ids(route)),
-                         ("strong", ["impl-review", "impl-review-alternative", "one-shot"]))
+                         ("strong", ["impl-review", "impl-review-alternative", "test", "one-shot"]))
         self.verify(route)
 
     def test_a_profile_and_explicit_profiles_still_win(self):
         light = self.solo("strong", profile="light")
         self.assertEqual((light["owner_model_profile"], [n["model_profile"] for n in light["nodes"]]),
-                         ("light", ["light", "light", "light"]))
+                         ("light", ["light", "light", "light", "light"]))
         self.verify(light)
         picked = self.solo("thorough", explicit_profiles={"impl-review-alternative": "deep"})
-        self.assertEqual([n["model_profile"] for n in picked["nodes"]], ["deep", "deep", "deep", "balanced"])
+        self.assertEqual([n["model_profile"] for n in picked["nodes"]], ["deep", "deep", "deep", "light", "balanced"])
         self.verify(picked)
 
     def test_the_preview_and_the_compose_again_command_name_every_leg(self):
@@ -221,7 +224,7 @@ class SoloIntensity(Base):
                     capability="autopilot-code", capability_mode="dev", shape="solo", graph=None, slug="preview",
                     cwd=R.ROOT, artifact_root=self.root, spec_read="fixture", campaign_key="form-key",
                     intensity=intensity, selection_only=True)
-                self.assertEqual([n["id"] for n in preview["nodes"]], [leg[0] for leg in legs] + ["one-shot"])
+                self.assertEqual([n["id"] for n in preview["nodes"]], [leg[0] for leg in legs] + ["test", "one-shot"])
                 route = self.solo(intensity)
                 path = Path(self.root) / "route-autoclose-task"
                 route = {**route, "artifact_root": str(self.root)}
@@ -383,7 +386,7 @@ class SoloIntensity(Base):
         for intensity in ("strong", "thorough"):
             route = self.solo(intensity)
             cap = CAP[intensity]
-            for node in route["nodes"][:-1]:
+            for node in [n for n in route["nodes"] if n.get("kind") == "review-worker"]:   # the test: S3's own file
                 with self.subTest(intensity=intensity, leg=node["id"]):
                     rows = [CELL.row(CELL.BLOCKING, f"d{i}", f"att-{i}") for i in range(1, cap + 1)]
                     # after a blocking round the owner fixed (the digest moved): a closure check, not a first review
@@ -425,7 +428,7 @@ class SoloIntensity(Base):
 
     def test_the_legs_are_the_nodes_the_fallback_check_and_the_round_rules_read(self):
         route = self.solo("strong")
-        self.assertEqual(RF.one_shot_review_node_ids(route), ["impl-review", "impl-review-alternative"])
+        self.assertEqual(RF.one_shot_review_node_ids(route), ["impl-review", "impl-review-alternative", "test"])
         team = self.compose(shape="staged", intensity="strong", graph="execute,impl-review,test,report", slug="s2-team-ids")
         self.assertEqual(RF.one_shot_review_node_ids(team), [])
         self.assertEqual(RF.one_shot_review_nodes(self.compose(shape="solo", slug="s2-q")), [])
@@ -488,8 +491,8 @@ class SoloIntensityTexts(Base):
                     self.assertIn(leg[0], text)
                 for phrase in ("runtime_wait: registered-children", "every blocking finding of every blocking report",
                                "start the closure checks with the same command", "return your final handoff",
-                               "cannot review your own work", "do not run `complete --inline`",
-                               f"Each review gets {CAP[intensity]} rounds in all", "end with `verdict: FAIL`"):
+                               "cannot review or test your own work", "do not run `complete --inline`",
+                               f"Each review and the test get {CAP[intensity]} rounds in all", "end with `verdict: FAIL`"):
                     self.assertIn(phrase, text)
                 self.assertEqual(W.owner_inline_marker_prompt(args), "")
                 self.assertNotIn("conductor", text)
@@ -638,7 +641,8 @@ class SoloGroupRestart(Base):
         from recovery_history import INPUT_SCHEMA, batch_input_path
         self.batch = _load("dispatch_batch_for_solo_group_restart", "dispatch-batch.py")
         self.route = self.solo("strong")
-        self.nodes = [n for n in self.route["nodes"] if n["id"] in RF.one_shot_review_node_ids(self.route)]
+        self.nodes = [n for n in self.route["nodes"]
+                      if n["id"] in RF.one_shot_review_node_ids(self.route) and n.get("parallel_group")]
         self.group = self.nodes[0]["parallel_group"]
         self.base = Path(self.root) / "restart"
         self.jobs = self.base / "dispatch" / "jobs.log"

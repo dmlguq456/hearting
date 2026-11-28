@@ -11,7 +11,7 @@ This is the portable capability contract for `session-tidy`. It defines runtime-
 | Group | `ops` |
 | Supported modes | `none` |
 | Portable meaning | Write a handoff card; tidy memory; compact the same session. |
-| Argument shape | `[정리] \| 정리만 \| 인계 <받을 세션>` |
+| Argument shape | `[정리] \| 정리만 \| 취소 \| 인계 <받을 세션>` |
 
 ## Invocation Semantics
 
@@ -193,7 +193,21 @@ session. A newer prompt, changed card, handoff, expired booking, changed SID or
 unavailable native callback leaves the booking pending or skipped under the
 existing result rules. `정리만` (`enqueue --no-clear`) keeps the window as it is
 and cancels a pending booking; `enqueue --no-continue` compacts without the
-continue action. Outside herdr or tmux the session prints the manual `/compact`
+continue action. `취소` (`cancel`) writes no card and queues no memory work: it
+ends the window's booking, deciding from its current record under its lock, and
+touches no peer row and no ledger row. A booking the same user turn's prompt
+already ended counts as cancelled by it, and that turn's own end books no new
+idle tidy (the next prompt does). A /compact not typed yet is not typed; after
+its claim, the last check before the typing (idle and manual alike) reads the
+booking again and types nothing, and the result line says only that a typing
+already past that check may not stop. A continue with no peer row yet is not
+typed. Once a peer row may exist for it (its ref is bound, or a pane steward
+holds its claim and may be binding one) or Claude's private connection holds
+its claim, the row stays with its carrier and the result line says it cannot be
+taken back and may arrive with the next turn. A continue claim that wrote
+nothing ends `released` in the ledger, even after a cancel or a newer booking,
+and a later settle keeps it so, so the person's own `이어서해` counts as their
+prompt. Outside herdr or tmux the session prints the manual `/compact`
 command. A handoff compacts only the calling window, never the target, and that
 window does not continue from a card marked as handed off; failed delivery
 preserves the card for normal continuation.
@@ -278,13 +292,16 @@ and never rescan conversations on a rendering tick or create another store.
 ## Portable Procedure
 
 Modes are `정리` (default: compact this session and continue), `정리만` (keep
-this window as it is), and `인계 <받을 세션>` (pass the card to an
+this window as it is), `취소` (cancel this window's booked compaction and its
+continue), and `인계 <받을 세션>` (pass the card to an
 already-running peer; only this window may compact). Use
 `python3 $AGENT_HOME/utilities/session_tidy.py tidy`; add `--no-clear` for
 `정리만`, `--no-continue` when asked to stop after tidying, and
 `--handoff <받을 세션>` for a peer handoff. Card writing, queueing and optional
 handoff keep their existing one-call behavior. Reply with the command's `say=`
 line; report its `prompted=` line for handoff and do not retry an uncertain send.
+`취소` is `python3 $AGENT_HOME/utilities/session_tidy.py cancel` alone: no card is
+written; reply with its `say=` line.
 
 `정리만` / `--no-clear` saves the card and queues the existing memory work while
 keeping the conversation uncompacted. Saving does not shrink its context, disable native

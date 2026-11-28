@@ -79,8 +79,8 @@ from .. import model
 from ..model import (DONE_AFTERGLOW_MIN, ContextEvidence, DispatchJob,
                      etime_to_min, project_of)
 from ..token_budget import (context_policy_snapshot, context_policy_used_pct,
-                            opencode_context_tokens, parse_codex_token_count,
-                            telemetry_from_explicit)
+                            opencode_context_tokens, opencode_context_used_pct,
+                            parse_codex_token_count, telemetry_from_explicit)
 from . import procscan, project_status
 from . import parse_cache
 from . import shell_jobs
@@ -3780,7 +3780,7 @@ def _enrich_opencode_attempt_session(job, fast_first=False):
             enforced=policy_data.get("enforced"), session_id=parsed.get("session_id"),
             attempt_id=job.attempt_id, raw_percentage=policy_data.get("raw_percentage"),
             reason=policy_data.get("reason"))
-        raw_window = policy["effective_window_tokens"]
+        raw_window = policy["effective_window_tokens"] or raw_window
         if isinstance(record.get("model"), str) and record["model"]:
             job.resolved_model = record["model"]
     else:
@@ -3800,15 +3800,17 @@ def _enrich_opencode_attempt_session(job, fast_first=False):
     job.context_policy = policy
     job.context_display_window_tokens = (
         policy["applied_trigger_tokens"] if policy["state"] == "applied" else None)
-    job.ctx_pct = context_policy_used_pct(job.active_context_tokens, policy)
+    job.ctx_pct = opencode_context_used_pct(job.active_context_tokens, policy)
     job._context_evidence = None
     if job.ctx_pct is None:
         return
     try:
         st = os.stat(path)
         sequence = (st.st_mtime_ns, st.st_size)
+        applied = (policy or {}).get("state") == "applied"
         job._context_evidence = ContextEvidence(
-            used_pct=job.ctx_pct, source="opencode-attempt-stream",
+            used_pct=job.ctx_pct,
+            source=("opencode-attempt-native-policy" if applied else "opencode-attempt-window"),
             sequence=sequence, source_head_sequence=sequence,
             observed_at=st.st_mtime, fresh_until=st.st_mtime + 900)
     except OSError:

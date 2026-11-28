@@ -1076,6 +1076,8 @@ def _validate_continuations(recipe, registry, nodes, by_id):
 
 
 ONE_SHOT_REVIEW_KEYS = {"node", "inputs", "fallback_hops", "model_profile", "owner_model_profile"}
+# `verify_node` (optional): the recipe's own depth-2 test node a `solo` route borrows from `strong` up, after its reviews.
+ONE_SHOT_REVIEW_OPTIONAL_KEYS = {"verify_node"}
 
 
 def _validate_one_shot_review(recipe, registry):
@@ -1084,8 +1086,15 @@ def _validate_one_shot_review(recipe, registry):
     node is that node's own. `owner_model_profile` is the model role of the owner that makes the work."""
     where = f"{recipe['capability']}:one_shot_review"
     declared = recipe["one_shot_review"]
-    if not isinstance(declared, dict) or set(declared) != ONE_SHOT_REVIEW_KEYS:
-        raise TopologyError(f"{where}: must declare exactly {sorted(ONE_SHOT_REVIEW_KEYS)}")
+    if (not isinstance(declared, dict) or not ONE_SHOT_REVIEW_KEYS <= set(declared)
+            or set(declared) - ONE_SHOT_REVIEW_KEYS - ONE_SHOT_REVIEW_OPTIONAL_KEYS):
+        raise TopologyError(f"{where}: must declare exactly {sorted(ONE_SHOT_REVIEW_KEYS)} "
+                            f"(and optionally {sorted(ONE_SHOT_REVIEW_OPTIONAL_KEYS)})")
+    if "verify_node" in declared:
+        test = next((n for n in recipe["standard_plus"]["nodes"] if n.get("id") == declared["verify_node"]), None)
+        if (test is None or test.get("dispatch_depth") != 2 or test.get("unit") != "qa/test"
+                or not test.get("completion_gate")):
+            raise TopologyError(f"{where}: verify_node must be one of the recipe's depth-2 qa/test nodes")
     node = next((n for n in recipe["standard_plus"]["nodes"] if n.get("id") == declared["node"]), None)
     if (node is None or node.get("kind") != "review-worker" or node.get("dispatch_depth") != 2
             or not node.get("completion_gate")):

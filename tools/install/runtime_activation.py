@@ -722,7 +722,7 @@ def _keep_edited_opencode_bootstrap(previous: Optional[dict], scope: str):
 def _kernel_agents(source_root: Path) -> set[str]:
     manifest_path = source_root / harness_manifest.MANIFEST_NAME
     if not manifest_path.is_file():
-        return {"memory-scout"}
+        return {"memory-scout"}  # a source older than the manifest shipped this one helper
     try:
         canonical = harness_manifest.load(manifest_path)
     except harness_manifest.ManifestError as exc:
@@ -906,13 +906,28 @@ def _run_native_agent_plan(
                 lines.append(f"{runtime} native agent {name} {status}: {row.get('reason', '')}")
         except (KeyError, TypeError, ValueError, OSError) as exc:
             raise ActivationError(f"{runtime} native agent plan row unusable: {exc}") from exc
-    # Hand-written shipped definitions the renderer never decides (Claude memory-scout).
+    # Hand-written shipped definitions the renderer never decides (an older source's Claude memory-scout).
     entries.extend(_shipped_agent_links(runtime, active_root, home, static_names))
     for name in sorted(projected - decided - static_names):
         lines.append(f"{runtime} native agent {name} not-in-selected-catalog: "
                      "the selected models.conf does not list it, so no definition is projected")
     entries.sort(key=lambda entry: entry["dest"])
-    return entries, lines, default_subagent
+    withheld = frozenset(row["name"] for row in rows if row.get("status") == "withheld")
+    return entries, lines, default_subagent, withheld
+
+
+def _agents_withheld_by_policy(runtime: str, active_root: Path, home: Path) -> bool:
+    """The renderer's plan for this home withheld every agent its selected models.conf lists (a model the
+    file makes main-session-only). A plan missing a listed agent's row, or a catalog that lists no valid
+    name or has a malformed entry, does not count."""
+    plan = _NATIVE_AGENT_PLANS.get(_native_agent_plan_key(runtime, active_root, home))
+    try:
+        cfg, _ = model_config.resolve_config(runtime, runtime=home, source_root=active_root)
+    except model_config.ModelConfigError:
+        return False
+    tokens, problems = native_agents.catalog_tokens(cfg)
+    listed = {name for name, _ in tokens}
+    return bool(plan) and bool(listed) and not problems and listed <= plan[3]
 
 
 def _linked_entries(
@@ -1074,7 +1089,12 @@ def _linked_entries(
             f"source {source_root} lacks Claude statusline.sh activation surface"
         )
     required_surfaces = {"instructions", "skill", "agent", "hook_config"}
-    present_surfaces = {entry["surface"] for entry in existing}
+    # The agent surface is the native agent files (Codex mode files do not stand in for them), or a plan
+    # whose selected models.conf withholds every agent it lists: an empty surface by that policy only.
+    present_surfaces = {entry["surface"] for entry in existing
+                        if entry["surface"] != "agent" or Path(entry["dest"]).parent == home / "agents"}
+    if "agent" not in present_surfaces and _agents_withheld_by_policy(runtime, source_root, home):
+        present_surfaces.add("agent")
     missing = sorted(required_surfaces - present_surfaces)
     if missing:
         raise ActivationError(
@@ -3489,23 +3509,27 @@ def _recover_transactions(runtime: str, scope: str = "global") -> None:
 
 
 def _trusted_owned(
-    runtime: str, state: Optional[dict], desired: List[dict], scope: str
+    runtime: str, state: Optional[dict], desired: List[dict], scope: str, uninstall: bool = False
 ) -> tuple[set, dict]:
     """Treat activation.json as untrusted input before using deletion paths."""
     # Profile activation adopts only links that resolve to a canonical harness
-    # manifest. This lets a refresh remove stale native links left by the
-    # legacy all-skills installer without touching user-owned entries.
+    # manifest, and only where it projects (to replace them); uninstall takes
+    # every such link an older installer left. A path activation no longer
+    # wants is Hearting's only on its exact record below: a link with no
+    # record, or one repointed elsewhere in an earlier root, stays the user's.
     home = paths.runtime_home(runtime, scope)
+    wanted = {item["dest"] for item in desired}
     trusted = {
         str(path) for path in _discovered_harness_links(runtime, scope)
-        if runtime != "opencode" or not projector.opencode_guard_leaf(path, home)
+        if (uninstall or str(path) in wanted)
+        and (runtime != "opencode" or not projector.opencode_guard_leaf(path, home))
     }
     if runtime == "opencode":
         trusted.update(item["dest"] for item in desired if item.get("guard")
                        and projector.opencode_guard_owned(item, home, scope))
     if not state:
         return trusted, {}
-    allowed = {item["dest"] for item in desired}
+    allowed = set(wanted)
     desired_kind = {item["dest"]: item.get("kind") for item in desired}
     roots = []
     for key in ("source_root", "active_root"):
@@ -3537,7 +3561,7 @@ def _trusted_owned(
             try:
                 current_target = os.readlink(dest)
                 matches = current_target == item.get("source")
-                if (not matches and _journal_dest_allowed(runtime, dest, scope)
+                if (not matches and value in wanted and _journal_dest_allowed(runtime, dest, scope)
                         and not (runtime == "opencode" and projector.opencode_guard_leaf(dest, home))):
                     raw_target = Path(current_target)
                     target = raw_target if raw_target.is_absolute() else dest.parent / raw_target
@@ -4584,8 +4608,9 @@ def _edited_render_lines(runtime: str, previous: Optional[dict], desired: List[d
             and not dest.is_symlink()
             and _bytes_sha256(dest) != item.get("content_sha256")
         ):
-            lines.append(f"{runtime} native agent file {dest.name} was edited after it was rendered; "
-                         "kept as your file and no longer managed")
+            lines.append(f"{runtime} native agent file {dest.name} was edited after it was rendered; kept. "
+                         "`runtime status` lists it as user-changed until you remove it (or put back the "
+                         "rendered text, which the next refresh removes)")
     return lines
 
 
@@ -4734,6 +4759,12 @@ def status(runtime: str, scope: str = "global") -> dict:
             next_action = (
                 f"resolve {label} conflicts ({','.join(config_conflicts)}), "
                 f"then harness runtime refresh --runtime {runtime}"
+            )
+        elif unexpected and len(duplicates) == len(unexpected):
+            next_action = (  # activation removes only what it recorded, so it leaves these in place
+                "review links to Hearting files that no activation recorded ("
+                f"{', '.join(str(path.relative_to(runtime_home)) for path in unexpected)}); "
+                "remove the ones you did not make"
             )
         else:
             next_action = (
@@ -4975,7 +5006,7 @@ def deactivate(runtime: str, scope: str = "global", dry_run: bool = False) -> di
         )
     except ActivationError:
         desired = []
-    trusted, user_changed_items = _trusted_owned(runtime, state, desired, scope)
+    trusted, user_changed_items = _trusted_owned(runtime, state, desired, scope, uninstall=True)
     preserved = sorted(user_changed_items)
     desired_by_dest = {item["dest"]: item for item in desired}
     replaced_installer_symlink_targets = state.get("replaced_installer_symlink_targets") or {}
