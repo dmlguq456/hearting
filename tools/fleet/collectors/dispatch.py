@@ -3780,7 +3780,7 @@ def _enrich_opencode_attempt_session(job, fast_first=False):
             enforced=policy_data.get("enforced"), session_id=parsed.get("session_id"),
             attempt_id=job.attempt_id, raw_percentage=policy_data.get("raw_percentage"),
             reason=policy_data.get("reason"))
-        raw_window = policy["effective_window_tokens"]
+        raw_window = policy["effective_window_tokens"] or raw_window
         if isinstance(record.get("model"), str) and record["model"]:
             job.resolved_model = record["model"]
     else:

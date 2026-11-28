@@ -714,6 +714,34 @@ class CurrentSessionBindingTest(unittest.TestCase):
                     self.assertEqual(sess.active_context_tokens, 123456)
                     self.assertEqual(sess.ctx_pct, 13)
 
+    def test_v2_a_record_without_a_window_uses_the_model_catalogue(self):
+        observed = {"state": "observed", "generation": "v2", "cursor": 8, "event_seq": 10,
+                    "session": {"model": {"id": "m", "providerID": "p"},
+                                "time_updated": 2000000, "tokens_input": 999999},
+                    "messages": [{"type": "assistant", "id": "msg-current", "started": 1999500,
+                                  "model": {"id": "m", "providerID": "p"},
+                                  "tokens": {"total": 123456}, "updated": 2000000}]}
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.root / "state"),
+                                          "FLEET_SESSION_REGISTRY_DIR": str(self.root / "sessions")}):
+            path = policy_path("opencode", pid=4242, proc_start="123")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            record = {"schema": SCHEMA, "harness": "opencode", "session_id": "ses_b",
+                      "pid": 4242, "proc_start": "123", "attempt_id": None, "model": "p/m",
+                      "observed_at": 1999.0, "request": {
+                          "kind": "opencode-v2-primary", "assistant_message_id": "msg-current",
+                          "event_seq": 10, "observed_event_seq": 10,
+                          "started_at_ms": 1999500, "context_at_ms": 1999000,
+                          "context_returned_at_ms": 1999001}, "policy": {
+                          "state": "unknown", "source": "opencode-v2-request",
+                          "effective_window_tokens": None,
+                          "session_id": "ses_b", "reason": "native-v2-compaction-behavior-unverified"}}
+            path.write_text(json.dumps(record))
+            with mock.patch.object(opencode, "_model_ctx_limit", return_value=1_000_000):
+                sess, _ = self._run_v2(self._session(), ("ses_b", "opencode-tui-selection"),
+                                       observed, policy_reader=read_policy)
+        self.assertEqual(sess.context_window_tokens, 1_000_000)
+        self.assertEqual(sess.ctx_pct, 12)      # 123,456 of 1,000,000
+
     def test_v2_a_streaming_step_reuses_the_last_measured_context(self):
         for tokens in (None, {"total": -1}, {"total": "invalid"}):
             with self.subTest(tokens=tokens):

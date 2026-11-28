@@ -336,9 +336,11 @@ class CollectorSemanticsTest(unittest.TestCase):
                 else:
                     os.environ["OPENCODE_MODELS"] = old_models
             self.assertEqual(sess.active_context_tokens, 25_000)
-            self.assertIsNone(sess.context_window_tokens)
+            # The record carries no window; the model catalogue's 100,000 is
+            # the display denominator (25,000 / 100,000).
+            self.assertEqual(sess.context_window_tokens, 100_000)
             self.assertIsNone(sess.context_display_window_tokens)
-            self.assertEqual(sess.ctx_pct, None)
+            self.assertEqual(sess.ctx_pct, 25)
             self.assertEqual(sess.context_policy["state"], "unknown")
             self.assertEqual(sess.session_total_tokens, 95_000)
 
@@ -380,8 +382,8 @@ class CollectorSemanticsTest(unittest.TestCase):
                 else:
                     os.environ["OPENCODE_MODELS"] = old_models
             self.assertEqual(sess.active_context_tokens, 0)
-            self.assertIsNone(sess.context_window_tokens)
-            self.assertIsNone(sess.ctx_pct)
+            self.assertEqual(sess.context_window_tokens, 100_000)
+            self.assertEqual(sess.ctx_pct, 0)
 
     def test_unfinished_zero_row_is_neither_a_reading_nor_cumulative_input(self):
         con = sqlite3.connect(":memory:")

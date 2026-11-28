@@ -652,6 +652,12 @@ def _enrich_v2(sess, tick, db, raise_unread=False):
     from ..context_policy import read_policy
     request_model = latest.get("model") if latest and isinstance(latest.get("model"), dict) else {}
     model_ref = f"{request_model.get('providerID') or ''}/{request_model.get('id') or ''}"
+    # A policy record can carry a measured window only in stretches; its
+    # absence (or a null value) falls back to the catalogue window the model
+    # itself declares, the same source the TUI reads.
+    catalogue_window = _model_ctx_limit(
+        request_model.get("id") or sess.model,
+        request_model.get("providerID") or sess._opencode_provider_id)
     policy_record = read_policy(harness="opencode", session_id=sid, pid=sess.pid,
                                 proc_start=sess.proc_start, model=model_ref)
     policy_data = policy_record.get("policy") if isinstance(policy_record, dict) else None
@@ -687,7 +693,8 @@ def _enrich_v2(sess, tick, db, raise_unread=False):
             runtime_version=policy_data.get("runtime_version"),
             configured_request_tokens=policy_data.get("configured_request_tokens"),
             configured_request=policy_data.get("configured_request"),
-            effective_window_tokens=policy_data.get("effective_window_tokens"),
+            effective_window_tokens=(policy_data.get("effective_window_tokens")
+                                     or catalogue_window),
             applied_trigger_tokens=policy_data.get("applied_trigger_tokens"),
             output_allowance_tokens=policy_data.get("output_allowance_tokens"),
             compaction_reserve_tokens=policy_data.get("compaction_reserve_tokens"),
@@ -701,12 +708,14 @@ def _enrich_v2(sess, tick, db, raise_unread=False):
         # its exact pairing.
         sess.context_policy = context_policy_snapshot(
             source=policy_data.get("source") or "opencode-native-v2-context",
-            effective_window_tokens=policy_data.get("effective_window_tokens"),
+            effective_window_tokens=(policy_data.get("effective_window_tokens")
+                                     or catalogue_window),
             session_id=sid,
             reason="selected-request-policy-not-current-window-only")
     else:
         sess.context_policy = context_policy_snapshot(
-            source="opencode-db-v2", session_id=sid,
+            source="opencode-db-v2", effective_window_tokens=catalogue_window,
+            session_id=sid,
             reason="selected-request-policy-not-observed")
     sess.context_window_tokens = sess.context_policy["effective_window_tokens"]
     sess.context_display_window_tokens = (sess.context_policy["applied_trigger_tokens"]
@@ -1349,13 +1358,15 @@ def enrich(sess, tick=None, *, raise_unread=False):
     sess.session_reasoning_output_tokens = int(tr) if isinstance(tr, (int, float)) else None
     sess.session_total_tokens = toks or None
     # The latest assistant request alone describes current usage. Cumulative
-    # session input is cost telemetry; a catalogue window is not the applied
+    # session input is cost telemetry. The catalogue window is the display
+    # denominator when the record carries none; it is never the applied
     # compaction boundary. Preserve an observed zero without manufacturing a %.
     if isinstance(last_ctx, (int, float)) and not isinstance(last_ctx, bool) and last_ctx >= 0:
         sess.active_context_tokens = int(last_ctx)
     from ..token_budget import context_policy_snapshot, opencode_context_used_pct
     from ..context_policy import read_policy
     native_model = f"{provider or ''}/{sess.model or ''}"
+    catalogue_window = _model_ctx_limit(sess.model, provider)
     policy_record = read_policy(
         harness="opencode", session_id=sid, pid=sess.pid,
         proc_start=sess.proc_start, model=native_model)
@@ -1370,7 +1381,8 @@ def enrich(sess, tick=None, *, raise_unread=False):
             runtime_version=policy_data.get("runtime_version"),
             configured_request_tokens=policy_data.get("configured_request_tokens"),
             configured_request=policy_data.get("configured_request"),
-            effective_window_tokens=policy_data.get("effective_window_tokens"),
+            effective_window_tokens=(policy_data.get("effective_window_tokens")
+                                     or catalogue_window),
             applied_trigger_tokens=policy_data.get("applied_trigger_tokens"),
             output_allowance_tokens=policy_data.get("output_allowance_tokens"),
             compaction_reserve_tokens=policy_data.get("compaction_reserve_tokens"),
@@ -1385,12 +1397,14 @@ def enrich(sess, tick=None, *, raise_unread=False):
             # belongs to the session/model. Window only, never its trigger state.
             sess.context_policy = context_policy_snapshot(
                 source=policy_data.get("source") or "opencode-native-chat-params",
-                effective_window_tokens=policy_data.get("effective_window_tokens"),
+                effective_window_tokens=(policy_data.get("effective_window_tokens")
+                                         or catalogue_window),
                 session_id=sid,
                 reason="selected-request-policy-not-current-window-only")
         else:
             sess.context_policy = context_policy_snapshot(
-                source="opencode-db", session_id=sid,
+                source="opencode-db", effective_window_tokens=catalogue_window,
+                session_id=sid,
                 reason="selected-request-policy-not-observed-or-mismatched")
     sess.context_window_tokens = sess.context_policy["effective_window_tokens"]
     sess.context_display_window_tokens = (
