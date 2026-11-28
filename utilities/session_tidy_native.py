@@ -309,11 +309,21 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
         if continuing and claim is not None:
             fields["claim_id"] = (claim.get("continued") or {}).get("claim_id", "")
         return fields
+    def refused(why, claimed=None):
+        # A continue the input box (or an open question) holds back waits unbound, as on the
+        # pane path (`hold_continue_for_input`); any other refusal ends as before.
+        if continuing:
+            hold = clear.hold_continue_for_input(claimed, why)
+            if hold:
+                return result(hold, why if hold == "queued" else "superseded")
+            if claimed is not None:
+                clear.release_unsent_continue(claimed)
+        return result("skipped", why)
     if req.get("harness") != "claude" or not target:
         return result("skipped", "unsupported-harness")
     why = idle_reason(target, sid)
     if why and not (continuing and why == "not-idle-native"):
-        return result("skipped", why)
+        return refused(why)
     validator = clear.validate_continue if continuing else clear.validate_request
     try:
         with attachment(target) as (fd, proc):
@@ -328,19 +338,16 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
                     return result("queued", "snapshot-pending")
                 why = idle_reason(target, sid)
                 if not why and continuing:
-                    # The prompt hook hands the card over with this continue; only a
-                    # card another prompt already took stops it.
-                    seat = st.seat_from_dict(req["seat"])
-                    consumed = st.read_json(st._consumed_path(seat)) or {}
-                    if consumed.get("generation") == req.get("card_generation") and consumed.get("receipts"):
-                        why = "card-taken"
+                    # The prompt hook hands the card over with this continue; only the
+                    # booked card already taken by this session's turn stops it.
+                    why = clear.continue_card_reason(current) or ""
                 if not continuing or why != "not-idle-native" or time.monotonic() >= deadline:
                     break
                 time.sleep(0.1)
-            if why: return result("skipped", why)
+            if why: return refused(why)
             lines = view.read()
             why, detail = ("screen-unknown", view.why) if lines is None else (screen_ready("claude", lines), "")
-            if why: return result("skipped", why)
+            if why: return refused(why)
             current, why = validator(request_path, nonce)
             if current is None: return result("skipped", why)
             why = idle_reason(target, sid)
@@ -364,7 +371,7 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
                 why, detail = ("screen-unknown", view.why) if lines is None else (screen_ready("claude", lines), "")
                 why = why or idle_reason(target, sid)
                 if why or proc.poll() is not None:
-                    if continuing: clear.release_unsent_continue(claim)
+                    if continuing: return refused(why or "target-changed", claim)
                     return result("skipped", why or "target-changed")
                 # An idle screen must not hide a newer prompt, card or booking.
                 if continuing:

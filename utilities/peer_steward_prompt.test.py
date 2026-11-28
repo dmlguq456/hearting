@@ -6039,7 +6039,8 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
         self.cleared()
         guard = mock.Mock(return_value=(None, {"pid": 202}))
         with mock.patch.object(peer_steward, "_native_idle_prompt_guard", guard), \
-             mock.patch.object(peer_steward, "_herdr_prompt", return_value=(0, {})) as send:
+             mock.patch.object(peer_steward, "_herdr_prompt", return_value=(0, {})) as send, \
+             self.empty_codex_box():
             rc, line = self.continue_cmd()
         self.assertEqual(rc, 0, line)
         self.assertIn("continued=true", line)
@@ -6059,7 +6060,8 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
         with mock.patch.object(peer_steward, "_native_idle_prompt_guard",
                                return_value=(None, {"pid": 202})), \
              mock.patch.object(peer_steward, "_herdr_prompt",
-                               return_value=(1, {"error": {"code": "timeout"}})):
+                               return_value=(1, {"error": {"code": "timeout"}})), \
+             self.empty_codex_box():
             rc, line = self.continue_cmd()
         self.assertEqual(rc, 5, line)
         self.assertIn("continued=unverified", line)
@@ -6072,7 +6074,7 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
                                     return_value=("draft", None))
         no_send = mock.patch.object(peer_steward, "_herdr_prompt",
                                     side_effect=AssertionError("continue PTY send"))
-        with refused, no_send:
+        with refused, no_send, self.empty_codex_box():
             rc, line = self.continue_cmd()
         self.assertEqual(rc, 3, line)
         self.assertIn("continued=queued", line)
@@ -6089,7 +6091,7 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
             claim_id=claim_id, transfer_ref=ref))
         booked = self.booking()["continued"]
         self.assertEqual((booked["state"], booked["transfer_ref"]), ("pending", ref))
-        with refused, no_send:
+        with refused, no_send, self.empty_codex_box():
             second_rc, second = self.continue_cmd()
         self.assertEqual(second_rc, 3, second)
         self.assertIn("transfer_ref=" + ref, second)
@@ -6227,14 +6229,58 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(len(asks), 1)
         self.assertEqual(self.booking()["continued"]["state"], "pending")
 
-    def test_claude_continue_does_not_read_the_codex_composer_check(self):
+    def test_claude_continue_reads_the_box_before_the_claim_and_holds_a_draft_unbound(self):
+        # RV-PR1780 (deferred 1): Claude read its box only after the ref was bound, so a draft left a
+        # "pending with ref" continue the helper never asked again. Read before the claim, as
+        # Codex and OpenCode do: nothing is bound, nothing typed, and the helper asks again.
+        for reason in ("draft", "draft-unknown", "form-open"):
+            with self.subTest(reason=reason):
+                self.cleared()
+                reads = []
+                with mock.patch.object(peer_steward, "_native_idle_prompt_guard",
+                                       side_effect=AssertionError("typing path over a draft")), \
+                     mock.patch.object(peer_steward, "_herdr_prompt",
+                                       side_effect=AssertionError("continue PTY send")), \
+                     self.empty_codex_box(reason, reads=reads):
+                    rc, line = self.continue_cmd()
+                self.assertEqual(rc, 3, line)
+                self.assertIn("continued=queued", line)
+                self.assertIn("reason=" + reason, line)
+                self.assertNotIn("transfer_ref=", line)
+                self.assertNotIn("claim_id=", line)                     # no claim was taken
+                held = self.booking()["continued"]
+                self.assertEqual(held["state"], "pending")
+                self.assertNotIn("transfer_ref", held)
+                self.assertEqual(reads, ["w1:pX"])
+
+    def test_claude_helper_asks_again_after_a_draft_and_types_the_continue_once(self):
         self.cleared()
-        with mock.patch.object(peer_steward, "_continue_composer_reason",
-                               side_effect=AssertionError("claude has its own guard")), \
+        answers = iter(["draft", None, None])
+        asks, slept = [], []
+
+        def ask(path, nonce, pane):
+            printed = []
+            with mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(map(str, a)))):
+                peer_steward.main(["continue", pane, "--request", str(path), "--nonce", nonce])
+            asks.append(printed[-1])
+            return dict(part.partition("=")[::2] for part in printed[-1].split())
+        typed = mock.Mock(return_value=(0, {}))
+        with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(peer_steward, "_continue_look", return_value=None), \
+             mock.patch.object(peer_steward, "_read_screen_reason", return_value=([[]], "")), \
+             mock.patch.object(peer_steward, "_screen_ready", side_effect=lambda *_a: next(answers)), \
              mock.patch.object(peer_steward, "_native_idle_prompt_guard", return_value=(None, {"pid": 202})), \
-             mock.patch.object(peer_steward, "_herdr_prompt", return_value=(0, {})):
-            rc, line = self.continue_cmd()
-        self.assertEqual(rc, 0, line)
+             mock.patch.object(peer_steward, "_herdr_prompt", typed):
+            outcome = self.clear._continue(self.seat_obj.key, "n0nce", ask, sleep=slept.append,
+                                           ask_again=True)
+        self.assertEqual(outcome, "continued")
+        self.assertEqual(len(asks), 2, asks)
+        self.assertIn("reason=draft", asks[0])
+        self.assertNotIn("transfer_ref=", asks[0])
+        self.assertIn("continued=true", asks[1])
+        self.assertEqual(slept, [self.clear.CONTINUE_INPUT_RETRY_SEC])
+        typed.assert_called_once()
+        self.assertEqual(self.booking()["continued"]["state"], "sent")
 
     def test_codex_continue_uses_exact_queue_and_receipt_settles_same_booking(self):
         self.cleared(harness="codex", sid="old-thread", new="new-thread")
@@ -6556,6 +6602,7 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(peer_steward, "_continue_look", side_effect=lambda *_a: next(answers)), \
              mock.patch.object(peer_steward, "_native_idle_prompt_guard", guard), \
              mock.patch.object(peer_steward, "_herdr_prompt", return_value=(0, {})) as send, \
+             self.empty_codex_box(), \
              mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(map(str, a)))):
             rc = peer_steward.main(["continue", self.seat_obj.pane, "--request", str(self.path),
                                     "--nonce", "n0nce"])
