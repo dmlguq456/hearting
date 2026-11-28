@@ -359,8 +359,7 @@ class OtherDecisionTest(Homes):
     def test_claude_another_matching_hook_or_rule(self):
         cases = [
             ({"matcher": "Agent", "hooks": [self.REFUSE]}, {}),
-            ({"matcher": "*", "hooks": [self.REFUSE]}, {}),
-            ({"hooks": [self.REFUSE]}, {}),
+            ({"matcher": ".*", "hooks": [self.REFUSE]}, {}),
             ({"matcher": "^Ag", "hooks": [self.REFUSE]}, {}),
             ({"matcher": "Task", "hooks": [self.REFUSE]}, {}),
             (None, {"permissions": {"deny": ["Agent(Explore)"]}}),
@@ -375,6 +374,51 @@ class OtherDecisionTest(Homes):
         self.write(self.project.parent / ".claude/settings.local.json",
                    json.dumps({"hooks": {"PreToolUse": [{"matcher": "Agent", "hooks": [self.REFUSE]}]}}))
         self.assertFalse(self.sole("claude", "Agent"))
+
+    def test_a_hook_on_every_tool_is_not_a_decision_on_this_call(self):
+        # The harness runs such a hook for any tool (matcher `*`, empty or none), so it decides nothing about
+        # this call; a matcher that names or patterns the subagent tool beside it still does.
+        named = {"matcher": "Agent", "hooks": [self.REFUSE]}
+        for every in ({"matcher": "*", "hooks": [self.REFUSE]}, {"matcher": "", "hooks": [self.REFUSE]},
+                      {"hooks": [self.REFUSE, {"type": "prompt", "prompt": "ask first"}]}):
+            with self.subTest(group=every):
+                self.register("claude", every)
+                self.assertTrue(self.sole("claude", "Agent"))
+                self.register("claude", every, named)
+                self.assertFalse(self.sole("claude", "Agent"))
+                self.write(self.claude_home / "settings.json", json.dumps(
+                    {"hooks": {"PreToolUse": [ours("claude"), every]}, "permissions": {"ask": ["Agent"]}}))
+                self.assertFalse(self.sole("claude", "Agent"))            # a rule still decides
+                self.register("codex", every)
+                self.assertTrue(self.sole("codex", "spawn_agent"))
+                self.register("codex", every, {"matcher": "spawn_agent", "hooks": [self.REFUSE]})
+                self.assertFalse(self.sole("codex", "spawn_agent"))
+        # Hearting's own hook on every tool beside its registration still runs twice.
+        self.register("claude", {"matcher": "*", "hooks": ours("claude")["hooks"]})
+        self.assertFalse(self.sole("claude", "Agent"))
+
+    def test_a_handler_s_own_if_on_the_subagent_tool_still_decides(self):
+        # Claude runs a handler with `if` (one permission rule) only where the rule matches the call, so under a
+        # group on every tool it decides this call when the rule names the subagent tool or cannot be read as one
+        # tool name; a rule on another tool never runs for this call.
+        for rule, sole in (("Agent(Explore)", False), ("Task", False), (" Agent (x)", False), ("*", False),
+                           ("", False), (7, False), ("Bash(rm *)", True), ("mcp__notes__save", True)):
+            with self.subTest(rule=rule):
+                self.register("claude", {"matcher": "*", "hooks": [{**self.REFUSE, "if": rule}]})
+                self.assertEqual(self.sole("claude", "Agent"), sole)
+        for rule, sole in (("spawn_agent", False), ("Agent(x)", False), ("Bash(x)", True)):
+            with self.subTest(codex=rule):
+                self.register("codex", {"hooks": [{**self.REFUSE, "if": rule}]})
+                self.assertEqual(self.sole("codex", "spawn_agent"), sole)
+
+    def test_a_pattern_a_number_a_list_or_a_broken_regex_still_decides(self):
+        # Only none, "" and `*` are every tool; any other matcher that may pick the call counts.
+        for matcher in (".*", 0, ["Agent"], "["):
+            with self.subTest(matcher=matcher):
+                self.register("claude", {"matcher": matcher, "hooks": [self.REFUSE]})
+                self.assertFalse(self.sole("claude", "Agent"))
+                self.register("codex", {"matcher": matcher, "hooks": [self.REFUSE]})
+                self.assertFalse(self.sole("codex", "spawn_agent"))
 
     def test_our_hook_is_known_by_its_exact_command(self):
         # A command that only contains the hook's file name is another hook (a wrapper that may refuse).
@@ -444,6 +488,9 @@ class OtherDecisionTest(Homes):
         (self.codex_home / "config.toml").unlink()
         self.write(self.codex_home / "plugins/cache/m/p/1/hooks/hooks.json",
                    json.dumps({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"command": "x"}]}]}}))
+        self.assertTrue(self.sole("codex", "spawn_agent"))                  # on every tool: no decision here
+        self.write(self.codex_home / "plugins/cache/m/p/1/hooks/hooks.json",
+                   json.dumps({"hooks": {"PreToolUse": [{"matcher": "spawn_agent", "hooks": [{"command": "x"}]}]}}))
         self.assertFalse(self.sole("codex", "spawn_agent"))
         shutil.rmtree(self.codex_home / "plugins")
         # A linked worktree: Codex also reads the main checkout's project layer.
@@ -583,7 +630,7 @@ class StartTest(Base):
                                         "no record). It waits for a free worker and does not run natively."), line)
         self.assertIn("comes back to this session as a completion notice", line)
         self.assertNotIn("idle", line)
-        self.assertIn("If this session is idle by then, it comes with the next message.",
+        self.assertIn("If this session went idle before the queued worker started, the notice comes with the next message.",
                       redirect.reason_for(receipt, "light", "claude"))
 
     def test_the_first_capacity_refusal_of_this_start_arms_the_runtime_s_resume(self):
