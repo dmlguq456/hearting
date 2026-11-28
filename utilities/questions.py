@@ -484,13 +484,19 @@ def _ask(args):
     except (OSError, ValueError, RuntimeError) as exc:
         print("questions: " + str(exc), file=sys.stderr)
         return 2
+    # This very registration may already have ended at this prompt (closed, or answered): say its
+    # end, never "waiting for an answer". A later prompt opens a new id.
+    ended = value["lifecycle"] != "open"
     if args.json:
         print(json.dumps({"id": value["id"], "state": value["lifecycle"]}, ensure_ascii=False))
+    elif ended:
+        print("questions: %s %s (the same question already ended at this prompt; ask at a later "
+              "prompt for a new one)" % (value["id"], value["lifecycle"]))
     else:
         print(value["id"])
         print(HWS.ui_translator()("questions.registered_choices" if args.choice
                                   else "questions.registered"))
-    return 0
+    return 1 if ended else 0
 
 
 def main(argv=None):

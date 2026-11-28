@@ -293,6 +293,181 @@ console.log(JSON.stringify([block.summary().count,block.references().length,(lin
         self.assertEqual(self.source(a)["completion"]["action_id"], "before-resume")
         self.assertEqual(self.source(b)["lifecycle"], "open")
 
+    # Independent review 1 (11-28), the five scenes it reproduced on this source.
+
+    def test_an_ended_question_takes_no_answer_slot_and_a_late_draft_or_answer_does_not_reopen_it(self):
+        # Review 6: each read of a question closed with no draft made an answer slot the store never prunes;
+        # once the slots ran out no new answer stood in any session. A draft from a screen opened before the
+        # close made its answer record `open` again.
+        with mock.patch.object(waits, "_SELECTED_RESPONSE_MAX", 4):
+            for n in range(8):
+                closed, ec = self.f.ask(text="Closed %d?" % n, choices=["x", "y"])
+                if n % 2:
+                    waits.write_selected_draft(ec, "draft %d" % n)     # what a close leaves is prunable
+                self.assertEqual(waits.close_message("claude", SID, closed["seat_key"], closed["id"])["state"],
+                                 "cancelled")
+                for _read in range(3):
+                    self.assertEqual(waits.read_selected_request(ec)["state"], "cancelled")
+            fresh, ef = self.f.ask(text="Fresh?", choices=["x", "y"])
+            self.assertEqual(waits.write_selected_draft(ef, "fresh draft").get("draft"), "fresh draft")
+            self.assertEqual(self.f.submit(ef, "x", "fresh-action")["state"], "submitted")
+            self.assertEqual(self.f.record(fresh)["receipt"]["answer_binding"]["action_id"], "fresh-action")
+        a, old_screen = self.f.ask(text="Closed under an old screen?", choices=["x", "y"])
+        b, eb = self.f.ask(text="Kept beside it?", choices=["x", "y"])
+        waits.write_selected_draft(eb, "draft of B")
+        with self.caller():
+            self.assertEqual(_run("close", a["id"])[0], 0)
+        self.assertNotEqual(waits.write_selected_draft(old_screen, "late draft").get("draft"), "late draft")
+        for place in ("panel", "fleet"):                              # two places answer from the old screen
+            self.assertNotEqual(self.f.submit(old_screen, "y", "late-" + place)["state"], "submitted")
+        self.assertIsNone(waits._selected_entry(old_screen))
+        again = waits.read_selected_request(old_screen)
+        self.assertEqual((again["state"], again.get("draft", "")), ("cancelled", ""))
+        self.assertIsNone(self.f.record(a))
+        self.assertEqual((self.source(b)["lifecycle"], waits._selected_entry(eb)["draft"]), ("open", "draft of B"))
+
+    def test_an_ended_question_is_kept_by_when_it_ended_and_until_its_decision_is_queued(self):
+        # Review 4: the 32 ended rows were kept by registration time, so the longest-open question went in the
+        # very write that answered it: no decision record, and closing or asking about it no longer knew it.
+        import tidy_decisions
+        path = waits._questions_path("claude", SID)
+
+        def answered(text, value, action, *, owed=False):
+            signal, envelope = self.f.ask(text=text, choices=["x", "y"])
+            self.assertEqual(self.f.submit(envelope, value, action)["state"], "submitted")
+            yield signal
+            wire, _, _ = self.f.prepare(signal)
+            with mock.patch.object(tidy_decisions, "save_pending", return_value=None) if owed else \
+                    contextlib.nullcontext():
+                self.f.consume(signal, wire)
+                waits.flush_message_decisions()
+            self.assertEqual(self.source(signal)["completion"]["action_id"], action)
+            yield signal
+
+        def close_later(label):
+            for n in range(waits._TERMINAL_QUESTIONS_KEPT):
+                later, _ = self.f.ask(text="%s %d?" % (label, n))
+                waits.close_message("claude", SID, later["seat_key"], later["id"])
+
+        def decisions():
+            return sorted(payload["answers"] for _path, payload in tidy_decisions.list_pending())
+        # The longest-open A is answered after 32 later questions closed: it is the newest ending.
+        steps = answered("Asked first, answered last?", "y", "action-a")
+        a = next(steps)
+        close_later("Closed before A arrives")
+        next(steps)
+        self.assertIn(a["id"], waits._read_questions_file(path))
+        self.assertEqual(decisions(), [["y"]])
+        self.assertEqual(waits.closed_question(a["id"])["status"], "answered")
+        with self.caller():
+            self.assertEqual(json.loads(_run("close", a["id"], "--json")[1])["state"], "answered")
+        # D's decision record could not be written: 32 newer endings do not take D before it is queued.
+        steps = answered("Its decision is owed?", "x", "action-d", owed=True)
+        d = next(steps)
+        next(steps)
+        close_later("Closed after D arrived")
+        self.assertIn(d["id"], waits._read_questions_file(path))
+        waits.flush_message_decisions()
+        self.assertEqual(decisions(), [["x"], ["y"]])
+        self.assertNotIn(d["id"], waits._read_questions_file(path))   # queued, it is one more old ending
+        self.assertEqual(len(waits._read_questions_file(path)), waits._TERMINAL_QUESTIONS_KEPT)
+
+    def test_a_file_missing_what_reads_need_or_at_another_sessions_address_is_unknown(self):
+        # Review 5: a row without `detail` passed (health ok, then KeyError on reading or registering), and
+        # another session's file put at this session's address let this session close that session's question.
+        a, _ = self.f.ask(text="A?", choices=["x", "y"])
+        b, _ = self.f.ask(text="B?", choices=["x", "y"])
+        other, _ = self.f.ask(sid="another-session", text="Theirs?", choices=["x", "y"])
+        path = waits._questions_path("claude", SID)
+        kept = path.read_bytes()
+        cases = {"foreign file": waits._questions_path("claude", "another-session").read_bytes()}
+        for field, value in (("detail", None), ("detail", {"questions": []}), ("sequence", "3"),
+                             ("lifecycle", None)):
+            rows = json.loads(kept)
+            rows["questions"][b["id"]][field] = value
+            if value is None:
+                del rows["questions"][b["id"]][field]
+            cases["%s=%r" % (field, value)] = json.dumps(rows).encode()
+        for name, raw in cases.items():
+            with self.subTest(case=name):
+                path.write_bytes(raw)
+                self.assertEqual(waits.message_questions("claude", SID), ({}, "unknown"))
+                health = []
+                self.assertEqual([s["id"] for s in waits.read_signals(health=health)], [other["id"]])
+                self.assertIn({"source": "S4", "state": "unknown", "reason": "question-file-unreadable"}, health)
+                self.assertTrue(waits._refresh_cache())
+                with self.caller():
+                    code, out, _err = _run("list", "--json")
+                    self.assertEqual((code, json.loads(out)["complete"]), (0, False))
+                    for argv in (("ask", "C?"), ("close", b["id"]), ("close", other["id"])):
+                        self.assertEqual(_run(*argv)[::2], (2, "questions: question-storage-unreadable\n"))
+                self.assertEqual(self.source(other)["lifecycle"], "open")
+        path.write_bytes(kept)
+        self.assertEqual(self.open_ids(), sorted([a["id"], b["id"]]))
+
+    def test_an_answer_on_its_way_waits_out_an_unreadable_file_and_lands_when_it_reads_again(self):
+        # Review 1: while the session's file could not be read (another row broken), the answer on its way to A
+        # ended as "no longer there": rejected before sending, `answered-elsewhere` after its receipt, and stuck
+        # after the file came back. Unreadable is not gone.
+        for when in ("before-send", "after-receipt"):
+            with self.subTest(when=when):
+                sid = "unreadable-" + when
+                a, ea = self.f.ask(sid=sid, text="A?", choices=["x", "y"])
+                b, _ = self.f.ask(sid=sid, text="B?", choices=["x", "y"])
+                other, eo = self.f.ask(sid="beside-" + when, text="Theirs?", choices=["x", "y"])
+                self.assertEqual(self.f.submit(ea, "y", "action-" + when)["state"], "submitted")
+                self.assertEqual(self.f.submit(eo, "x", "beside-" + when)["state"], "submitted")
+                path = waits._questions_path("claude", sid)
+                kept = path.read_bytes()
+                rows = json.loads(kept)
+                rows["questions"][b["id"]]["since"] = "broken"
+                if when == "after-receipt":
+                    wire, _, _ = self.f.prepare(a)
+                path.write_text(json.dumps(rows))
+                # Another session's question and answer go on as ever.
+                self.assertTrue(session_notice.notice_is_current(self.f.record(other)))
+                wire_o, _, _ = self.f.prepare(other)
+                self.f.consume(other, wire_o)
+                self.assertEqual(self.source(other)["completion"]["action_id"], "beside-" + when)
+                if when == "before-send":
+                    self.assertTrue(session_notice.notice_is_current(self.f.record(a)))
+                    _calls, _ref, row = self.f.courier(a)
+                    wire = row["text"]
+                self.assertNotEqual(self.f.record(a)["state"], "rejected")
+                self.f.consume(a, wire)
+                entry = waits._selected_entry(ea)
+                self.assertEqual((entry["state"], entry.get("source_terminal")), ("submitted", None))
+                path.write_bytes(kept)
+                # The existing re-observation of the acknowledged receipt applies it once the file reads.
+                with contextlib.suppress(StopIteration):              # its duty is done after the pass
+                    self.f.courier(a)
+                self.assertEqual((self.source(a)["lifecycle"], self.source(a)["completion"]["action_id"]),
+                                 ("answered", "action-" + when))
+                self.assertEqual(waits._selected_entry(ea)["state"], "applied")
+                self.assertEqual(self.source(b)["lifecycle"], "open")
+
+    def test_asking_again_after_the_same_registration_ended_says_its_end_not_a_wait(self):
+        # Review 7: closing A and asking the same text at the same prompt said "registered, waiting" with
+        # exit 0 while nothing waited. The next prompt opens a new id, as before.
+        waiting = waits.ui_translator()("questions.registered")
+        with self.caller():
+            code, out, _err = _run("ask", "Same prompt?", "--json")
+            first = json.loads(out)
+            self.assertEqual((code, first["state"]), (0, "open"))
+            self.assertEqual(_run("close", first["id"])[0], 0)
+            self.assertEqual(_run("ask", "Same prompt?", "--json")[:2],
+                             (1, json.dumps({"id": first["id"], "state": "cancelled"}) + "\n"))
+            code, out, _err = _run("ask", "Same prompt?")
+            self.assertEqual(code, 1)
+            self.assertIn(first["id"] + " cancelled", out)
+            self.assertNotIn(waiting, out)
+            self.assertEqual(self.open_ids(), [])
+            tidy.bump_prompt_seq(self.f.seat("claude", SID), "claude", SID, time.time())
+            code, out, _err = _run("ask", "Same prompt?", "--json")
+            self.assertEqual(code, 0)
+            self.assertNotEqual(json.loads(out)["id"], first["id"])
+            self.assertEqual(self.open_ids(), [json.loads(out)["id"]])
+
 
 if __name__ == "__main__":
     unittest.main()
