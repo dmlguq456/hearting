@@ -494,6 +494,7 @@ def merge_parked_viewers(sessions, *, links=None):
             [*(getattr(row, "session_aliases", None) or []), viewer_sid,
              *(getattr(viewer, "session_aliases", None) or [])]))
         row._parked_viewer = viewer_sid
+        row._parked_viewer_process = (link.get("viewer_pid"), link.get("viewer_start"))
         merged[viewer_sid] = row.session_id
         gone.add(id(viewer))
     if gone:

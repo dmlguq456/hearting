@@ -242,8 +242,10 @@ def _resolve_tag(tag):
         return None, "fleet-tag-not-found"
     except (OSError, ValueError, TypeError):
         return None, "fleet-tag-unavailable"
-    keys = [key for key, row in rows.items() if row["tag"] == tag.lower()
-            and session_tags.assigned_tag(*key) == tag.lower()]
+    tag = tag.lower()
+    # A number a live session moved off to follow its name is still that session's address.
+    keys = [key for key, row in rows.items() if tag in session_tags._held(row)
+            or row["tag"] == tag and session_tags.assigned_tag(*key) == tag]
     if len(keys) != 1:
         return None, "fleet-tag-ambiguous" if keys else "fleet-tag-not-found"
     return _follow_parked(_identity(*keys[0])), None

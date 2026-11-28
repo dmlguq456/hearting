@@ -525,7 +525,7 @@ def resolve_target(target: str) -> tuple[dict | None, str]:
     from fleet import session_tags
     try:
         identities = [key for key, row in session_tags._read(session_tags._path()).items()
-                      if row["tag"] == tag.lower()]
+                      if row["tag"] == tag.lower() or tag.lower() in session_tags._held(row)]
     except (OSError, ValueError, TypeError):
         return None, "fleet-tag-unavailable"
     if len(identities) != 1:

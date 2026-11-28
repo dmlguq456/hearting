@@ -94,6 +94,12 @@ def _order(row):
     return row["first_seen"], row["started_at"], row["harness"], row["session_id"]
 
 
+def _held(row):
+    """Numbers a live session moved off to follow its name: its earlier addresses stay its own."""
+    held = row.get("held")
+    return [tag for tag in held if isinstance(tag, str) and _HEX.fullmatch(tag)] if isinstance(held, list) else []
+
+
 def _started(harness, sid, started=None):
     if isinstance(started, (int, float)) and not isinstance(started, bool) and math.isfinite(started):
         return started
@@ -123,6 +129,8 @@ def _inventory(sessions):
     from .collectors.procscan import read_proc_start
     live = {}
     viewers = _parked(sessions)
+    chosen = {(sess.harness, sess._parked_viewer): tuple(map(str, getattr(sess, "_parked_viewer_process", ())))
+              for sess in sessions if getattr(sess, "_parked_viewer", None)}
     for sess in sessions:
         harness, sid = sess.harness, getattr(sess, "session_id", None)
         if harness not in {"claude", "codex", "opencode"} or not isinstance(sid, str) or not sid:
@@ -163,10 +171,14 @@ def _inventory(sessions):
                     row["tag"] = _claude_tag_candidate(sid)
             # The session list shows this window as `<folder>-<xx>`: Claude names an interactive
             # process once, when it registers, and keeps that name across /clear, compaction and
-            # an in-process resume. A window sent to the background shows the held session.
+            # an in-process resume. Only a record carrying this process's start time counts. A
+            # window sent to the background names the held session, from the window #1849 chose.
             named = live.get(viewers.get(key, key))
             tag = derived_tag(record.get("name")) if record.get("nameSource") == "derived" else None
-            if harness == "claude" and named is not None and tag:
+            if (harness == "claude" and named is not None and tag and record.get("kind") == "interactive"
+                    and record.get("procStart") is not None
+                    and (chosen.get(key) == (str(pid), str(start)) if key in viewers
+                         else key not in viewers.values())):
                 named["_registered"] = tag if named.get("_registered", tag) == tag else ""
     agents = list_agents()
     for agent in agents or []:
@@ -309,34 +321,47 @@ def _same_process(row, other):
             and (row.get("pid"), str(row.get("proc_start"))) == (other.get("pid"), str(other.get("proc_start"))))
 
 
-def _follow_registered_names(live, observed, registered):
-    """Give a Claude session the number of the name the session list shows for its window.
+def _renumber(row, tag, keep=()):
+    """Give ``row`` the number ``tag``; the numbers in ``keep`` (and its own) stay reserved for it."""
+    held = sorted((set(_held(row)) | set(keep)) - {tag})
+    row["tag"] = tag
+    if held:
+        row["held"] = held
+    else:
+        row.pop("held", None)
 
-    ``registered`` is ``{key: xx}`` from the window's live native record (``<folder>-<xx>``,
-    ``nameSource: derived``). That name is fixed when the process registers, while a stored
-    number follows the session id: a resume in a new process, an in-process resume of another
-    session, or a number drawn before the record named the session left the two apart. The
-    number moves to the name's only when no other session holds it, or when its holder is the
-    same window's earlier session (same process, no longer observed), which then retires.
-    Two windows registering one name keep the first; the later one keeps its own number."""
-    moved = True
-    while moved:
-        moved = False
-        holders = {}
-        for key, row in live.items():
-            holders.setdefault(row.get("tag"), []).append(key)
-        for key, row in sorted(live.items(), key=lambda item: _order(item[1])):
-            named = registered.get(key)
-            earlier = [other for other in holders.get(named, ()) if other != key] if named else []
-            if not named or (row.get("tag") == named and not earlier):
-                continue
-            if any(other in observed or not _same_process(live[other], row) for other in earlier):
-                continue
-            for other in earlier:
-                live.pop(other)
-            row["tag"] = named
-            moved = True
-            break
+
+def _follow_registered_names(live, observed, registered, stored, protected):
+    """Give a Claude window's session the number of the name the session list shows for it.
+
+    ``registered`` is ``{key: xx}`` from the window's own live record (``<folder>-<xx>``, an
+    interactive process whose record carries its start time). Claude fixes that name when the
+    process registers, while a stored number follows the session id: a resume in a new process,
+    an in-process resume, or a number drawn before the record named the session leave the two
+    apart. The number moves to the name's only when no stored session holds or keeps it, or its
+    holder is this window's earlier session (same harness and process, not observed, no newer
+    row than this census read), which retires and hands its seat evidence over. A number the
+    session already published stays reserved for it (``held``) while it lives, so a remembered
+    address never names another session. A newer row (``protected``) is not this census's to
+    rename. Among windows sharing a name, the one Fleet stored first takes its number."""
+    for key in sorted((key for key, named in registered.items() if named and key in live
+                       and key not in protected), key=lambda key: _order(live[key])):
+        row, named = live[key], registered[key]
+        holders = [other for other, kept in live.items() if other != key
+                   and (kept.get("tag") == named and other in stored or named in _held(kept))]
+        if (row.get("tag") == named and not holders) or any(
+                other in observed or other in protected or other[0] != key[0]
+                or not _same_process(live[other], row) for other in holders):
+            continue
+        keep = [row["tag"]] if key in stored and row.get("tag") else []
+        for other in holders:
+            earlier = live.pop(other)
+            first = min(earlier, row, key=_order)
+            row["first_seen"], row["started_at"] = first["first_seen"], first["started_at"]
+            if row.get("pane_id") is None and earlier.get("pane_id") is not None:
+                row["pane_id"] = earlier["pane_id"]
+            keep += _held(earlier)
+        _renumber(row, named, keep)
 
 
 def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=None, lineage=None,
@@ -348,7 +373,7 @@ def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=
     is returned with ``held_session`` naming it (the pane header reads that)."""
     from .session_handle import minted_tag
     registered = {key: row.pop("_registered", None) for key, row in live.items()}
-    observed = set(live)
+    observed, protected = set(live), set()
     path = _path()
     try:
         import fcntl
@@ -374,11 +399,13 @@ def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=
             for key, row in old.items():
                 # Only unchanged rows can be retired/refreshed by this census.
                 # Newer pane/PID evidence wins even when live contains the SID.
-                if ((not observed_only and (reaffirmed or row != baseline.get(key)))
-                        or (key not in live and (observed_only or _keep(row, agents)))):
+                newer = not observed_only and (reaffirmed or row != baseline.get(key))
+                if newer or (key not in live and (observed_only or _keep(row, agents))):
                     live[key] = row.copy()
                     if not observed_only:
                         observed.discard(key)
+                    if newer:
+                        protected.add(key)
             now = time.time()
             for key, row in live.items():
                 previous = old.get(key, {})
@@ -396,10 +423,13 @@ def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=
                     row["observation_revision"] = previous.get("observation_revision", 0) + 1
                 if previous:
                     row["tag"] = previous["tag"]
+                    if _held(previous):
+                        row["held"] = _held(previous)
                 elif not _HEX.fullmatch(str(row.get("tag") or "")):
                     row["tag"] = minted_tag(row["session_id"])
             # The same seat keeps its number: the successor takes the number of
             # the earliest session it continues, and those ended ids retire.
+            stored = set(old)
             for successor, predecessors in _continuations(live, observed, lineage).items():
                 if successor not in live:
                     continue
@@ -408,24 +438,29 @@ def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=
                     continue
                 first = min(chain + [live[successor]], key=_order)
                 row = live[successor]
-                for field in ("tag", "first_seen", "started_at"):
+                for field in ("first_seen", "started_at"):
                     row[field] = first[field]
+                _renumber(row, first["tag"], [tag for earlier in chain for tag in _held(earlier)])
+                stored.add(successor)
                 if row.get("pane_id") is None and chain[0].get("pane_id") is not None:
                     row["pane_id"] = chain[0]["pane_id"]
                 for key in predecessors:
                     live.pop(key, None)
-            _follow_registered_names(live, observed, registered)
+            _follow_registered_names(live, observed, registered, stored, protected)
             taken = set()
+            held = {tag for row in live.values() for tag in _held(row)}
             movable = sorted(live.items(), key=lambda item: (0 if item[0] in old else 1, *_order(item[1])))
             # Reserve every surviving old number before placing newcomers or a
-            # displaced number. A new hash must never evict an existing session.
+            # displaced number. A new hash must never evict an existing session,
+            # nor take a number a live session moved off (its earlier address).
             displaced = []
             for key, row in movable:
                 tag = row.get("tag")
-                if tag and tag not in taken:
+                if tag and tag not in taken and (key in old or tag not in held):
                     taken.add(tag)
                 else:
                     displaced.append(row)
+            taken |= held
             for row in displaced:
                 base = int(row["tag"], 16)
                 tag = next((f"{(base + step) % 256:02x}" for step in range(256)

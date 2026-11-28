@@ -1766,12 +1766,17 @@ Fleet's two-hex session numbers have one shared resolver,
 and Herdr titles. All three harnesses reserve distinct live numbers in the existing
 XDG state file. Surviving assignments keep their numbers before newcomers take free
 ones; initial collection orders unassigned sessions by known start time. Claude's
-native suffix is a preferred candidate, with the native name unchanged. A live
-Claude window's number follows the name the session list shows for it
-(`<folder>-<xx>`, fixed when its process registers; a window sent to the
-background names the held session): after a resume or an early draw a differing
-number moves to it when no other live session holds it, or its holder is the
-same process's earlier session. Legacy
+native suffix is a preferred candidate, with the native name unchanged. A full
+Fleet collection also moves a live Claude window's number to the name the session
+list shows for it (`<folder>-<xx>`, `nameSource: derived`, read from that
+interactive process's own record with its start time; a window sent to the
+background names the held session from the window #1849 chose, and the held
+session keeps that number after the link ends). It moves only when no stored
+session holds or keeps that number, or its holder is the same window's earlier
+session (same process, not observed, not newer than the collection); a native
+report alone moves none. The number a session moved off stays reserved for
+it and still addresses it while it lives, so a remembered `[xx]` cannot reach
+another session. Legacy
 Claude duplicates keep the earliest assignment and move later colliding rows.
 Normal start, native reports and collection attempt these reservations without
 waiting for a writer lock; allocation failure does not fail the observed work.
