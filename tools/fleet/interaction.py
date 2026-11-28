@@ -27,6 +27,7 @@ WAIT_SOURCES = (
     "codex-permissionrequest",
     "codex-rollout",
     "codex-appserver",
+    "codex-question",
     "opencode-question",
     "opencode-form",
     "opencode-permission",
