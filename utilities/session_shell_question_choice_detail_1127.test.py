@@ -612,6 +612,10 @@ class Answers(Base):
                             (["2", ENTER], ["관찰 기록"])):
             with self.subTest(keys=keys):
                 self.forget()
+                # each ask is a later prompt: the same registration at one prompt reads back its closed record
+                import session_tidy as tidy
+                import time
+                tidy.bump_prompt_seq(self.f.seat("claude", SID), "claude", SID, time.time())
                 drawn = popup(self.native(), cols=64, keys=keys)
                 self.assertEqual(drawn["sent"]["answers"]["message-response"], value)
 
