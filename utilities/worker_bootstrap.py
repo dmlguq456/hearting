@@ -2518,10 +2518,11 @@ def assignment_prompt(args, task: str, environ) -> str:
         )
         from verification_runtime import assignment_hint
         steps = owner_route_steps_prompt(args, environ)
+        plan_leg = plan_leg_prompt(route, getattr(args, 'route_node', None),
+                                   getattr(args, 'report_file', None))
         return (f"Assignment:\n{task.rstrip()}\n\n{completion_scope_prompt()}"
                 f"{assignment_hint(route, getattr(args, 'route_node', None))}"
-                f"{plan_leg_prompt(route, getattr(args, 'route_node', None),
-                                   getattr(args, 'report_file', None))}"
+                f"{plan_leg}"
                 f"{node_scope_prompt(scope)}{reopened_output_prompt(args, route, scope)}"
                 f"{node_inputs_prompt(route, getattr(args, 'route_node', None), scope.output_dir)}"
                 f"{handed_over_prompt(route, getattr(args, 'route_node', None), scope.output_dir)}"

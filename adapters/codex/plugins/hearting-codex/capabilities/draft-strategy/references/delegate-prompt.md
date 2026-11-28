@@ -161,7 +161,7 @@ When converting **reviewer concerns / rebuttal materials → paper-body mutation
 
 When paper mode produces a card-based cheatsheet for camera-ready, major revision, or explicit `subtype: camera-ready-paste-ready`, the post-approval [paste-ready cheatsheet contract](../../autopilot-draft/references/convention-paper.md#paste-ready-cheatsheet-contract) is the single authority for draft-body format. Design the mutation list, paste order, and branch points on the assumption that the later draft will follow that contract.
 
-Keep the strategy's mutation list card-based: one entry contains one location line, one paste-ready LaTeX line or reference, and a short reason. Group tracking metadata such as reviewer mapping, dependency tables, and wording invariants into separate sections such as §Reviewer mapping and §Dependency map, away from the body flow. During draft generation, move those tracking sections into `_internal/draft_meta.md`; do not place them beside body entries.
+Keep the strategy's mutation list card-based: one entry contains one location line, one paste-ready LaTeX line or reference, and a short reason. Group tracking metadata such as reviewer mapping, dependency tables, and wording invariants into separate sections such as §Reviewer mapping and §Dependency map, away from the body flow. During draft generation, move those tracking sections into `draft/_internal/draft_meta.md`; do not place them beside body entries.
 
 ### If mode = review
 ```markdown
