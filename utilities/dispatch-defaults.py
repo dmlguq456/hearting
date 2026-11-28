@@ -109,6 +109,13 @@ def _valid_weight(value):
     return not isinstance(value, bool) and isinstance(value, (int, float)) and 0.0 < value <= 1.0
 
 
+def _one_of(value, options):
+    """`value in options` for one parsed cell. A mapping (`key: {}`) or a list
+    is never one of the scalar options, and testing it against a set would
+    raise TypeError before the validator names the cell."""
+    return not isinstance(value, (dict, list)) and value in options
+
+
 def _repo_root():
     # realpath, not abspath: the helper is projected into
     # adapters/<harness>/utilities/ as a symlink, and the shipped config and
@@ -245,7 +252,8 @@ def _scalar(value):
 
 def parse_yaml_subset(text):
     """Parse the narrow schema: comments, blank lines, 2-space indent,
-    'key: value', 'key: [a, b]', and 'key:' mapping starts only."""
+    'key: value', 'key: [a, b]', 'key: {}' (an empty mapping), and 'key:'
+    mapping starts only."""
     entries = []
     for lineno, raw in enumerate(text.splitlines(), start=1):
         stripped = _strip_comment(raw).rstrip()
@@ -268,6 +276,10 @@ def parse_yaml_subset(text):
         if not stack:
             raise DefaultsConfigError(f"line {lineno}: indentation does not match any open mapping")
         parent = stack[-1][1]
+        if parent is None:
+            raise DefaultsConfigError(
+                f"line {lineno}: {content!r} is indented under an empty `{{}}` mapping; "
+                "write the parent as 'key:' with its entries below, or put this line at the parent's depth")
         if not isinstance(parent, dict):
             raise DefaultsConfigError(f"line {lineno}: list items are not supported in this schema")
         if ":" not in content:
@@ -283,6 +295,15 @@ def parse_yaml_subset(text):
             child = {}
             parent[key] = child
             stack.append((indent, child))
+        elif value.startswith("{") and value.endswith("}") and not value[1:-1].strip():
+            # `key: {}` is how a person writes "nothing here" (for example
+            # clearing allocation.depth_affinity); reading it as the string
+            # "{}" made the whole file invalid. Only the empty form is read:
+            # inline `{a: 1}` mappings stay a scalar the validator names.
+            parent[key] = {}
+            # Nothing may nest under it: a deeper next line is refused above
+            # instead of landing in the enclosing mapping.
+            stack.append((indent, None))
         elif value.startswith("[") and value.endswith("]"):
             items = [v.strip() for v in value[1:-1].split(",") if v.strip()]
             parent[key] = [_scalar(v) for v in items]
@@ -323,7 +344,7 @@ def validate(config, capmap, topology_path=None):
         errors.append(f"unsupported schema_version: {version!r}")
 
     enabled = []
-    if version in {1, 2}:
+    if _one_of(version, {1, 2}):
         owner = config.get("depth1_owner")
         if not isinstance(owner, list) or not owner:
             errors.append("depth1_owner must be a non-empty list of concrete harnesses")
@@ -355,7 +376,7 @@ def validate(config, capmap, topology_path=None):
                 )
         if "harnesses" in config or "profiles" in config:
             errors.append("harnesses/profiles require schema_version 3 or 4")
-    elif version in {3, 4}:
+    elif _one_of(version, {3, 4}):
         if "depth1_owner" in config or "opencode" in config:
             errors.append("schema v3+ replaces depth1_owner/opencode with harnesses/profiles")
         harnesses = config.get("harnesses")
@@ -432,7 +453,7 @@ def validate(config, capmap, topology_path=None):
                     )
 
     allocation = config.get("allocation")
-    if version in {2, 3, 4}:
+    if _one_of(version, {2, 3, 4}):
         if not isinstance(allocation, dict):
             errors.append(f"allocation must be a mapping for schema v{version}")
         else:
@@ -443,7 +464,7 @@ def validate(config, capmap, topology_path=None):
             for key in unknown_allocation:
                 errors.append(f"unknown allocation key: {key!r}")
             strategy = allocation.get("strategy")
-            if strategy not in ALLOCATION_STRATEGIES:
+            if not _one_of(strategy, ALLOCATION_STRATEGIES):
                 errors.append(f"allocation.strategy must be one of {sorted(ALLOCATION_STRATEGIES)}")
             if version == 2 and strategy != "least-recent-attempts":
                 errors.append("schema v2 allocation.strategy must be least-recent-attempts")
@@ -456,7 +477,7 @@ def validate(config, capmap, topology_path=None):
             depth_affinity = allocation.get("depth_affinity", {})
             if not isinstance(depth_affinity, dict) or not set(depth_affinity) <= {"owner", "worker"}:
                 errors.append("allocation.depth_affinity keys must be a subset of owner and worker")
-            elif any(value not in DISPATCHABLE_HARNESSES for value in depth_affinity.values()):
+            elif any(not _one_of(value, DISPATCHABLE_HARNESSES) for value in depth_affinity.values()):
                 errors.append("allocation.depth_affinity values must name known harnesses")
             if "owner_order" in allocation and not valid_owner_order(allocation["owner_order"]):
                 errors.append("allocation.owner_order must be a list of distinct known harnesses")
@@ -596,7 +617,7 @@ def validate(config, capmap, topology_path=None):
                         f"(canonical node ids: {sorted(capmap[cap_name])})"
                     )
                     continue
-                if value not in AFFINITY_VALUES:
+                if not _one_of(value, AFFINITY_VALUES):
                     errors.append(
                         f"invalid affinity value for {cap_name}.{stage_name}: {value!r} "
                         f"(allowed: {sorted(AFFINITY_VALUES)}; model/effort values are never allowed here)"
@@ -1192,8 +1213,12 @@ def query_user_rules_opencode(config):
 
 
 def _scan_user_rules(text):
-    """Only the switch's own lines, for a file the full parser rejects."""
-    found, section = {}, None
+    """Only the switch's own lines, for a file the full parser rejects.
+
+    Under `user_rules:` only a direct child (the depth of the first line under
+    it) is the switch; an `opencode:` nested deeper belongs to another key.
+    """
+    found, section, child = {}, None, None
     for raw in text.splitlines():
         line = _strip_comment(raw).rstrip()
         if not line.strip():
@@ -1204,7 +1229,7 @@ def _scan_user_rules(text):
         if not colon:
             continue
         if indent == 0:
-            section = None
+            section, child = None, None
             if key == "user_rules":
                 if value:
                     found["user_rules"] = _scalar(value)
@@ -1212,8 +1237,10 @@ def _scan_user_rules(text):
                     section = found["user_rules"] = {}
             elif key == USER_RULES_DOTTED:
                 found[key] = _scalar(value)
-        elif section is not None and key == "opencode":
-            section["opencode"] = _scalar(value) if value else {}
+        elif section is not None:
+            child = indent if child is None else child
+            if indent == child and key == "opencode":
+                section["opencode"] = _scalar(value) if value else {}
     return found
 
 
