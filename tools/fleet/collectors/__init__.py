@@ -269,6 +269,10 @@ def resolve_parent_edges(sessions, jobs):
         if not parent_sid:
             j._parent_edge_sid, j._parent_edge_promoted_orphan = model.parent_edge_unknown(j.slug)
             continue  # Unreadable current lineage cannot establish a new managed-dir edge.
+        metadata, registry = getattr(j, "_registry_metadata", None), getattr(j, "_registry_path", None)
+        from dispatch_seat_handover import route_assigned  # on the path through _effective_job_parent
+        if isinstance(metadata, dict) and registry and route_assigned(metadata, registry, read_context=parent_context):
+            j._route_holder = (parent_harness, parent_sid)  # a route hand-off: its row shows under this holder
 
         candidates = sessions_by_sid.get(parent_sid, [])
         if parent_harness:

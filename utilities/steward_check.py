@@ -626,6 +626,7 @@ def _observe_role(harness: str, session_id: str) -> dict:
     targets = []
     cwds = set()
     agents = ()
+    censuses = {}
     flagged = False
     observation = _end_observation()
     if collector is not None:
@@ -654,12 +655,15 @@ def _observe_role(harness: str, session_id: str) -> dict:
                     directories.add(agent["cwd"])
                 cwds.update(directories)
             state = (agent or {}).get("agent_status") or "unknown"
+            liveness = (_session_liveness(t_harness, t_sid, agents, observation)
+                        if t_sid else "unknown")
+            if liveness != "live" and _window_closed_target(target, censuses):
+                continue  # its own window closed and it lives nowhere else: it ended there
             targets.append({
                 "name": str(target.get("name") or (t_sid or "-")[:8]),
                 "harness": t_harness or "-", "session_id": t_sid,
                 "state": state,
-                "liveness": (_session_liveness(t_harness, t_sid, agents, observation)
-                             if t_sid else "unknown"),
+                "liveness": liveness,
                 **({"unresolved": True} if target.get("unresolved") else {}),
                 "owed": _pending_count(module, t_harness, t_sid)})
         try:  # `_role_flagged` from what is already read; no targets, no flag question
@@ -693,6 +697,28 @@ def _registry_view():
         return None
 
 
+def _window_closed_target(target: dict, censuses: dict) -> bool:
+    """Whether the target's own Herdr window is gone in a complete census of its server.
+
+    `start`, `watch` and `wait` record the pane they saw and that pane's server (Herdr
+    pane ids repeat across servers), and the census reads that server alone. An entry
+    with no recorded server, a tmux pane, an unanswered or incomplete census, or a pane
+    still listed keeps the target. One census per server per check."""
+    pane, server = target.get("pane"), target.get("server")
+    if (not isinstance(pane, str) or not pane or pane.startswith("%")
+            or not isinstance(server, str) or not server):
+        return False
+    if server.startswith("tmux:"):
+        return False
+    try:
+        import herdr_observation
+        if server not in censuses:
+            censuses[server] = herdr_observation.pane_census(session=server)
+        return herdr_observation.confirms_absence(censuses[server], pane, endpoint=server)
+    except Exception:  # noqa: BLE001 - an unreadable census keeps the target listed
+        return False
+
+
 def _lengthen_shared_prefixes(targets: list) -> None:
     """Two targets named only by the first 8 characters of different session ids keep
     them apart: each such name is lengthened to the shortest prefix that differs."""
@@ -716,10 +742,12 @@ def _queued_for(target: dict) -> int:
 
 
 def _remaining(observation: dict) -> bool:
-    """Whether open work, a user decision or a queued peer request remains for this role."""
+    """Whether open work, a user decision or a request for this role remains.
+
+    A peer request queued for a target is the runtime's delivery, not a next action
+    the steward can take; it no longer keeps the check awake."""
     return bool(observation.get("open_work")) or bool(observation.get("user_decisions")) \
-        or observation.get("pending_messages", 0) > 0 \
-        or any(_queued_for(t) > 0 for t in observation["targets"])
+        or observation.get("pending_messages", 0) > 0
 
 
 def _waiting(target: dict) -> bool:
@@ -794,11 +822,6 @@ def next_actions(observation: dict, waiting_since=None, now: float | None = None
     waiting = sorted((t for t in targets if _waiting(t) and not _queued_for(t)),
                      key=lambda t: waiting_since.get(str(t.get("session_id")), now))
     actions = []
-    for target in targets:
-        owed = _queued_for(target)
-        if owed:
-            actions.append(f"{_label(target['name'])} {owed} peer request(s) queued, not yet "
-                           "delivered → do not resend")
     for target in waiting:
         minutes = int(max(0.0, now - float(waiting_since.get(str(target.get("session_id")), now))) // 60)
         since = f" {minutes} min" if minutes else ""
@@ -846,8 +869,11 @@ def _quiet_signature(observation: dict) -> str:
 def _quiet(observation: dict) -> bool:
     """No live unfinished target: an unchanged state sends no further model turn. Open
     records alone do not repeat; a live unfinished target is checked every interval.
-    Unresolved targets remain visible, but only repeat when positively live."""
+    Unresolved targets remain visible, but only repeat when positively live. Only an
+    idle target whose outstanding row is a queued peer request is the runtime's
+    delivery; a working target with one is still checked every interval."""
     return not any(t["state"] != "done" and t["liveness"] != "ended"
+                   and not (_queued_for(t) and t["state"] == "idle")
                    for t in observation["targets"]
                    if not t.get("unresolved") or t["liveness"] == "live")
 
