@@ -4775,8 +4775,14 @@ def cmd_status(args):
     displayed_state = "COMPLETE" if closed_complete else state["workflow_state"]
     if (not closed_complete and not failed and owner.get("liveness") == "live"
             and owner.get("registry_status") in {"open", "running"}
-            and displayed_state in {"CREATED", "READY"}):
-        displayed_state = derived = "RUNNING"
+            and displayed_state in {"CREATED", "READY", "COMPLETE"}):
+        # A live owner runs a turn. After an earlier turn COMPLETE, a follow-up
+        # owner is still work in progress; the top value must not read as done.
+        # The journal and the derived state keep their own values.
+        was_starting = displayed_state in {"CREATED", "READY"}
+        displayed_state = "RUNNING"
+        if was_starting:
+            derived = "RUNNING"
         if not running:
             node = owner.get("current_stage")
             declared = {entry["id"] for entry in route.get("nodes") or ()}

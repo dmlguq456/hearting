@@ -59,6 +59,15 @@ class OwnerStatusTest(unittest.TestCase):
         self.assertEqual(result['current_stage'],['one-shot'])
         self.assertEqual(result['next_stage'],[])
 
+    def test_a_live_followup_after_complete_reads_running_on_top(self):
+        result = self.render(journal='COMPLETE')
+        self.assertEqual(result['workflow_state'], 'RUNNING')
+        self.assertEqual(result['journal_workflow_state'], 'COMPLETE')
+        self.assertEqual(result['derived_workflow_state'], 'CREATED')
+        self.assertEqual(result['owner']['liveness'], 'live')
+        self.assertEqual(result['current_stage'], ['one-shot'])
+        self.assertEqual(result['next_stage'], [])
+
     def test_missing_observation_does_not_invent_execution(self):
         result=self.render(process='unverifiable')
         self.assertEqual(result['workflow_state'],'CREATED')
