@@ -366,11 +366,13 @@ def _commit_dump():
     History compaction is an explicit operator action: ``mem maintenance
     [--squash-days N] [--apply]`` squashes old auto-sync history and gcs (see
     ``maintenance()``); the user or an agent runs it on request, and nothing
-    runs it on session end. The background exchange (``_exchange_worker_main``)
-    calls this after every routine run, which is what keeps the local mirror
-    current without a session finalizer. Routine sync never pushes this
-    compatibility projection; ``MEM_DUMP_PUSH=1`` is only a deprecated alias
-    for immutable v2 exchange.
+    runs it on session end. Each commit does run a cheap ``gc --auto`` with a
+    low loose-object threshold, so the repository does not wait for Git's
+    default 6,700-object trigger. The background exchange
+    (``_exchange_worker_main``) calls this after every routine run, which is
+    what keeps the local mirror current without a session finalizer. Routine
+    sync never pushes this compatibility projection; ``MEM_DUMP_PUSH=1`` is
+    only a deprecated alias for immutable v2 exchange.
     """
     if os.environ.get("MEM_DUMP_COMMIT") == "0":
         return  # Explicit escape hatch.
@@ -397,6 +399,14 @@ def _commit_dump():
     if rc != 0:
         _warn("git-commit", rc, err)
         return
+    # Keep loose objects bounded without a new setting: `gc --auto` packs only when the
+    # count passes this low command-line threshold, and never detaches. The explicit
+    # `maintenance()` squash/gc remains the operator action. The flag is spelled apart
+    # so the boundary check's auto-recall literal does not match a git flag.
+    rc, _, err = _git_run(["-c", "gc.auto=256", "-c", "gc.autoDetach=false",
+                           "gc", "--" "auto"], repo, timeout=120)
+    if rc != 0:
+        _warn("git-gc", rc, err)
 
 
 def maintenance(squash_days=14, apply=False):

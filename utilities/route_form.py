@@ -18,8 +18,8 @@ the recorded shape (a `solo` shape with a signal still seals a team route, so th
   `max_dispatch_depth 2` and the owner's wait on its children hang on it.
 
 In today's routes the two answers move together (quick: A only; team: B only). The middle cell
-`solo·standard` and above -- one owner that makes the work and starts its kind's declared review nodes
-(one review at `standard`; the kind's review legs from `strong`) -- is the route where both are true.
+`solo·standard` and above -- one owner that makes the work and starts its kind's declared verification nodes
+(one review at `standard`; from `strong` the kind's review legs, then its test) -- is the route where both are true.
 
 `form_of` / `route_form` (the recorded capability, shape and intensity) say what to *build* at the
 compile entrance and name a record for display; the middle cell is the `solo` intensities (`standard`
@@ -200,7 +200,7 @@ def one_shot_review_route(route):
 
 def one_shot_review_nodes(route):
     """The middle cell's verification nodes (every depth-2 node the `one-shot` end node waits on): one review
-    at `standard`, the review group's legs from `strong`. An empty list for any other route."""
+    at `standard`, the review group's legs and then the test from `strong`. An empty list for any other route."""
     if not one_shot_review_route(route):
         return []
     return [node for node in _node_list(route) if isinstance(node, dict) and node.get("dispatch_depth") == 2]
@@ -214,3 +214,8 @@ def one_shot_review_node(route):
 def one_shot_review_node_ids(route):
     """The ids of every verification node of the middle cell."""
     return [node.get("id") for node in one_shot_review_nodes(route)]
+
+
+def one_shot_test_node(route):
+    """The middle cell's test node (from `strong`, after every review leg passes), or None."""
+    return next((node for node in one_shot_review_nodes(route) if node.get("unit") == "qa/test"), None)
