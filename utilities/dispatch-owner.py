@@ -18,7 +18,8 @@ from route_form import serial_attempt_route, starts_depth2_nodes
 from owner_route_binding import OwnerRouteBindingError, validate_owner_route_binding, derive_quick_owner_binding, derive_frame_route_binding
 from dispatch_mode_contract import DispatchModeContractError, resolve_qa
 from dispatch_allocation_receipt import changed_raw_headroom, raw_headroom_lines
-from dispatch_contract import (DispatchContractError, frame_harness_admission,
+from dispatch_contract import (DispatchContractError, FRAME_OTHER_HARNESS_UNUSABLE,
+                               candidate_detail, frame_harness_admission,
                                parse_registry_metadata, record_frame_launch_degradation)
 from route_authority import (depth1_supported_harnesses, harness_admitted, pinned_launch_harness,
                              route_in_force, sealed_pin_harness)
@@ -351,6 +352,23 @@ def _frame_alternative_tiebreak(first_harness, selected, band, ranks, scores, *,
             continue
         return name
     return selected
+
+
+def _frame_alternative_detail(alternatives, band, policy, ranks):
+    """Describe a same-harness result using the policy and ranks it saw."""
+    entries = [f"band:{band}"]
+    for harness in sorted(alternatives):
+        if harness not in policy.get(band, ()):
+            exclusion = "not-in-band"
+        elif ranks is None:
+            exclusion = "legacy-no-tiebreak"
+        elif harness not in ranks[band]:
+            exclusion = "ineligible"
+        else:
+            # A ranked peer could only have been skipped by the tie-break's usage gate.
+            exclusion = "gated"
+        entries.append(f"{harness}:{exclusion}")
+    return candidate_detail(FRAME_OTHER_HARNESS_UNUSABLE, ",".join(entries))
 
 
 @contextlib.contextmanager
@@ -739,7 +757,7 @@ def _canonical_jobs():
 def _audit(
     status, adapter, source, configured, explicit, states, *, allocation=None,
     counts=None, rejected=(), fallback=None, reason="none", capacity=None,
-    quality_band=None, relief_promoted=False, capacity_sources=None,
+    quality_band=None, relief_promoted=False, capacity_sources=None, deviation_detail="",
     capacity_freshness=None, top_excluded=(), field=None,
 ):
     lines = [
@@ -818,6 +836,8 @@ def _audit(
         "trace.3=eligibility=" + ",".join(f"{h}:{states[h]}" for h in sorted(states)),
         f"trace.4=configured={','.join(configured)};selected={adapter or '-'};source={source};deviation_reason={reason}",
     ]
+    if deviation_detail:
+        lines[-1] += f";deviation_detail={deviation_detail}"
     return lines
 
 
@@ -873,6 +893,7 @@ def run_owner_wrapper(argv: list[str], env: dict[str, str]) -> int:
 def main(argv):
     try:
         frame_degradation = None
+        deviation_detail = ""
         first = None
         pair_model_profile = None
         pair_model_reason = "not-applicable"
@@ -1126,21 +1147,9 @@ def main(argv):
                 if selected == first_harness:
                     alternatives = [h for h in configured if h != first_harness]
                     if alternatives:
-                        reason = "frame-other-harness-unusable"
-                        excluded_scores = {h: capacity.get(h) for h in alternatives}
-                        raw = changed_raw_headroom(excluded_scores, freshness=capacity_freshness)
-                        detail = json.dumps({
-                            "excluded_harnesses": alternatives,
-                            "states": {h: states.get(h, "unknown") for h in alternatives},
-                            "capacity": excluded_scores,
-                            **({"capacity_raw_headroom": raw} if raw else {}),
-                            "quality_band": quality_band,
-                            **({"gated": {h: _capacity.is_gated(
-                                    capacity, h,
-                                    usage_gate_used_percent=allocation.get("usage_gate_used_percent", 90))
-                                    for h in alternatives}}
-                               if allocation["strategy"] == "balanced" else {}),
-                        }, sort_keys=True)
+                        reason = FRAME_OTHER_HARNESS_UNUSABLE
+                        detail = _frame_alternative_detail(alternatives, quality_band, policy, ranks)
+                        deviation_detail = detail
                     else:
                         reason = "frame-single-available-harness"
                         detail = json.dumps({"configured_alternatives": []})
@@ -1195,7 +1204,8 @@ def main(argv):
                                       allocation=allocation, counts=counts,
                                       rejected=rejected if source != "explicit" else (),
                                       fallback=selected if source == "eligibility-fallback" else None,
-                                      reason=reason, capacity=capacity, capacity_sources=capacity_sources,
+                                      reason=reason, deviation_detail=deviation_detail,
+                                      capacity=capacity, capacity_sources=capacity_sources,
                                       capacity_freshness=capacity_freshness,
                                       quality_band=quality_band,
                                       relief_promoted=relief_promoted, top_excluded=top_excluded,
@@ -1206,7 +1216,8 @@ def main(argv):
                                   allocation=allocation, counts=counts,
                                   rejected=rejected if source != "explicit" else (),
                                   fallback=selected if source == "eligibility-fallback" else None,
-                                  reason=reason, capacity=capacity, capacity_sources=capacity_sources,
+                                  reason=reason, deviation_detail=deviation_detail,
+                                  capacity=capacity, capacity_sources=capacity_sources,
                                   capacity_freshness=capacity_freshness,
                                   quality_band=quality_band,
                                   relief_promoted=relief_promoted, top_excluded=top_excluded,

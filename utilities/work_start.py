@@ -1428,6 +1428,20 @@ def _interview_questions(rows):
 AUTOMATIC_DIRECTION_DIR = "shards/frame/automatic"
 
 
+AUTOMATIC_DIRECTION_HARMLESS_NOTES = (
+    "kept:",
+    "blocks:",
+    "section-8-heading-missing",
+    "card-copy-kept",
+)
+
+
+def _harmless_read_notes(row) -> bool:
+    """Only notes that do not describe a cut or a left-out part may pass."""
+    return all(str(note).startswith(AUTOMATIC_DIRECTION_HARMLESS_NOTES)
+               for note in row.get("read_notes") or ())
+
+
 def _automatic_direction(route, rows, output):
     """`(interview, answers)` the runtime records itself when there is nothing to choose, else None.
 
@@ -1443,7 +1457,7 @@ def _automatic_direction(route, rows, output):
     single = len(rows) == 1 and rows[0]["proposal"] is not None
     if not (single or RP.proposals_equal(rows)) or any(_start_approval_keys(row) for row in rows):
         return None
-    if any(row.get("repository_preparation") or row.get("read_notes") for row in rows):
+    if any(row.get("repository_preparation") or not _harmless_read_notes(row) for row in rows):
         return None   # a part the compile cut or left out is a difference only the person can see
     texts = []
     for row in rows:
