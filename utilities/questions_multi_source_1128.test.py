@@ -293,6 +293,17 @@ console.log(JSON.stringify([block.summary().count,block.references().length,(lin
         self.assertEqual(self.source(a)["completion"]["action_id"], "before-resume")
         self.assertEqual(self.source(b)["lifecycle"], "open")
 
+    def test_the_words_under_the_choices_ride_in_the_session_file(self):
+        # #1908's words under the choices are part of the record the session's file keeps; other words for the
+        # same open question are still that question (its id and first words).
+        a, ea = self.f.ask(text="Cover label?", choices=["Dogwood", "Field Guide"], descriptions={"Dogwood": "The tree"})
+        row = waits._read_questions_file(waits._questions_path("claude", SID))[a["id"]]
+        self.assertEqual(row["detail"]["questions"][0]["choice_descriptions"], {"Dogwood": "The tree"})
+        self.assertEqual(ea["detail"]["questions"][0]["choice_descriptions"], {"Dogwood": "The tree"})
+        again, _ = self.f.ask(text="Cover label?", choices=["Dogwood", "Field Guide"],
+                              descriptions={"Dogwood": "Other words"})
+        self.assertEqual((again["id"], again["detail"]), (a["id"], a["detail"]))
+
     # Independent review 1 (11-28), the five scenes it reproduced on this source.
 
     def test_an_ended_question_takes_no_answer_slot_and_a_late_draft_or_answer_does_not_reopen_it(self):
