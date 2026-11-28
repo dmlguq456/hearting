@@ -813,6 +813,121 @@ class CapacityResumeTest(unittest.TestCase):
         missing = unit_continue.session_plan(self.jobs, original, "claude")
         self.assertEqual(missing.row_value, "fresh:session-missing")
 
+    BROAD = "The unit worker stopped for capacity (a usage limit or a provider at capacity)"
+
+    def assert_main_instruction(self, receipt, reason, instruction="Inspect the unit recovery receipt before "
+                                "continuing this route."):
+        """A refused unit continuation adds only the broad stop and the step's reason to main's own instruction."""
+        from start_receipt import next_line
+        self.assertEqual((receipt["state"], receipt["reason"], receipt["required_action"], receipt["parent_next"]),
+                         ("needs-attention", reason, "inspect-preparation", "inspect-receipt"), receipt)
+        self.assertEqual(receipt["next_step"], f"{self.BROAD}; its recovery reported {reason}. {instruction}")
+        self.assertNotIn("resume_command", next_line(receipt))
+
+    def test_a_unit_continuation_refusal_promises_nothing_about_its_launch(self):
+        # The closure review's orders: a passing launch failure twice (the second start rewrites the same claim),
+        # a continuation that started and then timed out, and a claim that settled while the receipt was written.
+        import shutil
+
+        def fresh(**extra):
+            shutil.rmtree(R._directory(self.jobs), ignore_errors=True)
+            self.calls.clear()
+            self.quiet, self.cleaned, self.launch_error = {}, [], None
+            return self.seed_unit("claude", **extra)
+
+        for extra in ({}, {"api_status": "503"}, {"api_status": "429"}):
+            with self.subTest("passing launch failure, twice", extra=extra):
+                original = fresh(**extra)
+                self.launch_error = "fixture-launch-broke"
+                for _ in range(2):
+                    self.assert_main_instruction(self.start(), "replacement-launch-pending")
+                self.assertEqual((len(self.calls), len(self.claims())), (2, 1))
+                # main's own path is unchanged: a later start launches the kept claim, once.
+                self.launch_error = None
+                self.assertEqual(self.start()["unit_attempt_id"], self.replacement_id(original))
+                self.assertEqual(len(self.calls), 3)
+        with self.subTest("started, then timed out"):
+            original = fresh()
+
+            def started_then_timed_out(command, **kwargs):
+                self.launcher(command, **kwargs)   # registers the continuation with launch_started=1
+                raise subprocess.TimeoutExpired(command, 1)
+            self.assert_main_instruction(self.start(run=started_then_timed_out), "replacement-launch-timeout")
+            self.assertEqual(self.rows()[self.replacement_id(original)][1]["launch_started"], "1")
+            self.assertEqual((self.start()["state"], len(self.calls)), ("running", 1))   # it already runs
+        with self.subTest("settled while the receipt was written"):
+            original = fresh()
+            self.launch_error = "fixture-launch-broke"
+            stop = W._unit_stop
+
+            def settle_then_stop(row, capacity=False):
+                # Another start's refusal settles the same claim after this start read its step.
+                R._settle_recovery_attention(self.jobs, original, {"reason": "replacement-registration-refused"})
+                return stop(row, capacity)
+            with mock.patch.object(W, "_unit_stop", side_effect=settle_then_stop):
+                self.assert_main_instruction(self.start(), "replacement-launch-pending")
+            self.assertEqual(R.recovery_delivery_state(self.jobs, original), "settled")
+            self.launch_error = None
+            self.assertEqual(self.start()["required_action"], "compose-again")
+            self.assertEqual(len(self.calls), 1)
+
+    def test_a_refusal_without_a_claim_keeps_its_own_instruction(self):
+        aid = self.seed_unit("claude")
+        (R._directory(self.jobs) / "inputs" / f"{aid}.json").unlink()   # the sealed launch input is gone
+        for _ in range(2):
+            receipt = self.start()
+            self.assertEqual(receipt["reason"], "replacement-input-unproven", receipt)
+            step = receipt["replacement_attention"][0]
+            self.assert_main_instruction(receipt, "replacement-input-unproven", step.get("retry_when")
+                                         or step.get("next_step") or "Inspect the unit recovery receipt before "
+                                         "continuing this route.")
+        self.assertEqual((self.calls, self.claims()), ([], []))
+
+    def test_any_capacity_evidence_reads_as_one_broad_stop_and_none_keeps_the_main_sentence(self):
+        import route_authority
+        import unit_ephemeral
+        scratch = self.root / "ephemeral" / "123456789abc" / ".agent_reports"
+        scratch.mkdir(parents=True)
+        (scratch / unit_ephemeral.MARKER).touch()
+        self.route["artifact_root"] = str(scratch)
+        aid = self.seed_unit("claude", artifact_root=str(scratch))
+        self.ready = True
+        tail = " Read its result and report; to run the same unit again, run parent_next_command (a new route; " \
+               "this one stays as it ended)."
+        none = {"note": "dead-exit-1", "failure_class": "runtime"}
+        for changes in (
+                {},                                                   # a detached watcher's capacity end
+                {"api_status": "503"},                                # a recorded provider at capacity
+                {"note": "dead-session-limit", "failure_class": ""},
+                {"api_status": "429"},
+                {**none, "quota_window": "seven_day"},
+                {**none, "provider_failure_kind": "usageLimitExceeded"},
+                {**none, "provider_failure_kind": "provider.rate-limit"}):
+            with self.subTest(changes=changes):
+                self.set_status(aid, "done", **{"note": "dead-capacity", "failure_class": "capacity", "api_status": "",
+                                                "quota_window": "", "provider_failure_kind": "", **changes})
+                with mock.patch.object(W, "_outcome", return_value={"classification": "failure"}):
+                    receipt = self.start()
+                self.assertEqual((receipt["reason"], receipt["required_action"]),
+                                 ("unit-outcome-needs-inspection", "compose-again"), receipt)
+                self.assertEqual(receipt["next_step"], self.BROAD + "." + tail)
+        # The early-death watcher writes the usage-limit alias for any retry exhaustion (a provider's 503, a
+        # reset connection, a 401 after retries), so that alias alone keeps the main sentence.
+        endings = []
+        for line in ("APIError: exceeded retry limit, last status: 503 Service Unavailable",
+                     "APIError: exceeded retry limit, last error: connection reset by peer",
+                     "APIError: exceeded retry limit, last status: 401 Unauthorized"):
+            label, _ = route_authority.scan_death(line)
+            self.assertEqual(label, "usage-limit", line)
+            endings.append({"note": f"dead-{label}", "failure_class": ""})
+        for changes in (none, *endings):
+            with self.subTest(changes=changes):
+                self.set_status(aid, "done", **{"api_status": "", "quota_window": "", "provider_failure_kind": "",
+                                                **changes})
+                with mock.patch.object(W, "_outcome", return_value={"classification": "failure"}):
+                    self.assertEqual(self.start()["next_step"], "The unit worker ended without a pass." + tail)
+        self.assertEqual(self.calls, [])
+
     def test_only_a_launched_recording_unit_capacity_end_can_continue(self):
         import unit_ephemeral
         original = self.seed_unit("claude")
@@ -840,6 +955,11 @@ class CapacityResumeTest(unittest.TestCase):
                 mock.patch.object(D, "_parent_liveness_evidence", return_value=(False, "exited", None)):
             result = self.start()
             self.assertEqual(result["reason"], "replacement-parent-not-live", result)
+            # A refusal before any claim keeps its own instruction and promises nothing about a launch.
+            step = result["replacement_attention"][0]
+            self.assert_main_instruction(result, "replacement-parent-not-live", step.get("retry_when")
+                                         or step.get("next_step") or "Inspect the unit recovery receipt before "
+                                         "continuing this route.")
         self.assertEqual((self.calls, self.claims()), ([], []))
         with mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": "att-caller", "AGENT_DISPATCH_CHILD": "1"}), \
                 mock.patch.object(D, "_parent_liveness_evidence", return_value=(True, "live", None)):
