@@ -291,11 +291,18 @@ term.loadAddon(new Unicode11Addon());term.unicode.activeVersion='11';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const child=pty.spawn(cfg.python,[cfg.entry,cfg.harness,cfg.python,cfg.fake,cfg.harness,cfg.sid],{cols,rows,cwd:cfg.project,
   env:{...process.env,TERM:'xterm-256color',NODE_OPTIONS:'--require '+cfg.launcher}});
-child.onData(d=>term.write(d));
+// The host draws each panel or popup frame inside synchronized output (`ESC[?2026h` … `ESC[?2026l`, host.cjs), and a
+// terminal shows such a frame only once it is whole; a read between two PTY reads of one frame saw half of it.
+let framing=false,arrived=0,tail='';
+const take=d=>{arrived++;term.write(d);const t=tail+d,open=t.lastIndexOf('\x1b[?2026h'),shut=t.lastIndexOf('\x1b[?2026l');
+  if(open>=0||shut>=0)framing=open>shut;tail=t.slice(-7);};
+child.onData(take);
 const flush=()=>new Promise(r=>term.write('',r));
+// Every byte that arrived is parsed and no frame is open (one that never closes is read as it stands after 2 s).
+const whole=async()=>{for(let i=0;i<400;i++){const n=arrived;await flush();if(!framing&&n===arrived)return;await sleep(5);}};
 const cellsOf=y=>{const line=term.buffer.active.getLine(y),out=[];for(let x=0;x<cols;x++){const c=line?.getCell(x);out.push(!c?' ':c.getWidth()===0?'':c.getChars()||' ');}return out;};
-const screen=async()=>{await flush();return Array.from({length:rows},(_,y)=>cellsOf(y).join('').trimEnd());};
-const at=async needle=>{await flush();for(let y=0;y<rows;y++){const c=cellsOf(y),where=[];let text='';
+const screen=async()=>{await whole();return Array.from({length:rows},(_,y)=>cellsOf(y).join('').trimEnd());};
+const at=async needle=>{await whole();for(let y=0;y<rows;y++){const c=cellsOf(y),where=[];let text='';
   c.forEach((ch,x)=>{for(const _ of ch)where.push(x);text+=ch;});const m=needle instanceof RegExp?needle.exec(text):null,i=needle instanceof RegExp?(m?m.index:-1):text.indexOf(needle);if(i>=0)return {x:where[i],y};}return null;};
 const until=async(test,what,ms=20000)=>{const began=Date.now();while(Date.now()-began<ms){const s=await screen();if(test(s))return {s,ms:Date.now()-began};await sleep(25);}
   throw Error('never '+what+'\n'+(await screen()).join('\n'));};
@@ -304,6 +311,9 @@ const has=word=>s=>s.some(line=>word instanceof RegExp?word.test(line):line.incl
 const hasButton=s=>s.some(line=>/STATUS( \+?\d+)? +›/.test(line));   // (11-26, panel B: beside the native area the head says the whole count, `STATUS 5 ›`)
 const press=async(x,y,ms=100)=>{child.write(`\x1b[<0;${x+1};${y+1}M\x1b[<0;${x+1};${y+1}m`);await sleep(ms);};
 const key=async(bytes,ms=250)=>{child.write(bytes);await sleep(ms);};
+// A key, then the screen it leads to: the host redraws once it has read the key, so the wait ends the moment `test`
+// holds, never after a fixed time (11-26/11-27 CI: 400 ms after Enter on a loaded runner, the detail was not drawn yet).
+const step=async(bytes,test,what)=>{child.write(bytes);return (await until(test,what)).s;};
 const box=s=>{const top=s.findIndex(l=>l.includes('╭─')&&l.includes('✕ ─╮'));if(top<0)return null;
   const left=[...s[top]].indexOf('╭'),bottom=s.findIndex((l,i)=>i>top&&[...l][left]==='╰'&&l.includes('╯'));
   if(bottom<0)return null;   // (a popup whose bottom line is not drawn yet is no box yet: every wait reads it as "not yet")
@@ -353,8 +363,8 @@ const checks={};
     r=await until(s=>{const p=place(s);return p&&placeBefore&&p[1]>placeBefore[1];},'Fleet\'s lines arrived',15000);
     checks.fleet_ms=Date.now()-began;checks.vm_started=count('vm')-v0;checks.top_before=topBefore;checks.top_after=body(r.s)[0];
     checks.place=[placeBefore,place(r.s)];
-    await key('\x1b[5~',300);await key('\x1b[5~',300);
-    checks.head_visible=popupHas('FLEET_STATUS_LINE')(await screen());
+    await key('\x1b[5~',300);await step('\x1b[5~',popupHas('FLEET_STATUS_LINE'),'Fleet\'s head line after PgUp');
+    checks.head_visible=true;
     checks.first_body=body(await screen())[0];
     await close();
     // Closed and opened again at once: the rows read last, no read.
@@ -440,36 +450,43 @@ const checks={};
     checks.stands=body(r.s).some(l=>l.startsWith('▶ ')&&l.includes('BL_ITEM_TWO'));
     checks.other_folded=body(r.s).some(l=>l.includes('▸')&&l.includes('TBD 2'));
     checks.other_hidden=!popupHas('BL_OTHER_ITEM')(r.s);
-    await key('\x1b[A',250);await key('\r',400);r=await screen();
-    checks.detail=popupHas('BL_DETAIL_NOTE')(r);
-    await key('\r',300);r=await screen();checks.detail_closed=!popupHas('BL_DETAIL_NOTE')(r);
-    for(let i=0;i<4;i++)await key('\x1b[B',200);await key('\r',400);r=await screen();
-    checks.group_opened=popupHas('BL_OTHER_ITEM')(r);
-    // PgDn/PgUp move the chosen line (the window follows): to the end of what there is, and back to the first line (11-26: the board's first group head).
-    await key('\x1b[6~',300);r=await screen();checks.pgdn_end=body(r).some(l=>l.startsWith('▶ ')&&l.includes('full document'));
-    await key('\x1b[5~',300);r=await screen();checks.pgup_top=body(r).some(l=>l.startsWith('▶ ')&&l.includes('FIX 4'));
-    // 11-26 (scheme A): the board's own keys, typed as a person types them. `t` shows the Discuss items only, and Esc undoes that, not the popup.
     const chosen=s=>body(s).find(l=>l.startsWith('▶ '))||'';
-    await key('t',400);r=await screen();
-    checks.discuss=popupHas('state Discuss')(r)&&popupHas('showing 1 of 6')(r)&&body(r).some(l=>/Discuss +BL_ITEM_ONE/.test(l))&&!popupHas('BL_ITEM_TWO')(r);
-    await key('\x1b',500);r=await screen();checks.esc_filter=!!box(r)&&popupHas('showing 6 ·')(r)&&!popupHas('state Discuss')(r);
+    // ↑/↓ move the chosen line: each move is waited for before the next key.
+    const move=async bytes=>{const was=chosen(await screen());return step(bytes,s=>chosen(s)!==was,'the chosen line moved by '+JSON.stringify(bytes));};
+    // Typed as a person types: each letter stands in the finder's line before the next one.
+    const type=async(line,text)=>{for(let n=1;n<=text.length;n++)await step(text[n-1],popupHas(line+text.slice(0,n)),'"'+text.slice(0,n)+'" typed');};
+    await move('\x1b[A');
+    r=await step('\r',popupHas('BL_DETAIL_NOTE'),'the detail under the item');checks.detail=true;
+    r=await step('\r',s=>!!box(s)&&!popupHas('BL_DETAIL_NOTE')(s),'the detail closed');checks.detail_closed=true;
+    for(let i=0;i<4;i++)await move('\x1b[B');
+    r=await step('\r',popupHas('BL_OTHER_ITEM'),'the folded group opened');checks.group_opened=true;
+    // PgDn/PgUp move the chosen line (the window follows): to the end of what there is, and back to the first line (11-26: the board's first group head).
+    r=await step('\x1b[6~',s=>chosen(s).includes('full document'),'PgDn to the end');checks.pgdn_end=true;
+    r=await step('\x1b[5~',s=>chosen(s).includes('FIX 4'),'PgUp to the first line');checks.pgup_top=true;
+    // 11-26 (scheme A): the board's own keys, typed as a person types them. `t` shows the Discuss items only, and Esc undoes that, not the popup.
+    r=await step('t',s=>popupHas('state Discuss')(s)&&popupHas('showing 1 of 6')(s)&&body(s).some(l=>/Discuss +BL_ITEM_ONE/.test(l))&&!popupHas('BL_ITEM_TWO')(s),'the Discuss items');checks.discuss=true;
+    // (each Esc is waited for by its own screen: the next key is not read as Alt+key)
+    r=await step('\x1b',s=>!!box(s)&&popupHas('showing 6 ·')(s)&&!popupHas('state Discuss')(s),'the filter undone by Esc');checks.esc_filter=true;
     // `a`, `d`, `k`: grouped by area (case and blanks folded: `Panel` and `panel` are one group), by date, and by kind again.
-    await key('a',400);r=await screen();checks.area=popupHas('[Area]')(r)&&popupHas('Panel 2')(r)&&popupHas('No area 4')(r);
-    await key('d',400);r=await screen();checks.date=popupHas('[Date]')(r)&&popupHas('2026-11-20 1')(r)&&popupHas('No date 5')(r);
-    await key('k',400);r=await screen();checks.kind=popupHas('[Kind]')(r)&&popupHas('FIX 4')(r);
+    r=await step('a',s=>popupHas('[Area]')(s)&&popupHas('Panel 2')(s)&&popupHas('No area 4')(s),'grouped by area');checks.area=true;
+    r=await step('d',s=>popupHas('[Date]')(s)&&popupHas('2026-11-20 1')(s)&&popupHas('No date 5')(s),'grouped by date');checks.date=true;
+    r=await step('k',s=>popupHas('[Kind]')(s)&&popupHas('FIX 4')(s),'grouped by kind');checks.kind=true;
     // `/` finds a title: the keys typed are the finder's (the `t` and `e` of "three" neither filter nor do anything else); Korean is typed whole.
-    await key('/',300);for(const c of 'three')await key(c,120);r=await screen();checks.typing=popupHas('/ Title: three')(r);
-    await key('\r',400);r=await screen();checks.find=popupHas('find Title "three"')(r)&&/BL_ITEM_THREE/.test(chosen(r))&&!popupHas('BL_ITEM_TWO')(r)&&!popupHas('state Discuss')(r);
-    await key('\x1b',500);await key('/',300);await key('셋째',300);await key('\r',400);r=await screen();
-    checks.find_korean=popupHas('find Title "셋째"')(r)&&/BL_ITEM_THREE/.test(chosen(r));
+    await step('/',popupHas('/ Title:'),'the finder');await type('/ Title: ','three');checks.typing=true;
+    r=await step('\r',s=>popupHas('find Title "three"')(s)&&/BL_ITEM_THREE/.test(chosen(s))&&!popupHas('BL_ITEM_TWO')(s)&&!popupHas('state Discuss')(s),'the title found');checks.find=true;
+    await step('\x1b',s=>!!box(s)&&!popupHas('find Title')(s),'the find undone by Esc');
+    await step('/',popupHas('/ Title:'),'the finder again');await step('셋째',popupHas('/ Title: 셋째'),'the Korean typed');
+    r=await step('\r',s=>popupHas('find Title "셋째"')(s)&&/BL_ITEM_THREE/.test(chosen(s)),'the Korean title found');checks.find_korean=true;
     // `/` then Tab finds an area's name.
-    await key('\x1b',500);await key('/',300);await key('\t',200);for(const c of 'PANEL')await key(c,120);await key('\r',400);r=await screen();
-    checks.find_area=popupHas('find Area "PANEL"')(r)&&popupHas('BL_ITEM_ONE')(r)&&popupHas('BL_ITEM_TWO')(r)&&!popupHas('BL_ITEM_THREE')(r);
+    await step('\x1b',s=>!!box(s)&&!popupHas('find Title')(s),'the Korean find undone by Esc');
+    await step('/',popupHas('/ Title:'),'the finder for an area');await step('\t',popupHas('/ Area:'),'the area finder');await type('/ Area: ','PANEL');
+    r=await step('\r',s=>popupHas('find Area "PANEL"')(s)&&popupHas('BL_ITEM_ONE')(s)&&popupHas('BL_ITEM_TWO')(s)&&!popupHas('BL_ITEM_THREE')(s),'the area found');checks.find_area=true;
     // Home and End: the first and the last item of the view (End opens the folded TBD group the last item is in).
-    await key('\x1b',500);await key('\x1b[F',400);r=await screen();checks.end=/BL_LOOSE/.test(chosen(r));
-    await key('\x1b[H',400);r=await screen();checks.home=/BL_ITEM_ONE/.test(chosen(r));
-    await key('\x1b[C',400);r=await until(s=>{const x=box(s);return !!x&&x.rows[0].includes('ROUTE');},'the next section after BACKLOG');checks.next_section=true;
-    await key('\x1b[D',400);r=await until(s=>{const x=box(s);return !!x&&x.rows[0].includes('BACKLOG');},'BACKLOG again by ←');checks.back=true;
+    await step('\x1b',s=>!!box(s)&&!popupHas('find Area')(s),'the area find undone by Esc');
+    r=await step('\x1b[F',s=>/BL_LOOSE/.test(chosen(s)),'End');checks.end=true;
+    r=await step('\x1b[H',s=>/BL_ITEM_ONE/.test(chosen(s)),'Home');checks.home=true;
+    await step('\x1b[C',s=>{const x=box(s);return !!x&&x.rows[0].includes('ROUTE');},'the next section after BACKLOG');checks.next_section=true;
+    await step('\x1b[D',s=>{const x=box(s);return !!x&&x.rows[0].includes('BACKLOG');},'BACKLOG again by ←');checks.back=true;
     await close();
     // 11-26 (panel B): the presses of the new rows, in the real host. The BACKLOG head opens the board; the MESSAGES head (a message is one row,
     // its time at the right end) opens the MESSAGES popup; the STATUS head is one row and opens the status popup (`opened`, the other scenarios).
@@ -484,7 +501,7 @@ const checks={};
     r=await until(s=>s.some(l=>folded.test(l)),'the buttons on the REPO row');
     {const y=r.s.findIndex(l=>folded.test(l)),line=r.s[y];checks.folded_row=line.slice(line.lastIndexOf('│',line.indexOf('REPO'))).trim();
      // (by cells, the folder's name and its Git words being the machine's: the last `›` of the row is BACKLOG's button, its label `REPO` lies in STATUS's press)
-     await flush();const c=cellsOf(y),button={x:c.lastIndexOf('›'),y},name=await at(/REPO +/);
+     await whole();const c=cellsOf(y),button={x:c.lastIndexOf('›'),y},name=await at(/REPO +/);
      await press(button.x,button.y,0);let o=await until(s=>{const x=box(s);return !!x&&x.rows[0].includes('BACKLOG')&&popupHas('6 total')(s);},'the board from the folded button');
      checks.folded_backlog=true;await close();   // (16 rows: the board's head lines; its items are below its short window)
      await press(name.x+1,name.y,0);o=await until(s=>{const x=box(s);return !!x&&x.rows[0].includes('STATUS');},'the status popup from the REPO row');
