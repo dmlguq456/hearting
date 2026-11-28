@@ -158,22 +158,30 @@ def one_shot_review_node(recipe):
 
 def one_shot_review_nodes(recipe, effective="standard", registry=None, persona_policy=True):
     """The middle cell's verification nodes at `effective`: the borrowed review node, widened from `strong`
-    into the kind's own declared review group.
+    into the kind's own declared review group, and from `strong` the kind's test node after it.
 
-    ONE function for the compiler and `verify_route`. The group is the one the team route expands
+    ONE function for the compiler, the preview and `verify_route`. The group is the one the team route expands
     (`parallel_groups`, `_expand_parallel_groups`): the same legs, perspectives and widths. Only the anchor
     leg differs: it takes the cell's review model (`one_shot_review.model_profile`), so `strong` never
-    reviews more shallowly than `standard` does. The other legs keep the model the group declares."""
-    anchor = one_shot_review_node(recipe)
-    declared = recipe["one_shot_review"]["node"]
-    groups = [g for g in recipe["standard_plus"].get("parallel_groups") or [] if g.get("node") == declared]
-    if not groups:
-        return [anchor]
-    registry = registry or TOPO.load_registry()
-    nodes = _expand_parallel_groups([anchor], groups, effective, recipe["capability"],
-                                    auxiliary_check_units=registry.get("auxiliary_check_units"),
-                                    persona_policy=persona_policy)
-    nodes[0]["model_profile"] = recipe["one_shot_review"]["model_profile"]
+    reviews more shallowly than `standard` does. The other legs keep the model the group declares. The test
+    node (`one_shot_review.verify_node`) is borrowed like the review: its own unit, model, outputs and gate,
+    the declared inputs and hops, and it waits on every review leg (the team route's `impl-review -> test`)."""
+    declared = recipe["one_shot_review"]
+    nodes = [one_shot_review_node(recipe)]
+    groups = [g for g in recipe["standard_plus"].get("parallel_groups") or [] if g.get("node") == declared["node"]]
+    if groups:
+        registry = registry or TOPO.load_registry()
+        nodes = _expand_parallel_groups(nodes, groups, effective, recipe["capability"],
+                                        auxiliary_check_units=registry.get("auxiliary_check_units"),
+                                        persona_policy=persona_policy)
+        nodes[0]["model_profile"] = declared["model_profile"]
+    if declared.get("verify_node") and ROUTE_FORM.INTENSITY_ORDER.index(effective) >= \
+            ROUTE_FORM.INTENSITY_ORDER.index("strong"):
+        test = next(n for n in recipe["standard_plus"]["nodes"] if n.get("id") == declared["verify_node"])
+        test = json.loads(json.dumps(test))
+        test.update({"depends_on": [n["id"] for n in nodes], "inputs": list(declared["inputs"]),
+                     "fallback_hops": list(declared["fallback_hops"])})
+        nodes.append(test)
     return nodes
 
 

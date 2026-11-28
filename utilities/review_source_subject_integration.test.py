@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT / "utilities"))
 import dispatch_contract as DC  # noqa: E402
 import review_round_cap as CAP  # noqa: E402
 import review_source_subject as SUBJECT  # noqa: E402
+import codex_dispatch_terminal as TERMINAL  # noqa: E402
 from route_identity import route_hash, route_id_from_hash  # noqa: E402
 from split_module_fixture import patch_split  # noqa: E402
 
@@ -1751,6 +1752,467 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
                                           observe=True, jobs=self.jobs).state, "superseded")
         self.assertEqual(self.test_admission().budget.state, "exhausted")
         self.assertEqual(self.test_admission().budget.verdict_rounds, 2)
+
+    # -- the middle cell's test (`solo` from `strong`): its start needs every review's current PASS --------------
+    def solo_strong(self, suffixes=("", "-alternative")):
+        """This fixture's route as the middle cell from `strong` seals it: two review legs (three at `thorough`), the
+        test after them, and the owner's end node after all of them."""
+        legs = [{"id": "impl-review" + suffix, "kind": "review-worker", "unit": "qa/code-review",
+                 "completion_gate": "code-impl-review", "dispatch_depth": 2, "parallel_group": "impl-review",
+                 "parallel_anchor": "impl-review", "write_scope": [f"_internal/dev_reviews{suffix}/**"],
+                 "depends_on": []} for suffix in suffixes]
+        test = {"id": "test", "kind": "pipeline-stage", "unit": "qa/test", "completion_gate": "code-test",
+                "dispatch_depth": 2, "write_scope": ["test_logs/**"], "depends_on": [leg["id"] for leg in legs]}
+        owner = {"id": "one-shot", "kind": "capability-owner", "unit": "_kernel/owner", "dispatch_depth": 1,
+                 "completion_gate": "quick-complete", "write_scope": ["source/**"], "terminal": True,
+                 "depends_on": [*(leg["id"] for leg in legs), "test"]}
+        self.route["nodes"] = [*legs, test, owner]
+        if len(legs) == 3:                                   # `thorough`: three legs, three rounds each
+            self.route.update(effective_intensity="thorough", continuation_budget={"review_round_cap": 3})
+        self.test_node = test
+        self.route["route_hash"] = route_hash(self.route)
+        self.route["route_id"] = route_id_from_hash(self.route["route_hash"])
+        self.route_file.write_text(json.dumps(self.route, sort_keys=True), encoding="utf-8")
+        import route_form
+        self.assertEqual(route_form.one_shot_test_node(self.route)["id"], "test")
+
+    def finished_process(self):
+        process = subprocess.Popen(["true"], start_new_session=True)
+        identity = {"pid": str(process.pid), "pgid": str(os.getpgid(process.pid)),
+                    "pid_start": str(DC.process_start_ticks(process.pid))}
+        process.wait(timeout=5)
+        return identity
+
+    def review_leg(self, node_id, attempt_id, worker_type="review"):
+        """One review leg's (or the test's) PASS on the source the worktree holds now: its exact settled row and its
+        marker."""
+        node = self.get_node(node_id)
+        metadata = self._metadata(node, attempt_id, worker_type)
+        metadata.update(SUBJECT.seal_attempt(self.jobs, self.route, node, attempt_id, worktree=self.repo))
+        metadata = self._row(metadata, extra=self.finished_process())
+        evidence = self.artifact_root / f"{attempt_id}.md"
+        evidence.write_text("independent PASS", encoding="utf-8")
+        ROUTE_WRITER._publish_completion_locked(self.route, node, node_id, evidence, jobs=self.jobs,
+                                                attempt_id=attempt_id, attempt_metadata=metadata)
+
+    def start_test(self, action="start"):
+        """The shared start gate for the test (every harness wrapper calls it before registration): the missing
+        predecessors it names, or None when it admits the start."""
+        try:
+            DC.completion_marker_gate(str(self.route_file), "test", action, self.agent_home, self.jobs)
+        except DC.DispatchContractError as refused:
+            self.assertEqual(refused.reason, "completion-marker-missing")
+            return sorted(refused.detail.split(","))
+        return None
+
+    def commit(self, value):
+        (self.repo / "engine.py").write_text(f"value = '{value}'\n", encoding="utf-8")
+        self.git("commit", "-qam", f"source {value}")
+
+    def test_the_solo_test_starts_only_on_reviews_that_passed_the_current_source(self):
+        self.solo_strong()
+        self.review_leg("impl-review", "att-solo-review-A")
+        self.review_leg("impl-review-alternative", "att-solo-alternative-A")
+        self.assertIsNone(self.start_test("dry-run"))                  # both legs passed the current source
+        self.commit("B")                                                # the owner changed the work after them
+        legs = ["impl-review", "impl-review-alternative"]
+        self.assertEqual(self.start_test("dry-run"), legs)
+        self.assertEqual(self.start_test(), legs)
+        self.review_leg("impl-review", "att-solo-review-B")             # one leg judged the change, one did not
+        self.assertEqual(self.start_test(), ["impl-review-alternative"])
+        self.review_leg("impl-review-alternative", "att-solo-alternative-B")
+        self.assertIsNone(self.start_test("dry-run"))
+        self.commit("C")                                                # the source moved right before registration
+        self.assertEqual(self.start_test(), legs)
+
+    # -- after the middle cell's test: its handoff, its owner's end and its refused start read one admission -------
+    def settle_test(self, attempt_id, verdict="FAIL", report="readable", **extra):
+        """One settled test attempt on the source the worktree holds now. Its note and class are what the real terminal
+        parser reads from the worker's final envelope (`verdict: FAIL` naming a report, `artifact: -`, or a report
+        deleted after the row settled); `verdict=None` is a death without one."""
+        node = self.get_node("test")
+        metadata = self._metadata(node, attempt_id, "stage")
+        metadata.update(SUBJECT.seal_attempt(self.jobs, self.route, node, attempt_id, worktree=self.repo))
+        log, artifact = self.base / f"{attempt_id}.jsonl", self.artifact_root / "test_logs" / f"{attempt_id}.md"
+        artifact.parent.mkdir(exist_ok=True)
+        artifact.write_text("the test fails\n", encoding="utf-8")
+        handoff = f"artifact: {'-' if report == 'none' else artifact}\nverdict: {verdict}\nblocker: the test fails"
+        log.write_text("".join(json.dumps(row) + "\n" for row in (
+            {"type": "turn.started"}, {"type": "item.completed", "item": {"type": "agent_message", "text": handoff}},
+            {"type": "turn.completed"})), encoding="utf-8")
+        parsed = TERMINAL.inspect_terminal_log(log) if verdict else {"failure_note": "dead-runtime-exit",
+                                                                       "failure_class": "runtime"}
+        metadata.update(log_file=str(log), artifact_root=str(self.artifact_root), cwd=str(self.repo), **extra)
+        record = self._row(metadata, note=parsed["failure_note"],
+                           extra={"failure_class": parsed["failure_class"], **self.finished_process()})
+        if report != "readable":
+            artifact.unlink()
+        return record
+
+    def told(self, attempt_id=None, own_slug=None):
+        """What the owner is told now, with the test's admission: the test's handoff for `attempt_id` (the join's
+        follow-up for that exact row), the owner's end without the test (the workflow-completion text), and what a real
+        start of the test decides (`refused`, its reason; `refusal`, its fields, None while it is admitted)."""
+        import dispatch_terminal_commit as DTC
+        import route_form
+        import worker_bootstrap as W
+        handoff = None
+        if attempt_id:
+            meta = next(DC.parse_registry_metadata(line.split("\t")[5]) for line in self.jobs.read_text().splitlines()
+                        if f"attempt_id={attempt_id}," in line)
+            handoff = W.continuation_followup_text(W.continuation_followup_for_row(meta, self.jobs, return_fields=True))
+        missing = DTC.owner_workflow_gaps(self.jobs, {"workflow_completion": "runtime-v1"}, self.route)
+        nodes = [n for n in route_form.one_shot_review_nodes(self.route) if n["id"] in missing]
+        end = DTC._middle_cell_review_sentence(self.route, str(self.route_file), nodes, missing, self.jobs) if nodes else ""
+        admission = self.test_admission().budget
+        refused, refusal = self.real_test_start(own_slug)
+        return SimpleNamespace(handoff=handoff, end=end, refused=refused, refusal=refusal or None, missing=missing,
+                               admission=(admission.state, admission.verdict_rounds))
+
+    def real_test_start(self, own_slug=None):
+        """What a real `--start` of the test decides before it spawns anything, through the functions it calls in its
+        order (stage-dispatch-fallback.py): the shared start gate, the settling of a dead latest row, the round
+        admission without the row this same command registered and never launched, the continuation decision and, on
+        a refused round, its recovery fields. (reason, fields): ("", {}) when the start is admitted."""
+        import route_authority
+        fallback = _load("stage_dispatch_fallback_source_subject_fixture", "utilities/stage-dispatch-fallback.py")
+        try:
+            DC.completion_marker_gate(str(self.route_file), "test", "start", self.agent_home, self.jobs)
+        except DC.DispatchContractError as refused:
+            return refused.reason, {}
+        node = self.get_node("test")
+        fallback.settle_dead_latest_attempt(self.jobs, self.route["route_id"], "test")
+        own = fallback.own_registered_attempt(SimpleNamespace(action="start", jobs=self.jobs, slug=own_slug or "-",
+                                                              parent_attempt_id=""), self.route, node)
+        admission = DISPATCH_NODE.admit_round(self.route, node, self.jobs, exclude_attempt=own)
+        choice = route_authority.decide_continuation(self.route, action="round", node=node,
+                                                     facts={"budget": admission.budget})
+        if choice.allowed:
+            return "", {}
+        fields = {"next_action": choice.next_action, "retry_when": choice.retry_when}
+        if choice.state in {"exhausted", "verdictless-bound", "review-correction-required"}:
+            fields.update(DISPATCH_NODE.review_budget_recovery_fields(node.get("kind"), choice.state, route=self.route,
+                          node=node, jobs=self.jobs, route_file=self.route_file))
+        return choice.reason, fields
+
+    def start(self, node_id):
+        import worker_bootstrap as W
+        return W.route_start_command(self.route_file, node_id, jobs=self.jobs)
+
+    def both_legs(self, suffix):
+        self.review_leg("impl-review", f"att-review-{suffix}")
+        self.review_leg("impl-review-alternative", f"att-alternative-{suffix}")
+
+    def test_one_failing_test_tells_its_handoff_its_owners_end_and_its_refused_start_one_thing(self):
+        legs = "impl-review"
+        for report in ("readable", "none", "deleted"):
+            with self.subTest(report=report):
+                self.doCleanups()
+                self.setUp()
+                self.solo_strong()
+                self.both_legs("A")
+                self.settle_test("att-test-1", report=report)
+                named = report == "readable"
+                # right after the FAIL: one round each is left, so the owner fixes and the reviews judge it first
+                now = self.told("att-test-1")
+                self.assertEqual(now.admission, ("admit", 1))
+                self.assertIsNone(now.refusal)
+                fix = now.handoff
+                self.assertIn("Test FAIL att-test-1: the independent test of your work fails.", fix)
+                self.assertIn(f"start the reviews again with the same command: {self.start(legs)}", fix)
+                self.assertEqual("test_logs/att-test-1.md" in fix, named, fix)
+                self.assertEqual(now.end, fix)
+                # the owner fixed and the reviews passed the change: the same receipt read late still sends the fix
+                # through the review group's one command. That start reuses both current passes (neither is missing
+                # from the owner's end) and leads to the test, whose real start is admitted.
+                self.commit("B")
+                self.both_legs("B")
+                late = self.told("att-test-1")
+                self.assertEqual(late.admission, ("admit", 1))
+                self.assertIn(f"start the reviews again with the same command: {self.start(legs)}", late.handoff)
+                self.assertNotIn("--node test", late.handoff)
+                self.assertNotIn("Do not correct further", late.handoff)
+                self.assertEqual(late.end, late.handoff)
+                self.assertEqual((sorted(late.missing), late.refused), (["test"], ""))
+                # the second FAIL: no round is left for the reviews or the test; every reader ends the owner
+                self.settle_test("att-test-2", report=report)
+                spent = self.told("att-test-2")
+                self.assertEqual(spent.admission, ("exhausted", 2))
+                self.assertIn("Test FAIL att-test-2: the test still fails, and the one correction allowed is spent. "
+                              "Do not correct further.", spent.handoff)
+                self.assertIn("end with `verdict: FAIL`.", spent.handoff)
+                self.assertEqual("from " in spent.handoff, named, spent.handoff)
+                self.assertNotIn("stage-dispatch-fallback", spent.handoff)
+                self.assertEqual(spent.end, spent.handoff)
+                self.assertEqual(spent.refusal["recovery_hint"], spent.handoff)
+                self.assertEqual((spent.refusal["recovery_surface"], spent.refusal["next_action"]),
+                                 ("owner-report", "owner-report"))
+                self.assertEqual(self.told("att-test-1").handoff, spent.handoff)   # the first receipt read late
+
+    def test_a_sub_session_fail_of_the_test_spends_no_round(self):
+        # A serial sub-session of the test (`stage_authority=0`) fails beside the whole test's FAIL: admission counts
+        # one round, so every reader sends the fix through the reviews and none ends the owner.
+        self.solo_strong()
+        self.both_legs("A")
+        self.settle_test("att-test-1")
+        self.settle_test("att-test-slice-1", stage_authority="0", subsession_id="slice-1")
+        now = self.told("att-test-slice-1")
+        self.assertEqual(now.admission, ("admit", 1))
+        for text in (now.handoff, now.end, self.told("att-test-1").handoff):
+            self.assertIn("Test FAIL att-test-1: the independent test of your work fails.", text)
+            self.assertIn(f"start the reviews again with the same command: {self.start('impl-review')}", text)
+            self.assertNotIn("Do not correct further", text)
+
+    def blocked_leg(self, node_id, attempt_id):
+        """One review leg's blocking verdict on the source the worktree holds now (its exact settled row)."""
+        node = self.get_node(node_id)
+        metadata = self._metadata(node, attempt_id, "review")
+        metadata.update(SUBJECT.seal_attempt(self.jobs, self.route, node, attempt_id, worktree=self.repo))
+        return self._row(metadata, note=CAP.REVIEW_BLOCKING_NOTE,
+                         extra={"failure_class": "review", **self.finished_process()})
+
+    def assert_one(self, told, sentence, *absent, readers=("handoff", "end", "refusal")):
+        """Every reader named says `sentence` and none of `absent` (a refusal is its recovery hint)."""
+        for reader in readers:
+            text = getattr(told, reader)
+            text = text["recovery_hint"] if reader == "refusal" else text
+            self.assertIn(sentence, text, reader)
+            for phrase in absent:
+                self.assertNotIn(phrase, text, reader)
+
+    def test_a_fail_read_late_after_a_review_leg_blocked_the_fix_restarts_the_reviews_never_the_test(self):
+        # thorough: three legs pass A, the test fails A, the fix B is blocked by the primary leg while the other two
+        # pass. The late A receipt sends the fix through the review group; the test's real start names that leg.
+        self.solo_strong(("", "-alternative", "-risk"))
+        for suffix in ("", "-alternative", "-risk"):
+            self.review_leg("impl-review" + suffix, f"att-A{suffix}")
+        self.settle_test("att-test-1")
+        self.commit("B")
+        self.blocked_leg("impl-review", "att-B")
+        self.review_leg("impl-review-alternative", "att-B-alternative")
+        self.review_leg("impl-review-risk", "att-B-risk")
+        primary = DISPATCH_NODE.admit_round(self.route, self.get_node("impl-review"), self.jobs,
+                                            record_auto_revisions=False)
+        self.assertEqual((primary.budget.state, primary.budget.verdict_rounds, primary.requires_next_round),
+                         ("review-correction-required", 2, False))
+        late = self.told("att-test-1")
+        self.assertEqual(late.admission, ("admit", 1))
+        self.assertIn(f"start the reviews again with the same command: {self.start('impl-review')}", late.handoff)
+        self.assertNotIn("--node test", late.handoff)
+        self.assertNotIn("--node test", late.end)                                 # the blocking leg's own text
+        self.assertEqual((late.refused, self.start_test()), ("completion-marker-missing", ["impl-review"]))
+
+    def test_already_passed_is_the_owners_exact_markers_never_the_rounds(self):
+        import dispatch_terminal_commit as DTC
+        import worker_bootstrap as W
+        # A FAIL, B reviewed, B test PASS, then its canonical marker is gone: both rounds are used, the owner lacks it
+        self.solo_strong()
+        self.both_legs("A")
+        self.settle_test("att-test-1")
+        self.commit("B")
+        self.both_legs("B")
+        self.review_leg("test", "att-test-2", worker_type="stage")
+        marker = self.jobs.parent / "completion" / self.route["route_id"] / "test.json"
+        self.assertTrue(marker.is_file())
+        marker.unlink()
+        gone = self.told("att-test-1")
+        self.assertEqual((gone.admission, gone.missing), (("exhausted", 2), {"test": "completion-marker-absent"}))
+        self.assert_one(gone, "could not reach a verdict", "already passed", "verdict: FAIL", "stage-dispatch-fallback")
+        self.assertNotEqual(gone.refusal.get("required_action"), "use-current-pass")
+        # A passed by the reviews and the test; B blocked by the primary leg; back to A's bytes: the owner's end finds
+        # the reviews and the test stale, so nothing says the test already passed
+        self.doCleanups()
+        self.setUp()
+        self.solo_strong()
+        self.both_legs("A")
+        self.review_leg("test", "att-test-A", worker_type="stage")
+        self.commit("B")
+        self.blocked_leg("impl-review", "att-review-B")
+        self.review_leg("impl-review-alternative", "att-alternative-B")
+        self.commit("A")
+        back = self.told()
+        self.assertIn("test", back.missing)
+        self.assertNotEqual(W.one_shot_test_next(self.route, self.jobs)["state"], "passed")
+        self.assertNotIn("already passed", back.end)
+        self.assertEqual(W.one_shot_test_followup(self.route, str(self.route_file), self.jobs), {})
+        self.assertNotEqual(DTC.owner_workflow_gaps(self.jobs, {"workflow_completion": "runtime-v1"}, self.route), {})
+
+    def test_a_finished_leg_with_no_round_left_leaves_the_correction_to_the_review_group_start(self):
+        # strong: the test fails A with `artifact: -`; the primary leg passes B on its second round (no round left,
+        # finished) while its sibling's reservation in that batch was never claimed. The test has a round: the fix
+        # goes through the review group, whose start resumes the sibling's own attempt (an unfinished batch member
+        # its admission names as current: dispatch-batch.test.py restarts that batch and reserves that attempt).
+        self.solo_strong()
+        self.both_legs("A")
+        self.settle_test("att-test-1", report="none")
+        self.commit("B")
+        self.review_leg("impl-review", "att-review-B")
+        sibling = self.get_node("impl-review-alternative")
+        metadata = self._metadata(sibling, "att-alternative-B", "review")
+        metadata.update(SUBJECT.seal_attempt(self.jobs, self.route, sibling, "att-alternative-B", worktree=self.repo))
+        self._row(metadata, status="open", note="", extra={"launch_claimed": "0"})
+        primary = DISPATCH_NODE.admit_round(self.route, self.get_node("impl-review"), self.jobs,
+                                            record_auto_revisions=False)
+        self.assertEqual((primary.budget.state, primary.budget.verdict_rounds), ("exhausted", 2))
+        member = DISPATCH_NODE.admit_round(self.route, sibling, self.jobs, record_auto_revisions=False)
+        self.assertEqual(member.budget.state, "blocked-live")
+        self.assertIn("att-alternative-B", member.current_attempt_ids)
+        late = self.told("att-test-1")
+        self.assertEqual(late.admission, ("admit", 1))
+        self.assertIn(f"start the reviews again with the same command: {self.start('impl-review')}", late.handoff)
+        self.assertNotIn("Do not correct further", late.handoff)
+        self.assertNotIn("verdict: FAIL", late.handoff)
+
+    def test_no_verdict_on_the_current_source_is_never_a_fail(self):
+        no_verdict = "Write in your report that the test could not reach a verdict, and do not report PASS."
+        # A FAIL; B reviewed; the test of B ends twice without a verdict: no FAIL, whatever A said
+        self.solo_strong()
+        self.both_legs("A")
+        self.settle_test("att-test-1")
+        self.commit("B")
+        self.both_legs("B")
+        self.settle_test("att-test-dead-1", verdict=None)
+        self.settle_test("att-test-dead-2", verdict=None)
+        bound = self.told("att-test-1")
+        self.assertEqual((bound.admission, bound.refused), (("verdictless-bound", 1), "review-verdictless-bound"))
+        self.assert_one(bound, no_verdict, "verdict: FAIL", "Test FAIL", "stage-dispatch-fallback")
+        # A FAIL, B FAIL, then C reviewed: both rounds are used and no test judged C
+        self.doCleanups()
+        self.setUp()
+        self.solo_strong()
+        self.both_legs("A")
+        self.settle_test("att-test-1")
+        self.commit("B")
+        self.both_legs("B")
+        self.settle_test("att-test-2")
+        self.commit("C")
+        self.both_legs("C")
+        moved = self.told("att-test-2")
+        self.assertEqual((moved.admission, moved.refused), (("exhausted", 2), "review-round-budget-exhausted"))
+        self.assert_one(moved, no_verdict, "verdict: FAIL", "Test FAIL", "stage-dispatch-fallback")
+        # two FAILs of the source as it is now: the fixed FAIL sentence (the 2nd fix's case, kept)
+        self.doCleanups()
+        self.setUp()
+        self.solo_strong()
+        self.both_legs("A")
+        self.settle_test("att-test-1")
+        self.commit("B")
+        self.both_legs("B")
+        self.settle_test("att-test-2")
+        spent = self.told("att-test-2")
+        self.assertEqual((spent.admission, spent.refused), (("exhausted", 2), "review-round-budget-exhausted"))
+        self.assert_one(spent, "Test FAIL att-test-2: the test still fails", "stage-dispatch-fallback")
+
+    def live_process(self):
+        process = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        self.addCleanup(lambda: (process.kill(), process.wait(timeout=5)))
+        return {"pid": str(process.pid), "pgid": str(os.getpgid(process.pid)),
+                "pid_start": str(DC.process_start_ticks(process.pid))}
+
+    def test_a_running_or_unsettled_test_gets_no_start_command(self):
+        wait = "The independent test is still running or its result has not settled; wait for that result."
+        node = self.get_node
+        rows = {"running": dict(status="open", note="", extra={"launch_claimed": "1", "launch_started": "1"}),
+                "unsettled": dict(note="completed-marker", extra={
+                    "terminal_conflict": "1", "conflicting_terminal_note": "completed-marker",
+                    "conflicting_failure_class": "pass", "conflicting_classifier_source": "fixture"}),
+                "registered by the same start": dict(status="open", note="", extra={"launch_claimed": "0"})}
+        for case, row in rows.items():
+            with self.subTest(case):
+                self.doCleanups()
+                self.setUp()
+                self.solo_strong()
+                self.both_legs("A")
+                self.settle_test("att-test-1")
+                self.commit("B")
+                self.both_legs("B")
+                metadata = self._metadata(node("test"), "att-test-B", "stage")
+                metadata.update(SUBJECT.seal_attempt(self.jobs, self.route, node("test"), "att-test-B",
+                                                     worktree=self.repo))
+                if case == "running":
+                    row["extra"].update(self.live_process())
+                self._row(metadata, status=row.get("status", "done"), note=row["note"], extra=dict(row["extra"]))
+                late = self.told("att-test-1", own_slug="att-test-B")
+                if case == "registered by the same start":
+                    # the start claims that row: it is admitted, and the late receipt says what an admitted open FAIL
+                    # says (the review group first; its start reuses both current passes and leads to the test)
+                    self.assertEqual((late.admission[0], late.refused), ("blocked-live", ""))
+                    self.assertIn(f"start the reviews again with the same command: {self.start('impl-review')}",
+                                  late.handoff)
+                    self.assertEqual(late.end, late.handoff)
+                    continue
+                self.assertEqual(late.admission[0], {"running": "blocked-live", "unsettled": "blocked-unsettled"}[case])
+                # the real start refuses at its shared gate: the test's own prior attempt has not stopped
+                self.assertEqual(late.refused, {"running": "prior-attempt-still-live",
+                                                "unsettled": "prior-attempt-unverifiable"}[case])
+                self.assert_one(late, wait, "stage-dispatch-fallback", "Test FAIL", readers=("handoff", "end"))
+
+    def test_an_unreadable_test_state_claims_nothing(self):
+        import review_input
+        unread = "The independent test's state could not be read; do not report PASS."
+        real = review_input._dispatch_node_module
+
+        def raced():
+            module = real()
+            def admit_round(*_args, **_kwargs):
+                raise module.DispatchNodeError("review-source-snapshot-raced")
+            return SimpleNamespace(prior_round_attempts=module.prior_round_attempts, admit_round=admit_round)
+        self.solo_strong()
+        self.both_legs("A")
+        self.settle_test("att-test-1")
+        for attempt in ("att-test-1", "att-test-2"):
+            with self.subTest(attempt):
+                if attempt == "att-test-2":
+                    self.commit("B")
+                    self.both_legs("B")
+                    self.settle_test("att-test-2")
+                with mock.patch.object(review_input, "_dispatch_node_module", side_effect=raced):
+                    told = self.told(attempt)
+                readers = ("handoff", "end", "refusal") if told.refusal else ("handoff", "end")
+                self.assert_one(told, unread, "stage-dispatch-fallback", "has not run", "no verdict", "start it",
+                                readers=readers)
+                # the real start once the read works again: the first FAIL's next start is admitted (the reviews
+                # first, as the sentence of an admitted FAIL says), the second's is refused with its own state
+                self.assertEqual(told.refused, {"att-test-1": "", "att-test-2": "review-round-budget-exhausted"}[attempt])
+                if told.refusal:
+                    self.assertEqual(told.refusal["required_action"], "report-unresolved-verification")
+
+    def test_a_test_that_ends_twice_without_a_verdict_is_reported_never_restarted_or_run_inline(self):
+        self.solo_strong()
+        self.both_legs("A")
+        self.settle_test("att-test-dead-1", verdict=None)
+        once = self.told()
+        self.assertEqual((once.admission, once.refusal), (("admit", 0), None))
+        self.assertIn("Your route's independent test ended without a verdict.", once.end)
+        self.assertIn(self.start("test"), once.end)
+        self.settle_test("att-test-dead-2", verdict=None)
+        bound = self.told()
+        self.assertEqual(bound.admission, ("verdictless-bound", 0))
+        self.assertEqual((bound.refusal["recovery_surface"], bound.refusal["next_action"]),
+                         ("owner-report", "owner-report"))
+        for text in (bound.refusal["recovery_hint"], bound.end):
+            self.assertIn("Write in your report that the test could not reach a verdict, and do not report PASS.", text)
+            self.assertNotIn("stage-dispatch-fallback", text)
+        self.assertFalse(any("inline" in str(value) for value in bound.refusal.values()), bound.refusal)
+
+    def test_a_restart_after_the_test_passed_its_correction_is_done_not_a_fail(self):
+        # First FAIL, the fix reviewed, the second test PASS (its exact current marker): the same start is refused
+        # because both rounds are used, and every reader says the test already passed, never `verdict: FAIL`.
+        self.solo_strong()
+        self.both_legs("A")
+        self.settle_test("att-test-1")
+        self.commit("B")
+        self.both_legs("B")
+        self.review_leg("test", "att-test-2", worker_type="stage")
+        import dispatch_terminal_commit as DTC
+        self.assertEqual(DTC.owner_workflow_gaps(self.jobs, {"workflow_completion": "runtime-v1"}, self.route), {})
+        done = self.told("att-test-1")
+        self.assertEqual(done.admission, ("exhausted", 2))
+        self.assertEqual(done.refusal["required_action"], "use-current-pass")
+        for text in (done.refusal["recovery_hint"], done.handoff):
+            self.assertIn("The independent test already passed your current work", text)
+            self.assertNotIn("verdict: FAIL", text)
+            self.assertNotIn("Do not correct further", text)
 
     def test_code_test_owner_closure_remains_refused(self):
         choice = __import__("route_authority").decide_continuation(
