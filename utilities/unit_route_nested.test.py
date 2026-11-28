@@ -484,16 +484,22 @@ class ComposeEphemeralTest(U.UnitLegBase):
 class RefusedRecordFreeStartTest(unittest.TestCase):
     """A worker's record-free start that no worker follows (the governor's wait, a root it does not accept) is closed."""
 
-    def closes(self, started, child="1"):
+    COMPOSE_AGAIN = "python3 capability-route.py compose --unit general/explore --start"
+
+    def receipt(self, started, child="1"):
         import route_autoclose
         route = {"artifact_root": "/scratch/root", "route_id": "rt-x"}
         env = {k: v for k, v in os.environ.items() if k != "AGENT_DISPATCH_CHILD"}
         if child is not None:
             env["AGENT_DISPATCH_CHILD"] = child
         with mock.patch.object(route_autoclose, "close_one") as close, \
+                mock.patch.object(W, "_compose_again", return_value=self.COMPOSE_AGAIN), \
                 mock.patch.dict(os.environ, env, clear=True), mock.patch.dict(sys.modules, {R.__name__: R}):
-            R._close_unstarted_record_free(route, "/scratch/root/route.json", started)
-        return close.called
+            printed = R._close_unstarted_record_free(route, "/scratch/root/route.json", started)
+        return close.called, printed
+
+    def closes(self, started, child="1"):
+        return self.receipt(started, child)[0]
 
     def test_a_refused_start_with_no_row_and_no_resume_is_closed(self):
         self.assertTrue(self.closes({"state": "waiting-capacity", "launches": []}))
@@ -504,6 +510,40 @@ class RefusedRecordFreeStartTest(unittest.TestCase):
         self.assertFalse(self.closes({"state": "waiting-capacity", "launches": [], "auto_resume": {"armed": True}}))
         self.assertFalse(self.closes({"state": "completed", "launches": []}))
         self.assertFalse(self.closes({"state": "needs-attention", "launches": []}, child=None))
+
+    def test_the_closed_start_names_the_compose_that_still_works_not_its_resume(self):
+        # Live 2026-11-28 (CP-PARITY-CODEX-OPENCODE-1128): the receipt said "run resume_command again ... it
+        # starts the same worker again" while this close had already ended the route; that resume then failed
+        # (`route-id-unresolved`) and the next start answered `compose-again`.
+        from start_receipt import next_line
+        resume = "python3 capability-route.py start --route rt-x"
+        refused = {"state": "needs-attention", "reason": "unit-launch-not-admitted", "launches": [],
+                   "required_action": "resume-later", "resume_command": resume,
+                   "next_step": "The unit worker did not start (x); nothing ran. Run resume_command again once "
+                                "the reason is cleared; it starts the same worker again."}
+        waiting = {"state": "waiting-capacity", "reason": "launch-capacity-wait", "launches": [],
+                   "required_action": "resume-after-capacity", "resume_command": resume,
+                   "parent_next": "bounded-wait", "parent_next_command": resume + " --wait",
+                   "next_step": "resume_command --wait waits until retry_at and launches the same attempt id once."}
+        for started in (refused, waiting):
+            closed, printed = self.receipt(started)
+            self.assertTrue(closed)
+            self.assertEqual((printed["state"], printed["reason"]), (started["state"], started["reason"]))
+            self.assertEqual(printed["required_action"], "compose-again")
+            self.assertEqual(printed["resume_command"], self.COMPOSE_AGAIN)
+            self.assertNotIn("parent_next", printed)                  # no bounded wait on a closed route
+            self.assertNotIn("parent_next_command", printed)
+            self.assertNotIn("same worker again", printed["next_step"])
+            line = next_line(printed)
+            self.assertIn(f"resume_command={self.COMPOSE_AGAIN}", line)
+            self.assertNotIn(resume, line)
+
+    def test_a_start_that_is_not_closed_keeps_its_receipt(self):
+        for started, child in (({"state": "needs-attention", "launches": []}, None),
+                               ({"state": "running", "launches": [], "parent_next": "bounded-wait"}, "1")):
+            closed, printed = self.receipt(started, child)
+            self.assertFalse(closed)
+            self.assertIs(printed, started)
 
 
 if __name__ == "__main__":

@@ -1847,17 +1847,28 @@ def _close_unstarted_record_free(route, path, started):
     """A record-free route a worker started and the start refused (the governor's wait, or a root the governor
     does not accept) has a route file and an open cycle and no row; nothing will start it (no resume is armed
     for a worker, which is told not to ask again). Close it the way the runtime closes any route nobody works
-    on, so none is left open in the scratch root."""
+    on, so none is left open in the scratch root.
+
+    Returns the receipt to print. Once the route is closed, its resume or bounded wait leads nowhere (`start`
+    on a closed route only hands back a compose command), so the receipt names that compose command instead."""
     if (started.get("state") not in ("waiting-capacity", "needs-attention") or started.get("registered_attempts")
             or started.get("auto_resume") or os.environ.get("AGENT_DISPATCH_CHILD") != "1"):
-        return
+        return started
     try:
         import time
         import route_autoclose
+        from work_start import _compose_again
         route_autoclose.close_one(Path(route["artifact_root"]), Path(path), route, "start-refused",
                                   sys.modules[__name__], trigger="compose", now=time.time())
+        command = _compose_again(route)
     except Exception as exc:  # noqa: BLE001
         print(f"route_close_unstarted error={type(exc).__name__}", file=sys.stderr)
+        return started
+    receipt = {key: value for key, value in started.items() if key not in ("parent_next", "parent_next_command")}
+    return {**receipt, "required_action": "compose-again", "resume_command": command,
+            "next_step": "Nothing ran, and this record-free route is closed: a start refused inside a worker is "
+                         "not resumed. Do that work yourself or put the reason in your report; once the reason "
+                         "is cleared, resume_command composes the same unit again."}
 
 
 @compose_command_snapshot
@@ -2324,7 +2335,7 @@ def main():
             print("\n".join(compose_decision_lines(route, non_git_decision)), file=sys.stderr, flush=True)
             started=start_work(route,path,jobs)
             if a.ephemeral:
-                _close_unstarted_record_free(route,path,started)
+                started=_close_unstarted_record_free(route,path,started)
             if access_change is not None:
                 started={**started,"access_change":access_change}
             if worktree is not None and worktree.get("cwd"):
