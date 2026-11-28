@@ -280,8 +280,13 @@ class OpenPaneReachesTheMultiplexer(unittest.TestCase):
         import session_tidy
         with mock.patch.object(session_tidy, "_herdr_endpoint_socket",
                                side_effect=lambda server: f"/reported/{server or 'default'}.sock"):
+            # Without HERDR_SESSION the inherited socket names no owner; the
+            # default endpoint does not claim it. An explicit owner still does.
             self.assertEqual(herdr_endpoint_socket("default", {"HERDR_SOCKET_PATH": "/inherited.sock"}),
-                             "/inherited.sock")
+                             "/reported/default.sock")
+            self.assertEqual(herdr_endpoint_socket(
+                "default", {"HERDR_SOCKET_PATH": "/inherited.sock", "HERDR_SESSION": "default"}),
+                "/inherited.sock")
             self.assertEqual(herdr_endpoint_socket("default", {}), "/reported/default.sock")
             self.assertEqual(herdr_endpoint_socket("work", {"HERDR_SOCKET_PATH": "/inherited.sock"}),
                              "/reported/work.sock")
