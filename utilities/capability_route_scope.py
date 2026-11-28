@@ -594,17 +594,37 @@ def _compose_field_line(route):
     return f"  field {field} ({source})\n" if field else ""
 
 
+def _is_hearting_checkout(path) -> bool:
+    """Whether `path` is a checkout of Hearting itself (a linked worktree included).
+
+    The advice below names Hearting's own protected paths (`core/`, `capabilities/`,
+    `roles/`, a PRD) and its own spec/ship kinds. In another project those names are
+    ordinary directories, and the ship kind is always a sign, so the line was noise
+    there. Three files every Hearting checkout carries decide it; nothing is read from
+    the project's own records."""
+    try:
+        root = Path(path).resolve()
+    except (OSError, TypeError, ValueError):
+        return False
+    return all((root / marker).is_file() for marker in
+               ("utilities/capability-route.py", "core/WORKFLOW.md", "capabilities/README.md"))
+
+
 def frame_advice(route) -> list:
     """`[(kind, detail), ...]`: why a directly opened `solo` or `staged` route may be worth a frame first.
 
     Advice only -- the route opens either way, and nothing reads this to allow or refuse anything.
     It reuses the signals the frame width already reads (`route_plan.frame_signals`). A part's start
     approval is not one: the card already shows it and the approval itself stops that step. A framed route, a route made from a proposal (its direction was
-    settled), a route that carries its own frame legs, a unit route and the inline `direct` shape get none."""
+    settled), a route that carries its own frame legs, a unit route and the inline `direct` shape get none.
+    Advice also stays inside a Hearting checkout: in another project the protected names are that
+    project's own directories and the spec/ship kinds do not make its direction Hearting's to settle."""
     selection = route.get("selection") or {}
     if (selection.get("shape") not in ("solo", "staged") or route.get("route_plan")
             or route.get("capability") in (ROUTE_PLAN.CAPABILITY, TOPO.UNIT_CAPABILITY)
             or ROUTE_PLAN.frame_legs(route)):    # a preset that carries its own frame settles the direction itself
+        return []
+    if not _is_hearting_checkout(route.get("cwd")):
         return []
     text = (route.get("work_request") or {}).get("text") or ""
     # The path pattern runs to the next space, so a Korean particle ("core/x.md의") rides along; drop it.

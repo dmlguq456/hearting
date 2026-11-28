@@ -58,6 +58,24 @@ class FrameAdviceTest(F.FramedBase):
                 self.assertEqual(SCOPE.frame_advice(route), [])
                 self.assertNotIn(ADVICE_KO, self.card(route))
 
+    def test_advice_stays_inside_a_hearting_checkout(self):
+        # Another project's `core/` is its own directory, and the ship kind is not
+        # Hearting's direction to settle; the same request outside a Hearting
+        # checkout gets no advice line.
+        protected = {**self.route(PROTECTED), "cwd": str(self.root)}
+        self.assertEqual(SCOPE.frame_advice(protected), [])
+        self.assertNotIn(ADVICE_KO, self.card(protected))
+        ship = {**self.route(CLEAR, capability="autopilot-ship"), "cwd": str(self.root)}
+        self.assertEqual(SCOPE.frame_advice(ship), [])
+
+    def test_a_hearting_worktree_keeps_the_advice(self):
+        worktree = Path(self.root) / "hearting-wt"
+        for marker in ("utilities/capability-route.py", "core/WORKFLOW.md", "capabilities/README.md"):
+            (worktree / marker).parent.mkdir(parents=True, exist_ok=True)
+            (worktree / marker).write_text("", encoding="utf-8")
+        route = {**self.route(PROTECTED), "cwd": str(worktree)}
+        self.assertEqual(SCOPE.frame_advice(route), [("protected-path", "core/WORKFLOW.md")])
+
     def test_each_sign_adds_one_line_and_names_its_reason(self):
         cases = (
             ("protected path", PROTECTED, {}, [("protected-path", "core/WORKFLOW.md")]),
