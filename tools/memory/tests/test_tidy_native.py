@@ -849,9 +849,40 @@ class NativeCommandTest(NativeCase):
     def test_draft_after_continue_claim_releases_only_unsent_claim(self):
         req, path = self.book(continuing=True); self.prepare_transport()
         ready = mock.Mock(side_effect=[None, "draft"])
-        self.assertEqual(self.run_command(req, path, continuing=True, ready=ready)["reason"], "draft")
-        self.assertEqual(clear.read_reservation(self.seat.key)["continued"]["state"], "pending")
+        result = self.run_command(req, path, continuing=True, ready=ready)
+        # As on the pane path (RV-PR1931 (4)): it waits unbound and the helper asks again.
+        self.assertEqual((result["continued"], result["reason"]), ("queued", "draft"))
+        held = clear.read_reservation(self.seat.key)["continued"]
+        self.assertEqual(held["state"], "pending")
+        self.assertNotIn("transfer_ref", held)
         self.write.assert_not_called()
+
+    def test_a_draft_on_the_private_connection_holds_the_continue_and_it_is_typed_once_cleared(self):
+        # RV-PR1931 (4): Claude's private connection answered `skipped` for writing already in the
+        # box, and the helper asks again only for `queued`: the continue never came after the
+        # person cleared the box. It now waits like the pane path, then is typed once.
+        req, path = self.book(continuing=True); self.prepare_transport()
+        ready = mock.Mock(side_effect=["draft", None, None])
+
+        def sent(fd, text):
+            st.run_hook("claude", "prompt", "session-A", cwd=self.cwd, prompt_text=clear.CONTINUE_TEXT)
+            return len(text)
+        self.write.side_effect = sent
+        results, slept = [], []
+
+        def continuer(request, nonce, _pane):
+            held, why = clear.validate_continue(request, nonce)
+            if not held:
+                return {"continued": "skipped", "reason": why}
+            results.append(native.command(held, request, nonce, continuing=True, screen_ready=ready))
+            return results[-1]
+        self.assertEqual(clear._continue(self.seat.key, req["nonce"], continuer, sleep=slept.append,
+                                         ask_again=True), "continued")
+        self.assertEqual((results[0]["continued"], results[0]["reason"]), ("queued", "draft"))
+        self.assertNotIn("claim_id", results[0])                 # no claim was taken for it
+        self.assertEqual(slept, [clear.CONTINUE_INPUT_RETRY_SEC])
+        self.write.assert_called_once_with(99, (clear.CONTINUE_TEXT + "\r").encode())
+        self.assertEqual(clear.read_reservation(self.seat.key)["continued"]["state"], "sent")
 
     def test_another_session_after_send_cannot_confirm_the_continue_prompt(self):
         req, path = self.book(continuing=True); self.prepare_transport()

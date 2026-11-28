@@ -5201,6 +5201,121 @@ class ContinueHelperTest(TidyCase):
             self.assertEqual(clear.validate_request(path, req["nonce"]), (None, "superseded"))  # no second clear
 
 
+    # --- the card already reached the session: no "type the continue" line (11-16, 11-21) ---
+
+    NOTICE_TURN = ("<task-notification>\n<task-id>bg-1</task-id>\n<status>completed</status>\n"
+                   "<summary>Background command completed</summary>\n</task-notification>")
+
+    def compact_then(self, seat):
+        """The booked compaction's own hook (it starts the session's new card epoch)."""
+        with self.iso.patched_environ(self.extra):
+            st.run_hook("claude", "compact", "sid-A", cwd=str(self.cwd), phase="after",
+                        compact_summary="요약", compact_context={"trigger": "manual"})
+
+    def notice_turn_takes_the_card(self, seat):
+        shown = []
+        with self.iso.patched_environ(self.extra):
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text=self.NOTICE_TURN,
+                        emit=shown.append)
+            self.assertEqual(clear.continue_card_reason(self.booking(seat)), "card-taken")
+        self.assertIn("표식 쓰기", "".join(shown))            # the card rode the notice's turn
+
+    def test_a_continue_left_waiting_after_a_notice_turn_took_the_card_ends_without_the_type_it_line(self):
+        # 11-21 (v4.66.1): the card came with the first notice after the compaction, the continue
+        # waited (`peer-delivery-already-claimed`), and 15 minutes later the person was told to type
+        # 이어서해 although the session had already resumed with the card. Only a card still waiting
+        # gets that line.
+        held_ref = {"continued": "queued", "reason": "peer-delivery-already-claimed", "transfer_ref": "b" * 32}
+        for taken in (True, False):
+            with self.subTest(card_taken=taken):
+                self.calls = []
+                seat, req = self.booked()
+                self.assertEqual(self.run_helper(seat, req, cont=held_ref), "cleared")
+                self.assertEqual(self.booking(seat)["continued"]["state"], "pending")
+                self.compact_then(seat)
+                if taken:
+                    self.notice_turn_takes_the_card(seat)
+                self.expire(seat, continued=True)
+                with self.iso.patched_environ(self.extra):       # the next hook's one ask
+                    self.assertEqual(clear._continue(seat.key, req["nonce"],
+                                                     lambda *_a: self.fail("asked past the window")),
+                                     "cleared")
+                held = self.booking(seat)["continued"]
+                self.assertEqual((held["state"], held["reason"]), ("skipped", "expired"))
+                if taken:
+                    self.assertEqual(self.notices(seat), [])
+                else:
+                    self.assertEqual(len(self.notices(seat)), 1)
+                    self.assertIn("예약 시간", self.notices(seat)[0])
+                    self.assertIn("이어서해", self.notices(seat)[0])
+
+    def test_an_unconfirmed_continue_whose_turn_took_the_card_leaves_no_line(self):
+        seat, req = self.booked()
+
+        def typed_and_taken(_n):
+            self.compact_then(seat)
+            self.notice_turn_takes_the_card(seat)
+            return {"continued": "unverified", "reason": "submission-not-observed"}
+        self.assertEqual(self.run_helper(seat, req, cont=typed_and_taken), "cleared")
+        self.assertEqual(self.booking(seat)["continued"]["state"], "unverified")
+        self.assertEqual(self.notices(seat), [])
+
+    # --- "the card arrived" is the booking's own card generation and its continuing session only ---
+
+    def receipts(self, seat, generation, *receipts, raw=None):
+        with self.iso.patched_environ(self.extra):
+            req = self.booking(seat)
+            path = st._consumed_path(st.seat_from_dict(req["seat"]))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if raw is not None:
+                path.write_bytes(raw)
+            else:
+                st.atomic_write_json(path, {"schema": st.SCHEMA, "generation": generation,
+                                            "receipts": list(receipts)})
+            return clear.continue_card_reason(self.booking(seat))
+
+    def test_only_the_booked_card_taken_by_the_continuing_session_counts_as_arrived(self):
+        # RV-PR1931 (5): the latest card's receipt, or any receipt, made a waiting continue "taken".
+        seat, req = self.booked()
+        self.assertEqual(self.run_helper(seat, req, cont={"continued": "queued",
+                                                          "reason": "awaiting-native-receiver"}), "cleared")
+        booked = req["card_generation"]
+        self.assertEqual(self.receipts(seat, booked, "claude:sid-A:1"), "card-taken")        # arrived
+        self.assertIsNone(self.receipts(seat, booked + 1, "claude:sid-A:2"))               # another card
+        self.assertIsNone(self.receipts(seat, booked, "claude:sid-Z:1"))                   # another session
+        self.assertIsNone(self.receipts(seat, booked, "codex:sid-A:1"))                    # another harness
+        self.assertIsNone(self.receipts(seat, booked, "claude:sid-A"))                     # not a receipt
+        self.assertIsNone(self.receipts(seat, booked, raw=b"\xff"))                        # unreadable
+
+    def test_a_later_cards_receipt_does_not_hide_the_type_it_line_of_an_earlier_booking(self):
+        # The reviewer's sequence: booking 1's card never reached the session; after a later
+        # compaction card 2 rode a notice turn. Booking 1's continue expired: its line still shows.
+        seat, req = self.booked()
+        self.assertEqual(self.run_helper(seat, req, cont={"continued": "queued",
+                                                          "reason": "peer-delivery-already-claimed",
+                                                          "transfer_ref": "b" * 32}), "cleared")
+        with self.iso.patched_environ(self.extra):
+            caller = st.session_seat(seat, "claude", "sid-A")
+            with st.session_state_lock(caller):
+                second = st.write_card(caller, "claude", "sid-A", "진행 중: 다음 일\n다음 할 일: 표식 쓰기")
+        self.assertEqual(second["generation"], req["card_generation"] + 1)
+        self.compact_then(seat)
+        shown = []
+        with self.iso.patched_environ(self.extra):
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text=self.NOTICE_TURN,
+                        emit=shown.append)
+            self.assertIsNone(clear.continue_card_reason(self.booking(seat)))
+        self.assertIn("다음 일", "".join(shown))                       # card 2 rode the notice's turn
+        self.expire(seat, continued=True)
+        with self.iso.patched_environ(self.extra):
+            self.assertEqual(clear._continue(seat.key, req["nonce"], lambda *_a: self.fail("asked past the window")),
+                             "cleared")
+        held = self.booking(seat)["continued"]
+        self.assertEqual((held["state"], held["reason"]), ("skipped", "expired"))
+        self.assertEqual(len(self.notices(seat)), 1)
+        self.assertIn("이어서해", self.notices(seat)[0])
+
+
 class BackgroundAgentCompactTest(TidyCase):
     """A Claude window whose native background agents still run is compacted, never cleared."""
 

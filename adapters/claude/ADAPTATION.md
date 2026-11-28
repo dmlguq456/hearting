@@ -318,15 +318,21 @@ stdout, and is a no-op for registered workers and native subagents. Herdr's
 separate hook remains optional corroboration and is not edited.
 
 `native-question-redirect.py` is `PreToolUse(AskUserQuestion)` (it replaces the plain
-decision-marker entry). It registers the question (text, choices, a label ending
-`(권장)`/`(Recommended)` as the recommendation) as this session's Hearting question through
-`utilities/native_question_redirect.py` and refuses the native call with one short line
-(the question id, "end your turn"). Several questions, `multiSelect` and `preview` are
-written as one text question listing the options. When registration fails, times out
-(5 s inside the hook's 10 s) or the caller is a registered worker or native subagent, the
-native question runs as before and only then does the decision marker above apply. The
-frame-answer `PostToolUse(AskUserQuestion)` bridge is retired: a registered frame question
-is answered on the question board. Codex has no
+decision-marker entry) and carries the three outcomes of `utilities/native_question_redirect.py`.
+Registered: the question (text, choices, a label ending `(권장)`/`(Recommended)` as the
+recommendation, secrecy) becomes this session's Hearting question, or is the same question
+already open, whatever else the session waits on; the native call is refused with one short
+line (the id, "end your turn"). Several questions, `multiSelect` and `preview` are written as
+one text question listing the options. Pass: registration failed before any write (a shape it
+cannot carry, no seat, a failed write, the 5 s budget inside the hook's 10 s) and no same
+question was read; the native question runs with the decision marker above (a marker that
+cannot be written does not hold it back), and the same call again is decided anew. Unknown
+(the question storage cannot be read, a lost write result cannot be read back): the call is
+refused with that reason once. A registered worker or
+native subagent runs the native question as before. A hook the harness times out or that dies
+lets the native question open (outside Hearting's control). The frame-answer
+`PostToolUse(AskUserQuestion)` bridge is retired: a registered frame question is answered on
+the question board. Codex has no
 `PostToolUseFailure` event; its `PostToolUse` also runs after a Bash command that
 exits non-zero (https://learn.chatgpt.com/docs/hooks#posttooluse) and carries the
 same wait clear and index-lock hint there, so the adaptation boundary keeps the
