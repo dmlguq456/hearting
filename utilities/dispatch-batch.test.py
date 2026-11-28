@@ -4373,18 +4373,19 @@ class DispatchBatchTest(unittest.TestCase):
         self.assertEqual(receipt["state"], "idempotent-mixed")
         self.assertEqual((receipt["admitted"], receipt["existing"]), (1, 1))
 
-    def restart_receipt(self, *, review_group, claimed="1"):
+    def restart_receipt(self, *, review_group, claimed="1", status="open", note=""):
         """`--action start` again for a group whose first leg ended `PASS` on the current source and whose
-        second leg is still running (`claimed="0"`: reserved but never claimed, the start was cut short),
-        both of one sealed batch: the exit code and the receipt it prints."""
+        second leg is still running (`claimed="0"`: reserved but never claimed, the start was cut short;
+        `status="done"` with a dead-worker `note`: it ended without a verdict), both of one sealed batch:
+        the exit code and the receipt it prints."""
         self._configure_lab_review()           # capped review legs: each restarted leg is admitted a round
         stack, assignments = self.common_patches()
         output = io.StringIO()
         passed, running = self.legs(assignments)
         self.write_existing(passed, status="done", note="completed-marker,failure_class=pass", live_identity=False,
                             group_key="parallel_group")
-        self.write_existing(running, group_key="parallel_group", claimed=claimed,
-                            live_identity=claimed == "1")
+        self.write_existing(running, group_key="parallel_group", claimed=claimed, status=status, note=note,
+                            live_identity=claimed == "1" and status == "open")
         self.jobs.write_text(self.jobs.read_text(encoding="utf-8").replace(
             "route_id=rt-fixture,", "route_id=rt-fixture,route_hash=" + self.route["route_hash"] + ","), encoding="utf-8")
         state = self.base / "state"
@@ -4457,6 +4458,51 @@ class DispatchBatchTest(unittest.TestCase):
             receipts[review_group] = (rc, receipt, reserve.call_count)
         self.assertNotEqual(receipts[True][1].get("reason"), "prior-attempt-still-live", receipts[True])
         self.assertEqual(receipts[True], receipts[False])
+
+    def test_a_restart_after_the_other_leg_died_without_a_verdict_starts_only_that_leg(self):
+        # The owner's wake text says to start a review leg that ended without a verdict again. A solo review
+        # group that reuses its passed leg reserves one new attempt for the dead leg only and reports the passed
+        # leg as reused; the dead row of the batch it continues is a known prior binding, not an unproven one.
+        # A group without reuse prints the receipt it printed before (the sealed batch replayed, nothing reserved).
+        receipts = {}
+        for review_group in (False, True):
+            self.tearDown()
+            self.setUp()
+            rc, receipt, popen, reserve = self.restart_receipt(
+                review_group=review_group, status="done", note="dead-worker-fail,failure_class=fail")
+            receipts[review_group] = (rc, receipt, reserve)
+        rc, receipt, reserve = receipts[True]
+        self.assertNotEqual(receipt.get("reason"), "batch-prior-binding-unproven", receipt)
+        self.assertEqual(reserve.call_count, 1, receipt)
+        self.assertEqual([leg["node"] for leg in reserve.call_args.args[2]], ["independent-verify-alternative"])
+        self.assertEqual(self.reused_nodes, ["independent-verify"])
+        reasons = {leg["node"]: leg.get("reason") for leg in receipt.get("legs", [])}
+        self.assertEqual(reasons.get("independent-verify"), "reused-current-completion", receipt)
+        rc, receipt, reserve = receipts[False]
+        self.assertEqual((rc, receipt.get("state"), receipt.get("reason")), (70, "partial-failure", None), receipt)
+        reserve.assert_not_called()
+
+    def test_the_preview_of_a_restart_decides_nothing_when_its_admission_raises_what_main_refuses(self):
+        # The preview that looks for an unfinished batch leaves every refusal `main` catches to the real admission:
+        # a preview-only `DispatchNodeError` changes neither the reuse nor the receipt.
+        real = BATCH.DISPATCH_NODE.admit_round
+
+        def preview_raises(*args, **kwargs):
+            if kwargs.get("record_auto_revisions") is False:
+                raise BATCH.DISPATCH_NODE.DispatchNodeError("review-source-snapshot-raced")
+            return real(*args, **kwargs)
+
+        receipts = []
+        for raising in (False, True):
+            self.tearDown()
+            self.setUp()
+            with mock.patch.object(BATCH.DISPATCH_NODE, "admit_round",
+                                   side_effect=preview_raises if raising else real):
+                rc, receipt, _popen, reserve = self.restart_receipt(
+                    review_group=True, status="done", note="dead-worker-fail,failure_class=fail")
+            receipts.append((rc, receipt.get("state"), receipt.get("reason"), reserve.call_count, self.reused_nodes))
+        self.assertEqual(receipts[0], receipts[1])
+        self.assertEqual(receipts[1][3:], (1, ["independent-verify"]))
 
     def test_terminal_failed_duplicate_is_not_reported_as_existing(self):
         stack, assignments = self.common_patches()

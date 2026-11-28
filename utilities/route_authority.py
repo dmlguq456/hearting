@@ -1061,10 +1061,11 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
 
 
 def _is_one_shot_review(route, node) -> bool:
-    """Whether `node` is one of the middle cell's review nodes (the owner makes the work and starts this
-    review; from `strong` the review is a group of legs, and every leg counts its rounds on its own lineage)."""
+    """Whether `node` is one of the middle cell's verification nodes (the owner makes the work and starts it;
+    from `strong` the review is a group of legs and a test follows it, and every node counts its rounds on its
+    own lineage)."""
     return (isinstance(node, dict) and node.get("id") in one_shot_review_node_ids(route)
-            and node.get("kind") == "review-worker")
+            and (node.get("kind") == "review-worker" or node.get("unit") == "qa/test"))
 
 
 # ---------------------------------------------------------------------------

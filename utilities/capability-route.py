@@ -1624,12 +1624,12 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
             gates = ["resource-exit", "quick-complete"]
         if review_cell:
             # The middle cell (`solo` at `standard` and up): the kind's declared verification nodes at this
-            # intensity (one review, or its review legs from `strong`), then the owner's end node, which waits
-            # on all of them (a review never waits on the owner). No frame pair (a decided shape).
+            # intensity (one review, or from `strong` its review legs and then its test), then the owner's end
+            # node, which waits on all of them (a verification node never waits on the owner). No frame pair.
             review_nodes = one_shot_review_nodes(recipe, effective, registry)
             nodes = [*review_nodes, nodes[-1]]
             nodes[-1]["depends_on"] = [n["id"] for n in review_nodes]
-            gates = [review_nodes[0]["completion_gate"], "quick-complete"]
+            gates = [*dict.fromkeys(n["completion_gate"] for n in review_nodes), "quick-complete"]
         selection_basis=[{"axis":"direct-predicate-gap","signal":p,"source":"compiler"} for p in sorted(known_pred-set(predicates))]
     else:
         if transport not in (None, "headless"):

@@ -3177,7 +3177,8 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 probe_admissions, _ = admit_pending({}, preview=True)
                 unfinished_probe = unfinished_for(probe_admissions, {})
-            except BatchError:
+            except (BatchError, DispatchContractError, DISPATCH_NODE.DispatchNodeError, ValueError, OSError):
+                # The preview decides nothing: what `main` refuses below it leaves to the real admission.
                 unfinished_probe = None
             if unfinished_probe is not None:
                 reusable_peers = {}
@@ -3215,6 +3216,13 @@ def main(argv: list[str] | None = None) -> int:
                 frozenset() if next_generation else admission.current_attempt_ids)
             for admission in round_admissions.values()
         )) | producer_historical_attempts
+        if reusable_peers:
+            # A start that reuses passed legs continues their sealed batch: its other members (a leg that ended
+            # without a verdict) are known prior bindings of the legs it starts anew, not unproven ones.
+            historical_batch_attempts |= frozenset(
+                str(member.get("attempt_id")) for peer in reusable_peers.values()
+                for member in peer["manifest"].get("members", ())
+                if str(member.get("route_node")) not in reusable_peers)
         prior_input = unfinished_input or (None if partial is not None or reusable_peers else prior_batch_input(
             jobs, route, nodes, args.parallel_group,
             os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", ""), args.prompt_text,

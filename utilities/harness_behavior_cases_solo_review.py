@@ -9,7 +9,10 @@ harness's dispatch wrapper, so the park, the join and the wake are the ones used
 From `strong` the same owner starts the kind's review *group* with the same one command (two legs at `strong`,
 three at `thorough`): ``solo-strong-pass`` / ``solo-strong-fix`` / ``solo-strong-spent`` / ``solo-thorough-pass``
 run the first three scenarios' shapes on the group (one leg blocks, the owner corrects once, every leg is judged
-again, or the rounds are spent and the owner ends `verdict: FAIL`).
+again, or the rounds are spent and the owner ends `verdict: FAIL`). Once every leg passes, the route's test runs
+(its start is the `Next ready:` line): ``solo-strong-test-fix`` (the test fails, the owner fixes, the reviews and
+then the test run again, the route closes) and ``solo-strong-test-spent`` (the test fails again: the owner ends
+`verdict: FAIL`).
 
 ``solo-review-pass``      work, review `mergeable`, final handoff, the route closes, one completion notice.
 ``solo-review-fix``       review `changes requested`: the same owner session fixes, the closure check (second
@@ -44,6 +47,8 @@ START = "SCENARIO-SOLO start the solo route and end your turn"
 SLUG = "hb-solo-review"
 ROUTE_NODE = re.compile(r"- route_node: (\S+)")
 START_COMMAND = re.compile(r"`(python3 [^`]*stage-dispatch-fallback\.py --route [^`]*--node impl-review --start[^`]*)`")
+# the test's start, from a `Next ready:` line or a wake text (from `strong`)
+TEST_COMMAND = re.compile(r"(python3 \S*stage-dispatch-fallback\.py --route \S+ --node test --start(?: --jobs [^\s`]+)?)")
 SID = re.compile(r"guard_session_id: (att-\S+)")
 OUTPUT = re.compile(r"artifact_output_dir: (\S+)")
 FAIL_FINDING = "HB-SOLO-BLOCKER-77"
@@ -72,6 +77,7 @@ class SoloReviewScenario(unit.UnitRouteScenario):
 
     # -- the fixture model ----------------------------------------------------------------------
     def script(self, run):
+        self.last_start = "group"  # what the owner started last: the review group or the test
         self.owner_steps = {}      # owner session id -> the steps it has taken
         self.review_order = []     # review session ids, in the order they first asked
         self.review_by_node = {}   # review node id -> its session ids, in order (one per round)
@@ -105,8 +111,13 @@ class SoloReviewScenario(unit.UnitRouteScenario):
                 # a call the harness handed to the background: keep waiting for it, as its notice says
                 return Reply(tool=("write_stdin", {"session_id": int(running.group(1)), "chars": "",
                                                    "yield_time_ms": 120000}))
-            if "[workflow-completion-pending]" in last and START_COMMAND.search(last):
+            if "[workflow-completion-pending]" in last and (START_COMMAND.search(last) or TEST_COMMAND.search(last)):
                 found = START_COMMAND.search(last)
+                if found is None:
+                    cell.last_start = "test"
+                    steps.append("test-start")
+                    return shell_step(record, TEST_COMMAND.search(last).group(1))
+                cell.last_start = "group"
                 steps.append("restart")
                 return shell_step(record, found.group(1) if found else "echo no-start-command")
             if "Runtime wait was rejected" in last:
@@ -117,7 +128,7 @@ class SoloReviewScenario(unit.UnitRouteScenario):
             if record["last_kind"] == "tool":
                 previous = steps[-1] if steps else ""
                 poll = re.search(r"parent_next=bounded-wait[\s\S]*?parent_next_command=(\S+(?: --\S+ \S+)*)", last)
-                if previous in ("start", "restart") and poll:
+                if previous in ("start", "restart", "test-start") and poll:
                     # a receipt that names its own bounded wait (no supervisor park on this harness): run it once
                     steps.append("poll")
                     return Reply(shell=poll.group(1))
@@ -125,6 +136,9 @@ class SoloReviewScenario(unit.UnitRouteScenario):
                     # read the review's result as the task says, then act on it
                     steps.append("read")
                     review_dir = (output.group(1) if output else "/nonexistent") + "/_internal"
+                    if cell.last_start == "test":
+                        # the test's report, after its own start
+                        return Reply(shell=f"head -5 {shlex.quote(review_dir.rsplit('/', 1)[0])}/test_logs/test_report.md 2>&1")
                     # every leg's report (a group has one per leg)
                     return Reply(shell=f"for f in {shlex.quote(review_dir)}/dev_reviews*/phase_review.md; "
                                        "do head -5 \"$f\"; done 2>&1")
@@ -145,8 +159,9 @@ class SoloReviewScenario(unit.UnitRouteScenario):
                         steps.append("skipped")
                         return Reply(handoff(text, "PASS")[1])
                     steps.append("start")
+                    cell.last_start = "group"
                     return shell_step(record, command.group(1) if command else "echo no-start-command")
-                if previous in ("start", "restart"):
+                if previous in ("start", "restart", "test-start"):
                     steps.append("wait")
                     return Reply("runtime_wait: registered-children")
                 if previous == "edit-after-pass":
@@ -162,9 +177,14 @@ class SoloReviewScenario(unit.UnitRouteScenario):
             if "Do not correct further" in last:
                 steps.append("fail")
                 return Reply(f"artifact: {target}\nverdict: FAIL\nblocker: {FAIL_FINDING} the closure check still blocks")
-            if "Fix every blocking finding" in last and "fix" not in steps:
+            if ("Fix every blocking finding" in last or "Test FAIL" in last) and "fix" not in steps:
                 steps.append("fix")
                 return Reply(shell=shell_edit("solo fix"))
+            if TEST_COMMAND.search(last) and "Next ready:" in last and steps[-1] == "wait":
+                # every review passed: the `Next ready:` line names the test's start, as the task says
+                cell.last_start = "test"
+                steps.append("test-start")
+                return shell_step(record, TEST_COMMAND.search(last).group(1))
             if steps[-1] == "wait" and cell.owner_edits_after_pass and "edit-after-pass" not in steps:
                 steps.append("edit-after-pass")
                 return Reply(shell=shell_edit("changed after the review passed"))
@@ -187,7 +207,8 @@ class SoloReviewScenario(unit.UnitRouteScenario):
             mode = spec if isinstance(spec, str) else spec.get(node, spec.get("*", "ok"))
             output = OUTPUT.search(text)
             target = ((output.group(1) if output else "/nonexistent")
-                      + f"/_internal/dev_reviews{node.removeprefix('impl-review')}/phase_review.md")
+                      + (f"/_internal/dev_reviews{node.removeprefix('impl-review')}/phase_review.md"
+                         if node != "test" else "/test_logs/test_report.md"))
             wrote = f"{session}-wrote" in cell.owner_steps
             if record["last_kind"] != "tool" and not wrote:
                 cell.owner_steps[f"{session}-wrote"] = ["wrote"]
@@ -213,7 +234,7 @@ class SoloReviewScenario(unit.UnitRouteScenario):
             if session is None and "Dispatch metadata:" in text:
                 # OpenCode's task text carries no session id: the owner is the one owner session of the route; a
                 # review process is a new one at each of its first (user-turn) requests
-                if "- worker_type: review" in text:
+                if "- worker_type: review" in text or "- route_node: test" in text:
                     # concurrent legs of a group: a review process is a new one at each of its node's first requests
                     node = ROUTE_NODE.search(text)
                     node = node.group(1) if node else "impl-review"
@@ -224,7 +245,7 @@ class SoloReviewScenario(unit.UnitRouteScenario):
                     session = "owner"
             if session and "Dispatch metadata:" in text:
                 cell.requests_by_session.setdefault(session, []).append(record["at"])
-                if "- worker_type: review" in text:
+                if "- worker_type: review" in text or "- route_node: test" in text:   # the test runs as a stage worker
                     return review(record, session)
                 if WORK in text:
                     return owner(record, session)
@@ -273,7 +294,7 @@ class SoloReviewScenario(unit.UnitRouteScenario):
         run.wait_idle(8, 60)
         rows = self.unit_rows()
         owners = [r for r in rows if r.get("worker_type") == "owner"]
-        reviews = [r for r in rows if r.get("worker_type") == "review"]
+        reviews = [r for r in rows if r.get("worker_type") == "review" or r.get("route_node") == "test"]
         requests = unit.resting_session_requests(run)
         route_id = route.get("route_id") or "rt-unknown"
         carriers = [r for r in requests[before:] if route_id in r["last_text"] and "HEARTING_RECEIPT_V1" in r["last_text"]
@@ -313,6 +334,10 @@ class SoloReviewScenario(unit.UnitRouteScenario):
                                if "Review FAIL" in r["last_text"]]
         ev["pending_texts"] = [r["last_text"][r["last_text"].index("[workflow-completion-pending]"):][:2600]
                                for r in owner_requests if "[workflow-completion-pending]" in r["last_text"]]
+        ev["test_texts"] = [r["last_text"][r["last_text"].index("Test FAIL"):][:700] for r in owner_requests
+                            if "Test FAIL" in r["last_text"]]
+        ev["next_ready_test"] = sum(1 for r in owner_requests if "Next ready:" in r["last_text"]
+                                    and TEST_COMMAND.search(r["last_text"]))
         ev["owner_requests"] = len(owner_requests)
         # the rigor each review worker was told (`- qa:`), one entry per distinct value, from its own task text
         ev["review_qa"] = sorted({m.group(1) for r in run.main_requests() if "- worker_type: review" in r["text"]
@@ -377,7 +402,7 @@ class SoloReviewScenario(unit.UnitRouteScenario):
 
     def owner_requests(self, run):
         return [r for r in run.main_requests() if "Dispatch metadata:" in r["text"] and WORK in r["text"]
-                and "- worker_type: review" not in r["text"]]
+                and "- worker_type: review" not in r["text"] and "- route_node: test" not in r["text"]]
 
     def closed(self, ev):
         return bool(ev["route_closed"] and (ev["outcome"] or {}).get("terminal_gate_proven") is True)
@@ -404,7 +429,9 @@ class SoloReviewFixScenario(SoloReviewScenario):
         # the runtime's verdict text reached the owner and said what to do, and the owner did it in its session
         verdict = any("Fix every blocking finding" in text and "start the closure check with the same command" in text
                       for text in ev["verdict_texts"])
-        return (len(owners) == 1 and len(reviews) == 2 * len(self.legs) and verdict and ev["session_proof"] != "broken"
+        # every review leg twice; a test (from `strong`) once, after the corrected legs passed
+        rows = 2 * len([leg for leg in self.legs if leg != "test"]) + ("test" in self.legs)
+        return (len(owners) == 1 and len(reviews) == rows and verdict and ev["session_proof"] != "broken"
                 and "fix" in steps and steps.count("start") == 2 and steps[-1] == "final"
                 and self.closed(ev))
 
@@ -419,7 +446,8 @@ class SoloReviewSpentScenario(SoloReviewScenario):
         steps = next(iter(ev["owner_sessions"].values()), [])
         # the second verdict text told the owner to stop correcting and end failed, and it did
         verdict = any("Do not correct further" in text and "`verdict: FAIL`" in text for text in ev["verdict_texts"])
-        return (len(owners) == 1 and len(reviews) == 2 * len(self.legs) and verdict and steps[-1] == "fail"
+        rows = 2 * len([leg for leg in self.legs if leg != "test"])      # the test never runs: a leg still blocks
+        return (len(owners) == 1 and len(reviews) == rows and verdict and steps[-1] == "fail"
                 and ev["session_proof"] != "broken" and not self.closed(ev) and bool(ev["resting_fail_notice"]))
 
 
@@ -476,18 +504,21 @@ class SoloReviewVerdictlessScenario(SoloReviewScenario):
 class SoloStrongPassScenario(SoloReviewScenario):
     name = "solo-strong-pass"
     summary = ("`solo·strong`: the owner starts the review group (two legs) with one command, waits, both legs pass, "
-               "and the route closes after the final handoff.")
+               "the test runs from its `Next ready:` start and passes, and the route closes after the final handoff.")
     intensity = "strong"
-    legs = ("impl-review", "impl-review-alternative")
+    legs = ("impl-review", "impl-review-alternative", "test")
+    WAIT = 600
 
 
 class SoloStrongFixScenario(SoloReviewFixScenario):
     name = "solo-strong-fix"
     summary = ("`solo·strong`: one leg blocks; the same owner session fixes once, the same command runs the group "
-               "again (both legs judged anew, the blocked leg as a closure check), and the route closes.")
+               "again (both legs judged anew, the blocked leg as a closure check), the test passes, and the route "
+               "closes.")
     intensity = "strong"
-    legs = ("impl-review", "impl-review-alternative")
+    legs = ("impl-review", "impl-review-alternative", "test")
     reviews = ({"impl-review-alternative": "block", "*": "ok"}, "ok")
+    WAIT = 720
 
 
 class SoloStrongSpentScenario(SoloReviewSpentScenario):
@@ -495,19 +526,59 @@ class SoloStrongSpentScenario(SoloReviewSpentScenario):
     summary = ("`solo·strong`: the blocked leg blocks its closure check too: no third round, the owner ends "
                "`verdict: FAIL` and the end reads as a failure.")
     intensity = "strong"
-    legs = ("impl-review", "impl-review-alternative")
+    legs = ("impl-review", "impl-review-alternative", "test")
     reviews = ({"impl-review-alternative": "block", "*": "ok"}, {"impl-review-alternative": "block", "*": "ok"})
+
+
+class SoloStrongTestFixScenario(SoloReviewScenario):
+    name = "solo-strong-test-fix"
+    summary = ("`solo·strong`: both legs pass and the test fails; the same owner session fixes once and starts the "
+               "review group again, both legs pass on the change, the test passes, and the route closes.")
+    intensity = "strong"
+    legs = ("impl-review", "impl-review-alternative", "test")
+    reviews = ({"test": "block", "*": "ok"}, "ok")
+    WAIT = 900
+
+    def judge(self, run, ev, owners, reviews):
+        steps = next(iter(ev["owner_sessions"].values()), [])
+        # the test's failure reached the owner and sent the fixed work through the reviews first, then the test (a
+        # harness whose owner is not woken in its session reads the test's report itself: `session_proof` unproven)
+        told = any("start the reviews again with the same command" in text for text in ev["test_texts"]) or (
+            ev["session_proof"] != "proven")
+        nodes = [row["route_node"] for row in ev["review_rows"]]
+        first_test = nodes.index("test") if "test" in nodes else -1
+        again = nodes[first_test + 1:first_test + 3] if first_test >= 0 else []
+        return (len(owners) == 1 and len(reviews) == 6 and nodes.count("test") == 2 and told
+                and sorted(again) == ["impl-review", "impl-review-alternative"]       # reviews before the second test
+                and "fix" in steps and steps.count("start") == 2 and steps.count("test-start") == 2
+                and steps[-1] == "final" and ev["session_proof"] != "broken" and self.closed(ev))
+
+
+class SoloStrongTestSpentScenario(SoloStrongTestFixScenario):
+    name = "solo-strong-test-spent"
+    summary = ("`solo·strong`: the test fails again after the correction: no third round, the owner ends "
+               "`verdict: FAIL` and the end reads as a failure.")
+    reviews = ({"test": "block", "*": "ok"}, {"test": "block", "*": "ok"})
+
+    def judge(self, run, ev, owners, reviews):
+        steps = next(iter(ev["owner_sessions"].values()), [])
+        spent = any("Do not correct further" in text and "`verdict: FAIL`" in text for text in ev["test_texts"]) or (
+            ev["session_proof"] != "proven")
+        nodes = [row["route_node"] for row in ev["review_rows"]]
+        return (len(owners) == 1 and len(reviews) == 6 and nodes.count("test") == 2 and spent and steps[-1] == "fail"
+                and ev["session_proof"] != "broken" and not self.closed(ev) and bool(ev["resting_fail_notice"]))
 
 
 class SoloThoroughPassScenario(SoloReviewScenario):
     name = "solo-thorough-pass"
-    summary = ("`solo·thorough`: the review group has three legs (the failure-mode leg too); all pass and the route "
-               "closes.")
+    summary = ("`solo·thorough`: the review group has three legs (the failure-mode leg too); all pass, the test "
+               "passes, and the route closes.")
     intensity = "thorough"
     qa = "thorough"
-    legs = ("impl-review", "impl-review-alternative", "impl-review-failure-mode")
+    legs = ("impl-review", "impl-review-alternative", "impl-review-failure-mode", "test")
+    WAIT = 600
 
 
 SCENARIOS = [SoloReviewScenario, SoloReviewFixScenario, SoloReviewSpentScenario, SoloReviewSkipScenario,
              SoloReviewStaleScenario, SoloReviewVerdictlessScenario, SoloStrongPassScenario, SoloStrongFixScenario,
-             SoloStrongSpentScenario, SoloThoroughPassScenario]
+             SoloStrongSpentScenario, SoloStrongTestFixScenario, SoloStrongTestSpentScenario, SoloThoroughPassScenario]
