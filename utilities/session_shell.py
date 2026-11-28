@@ -932,7 +932,7 @@ def session_questions(harness, sid, *, view=None, retained=(), elsewhere=None):
     answerable, receipts, current = [], [], set()
     for item in view.get("items", ()):
         owner = item.get("owner") or {}
-        if ((item.get("id") in ids or item.get("answer") == "sent") and not item.get("stale")
+        if ((item.get("id") in ids or item.get("answer") == "sent" and item.get("source") != "S3") and not item.get("stale")
                 and owner.get("harness") == harness and owner.get("session_id") == sid):
             current.add(item.get("id"))
             described = questions.describe(item, now=time.time())
@@ -942,13 +942,14 @@ def session_questions(harness, sid, *, view=None, retained=(), elsewhere=None):
                 receipts.append(described)
             elif elsewhere is not None:
                 elsewhere.append(described)
-    result = (answerable + receipts)[:8]
+    # Every question by its full id: the count and the popup's `i/N` and Tab reach the last one.
+    result = answerable + receipts
     # A current wait left out above stays out: a retained display reference keeps only a
     # question that has left this session's waits (its receipt), never one judged here.
     known = {item["id"] for item in result} | current
     listed = {item.get("id") for item in view.get("items", ())}
-    for old in list(retained or ())[:8]:
-        if not isinstance(old, dict) or old.get("id") in known or len(result) >= 8:
+    for old in list(retained or ()):
+        if not isinstance(old, dict) or old.get("id") in known:
             continue
         if not isinstance(old.get("id"), str) or not re.fullmatch(r"S[1-4]:[A-Za-z0-9:_-]{1,256}", old["id"]):
             continue
