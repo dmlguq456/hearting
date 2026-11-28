@@ -37,9 +37,9 @@ class QuestionAnswerLine(unittest.TestCase):
         return state._read(state._signal_path(signal))
 
     def test_each_harness_reads_the_one_line_and_settles_the_answer_once(self):
-        # Codex keeps its full text (its queue recovery reads the receipt marker lines); the
-        # other two take the one line through their session-shell host.
-        for harness in ("claude", "opencode"):
+        # Claude and OpenCode take the one line through their session-shell host, Codex through
+        # its native queue (the courier's `thread/queue/add`).
+        for harness in ("claude", "opencode", "codex"):
             with self.subTest(harness=harness):
                 self.f.display = True
                 signal, envelope = self.f.ask(harness, "line-" + harness)
@@ -138,16 +138,37 @@ class QuestionAnswerLine(unittest.TestCase):
                 # ... and its body, when no line is sealed, reaches the window only as a pointer.
                 self.assertTrue(sweep.delivery_holds_secret_answer([(self.f.root, [record])]))
 
-    def test_codex_keeps_the_full_text_and_settles_as_before(self):
+    def test_codex_queue_receipt_settles_the_line_on_its_own_ref_and_nothing_is_sent_again(self):
+        # The queued line settles on the row's own `delivery-peer-<ref>` item and the exact text the
+        # courier sent: no receipt marker line is read from the item (they stay in the agent's text).
+        import codex_queue_delivery as queue
+        import codex_queue_dispatch
         self.f.display = True
-        signal, envelope = self.f.ask("codex", "line-codex")
+        signal, envelope = self.f.ask("codex", "line-codex-queue")
         self.f.submit(envelope, "네")
         calls, ref, row = self.f.courier(signal)
-        self.assertEqual(len(calls), 1)
-        self.assertIn("HEARTING_RECEIPT_V1", calls[0])
-        self.assertNotIn("display", self.f.peer._read_transfer_record(ref))
-        self.f.consume(signal, calls[0])
-        self.assertEqual(self.source(signal)["completion"]["action_id"], "fixture-action")
+        self.assertEqual((calls, row["state"]), (["↳ 질문에 답함: 네"], "queued"))
+        agent = self.f.peer._read_transfer_record(ref)["display"]["agent"]
+        self.assertIn("HEARTING_RECEIPT_V1 delivery-", agent)
+
+        def observed(text):
+            turn = {"id": "turn-fixture", "status": "completed", "items": [{"type": "userMessage",
+                    "clientId": "delivery-peer-" + ref, "content": [{"type": "text", "text": text}]}]}
+            with mock.patch.object(queue, "_known_consumed", return_value=turn), \
+                    mock.patch.object(codex_queue_dispatch, "resolve_queue_socket",
+                                      return_value=self.f.root / "fixture.sock"):
+                return self.f.peer.deliver_pending_codex(ref, _promote_prior=False)["status"]
+        self.assertEqual(observed(agent), "unverified")      # another text under the id is not it
+        self.assertEqual(self.source(signal)["lifecycle"], "open")
+        self.assertEqual(observed(calls[0]), "received")
+        self.settled(signal, ref)
+        # nothing is owed again: the record is ACKed and no notice duty for it is left open
+        import peer_obligations
+        record = self.f.record(signal)
+        self.assertEqual(record["state"], "acked")
+        self.assertEqual([duty for duty in peer_obligations.ObligationStore(self.f.root).list(kinds={"run-notice"})
+                          if duty["intent"]["delivery_id"] == record["delivery_id"]
+                          and duty.get("state") != "complete"], [])
 
     def test_an_unsigned_window_gets_the_full_text_as_before(self):
         signal, envelope = self.f.ask("claude", "unsigned")
@@ -164,11 +185,11 @@ class QuestionAnswerLine(unittest.TestCase):
     # and the same line still waiting for an earlier answer (every secret answer's line is `•••`).
     # OpenCode hands an ordinary notice to its own plugin carrier, so it never shares a batch
     # with an answer (no mixed or folded case there).
-    CASES = (("codex", "marked"), ("codex", "mixed"), ("claude", "unsigned"), ("claude", "stale-sign"),
+    CASES = (("codex", "mixed"), ("claude", "unsigned"), ("claude", "stale-sign"),
              ("claude", "mixed"), ("claude", "folded"), ("claude", "same-line-waiting"),
              ("opencode", "unsigned"), ("opencode", "stale-sign"), ("opencode", "same-line-waiting"))
-    # OpenCode, even when its window reads the one-line form: a secret answer takes the pointer.
-    SECRET_ONLY_CASES = (("opencode", "marked"),)
+    # Codex and OpenCode, even when the window reads the one-line form: a secret answer takes the pointer.
+    SECRET_ONLY_CASES = (("codex", "marked"), ("opencode", "marked"))
 
     def deliver(self, harness, case, answer, secret, *, patches=()):
         import os
@@ -475,6 +496,65 @@ class QuestionAnswerLine(unittest.TestCase):
         self.assertEqual(self.f.peer._read_pending(prior_ref)["state"], "received")
         self.assertEqual(self.source(signal)["lifecycle"], "answered")
         self.settled(signal, answer_ref)
+
+    def test_the_opencode_idle_courier_pastes_the_short_forms_and_settles_each_once(self):
+        # The plugin's own idle delivery (OpenCode 1 save + resume, OpenCode 2 prompt) pastes what a
+        # session-shell paste carries: the body + `— <sender>` and the one `↳` line. The model call
+        # answering each gets the full text, each row settles from the history, and a later idle
+        # sends nothing again.
+        peer_sender = {"harness": "codex", "session_id": "0100000a-0000-7000-8000-000000000012",
+                       "name": "fixture-peer"}
+        for host in ("v1", "v2"):
+            with self.subTest(host=host):
+                sid = "idle-short-" + host
+                self.f.display = True
+                self.f.peer.note_display_ready({"harness": "opencode", "session_id": sid})
+                _text, peer_ref = self.f.peer.prepare_peer_message(
+                    "테스트 다 돌았어?", peer_sender, {"harness": "opencode", "session_id": sid}, defer=True)
+                signal, envelope = self.f.ask("opencode", sid)
+                self.f.submit(envelope, "네, 그렇게 하세요")
+                _text, answer_ref, _recipient = self.f.prepare(signal)
+                result = self.f.opencode_plugin_session(sid, {"idles": 4, "v2": host == "v2"})
+                sent = {m["text"]: m["id"] for m in result["history"] if m["role"] == "user"}
+                line, peer_text = "↳ 질문에 답함: 네, 그렇게 하세요", "테스트 다 돌았어?\n\n— codex fixture-peer"
+                self.assertEqual(sorted(sent), sorted([line, peer_text]))
+                for text in sent:
+                    for noise in ("ref=", "sid=", "peer-from", "runtime-from", "HEARTING_RECEIPT", "request=S4:"):
+                        self.assertNotIn(noise, text)
+                agent = self.f.peer._read_transfer_record(answer_ref)["display"]["agent"]
+                self.assertIn("the full text:\n" + agent, self.call(result, sent[line]))
+                self.assertIn("Sender of the message above (the person sees only `— codex fixture-peer`)",
+                              self.call(result, sent[peer_text]))
+                self.settled(signal, answer_ref)
+                self.assertEqual(self.f.peer._read_pending(peer_ref)["state"], "received")
+                for ref in (answer_ref, peer_ref):
+                    self.assertEqual(len([r for r in self.f.peer._iter_records() if r.get("transfer_ref") == ref
+                                          and r.get("delivery", {}).get("status") == "received"]), 1)
+                again = self.f.opencode_plugin_session(sid, {"idles": 2, "v2": host == "v2"})
+                self.assertEqual(again["calls"], {"prompt": 0, "promptAsync": 0})
+
+    def test_a_short_form_the_window_host_pasted_is_still_received_by_the_plugin(self):
+        # The plugin leaves only its own send's receipt to its idle pass. The same visible text pasted
+        # by the session-shell host (the row that host is delivering) is received when it arrives.
+        import dispatch_contract
+        sid = "window-paste"
+        recipient = {"harness": "opencode", "session_id": sid}
+        self.f.peer.note_display_ready(recipient)
+        _text, ref = self.f.peer.prepare_peer_message("셸로 붙인 글", {
+            "harness": "codex", "session_id": "0100000a-0000-7000-8000-000000000012", "name": "fixture-peer"},
+            recipient, defer=True)
+        reserved = self.f.peer.reserve_pending_herdr(ref, recipient, receipt="session-shell-inflight")
+        row = self.f.peer._read_pending(ref)
+        me = {"pid": os.getpid(), "start": dispatch_contract.process_start_ticks(os.getpid())}
+        self.assertTrue(self.f.peer.begin_pending_write(row, recipient=recipient,
+                                                        receipt="session-shell-inflight", claimant=me))
+        self.assertTrue(self.f.peer.mark_pending_prompt_queued(ref, reserved["rpc_claim"]))
+        pasted = self.f.peer.pasted_text(row)
+        self.assertEqual(pasted, "셸로 붙인 글\n\n— codex fixture-peer")
+        result = self.f.opencode_plugin_session(sid, {"personFirst": pasted, "idles": 2})
+        self.assertEqual(result["calls"], {"prompt": 0, "promptAsync": 0})
+        self.assertEqual((self.f.peer._read_pending(ref)["state"], self.f.peer._read_pending(ref)["receipt"]),
+                         ("received", "exact-peer-ref"))
 
     def test_an_opencode_session_without_a_window_origin_gets_the_answer_at_its_tool_boundary(self):
         # `opencode -c` proves no window origin, so the idle delivery does not run: the working

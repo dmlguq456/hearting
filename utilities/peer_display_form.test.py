@@ -389,14 +389,8 @@ class RuntimeDisplayForms(DisplayFixture):
                                             display_line=line)
         return text, ref, producer, pm.pasted_text(pm._read_pending(ref))
 
-    def test_codex_keeps_the_full_runtime_text(self):
-        recipient = {"harness": "codex", "session_id": "runtime-codex-full"}
-        text, ref, _producer, shown = self.runtime_prompt(recipient, "↳ 작업 끝: 설계 — 완료")
-        self.assertEqual(shown, text)
-        self.assertNotIn("display", pm._read_transfer_record(ref))
-
     def test_runtime_line_is_the_whole_visible_text_and_the_agent_context_is_the_old_text(self):
-        for harness in ("claude", "opencode"):
+        for harness in ("claude", "codex", "opencode"):
             with self.subTest(harness=harness):
                 recipient = {"harness": harness, "session_id": "runtime-" + harness}
                 line = "↳ 작업 끝: 설계 확정 — 완료 (3분)"

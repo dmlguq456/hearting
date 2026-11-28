@@ -2768,6 +2768,13 @@ function looksLikePeerPrompt(prompt) {
       || PEER_DISPLAY_LINE.test(prompt.slice(0, 300)) || PEER_DISPLAY_TAIL.test(prompt.slice(-400)))
 }
 
+// What the idle courier pastes for a pending row and finds in the session history: the `pending`
+// command's `shown`, the same visible text a session-shell paste carries (body + `— [xx]`, or one
+// `↳` line); a row without it keeps its sealed text. chat.message leaves the receipt of its own
+// send (the row's receipt while this courier delivers it) to the idle pass that reads the history.
+const courierText = (row) => typeof row?.shown === "string" ? row.shown : row?.text
+const COURIER_RECEIPTS = new Set(["opencode-prompt-inflight", "context-api-accepted"])
+
 // The `pending` and `context` commands below pass `HEARTING_PEER_DISPLAY_GATE: "2"`: this plugin's
 // own gate (above) reads the display forms, and only then does the Python side leave the sign a
 // sender looks for. `AGENT_HOME` may name a `current` link, so a plugin loaded before the forms
@@ -3190,7 +3197,7 @@ async function pendingPeerDelivery(ctx, sid) {
       }
       const created = Number(row.created) * 1000
       const matches = messages.filter((m) => m?.info?.sessionID === sid && m.info.role === "user"
-        && promptText(m) === row.text
+        && promptText(m) === courierText(row)
         && (!row.no_trailer || (nativeMessageTime(m.info) > 0
           && nativeMessageTime(m.info) >= created - 2000)))
       if (matches.length > 1) continue // Ambiguous history is never an exact receipt.
@@ -3218,7 +3225,7 @@ async function pendingPeerDelivery(ctx, sid) {
         // The resumed model call reads this message's own guidance, whatever came between
         // (a new plugin process, a person's prompt); the saving `chat.message` is not relied on.
         // A failed read defers the resume. An empty read clears the previous row's guidance.
-        const parts = peerGuidanceFor(sid, row.text, baseDir(ctx))
+        const parts = peerGuidanceFor(sid, courierText(row), baseDir(ctx))
         if (!parts) continue
         if (!pendingPeerTransition(sid, ["--resuming", row.ref, "--message-id", mid])) continue
         peerGuidanceBySession.set(sid, parts.guidance)
@@ -3254,7 +3261,9 @@ async function pendingPeerDelivery(ctx, sid) {
         "--claim-pid", String(identity.pid), "--claim-start", identity.start])
       if (reserved.ref !== row.ref) { releaseReservation(); return "claim-ref-mismatch" }
       if (reserved.state !== "pending") { releaseReservation(); return "claim-state-mismatch" }
-      if (reserved.text !== row.text) { releaseReservation(); return "claim-body-mismatch" }
+      if (reserved.text !== row.text || courierText(reserved) !== courierText(row)) {
+        releaseReservation(); return "claim-body-mismatch"
+      }
       if (!pendingPeerRoot(ctx, sid)) { releaseReservation(); return "native-origin-changed" }
       if (await recheckReceipt(reserved)) {
         releaseReservation()
@@ -3280,7 +3289,7 @@ async function pendingPeerDelivery(ctx, sid) {
       let persistenceResponseLost = false
       try {
         accepted = await bounded(client.prompt({ path: { id: sid }, query: { directory }, body: {
-          noReply: true, parts: [{ type: "text", text: claimed.text }],
+          noReply: true, parts: [{ type: "text", text: courierText(claimed) }],
         }}), 5000)
       } catch (error) {
         accepted = null
@@ -3294,7 +3303,7 @@ async function pendingPeerDelivery(ctx, sid) {
       const saved = pendingPeerSdkData(accepted)
       let savedInfo = saved?.info?.sessionID === sid && saved.info.role === "user"
         && typeof saved.info.id === "string" && saved.info.id
-        && promptText(saved) === claimed.text ? saved : null
+        && promptText(saved) === courierText(claimed) ? saved : null
       pendingPeerTrace(ctx, sid, "noReply-save", savedInfo ? "persisted-response-verified" : "persisted-response-unverified", {
         ...pendingPeerSdkMeta(accepted, sid),
         user_session_match: saved?.info?.sessionID === sid,
@@ -3308,7 +3317,7 @@ async function pendingPeerDelivery(ctx, sid) {
         let latest
         try { latest = pendingPeerSdkData(await bounded(client.messages({ path: { id: sid }, query: { directory } }))) } catch { latest = null }
         const reconciled = Array.isArray(latest) ? latest.filter((m) => m?.info?.sessionID === sid
-          && m.info.role === "user" && promptText(m) === claimed.text
+          && m.info.role === "user" && promptText(m) === courierText(claimed)
           && (!claimed.no_trailer || (nativeMessageTime(m.info) > 0
             && nativeMessageTime(m.info) >= Number(claimed.created) * 1000 - 2000))) : []
         pendingPeerTrace(ctx, sid, "noReply-reconcile", reconciled.length === 1 ? "one-exact-history-match" : "not-exact", {
@@ -3324,7 +3333,7 @@ async function pendingPeerDelivery(ctx, sid) {
         if (pendingPeerTransition(sid, ["--resuming", row.ref, "--message-id", mid])) {
           if (!pendingPeerRoot(ctx, sid)) return "native-origin-changed"
           // A failed read keeps the guidance the saving `chat.message` set for this text.
-          setPeerGuidance(sid, peerGuidanceFor(sid, row.text, baseDir(ctx)))
+          setPeerGuidance(sid, peerGuidanceFor(sid, courierText(row), baseDir(ctx)))
           peerGuidanceMessage.set(sid, mid)
           const resumed = await bounded(client.promptAsync({ path: { id: sid }, query: { directory },
             body: { messageID: mid, parts: [] } }))
@@ -3387,7 +3396,7 @@ async function pendingPeerDeliveryV2(ctx, sid) {
     } catch { return null }
   }
   const exact = (messages, row) => messages.filter((m) => m?.info?.sessionID === sid
-    && m.info.role === "user" && promptText(m) === row.text
+    && m.info.role === "user" && promptText(m) === courierText(row)
     && (!row.no_trailer || (nativeMessageTime(m.info) > 0
       && nativeMessageTime(m.info) >= Number(row.created) * 1000 - 2000)))
   try {
@@ -3441,6 +3450,7 @@ async function pendingPeerDeliveryV2(ctx, sid) {
         "--claim-token", reserved.rpc_claim?.token || "",
         "--claim-pid", String(identity.pid), "--claim-start", identity.start])
       if (reserved.ref !== row.ref || reserved.state !== "pending" || reserved.text !== row.text
+          || courierText(reserved) !== courierText(row)
           || !pendingPeerRoot(ctx, sid) || carrierOrigin(ctx) !== origin) {
         releaseReservation(); return "claim-mismatch"
       }
@@ -3455,7 +3465,7 @@ async function pendingPeerDeliveryV2(ctx, sid) {
       let accepted = false
       try {
         const result = await bounded(client.promptAsync({ path: { id: sid },
-          body: { parts: [{ type: "text", text: claimed.text }] } }), 5000)
+          body: { parts: [{ type: "text", text: courierText(claimed) }] } }), 5000)
         accepted = !!result && result.error == null && result.response?.ok !== false
       } catch {}
       messages = (await history()) || []
@@ -3890,7 +3900,8 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       // Ordinary manual sends retain their existing notice path. Pending refs
       // are acknowledged by the persisted-context observation at normal idle.
       const rows = pendingPeerCommand(eventSid)
-      if (Array.isArray(rows) && !rows.some((row) => row.text === prompt)) {
+      if (Array.isArray(rows) && !rows.some((row) => row.text === prompt
+          || (courierText(row) === prompt && COURIER_RECEIPTS.has(row.receipt)))) {
         spawnPeerNotice(eventSid, prompt, baseDir(ctx))
       }
     }

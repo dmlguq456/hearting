@@ -2820,13 +2820,14 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
             and receiver_reads_display(recipient)):
         if producer_binding is None and sender.get("harness") in _DISPLAY_HARNESSES:
             display = {"kind": "peer"}
-        elif (producer_binding is not None and display_line and recipient.get("harness") != "codex"
-              and not (private_body and recipient.get("harness") == "opencode")):
-            # Codex keeps the full runtime text in its own queue: its delivery recovery reads the
-            # receipt marker lines from the thread's input history (`codex_queue_delivery`), and
-            # the one-line form has none. A person's window there still reads the full text.
-            # OpenCode's idle plugin delivery pastes a row's sealed text, which for the one-line
-            # form is the whole old text: a secret answer to OpenCode takes the pointer form.
+        elif (producer_binding is not None and display_line
+              and not (private_body and recipient.get("harness") in ("codex", "opencode"))):
+            # Every carrier of a row pastes `pasted_text(row)` and the row settles on its own ref
+            # (the Codex queue on `delivery-peer-<ref>` and the exact text it sent), so the receipt
+            # marker lines stay in the sealed text the agent gets. The marker lines a Codex queue
+            # retirement reads back are in the completion carrier's own items, never in a row.
+            # A secret answer keeps the pointer form there: an OpenCode tool boundary appends a
+            # row's sealed text to the tool result its TUI draws; Codex keeps its earlier form.
             display = {"kind": "runtime", "line": display_line}
     body_hash = hashlib.sha256(body.rstrip("\n").encode("utf-8")).hexdigest()
     request_seal = dict(request["seal"]) if request is not None else None
@@ -5437,6 +5438,17 @@ def cmd_context(args):
     return 0
 
 
+def _courier_shown(row):
+    """What the OpenCode plugin courier pastes for ``row`` and looks for in the session history
+    (``shown``): the same text a session-shell paste carries (`pasted_text`). None when the row's
+    sealed record cannot be read this time: the courier then sends nothing for it this pass, since
+    the sealed text would not match a visible text it may already have sent."""
+    try:
+        return pasted_text(row, strict=True)
+    except ValueError:
+        return None
+
+
 def cmd_pending(args):
     recipient = {"harness": args.to_harness, "session_id": args.to_session_id}
     if _valid_transfer_endpoint(recipient):
@@ -5466,11 +5478,14 @@ def cmd_pending(args):
             if not row or row.get("state") != "pending" \
                     or not _same_transfer_session(pending_delivery_recipient(row), recipient):
                 return 1
+            shown = _courier_shown(row)
+            if shown is None:
+                return 1
             reserved = reserve_pending_herdr(reserve_ref, recipient,
                 receipt="opencode-prompt-inflight", claimant=claimant)
             if not reserved:
                 return 1
-            print(json.dumps(reserved, ensure_ascii=False))
+            print(json.dumps(dict(reserved, shown=shown), ensure_ascii=False))
             return 0
         transition_ref = begin_ref or release_ref
         row = _read_pending(transition_ref)
@@ -5484,16 +5499,19 @@ def cmd_pending(args):
         if release_ref:
             return 0 if release_pending_herdr_claim(
                 row, receipt="opencode-prompt-reservation-released") else 1
-        begun = begin_pending_write(row, recipient=recipient,
+        shown = _courier_shown(row)
+        begun = shown is not None and begin_pending_write(row, recipient=recipient,
                                     receipt="opencode-prompt-inflight", claimant=claimant)
         if not begun:
             return 1
-        print(json.dumps(begun, ensure_ascii=False))
+        print(json.dumps(dict(begun, shown=shown), ensure_ascii=False))
         return 0
     if not claim_ref and not queued_ref and not resuming_ref and not received_ref:
         # The OpenCode idle callback itself owns delivery. Listing is side-effect
         # free so it does not recursively start another continuation decision.
-        print(json.dumps(pending_messages(recipient)[:5], ensure_ascii=False))
+        rows = [dict(row, shown=shown) if (shown := _courier_shown(row)) is not None else row
+                for row in pending_messages(recipient)[:5]]
+        print(json.dumps(rows, ensure_ascii=False))
         return 0
     ref = claim_ref or queued_ref or resuming_ref or received_ref
     with pending_lock(ref):

@@ -3324,7 +3324,8 @@ evidence keeps the complete body inline; SID-less panes remain inline until
 session binding. Helper file reads and model-readable access are separate
 observations. One runtime delivery takes a payload on every harness: a body
 holding a secret question's answer that gets no one-line display form (to
-OpenCode none at all, since its idle plugin delivery pastes a row's sealed text)
+Codex and OpenCode none at all; an OpenCode tool boundary appends a row's sealed
+text to the tool result its TUI draws)
 shows the window only a pointer to its private payload (`private-answer`).
 Each carrier that takes the row gives the agent the verified full text in an
 agent-only place before the row settles: the Claude and Codex prompt hooks and
