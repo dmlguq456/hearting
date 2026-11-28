@@ -1127,6 +1127,28 @@ def _open_attempt_rows(jobs):
     return result
 
 
+def open_route_count(view, session_id):
+    """How many routes ``session_id`` parents in one registry generation: its dispatch-depth-1
+    owner attempts whose last row is open, counted by route.
+
+    ``None`` for no view, an unknown session, or a generation its reader calls incomplete or
+    empty: what could not be read is never shown as none. It counts the registry's open owner
+    rows, so a route may still count for a moment after it closes, until its row does.
+    """
+    if view is None or not session_id or view.completeness_reason or not view.record_count:
+        return None
+    routes = set()
+    for record in view.completion_parent_records(session_id):
+        if record.status not in {"open", "running"}:
+            continue
+        metadata = record.completion_metadata()
+        last = view.handover_attempt(metadata.get("attempt_id", ""))  # the attempt's last row decides
+        if (last and last[0] in {"open", "running"} and metadata.get("dispatch_depth") == "1"
+                and metadata.get("worker_type") == "owner"):
+            routes.add(metadata.get("owner_route_id") or metadata.get("route_id") or "")
+    return len(routes - {""})
+
+
 def running_route_ids(jobs, candidates, session_id=None):
     """Which of the ``candidates`` route ids have a worker that works or waits on its own work now.
 

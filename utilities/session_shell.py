@@ -924,7 +924,7 @@ def session_questions(harness, sid, *, view=None, retained=(), elsewhere=None):
     answerable, receipts, current = [], [], set()
     for item in view.get("items", ()):
         owner = item.get("owner") or {}
-        if ((item.get("id") in ids or item.get("answer") == "sent") and not item.get("stale")
+        if ((item.get("id") in ids or item.get("answer") == "sent" and item.get("source") != "S3") and not item.get("stale")
                 and owner.get("harness") == harness and owner.get("session_id") == sid):
             current.add(item.get("id"))
             described = questions.describe(item, now=time.time())
