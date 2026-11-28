@@ -145,7 +145,8 @@ workers do not. The retired broker exposes only legacy `status`/`stop`.
 dispatch-depth-2 `code-plan -> code-execute -> code-test -> code-report` stage
 workers; `direct` is inline and `quick` is one registered-headless
 dispatch-depth-1 one-shot conductor. For `autopilot-code`, `capability-info` and `route` print the portable pipeline contract (`code-plan>code-execute>code-test>code-report` for `standard+`).
-Use native subagents only after `preflight.sh subagent-info --check`. After
+A native subagent call (`spawn_agent`) is taken as a Hearting unit route by the
+`PreToolUse` hook when that is certain, and otherwise runs natively. After
 integration, verification, and push, use `preflight.sh worktree-cleanup
 --check` before `--apply`; SessionEnd/Stop never cleans worktrees.
 
@@ -185,7 +186,7 @@ read-only unless the user explicitly opts into a separately validated feature.
 | completion delivery | Interactive Codex parents use the native per-thread queue, addressed to CODEX_THREAD_ID. Delivery is at-least-once with exact pending/history checks. The launcher and interactive gateway are retired; registered headless owners retain their private App Server supervisor. The TUI remains the sole question/approval owner. |
 | launch publication settle | When an App Server owner turn ends during the atomic register-to-`launch_started=1` publication window, with or without the runtime-wait sentinel, the Codex supervisor briefly rereads only undelivered exact-parent rows outside registry locks. A fully fenced batch parks without a model retry or continuation charge; genuinely register-only rows retain the bounded `registration-required` correction. The supervisor never replays the dispatch itself |
 | autopilot routing | Codex exposes `autopilot-*` as native Skills/plugin entries and can select matching Skills from descriptions, but the adapter does not emulate Claude slash-command routing. `prompt-signal` emits the portable routing contract and Codex-native entrypoint surface; for spec-backed work, rely on spec-read/capability gates plus the relevant Skill or explicit dispatch wrapper |
-| subagent delegation | Codex supports native subagent workflows, but they are explicit or main-dispatched. Run `adapters/codex/bin/preflight.sh subagent-info --check` to verify the `multi_agent` runtime feature and projected custom agents before claiming delegation parity. Use prompt-directed subagents or `preflight.sh dispatch`; do not treat UI/status state as an automatic delegation trigger |
+| subagent delegation | A person's session's `spawn_agent` call (multi-agent v1) is taken as a `general/explore` unit route by the `PreToolUse` hook (`adapters/codex/hooks/pretooluse-subagent-redirect.py`, `utilities/native_subagent_redirect.py`) when that is certain (`capabilities/unit.md`, A native subagent call); otherwise, a multi-agent v2 call and a registered worker's call run natively. Run `adapters/codex/bin/preflight.sh subagent-info --check` to verify the `multi_agent` runtime feature and projected custom agents that native path uses. Do not treat UI/status state as an automatic delegation trigger |
 
 A question to the person goes to the Hearting question board: `PreToolUse` on
 `request_user_input` and `request_user_input_async` registers it and refuses the native call
