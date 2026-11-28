@@ -37,6 +37,9 @@ _SAFE = re.compile(r"^[A-Za-z0-9._-]{1,200}$")
 _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:@/+\-=]{1,256}$")
 _SAFE_ROUTE_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CACHE_MAX_BYTES = 2 * 1024 * 1024
+# A route record's values for the first screen of its page (the leg band and the head's first words, `live._panel_route_record`):
+# the first to go where the route details would outweigh their share of the cache.
+_PANEL_PICTURE_KEYS = frozenset({"bands", "head_repo", "session_tag"})
 _DISPLAY_TTL = 180.0
 _REQUEST_TTL = 60.0
 # While a display wants routes the producer starts its next pass early on a change instead of
@@ -1633,7 +1636,14 @@ def publish_cache(result: dict) -> bool:
     panels = result.get("route_panels", {})
     # Optional display detail must never crowd question truth out of this cache.
     # Missing detail is unknown; do not manufacture an empty-route observation.
-    if not isinstance(panels, dict) or len(json.dumps(panels, ensure_ascii=False).encode()) > _CACHE_MAX_BYTES // 4:
+    weight = lambda value: len(json.dumps(value, ensure_ascii=False).encode())
+    if isinstance(panels, dict) and weight(panels) > _CACHE_MAX_BYTES // 4:
+        # 11-27: the first screen's picture values go first, so the route details that fit before them still do
+        # (without them a route's first screen is the panel's box, as it was).
+        panels = {key: [{name: value for name, value in row.items() if name not in _PANEL_PICTURE_KEYS}
+                        if isinstance(row, dict) else row for row in rows] if isinstance(rows, list) else rows
+                  for key, rows in panels.items()}
+    if not isinstance(panels, dict) or weight(panels) > _CACHE_MAX_BYTES // 4:
         panels = {}
     value = {"schema_version": 3, "observed_at": observed_at,
              "complete": bool(result.get("complete")), "total": current_total,

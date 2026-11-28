@@ -687,7 +687,7 @@ const first=lines(),item=list.layout(entries,st).marks.find(m=>m.key.startsWith(
 const out={item_can_open:!!item,item_lazy:item.lazy};
 out.pressed=list.press(st,list.layout(entries,st),item.key);
 // until the lines come one dim `⠏` stands under the row; then they do
-out.waiting=lines().slice(lines().findIndex(l=>l.startsWith('> '))+1)[0];
+out.waiting=lines().slice(lines().findIndex(l=>l.startsWith('▶ '))+1)[0];
 st.more[item.key]=detail;
 const opened=lines();out.more=opened.length-first.length;out.shown=opened.filter(l=>/TBD ·|campaign |source |note /.test(l));
 const v=list.layout(entries,st,{width:60});out.tinted=v.rows.slice(v.at,v.at+v.span).every(r=>r.some(p=>p.tint));out.span=v.span;

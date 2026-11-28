@@ -3649,6 +3649,30 @@ class SessionRouteDisplayCacheTests(unittest.TestCase):
         self.assertTrue(view["complete"])
         self.assertEqual(view["route_panels"], {})
 
+    def test_route_details_that_fit_without_the_first_screens_values_keep_their_place(self):
+        # 11-27 (review of #1900): the first screen's picture values (`bands`, `head_repo`, `session_tag`) go first where the details
+        # would outweigh their share, so a projection whose details fit before those values came still carries every session's.
+        band = [{"n": "leg 1 · code dev", "st": "active", "verdict": "2/6", "kind": "leg", "lines": [[["owner  ", "dim"], ["claude " * 8, "hb_claude"]]],
+                 "title": [["leg 1 · code dev " * 4, "head"]], "stage": {"n": "execute", "st": "active", "at": 2, "done": 2, "of": 6}}]
+        record = {"id": "rt-a000000000000001", "title": "x" * 1500, "stages": [{"name": "execute", "st": "active"}]}
+        picture = {"bands": band * 2, "head_repo": "project/", "session_tag": "e9"}
+        sessions = 300
+        limit = state._CACHE_MAX_BYTES // 4
+        plain = {"claude\0sid-%03d" % n: [dict(record)] for n in range(sessions)}
+        panels = {key: [{**rows[0], **picture}] for key, rows in plain.items()}
+        weigh = lambda value: len(json.dumps(value, ensure_ascii=False).encode())
+        self.assertLess(weigh(plain), limit)
+        self.assertGreater(weigh(panels), limit)
+        result = {"items": [], "complete": True, "observed_at": time.time(), "route_panels": panels}
+        self.assertTrue(state.publish_cache(result))
+        shown = state.cached_view(request=False)["route_panels"]
+        self.assertEqual(len(shown), sessions)
+        self.assertEqual(shown, plain)
+        # (a projection that fits keeps its picture values)
+        small = {key: rows for key, rows in list(panels.items())[:3]}
+        self.assertTrue(state.publish_cache({**result, "route_panels": small}))
+        self.assertEqual(state.cached_view(request=False)["route_panels"], small)
+
 
 class MessageCompletionTests(unittest.TestCase):
     def setUp(self):

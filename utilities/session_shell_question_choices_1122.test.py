@@ -79,7 +79,7 @@ class QuestionChoicesTest(unittest.TestCase):
   x.keys('\x1b[5~');assert(x.rows(12).includes('body line 1'));
   // The wheel reads the words too; ↑↓ choose and the highlighted choice is marked, the words stay.
   x.b.wheel(3);assert(!x.rows(12).includes('body line 1'));
-  x.keys('\x1b[B');assert(x.rows(12).some(r=>r.includes('▸ 2')),x.rows(12).join('\n'));assert.deepEqual(seen(x.rows(12)),[1,2,3,4]);
+  x.keys('\x1b[B');assert(x.rows(12).some(r=>r.includes('▶ 2')),x.rows(12).join('\n'));assert.deepEqual(seen(x.rows(12)),[1,2,3,4]);
   assert.deepEqual((await x.send())?.answers.q,['v2']);
 """)
 
@@ -98,7 +98,7 @@ class QuestionChoicesTest(unittest.TestCase):
   // The words go down to one row and the `more` line before a choice is given up: the choices slide around the
   // highlighted one and say there are more; the words stay.
   rows=setup({lines:17,choices:3}).rows(6);assert(rows.some(r=>r.includes('body line 1'))&&rows.some(r=>r.includes('+16 · more'))&&rows.some(r=>r.includes('more choices')),rows.join('\n'));
-  assert(rows.some(r=>r.includes('▸ 1')),rows.join('\n'));
+  assert(rows.some(r=>r.includes('▶ 1')),rows.join('\n'));
   // Tighter: one row of words with its `more` line and one choice; then one row of words with the head saying it pages
   // and one choice; then (one row left) the choice alone, the head promising no words.
   rows=setup({lines:17,choices:3}).rows(5);assert(rows.some(r=>r.includes('+16 · more'))&&seen(rows).length===1,rows.join('\n'));
@@ -106,7 +106,7 @@ class QuestionChoicesTest(unittest.TestCase):
   rows=setup({lines:17,choices:3}).rows(3);assert(seen(rows).length===1&&!rows.some(r=>r.includes('body line'))&&!rows[0].includes('PgUp'),rows.join('\n'));
   // Not enough for the choices: they slide around the highlighted one and say there are more, the words beside them.
   x=setup({lines:17,choices:9});x.keys('\x1b[B'.repeat(6));rows=x.rows(8);
-  assert(rows.some(r=>r.includes('▸ 7')),rows.join('\n'));assert(rows.some(r=>r.includes('more choices')),rows.join('\n'));assert(seen(rows).length>=1);
+  assert(rows.some(r=>r.includes('▶ 7')),rows.join('\n'));assert(rows.some(r=>r.includes('more choices')),rows.join('\n'));assert(seen(rows).length>=1);
   assert(rows.some(r=>r.includes('body line 1')),'the words stay beside the sliding choices\n'+rows.join('\n'));
   x=setup({lines:17,choices:9,focus:false});rows=x.rows(8);assert(seen(rows)[0]===1&&rows.some(r=>r.includes('more choices')),rows.join('\n'));
 """)
