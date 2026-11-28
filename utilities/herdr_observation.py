@@ -47,11 +47,13 @@ def endpoint_env(session: str | None, environ=None) -> dict:
 
     Herdr follows an inherited ``HERDR_SOCKET_PATH`` or ``HERDR_SESSION`` before its
     default server, so a call meant for one server from a pane of another would read
-    that other one. Its socket stays only while its ``HERDR_SESSION`` owner is the
-    selected server; another server's ``HERDR_SESSION`` is dropped."""
+    that other one. A named server keeps the socket only while its ``HERDR_SESSION``
+    owner is that server; the default server keeps none (a socket alone names no
+    owner: it may be another server's), so Herdr finds the default one itself.
+    Another server's ``HERDR_SESSION`` is dropped."""
     selected = endpoint_name(session or "default")
     env = dict(os.environ if environ is None else environ)
-    if (env.get("HERDR_SESSION") or "default") != selected:
+    if selected == "default" or env.get("HERDR_SESSION") != selected:
         env.pop("HERDR_SOCKET_PATH", None)
     if selected == "default":
         env.pop("AGENT_HERDR_SESSION", None)

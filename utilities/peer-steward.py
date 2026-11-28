@@ -806,6 +806,37 @@ _LAST_HERDR_EXIT = None          # real `herdr agent wait` return code of the la
 _SEAT_UNPROVEN = object()
 
 
+def _recorded_target_server(from_harness, from_sid, to):
+    """The server the caller's marker already records for ``to`` on the same pane, else None.
+
+    That entry is the one the grant renews (``peer_message.grant_steward``: its key, or
+    the name-only launch entry a later SID completes). Herdr pane ids repeat across
+    servers, so the server the pane was recorded on (``start``) stays with it: a watch
+    or wait that reads it under another default (no option, an inherited
+    ``HERDR_SESSION``) does not move it to that default."""
+    if not from_sid or not to.get("pane"):
+        return None
+    try:
+        with open(peer_message.steward_marker_path(from_harness, from_sid), encoding="utf-8") as fh:
+            targets = json.load(fh).get("targets")
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    if not isinstance(targets, dict):
+        return None
+    key = to.get("session_id") or to.get("name") or "-"
+    entries = [targets.get(key)]
+    if to.get("session_id") and to.get("name"):
+        entries += [entry for other, entry in targets.items()
+                    if other != key and isinstance(entry, dict)
+                    and not entry.get("session_id") and entry.get("name") == to["name"]]
+    for entry in entries:
+        if (isinstance(entry, dict) and entry.get("harness") == to.get("harness")
+                and entry.get("pane") == to["pane"]
+                and isinstance(entry.get("server"), str) and entry["server"]):
+            return entry["server"]
+    return None
+
+
 def _mark_observed(to_harness, to_session_id, to_name, from_identity=None, *, pane=None,
                    target_cwd=None, steward_seat=_SEAT_UNPROVEN, server=None):
     """F-100c-2 — the ONE place `source=watch` steward evidence is written: after
@@ -813,7 +844,8 @@ def _mark_observed(to_harness, to_session_id, to_name, from_identity=None, *, pa
     agent-not-found, or `watch` armed its watcher). The `kind=watch` ledger row itself
     is only the message; `record` never marks (review round 1, #1/#2). ``server`` is the
     Herdr server the pane was seen on: the entry keeps it as `start` does, so the check
-    reads that server's window list for it."""
+    reads that server's window list for it. A server already recorded for this target on
+    this same pane (:func:`_recorded_target_server`) stays; ``server`` fills only none."""
     if from_identity is not None:
         from_sid, from_harness = from_identity[0], from_identity[1]
     else:
@@ -822,8 +854,9 @@ def _mark_observed(to_harness, to_session_id, to_name, from_identity=None, *, pa
     to = {"harness": to_harness if to_harness and to_harness != "-" else "unknown",
           "session_id": sid,
           "name": to_name if isinstance(to_name, str) and to_name and to_name != "-" else None,
-          "pane": pane if isinstance(pane, str) and pane and pane != "-" else None,
-          "server": server if isinstance(server, str) and server else None}
+          "pane": pane if isinstance(pane, str) and pane and pane != "-" else None}
+    to["server"] = (_recorded_target_server(from_harness, from_sid, to)
+                    or (server if isinstance(server, str) and server else None))
     # The caller's own seat serializes the grant. The watch/wait entry proves it without
     # asking Herdr about other panes (`_steward_seat`); `watch` has already done so.
     if steward_seat is _SEAT_UNPROVEN:
@@ -2331,14 +2364,23 @@ def _retire_seat(identity):
     return {**attachment, "schema": session_shell.SCHEMA}
 
 
-def _retire_input_arrived(pane, harness, ident, identity, booked):
+def _retire_input_arrived(pane, harness, ident, identity, booked, screen_epoch=None):
     """Why the exit must not start now, else ``""``: the last look right before its first key.
 
     Input may have reached the seat since the screen was read: a turn shows in Herdr's
     or the host's state, and a first prompt's start hook selects the seat in the host at
     once while its attachment record is written only after (host.cjs, ``source('register')``
     on ``setImmediate``). The host answers a request only for the attachment it holds
-    now, so the booked one answering proves no selection came in between."""
+    now, so the booked one answering proves no selection came in between.
+
+    Keys that reached the host before that hook (a first prompt and its Enter) change
+    none of these, so the booked attachment's answer must also show the input box the
+    screen showed (``screen_epoch``, read with it): the same ``epoch`` (the host counts
+    every key it takes), no shell editor in front (``focused``) and the box empty. The
+    host reads the box only for a selected seat (host.cjs ``refreshReadiness`` answers
+    ``empty=false`` with no SID); for the booked unselected seat the screen judged empty
+    at that same epoch is that reading. A missing value is no answer: zero keys, the
+    duty waits."""
     if _retire_foreground(pane, harness) != identity:
         return "foreground-changed"
     state, current, _code, reason = _retire_target(pane)
@@ -2357,6 +2399,15 @@ def _retire_input_arrived(pane, harness, ident, identity, booked):
                 and answer.get("reason") == "attachment-changed" else "foreground-unverified")
     if answer.get("state") in ("working", "submitting", "blocked"):
         return "target-changed"
+    if answer.get("focused") is not False:
+        return "shell-editor-open" if answer.get("focused") is True else "draft-unknown"
+    epoch = answer.get("epoch")
+    if type(epoch) is not int or type(screen_epoch) is not int:
+        return "draft-unknown"
+    if epoch != screen_epoch:
+        return "target-changed"
+    if answer.get("empty") is not True and not _unselected_seat(current, booked):
+        return "draft-unknown"
     return ""
 
 
@@ -3052,7 +3103,8 @@ def cmd_retire(args):
     if identity != booked_foreground:
         return finish("foreground-changed", pending=True)
     seat = _retire_seat(identity)
-    lines = _read_screen(pane, seat=seat)
+    seen = {}  # the seat's screen epoch: the last look before the first key compares it
+    lines = _read_screen(pane, seat=seat, seen=seen)
     # A shell seat's own reason for no screen (too large, an editor open) is the wait's.
     screen_reason = ((_native_trust_reason(harness, lines) or _screen_ready(harness, lines)) if lines
                      else _shell_screen_reason(pane, seat=seat) or "screen-unavailable")
@@ -3072,7 +3124,8 @@ def cmd_retire(args):
     sent = 0
     try:
         for index, (operation, value) in enumerate(_RETIRE_ACTIONS[harness]):
-            stop = (_retire_input_arrived(pane, harness, ident, identity, booked_foreground)
+            stop = (_retire_input_arrived(pane, harness, ident, identity, booked_foreground,
+                                          seen.get("epoch"))
                     if index == 0 else
                     "foreground-changed" if _retire_foreground(pane, harness) != identity else "")
             if stop:
@@ -8607,7 +8660,7 @@ def _shell_seat(target, harness=None, info=None):
         return None
 
 
-def _read_screen(target, *, seat=None):
+def _read_screen(target, *, seat=None, seen=None):
     """The visible pane (ANSI) as screen lines, or None when it could not be read.
 
     A shell seat's pane also shows the shell's frame and panel; its draft, form
@@ -8615,8 +8668,9 @@ def _read_screen(target, *, seat=None):
     judged key into a shell seat's pane reads here first: while the host says a
     shell editor holds the outer keys, or gives no answer, there is no screen to
     type into (None), never the framed pane read again as an empty box. ``seat``
-    is an attachment the caller already holds for this pane (a retire's booking)."""
-    return _read_screen_reason(target, seat=seat)[0]
+    is an attachment the caller already holds for this pane (a retire's booking);
+    ``seen`` receives that seat's screen ``epoch`` (``session_shell.native_screen_reason``)."""
+    return _read_screen_reason(target, seat=seat, seen=seen)[0]
 
 
 def _shell_screen_reason(target, *, seat=None):
@@ -8629,12 +8683,12 @@ def _shell_screen_reason(target, *, seat=None):
     return why if lines is None else ""
 
 
-def _read_screen_reason(target, *, seat=None):
+def _read_screen_reason(target, *, seat=None, seen=None):
     """``(lines | None, reason)``: :func:`_read_screen` and, for a shell seat's None, why."""
     seat = seat or _shell_seat(target)
     if seat is not None:
         import session_shell
-        lines, why = session_shell.native_screen_reason(seat)
+        lines, why = session_shell.native_screen_reason(seat, seen=seen)
         if lines != session_shell.PASSTHROUGH:
             return lines, why
     if terminal_surface.is_tmux_pane(target):

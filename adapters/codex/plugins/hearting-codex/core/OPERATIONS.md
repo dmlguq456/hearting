@@ -3187,8 +3187,8 @@ screen is unchanged from the stable snapshot recorded before native start.
 Retirement protects busy sessions, open forms, drafts, unknown process identity
 and unconfirmed shell return; it sends no repeated exit, forced kill or forced
 close. Claude's own faint composer suggestion (`Try "…"`) is an empty input, not a
-draft, only when the screen shows the cursor block (reverse video) on its bright first
-letter; without that evidence (an older shell host) the line stays a draft. A pending result ends its line with
+draft; with a bright first letter, only when the screen shows the cursor block (reverse
+video) on that letter. Without that evidence (an older shell host) such a line stays a draft. A pending result ends its line with
 one `detail=` saying what releases it (send or clear the draft, answer the dialog,
 wait for the turn, close a window whose agent could not be confirmed); it names no
 new command or step. The same runner completes delayed Claude background-work confirmation
@@ -3800,7 +3800,9 @@ and the empty composer and form checks still decide. The readiness projection, t
 command and the retained runner read that same booked seat; the screen and the wait
 reason are read on the booked pane and attachment, so a name and a pane id wait alike.
 Right before the first key the host is asked again for the booked attachment: a turn
-or a selection that arrived meanwhile sends nothing and the request waits again,
+or a selection that arrived meanwhile, a key it took since the screen was read (another
+`epoch`), an open shell editor, or a box it does not read empty (for an unselected
+seat, whose box it does not read, that same screen) sends nothing and the request waits again,
 while a stop after a sent key keeps the exit requested with the keys sent. A native
 that proves a session the attachment does not name stays unverified. A returned shell and
 the original native lifetime's exit still govern cleanup, independently of

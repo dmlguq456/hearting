@@ -443,9 +443,15 @@ def native_screen(binding: dict):
     return native_screen_reason(binding)[0]
 
 
-def native_screen_reason(binding: dict):
-    """``(lines | None | PASSTHROUGH, reason)``: :func:`native_screen` and, for None, why."""
+def native_screen_reason(binding: dict, *, seen: dict | None = None):
+    """``(lines | None | PASSTHROUGH, reason)``: :func:`native_screen` and, for None, why.
+
+    ``seen``, when given, receives the answering screen's ``epoch`` (the host's count of the
+    input it took, which moves with every key): a later ``status`` with the same epoch has
+    taken no key since these cells."""
     result = control(binding, "screen")
+    if seen is not None and isinstance(result, dict) and result.get("ok"):
+        seen["epoch"] = result.get("epoch")
     if isinstance(result, dict) and result.get("ok") is False:
         if result.get("reason") == "display-unavailable":
             return PASSTHROUGH, ""

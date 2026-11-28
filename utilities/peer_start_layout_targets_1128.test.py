@@ -58,7 +58,9 @@ class _Isolated(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
 
 
-class StartArrangesItsTabTest(_Isolated):
+class _StartHarness(_Isolated):
+    """A herdr start with synthetic placement, native call and tidy; no tests of its own."""
+
     def setUp(self):
         super().setUp()
         self.placement, self.native_error, self.tidy_result = "split", None, None
@@ -110,6 +112,8 @@ class StartArrangesItsTabTest(_Isolated):
                               "--cwd", str(self.tmp)])
         return code, output.getvalue().strip().splitlines()
 
+
+class StartArrangesItsTabTest(_StartHarness):
     def test_a_split_start_arranges_the_callers_tab_once_inside_its_claim(self):
         code, lines = self.start()
         self.assertEqual(code, 0, lines)
@@ -304,6 +308,23 @@ class BoundCensusTest(unittest.TestCase):
                                                "HERDR_SOCKET_PATH": "/run/lab.sock"})
         self.assertEqual(seen["env"]["HERDR_SOCKET_PATH"], "/run/lab.sock")
 
+    def test_a_default_census_with_only_another_servers_socket_reads_the_default_one(self):
+        # Review 2 🔴⑤-1: Herdr follows an inherited socket before its default server, and a
+        # socket alone names no owner. Two fake servers: default holds the live `w1:p3`.
+        lists = {"/run/lab.sock": [{"pane_id": "w1:p9"}], None: [{"pane_id": "w1:p3"}]}
+
+        def runner(argv, **kwargs):
+            panes = lists[(kwargs.get("env") or os.environ).get("HERDR_SOCKET_PATH")]
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"result": {"panes": panes}}),
+                                               stderr="")
+        with mock.patch.dict(os.environ, {"PATH": "/usr/bin", "HERDR_SOCKET_PATH": "/run/lab.sock"},
+                             clear=True):
+            census = herdr_observation.pane_census(session="default", runner=runner,
+                                                   which=lambda _name: "/usr/bin/herdr")
+        self.assertEqual(census.endpoint, "default")
+        self.assertEqual([row["pane_id"] for row in census.panes], ["w1:p3"])
+        self.assertFalse(herdr_observation.confirms_absence(census, "w1:p3", endpoint="default"))
+
     def test_the_callers_own_server_census_is_as_before(self):
         _census, seen = self.run_census(None, {"PATH": "/usr/bin", "HERDR_SESSION": "lab"})
         self.assertIsNone(seen["env"])
@@ -337,6 +358,62 @@ class WatchKeepsTheStartServerTest(_Isolated):
             with self.subTest(caller=name):
                 for call in body.split("_mark_observed(")[1:]:
                     self.assertIn("server=", call.split(")\n", 1)[0])
+
+
+class WaitAndWatchKeepTheStartServerTest(_StartHarness):
+    """Review 2 🔴⑤-2: a start from a pane whose inherited `HERDR_SESSION` is `lab` records
+    `lab`; a later `wait` or `watch` by SID with no server option renews that same pane's entry
+    and keeps `lab` instead of the command's own default."""
+
+    SID = "01000000-0000-7000-8000-00000000a128"
+
+    def setUp(self):
+        super().setUp()
+        os.environ["HERDR_SESSION"] = "lab"
+        message = peer.peer_message
+        for owner, name, value in ((message, "_fleet_steward", None), (message, "_has_explicit_self_entry", True),
+                                   (peer, "_print_steward_limited", None), (peer, "_steward_seat", None),
+                                   (peer, "_process_session", self.SID), (peer, "_spawn_watch_observer", True),
+                                   (peer, "_watcher_present", True), (message, "_steward_check", None),
+                                   (message, "observe_steward_resume", None)):
+            mock.patch.object(owner, name, return_value=value).start()
+        mock.patch("dispatch_seat_handover.pane_seat", return_value=None).start()  # no Herdr seat lookup
+        self.marker = message.steward_marker_path("codex", "controller-sid")
+        self.marker.parent.mkdir(parents=True, exist_ok=True)
+        self.marker.write_text(json.dumps({"schema_version": 2, "harness": "codex",
+                                           "session_id": "controller-sid", "targets": {}}))
+        self.row = {"agent": "codex", "agent_status": "idle", "agent_session": {"value": self.SID},
+                    "name": "new", "pane_id": "w1:pNew", "pid": os.getpid(), "pid_start": "1",
+                    "pid_namespace": "pid:[1]", "cwd": str(self.tmp)}
+
+    def entry(self):
+        targets = json.loads(self.marker.read_text())["targets"]
+        self.assertIn(self.SID, targets, targets)
+        return targets[self.SID]
+
+    def test_wait_and_watch_by_sid_keep_the_server_the_start_recorded(self):
+        code, lines = self.start()
+        self.assertEqual(code, 0, lines)
+        self.assertEqual((self.entry()["source"], self.entry()["pane"], self.entry()["server"]),
+                         ("start", "w1:pNew", "lab"))
+        answer = {"result": {"agent": self.row}}
+        for command in ("wait", "watch"):
+            with self.subTest(command=command), \
+                 mock.patch.object(terminal_surface, "wait_native", return_value=answer), \
+                 mock.patch.object(peer, "native_agent", return_value=answer), \
+                 contextlib.redirect_stdout(io.StringIO()) as output:
+                rc = peer.main([command, "codex:" + self.SID, "--timeout", "1000"] if command == "wait"
+                               else [command, "codex:" + self.SID])
+                self.assertEqual(rc, 0, output.getvalue())
+                self.assertEqual((self.entry()["source"], self.entry()["pane"], self.entry()["server"]),
+                                 ("watch", "w1:pNew", "lab"))
+
+    def test_an_entry_with_no_recorded_server_takes_the_observed_one(self):
+        with mock.patch.object(terminal_surface, "wait_native", return_value={"result": {"agent": self.row}}), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            rc = peer.main(["wait", "codex:" + self.SID, "--timeout", "1000"])
+        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual((self.entry()["pane"], self.entry()["server"]), ("w1:pNew", "default"))
 
 
 if __name__ == "__main__":

@@ -240,8 +240,8 @@ class SuggestionComposerTest(SeatBase):
                 lines = self.host_lines(runs)
                 # retire
                 self.select("claude")
-                with mock.patch.object(peer, "_read_screen", return_value=lines):
-                    rc, output = self.retire()
+                self.screen = lines
+                rc, output = self.retire()
                 if expected is None:
                     self.assertIn("retired=true reason=normal-exit", output)
                 else:
@@ -263,8 +263,8 @@ class SuggestionComposerTest(SeatBase):
 
     def test_public_retire_exits_a_seat_showing_only_the_suggestion(self):
         self.select("claude")
-        with mock.patch.object(peer, "_read_screen", return_value=self.suggestion_lines()):
-            rc, output = self.retire()
+        self.screen = self.suggestion_lines()
+        rc, output = self.retire()
         self.assertEqual(rc, 0, output)
         self.assertIn("retired=true reason=normal-exit", output)
         self.assertEqual(self.actions, [("send-text", "/exit"), ("send-keys", "enter"),
@@ -272,9 +272,8 @@ class SuggestionComposerTest(SeatBase):
 
     def test_public_retire_keeps_a_real_draft(self):
         self.select("claude")
-        typed = shell_lines([("❯ Try this", False)], [(RULE, False)])
-        with mock.patch.object(peer, "_read_screen", return_value=typed):
-            _rc, output = self.retire()
+        self.screen = shell_lines([("❯ Try this", False)], [(RULE, False)])
+        _rc, output = self.retire()
         self.assertEqual(self.actions, [])
         self.assertIn("reason=draft", output)
 
@@ -429,7 +428,9 @@ class LastLookTest(RealSeatBase):
                 with self.subTest(case=name, harness=harness):
                     self.fresh(harness)
 
-                    def screen(*_a, **_k):
+                    def screen(*_a, seen=None, **_k):
+                        if seen is not None:
+                            seen["epoch"] = self.host_epoch
                         arrive()
                         return ["synthetic composer"]
                     with mock.patch.object(peer, "_read_screen", side_effect=screen):
@@ -453,6 +454,81 @@ class LastLookTest(RealSeatBase):
         self.assertIn("reason=foreground-changed", output)
         observation = self.store.list()[0]["observation"]
         self.assertEqual((observation["phase"], observation["keys_sent"]), ("exit-requested", 1))
+
+
+class HostAnswerBeforeTheKeyTest(RealSeatBase):
+    """The booked attachment's own answer right before the first key (review 2 🔴②, PR #1933).
+
+    A first prompt and its Enter reach the host before the native's start hook selects
+    the seat: the booked attachment still answers, with `empty=false` and a later `epoch`
+    (host.cjs counts every key it takes). A shell editor opened in that gap answers
+    `focused=true`. Either sends no key and leaves the duty waiting, from the command and
+    from the runner alike; the same request exits once the host shows the screen's input."""
+
+    ARRIVALS = {  # what reached the host after the screen read, and the wait it gives
+        "keys-before-the-start-hook": (lambda test: setattr(test, "host_epoch", 23), "target-changed"),
+        "a-shell-editor-opened": (lambda test: setattr(test, "host_focused", True), "shell-editor-open"),
+    }
+
+    def after_the_screen(self, arrive):
+        def screen(*_a, seen=None, **_k):
+            if seen is not None:
+                seen["epoch"] = self.host_epoch
+            arrive(self)
+            return ["synthetic composer"]
+        return mock.patch.object(peer, "_read_screen", side_effect=screen)
+
+    def test_input_that_reached_the_host_after_the_screen_sends_no_key(self):
+        for name, (arrive, reason) in self.ARRIVALS.items():
+            for harness in ("codex", "claude", "opencode"):
+                with self.subTest(case=name, harness=harness):
+                    self.fresh(harness)
+                    self.host_epoch, self.host_focused = 7, False
+                    with self.after_the_screen(arrive):
+                        _rc, output = self.retire()
+                    self.assertEqual(self.actions, [], output)
+                    self.assertIn(f"reason={reason} ", output)
+                    duty = self.store.list()[0]
+                    self.assertEqual((duty["observation"]["phase"], duty["observation"]["keys_sent"]),
+                                     ("waiting", 0))
+                    self.host_epoch, self.host_focused = 7, False
+                    with self.after_the_screen(arrive), contextlib.redirect_stdout(io.StringIO()):
+                        peer._resume_retire_obligation(self.store.get(duty["id"]), self.store)
+                    self.assertEqual(self.actions, [])
+                    observation = self.store.get(duty["id"])["observation"]
+                    self.assertEqual((observation["phase"], observation["keys_sent"], observation["reason"]),
+                                     ("waiting", 0, reason))
+                    self.host_epoch, self.host_focused = 7, False
+                    rc, output = self.retire()
+                    self.assertEqual(rc, 0, output)
+                    self.assertEqual(self.actions, EXITS[harness] + [("close", self.pane)])
+
+
+class HostBoxReadingTest(SeatBase):
+    """A selected seat's host reads its own box: the exit starts only on `empty=true`, and an
+    answer without its `epoch` or `focused` value is no answer (zero keys, the duty waits)."""
+
+    def test_a_selected_seat_waits_unless_its_host_reads_the_box_empty(self):
+        cases = {
+            "host-reads-no-empty-box": lambda: setattr(self, "host_empty", False),
+            "no-epoch": lambda: setattr(self, "host_epoch", None),
+            "no-focused-value": lambda: setattr(self, "host_focused", None),
+        }
+        for name, arrange in cases.items():
+            with self.subTest(case=name):
+                self.select("codex")
+                self.host_empty, self.host_epoch, self.host_focused = True, 7, False
+                arrange()
+                _rc, output = self.retire()
+                self.assertEqual(self.actions, [], output)
+                self.assertIn("reason=draft-unknown ", output)
+                observation = self.store.list()[0]["observation"]
+                self.assertEqual((observation["phase"], observation["keys_sent"]), ("waiting", 0))
+        self.select("codex")
+        self.host_empty, self.host_epoch, self.host_focused = True, 7, False
+        rc, output = self.retire()
+        self.assertEqual(rc, 0, output)
+        self.assertEqual(self.actions, EXITS["codex"] + [("close", self.pane)])
 
 
 class NamedTargetScreenTest(RealSeatBase):
@@ -509,6 +585,58 @@ class HostCursorEvidenceTest(AnswerReachesIdleShellTest):
                     self.assertEqual(REAL_SCREEN_READY("claude", lines), expected)
                 finally:
                     rig.stop()
+
+
+class UnselectedHostAnswerTest(AnswerReachesIdleShellTest):
+    """The real shell host for a seat no prompt has selected yet (a private host and PTY).
+
+    OpenCode's home route is such a seat (host.cjs publishes it as `-` at start). It answers the booked `-` attachment with its `epoch` and `focused` but never reads the
+    box (`empty=false`: no SID, host.cjs `refreshReadiness`), so the retire's last look takes
+    the screen judged at that same epoch as the box's reading. A first prompt and its Enter
+    that reach the host while the native holds its start hook move the epoch, and that look
+    refuses; once the hook comes the `-` attachment gets no answer at all."""
+    ENTRY = ROOT / "utilities/session-shell/entry.py"
+
+    def test_keys_before_the_first_start_hook_move_the_epoch_the_last_look_compares(self):
+        gate = self.case / "gate"
+        rig = ShellRig(self, self.ENTRY, "unselected", "opencode", env={
+            "ARI_NATIVE_UNSELECTED": "1", "ARI_NATIVE_MODE": "slow", "ARI_NATIVE_GATE": str(gate)})
+        try:
+            rig.start(selected=False)
+            binding = rig.binding
+            pane = "w1:p3"
+            keys = ("harness", "sid", "incarnation", "socket", "host_pid", "host_start",
+                    "native_pid", "native_start", "broker_pid", "broker_start")
+            booked = {"pid": binding["native_pid"], "session_id": UNSELECTED,
+                      "attachment": {key: binding[key] for key in keys if key in binding}}
+            ident = {"harness": "opencode", "session_id": UNSELECTED, "name": "probe", "pane": pane}
+
+            def last_look(screen_epoch):
+                with mock.patch.object(peer, "_retire_foreground", return_value=booked), \
+                     mock.patch.object(peer, "_retire_target", return_value=("unknown", dict(ident), 0, None)):
+                    return peer._retire_input_arrived(pane, "opencode", ident, booked, booked, screen_epoch)
+
+            seen = {}
+            lines, why = session_shell.native_screen_reason(binding, seen=seen)
+            self.assertEqual(why, "")
+            self.assertIsInstance(seen["epoch"], int)
+            status = session_shell.control(binding, "status")
+            self.assertEqual((status["ok"], status["sid"], status["empty"], status["focused"], status["epoch"]),
+                             (True, UNSELECTED, False, False, seen["epoch"]))
+            self.assertEqual(last_look(seen["epoch"]), "")
+            rig.type("slow first\r")
+            rig.wait(lambda: any(row.get("taken") == "slow first" for row in rig.notes()),
+                     "the native never took the first prompt")
+            moved = session_shell.control(binding, "status")
+            self.assertEqual((moved["ok"], moved["sid"], moved["empty"]), (True, UNSELECTED, False))
+            self.assertGreater(moved["epoch"], seen["epoch"])
+            self.assertEqual(last_look(seen["epoch"]), "target-changed")
+            gate.touch()
+            rig.wait(lambda: session_shell.control(binding, "status").get("ok") is not True,
+                     "the start hook never selected the seat")
+            self.assertIn(last_look(seen["epoch"]), {"foreground-changed", "foreground-unverified"})
+        finally:
+            rig.stop()
 
 
 if __name__ == "__main__":
