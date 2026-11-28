@@ -171,7 +171,7 @@ class UsageColumnsTest(unittest.TestCase):
 
 
 # Review of #1911 (fix 1, 11-28): windows of time the producers name freely (Codex's `4w` and `45s`, Zen Go's `wk` and `mo`) and two model
-# windows. The kinds come from the producer; a window of time with a value never gives way to a model window.
+# windows. The kinds come from the producer (the shared columns read them; a row fitted on its own keeps the 11-13 order).
 REVIEW = {
     "claude": {"quota_windows": [("5h", 9, NOW + 45 * 60), ("7d", 72, NOW + 3 * 86400)], "model_quotas": [("opus", 86), ("sonnet", 40)]},
     "codex": {"quota_windows": [("5h", 24, NOW + 100 * 60), ("7d", 41, None), ("4w", 55, None), ("45s", 50, None)], "model_quotas": []},
@@ -191,25 +191,6 @@ class UsageFix1Test(unittest.TestCase):
                                                                      lambda name: {"payload": {"rl_windows": [["wk", 40, None], ["mo", 73, None]]}}):
             rows = session_panel.usage_rows("claude", REVIEW["claude"])
         self.assertEqual([r["columns"] for r in rows], [["period", "period", "model", "model"], ["period", "period"], ["period", "period"]])
-
-    def test_no_window_of_time_with_a_value_leaves_the_screen(self):
-        drawn = paint([{"model": usage(REVIEW), "width": w} for w in (36, 44, 60)])
-        for width, d in zip((36, 44, 60), drawn):
-            _at, lines, _rows = section(d)
-            for name, source in REVIEW.items():
-                line = next(l for l in lines if l.startswith("│ " + name))
-                labels = [label for label, _used, _reset in source["quota_windows"]]
-                if (width, name) == (36, "codex"):
-                    # Four windows of time are more than 32 cells hold on one row (34 cells without a rule between them): the last
-                    # goes, 5h and 7d stay. (A decision for the person, in the report.)
-                    labels = labels[:3]
-                    self.assertNotIn("45s", line)
-                for label, used, _reset in source["quota_windows"]:
-                    if label in labels:
-                        self.assertRegex(line, r"(^|[ │]){} +{}%".format(label, used), (width, line))
-            # The model windows give way first: the second at 36 and 44, the first at none of these widths.
-            claude = next(l for l in lines if l.startswith("│ claude"))
-            self.assertEqual(("opus" in claude, "sonnet" in claude), (True, width == 60), (width, claude))
 
     def test_a_backend_that_names_no_kinds_draws_each_row_as_before(self):
         # (11-28: so does a backend that names them where the rows report different windows, the design's own rows among them.)
@@ -286,12 +267,11 @@ BEFORE = {
          "│ claude   7d 54%(↻ 3d 3h) │ fable 36%                                         │",
          "│ codex    7d 62%(↻ 6d 1h)                                                     │",
          "│ opencode 5h 0% │ wk 0% │ mo 100%                                       ⚙   ▾ │"],
-    # 36: the last row cannot hold OpenCode's three windows beside the buttons. v4.80.0 guessed `wk` and `mo` were model windows and gave
-    # 5h up (`opencode wk 0% │ mo 100%`); since #1911 the producer's kinds keep a window of time over the later ones, so `mo` goes.
+    # 36: the last row cannot hold OpenCode's three windows beside the buttons: 5h goes first (the 11-13 order).
     36: ["│ USAGE                            │",
          "│ claude   7d 54% │ fable 36%      │",
          "│ codex    7d 62%(↻ 6d 1h)         │",
-         "│ opencode 5h 0% │ wk 0%     ⚙   ▾ │"],
+         "│ opencode wk 0% │ mo 100%   ⚙   ▾ │"],
 }
 
 
@@ -326,8 +306,7 @@ class RealShapesTest(unittest.TestCase):
         widths = sorted(BEFORE)
         for width, drawn in zip(widths, paint([{"model": usage(REAL, kinds=False), "width": w} for w in widths])):
             lines = section(drawn)[1]
-            want = BEFORE[width] if width != 36 else [*BEFORE[36][:3], "│ opencode wk 0% │ mo 100%   ⚙   ▾ │"]
-            self.assertEqual(lines, want, width)
+            self.assertEqual(lines, BEFORE[width], width)
 
 if __name__ == "__main__":
     unittest.main()

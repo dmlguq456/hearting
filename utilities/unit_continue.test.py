@@ -701,6 +701,55 @@ class ContinuedTurnTest(unittest.TestCase):
         self.assertTrue(decide(False).allowed)
         self.assertEqual((decide(True).allowed, decide(True).state), (False, "not-applicable"))
 
+    def test_a_late_notice_of_a_continued_turn_says_it_is_not_the_latest_result(self):
+        turn3 = "att-" + "3" * 32
+        started = {"launch_started": "1"}
+        self.write((FIRST, started), (self.TURN2, {"continues_attempt_id": FIRST, "turn": "2", **started}))
+        head, _note = UC.notice_lines(str(self.jobs), meta(FIRST))
+        self.assertEqual(head, "An earlier turn of this unit route; a later turn continued it, so this is not "
+                               "its latest result.")
+        # The last turn keeps its own head, and a turn no later one continued gets none.
+        self.assertEqual(UC.notice_lines(str(self.jobs), meta(self.TURN2, 2, continues_attempt_id=FIRST,
+                                                                session="resumed"))[0],
+                         "Turn 2 of this unit route (session: resumed).")
+        # A third turn took over from the second: the second's late notice keeps its turn and session and says so.
+        self.write((FIRST, started), (self.TURN2, {"continues_attempt_id": FIRST, "turn": "2", **started}),
+                   (turn3, {"continues_attempt_id": self.TURN2, "turn": "3", **started}))
+        self.assertEqual(UC.notice_lines(str(self.jobs), meta(self.TURN2, 2, continues_attempt_id=FIRST,
+                                                                session="resumed"))[0],
+                         "Turn 2 of this unit route (session: resumed). A later turn continued it, so this is not its "
+                         "latest result.")
+        # A second turn registered and closed before it launched took nothing over.
+        self.write((FIRST, started), (self.TURN2, {"continues_attempt_id": FIRST, "turn": "2",
+                                                   "launch_outcome": "never-launched", "launch_claimed": "0"}))
+        self.assertEqual(UC.notice_lines(str(self.jobs), meta(FIRST))[0], "")
+        self.assertTrue(UC.continued_by_later_turn(self.jobs, meta(FIRST)))   # its settlement reading is unchanged
+        self.write((FIRST, {}))
+        self.assertEqual(UC.notice_lines(str(self.jobs), meta(FIRST))[0], "")
+
+    def test_the_closed_route_start_does_not_wait_on_a_turn_a_later_turn_continued(self):
+        import work_start as W
+        # Two runtime-v1 turns and the route's closure: the first passed and a later turn continued it; the
+        # last ended on a FAIL review, which a unit route closes on too.
+        route = {**ROUTE, "capability": "unit", "nodes": [{"id": NODE}], "artifact_root": self.dir.name}
+        path = Path(self.dir.name) / "rt-abc.json"
+        path.write_text(json.dumps(route))
+        path.with_name("rt-abc.outcome.json").write_text(json.dumps(
+            {"route_id": "rt-abc", "route_hash": "h", "terminal_gate_proven": True}))
+
+        def closed_start():
+            with mock.patch("artifact_producer.completed_route_spec_publication",
+                            return_value={"status": "not-applicable"}), \
+                    mock.patch.object(W, "_closed_unit_summary", return_value={}):
+                return W._advance_open(route, path, self.jobs, {}, None, "resume", wait=False, interview=None,
+                                       answers=None, decision="proceed", run=None, sleep=None, clock=None)
+        self.write((FIRST, {"failure_class": "pass"}),
+                   (self.TURN2, {"continues_attempt_id": FIRST, "turn": "2", "failure_class": "fail"}))
+        self.assertEqual(closed_start()["state"], "completed")
+        # The same first turn that no later turn names still holds the closed route back.
+        self.write((FIRST, {"failure_class": "pass"}), (self.TURN2, {"turn": "2", "failure_class": "fail"}))
+        self.assertEqual(closed_start()["reason"], "workflow-completion-pending")
+
     def test_a_continued_turn_has_nothing_to_settle_and_the_last_turn_still_does(self):
         import dispatch_terminal_commit as DTC
         self.write((FIRST, {"failure_class": "pass"}),
