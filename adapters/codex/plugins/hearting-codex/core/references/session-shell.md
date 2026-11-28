@@ -758,8 +758,8 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   the time columns go in every row together, then the model windows from the last, each value whole; a window of time with a value
   never gives way to a model window, and 5h and 7d stand side by side to the end (at 44 cells `5h` 12, `7d` 21, `opus` 30; at 36 the
   model windows go). Where the rows report different windows, where those of time cannot all stand in one set of columns, or where a
-  backend sends no kinds, each row is fitted on its own as before 11-27 (its reset times, `│`, the last row beside the buttons): the reset times, then its model windows from the last, then, only where its own windows of time cannot all stand on one
-  row, those from the last (a backend without kinds: the order before, the reset times, 5h, the model windows from the last, 7d). The
+  backend sends no kinds, each row is fitted on its own as before 11-27 (its reset times, `│`, the last row beside the buttons), giving way in the last row's order (11-28: back to the design the
+  person approved on 11-13): the reset times, 5h, the model windows from the last, 7d (`7d 66% │ fable 70%`, then `7d 66%`). The
   last row is not laid out again beside the buttons (its columns would move): it shares their row only where it fits there as it is (at
   36), else the buttons stand on a row of their own (at 44 and 60: one row more than before, whatever the height; short of rows the
   sections above give way for it as for any USAGE row). Values keep their colors. Under the native area it stands as beside it, as rows
