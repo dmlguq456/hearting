@@ -101,8 +101,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/run-hook.sh\" bash subagent-model-default.sh",
-            "timeout": 15
+            "command": "sh \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/run-hook.sh\" bash subagent-model-default.sh --redirect",
+            "timeout": 180
           }
         ]
       }
