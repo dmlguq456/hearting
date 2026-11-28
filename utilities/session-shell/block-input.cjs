@@ -169,7 +169,7 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
   function release(){if(!focused)items=items.filter(item=>!settled(item));}
   function update(rows,guidance,presentation={}) {
     labels=presentation.labels||labels;styles=presentation.styles||styles;help=guidance||help;
-    const previous=current();items=Array.isArray(rows)?rows.slice(0,8):[];
+    const previous=current();items=Array.isArray(rows)?rows.slice():[];
     for(const item of items){
       if(['submitted','received','applied','expired','cancelled'].includes(item.request_state)){
         const local=state(item);if(local.state!=='applied')local.state=item.request_state;if(item.request_state==='applied')local.notice='';
@@ -238,7 +238,7 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
     return result;
   }
   function complete(row,values){return row.item.answer_kind==='decision'?!!values[row.question.id]:(row.item.questions||[]).every(q=>values[q.id]);}
-  function references(){return items.slice(0,8).map(item=>({id:item.id,revision:item.revision}));}
+  function references(){return items.map(item=>({id:item.id,revision:item.revision}));}
   // 11-27 (design 가; reviews of #1908): laid out as the same question without words, the rows the popup could still
   // grow by take the words under the names shown: the highlighted choice's first, then from the top, a cut one ending `…`.
   let pendingWords=null;

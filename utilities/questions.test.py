@@ -288,11 +288,15 @@ class MessageQuestionTest(unittest.TestCase):
             self.assertIn("UTC", err)
             self.assertNotIn("PRIVATE", err)
             old, _ = self.f.ask(harness=harness, text="old question")
-            self.f.ask(harness=harness, text="new question")
+            new, _ = self.f.ask(harness=harness, text="new question")
+            # 3a: the new question closes nothing; the asker withdraws the old one by its id.
+            self.assertEqual(state.close_message(harness, old["session_id"], old["seat_key"], old["id"]),
+                             {"id": old["id"], "state": "cancelled"})
             with mock.patch.object(questions, "load_board", return_value={"items": []}):
                 code, _, err = _run("answer", old["id"], "--text", "second answer")
             self.assertEqual(code, 2)
-            self.assertIn("replaced", err)
+            self.assertIn("cancelled", err)
+            self.assertEqual(state._read(state._signal_path(new))["lifecycle"], "open")
 
     def test_ask_cli_uses_caller_seat_sequence_and_preserves_private_detail(self):
         import session_tidy as tidy
@@ -313,10 +317,10 @@ class MessageQuestionTest(unittest.TestCase):
         question = questions.questions_of(envelope)[0]
         self.assertEqual((question["question"], question["recommended"], question["secret"]), (text, 1, True))
         self.assertNotIn(text, out)
-        self.assertEqual(state._signal_path({"seat_key": seat.key}).stat().st_mode & 0o777, 0o600)
+        self.assertEqual(state._questions_path("claude", "native-question-session").stat().st_mode & 0o777, 0o600)
         self.assertEqual(state.state_root().stat().st_mode & 0o777, 0o700)
 
-    def test_ask_says_which_unanswered_question_it_replaced(self):
+    def test_ask_adds_a_different_question_beside_the_open_one(self):
         import session_tidy as tidy
         from fleet import process_identity
         with mock.patch("dispatch_parent_completion.interactive_parent_identity", return_value=("claude", "native-question-session")), \
@@ -324,23 +328,21 @@ class MessageQuestionTest(unittest.TestCase):
              mock.patch.object(process_identity, "current_launch_context", return_value=None):
             first = _run("ask", "first line of the old one\nsecond line stays out", "--json")
             self.assertEqual(first[0], 0)
-            self.assertNotIn("replaced", json.loads(first[1]))
             old_id = json.loads(first[1])["id"]
-            # Asking the same text again is a retry, not a replacement.
-            retry = _run("ask", "first line of the old one\nsecond line stays out", "--json")
-            self.assertNotIn("replaced", json.loads(retry[1]))
+            # The same text again (edge spaces and line endings aside) is the same open question.
+            retry = _run("ask", "  first line of the old one\r\nsecond line stays out\n", "--json")
+            self.assertEqual(json.loads(retry[1]), {"id": old_id, "state": "open"})
             text = _run("ask", "the new question")
             self.assertEqual(text[0], 0)
             lines = text[1].splitlines()
             self.assertTrue(lines[0].startswith("S4:") and lines[0] != old_id)
-            self.assertEqual(lines[1], "questions: replaced %s — first line of the old one" % old_id)
-            self.assertEqual(len(lines), 3)
-            self.assertNotIn("second line", text[1])
-            # Each new ask names only the one it closed.
+            self.assertEqual(len(lines), 2)
+            self.assertNotIn("replaced", text[1])
             third = _run("ask", "a third question", "--json")
-            replaced = json.loads(third[1])["replaced"]
-            self.assertEqual(replaced["first_line"], "the new question")
-            self.assertEqual(state.closed_question(old_id)["status"], "replaced")
+            ids = [old_id, lines[0], json.loads(third[1])["id"]]
+            self.assertEqual(len(set(ids)), 3)
+            self.assertEqual(sorted(signal["id"] for signal in state.read_signals()), sorted(ids))
+            self.assertIsNone(state.closed_question(old_id))
 
     def test_registration_notice_names_choice_answers_only_when_choices_exist(self):
         import session_tidy as tidy
@@ -427,13 +429,12 @@ class MessageQuestionTest(unittest.TestCase):
         state.write_selected_draft(e, "unresolved draft")
         marker = state.signal_value(s["harness"], s["session_id"], s["seat_key"], "[답변 필요] marker", sequence=7)
         self.assertFalse(state.write_signal(marker))
-        replacement, _ = self.f.ask(text="new question")
-        self.assertNotEqual(s["id"], replacement["id"])
-        self.assertEqual(len(state.read_signals()), 1)
+        other, _ = self.f.ask(text="new question")
+        self.assertNotEqual(s["id"], other["id"])
+        self.assertEqual(sorted(item["id"] for item in state.read_signals()), sorted([s["id"], other["id"]]))
         old = state._selected_entry(e)
-        self.assertEqual((old["state"], old["draft"], old["result"]["status"]),
-                         ("cancelled", "unresolved draft", "replaced"))
-        self.assertFalse(state.read_selected_request(e)["support"]["supported"])
+        self.assertEqual((old["state"], old["draft"]), ("open", "unresolved draft"))
+        self.assertTrue(state.read_selected_request(e)["support"]["supported"])
         self.assertIsNone(self.f.record(s))
 
     def test_source_is_durable_and_public_projection_has_no_body(self):
@@ -458,7 +459,7 @@ class MessageQuestionTest(unittest.TestCase):
             with self.subTest(length=len(text)):
                 self.f.submit(e, text)
                 self.assertIsNone(self.f.record(s))
-                self.assertIsNone(state._selected_entry(e).get("action_id"))
+                self.assertIsNone((state._selected_entry(e) or {}).get("action_id"))
         text = "한국어  \n\n답 🙂\n" + "x" * 580
         result = self.f.submit(e, text)
         self.assertEqual(result["state"], "submitted")
@@ -533,15 +534,18 @@ class MessageQuestionTest(unittest.TestCase):
         self.assertEqual(state._read(state._signal_path(s)), before)
 
     def test_full_unresolved_overlay_keeps_source_and_draft(self):
+        # 256 open questions of one session, each with a draft: no product cap on questions.
         first = None
         for index in range(256):
             s, e = self.f.ask(text="unresolved " + str(index))
             state.write_selected_draft(e, "draft " + str(index))
             first = first or e
-        before = state._signal_path(s).read_bytes()
-        with self.assertRaisesRegex(ValueError, "capacity-unresolved"):
-            self.f.ask(text="257")
-        self.assertEqual(state._signal_path(s).read_bytes(), before)
+        # The source is the registration; only the 257th draft finds no room.
+        last, envelope = self.f.ask(text="257")
+        self.assertEqual(len(state.read_signals()), 257)
+        self.assertEqual(state.write_selected_draft(envelope, "no room")["support"]["reason"],
+                         "selected-draft-storage-unavailable")
+        self.assertEqual(state._read(state._signal_path(last))["lifecycle"], "open")
         self.assertEqual(state._selected_entry(first)["draft"], "draft 0")
 
     def test_mixed_terminal_pruning_preserves_unresolved_draft_and_prune_submit_race(self):
@@ -549,7 +553,8 @@ class MessageQuestionTest(unittest.TestCase):
         first, old = self.f.ask(text="unresolved old")
         state.write_selected_draft(old, "keep unresolved")
         for index in range(255):
-            signal, _ = self.f.ask(text="settled " + str(index))
+            # Each in its own session: a prompt answers only a seat's one open question.
+            signal, _ = self.f.ask(sid="settled-%d" % index, text="settled " + str(index))
             with tidy.seat_lock(signal["seat_key"]):
                 state.close_signal(signal["seat_key"], sequence=signal["sequence"],
                     harness=signal["harness"], session_id=signal["session_id"], answer="settled")
@@ -559,20 +564,20 @@ class MessageQuestionTest(unittest.TestCase):
         def synchronized(*args):
             barrier.wait(timeout=5)
             return submit(*args)
-        def replace():
+        def another():
             barrier.wait(timeout=5)
-            return self.f.ask(text="race replacement")
+            return self.f.ask(text="race other question")
         with mock.patch.object(state, "_submit_message", side_effect=synchronized), ThreadPoolExecutor(2) as pool:
             answer = pool.submit(self.f.submit, envelope)
-            replacement = pool.submit(replace)
+            added = pool.submit(another)
             answer.result(timeout=10)
-            current, _ = replacement.result(timeout=10)
-        self.assertEqual(state.read_signals()[0]["id"], current["id"])
+            current, _ = added.result(timeout=10)
+        # 3a: a question added meanwhile closes nothing; the answer keeps its own question.
+        self.assertEqual({item["id"] for item in state.read_signals()
+                          if item["session_id"] == signal["session_id"]}, {first["id"], signal["id"], current["id"]})
         self.assertEqual(state._selected_entry(old)["draft"], "keep unresolved")
-        record = self.f.record(signal)
-        if record is not None:
-            self.assertFalse(__import__("session_notice").notice_is_current(record))
-        self.assertFalse(state.read_selected_request(envelope)["support"]["supported"])
+        self.assertTrue(__import__("session_notice").notice_is_current(self.f.record(signal)))
+        self.assertEqual(state.read_selected_request(envelope)["state"], "submitted")
 
     def test_durable_claim_survives_a_new_process_without_resend(self):
         import subprocess
@@ -599,17 +604,23 @@ print(json.dumps({"state":result["state"],"action_id":result.get("action_id"),"d
         path = state._cache_path()
         original = path.read_bytes()
         path.write_text("{damaged")
-        with self.assertRaisesRegex(ValueError, "storage-unreadable"):
-            self.f.ask(text="cannot discard old overlay")
+        # The source file is the registration: an unreadable answer record does not stop it,
+        # and is left as it is.
+        added, _ = self.f.ask(text="added beside a damaged answer record")
         self.assertEqual(path.read_text(), "{damaged")
         path.write_bytes(original)
-        with mock.patch.object(state, "_write_cache_value", return_value=False):
-            with self.assertRaises(OSError):
-                self.f.ask(text="source written before projection")
-        source = state._read(state._signal_path(signal))
-        retried, _ = self.f.ask(text="source written before projection")
-        self.assertEqual((source["id"], source["since"]), (retried["id"], retried["since"]))
+        retried, _ = self.f.ask(text="added beside a damaged answer record")
+        self.assertEqual((added["id"], added["since"]), (retried["id"], retried["since"]))
         self.assertEqual(state._selected_entry(envelope)["draft"], "private draft")
+        # An unreadable question file is unknown, not empty: nothing registers over it.
+        source = state._questions_path(signal["harness"], signal["session_id"])
+        kept = source.read_bytes()
+        source.write_text("{damaged")
+        with self.assertRaisesRegex(ValueError, "question-storage-unreadable"):
+            self.f.ask(text="cannot write over unknown questions")
+        self.assertEqual(source.read_text(), "{damaged")
+        source.write_bytes(kept)
+        self.assertEqual(state._read(state._signal_path(signal))["lifecycle"], "open")
 
 
 if __name__ == "__main__":
