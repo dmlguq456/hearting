@@ -109,6 +109,13 @@ def _valid_weight(value):
     return not isinstance(value, bool) and isinstance(value, (int, float)) and 0.0 < value <= 1.0
 
 
+def _one_of(value, options):
+    """`value in options` for one parsed cell. A mapping (`key: {}`) or a list
+    is never one of the scalar options, and testing it against a set would
+    raise TypeError before the validator names the cell."""
+    return not isinstance(value, (dict, list)) and value in options
+
+
 def _repo_root():
     # realpath, not abspath: the helper is projected into
     # adapters/<harness>/utilities/ as a symlink, and the shipped config and
@@ -269,6 +276,10 @@ def parse_yaml_subset(text):
         if not stack:
             raise DefaultsConfigError(f"line {lineno}: indentation does not match any open mapping")
         parent = stack[-1][1]
+        if parent is None:
+            raise DefaultsConfigError(
+                f"line {lineno}: {content!r} is indented under an empty `{{}}` mapping; "
+                "write the parent as 'key:' with its entries below, or put this line at the parent's depth")
         if not isinstance(parent, dict):
             raise DefaultsConfigError(f"line {lineno}: list items are not supported in this schema")
         if ":" not in content:
@@ -290,6 +301,9 @@ def parse_yaml_subset(text):
             # "{}" made the whole file invalid. Only the empty form is read:
             # inline `{a: 1}` mappings stay a scalar the validator names.
             parent[key] = {}
+            # Nothing may nest under it: a deeper next line is refused above
+            # instead of landing in the enclosing mapping.
+            stack.append((indent, None))
         elif value.startswith("[") and value.endswith("]"):
             items = [v.strip() for v in value[1:-1].split(",") if v.strip()]
             parent[key] = [_scalar(v) for v in items]
@@ -330,7 +344,7 @@ def validate(config, capmap, topology_path=None):
         errors.append(f"unsupported schema_version: {version!r}")
 
     enabled = []
-    if version in {1, 2}:
+    if _one_of(version, {1, 2}):
         owner = config.get("depth1_owner")
         if not isinstance(owner, list) or not owner:
             errors.append("depth1_owner must be a non-empty list of concrete harnesses")
@@ -362,7 +376,7 @@ def validate(config, capmap, topology_path=None):
                 )
         if "harnesses" in config or "profiles" in config:
             errors.append("harnesses/profiles require schema_version 3 or 4")
-    elif version in {3, 4}:
+    elif _one_of(version, {3, 4}):
         if "depth1_owner" in config or "opencode" in config:
             errors.append("schema v3+ replaces depth1_owner/opencode with harnesses/profiles")
         harnesses = config.get("harnesses")
@@ -439,7 +453,7 @@ def validate(config, capmap, topology_path=None):
                     )
 
     allocation = config.get("allocation")
-    if version in {2, 3, 4}:
+    if _one_of(version, {2, 3, 4}):
         if not isinstance(allocation, dict):
             errors.append(f"allocation must be a mapping for schema v{version}")
         else:
@@ -450,7 +464,7 @@ def validate(config, capmap, topology_path=None):
             for key in unknown_allocation:
                 errors.append(f"unknown allocation key: {key!r}")
             strategy = allocation.get("strategy")
-            if strategy not in ALLOCATION_STRATEGIES:
+            if not _one_of(strategy, ALLOCATION_STRATEGIES):
                 errors.append(f"allocation.strategy must be one of {sorted(ALLOCATION_STRATEGIES)}")
             if version == 2 and strategy != "least-recent-attempts":
                 errors.append("schema v2 allocation.strategy must be least-recent-attempts")
@@ -463,7 +477,7 @@ def validate(config, capmap, topology_path=None):
             depth_affinity = allocation.get("depth_affinity", {})
             if not isinstance(depth_affinity, dict) or not set(depth_affinity) <= {"owner", "worker"}:
                 errors.append("allocation.depth_affinity keys must be a subset of owner and worker")
-            elif any(value not in DISPATCHABLE_HARNESSES for value in depth_affinity.values()):
+            elif any(not _one_of(value, DISPATCHABLE_HARNESSES) for value in depth_affinity.values()):
                 errors.append("allocation.depth_affinity values must name known harnesses")
             if "owner_order" in allocation and not valid_owner_order(allocation["owner_order"]):
                 errors.append("allocation.owner_order must be a list of distinct known harnesses")
@@ -603,7 +617,7 @@ def validate(config, capmap, topology_path=None):
                         f"(canonical node ids: {sorted(capmap[cap_name])})"
                     )
                     continue
-                if value not in AFFINITY_VALUES:
+                if not _one_of(value, AFFINITY_VALUES):
                     errors.append(
                         f"invalid affinity value for {cap_name}.{stage_name}: {value!r} "
                         f"(allowed: {sorted(AFFINITY_VALUES)}; model/effort values are never allowed here)"
@@ -792,71 +806,20 @@ def normalize_policy(config):
     return result
 
 
-# Optional allocation tuning keys: each reads as neutral when absent
-# (`query_allocation`). A wrong value in one of them is dropped on read and its
-# validator error comes back as an `...: ignored` warning, so one bad cell no
-# longer turns every dispatch read of the file into `defaults-invalid`.
-# `validate()` stays strict: the settings editor and the `validate` warnings
-# still name the same error, and every other error still fails the file.
-OPTIONAL_ALLOCATION_KEYS = (
-    "usage_gate_used_percent", "depth_affinity", "depth_affinity_weight",
-    "usage_headroom_exponent", "harness_weights", "owner_order",
-)
-
-
-def _drop_invalid_optional_allocation(config, capmap, topology_path, errors):
-    """Return `(config, remaining_errors, ignored_errors)`.
-
-    For each optional allocation key, a wrong entry of a mapping value
-    (`harness_weights.<name>`, `depth_affinity.<role>`) is dropped first, then
-    the whole key if errors still point at it. A drop is kept only when it
-    clears some of the current errors and adds none; the errors it cleared are
-    returned as ignored. Attribution is by revalidation, not by message text,
-    so a reworded validator message cannot widen what is dropped."""
-    allocation = config.get("allocation")
-    if not errors or not isinstance(allocation, dict):
-        return config, errors, []
-    remaining = list(errors)
-    ignored = []
-    kept = dict(allocation)
-    for key in OPTIONAL_ALLOCATION_KEYS:
-        if key not in kept:
-            continue
-        entries = list(kept[key]) if isinstance(kept[key], dict) else []
-        for entry in [*entries, None]:
-            if key not in kept:
-                break
-            if entry is None:
-                trial = {name: value for name, value in kept.items() if name != key}
-            else:
-                trial = {**kept, key: {name: value for name, value in kept[key].items() if name != entry}}
-            trial_errors = validate({**config, "allocation": trial}, capmap, topology_path)
-            if set(trial_errors) < set(remaining):
-                ignored.extend(error for error in remaining if error not in trial_errors)
-                remaining = trial_errors
-                kept = trial
-    if not ignored:
-        return config, errors, []
-    return {**config, "allocation": kept}, remaining, ignored
-
-
 def load_validated(config_path, topology_path):
     """Load, validate structure, normalize, and return `(config, warnings)`.
 
-    Structural errors raise `DefaultsConfigError` naming every error found; a
-    wrong optional allocation key alone is dropped and its error comes back as
-    an `...: ignored` warning. Recommendation findings come back as warning
-    strings too, and the returned config is already normalized.
+    Structural errors raise `DefaultsConfigError`; recommendation findings come
+    back as warning strings and the returned config is already normalized.
     """
     with open(config_path, encoding="utf-8") as f:
         text = f.read()
     config = parse_yaml_subset(text)
     capmap = load_topology_capabilities(topology_path)
     errors = validate(config, capmap, topology_path)
-    config, remaining, ignored = _drop_invalid_optional_allocation(config, capmap, topology_path, errors)
-    if remaining:
+    if errors:
         raise DefaultsConfigError("; ".join(errors))
-    warnings = [f"{error}: ignored" for error in ignored] + policy_warnings(config)
+    warnings = policy_warnings(config)
     config = normalize_policy(config)
     # Merging before validation would turn a valid user file into a loud
     # failure for every user the moment the shipped baseline goes stale, so

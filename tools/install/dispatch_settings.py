@@ -83,6 +83,11 @@ def _find(lines: list[str], start: int, end: int, indent: int, key: str):
     return None
 
 
+def _empty_mapping(value: str) -> bool:
+    """The parser's `key: {}` test (`parse_yaml_subset`): braces holding only whitespace."""
+    return value.startswith("{") and value.endswith("}") and not value[1:-1].strip()
+
+
 def _set_line(lines, index, indent, key, value):
     _indent, _key, old, comment = _split(lines[index])
     padding = ""
@@ -121,7 +126,7 @@ def edit_text(text: str, updates: dict, section: str = "allocation") -> str:
             raise DispatchSettingsUsageError(f"{section}.{name} is not an editable key")
         head = _find(lines, top + 1, end, 2, parent)
         if head is not None and _split(lines[head])[2]:
-            if _split(lines[head])[2].replace(" ", "") != "{}":
+            if not _empty_mapping(_split(lines[head])[2]):
                 raise DispatchSettingsError(f"allocation.{parent} must be a block mapping to be edited")
             if value is UNSET:
                 continue
@@ -159,9 +164,16 @@ def _validated(module, text: str):
 
 
 def _section_values(module, config, section) -> dict:
-    if not isinstance(config.get(section), dict):
+    values = config.get(section)
+    if not isinstance(values, dict):
         return {}
-    return module.query_allocation(config) if section == "allocation" else dict(config[section])
+    if section != "allocation":
+        return dict(values)
+    # `allocation: {}` or a block missing a required key has no applied values
+    # yet; the edit and the validator name what is wrong instead of a KeyError.
+    if not {"strategy", "window"} <= set(values):
+        return {}
+    return module.query_allocation(config)
 
 
 def _diff(before: dict, after: dict, updates: dict) -> list[str]:
