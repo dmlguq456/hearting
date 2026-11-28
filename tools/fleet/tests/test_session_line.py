@@ -239,7 +239,9 @@ class CommonSessionLineTest(unittest.TestCase):
         self.assertEqual((worker["kind"], worker["role"], worker["stage"], worker["tool"], worker["target"], worker["elapsed"],
                           worker["harness"], worker["effort"], worker["ctx"]),
                          ("working", "worker", "execute", "Edit", "tools/x.py", "12m", "codex", "high", "22%"))
-        self.assertEqual(len(worker["gauge_row"]), 4)
+        self.assertEqual("".join(part[0] for part in worker["gauge5"]), "━──── 22%")
+        self.assertNotIn("gauge_row", worker)
+        self.assertNotIn("gauge_row", painted["owner_paint"])
         # A row from an older producer has neither, and its painted row neither.
         self.assertNotIn("workers_live", route_row({"id": "rt", "state": "working"}, now=10_000.0))
 
@@ -415,13 +417,20 @@ class CommonSessionLineTest(unittest.TestCase):
         side = lambda parts: ("".join(text for text, _key in parts), {key for _text, key in parts})
         self.assertEqual((presented["repo_side"], presented["worktrees"], side(presented["git_side"])),
                          ([("hearting", "loc_repo")], [("wt 12", "dim")], ("main ↑2", {"dim", "lvl_g"})))
-        # 42 (b): beside the native area the `CTX` label stands for the word `context`; the
+        # 42 (b): beside the native area the reading stands without the word `context`; the
         # bottom layout's fragment keeps it, and an unknown reading has neither.
         self.assertEqual(presented["context"][0], ("context ", "dim"))
         self.assertEqual(presented["context_side"], presented["context"][1:])
         self.assertEqual("".join(text for text, _key in presented["context_side"]), "━━━━────── 37%")
+        # 11-27: the open side panel's MODEL row ends in the gauge; short of cells it takes a shorter one (ten cells down to five,
+        # each at Fleet's own fill and level), the first the same as `context_side`.
+        gauges = presented["context_gauges"]
+        self.assertEqual(gauges[0], presented["context_side"])
+        self.assertEqual(["".join(text for text, _key in parts) for parts in gauges],
+                         ["━━━━────── 37%", "━━━────── 37%", "━━━───── 37%", "━━━──── 37%", "━━──── 37%", "━━─── 37%"])
+        self.assertEqual(gauges[-1], [tuple(part) for part in session_panel.doer_paint({"ctx_pct": 37})["gauge5"]])
         unknown = session_panel.presentation({**values, "ctx_pct": None}, {}, "claude", "s", 40)
-        self.assertEqual((unknown["context"], unknown["context_side"]), ([], []))
+        self.assertEqual((unknown["context"], unknown["context_side"], unknown["context_gauges"]), ([], [], []))
         for count in (0, None):
             other = {**values, "git": {**values["git"], "extra_worktrees": count}}
             self.assertEqual(session_panel.session_worktrees(other), [])
@@ -491,12 +500,14 @@ class CommonSessionLineTest(unittest.TestCase):
         self.assertEqual(session_panel.session_memory_items({}, now), [])
         self.assertEqual(session_panel.presentation({"memory_recent": recent[:1]}, {}, "claude", "s", 40)["memory_items"][0]["kind"],
                          "correction")
-        # 36 (a), (b), 38: a route row's recorded role only, Fleet's kind word, the gauge at the panel's width.
+        # 36 (a), (b), 38: a route row's recorded role only, Fleet's kind word, and the gauge for the owner line.
         painted = session_panel.route_row({"role": "owner", "capability": "autopilot-code", "ctx_pct": 38}, cells=8)
         self.assertEqual((painted["role"], painted["kind_word"]), ("owner", "code"))
         self.assertEqual(session_panel.route_gauge_cells(40), 8)
-        self.assertEqual("".join(part[0] for part in painted["gauge_row"][:2]), "━━━─────")
-        self.assertEqual(painted["gauge_row"][-1][0], "38%")
+        self.assertEqual("".join(part[0] for part in painted["gauge5"]), "━━─── 38%")
+        self.assertNotIn("gauge_row", painted)
+        frame = session_panel.route_row({"role": "frame", "ctx_pct": 38}, cells=8)
+        self.assertEqual("".join(part[0] for part in frame["gauge_row"]), "━━━───── 38%")
         for capability, word in (("code", "code"), ("frame", "frame"), ("autopilot-lab", "lab")):
             self.assertEqual(session_panel.route_row({"capability": capability})["kind_word"], word)
         unknown = session_panel.route_row({"role": "boss", "ctx_tokens": 250_136}, cells=8)
