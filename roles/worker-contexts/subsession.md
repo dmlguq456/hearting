@@ -35,7 +35,7 @@
   worker does not create a separate chain handoff output. Ledger updates and
   compaction state remain separate from that runtime handoff.
 
-A native helper inside a sub-session (on Claude, the call that runs natively when it
+Native helper support inside a sub-session (on Claude, the call that runs natively when it
 cannot start as a unit route: `capabilities/unit.md`, A native subagent call) is checked
 separately from registered dispatch and never changes the gate:
 
