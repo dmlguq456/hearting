@@ -62,9 +62,9 @@ _BUILTIN_GP_DESCRIPTION = (
     "tries use this agent to perform the search for you."
 )
 
-# A call of a catalog agent from a person's session or a registered worker starts a unit route
+# A call of a catalog agent from a person's session or a supervised owner starts a unit route
 # (core/OPERATIONS.md §5.10c); the worker home builder renders the same definition, so the line names both.
-_UNIT_ROUTE = (" In a person's session or a registered worker the call starts a read-only Hearting unit route "
+_UNIT_ROUTE = (" In a person's session or a supervised owner the call starts a read-only Hearting unit route "
                "(general/explore, {depth}) when that is certain, and otherwise runs natively.")
 
 CATALOG_AGENTS = {

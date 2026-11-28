@@ -127,6 +127,12 @@ def entrypoint(agent_home, relative: str) -> str:
     return f"{root}/{relative}" if root else ""
 
 
+def worker_utility(agent_home, name: str) -> str:
+    """A checked utility as a registered Claude worker's allow rules name it (`dispatch-headless.py`
+    `_allowlist_rules`, on its launch release), so a command built on it is one those rules let it run."""
+    return f"python3 {Path(str(agent_home)) / 'utilities' / name}"
+
+
 def registry_args(jobs) -> list[str]:
     """`--jobs <registry>` unless it is the stable default a bare call uses here and in a new session.
 

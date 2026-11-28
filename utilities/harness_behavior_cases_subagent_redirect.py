@@ -64,10 +64,12 @@ Loaded by ``harness_behavior_scenarios.py`` (``_load_extra``).
     not run; the shared redirect never returns it, and Codex's runner turns the bridge's own failures into 0.
 
 ``subagent-redirect-worker`` (Claude)
-    A registered owner (quick, one session, started by compose) calls its native subagent with the worker home's
-    ``light`` name. The same hook, judging in the worker's home, starts it as a ``general/explore`` unit route below
-    the owner's attempt; the call is refused with the receipt's wait command, which the owner runs and which returns
-    the answer (``Answer:``). No native subagent request reaches the model. The times kept: the call to the refusal
+    A supervised owner (quick, one session, started by compose, detached) calls its native subagent with the worker
+    home's ``light`` name. The same hook, judging in the worker's home, starts it as a ``general/explore`` unit route
+    below the owner's attempt; the call is refused with the wait in the form the owner's allow rules name, which the
+    owner runs (again while the receipt says the leg still runs) and which returns the answer (``Answer:``); a leg
+    that ended before the receipt was written brings the answer in the refusal itself (``answer_by``). No native
+    subagent request reaches the model. The times kept: the call to the refusal
     (``call_to_refusal_seconds``), to the leg's first request (``call_to_worker_request_seconds``) and to the wait
     result carrying the answer (``call_to_answer_seconds``). A Codex or OpenCode worker's call is not taken.
 
@@ -1071,12 +1073,12 @@ class SubagentRedirectWorkerScenario(OwnerCallsScenario):
                     self.marks.setdefault("answer", record["at"])
                     ev.update(wait_result=last[-6000:], answer_by="refusal")
                     return Reply("artifact: -\nverdict: BLOCKED\nblocker: scenario probe only")
-                command = re.search(r"run this once to receive its answer: (\S.*? --wait)", last)
+                command = re.search(r"run (\S.*? --wait) to receive its answer", last)
                 if not command:
                     return Reply("artifact: -\nverdict: BLOCKED\nblocker: no wait command came back")
                 return Reply(shell=command.group(1))
-            if '"state": "completed"' not in last and len(waits) < 8:
-                return Reply(shell=waits[-1])                       # one wait is one start window: wait again
+            if '"state": "running"' in last and '"parent_next": "bounded-wait"' in last and len(waits) < 8:
+                return Reply(shell=waits[-1])       # the window ended, the leg runs, the receipt says wait again
             self.marks.setdefault("answer", record["at"])
             ev.update(wait_result=last[-6000:], answer_by="wait")
             return Reply("artifact: -\nverdict: BLOCKED\nblocker: scenario probe only")
@@ -1158,11 +1160,13 @@ class SubagentRedirectWorkerScenario(OwnerCallsScenario):
                  f"call-to-answer={ev.get('call_to_answer_seconds')}s; answer by {ev.get('answer_by')}")
         if not owner or "call" not in self.marks:
             return "inconclusive"
-        ok = bool(called and STARTED in ev.get("refusal", "") and " --wait" in ev.get("refusal", "")
+        # The answer comes by the wait, or in the refusal itself when the leg ended before the receipt was written.
+        ok = bool(called and STARTED in ev.get("refusal", "")
+                  and (" --wait" in ev.get("refusal", "") or ev.get("answer_by") == "refusal")
                   and "completion notice," not in ev.get("refusal", "")
                   and called["status"] == "done" and called.get("failure_class") == "pass"
                   and called.get("caller_attempt_id") == owner.get("attempt_id")
-                  and ev.get("answer_by") == "wait"
+                  and ev.get("answer_by") in ("wait", "refusal")
                   and "Answer:" in ev.get("wait_result", "") and self.nonce in ev.get("wait_result", "")
                   and not self.native and not ev["leftover_processes"])
         return "pass" if ok else "fail"

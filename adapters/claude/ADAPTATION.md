@@ -456,13 +456,17 @@ the old line (no `--redirect`, 15 s) and redirects nothing until Claude's settin
 settings. Measured in isolated TUIs (`harness_behavior_cases_subagent_redirect.py`): the hook sees `Agent`
 with `description`, `prompt`, `subagent_type`; a hook that exits 1, is killed, prints garbage or runs past
 its timeout lets the native call run; exit 2 blocks it (the redirect always exits 0).
-A registered worker's call (K) is judged the same way in its masked home. The worker launch's own command
-line layers count only if they decide the call: its `--settings` holds only `registered-parent-park.py`, which the
-hook runs once on the call and goes on only when it prints nothing (it refuses only in the worker's terminal
-cleanup); each `--add-dir` folder holds no `.claude`; `--allowedTools`/`--disallowedTools` name neither `Agent` nor
-`Task`. The start runs in the worker's environment (the leg hangs below it) and the line gives the receipt's wait
-command. A user hook that matches every tool (`*`) in the copied user settings keeps a worker's call native, as it
-keeps a session's.
+A supervised owner's call (K) is judged the same way in its masked home, and only when the hook proves the
+owner from its registry row (Claude, owner, detached, live, this route) and the Claude session its supervisor
+announced in the attempt log; a route sealing a native stage fallback, a leg that would launch foreground-scoped,
+and a stage, review or sub-session worker keep the call native. The owner launch's own command line layers count
+only if they decide the call: its `--settings` is exactly the park hook (`registered-parent-park.py`), outside the
+terminal cleanup in which alone it refuses (read with the hook's own `load_active_cleanup_scope`); each `--add-dir`
+folder is absolute and holds no `.claude`; `--allowedTools`/`--disallowedTools` hold plain rules naming neither
+`Agent` nor `Task`. The start runs in the owner's environment (the leg hangs below it). Its line gives the wait in
+the form the launch's allow list names (`parent_next_directive.worker_utility`, which `_allowlist_rules` uses too),
+and the call stays native unless that rule is on the launch, the mode is `bypassPermissions` or `acceptEdits`, and
+no Bash deny or ask rule is in the launch or a settings file the hook reads.
 
 ## Native Subagent Default Model (2026-07-23)
 

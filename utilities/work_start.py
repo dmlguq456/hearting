@@ -3139,14 +3139,15 @@ def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock, re
                 "next_step": f"The unit worker {_unit_stop(source) or 'ended without a pass'}. Read its result and "
                     "report; to run the same unit again, run parent_next_command (a new route; this one stays as "
                     "it ended)."}
-    if wait:
-        return _wait_expired(result)
     status, metadata = _rows(jobs).get(aid, rows[aid])
+    if wait and not metadata.get("caller_attempt_id"):   # one wait is one start window: a worker waits again
+        return _wait_expired(result)
     directive, reason, _ = parent_next(metadata.get("parent_completion_delivery", ""), aid, agent_home=ROOT)
     return {**result, "state": "running", "parent_next": directive, "parent_next_reason": reason,
             "parent_next_command": resume + " --wait" if directive == "bounded-wait" else "",
-            "next_step": "The unit worker runs as a separate attempt and its result comes back to this session "
-                "when it ends. Follow parent_next: end-turn means yield; bounded-wait means run "
+            "next_step": "The wait window ended and the unit worker still runs; run parent_next_command again for "
+                "its answer." if wait else "The unit worker runs as a separate attempt and its result comes back to "
+                "this session when it ends. Follow parent_next: end-turn means yield; bounded-wait means run "
                 "parent_next_command once."}
 
 

@@ -148,6 +148,51 @@ class FollowingCalledWorkTest(U.UnitLegBase):
         arm.assert_called_once()
 
 
+class CallerWaitWindowTest(U.UnitLegBase):
+    """One wait is one start window: when it ends while the leg a worker started still runs, the receipt gives the
+    same wait again (the running receipt's `parent_next_command`), and nothing is launched or composed anew."""
+
+    def setUp(self):
+        super().setUp()
+        self.route, self.path = self.unit_route()
+        self.jobs = Path(self.root) / "jobs.log"
+        self.now, self.launches = [1_000.0], []
+        for patch in (mock.patch.object(W, "default_parent_session_id", return_value="parent"),
+                      mock.patch.object(W, "prepare_task_request", return_value=None),
+                      mock.patch.object(W, "join_selected_attempts", side_effect=self.join)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def join(self, **kwargs):
+        self.now[0] += kwargs["timeout"]          # the whole window passes on the fixture's clock
+        return {"state": "timeout", "children": []}
+
+    def wait(self):
+        return W.start_work(self.route, self.path, self.jobs, wait=True, sleep=lambda seconds: None,
+                            run=lambda *args, **kwargs: self.launches.append(args), clock=lambda: self.now[0])
+
+    def test_the_same_wait_follows_a_called_leg_past_its_window(self):
+        self.jobs.write_text(self.leg_row(self.route, self.path, status="running", caller_attempt_id=CALLER,
+                                          parent_completion_delivery="poll-fallback"))
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": CALLER}):
+            first, second = self.wait(), self.wait()
+        self.assertGreaterEqual(self.now[0] - 1_000.0, 2 * W.START_WINDOW_SECONDS)
+        for receipt in (first, second):
+            self.assertEqual((receipt["state"], receipt["parent_next"]), ("running", "bounded-wait"))
+            self.assertEqual(receipt["parent_next_command"], receipt["resume_command"] + " --wait")
+            self.assertIn("run parent_next_command again", receipt["next_step"])
+        self.assertEqual(first["parent_next_command"], second["parent_next_command"])
+        self.assertEqual(self.launches, [])       # no new launch, no compose: the same route and attempt
+
+    def test_a_leg_no_worker_started_keeps_the_bounded_fallback_handoff(self):
+        self.jobs.write_text(self.leg_row(self.route, self.path, status="running",
+                                          parent_completion_delivery="poll-fallback"))
+        receipt = self.wait()
+        self.assertEqual((receipt["state"], receipt["reason"]), ("needs-attention", "parent-wait-deadline"))
+        self.assertNotIn("parent_next_command", receipt)
+        self.assertEqual(self.launches, [])
+
+
 class CalledResultTest(U.UnitLegBase):
     """What a waiting caller reads: finished work comes back with its summary, a run that did no work does not."""
 
