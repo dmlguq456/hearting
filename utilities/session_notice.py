@@ -275,6 +275,30 @@ def consumer_text(receipt: dict) -> str:
     return f"{receipt['subject']} (request={receipt['answer_binding']['request_id']}):\n{body}"
 
 
+def _is_answer(record) -> bool:
+    receipt = record.get("receipt") if isinstance(record, dict) else None
+    return isinstance(receipt, dict) and "answer_binding" in receipt
+
+
+def answered_order(record: dict) -> tuple:
+    """Where a person's answer stands among a delivery's answers: the order they were given.
+
+    An answer's delivery record is created as it is submitted (`notify`), so its existing
+    ``created_at_ns`` is that order; equal values fall back to the delivery id."""
+    created = record.get("created_at_ns")
+    return (created if type(created) is int else 0, str(record.get("delivery_id", "")))
+
+
+def in_answered_order(items: list, record=lambda item: item) -> list:
+    """``items`` with the person's answers in the order they were given, in the places answers held.
+
+    Every other item keeps its place. The courier picks a recipient's batch and the delivered
+    text places its answers with this one order, so the session reads them as they were given."""
+    answers = iter(sorted((item for item in items if _is_answer(record(item))),
+                          key=lambda item: answered_order(record(item))))
+    return [next(answers) if _is_answer(record(item)) else item for item in items]
+
+
 def classify(receipt: dict) -> str:
     """`attention`, `terminal`, `routine` or `progress`, from existing receipt fields only.
 

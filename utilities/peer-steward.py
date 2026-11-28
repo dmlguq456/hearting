@@ -7039,9 +7039,10 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
     from dispatch_notice_state import keep_claim
     from dispatch_seat_handover import record_recipient_binding
     from dispatch_session_sweep import (STORAGE_KEY, IDENTITY_KEY, delivery_context, delivery_display_text,
-                                        delivery_holds_secret_answer)
+                                        delivery_holds_secret_answer, fit)
     from dispatch_recipient_receipt import claimed_send_current, release_unsubmitted_claim
     from peer_read_context import PeerReadContext
+    import human_wait_state
     import session_notice
 
     root = store.root.parent.parent.resolve()
@@ -7135,7 +7136,8 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
     # d6: attention (a failure, a new attention), then terminal (completion)
     # notices go first, both in group order and inside the batch; progress and
     # routine notices share the batch or wait one pass. A question answer is the
-    # person's own reply: it ranks with attention.
+    # person's own reply: it ranks with attention, and a group's answers keep the
+    # order the person gave them (`session_notice.in_answered_order`).
     ranks = {}
 
     def _terminal_rank(item):
@@ -7159,6 +7161,8 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
     groups = {}
     for item in candidates:
         groups.setdefault((item[1], item[3]), []).append(item)
+    for key in groups:
+        groups[key] = session_notice.in_answered_order(groups[key], lambda item: item[4])
     # A quiet routine notice to the supervisor of the run's owner (a short or metric-less
     # normal end, a metric-less checkpoint) starts no turn of its own: a recipient whose
     # every open notice is such waits, and they ride its next delivery or next input.
@@ -7360,6 +7364,14 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                         != (harness, item_sid)
                         or not recipient_current()):
                     return
+                answer = (fresh.get("receipt") or {}).get("answer_binding")
+                if (answer is not None
+                        and not human_wait_state.message_answer_submission_current(answer)
+                        and session_notice.notice_is_current(fresh)):
+                    # The queue would refuse the whole transfer for this one answer (its window
+                    # changed, or one read failed). It sits out this pass unclaimed and unchanged
+                    # and the rest go; keep_claim below still refuses an obsolete answer.
+                    continue
                 owner = "retained-rewake:" + item_duty["id"]
                 prior = retargeted.get((storage_sid, fresh["delivery_id"]))
                 try:
@@ -7425,13 +7437,34 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
         if not claimed:
             return
         body = delivery_context([(root, [entry[5] for entry in claimed])])
-        display_line = None if folded else delivery_display_text([(root, [entry[5] for entry in claimed])])
         # A secret answer's body never reaches the window: without its sealed `•••` line the
         # window gets a pointer to the private copy instead (peer-message `private_body`).
         private_body = delivery_holds_secret_answer([(root, [entry[5] for entry in claimed])])
+        folded_block = ("\n\nfolded run notices (parent completion already received):\n"
+                        + "\n".join(f"- {line}" for line in folded)) if folded else ""
+        trailer = peer_message.peer_trailer("runtime", None, "Hearting runtime", transfer_ref="0" * 32)
+        size = lambda text: len((text + folded_block + "\n\n" + trailer).encode("utf-8"))  # noqa: E731
+        if (not private_body and size(body) > peer_message._PENDING_BYTES
+                and _peer_reference_access_evidence(harness, recipient_sid, binding=attachment,
+                    native_owner=None if attachment is not None or harness != "codex"
+                    else _prompt_codex_native_owner(recipient_sid)) is None):
+            # One transfer holds at most `_PENDING_BYTES` of inline text. The members whose whole
+            # text fits, from the front of the order it shows them in, go now; the rest were never
+            # prepared and wait, unclaimed, for the next pass (`fit`, as a hook context is fitted).
+            body, chosen, _rest = fit([(root, [entry[5] for entry in claimed])], delivery_context,
+                                      peer_message._PENDING_BYTES, measure=size)
+            kept = {id(view) for _root, views in chosen for view in views}
+            for _duty, storage_sid, _delivery_id, owner, stored, view in claimed:
+                if id(view) not in kept:
+                    release_unsubmitted_claim(root, storage_sid, stored, owner, recipient_sid)
+            claimed = [entry for entry in claimed if id(entry[5]) in kept]
+            going = {(entry[1], entry[2]) for entry in claimed}
+            producer_records = [row for row in producer_records
+                                if (row["storage_sid"], row["delivery_id"]) in going]
+            refs = [value for entry in claimed for value in (entry[0]["id"], entry[2])]
+        display_line = None if folded else delivery_display_text([(root, [entry[5] for entry in claimed])])
         if folded:
-            body += ("\n\nfolded run notices (parent completion already received):\n"
-                     + "\n".join(f"- {line}" for line in folded))
+            body += folded_block
         producer = {"schema": peer_message._SESSION_NOTICE_PRODUCER_SCHEMA,
             "duty_id": claimed[0][0]["id"], "jobs": str(jobs.resolve()),
             "records": producer_records,

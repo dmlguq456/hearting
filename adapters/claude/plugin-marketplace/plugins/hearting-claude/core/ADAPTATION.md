@@ -682,7 +682,10 @@ stamp path in `core/HOOKS.md`.
   wake says the owner is still running. The same classification orders every carrier's
   delivered text (`delivery_context`): attention first under its own heading, other notices
   next, and routine notices (normal checkpoints and ends) on one line with their count and
-  names. A routine notice its producer called quiet (`, quiet` subject: a normal end under
+  names. A person's question answers keep the places answers hold in that order but stand in
+  the order they were given (`session_notice.in_answered_order`), which is also the order the
+  courier picks a recipient's batch and cuts it at its count and transfer-size limits.
+  A routine notice its producer called quiet (`, quiet` subject: a normal end under
   `QUIET_RUN_SECONDS`, or a normal checkpoint or end with no metric) never has a line of its
   own, and when it is addressed to the session supervising the run's owner (`attempt-parent`)
   the runner and the OpenCode carrier open no turn for it alone: it rides that session's

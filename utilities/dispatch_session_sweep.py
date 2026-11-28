@@ -1501,6 +1501,14 @@ def _notice_layout(notice_records: list[tuple[Path, dict]]) -> dict:
         places[id(record)] = (0 if kinds[id(record)] == session_notice.ATTENTION else 1,
                               str(receipt.get("text", "")),
                               str(record.get("delivery_id", "")))
+    # The person's answers take the places answers hold, in the order they were given, as the
+    # courier picked them (`session_notice.in_answered_order`); every other place stays.
+    answers = sorted((record for _root, record in notice_records
+                      if isinstance(record.get("receipt"), dict) and "answer_binding" in record["receipt"]),
+                     key=lambda record: places[id(record)])
+    for place, record in zip([places[id(record)] for record in answers],
+                             session_notice.in_answered_order(answers)):
+        places[id(record)] = place
     attached: dict[int, list[tuple[Path, dict]]] = {}
     for root, record in held:
         host = min((other for _other_root, other in notice_records
