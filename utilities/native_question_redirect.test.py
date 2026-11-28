@@ -126,19 +126,27 @@ class RedirectTest(Base):
         for word in ("run ", "hearting run", "--", "command"):
             self.assertNotIn(word, reason)                                   # nothing for the agent to run or give
 
-    def test_several_questions_are_one_text_question_listing_every_question_and_option(self):
+    def test_several_questions_are_one_question_each_and_only_the_multiselect_one_is_text(self):
+        """11-28 (piece 3b, items): each question of the call is its own Hearting question, in order."""
         payload = claude_payload([
             {"question": "Which scope?", "multiSelect": False,
              "options": [{"label": "Small (Recommended)", "description": "one file"}, {"label": "Large", "description": "all"}]},
             {"question": "Which checks?", "multiSelect": True,
              "options": [{"label": "Unit", "description": "fast"}, {"label": "E2E", "description": "slow",
                                                                    "preview": "a long preview\nof the run"}]}])
-        (question,) = self.registered("claude", redirect.redirect("claude", payload))
-        self.assertEqual(question["choices"], [])
-        self.assertTrue(question["free_text"])
-        for part in ("Q1. Which scope?", "Q2. Which checks?", "Small (Recommended)", "one file",
-                     "several may be chosen", "E2E", "a long preview of the run"):
-            self.assertIn(part, question["question"])
+        reason = redirect.redirect("claude", payload)
+        found = re.findall(r"S4:[0-9a-f]{64}", reason)
+        self.assertEqual(len(set(found)), 2)
+        scope, checks = (questions.questions_of(state.read_selected_request(
+            {"id": item_id, "harness": "claude", "session_id": SID}))[0] for item_id in found)
+        self.assertEqual((scope["question"], scope["choices"], scope["recommended"]), ("Which scope?", ["Small", "Large"], 0))
+        self.assertEqual(scope["descriptions"], ["one file", "all"])
+        self.assertEqual(checks["choices"], [])
+        self.assertTrue(checks["free_text"])
+        for part in ("Which checks?", "several may be chosen", "E2E", "slow", "a long preview of the run"):
+            self.assertIn(part, checks["question"])
+        for part in ("Q1.", "Q2.", "Which scope?"):
+            self.assertNotIn(part, checks["question"])
 
     def test_a_single_multiselect_or_preview_question_is_written_as_text(self):
         for extra in ({"multiSelect": True}, {"multiSelect": False, "preview": "layout"}):
@@ -193,7 +201,7 @@ class PassThroughTest(Base):
             for failure in (OSError("state is not writable"), ValueError("question-seat-unproven"),
                             RuntimeError("no hearting")):
                 with self.subTest(harness=harness, failure=type(failure).__name__), \
-                     mock.patch.object(state, "register_message", side_effect=failure):
+                     mock.patch.object(state, "register_messages", side_effect=failure):
                     out = io.StringIO()
                     with contextlib.redirect_stdout(out):
                         code = redirect.main([flag], stdin=io.StringIO(json.dumps(payload)))
@@ -241,10 +249,10 @@ class PassThroughTest(Base):
         for env in ({"AGENT_SESSION_ROLE": "worker"}, {"AGENT_DISPATCH_CHILD": "1"}, {"AGENT_DISPATCH_DEPTH": "2"},
                     {"AGENT_SESSION_ROLE": "owner"}, {"OPENCODE_DISPATCH_SLUG": "w1"}):
             with self.subTest(env=env), mock.patch.dict(os.environ, env), \
-                 mock.patch.object(state, "register_message") as register:
+                 mock.patch.object(state, "register_messages") as register:
                 self.assertIsNone(redirect.redirect("claude", claude_payload()))
                 register.assert_not_called()
-        with mock.patch.object(state, "register_message") as register:
+        with mock.patch.object(state, "register_messages") as register:
             self.assertIsNone(redirect.redirect("claude", claude_payload(agent_id="sub-1")))
             register.assert_not_called()
 
@@ -258,14 +266,14 @@ class PassThroughTest(Base):
                  ("claude", "not a payload"), ("claude", None)]
         for harness, payload in cases:
             with self.subTest(harness=harness, payload=str(payload)[:60]), \
-                 mock.patch.object(state, "register_message") as register:
+                 mock.patch.object(state, "register_messages") as register:
                 self.assertIsNone(redirect.redirect(harness, payload))
                 register.assert_not_called()
 
     def test_a_slow_registration_gives_up_inside_the_budget_and_the_native_question_shows(self):
         def slow(*args, **kwargs):
             time.sleep(10)
-        with mock.patch.object(state, "register_message", side_effect=slow):
+        with mock.patch.object(state, "register_messages", side_effect=slow):
             started = time.monotonic()
             self.assertIsNone(redirect.redirect("claude", claude_payload(), seconds=1))
             elapsed = time.monotonic() - started

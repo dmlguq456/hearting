@@ -709,7 +709,11 @@ else: raise SystemExit(5)
 
     def test_settle_wrapper_does_not_wait_for_observers_meant_to_outlive_the_turn(self):
         started = time.monotonic()
-        command = "setsid sleep 5 </dev/null >/dev/null 2>&1 & exit 0"  # e.g. the human-wait producer
+        # e.g. the human-wait producer. The turn ends once the observer runs its own program: the background child
+        # is `sh -c …` until it has exec'd `setsid` and then `sleep`, and a loaded runner let the turn end (and the
+        # wrapper take its one reading) in between, naming it `sh -c` (CI 11-28, 16 of 76 runs).
+        command = ("setsid sleep 5 </dev/null >/dev/null 2>&1 & observer=$!; "
+                   "while read -r name </proc/$observer/comm && [ \"$name\" != sleep ]; do sleep 0.01; done; exit 0")
         result = subprocess.run(fj.settle_argv(["sh", "-c", command], seconds=20),
                                 capture_output=True, text=True, timeout=60)
         self.assertLess(time.monotonic() - started, 3)
