@@ -27,6 +27,8 @@ need core/WORKFLOW.md   'uses that entry as the primary route'              'mat
 need core/WORKFLOW.md   'explicit `direct` remains an intensity inside an entry route' 'explicit direct entry 유지 절'
 need core/WORKFLOW.md   'compose --start --shape direct --field <field> --prompt-file'     'direct source edit starts isolated preparation before editing'
 need core/WORKFLOW.md   'Their receipt and explicit finish contracts are unchanged' 'explicit direct receipt/finish compatibility'
+need core/WORKFLOW.md 'Keep small document edits that fit this scope in the opening session' 'WORKFLOW §0.2.1 small document edits stay in the opening session'
+need core/WORKFLOW.md 'evidence across sections or integrate an external draft' 'WORKFLOW §0.2.1 cross-section and external-draft work stays framed'
 need core/OPERATIONS.md 'Main-session role contract'                        'OPERATIONS §5.10 main-session role contract 존재'
 need core/OPERATIONS.md 'Inline exceptions'                                 'OPERATIONS §5.10 inline exceptions 존재'
 need core/OPERATIONS.md 'Delegation surfaces are distinct'                  'OPERATIONS §5.10 delegation surfaces 존재'

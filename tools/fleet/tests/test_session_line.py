@@ -467,9 +467,9 @@ class CommonSessionLineTest(unittest.TestCase):
         recent = [{**row, "type": "user-correction"}, {**row, "ts": "2026-11-12T08:00:00", "type": "completion", "headline": ""},
                   {**row, "type": "decision"}]
         self.assertEqual(session_panel.session_memory_items({"memory_recent": recent}, now),
-                         [{"kind": "correction", "age": "3m", "text": "route rows read who first", "tier": "", "scope": "", "body": "body line"},
-                          {"kind": "done", "age": "2h 3m", "text": "body line", "tier": "", "scope": "", "body": ""},
-                          {"kind": "decision", "age": "3m", "text": "route rows read who first", "tier": "", "scope": "", "body": "body line"}])
+                         [{"kind": "correction", "age": "3m", "text": "route rows read who first", "tier": "", "scope": "", "body": "body line", "group": "guide"},
+                          {"kind": "done", "age": "2h 3m", "text": "body line", "tier": "", "scope": "", "body": "", "group": ""},
+                          {"kind": "decision", "age": "3m", "text": "route rows read who first", "tier": "", "scope": "", "body": "body line", "group": "guide"}])
         self.assertEqual(len(session_panel.session_memory_items({"memory_recent": recent * 3}, now)), 3)   # (11-18: the newest three)
         # 11-20 (the MEM popup): the record's body is the snippet the journal keeps, 600 characters at most and one line of printable text;
         # nothing where it is the headline itself, a `superseded_by=` pointer or empty.

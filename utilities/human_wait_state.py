@@ -736,15 +736,60 @@ def _prune_selected(overlay, needed=1):
     return len(overlay) + needed <= _SELECTED_RESPONSE_MAX
 
 
+def choice_descriptions(question):
+    """Each choice's own words under its name, in choice order (`""` for none): what the board draws.
+
+    11-27 (the person: "답변 선지가 클로드 네이티브 질문창이 좀 더 상세하네?", design 가): an object choice's
+    `description`, else its `means`, then its `scope_note` on its own line unless already said; a registered
+    question's plain choices, its optional `choice_descriptions` (`{choice value: words}`). Display only."""
+    if not isinstance(question, dict):
+        return []
+    choices = question.get("choices") if isinstance(question.get("choices"), list) else []
+    given = question.get("choice_descriptions")
+    given = given if isinstance(given, dict) else {}
+    out = []
+    for choice in choices:
+        if isinstance(choice, dict):
+            words = next((value for value in (choice.get("description"), choice.get("means"))
+                          if isinstance(value, str) and value.strip()), "")
+        else:
+            words = given.get(choice) if isinstance(choice, str) else None
+        # The asker's lines stay (spaces made one, an empty line left out).
+        said = ("\n".join(" ".join(line.split()) for line in words.splitlines() if line.strip())
+                if isinstance(words, str) else "")
+        note = " ".join(choice.get("scope_note").split()) if (
+            isinstance(choice, dict) and isinstance(choice.get("scope_note"), str)) else ""
+        if note and note not in " ".join(said.split()):
+            said = said + "\n" + note if said else note
+        out.append(said)
+    return out
+
+
+def _message_choice_descriptions(choices, descriptions):
+    """The registered record's `choice_descriptions`: each given choice's words, in choice order, the
+    empty ones left out (None when none is left: the record then reads as it always did)."""
+    if descriptions is None:
+        return None
+    if (not isinstance(descriptions, dict) or any(key not in choices for key in descriptions)
+            or any(not isinstance(value, str) for value in descriptions.values())):
+        raise ValueError("question-choice-descriptions-invalid")
+    kept = {choice: descriptions[choice].strip() for choice in choices
+            if descriptions.get(choice, "").strip()}
+    return kept or None
+
+
 def register_message(harness, session_id, seat, text, *, sequence, choices=(),
-                     recommended=None, secret=False, cwd=None, incarnation=None, replace=None):
+                     recommended=None, secret=False, cwd=None, incarnation=None, replace=None,
+                     descriptions=None):
     """Register one explicit question on the caller's current prompt, without waiting.
 
     A different question is added beside this session's other open ones under its own id; it
     closes none of them. The same question still open (``_question_key``), or this very
     registration again, returns that record (its id, time and answer). The atomic write of the
     session's question file is the registration; an answer record is made when an answer or
-    draft comes. ``replace`` is accepted and has no effect (an earlier release replaced)."""
+    draft comes. ``replace`` is accepted and has no effect (an earlier release replaced).
+    `descriptions` (`{choice value: words}`, optional) are the words the board draws under those
+    choices (`choice_descriptions`); they count toward the record's size and are never part of an answer."""
     import session_tidy as tidy
     if (tidy.is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower()
             in {"owner", "worker", "auxiliary", "reviewer"}):
@@ -762,8 +807,11 @@ def register_message(harness, session_id, seat, text, *, sequence, choices=(),
     if recommended is not None and (type(recommended) is not int
                                     or not 0 <= recommended < len(choices)):
         raise ValueError("question-recommendation-invalid")
+    described = _message_choice_descriptions(list(choices), descriptions)
     question = {"id": "message-response", "question": text, "choices": list(choices),
                 "recommended": recommended, "is_secret": bool(secret), "is_other": True, "required": True}
+    if described:
+        question["choice_descriptions"] = described
     detail = {"questions": [question]}
     if len(json.dumps(detail, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 4096:
         raise ValueError("question-detail-too-large")
@@ -3568,6 +3616,23 @@ def _workflow_gate_interview(binding, item):
         return None, "workflow-interview-unavailable:" + type(exc).__name__
 
 
+def _frame_gate_choice(interview, question, option):
+    """One frame interview option as the board's choice (label as value; `means` with the scope line as ever; its
+    own `description`; the scope line as `scope_note`, drawn once by `choice_descriptions`)."""
+    import frame_interview as FI
+    choice = {"value": option["label"], "label": option["label"]}
+    note = FI.route_scope_note(interview, question.get("id"), option["label"])
+    means = " ".join(part for part in (
+        option["means"] if isinstance(option.get("means"), str) else "", note) if part)
+    if means or isinstance(option.get("means"), str):
+        choice["means"] = means
+    if isinstance(option.get("description"), str) and option["description"].strip():
+        choice["description"] = option["description"].strip()
+    if note:
+        choice["scope_note"] = note
+    return choice
+
+
 def _workflow_gate_detail(binding, item):
     """Build selected-only questions from the current gate or its sealed interview."""
     route = binding["route"]
@@ -3621,14 +3686,7 @@ def _workflow_gate_detail(binding, item):
         for option in options:
             if not (isinstance(option, dict) and isinstance(option.get("label"), str)):
                 continue
-            choice = {"value": option["label"], "label": option["label"]}
-            # The card's own words, then the one line the runtime reads from the proposal's structure.
-            means = " ".join(part for part in (
-                option["means"] if isinstance(option.get("means"), str) else "",
-                FI.route_scope_note(interview, question.get("id"), option["label"])) if part)
-            if means or isinstance(option.get("means"), str):
-                choice["means"] = means
-            choices.append(choice)
+            choices.append(_frame_gate_choice(interview, question, option))
         entry = {"id": question["id"], "question": question["question"], "choices": choices,
                  # The existing frame answer validator accepts off-menu notes.
                  "is_other": True}
