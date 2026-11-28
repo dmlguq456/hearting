@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Claude PreToolUse(AskUserQuestion): register the question as this session's Hearting question
-and refuse the native call (utilities/native_question_redirect.py).
+"""Claude PreToolUse(AskUserQuestion): carry the outcome of utilities/native_question_redirect.py.
 
-When nothing was registered the native question goes through and keeps its Fleet decision
-marker (hooks/fleet-interaction-state.py), so the person always sees the question."""
+Registered (a new or the same open Hearting question) or unknown: the native call is refused with
+its one line. Otherwise the native question goes through and keeps its Fleet decision marker
+(hooks/fleet-interaction-state.py)."""
 import importlib.util
 import io
 import json

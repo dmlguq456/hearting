@@ -9144,14 +9144,15 @@ def _continue_look(target, req):
 
 
 def _continue_composer_reason(target, harness="codex"):
-    """Why a Codex or OpenCode continue must not start a turn now: the input box holds the
-    person's writing, a form is open, or the screen cannot be read; else None.
+    """Why a continue must not start a turn now: the input box holds the person's writing, a form
+    is open, or the screen cannot be read; else None.
 
-    Claude's continue types into the pane behind the same judgement
-    (`_native_idle_prompt_guard`); Codex's goes through its native queue and OpenCode's through
-    its idle plugin, which start the turn at the moment the session is idle (not by typing, so
-    the writing is never overwritten, but never started over either), so the box is read before
-    the continue is bound to either."""
+    Every harness reads the box here before the claim, so a draft holds the continue without a
+    bound ref and the helper asks again. Claude's continue then types into the pane behind the
+    same judgement once more (`_native_idle_prompt_guard`); Codex's goes through its native queue
+    and OpenCode's through its idle plugin, which start the turn at the moment the session is
+    idle (not by typing, so the writing is never overwritten, but never started over either), so
+    for those two the box is read again after the claim, before the continue is bound."""
     refusal = _tmux_input_refusal(target)
     if refusal:
         return refusal
@@ -9230,7 +9231,7 @@ def cmd_continue(args):
         if reason.startswith("not-idle-") or reason == "new-session-unknown" and (
                 transfer_ref or str(req.get("new_session") or "-") == "-"):
             return "queued"
-        if harness in ("codex", "opencode") and reason in clear.CONTINUE_INPUT_WAIT:
+        if clear.hold_continue_for_input(None, reason):
             return "queued"     # the writing in the box or a passing doubt; nothing was bound
         return _look_outcome(reason)
 
@@ -9255,7 +9256,8 @@ def cmd_continue(args):
     if req is None:
         return finish("skipped", why)
     reason = _continue_look(target, req)
-    if not reason and harness in ("codex", "opencode"):
+    if not reason:
+        # Before the claim on every harness: a draft or an open form holds the continue unbound.
         reason = _continue_composer_reason(target, harness)
     if reason:
         return finish(held(reason), reason)
