@@ -43,7 +43,7 @@ elif sys.argv[1:2] == ["ack"]:
 
 JS = r'''
 import { pathToFileURL } from "node:url";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 const { AgentHarnessGuards } = await import(pathToFileURL(PLUGIN));
 const prompts = [];
 const accept = ACCEPT;
@@ -70,6 +70,11 @@ for (let round = 0; round < ROUNDS; round++) {
   if (round === 0 && late.length) { await settle(1000); for (const [path, text] of late) writeFileSync(path, text) }
   await settle(GAP);
 }
+// The pass that wakes the session ends with its `ack`, which the stub records as the watch's `.ack.json`; the
+// prompts are read once it stands (its helpers are separate Python starts, longer than the rounds on a loaded
+// runner: `0 != 1`, CI 11-28 5 of 76 runs), then one more gap for a second prompt to show if one were sent.
+const acked = ACK_FILE;
+if (acked) { for (let i = 0; i < 400 && !existsSync(acked); i++) await settle(50); await settle(GAP); }
 hooks.dispose();
 console.log(JSON.stringify({prompts}));
 '''
@@ -110,12 +115,13 @@ class OpenCodeWatchWakeTest(unittest.TestCase):
         for path, text in files:
             path.write_text(text)
 
-    def run_plugin(self, *, accept=True, rounds=2, store=True, ack="ok", gap=300):
+    def run_plugin(self, *, accept=True, rounds=2, store=True, ack="ok", gap=300, until_acked=False):
         js = JS.replace("PLUGIN", json.dumps(str(self.rt / "adapters/opencode/plugins/hearting-guards.js"))
                         ).replace("ACCEPT", "true" if accept else "false").replace(
             "STORE", "true" if store else "false").replace("GAP", str(gap)).replace(
             "LATE_FILES", json.dumps(self.late_files)).replace(
-            "SID", json.dumps(SID)).replace("ROUNDS", str(rounds))
+            "SID", json.dumps(SID)).replace("ROUNDS", str(rounds)).replace(
+            "ACK_FILE", json.dumps(str(self.state / "peer-watches" / f"{WATCH}.ack.json") if until_acked else ""))
         env = dict(os.environ, HARNESS_STATE_ROOT=str(self.state), AGENT_DISPATCH_JOBS=str(self.state / "jobs.log"),
                    AGENT_HOME=str(self.rt), STUB_STATE=str(self.state), STUB_ACK=ack)
         for key in ("AGENT_SESSION_ROLE", "AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH",
@@ -134,7 +140,7 @@ class OpenCodeWatchWakeTest(unittest.TestCase):
 
     def test_an_idle_session_is_woken_once_with_its_watch_receipt_and_acks_it(self):
         self.arm_receipt()
-        result = self.run_plugin()
+        result = self.run_plugin(until_acked=True)
         self.assertEqual(len(result["prompts"]), 1)
         request = result["prompts"][0]
         self.assertEqual(request["path"], {"id": SID})
