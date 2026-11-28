@@ -14,11 +14,14 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 
 import contextlib
+import fcntl
 import io
 import json
 from pathlib import Path
 import re
+import threading
 import time
+import types
 import unittest
 from unittest import mock
 
@@ -405,6 +408,192 @@ class OriginTest(Base):
         self.assertTrue(listed["complete"])
         mine = [item["id"] for item in listed["items"] if item["id"] in {cli["id"], *found}]
         self.assertEqual(sorted(mine), sorted([cli["id"], *found]))
+
+
+class FixOneTest(Base):
+    """Review of #1948, fix 1: each back to main's path, an order changed or one condition, nothing added."""
+
+    @contextlib.contextmanager
+    def store_lock_taken(self):
+        real, taken = state._cache_write_lock, []
+
+        def spy():
+            taken.append("store lock")
+            return real()
+        with mock.patch.object(state, "_cache_write_lock", side_effect=spy):
+            yield taken
+
+    def test_asking_an_open_question_again_takes_no_store_lock_and_a_new_one_decides_under_it(self):
+        """Review 6: main returned the open id on the seat lock's read; the store lock is for writing."""
+        if os.geteuid() == 0:
+            self.skipTest("root opens a read-only lock file")
+        choices = ["Dogwood", "Field Guide"]
+        for harness in HARNESSES:
+            with self.subTest(harness=harness):
+                cli, _ = self.f.ask(harness, SID, text=SINGLE["question"], choices=choices)
+                maps = self.ids(redirect.decide(harness, asked([MULTI])[harness]), 1)[0]
+                seat, lock = self.f.seat(harness, SID), state.state_root() / ".cache-write.lock"
+
+                def ask_cli():
+                    return state.register_message(harness, SID, seat, SINGLE["question"], choices=choices,
+                                                  sequence=self.tidy.read_prompt_seq(seat), cwd=str(self.f.root))
+                held = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+                fcntl.flock(held, fcntl.LOCK_EX)                 # another process's write in progress
+                result, thread = {}, threading.Thread(target=lambda: result.update(cli=ask_cli()))
+                try:
+                    started = time.monotonic()
+                    with self.store_lock_taken() as taken:
+                        thread.start()
+                        thread.join(3)
+                        self.assertFalse(thread.is_alive(), "questions ask waited for the store lock")
+                        found = self.ids(redirect.decide(harness, asked([SINGLE, MULTI])[harness]), 2)
+                    self.assertLess(time.monotonic() - started, 3)
+                    self.assertEqual((result["cli"]["id"], found, taken), (cli["id"], [cli["id"], maps], []))
+                finally:
+                    fcntl.flock(held, fcntl.LOCK_UN)
+                    os.close(held)
+                    thread.join()
+                os.chmod(lock, 0o400)                            # the lock file cannot be opened
+                try:
+                    self.assertEqual(ask_cli()["id"], cli["id"])
+                    with self.store_lock_taken() as taken:
+                        self.assertEqual(self.ids(redirect.decide(harness, asked([MULTI, SINGLE])[harness]), 2),
+                                         [maps, cli["id"]])
+                    self.assertEqual(taken, [])
+                finally:
+                    os.chmod(lock, 0o600)
+                # one new record among them: decided again and written under the store lock, once
+                with self.store_lock_taken() as taken, self.file_writes(harness) as writes:
+                    added = self.ids(redirect.decide(harness, asked([SINGLE, PREVIEW, MULTI])[harness]), 3)
+                self.assertEqual((added[0], added[2], len(taken), writes), (cli["id"], maps, 1, [set(added)]))
+                self.done(harness)
+
+    def test_the_interception_takes_the_open_same_question_before_this_registration_ended(self):
+        """Review 4: an ended record of this very registration does not hide the same question still open."""
+        for harness in HARNESSES:
+            with self.subTest(harness=harness):
+                ended = self.ids(redirect.decide(harness, asked([SINGLE])[harness]), 1)[0]
+                state.close_message(harness, SID, self.f.seat(harness, SID).key, ended)
+                other, _ = self.f.ask(harness, SID, text=SINGLE["question"], choices=["Dogwood", "Field Guide"],
+                                      recommended=1)               # the same question, another recommendation
+                with self.file_writes(harness) as writes:
+                    found = self.ids(redirect.decide(harness, asked([SINGLE, MULTI])[harness]), 2)
+                self.assertEqual(found[0], other["id"])
+                self.assertNotIn(found[1], (ended, other["id"]))
+                self.assertEqual(writes, [{other["id"], found[1]}])
+                self.done(harness)
+
+    def test_questions_ask_still_returns_this_very_registration_ended_first(self):
+        """`questions ask` (no `open_only`) is main's in every state."""
+        choices = ["Dogwood", "Field Guide"]
+        for harness in HARNESSES:
+            with self.subTest(harness=harness):
+                first, _ = self.f.ask(harness, SID, text=SINGLE["question"], choices=choices)
+                state.close_message(harness, SID, self.f.seat(harness, SID).key, first["id"])
+                other, _ = self.f.ask(harness, SID, text=SINGLE["question"], choices=choices, recommended=1)
+                again, _ = self.f.ask(harness, SID, text=SINGLE["question"], choices=choices)
+                self.assertEqual((again["id"], again["lifecycle"]), (first["id"], "cancelled"))
+                self.assertEqual(self.open_ids(harness), [other["id"]])
+                self.done(harness)
+
+    def test_registering_and_reading_back_a_lost_result_name_the_same_open_question(self):
+        """Review 4: an earlier release's form of A (its descriptions in the text) and this release's A both open;
+        the registration and the read-back take the same one: oldest first, then by id."""
+        old_text = SINGLE["question"] + "\n- Dogwood: The trail's name\n- Field Guide: What the book is"
+        words = {"Dogwood": "The trail's name", "Field Guide": "What the book is"}
+        real = state.register_messages
+
+        def lost(*args, **kwargs):
+            real(*args, **kwargs)
+            raise TimeoutError("result lost after the write")
+        for harness in HARNESSES:
+            for times in ("older first", "same time"):
+                for path in ("registered", "lost result"):
+                    with self.subTest(harness=harness, times=times, path=path):
+                        old, _ = self.f.ask(harness, SID, text=old_text, choices=["Dogwood", "Field Guide"])
+                        new, _ = self.f.ask(harness, SID, text=SINGLE["question"], choices=["Dogwood", "Field Guide"],
+                                            recommended=0, descriptions=words)   # this call's own record of A
+                        if times == "same time":         # the file lists the larger id first
+                            rows = self.rows(harness)
+                            for row in rows.values():
+                                row["since"] = rows[old["id"]]["since"]
+                            state._write(state._questions_path(harness, SID), {
+                                "schema_version": 1, "source": "S4-questions", "harness": harness,
+                                "session_id": SID, "questions": dict(sorted(rows.items(), reverse=True))})
+                        first = min((old["id"], new["id"])) if times == "same time" else old["id"]
+                        patch = (mock.patch.object(state, "register_messages", side_effect=lost)
+                                 if path == "lost result" else contextlib.nullcontext())
+                        with patch:
+                            found = self.ids(redirect.decide(harness, asked([SINGLE, MULTI])[harness]), 2)
+                        self.assertEqual(found[0], first)
+                        self.done(harness)
+
+    def test_a_question_too_large_still_finds_the_same_one_open_in_an_earlier_release_slot(self):
+        """Review 5: the seat is known before the questions are built, so the read-back sees the earlier release's
+        slot: its LF text fits (4,096 bytes), the same text with CRLF does not, and the open id is named."""
+        def text(room):
+            return "Read the notes?\n" + "x" * room + "\nok\ny"
+
+        def size(value):
+            return len(json.dumps(state._message_detail({"text": value}), separators=(",", ":")))
+        lf_text = text(4096 - size(text(0)))
+        crlf = {"question": lf_text.replace("\n", "\r\n"), "options": []}
+        self.assertEqual(size(lf_text), 4096)
+        with self.assertRaisesRegex(ValueError, "question-detail-too-large"):
+            size(crlf["question"])                               # 4,102 bytes
+        for harness in HARNESSES:
+            for seat_known in (True, False):
+                with self.subTest(harness=harness, seat_known=seat_known):
+                    seat = self.f.seat(harness, SID)
+                    old = {"schema_version": 1, "mode": "message", "source": "S4", "id": "S4:" + "c" * 64,
+                           "harness": harness, "session_id": SID, "seat_key": seat.key, "sequence": 0,
+                           "question": lf_text, "detail": state._message_detail({"text": lf_text}),
+                           "since": time.time() - 60, "lifecycle": "open", "cwd": str(self.f.root), "incarnation": None}
+                    slot = state._session_signal_path(old)
+                    state._write(slot, old)                          # as an earlier release wrote it
+                    unproven = (mock.patch.object(self.tidy, "resolve_seat", return_value=types.SimpleNamespace(key=None))
+                                if not seat_known else contextlib.nullcontext())
+                    with unproven, self.file_writes(harness) as writes:
+                        outcome = redirect.decide(harness, asked([crlf])[harness])
+                    if seat_known:
+                        self.assertEqual(self.ids(outcome, 1), [old["id"]])
+                        self.assertIsNone(interaction.read_wait(SID, harness))       # nothing opens natively
+                    else:                                        # no proven seat: no slot to read, as before
+                        self.assertEqual(outcome, redirect.Outcome("pass"))
+                    self.assertEqual(writes, [])
+                    os.unlink(slot)
+                    self.done(harness)
+
+    def test_options_that_are_no_list_make_that_question_one_a_record_cannot_carry(self):
+        """Review 1: an integer or an object as a question's `options` sinks only that question."""
+        for harness in HARNESSES:
+            for bad in ({"question": "How many copies?", "options": 7},
+                        {"question": "Which name?", "options": {"label": "Name"}}):
+                with self.subTest(harness=harness, bad=bad["question"]):
+                    with self.file_writes(harness) as writes:
+                        outcome = redirect.decide(harness, asked([SINGLE, bad, MULTI])[harness])
+                    self.assertEqual((outcome, writes), (redirect.Outcome("pass"), []))
+                    wait = interaction.read_wait(SID, harness)               # one marker for the whole call
+                    self.assertEqual(wait and wait["source"], "codex-question" if harness == "codex" else None)
+                    self.done(harness)
+                    self.assertEqual(redirect.decide(harness, asked([bad])[harness]), redirect.Outcome("pass"))
+                    self.done(harness)
+                    cli, _ = self.f.ask(harness, SID, text=SINGLE["question"], choices=["Dogwood", "Field Guide"])
+                    outcome = redirect.decide(harness, asked([MULTI, bad, SINGLE])[harness])
+                    self.assertEqual(outcome.kind, "unknown")
+                    self.assertIn("3 (" + cli["id"] + ")", outcome.reason)
+                    self.assertIn("could not register questions 1, 2", outcome.reason)
+                    self.assertEqual((self.open_ids(harness), interaction.read_wait(SID, harness)), ([cli["id"]], None))
+                    self.done(harness)
+
+    def test_string_options_no_options_and_an_empty_list_are_as_before(self):
+        for harness in HARNESSES:
+            for options, choices in ((["Yes", "No"], ["Yes", "No"]), (None, []), ([], [])):
+                with self.subTest(harness=harness, options=options):
+                    call = {"question": "Print the index?", **({} if options is None else {"options": options})}
+                    found = self.ids(redirect.decide(harness, asked([call])[harness]), 1)
+                    self.assertEqual(self.question(harness, found[0])["choices"], choices)
+                    self.done(harness)
 
 
 if __name__ == "__main__":

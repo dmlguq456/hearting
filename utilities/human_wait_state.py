@@ -832,10 +832,11 @@ def register_messages(harness, session_id, seat, items, *, sequence, cwd=None, i
     ``items`` hold ``register_message``'s question arguments (``text``, ``choices``,
     ``recommended``, ``secret``, ``descriptions``) and may add ``same``: more ``_question_key``
     values that are that question (an earlier release's text of it). One item that does not fit
-    fails them all before anything is written. Then, on the session's questions read again under
-    the lock that writes them, each item is this very registration again (its record, ended or
-    not; with ``open_only`` an ended one fails them all, ``question-already-ended``) or the same
-    question still open, else a new record; the new ones are written in one replacement of the
+    fails them all before anything is written. Then each item is this very registration again
+    (its record, ended or not; with ``open_only`` the oldest same one open comes first and an
+    ended one fails them all, ``question-already-ended``) or the same question still open, else a
+    new record. None new is all, under the seat lock alone; else it is decided again on the rows
+    read under the lock that writes them, and the new ones are written in one replacement of the
     session's file, so they appear together. Every new record carries ``origin`` when given
     (``"native-question-tool"``: an intercepted native question call)."""
     import session_tidy as tidy
@@ -868,16 +869,19 @@ def register_messages(harness, session_id, seat, items, *, sequence, cwd=None, i
             value["origin"] = origin
         values.append(value)
     found, added = [], []
+    order = (lambda row: (row["since"], row["id"])) if open_only else (lambda row: row["since"])
 
-    def fresh():
-        rows, state = message_questions(harness, session_id, seat.key)
+    def fresh(read=None):
+        rows, state = read or message_questions(harness, session_id, seat.key)
         if state != "ok":
             raise OSError("question-storage-unreadable")
+        del found[:], added[:]
         for item, value in zip(items, values):
             keys = {_question_key(value), *item.get("same", ())}
-            same = rows.get(value["id"]) or next((row for row in sorted(rows.values(), key=lambda row: row["since"])
-                                                  if row.get("lifecycle") == "open"
-                                                  and _question_key(row) in keys), None)
+            same = rows.get(value["id"])
+            if open_only or not same:
+                same = next((row for row in sorted(rows.values(), key=order) if row.get("lifecycle") == "open"
+                             and _question_key(row) in keys), None) or same
             if same and open_only and same.get("lifecycle") != "open":
                 raise ValueError("question-already-ended")
             if not same:
@@ -889,9 +893,11 @@ def register_messages(harness, session_id, seat, items, *, sequence, cwd=None, i
     with tidy.seat_lock(seat.key):
         if tidy.read_prompt_seq(seat) != sequence:
             raise ValueError("question-prompt-changed")
-        if message_questions(harness, session_id, seat.key)[1] != "ok":
+        read = message_questions(harness, session_id, seat.key)
+        if read[1] != "ok":
             raise ValueError("question-storage-unreadable")
-        _write_message(values[0], fresh)
+        if fresh(read):                 # none new: what was read is the answer, without the store lock
+            _write_message(values[0], fresh)
         # An explicit question owns its prompt: this session's body-display marker leaves (it
         # shared the question's slot, which the question used to overwrite).
         slot = _slot_path(values[0]) if added else None

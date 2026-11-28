@@ -24,8 +24,9 @@ each hook carries it as it is:
   cannot be written never holds the question back. The same call again is decided anew.
 - unknown: the question storage cannot be read, or a write's result was lost and cannot be read
   back; or some of the call's questions are open and another cannot be registered. Nothing opens;
-  the refusal says so once. The same call again reads as one of the other two; in the last case
-  the refusal names the open ids and asks only the other questions again.
+  the refusal says so once. In the first two cases the same call again reads as one of the other
+  two; in the last it is unknown again, and the refusal names the open ids and asks only the other
+  questions again.
 
 Registered workers and native subagents do nothing here.
 
@@ -106,7 +107,8 @@ def _normalized(harness: str, payload: dict) -> tuple[str, list | None]:
 
 
 def _row(raw):
-    if not isinstance(raw, dict) or not _text(raw.get("question")):
+    if (not isinstance(raw, dict) or not _text(raw.get("question"))
+            or not isinstance(raw.get("options") or [], list)):     # an integer or an object lists no options
         return None
     options = []
     for option in raw.get("options") or ():
@@ -238,12 +240,12 @@ def register(harness: str, session_id: str, rows: list, *, cwd: str | None = Non
     import human_wait_state as HWS
     import session_tidy as tidy
     cwd = cwd or os.getcwd()
-    items = [_item(row, same) for row, same in zip(rows, keys or _item_keys(rows))]
     seat = tidy.resolve_seat(harness, cwd, os.environ, session_id, hook=True)
     if not seat.key:
         raise Unfit("question-seat-unproven")
     if seen is not None:
         seen["seat_key"] = seat.key
+    items = [_item(row, same) for row, same in zip(rows, keys or _item_keys(rows))]
     sys.path.insert(0, str(ROOT / "tools"))
     from fleet.process_identity import current_launch_context
     launch = current_launch_context(harness, session_id)
