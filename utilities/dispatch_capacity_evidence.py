@@ -1302,7 +1302,7 @@ def _usage_snapshot(snapshot, *, models, unknown_window_min, now, env):
         if expires is not None:
             if now < expires:
                 # A sentence-derived reset has no row label of its own; name the moment instead.
-                label = reset if tz is None else _iso(expires)
+                label = _iso(expires)
                 states[harness] = f"limited({label})"
                 epochs[harness] = expires
                 if harness == "claude":
