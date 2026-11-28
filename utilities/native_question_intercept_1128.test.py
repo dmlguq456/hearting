@@ -212,12 +212,18 @@ class SecretTest(Base):
                 self.assertIsNone(interaction.read_wait(SID, harness))
                 self.done(harness)
 
-    def test_several_questions_with_a_secret_among_them_pass_and_write_nothing(self):
+    def test_a_secret_among_several_questions_is_that_one_secret_question(self):
+        """11-28 (items): the call's questions are registered one each, so a secret one keeps the
+        secret answer form alone and the others stay plain."""
         mixed = asked([start_question(), {"question": "API token?", "isSecret": True, "options": []}])
         for harness in HARNESSES:
             with self.subTest(harness=harness):
-                self.assertEqual(redirect.decide(harness, mixed[harness]).kind, "pass")
-                self.assertEqual(self.open_ids(harness), [])
+                outcome = redirect.decide(harness, mixed[harness])
+                self.assertEqual(outcome.kind, "registered")
+                start, token = (questions.questions_of(state.read_selected_request(
+                    {"id": found, "harness": harness, "session_id": SID}))[0] for found in ID.findall(outcome.reason))
+                self.assertEqual((start["question"], start["secret"]), ("Start now?", False))
+                self.assertEqual((token["question"], token["secret"]), ("API token?", True))
                 self.done(harness)
 
 
@@ -230,10 +236,10 @@ class PassTest(Base):
         def slow(*args, **kwargs):
             time.sleep(10)
         yield "no seat", mock.patch.object(tidy, "resolve_seat", return_value=tidy.Seat("none", "", pane=""))
-        yield "refused write", mock.patch.object(state, "register_message",
+        yield "refused write", mock.patch.object(state, "register_messages",
                                                  side_effect=ValueError("question-prompt-changed"))
         yield "failed write", mock.patch.object(state, "_write", side_effect=OSError("disk full"))
-        yield "budget", mock.patch.object(state, "register_message", side_effect=slow)
+        yield "budget", mock.patch.object(state, "register_messages", side_effect=slow)
         yield "shape", None
 
     def test_each_failure_before_a_write_passes_and_the_same_call_is_decided_again(self):
@@ -356,14 +362,14 @@ class UnknownTest(Base):
                 self.done(harness)
 
     def test_a_write_whose_result_was_lost_reads_back_as_the_same_id(self):
-        real = state.register_message
+        real = state.register_messages
 
         def lost(*args, **kwargs):
             real(*args, **kwargs)
             raise TimeoutError("result lost after the write")
         for harness in HARNESSES:
             with self.subTest(harness=harness):
-                with mock.patch.object(state, "register_message", side_effect=lost):
+                with mock.patch.object(state, "register_messages", side_effect=lost):
                     first = self.the_id(redirect.decide(harness, payloads()[harness]))
                 self.assertEqual(self.open_ids(harness), [first])
                 self.assertEqual(self.the_id(redirect.decide(harness, payloads()[harness])), first)

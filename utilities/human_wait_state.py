@@ -350,11 +350,13 @@ def seat_open_messages(harness, session_id, seat_key):
                   key=lambda row: (row["since"], row["id"]))
 
 
-def _write_message(signal):
+def _write_message(signal, fresh=None):
     """Persist one message question at its address: an earlier release's record in its own slot,
     any other as a row of its session's file, the whole file replaced at once. The short store
-    lock serializes writers of one session; callers hold the seat lock and not that one."""
-    path = _signal_path(signal)
+    lock serializes writers of one session; callers hold the seat lock and not that one.
+    Registration passes ``fresh``: called under that lock, it returns the new records, which join
+    the session's file (``signal`` names it) in this one replacement; none, nothing is written."""
+    path = _questions_path(signal["harness"], signal["session_id"]) if fresh else _signal_path(signal)
     if not isinstance(path, _QuestionPath):
         _write_signal_source(signal)
         return
@@ -362,7 +364,10 @@ def _write_message(signal):
         rows = _read_questions_file(path)
         if rows is None:
             raise OSError("question-storage-unreadable")
-        rows[signal["id"]] = signal
+        added = fresh() if fresh else [signal]
+        if not added:
+            return
+        rows.update((value["id"], value) for value in added)
 
         def ended_at(row):
             end = row.get("completion") or row.get("closed")
@@ -778,6 +783,31 @@ def _message_choice_descriptions(choices, descriptions):
     return kept or None
 
 
+def _message_detail(item):
+    """One question's record ``detail`` (``register_message``'s arguments in a dict), or ValueError
+    naming what does not fit: text, choices, recommendation, descriptions or size."""
+    text, choices, recommended = item.get("text"), item.get("choices", ()), item.get("recommended")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("question-text-empty")
+    if (not isinstance(choices, (list, tuple)) or len(choices) > 8
+            or any(not isinstance(choice, str) or not choice.strip() for choice in choices)
+            or len(set(choices)) != len(choices)):
+        raise ValueError("question-choices-invalid")
+    if recommended is not None and (type(recommended) is not int
+                                    or not 0 <= recommended < len(choices)):
+        raise ValueError("question-recommendation-invalid")
+    described = _message_choice_descriptions(list(choices), item.get("descriptions"))
+    question = {"id": "message-response", "question": text, "choices": list(choices),
+                "recommended": recommended, "is_secret": bool(item.get("secret")), "is_other": True,
+                "required": True}
+    if described:
+        question["choice_descriptions"] = described
+    detail = {"questions": [question]}
+    if len(json.dumps(detail, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 4096:
+        raise ValueError("question-detail-too-large")
+    return detail
+
+
 def register_message(harness, session_id, seat, text, *, sequence, choices=(),
                      recommended=None, secret=False, cwd=None, incarnation=None, replace=None,
                      descriptions=None):
@@ -790,6 +820,25 @@ def register_message(harness, session_id, seat, text, *, sequence, choices=(),
     draft comes. ``replace`` is accepted and has no effect (an earlier release replaced).
     `descriptions` (`{choice value: words}`, optional) are the words the board draws under those
     choices (`choice_descriptions`); they count toward the record's size and are never part of an answer."""
+    return register_messages(harness, session_id, seat, [
+        {"text": text, "choices": choices, "recommended": recommended, "secret": secret,
+         "descriptions": descriptions}], sequence=sequence, cwd=cwd, incarnation=incarnation)[0]
+
+
+def register_messages(harness, session_id, seat, items, *, sequence, cwd=None, incarnation=None,
+                      origin=None, open_only=False):
+    """Register several questions at once on the caller's current prompt: their records, in order.
+
+    ``items`` hold ``register_message``'s question arguments (``text``, ``choices``,
+    ``recommended``, ``secret``, ``descriptions``) and may add ``same``: more ``_question_key``
+    values that are that question (an earlier release's text of it). One item that does not fit
+    fails them all before anything is written. Then each item is this very registration again
+    (its record, ended or not; with ``open_only`` the oldest same one open comes first and an
+    ended one fails them all, ``question-already-ended``) or the same question still open, else a
+    new record. None new is all, under the seat lock alone; else it is decided again on the rows
+    read under the lock that writes them, and the new ones are written in one replacement of the
+    session's file, so they appear together. Every new record carries ``origin`` when given
+    (``"native-question-tool"``: an intercepted native question call)."""
     import session_tidy as tidy
     if (tidy.is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower()
             in {"owner", "worker", "auxiliary", "reviewer"}):
@@ -798,58 +847,68 @@ def register_message(harness, session_id, seat, text, *, sequence, choices=(),
             or _safe_native_ref(session_id) != session_id or not seat.key
             or type(sequence) is not int or sequence < 0):
         raise ValueError("question-caller-unknown")
-    if not isinstance(text, str) or not text.strip():
+    details = [_message_detail(item) for item in items]
+    if not details:
         raise ValueError("question-text-empty")
-    if (not isinstance(choices, (list, tuple)) or len(choices) > 8
-            or any(not isinstance(choice, str) or not choice.strip() for choice in choices)
-            or len(set(choices)) != len(choices)):
-        raise ValueError("question-choices-invalid")
-    if recommended is not None and (type(recommended) is not int
-                                    or not 0 <= recommended < len(choices)):
-        raise ValueError("question-recommendation-invalid")
-    described = _message_choice_descriptions(list(choices), descriptions)
-    question = {"id": "message-response", "question": text, "choices": list(choices),
-                "recommended": recommended, "is_secret": bool(secret), "is_other": True, "required": True}
-    if described:
-        question["choice_descriptions"] = described
-    detail = {"questions": [question]}
-    if len(json.dumps(detail, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 4096:
-        raise ValueError("question-detail-too-large")
     if incarnation is not None and (not isinstance(incarnation, dict)
             or set(incarnation) != {"pid", "proc_start"}
             or type(incarnation["pid"]) is not int or incarnation["pid"] <= 1
             or not str(incarnation["proc_start"]).isdigit()):
         raise ValueError("question-caller-incarnation-invalid")
-    raw = json.dumps([harness, session_id, seat.key, sequence, detail, incarnation],
-                     ensure_ascii=False, separators=(",", ":"))
-    item_id = "S4:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    value = {"schema_version": 1, "mode": "message", "source": "S4", "id": item_id,
-             "harness": harness, "session_id": session_id, "seat_key": seat.key,
-             "sequence": sequence, "question": text, "detail": detail,
-             "since": time.time(), "lifecycle": "open", "cwd": str(cwd or os.getcwd()),
-             "incarnation": incarnation}
+    now, values = time.time(), []
+    for index, (item, detail) in enumerate(zip(items, details)):
+        raw = json.dumps([harness, session_id, seat.key, sequence, detail, incarnation],
+                         ensure_ascii=False, separators=(",", ":"))
+        value = {"schema_version": 1, "mode": "message", "source": "S4",
+                 "id": "S4:" + hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+                 "harness": harness, "session_id": session_id, "seat_key": seat.key,
+                 "sequence": sequence, "question": item["text"], "detail": detail,
+                 "since": now + index / 1e6,          # the board keeps the items' order
+                 "lifecycle": "open", "cwd": str(cwd or os.getcwd()), "incarnation": incarnation}
+        if origin:
+            value["origin"] = origin
+        values.append(value)
+    found, added = [], []
+    order = (lambda row: (row["since"], row["id"])) if open_only else (lambda row: row["since"])
+
+    def fresh(read=None):
+        rows, state = read or message_questions(harness, session_id, seat.key)
+        if state != "ok":
+            raise OSError("question-storage-unreadable")
+        del found[:], added[:]
+        for item, value in zip(items, values):
+            keys = {_question_key(value), *item.get("same", ())}
+            same = rows.get(value["id"])
+            if open_only or not same:
+                same = next((row for row in sorted(rows.values(), key=order) if row.get("lifecycle") == "open"
+                             and _question_key(row) in keys), None) or same
+            if same and open_only and same.get("lifecycle") != "open":
+                raise ValueError("question-already-ended")
+            if not same:
+                rows[value["id"]] = same = value
+                added.append(value)
+            found.append(same)
+        return added
+
     with tidy.seat_lock(seat.key):
         if tidy.read_prompt_seq(seat) != sequence:
             raise ValueError("question-prompt-changed")
-        rows, state = message_questions(harness, session_id, seat.key)
-        if state != "ok":
+        read = message_questions(harness, session_id, seat.key)
+        if read[1] != "ok":
             raise ValueError("question-storage-unreadable")
-        same = rows.get(item_id) or next((row for row in sorted(rows.values(), key=lambda row: row["since"])
-                                          if row.get("lifecycle") == "open"
-                                          and _question_key(row) == _question_key(value)), None)
-        if same:
-            return same
-        _write_message(value)
+        if fresh(read):                 # none new: what was read is the answer, without the store lock
+            _write_message(values[0], fresh)
         # An explicit question owns its prompt: this session's body-display marker leaves (it
         # shared the question's slot, which the question used to overwrite).
-        slot = _slot_path(value)
+        slot = _slot_path(values[0]) if added else None
         marker = _read(slot) if slot is not None else None
         if (marker and marker.get("mode") != "message"
                 and (marker.get("harness"), marker.get("session_id")) == (harness, session_id)):
             with suppress(OSError):
                 _remove_signal_source(marker, slot)
-    _request_producer()
-    return value
+    if added:
+        _request_producer()
+    return found
 
 
 def close_message(harness, session_id, seat_key, item_id):
