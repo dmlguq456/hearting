@@ -432,9 +432,14 @@ def _read_project_memory(today, journal_ids=(), decisions=DECISIONS_PER_PROJECT,
                 (today, *_OPEN_TYPES, *scope_params, max(0, int(decisions))),
             ).fetchall()
             ids = [str(item) for item in journal_ids if item][:256]
-            headlines = dict(con.execute(
-                f"SELECT id, headline FROM records WHERE id IN ({', '.join('?' for _ in ids)})",
-                ids).fetchall()) if ids else {}
+            # 11-27: the same read gives each record's stored type and topics too (the session panel's MEM colors).
+            topics = "topics" if "topics" in columns else "NULL AS topics"
+            found = con.execute(
+                f"SELECT id, headline, type, {topics} FROM records WHERE id IN ({', '.join('?' for _ in ids)})",
+                ids).fetchall() if ids else []
+            headlines = {rid: text for rid, text, _type, _topics in found}
+            stored = {str(rid): {"type": rtype if isinstance(rtype, str) else "", "topics": list(_json_strings(raw, 160))}
+                      for rid, _text, rtype, raw in found}
         finally:
             con.close()
     except (sqlite3.Error, OSError, ValueError, TypeError):
@@ -486,7 +491,8 @@ def _read_project_memory(today, journal_ids=(), decisions=DECISIONS_PER_PROJECT,
             del entry["open"][max(1, int(open_limit)):]
     result = {"state": "success", "by_repo": by_repo, "limited": limited,
               "record_count": sum(len(e["decisions"]) + len(e["open"]) for e in by_repo.values()),
-              "headlines": {str(rid): str(text)[:240] for rid, text in headlines.items() if text}}
+              "headlines": {str(rid): str(text)[:240] for rid, text in headlines.items() if text},
+              "stored": stored}
     _project_cache.update(key=key, value=result)
     return dict(result)
 
@@ -620,6 +626,7 @@ def collect(now=None, *, include_summary=True, include_backlog=False):
                               if row.get("id")})
         database = _read_project_memory(now.date().isoformat(), journal_ids)
         headlines = database.pop("headlines", None) or {}
+        database.pop("stored", None)
         for rows in by_repo.values():
             for row in rows:
                 if row.get("id") in headlines:
