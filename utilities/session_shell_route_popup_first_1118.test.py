@@ -11,9 +11,11 @@ popup stands at once from what the host already holds, and its own reading repla
    that fails or is cut at 12 s changes the words (`다시 읽지 못함`) and leaves the rows; the next success removes them.
 4. Where the table is replaced, a person who scrolled keeps the route at the top of the window; one who pressed or
    Tabbed to a route sees it come into view.
-5. (11-19) A press on a route's row opens that route's page, not the table: the first screen is the stage boxes the panel's
-   own values draw (`panelView.routePageFirst`), then Fleet's page; Enter goes to the table and back; a press on the
-   section's head opens the table. A route with no stage line keeps the panel's box as its first screen.
+5. (11-19) A press on a route's row opens that route's page, not the table: the first screen is the page's frame the panel's
+   own values draw (`panelView.routePageFirst`; 11-27: for every form, its top rule on the screen row the reading's stands on,
+   `session_shell_route_page_frame_first_1127.test.py` holds it to Fleet's cells), then Fleet's page; Enter goes to the table
+   and back; a press on the section's head opens the table. A route the panel holds no leg band for (an older backend's
+   record) keeps the panel's box as its first screen.
 
 The collection is given a synthetic delay (as a long `collect_all` is); the host runs in a private PTY. Nothing here
 reaches a real account, session, artifact root or terminal.
@@ -117,9 +119,14 @@ _popup=m._panel_popup
 def popup(binding,request):
     if not SERVED:
         SERVED.append(1);open(C+'/backends','a').write('%d\n'%os.getpid())      # one line for each process that serves a popup (held or one-shot, any kind)
+    n=0
+    if request.get('kind')=='routes' and request.get('page'):
+        open(C+'/framed','a').write(('1' if request.get('framed') is True else '0')+'\n')   # (11-27: what the page request says its first screen was)
+        n=len(open(C+'/framed').read().split())                                          # (this page request's number)
     if request.get('kind')=='routes' and request.get('page') and os.path.exists(C+'/hold-page'):
-        open(C+'/page-asked','w').close()
-        while os.path.exists(C+'/hold-page'):time.sleep(0.01)
+        open(C+'/page-asked','w').close();open(C+'/page-asked-%d'%n,'w').close()
+        # (held while `hold-page` stands, unless this very request is let go: `release-<n>`)
+        while os.path.exists(C+'/hold-page') and not os.path.exists(C+'/release-%d'%n):time.sleep(0.01)
     return _popup(binding,request)
 m._panel_popup=popup
 m.session_questions=lambda harness,sid,**_kw:[]
@@ -190,7 +197,7 @@ const measure=async(label,press_=opened)=>{
     const sample=(name,s)=>{
       const b=box(s);
       frames[name]=plain(s);
-      return {top:b.top+1,bottom:b.bottom+1,stage:popupHas('╔═')(s),fleet:popupHas('FLEET_R1')(s),reading:reading(s)};
+      return {top:b.top+1,bottom:b.bottom+1,stage:popupHas('╔═')(s),fleet:popupHas('FLEET_R1')(s),reading:reading(s),rule:s.findIndex(l=>l.includes('╔═'))};
     };
     if(pending)fs.writeFileSync(cfg.vm+'.hang','');
     await opened();
@@ -231,7 +238,7 @@ const measure=async(label,press_=opened)=>{
     checks.changed=await measure('changed',async()=>{const p=await at('PANEL_R4');await press(p.x+2,p.y,0);});
     await close();
   }
-  if(sc==='row_page'||sc==='row_page_unstaged'){
+  if(sc==='row_page'||sc==='row_page_unstaged'||sc==='row_page_solo'){
     // A press on a route's row opens its page. The first screen is the stage boxes (a staged route) or the panel's box (none),
     // Fleet's page comes after the delay, Enter goes to the table and back, a press on the head opens the table.
     const staged=sc==='row_page';
@@ -268,12 +275,12 @@ const measure=async(label,press_=opened)=>{
        // the panel's pass mark `gate: true` is not drawn as a word; an empty `out`/`unit` is `·`
        c.first_true=/\btrue\b/.test(ft);c.first_dot=/out +· +│/.test(ft)&&/unit +· +│/.test(ft);c.first_box=boxGeo(fl);}
       c.first_rule=popupHas('╔═')(first.s);c.first_keys=popupHas('Enter 표로 돌아가기')(first.s);
-      c.first_top=box(first.s).top;
+      c.first_top=box(first.s).top;c.first_rule_row=first.s.findIndex(l=>l.includes('╔═'));
       frames['row_page_'+w+'_first']=plain(first.s);
       // (b) Fleet's page.
       const full=await until(s=>paged(s)&&popupHas('FLEET_R2')(s)&&!staleWords(s),'Fleet\'s page at '+w,cfg.delay*1000+20000);
       c.full_ms=Date.now()-t0;c.full_title=title(full.s);frames['row_page_'+w+'_page']=plain(full.s);
-      c.full_top=box(full.s).top;
+      c.full_top=box(full.s).top;c.full_rule_row=full.s.findIndex(l=>l.includes('╔═'));
       c.full_keys=popupHas('Enter 표로 돌아가기')(full.s);c.page_box=boxGeo(plain(full.s));
       // the page's stage boxes (Fleet's own drawing: a narrow page cuts a name, `plan-che…`), inside the page's `║` frame
       const tops=plain(full.s).filter(l=>/║.*┌─ (plan|execute|impl-r|test|report)/.test(l));
@@ -316,6 +323,99 @@ const measure=async(label,press_=opened)=>{
     if(!staged){
       // A route with no stage line: the panel's box first (no stage boxes, no frame), Fleet's page after.
       checks.collections=lines('collections').length;
+    }
+  }
+  if(sc==='reopen_shed'||sc==='late_band'||sc==='long_page'||sc==='stale_answer'){
+    // 11-27 (review 3 of #1900): the page request says what its first screen was (`framed`), whatever the panel's values are by the time it goes.
+    const framedLog=()=>fs.existsSync(cfg.control+'/framed')?fs.readFileSync(cfg.control+'/framed','utf8').split('\n').filter(Boolean):[];
+    // (the page's frame first: its second content row is the frame's rail; the first screen as before 11-27 has the legs' short box there)
+    const frameFirst=s=>{const p=plain(s);return p.length>2&&/^│ ║/.test(p[2]);};
+    const ruleRow=s=>s.findIndex(l=>l.includes('╔═'));
+    const setRows=fn=>{const c=JSON.parse(fs.readFileSync(cfg.cache,'utf8'));c.observed_at=Date.now()/1000;c.route_panels[cfg.key]=c.route_panels[cfg.key].map(fn);write(cfg.cache,JSON.stringify(c));};
+    const pageKeys=popupHas('Enter 표로 돌아가기');
+    const pressRow=async()=>{let target=await at('PANEL_R1');
+      if(!target){const fold=await at('▴');if(fold){await press(fold.x,fold.y,0);await until(s=>s.some(l=>l.includes('PANEL_R1')),'the opened panel');await sleep(300);target=await at('PANEL_R1');}}
+      await press(target.x+2,target.y,0);};
+    const sample=s=>({framed:frameFirst(s),rule:ruleRow(s)});
+    if(sc==='stale_answer'){
+      // 11-28 (review 4 of #1900): an answer asked for a first screen this popup no longer shows is not this screen's. At 80×24: read and closed; the
+      // projection keeps the route without its band; opened again on the page read last (its frame), that request held; the title changes (the
+      // page read last is no longer reused); Enter twice opens the page again on the stage boxes as before; only the held request is let go.
+      await resize(80,24);
+      await pressRow();
+      await until(s=>pageKeys(s)&&popupHas('FLEET_R1')(s)&&!staleWords(s),'the page read');
+      await close();
+      setRows(r=>{const {bands,head_repo,session_tag,...rest}=r;return rest;});
+      await sleep(2000);
+      control('hold-page');
+      await pressRow();
+      const again=await until(pageKeys,'the page read last, again');
+      await settle(()=>fs.existsSync(cfg.control+'/page-asked'),'the request held');
+      const held=framedLog().length;
+      checks.again=sample(again.s);
+      setRows(r=>({...r,title:'PANEL_R1 바뀐 제목'}));
+      await sleep(2000);
+      await key('\r',150);await key('\r',400);
+      checks.short=sample(await screen());frames.stale_short=plain(await screen());
+      fs.writeFileSync(cfg.control+'/release-'+held,'');
+      await settle(()=>fs.existsSync(cfg.control+'/page-asked-'+(held+1)),'the next page request',10000);
+      await sleep(600);
+      const between=await screen();checks.between={...sample(between),stale:staleWords(between)};frames.stale_between=plain(between);
+      checks.log=framedLog();
+      fs.unlinkSync(cfg.control+'/hold-page');
+      const read=await until(s=>pageKeys(s)&&!staleWords(s),'the page read anew',20000);
+      await sleep(400);checks.read=sample(await screen());
+      // (opened again quickly on the same first screen: the answer asked for it is used, no page read more than the one asked)
+      const before=framedLog().length;
+      control('hold-page');
+      await key('\r',100);await key('\r',300);
+      await settle(()=>framedLog().length>before,'the page asked again',10000);
+      fs.unlinkSync(cfg.control+'/hold-page');
+      await until(s=>pageKeys(s)&&!staleWords(s),'the page read again',20000);
+      await sleep(1500);
+      checks.fast={added:framedLog().length-before,read:sample(await screen())};
+    }
+    if(sc==='reopen_shed'){
+      // (가) Read and closed; the projection then keeps the route without its picture values (the reading's key unchanged); opened again.
+      await pressRow();
+      await until(s=>pageKeys(s)&&popupHas('FLEET_R1')(s)&&!staleWords(s),'the page read');
+      await close();
+      setRows(r=>{const {bands,head_repo,session_tag,...rest}=r;return {...rest,model:'Opus 9.9',owner_model:'Opus 9.9'};});
+      await until(has('9.9'),'the panel holding the route without its band');await sleep(300);
+    }
+    if(sc==='stale_answer'){}
+    else if(sc==='late_band'){
+      // (나) Enter on the table while its reading waits; the band comes before the page is asked for.
+      fs.writeFileSync(cfg.vm+'.hang','');
+      await opened();await until(either,'the route table');
+      await settle(()=>fs.existsSync(cfg.control+'/collections'),'the table collection is waiting');
+      child.write('\r');
+      const first=await until(pageKeys,'the first screen');
+      checks.first=sample(first.s);frames.late_first=plain(first.s);
+      // (the popup stands over the panel: the host takes the projection in well under the two seconds given)
+      setRows(r=>({...r,bands:cfg.bands,head_repo:'project/',session_tag:'e9'}));
+      await sleep(2000);
+      fs.unlinkSync(cfg.vm+'.hang');
+    }else{
+      if(cfg.size)await resize(cfg.size[0],cfg.size[1]);
+      control('hold-page');
+      await pressRow();
+      const first=await until(pageKeys,'the first screen');
+      await settle(()=>fs.existsSync(cfg.control+'/page-asked'),'the page request held');
+      checks.first=sample(first.s);frames[sc+'_first']=plain(first.s);
+      fs.unlinkSync(cfg.control+'/hold-page');
+    }
+    // (a long page reads its lines first: at 80×24 its first screenful names no route)
+    if(sc!=='stale_answer'){
+    const read=await until(s=>pageKeys(s)&&(sc==='long_page'||popupHas('FLEET_R1')(s))&&!staleWords(s),'the page read',cfg.delay*1000+30000);
+    await sleep(600);
+    const s1=await screen(),p1=plain(s1);frames[sc+'_read']=p1;
+    // (no rail of the first screen's frame stands above the reading's own frame top, or anywhere where the reading shows none)
+    const top=p1.findIndex(l=>/╔═/.test(l));
+    checks.read={...sample(s1),foot:Number(((p1.find(l=>/\d+\/\d+ ·/.test(l))||'').match(/\d+\/(\d+)/)||[])[1]||0),
+      residue:p1.slice(1,top>=0?top:p1.length).filter(l=>/║/.test(l)).length};
+    if(sc==='long_page'){for(let i=0;i<60;i++)await key('\x1b[6~',40);await sleep(400);const end=plain(await screen());frames.long_end=end;checks.end_bottom=end.some(l=>/╚═/.test(l));}
+    checks.log=framedLog();
     }
   }
   if(sc==='hang'){
@@ -606,7 +706,17 @@ def route_nodes(rid):
              'loops': [], 'detail': detail, 'title': [['leg 2 · code dev', 'head']]}]
 
 
-def route_row(rid, title, state='working', staged=False):
+def solo_nodes(rid, state='working'):
+    """Fleet's own node shape for a solo route (`live._node_groups` over its one `one-shot` node)."""
+    sys.path.insert(0, str(ROOT / 'tools'))
+    from fleet.explorer import live
+    node = {'id': 'one-shot', 'state': 'failed' if state == 'dead' else 'active', 'harness': 'claude', 'model': 'Opus 5.5',
+            'effort': 'high', 'unit': '_kernel/owner', 'elapsed_min': 3, 'depends_on': []}
+    route = dict(fleet_route(rid, 'x', state), legs=[['autopilot-code', node['state'], '0/1']])
+    return live._node_groups([node], route, rid, route['legs'], time.time(), 0, node['state'])
+
+
+def route_row(rid, title, state='working', staged=False, solo=False):
     row = {'id': rid, 'title': title, 'state': state, 'worker_stage': 'one-shot', 'shape': 'one-shot-owner',
            'stages': [{'name': 'one-shot', 'st': 'failed' if state == 'dead' else 'active'}], 'harness': 'claude',
            'model': 'Opus 5.5', 'effort': 'high'}
@@ -614,6 +724,13 @@ def route_row(rid, title, state='working', staged=False):
         row.update(shape='staged', kind_form='team', worker_stage='execute', capability='autopilot-code', mode='dev', intensity='standard',
                    chain=[{'name': 'frame', 'state': 'done'}, {'name': 'code', 'state': 'active'}],
                    stages=[stage_values(i, n) for i, n in enumerate(STAGES)])
+    if staged or solo:
+        # 11-27: the page's leg band and its head's first words as the producer carries them (`live._panel_bands`), which the first
+        # screen's frame is drawn from; a row without them (an older backend's, the plain fixture) keeps the panel's box first.
+        sys.path.insert(0, str(ROOT / 'tools'))
+        from fleet.explorer import live
+        row.update(bands=live._panel_bands(route_nodes(rid) if staged else solo_nodes(rid, state)), head_repo='project/', session_tag='e9',
+                   legs=2 if staged else 1, age='23m', capability='autopilot-code', mode='dev', intensity='standard' if staged else 'quick')
     return row
 
 
@@ -630,6 +747,38 @@ def fleet_route(rid, title, state='working', staged=False):
 
 def rid(n):
     return 'rt-a%015d' % n
+
+
+def long_view(ident, title, stages, lines):
+    """Fleet's view of a long staged route (11-27): ``stages`` serial stages (Fleet's `_node_groups` over them) and ``lines`` of visibility."""
+    sys.path.insert(0, str(ROOT / 'tools'))
+    from fleet.explorer import live
+    nodes = []
+    for i in range(stages):
+        state = 'done' if i < 2 else 'active' if i == 2 else 'todo'
+        nodes.append({'id': 'step-%02d' % (i + 1), 'state': state, 'harness': 'claude', 'model': 'Opus 5.5', 'effort': 'high', 'gate': 'code-plan-review',
+                      'says': 'working on the change', 'unit': 'qa/step', 'gate_passed': state == 'done', 'elapsed_min': 30 if state != 'todo' else None,
+                      'depends_on': [nodes[-1]['id']] if nodes else []})
+    route = dict(fleet_route(ident, title, staged=True), stages=[live._stage_record(item) for item in nodes], legs=[['code', 'active', '2/%d' % stages]],
+                 visibility={'schema': 'route_visibility_v1', 'route_id': ident, 'summary': 'ok', 'next': 'wait', 'lines': lines})
+    return {'repos': [{'id': 'project', 'name': 'project'}], 'system': {}, 'routes': [route],
+            'nodes': {ident: live._node_groups(nodes, route, ident, route['legs'], time.time(), 2, 'active')},
+            'sessions': [{'tag': 'e9', 'repo_id': 'project', 'harness': 'claude', 'model': 'Opus 5.5', 'effort': 'high', 'context': 46,
+                          'window': 200000, 'state': 'working', 'title': '이 창', 'now': '그리는 중', 'age': '23m'}]}
+
+
+def page_rows_as_before(view, columns):
+    """How many rows the route's page answer has as main draws it (the page asked for by a first screen that was not its frame)."""
+    import session_shell
+    from fleet import session_tags
+    from fleet.explorer.view_model import ExplorerViewModel
+    held = ExplorerViewModel.from_mapping(view)
+    with mock.patch.object(session_tags, 'assigned_tag', lambda harness, sid: 'e9'), mock.patch.object(session_shell, 'registry_root', lambda: None), \
+            mock.patch.object(session_shell, '_popup_view_model', lambda harness, sid, kind: held), \
+            mock.patch.object(session_shell, '_paint_mode', lambda: (256, False)), mock.patch.dict(session_shell._HELD_VIEW, clear=True):
+        answer = session_shell._panel_popup({'harness': 'claude', 'sid': 'sid'}, {'kind': 'routes', 'columns': columns, 'open': view['routes'][0]['id'],
+                                                                                 'page': True, 'rows': 40})
+    return answer, len(json.dumps({'id': 0, **answer}, ensure_ascii=False).encode())
 
 
 SIDS = {'claude': '00000000-0000-4000-8000-0000000000d1', 'codex': '00000000-0000-4000-8000-0000000000d2',
@@ -677,7 +826,7 @@ class RoutePopupFirstTest(unittest.TestCase):
         cls.no_record = catalog['fleet.route.no_stage_record']['ko']
         cls.count = 0
 
-    def run_case(self, harness, scenario, routes, delay=3, dead=None, staged=False, now=False):
+    def run_case(self, harness, scenario, routes, delay=3, dead=None, staged=False, now=False, solo=False, banded=True, size=None, long=None):
         """One private PTY run; returns what the driver read (its `frames` and `checks`)."""
         type(self).count += 1
         case = self.root / ('%s-%s-%d' % (harness, scenario, type(self).count)); case.mkdir(mode=0o700)
@@ -692,7 +841,10 @@ class RoutePopupFirstTest(unittest.TestCase):
         # The failed route (the third, unless said) is the one the popup unfolds when no route is pressed.
         dead = dead or (1 if routes == 1 else 3)
         states = ['dead' if n == dead else 'working' for n in range(1, routes + 1)]
-        value['route_panels'][key] = [route_row(rid(n), 'PANEL_R%d 제목' % n, states[n - 1], staged) for n in range(1, routes + 1)]
+        value['route_panels'][key] = [route_row(rid(n), 'PANEL_R%d 제목' % n, states[n - 1], staged, solo) for n in range(1, routes + 1)]
+        bands = value['route_panels'][key][0].get('bands')
+        if not banded:     # (a projection that keeps the route without its picture values)
+            value['route_panels'][key] = [{k: v for k, v in row.items() if k not in ('bands', 'head_repo', 'session_tag')} for row in value['route_panels'][key]]
         value['route_status'][key] = 'route %d' % routes; value['route_sessions'][key] = time.time() + 3600
         target.write_text(json.dumps(value)); target.chmod(0o600)
         if now:  # the panel's NOW row (a fresh summary in this session's title record), so ←→ reaches the NOW popup
@@ -701,12 +853,17 @@ class RoutePopupFirstTest(unittest.TestCase):
                 from fleet import titles
                 titles.write(sid, '이 창 제목', summary='그리는 중이다', harness=harness, source='refresher')
         vm = case / 'vm.json'
-        vm.write_text(json.dumps({'repos': [{'id': 'project', 'name': 'project'}], 'system': {},
-            'routes': [fleet_route(rid(n), 'FLEET_R%d 제목' % n, states[n - 1], staged) for n in range(1, routes + 1)],
-            # a staged route's page is drawn from Fleet's nodes: its leg band and the stage boxes
-            'nodes': {rid(n): route_nodes(rid(n)) for n in range(1, routes + 1)} if staged else {},
-            'sessions': [{'tag': 'e9', 'repo_id': 'project', 'harness': harness, 'model': 'Opus 5.5', 'effort': 'high', 'context': 46,
-                          'window': 200000, 'state': 'working', 'title': '이 창', 'now': '그리는 중', 'age': '23m'}]}, ensure_ascii=False))
+        if long:
+            view = long_view(rid(1), 'FLEET_R1 제목', **long)
+            vm.write_text(json.dumps(view, ensure_ascii=False, default=list))
+        else:
+            vm.write_text(json.dumps({'repos': [{'id': 'project', 'name': 'project'}], 'system': {},
+              'routes': [fleet_route(rid(n), 'FLEET_R%d 제목' % n, states[n - 1], staged) for n in range(1, routes + 1)],
+              # a staged route's page is drawn from Fleet's nodes: its leg band and the stage boxes
+              'nodes': {rid(n): route_nodes(rid(n)) for n in range(1, routes + 1)} if staged else
+                       {rid(n): solo_nodes(rid(n), states[n - 1]) for n in range(1, routes + 1)} if solo else {},
+              'sessions': [{'tag': 'e9', 'repo_id': 'project', 'harness': harness, 'model': 'Opus 5.5', 'effort': 'high', 'context': 46,
+                            'window': 200000, 'state': 'working', 'title': '이 창', 'now': '그리는 중', 'age': '23m'}]}, ensure_ascii=False))
         backend = case / 'backend'
         backend.write_text(BACKEND.format(python=sys.executable, utilities=str(ROOT / 'utilities'), tools=str(ROOT / 'tools'),
                                           sid=sid, vm=str(vm), control=str(control)))
@@ -715,7 +872,8 @@ class RoutePopupFirstTest(unittest.TestCase):
                   'entry': str(ROOT / 'utilities/session-shell/entry.py'), 'launcher': str(self.launcher),
                   'backend': str(backend), 'diagnostic': str(case / 'display-errors'), 'cache': str(target), 'vm': str(vm),
                   'project': str(project), 'result': str(case / 'result.json'), 'control': str(control),
-                  'scenario': scenario, 'routes': routes, 'delay': delay, 'unreadable': self.unreadable, 'noRecord': self.no_record}
+                  'scenario': scenario, 'routes': routes, 'delay': delay, 'unreadable': self.unreadable, 'noRecord': self.no_record,
+                  'bands': bands, **({'size': list(size)} if size else {})}
         (case / 'config.json').write_text(json.dumps(config))
         env = dict(self.env, LOOP_CONFIG=str(case / 'config.json'))
         child = subprocess.Popen([self.node, str(self.driver)], env=env, cwd=project, stdout=subprocess.PIPE,
@@ -943,7 +1101,7 @@ class RoutePopupFirstTest(unittest.TestCase):
             # (the boxes' own marks), no Fleet row, the words that it is not this reading's, the page's key line.
             self.assertLess(w['first_ms'], 1000, w)
             self.assertFalse(w['first_has_fleet'], w)
-            self.assertFalse(w['first_paged'], w)
+            self.assertTrue(w['first_paged'], w)          # (11-27: the page's own frame stands from the first moment; the title's words say it is not this reading's)
             self.assertTrue(w['first_rule'], w)
             # (a window shows the boxes its rows hold: the first row of them at least, in order)
             self.assertGreaterEqual(w['first_boxes'], 3, w)
@@ -965,6 +1123,9 @@ class RoutePopupFirstTest(unittest.TestCase):
             self.assertNotIn('읽은 내용', w['full_title'], w)
             self.assertTrue(w['full_keys'], w)
             self.assertEqual(w['first_top'], w['full_top'], w)
+            # (11-27: the frame's top rule stands on the same screen row before and after the reading: the reading moves nothing above it)
+            self.assertGreaterEqual(w['first_rule_row'], 0, w)
+            self.assertEqual(w['first_rule_row'], w['full_rule_row'], w)
             # (the page shows Fleet's stage boxes inside its frame, not the words that the route has no stage record)
             self.assertFalse(w['full_no_record'], w)
             for name in STAGES:
@@ -974,7 +1135,7 @@ class RoutePopupFirstTest(unittest.TestCase):
             self.assertEqual(w['full_marks'], {'done': 2, 'active': 1}, w)
             if width == '120':  # the page's limit: closed from the table, a press on the row opens the stage boxes first
                 self.assertGreaterEqual(w['limit']['boxes'], 3, w)
-                self.assertFalse(w['limit']['paged'] or w['limit']['fleet'], w)
+                self.assertFalse(w['limit']['fleet'], w)
             # (c) Enter: the table with the route unfolded and no frame; (d) Enter: the page again.
             self.assertIn('FLEET_R', w['table_unfolded'], w)
             self.assertNotIn('staged', w['table_unfolded'], w)
@@ -1003,11 +1164,28 @@ class RoutePopupFirstTest(unittest.TestCase):
                     self.assertTrue(frame['stage'] and frame['reading'], checks)
                     self.assertFalse(frame['fleet'], checks)
                     self.assertEqual(frame['top'], 2, checks)
+                    # (11-27: the frame's top rule is the page's first row, on the row the reading's stands on)
+                    self.assertEqual(frame['rule'], checks['full']['rule'], checks)
                 self.assertTrue(checks['full']['stage'] and checks['full']['fleet'], checks)
                 self.assertEqual(checks['full']['top'], 2, checks)
+                self.assertEqual(checks['full']['rule'], checks['full']['top'], checks)
                 self.assertEqual(checks['collections'], 1, checks)
 
-    def test_a_route_with_no_stage_line_keeps_the_panels_box_first_and_opens_to_its_page(self):
+    def test_a_solo_route_opens_to_its_frame_at_once_and_the_reading_leaves_its_top_rule_where_it_stands(self):
+        # 11-27 (#1760's D): a route with no stage line (the owner alone) draws its page's frame from the first moment too.
+        w = self.run_case('claude', 'row_page_solo', 3, delay=1, solo=True)['checks']['widths']['160']
+        self.assertLess(w['first_ms'], 1000, w)
+        self.assertTrue(w['first_rule'] and w['first_paged'], w)
+        self.assertFalse(w['first_has_fleet'], w)
+        self.assertIn('다시 읽는 중', w['first_title'], w)
+        self.assertTrue(w['first_keys'] and w['full_keys'], w)
+        self.assertEqual(w['first_top'], w['full_top'], w)
+        self.assertGreaterEqual(w['first_rule_row'], 0, w)
+        self.assertEqual(w['first_rule_row'], w['full_rule_row'], w)
+        self.assertNotIn('읽은 내용', w['full_title'], w)
+
+    def test_a_route_the_panel_holds_no_leg_band_for_keeps_the_panels_box_first_and_opens_to_its_page(self):
+        # (an older backend's record carries no `bands`: its first screen stays the panel's box, as before 11-27)
         w = self.run_case('claude', 'row_page_unstaged', 3, delay=1)['checks']['widths']['160']
         self.assertLess(w['first_ms'], 1000, w)
         self.assertFalse(w['first_rule'], w)
@@ -1017,6 +1195,60 @@ class RoutePopupFirstTest(unittest.TestCase):
         self.assertTrue(w['full_keys'], w)
         self.assertEqual(w['first_top'], w['full_top'], w)
         self.assertNotIn('읽은 내용', w['full_title'], w)
+
+    def test_a_reopened_page_asks_for_its_frame_as_its_first_screen_showed_it(self):
+        # 11-27 (review 3 of #1900, (가)): read and closed, then the projection keeps the route without its band; opened again, the first screen is the
+        # page read last, its frame first, and the request says so: the reading stands the frame on the same row.
+        c = self.run_case('claude', 'reopen_shed', 1, delay=1, staged=True)['checks']
+        self.assertTrue(c['first']['framed'], c)
+        self.assertEqual(c['log'][-1], '1', c)
+        self.assertTrue(c['read']['framed'], c)
+        self.assertEqual(c['first']['rule'], c['read']['rule'], c)
+
+    def test_an_answer_asked_for_another_first_screen_is_not_drawn_on_this_one(self):
+        # 11-28 (review 4 of #1900): the page opened again on the stage boxes as before keeps them while the answer asked for the frame of an earlier
+        # opening comes and goes; only the answer asked for this first screen changes it (as main's would). Opened again quickly on the same first
+        # screen, the answer asked for it is used: one page read, no more.
+        c = self.run_case('claude', 'stale_answer', 1, delay=1, staged=True)['checks']
+        self.assertTrue(c['again']['framed'], c)
+        self.assertFalse(c['short']['framed'], c)
+        self.assertEqual(c['log'][-2:], ['1', '0'], c)            # (the held request asked for the frame; the one after it, for this screen)
+        self.assertFalse(c['between']['framed'], c)               # (the old answer drew nothing: no band on row 3, the stage boxes stay)
+        self.assertTrue(c['between']['stale'], c)                 # (nor did it end the reading)
+        self.assertFalse(c['read']['framed'], c)
+        self.assertEqual(c['fast']['added'], 1, c)
+        self.assertFalse(c['fast']['read']['framed'], c)
+
+    def test_a_band_that_comes_after_the_first_screen_leaves_the_page_as_it_was(self):
+        # 11-27 (review 3 of #1900, (나)): Enter while the table's reading waits draws the stage boxes as before (no band yet); the band arrives before the
+        # page is asked for: the request still says the first screen was not the frame, and the page reads as main's, the lines first.
+        c = self.run_case('claude', 'late_band', 1, delay=1, staged=True, banded=False)['checks']
+        self.assertFalse(c['first']['framed'], c)
+        self.assertEqual(c['log'][-1], '0', c)
+        self.assertFalse(c['read']['framed'], c)
+        self.assertEqual(c['read']['residue'], 0, c)
+
+    def test_a_long_page_reads_as_main_whole_through_the_hosts_own_reading_and_leaves_nothing_of_its_first_screen(self):
+        # 11-27 (review 3 of #1900): a page whose frame first would not fit the answer is main's answer byte for byte; a large one (past the 64 KiB the
+        # held reader takes) comes the one-shot way, every row of it, down to the frame's bottom; the frame of the first screen leaves no rail behind.
+        path = '/very/long/fixture/path/' + 'segment-name/' * 12 + 'artifact.md'
+        twenty = [['why', 'the person asked for it', 'info']] + [['path', path, 'info']] * 18 + [['next', 'wait for the stage', 'info']]
+        wide = [['why', 'the person asked for it', 'info']] + [['path', 'ก' * 165 + '%03d' % i, 'info'] for i in range(18)] + [['next', 'wait for the stage', 'info']]
+        for label, size, columns, long in (('80x24, 45 stages, 20 lines', (80, 24), 72, {'stages': 45, 'lines': twenty}),
+                                           ('200x46, 45 stages, wide letters', (200, 46), 192, {'stages': 45, 'lines': wide})):
+            with self.subTest(label):
+                answer, size_bytes = page_rows_as_before(long_view(rid(1), 'FLEET_R1 제목', **long), columns)
+                c = self.run_case('claude', 'long_page', 1, delay=1, staged=True, size=size, long=long)['checks']
+                self.assertTrue(c['first']['framed'], c)
+                self.assertEqual(c['log'][-1], '1', c)
+                self.assertFalse(c['read']['framed'], c)
+                self.assertEqual(c['read']['foot'], len(answer['rows']), (c, size_bytes))
+                # (read down to its last row, it ends as main's answer does: the frame's bottom where main's answer reaches it)
+                self.assertEqual(c['end_bottom'], any(''.join(text for text, _style in row).startswith('╚═') for row in answer['rows']), c)
+                self.assertEqual(c['read']['residue'], 0, c)
+                if columns == 192:
+                    self.assertGreater(size_bytes, 65536)          # (past the held reader: the host read it the one-shot way)
+                    self.assertTrue(c['end_bottom'], c)
 
     def test_the_gaps_of_the_aged_key_a_failed_reread_keys_pressed_under_it_and_a_held_backend_that_died(self):
         # Review of #1735 (yellow 1 and 4).

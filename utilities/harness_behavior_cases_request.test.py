@@ -319,7 +319,8 @@ PANEL_SCRIPT = r"""
 const path=require('node:path'),view=require(process.argv[1]);
 const cells=s=>[...s].reduce((n,c)=>n+(/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/u.test(c)?2:1),0);
 const t=text=>({text}),title='검토 제목 9c4f7d',paint={harness:t('codex'),model_text:t('GPT 5.5'),effort:t('high')};
-const req=(glyph,kind,status,id='rq-aaaaaa')=>({id,way:glyph==='→'?'→':'←',glyph,who:'[b2]',title,status,age:'2m',kind,paint,details:[],body:[]});
+// (11-27: a closed request keeps its direction after its result, so the requester's closed one is sent: `✓ →`.)
+const req=(glyph,kind,status,id='rq-aaaaaa',way=glyph==='→'?'→':'←')=>({id,way,glyph,who:'[b2]',title,status,age:'2m',kind,paint,details:[],body:[]});
 const route=(state,glyph)=>({id:'rt-a',title,state,kind:state,shape:'one-shot',kind_word:'code',role:'owner',elapsed:'3m',
   paint:{glyph:t(glyph),harness:t('claude')}});
 const message={way:'←',who:'[b2]',harness:'codex',when:'09:01',kind:'reply',text:title+' · open'};
@@ -334,9 +335,13 @@ const cases={
  'short-no-rule':[38,7,true,[req('←','request-in','open')],[message],[]],
  'narrow':[32,7,true,[req('←','request-in','open')],[message],[]],
  'bottom':[80,24,false,[req('←','request-in','open')],[message],[]],
- 'requester':[44,40,true,[req('→','request-out','partial answer'),req('✓','request-done','final answer','rq-bbbbbb')],
+ 'requester':[44,40,true,[req('→','request-out','partial answer'),req('✓','request-done','final answer','rq-bbbbbb','→')],
    [{...message,way:'→'}],[route('done','✓')]],
  'requester-no-request':[44,40,true,[],[{...message,way:'→'}],[route('done','✓')]],
+ // (11-27, review of #1905: a closed request whose title begins with an arrow, an older record with no tag and no direction,
+ // and a newer one that carries its direction; the bottom layout at 44 cells.)
+ 'arrow-title-old':[44,24,false,[{id:'rq-cccccc',glyph:'✓',title:'→ Move patch',status:'final answer',age:'2m',kind:'request-done',details:[],body:[]}],[],[]],
+ 'arrow-title-new':[44,24,false,[{id:'rq-cccccc',glyph:'✓',way:'→',title:'→ Move patch',status:'final answer',age:'2m',kind:'request-done',details:[],body:[]}],[],[]],
 };
 const out={};
 for(const [name,[width,height,side,requests,messages,routes]] of Object.entries(cases)){
@@ -413,6 +418,24 @@ class PanelRequestLinesTest(unittest.TestCase):
             self.assertEqual(len(found), 1, (name, found, rows))
             self.assertTrue(found[0].startswith("← [b2] 검") and "…" in found[0] and found[0].endswith(" · open"),
                             (name, found))
+
+    def test_a_title_that_begins_with_an_arrow_is_told_from_the_direction_after_the_result(self):
+        # Review of #1905 (🔴4): the arrow after a closed request's result is its direction only where the words after it still
+        # read as a recorded title; an older record drew none, and its title may begin with an arrow itself.
+        title = ["→ Move patch"]
+        old = on_screen(panel_of("✓ → Move patch · final answer"))
+        self.assertEqual(cases.panel_request_lines(old, title, "→✓✕", layout=RIGHT), ["✓ → Move patch · final answer"])
+        new = on_screen(panel_of("✓ → → Move patch · final answer"))
+        self.assertEqual(cases.panel_request_lines(new, title, "→✓✕", layout=RIGHT), ["✓ → → Move patch · final answer"])
+        tagged = on_screen(panel_of("✓ ← [b2] Move patch · final", "✓ [b2] Move patch · final"))
+        self.assertEqual(cases.panel_request_lines(tagged, ["Move patch"], "→✓✕", layout=RIGHT),
+                         ["✓ ← [b2] Move patch · final", "✓ [b2] Move patch · final"])
+        # The rows the panel draws for them, read as the scenario reads them (44 cells, the bottom layout).
+        for name, want in (("arrow-title-old", "✓ → Move patch · final answer"), ("arrow-title-new", "✓ → → Move patch · final answer")):
+            panel = self.panels[name]
+            self.assertTrue(any(want in row for row in panel), "\n".join(panel))
+            layout = {"folded": False, "panelColumn": 0, "panelCols": cells(panel[0])}
+            self.assertEqual(cases.panel_request_lines(on_screen(panel, (), 44), title, "→✓✕", layout=layout), [want], name)
 
     def test_the_bottom_layout_reads_the_one_row_form_under_the_conversation(self):
         # An 80-column window: the panel stands under the native area, as wide as the window.
@@ -503,7 +526,7 @@ class PanelRequestLinesTest(unittest.TestCase):
 
     def test_a_finished_route_with_the_same_title_is_not_a_closed_request(self):
         self.assertEqual(self.lines("requester", "→✓✕"),
-                         [f"→ [b2] {self.TITLE} · partial answer", f"✓ [b2] {self.TITLE} · final answer"])
+                         [f"→ [b2] {self.TITLE} · partial answer", f"✓ → [b2] {self.TITLE} · final answer"])
         rows = self.panels["requester-no-request"]
         self.assertTrue(any(row.startswith("│ │ ✓ ") for row in rows), "\n".join(rows))
         self.assertEqual(self.lines("requester-no-request", "→✓✕"), [])

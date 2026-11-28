@@ -78,7 +78,7 @@ def classify_selection(jobs: Path, rows, *, settle: bool = False,
                 continue
             current["required_action"] = JOIN.delivery_required_action(state)
             current["readiness"] = (
-                "ready" if JOIN.delivery_classification(state) == "success"
+                "ready" if JOIN.delivery_classification(state) in {"success", "cancelled"}
                 else "pending" if not state.quiescent or state.owned_children or state.status in {"open", "running"}
                 else "terminal-failure"
             )

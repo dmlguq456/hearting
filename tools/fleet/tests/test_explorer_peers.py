@@ -76,6 +76,18 @@ def _arrow_glyph_delta(expected_cells):
     return expected_cells
 
 
+def _eight_marks_delta(expected_cells):
+    """The approved 2026-11-27 eight-marks change: an answer wait reads ``◑`` (the reference drew ``●`` in the
+    blocked color) and a card's recent-clear label leads with ``←`` (the reference drew ``◂ gen``)."""
+    for row in expected_cells:
+        for index, cell in enumerate(row):
+            if cell[0] == "●" and cell[1] in ("g_blocked", "blocked"):
+                cell[0] = "◑"
+            elif (cell[0] == "◂" and "".join(c[0] for c in row[index + 1:index + 5]) == " gen"):
+                cell[0] = "←"
+    return expected_cells
+
+
 def _lane_region(vm, boxes):
     """Every cell a side lane or its two labels paint, in screen coordinates."""
     cells = set()
@@ -212,6 +224,7 @@ class PeerPaneReference(unittest.TestCase):
                     expected_cells = _history_recede_delta(expected_cells)
                     expected_cells = _links_words_delta(frame, expected_cells)
                     expected_cells = _stage_cyan_delta(actual_cells, expected_cells)
+                    expected_cells = _eight_marks_delta(expected_cells)
                     expected_hits = [[hit[0] - 5, hit[1] - SEPARATOR, hit[2] - SEPARATOR, hit[3]]
                                      for hit in expected_full_hits
                                      if hit[0] >= 5 and hit[1] >= SEPARATOR]
@@ -325,8 +338,8 @@ class PeerDerivedElements(unittest.TestCase):
         for seat in seats:
             if seat[0] == "0c":
                 seat[3] = "22:47"
-        self.assertNotIn("◂ gen", "\n".join(_rows(_variant(seats=seats))))
-        self.assertIn("◂ gen 5 · 6m", "\n".join(_rows(load_fixture(FIXTURES / "view_model.json"))))
+        self.assertNotIn("← gen", "\n".join(_rows(_variant(seats=seats))))
+        self.assertIn("← gen 5 · 6m", "\n".join(_rows(load_fixture(FIXTURES / "view_model.json"))))
 
     def test_selected_card_wears_the_bright_border(self):
         vm = load_fixture(FIXTURES / "view_model.json")
@@ -603,7 +616,7 @@ class PeerCrossLinks(unittest.TestCase):
             if seat[0] == "e4":
                 seat[2], seat[3] = 4, "22:47 · 6m ago"
         vm = _variant(seats=seats)
-        clear = "◂ gen 3 · 6m"
+        clear = "← gen 3 · 6m"
         for cols in (120, 140, 168):
             with self.subTest(cols=cols):
                 full = draw(vm, NavState(view="PEERS", title="PEERS"), cols, 60, beat=1)

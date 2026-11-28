@@ -81,7 +81,7 @@ const out={};
 // (1) A long question with choices: words, one empty row, the line, then the choices.
 {const b=editor(),r=draw(b),f=frame(r),body=f.slice(1,f.length-1);
  out.rows=body.map(words);
- const at=body.findIndex(x=>/^▸ 1  /.test(words(x)));
+ const at=body.findIndex(x=>/^▶ 1  /.test(words(x)));
  out.at=at;
  out.rule_width=isRule(body[at-1])?words(body[at-1]).length:0;out.inner=r.inner;
  // The line is the frame's own color: the same foreground and ground as the top line's rule.
@@ -90,9 +90,9 @@ const out={};
  // The numbers: the question's rose (the `◑` mark's color), bold, two cells before the words, on every choice's row.
  const mark=f[0].row.find(p=>p.text.includes('◑'));out.mark=mark&&mark.foreground;
  out.numbers=body.slice(at).flatMap(x=>x.content.filter(p=>/^\d+  $/.test(p.text)).map(p=>[p.text,p.foreground,p.bold,p.dim===true,p.background]));
- // The chosen row stays: `▸` bold in the harness color, the chosen ground across it, its words bold.
+ // The chosen row stays: `▶` bold in the harness color, the chosen ground across it, its words bold.
  const lit=body.filter(x=>x.content.some(p=>p.background===F.chosen));
- out.chosen=lit.map(words);out.chosen_mark=lit[0].content.some(p=>p.text==='▸'&&p.bold===true);
+ out.chosen=lit.map(words);out.chosen_mark=lit[0].content.some(p=>p.text==='▶'&&p.bold===true);
  out.chosen_words_bold=lit[0].content.filter(p=>/아래 두 줄/.test(p.text)).every(p=>p.bold===true);
  // The other choices read dim, words not bold, numbers still the rose and bold.
  const other=body.find(x=>/^ ?2  /.test(words(x))||/^2  /.test(words(x).replace(/^ +/,'')));
@@ -100,11 +100,11 @@ const out={};
  out.other_bg=other.content.every(p=>p.background===F.popup);}
 // (2) Before the first ↑↓ (not choosing) the rows read the same way.
 {const b=editor();key(b,'\x1b[B');key(b,'\x1b[A');const r=draw(b),body=frame(r).slice(1,-1);
- out.after_arrows=body.map(words).findIndex(w=>/^▸ 1  /.test(w))-body.map(words).findIndex(w=>/^─+$/.test(w.trim()));}
+ out.after_arrows=body.map(words).findIndex(w=>/^▶ 1  /.test(w))-body.map(words).findIndex(w=>/^─+$/.test(w.trim()));}
 // (3) A question answered in words: no line, no empty row before anything. Tab to it, then to a short one.
 {const b=editor();key(b,'\t');const r=draw(b),body=frame(r).slice(1,-1);
  out.text_rows=body.map(words);out.text_rules=body.filter(isRule).length;
- key(b,'\t');const s=draw(b),sb=frame(s).slice(1,-1),sw=sb.map(words),i=sw.findIndex(w=>/^▸ 1  /.test(w));
+ key(b,'\t');const s=draw(b),sb=frame(s).slice(1,-1),sw=sb.map(words),i=sw.findIndex(w=>/^▶ 1  /.test(w));
  out.second=[sw,i,isRule(sb[i-1]),sw[i-2]];
  key(b,'\t');const d=draw(b),db=frame(d).slice(1,-1),dw=db.map(words),j=dw.findIndex(w=>/approve|^1  /.test(w));
  out.decision=[dw,j,j>0&&isRule(db[j-1])];}
@@ -113,7 +113,7 @@ const out={};
  for(let budget=40;budget>=5;budget--){
   const rows=b.detail({budget,columns:72}),text=rows.map(row=>row.map(p=>p.text).join(''));
   shown.push({budget,length:rows.length,blank:rows.some((row,i)=>i>0&&row.length===0),rule:text.some(t=>/^─{10,}$/.test(t)),
-    numbers:text.filter(t=>/^ {0,2}(▸ )?\d  /.test(t)).length,more:text.some(t=>/^\+\d+ ·/.test(t)),
+    numbers:text.filter(t=>/^ {0,2}(▶ )?\d  /.test(t)).length,more:text.some(t=>/^\+\d+ ·/.test(t)),
     keys:/Tab next/.test(text.at(-1)||''),
     ahead:(()=>{const i=text.findIndex(t=>/^─{10,}$/.test(t));return i>0?[rows[i-1].length===0,text[i-1]]:null;})()});}
  out.shown=shown;
@@ -123,17 +123,17 @@ const out={};
 // (5) No hue (mono, eight colors, NO_COLOR): the numbers' weight and the line tell; no ground; the line is dim in a bright frame.
 out.plain=[{configuration:{theme:'mono'}},{colors:8},{noColor:true}].map(o=>{
  const sty=o.noColor?Object.fromEntries(Object.entries(styles).map(([k,s])=>[k,{...s,foreground:null,bold:false,dim:false}])):styles;
- const p=draw(editor(items,sty),o),f=frame(p),body=f.slice(1,-1),at=body.findIndex(x=>/^▸ 1  /.test(words(x)));
+ const p=draw(editor(items,sty),o),f=frame(p),body=f.slice(1,-1),at=body.findIndex(x=>/^▶ 1  /.test(words(x)));
  const rule=body[at-1].content.find(q=>/^─+$/.test(q.text));
  return {rule:isRule(body[at-1]),blank:words(body[at-2]).trim()==='',rule_dim:rule.dim===true,rule_fg:rule.foreground??null,
   numbers:body.slice(at).flatMap(x=>x.content.filter(q=>/^\d+  $/.test(q.text)).map(q=>q.bold===true)),
   grounds:p.rows.flat().filter(q=>Number.isInteger(q.background)).length};});
 // (6) A light face: the line is that face's frame line.
-{const r=draw(editor(),{background:'light'}),f=frame(r),body=f.slice(1,-1),at=body.findIndex(x=>/^▸ 1  /.test(words(x)));
+{const r=draw(editor(),{background:'light'}),f=frame(r),body=f.slice(1,-1),at=body.findIndex(x=>/^▶ 1  /.test(words(x)));
  const top=f[0].row.find(p=>/^─+$/.test(p.text)),rule=body[at-1].content.find(p=>/^─+$/.test(p.text));
  out.light=[rule.foreground,top.foreground,L.popupLine,rule.background,L.popup];}
 // (7) 24-bit color: the line takes the frame's 24-bit value.
-{const r=draw(editor(),{colors:16777216}),f=frame(r),body=f.slice(1,-1),at=body.findIndex(x=>/^▸ 1  /.test(words(x)));
+{const r=draw(editor(),{colors:16777216}),f=frame(r),body=f.slice(1,-1),at=body.findIndex(x=>/^▶ 1  /.test(words(x)));
  const top=f[0].row.find(p=>/^─+$/.test(p.text)),rule=body[at-1].content.find(p=>/^─+$/.test(p.text));
  out.truecolor=[rule.foreground,top.foreground,F.rgb.popupLine];}
 console.log(JSON.stringify(out));
@@ -194,7 +194,7 @@ class QuestionSplitTest(unittest.TestCase):
     def test_the_chosen_row_keeps_its_mark_ground_and_weight_and_the_others_read_dim(self):
         out = self.run_script()
         self.assertEqual(len(out["chosen"]), 1, out["chosen"])
-        self.assertTrue(out["chosen"][0].startswith("▸ 1  아래 두 줄 (다)"), out["chosen"])
+        self.assertTrue(out["chosen"][0].startswith("▶ 1  아래 두 줄 (다)"), out["chosen"])
         self.assertTrue(out["chosen_mark"] and out["chosen_words_bold"], out)
         self.assertTrue(out["other_words"] and all(bold is False and foreground == out["floor"] for bold, foreground in out["other_words"]), out["other_words"])
         self.assertTrue(out["other_bg"], out)
@@ -238,7 +238,7 @@ class QuestionSplitTest(unittest.TestCase):
         end = out["end"]
         self.assertTrue(any(set(t) == {"─"} for t in end), end)
         self.assertIn("Tab next", end[-1], end)
-        self.assertTrue(any("▸" in t and "1  " in t for t in end) or any(t.lstrip().startswith("3  ") for t in end), end)
+        self.assertTrue(any("▶" in t and "1  " in t for t in end) or any(t.lstrip().startswith("3  ") for t in end), end)
 
     def test_where_there_is_no_color_the_numbers_weight_and_the_line_tell_the_two_parts_apart(self):
         out = self.run_script()

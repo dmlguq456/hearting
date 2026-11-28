@@ -31,6 +31,7 @@ from dispatch_completion_join import (
     join_selected_attempts, current_delivery_state, delivery_classification,
     delivery_required_action, completion_harvest_command,
 )
+from dispatch_registry_cache import demand_replacement_rows, registry_scope_active, registry_snapshot
 from route_authority import caller_identity as interactive_parent_identity, default_parent_session_id
 import route_authority
 from codex_managed_dispatch import ManagedDispatchError, probe_managed_codex_parent
@@ -646,6 +647,19 @@ def attempt_id(route, node):
 def _rows(jobs):
     if not jobs.exists():
         return {}
+    # Reuse the shared attempt index for an unchanged registry generation.
+    # A start must still observe new generations across the launcher and join,
+    # even if its caller has pinned an earlier read-only observation.
+    if not registry_scope_active():
+        demand_replacement_rows()
+        try:
+            indexed = registry_snapshot(jobs).view.replacement_rows()
+        except OSError:
+            indexed = None
+        if indexed is not None and indexed[1] is None:
+            return {aid: (fields[1], meta.copy()) for aid, (fields, meta) in indexed[0].items()}
+    # Keep the original text semantics for legacy line separators, duplicate
+    # attempts (last row wins), and an unindexable or unstable file.
     rows = {}
     for line in jobs.read_text().splitlines():
         fields = line.split("\t")
@@ -1188,7 +1202,7 @@ def _capacity_pause(result, attention, resume, *, unit=False):
 def _outcome(jobs, aid):
     state = current_delivery_state(jobs, aid, parent_attempt_id=aid, advance=False)
     if state.cancellation_requested:
-        return {"attempt_id": aid, "classification": "success" if state.cancelled else "pending",
+        return {"attempt_id": aid, "classification": delivery_classification(state) if state.cancelled else "pending",
                 "required_action": "advance-completed" if state.cancelled else "",
                 "cancellation_requested": True, "state": "cancelled" if state.cancelled else "termination-pending",
                 "reason": "cancelled-by-parent"}

@@ -75,7 +75,7 @@ const out={};
  out.wrapped=lit.map(words);
  out.beside=lit.every(x=>x.sides.length===2&&x.sides.every(p=>p.background===F.popup&&/^│ $| │$/.test(p.text)));
  out.others=frame(r).filter(x=>x.content.length&&!lit.some(y=>y.text===x.text)).every(x=>x.content.every(p=>p.background===F.popup));
- out.mark=lit[0]&&lit[0].content.some(p=>p.text==='▸'&&p.bold===true);
+ out.mark=lit[0]&&lit[0].content.some(p=>p.text==='▶'&&p.bold===true);
  out.no_other_ground=frame(r).every(x=>x.content.every(p=>[F.popup,F.chosen].includes(p.background)&&p.reverse!==true));
  out.margins=frame(r).every(x=>x.margins.length===2&&x.margins.every(p=>p.background===F.popup&&p.text===' '));
  out.above_below=[r.rows[0],r.rows.at(-1)].every(row=>row.every(p=>p.background===undefined||p.background===null));
@@ -114,13 +114,13 @@ class ChosenGroundTest(unittest.TestCase):
     def test_the_chosen_choice_stands_on_its_own_ground_every_row_one_cell_in_from_the_lines(self):
         out = self.run_script()
         self.assertGreaterEqual(len(out["wrapped"]), 2, out["wrapped"])     # the wrapped choice, every row
-        self.assertTrue(out["wrapped"][0].startswith("▸ 1  아래 두 줄"), out["wrapped"])
-        self.assertTrue(out["mark"], out)                                     # ▸ and bold stay
+        self.assertTrue(out["wrapped"][0].startswith("▶ 1  아래 두 줄"), out["wrapped"])
+        self.assertTrue(out["mark"], out)                                     # ▶ and bold stay
         self.assertTrue(out["beside"], out)                                   # the cell beside each side line: the popup's
         self.assertTrue(out["others"], out)
         self.assertTrue(out["no_other_ground"], out)                          # two grounds inside, nothing reversed
         self.assertEqual(len(out["moved"]), 1, out["moved"])
-        self.assertTrue(out["moved"][0].startswith("▸ 2  넓힌 옆 띠"), out["moved"])
+        self.assertTrue(out["moved"][0].startswith("▶ 2  넓힌 옆 띠"), out["moved"])
         self.assertEqual(out["typing"], out["moved"] + ["› ab"])
 
     def test_the_light_face_and_the_faces_without_hue(self):

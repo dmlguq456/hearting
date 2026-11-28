@@ -139,6 +139,50 @@ class UnitStartTest(UnitLegBase):
         self.assertEqual(result["unit_attempt_id"], W.attempt_id(self.route, "unit"))
         self.assertIn("parent_next", result)
 
+    def test_start_reuses_the_registry_index_and_observes_launch_and_join_writes(self):
+        earlier = "2026-11-17T00:00:00Z\tdone\t/w\t/w\told\tattempt_id=att-old\n"
+        self.jobs.write_text(earlier)
+        registry_reads = []
+        read_text = Path.read_text
+
+        def read(path, *args, **kwargs):
+            if path == self.jobs:
+                registry_reads.append(path)
+            return read_text(path, *args, **kwargs)
+
+        def launch(command, **kwargs):
+            self.commands.append(command)
+            self.jobs.write_text(earlier + self.leg_row(self.route, self.path))
+            return subprocess.CompletedProcess(command, 0, "check=ok\nchild_spawned=1\n", "")
+
+        def join(**kwargs):
+            new = self.jobs.with_suffix(".new")
+            new.write_text(earlier + self.leg_row(
+                self.route, self.path, parent_completion_delivery="codex-parent-runtime"))
+            new.replace(self.jobs)
+            return {"state": "pending", "children": []}
+
+        with mock.patch.object(Path, "read_text", read), \
+             mock.patch.object(W, "join_selected_attempts", side_effect=join), \
+             mock.patch.object(W, "parent_next", return_value=("end-turn", "fixture", "")) as parent_next:
+            result = W.start_work(self.route, self.path, self.jobs, run=launch)
+        command, = self.commands
+        attempt = W.attempt_id(self.route, "unit")
+        self.assertEqual(command[command.index("--attempt-id") + 1], attempt)
+        self.assertEqual((result["state"], result["unit_attempt_id"]), ("running", attempt))
+        self.assertEqual(parent_next.call_args.args, ("codex-parent-runtime", attempt))
+        self.assertLessEqual(len(registry_reads), 1)
+
+    def test_registry_index_preserves_duplicate_and_legacy_rows(self):
+        first = self.leg_row(self.route, self.path)
+        later = self.leg_row(self.route, self.path, status="done", note="fixture")
+        attempt = W.attempt_id(self.route, "unit")
+        for sep in ("\n", "\r\n", "\u2028"):
+            with self.subTest(separator=sep):
+                self.jobs.write_text(sep.join((first.rstrip(), later.rstrip(), "")))
+                status, metadata = W._rows(self.jobs)[attempt]
+                self.assertEqual((status, metadata["note"]), ("done", "fixture"))
+
     def test_a_finished_leg_reports_its_outcome(self):
         self.jobs.write_text(self.leg_row(self.route, self.path, status="done"))
         outcome = {"attempt_id": W.attempt_id(self.route, "unit"), "classification": "success"}

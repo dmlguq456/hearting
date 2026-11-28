@@ -816,7 +816,7 @@ class FallbackTest(unittest.TestCase):
     out=io.StringIO()
     proof="fixture-native-proof" if terminal=="native" else None
     with mock.patch.object(F,"ordered_fallback_hops",return_value=(hops,None)), \
-         mock.patch.object(F,"native_child_proof",return_value=proof), \
+         mock.patch.object(F,"native_child_proof",return_value=(proof or "","att-fixture-native" if proof else "")), \
          mock.patch.object(F,"run_wrapper",side_effect=[first,second]), \
          contextlib.redirect_stdout(out):
      code,_=self.run_inline(path)
@@ -1037,7 +1037,7 @@ class FallbackTest(unittest.TestCase):
                       command[command.index("--parent-harness")+1],command[command.index("--parent-sandbox")+1]))
   self.assertEqual(len(set(consumers)),1)
   self.assertEqual((primary/"x").read_text(),"uncommitted\n")
- def route(self,native="unsupported",same_status="unsupported",intensity="strong",tuples=None):
+ def route(self,native="unsupported",same_status="unsupported",intensity="strong",tuples=None,explicit_profiles=None):
   """Compile the fixture route under the SAME runtime root the launch uses.
 
   `launch_compatibility_tuple` seals the runtime root, the artifact root and
@@ -1060,7 +1060,7 @@ class FallbackTest(unittest.TestCase):
    "execution_surface":"codex-native-subagent","registered_worker":False,
    "status":native,"check_source":"fixture"}]}
   with mock.patch.dict(os.environ,self.launch_roots_env()):
-   route=R.compile_route("autopilot-code","dev",intensity,self.repo,self.art,signals=["shared-contract"],transport="headless",tracking="tracked",tracked_gate_evidence=gate,dispatch_evidence=evidence)
+   route=R.compile_route("autopilot-code","dev",intensity,self.repo,self.art,signals=["shared-contract"],transport="headless",tracking="tracked",tracked_gate_evidence=gate,dispatch_evidence=evidence,explicit_profiles=explicit_profiles)
   plan=next(node for node in route.get("nodes",[]) if node.get("id")=="plan")
   if plan.get("depends_on"):
    # These fallback-ranking fixtures do not test the frame entry gate.

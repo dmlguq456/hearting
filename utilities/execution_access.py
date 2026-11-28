@@ -2069,6 +2069,9 @@ def adapter_default_roots(args: object, *roots: Iterable[str | Path]) -> tuple[P
     raw = getattr(args, "raw_data_dir", None)
     if raw:
         values.append(Path(raw).resolve(strict=False))
+    temp = getattr(args, "worker_temp_dir", None)
+    if temp:
+        values.append(Path(temp).resolve(strict=False))
     # The portable kernel requires this witnessed read for every registered
     # launch. Tool-permission runtimes also need it in the grant inventory
     # when their bounded verification command uses the shared OS sandbox.

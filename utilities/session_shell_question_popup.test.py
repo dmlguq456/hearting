@@ -61,7 +61,7 @@ function setup(create,extra={},kind){let sent;const b=create({changed(){},action
  const items=[{id:'synthetic',revision:'one',answerable:true,answer_kind:kind,questions:[{...q,...extra}]},{id:'other',revision:'one',answerable:true,questions:[{...q,id:'q2'}]}];
  b.update(items,'',{});b.enter();return {b,items,get sent(){return sent}};}
 const rows=b=>b.detail({columns:92,budget:24});
-const marked=b=>rows(b).filter(r=>r.some(p=>p.role==='choice-mark')).map(r=>Number(r.find(p=>Number.isInteger(p.choiceIndex))?.choiceIndex??r.map(p=>p.text).join('').match(/▸ (\d+)/)[1]-1)+1);
+const marked=b=>rows(b).filter(r=>r.some(p=>p.role==='choice-mark')).map(r=>Number(r.find(p=>Number.isInteger(p.choiceIndex))?.choiceIndex??r.map(p=>p.text).join('').match(/▶ (\d+)/)[1]-1)+1);
 const words=b=>rows(b).map(r=>r.map(p=>p.text).join('')).join('\n');
 function step(x,keys){if(keys==='click-write')x.b.write();else if(keys==='click-3')x.b.choose(2);else if(keys==='reopen'){x.b.leave();x.b.update(x.items,'',{});x.b.enter();}else x.b.input(Buffer.from(keys));}
 const cases=[
@@ -156,7 +156,7 @@ for(const [width,side] of [[52,true],[40,true],[90,false]]){
  const rows=r.rows.map(row=>row.map(p=>p.text).join('')),all=rows.join('\n');
  for(const want of [side?'4 ROUTE':'route 4','ROUTE_0','MESSAGE_3',side?'╭─ 3 QUESTIONS ─':'3 QUESTIONS','◑ 패널을'])assert(all.includes(want),width+' lost '+want+'\n'+all);
  assert(!/\bLAB\b/.test(all),all);
- assert(!/╭─ › ◑|╭─ ◑/.test(all),'no question box in the panel\n'+all);
+ assert(!/╭─ ▶ ◑|╭─ ◑/.test(all),'no question box in the panel\n'+all);
  assert(rows.filter(s=>/패널을|아래 두 줄|넓힌|지금 그대로|21칸/.test(s)).length<=2,all);
  // (11-16: beside the native area the section is a thin box, its name in the top line, the summary inside; the bottom layout
  // keeps the head row and its rows. A press on the head and on every row of either opens the popup.)
@@ -181,7 +181,7 @@ console.log('ok');
 const assert=require('node:assert/strict'),path=require('node:path'),v=require(path.join(process.argv[1],'panel-view.cjs'));
 const P=t=>({text:t}),text=r=>r.rows.map(row=>row.map(p=>p.text).join(''));
 const body=n=>[...Array(n)].map((_,i)=>[P('row '+i)]).concat([[P('↑↓ · Enter 보내기 · Tab 다음 · Esc/Ctrl+] 돌아가기')]]);
-const pop=(cols,rows,band,n=3,title=[P('› ◑ 3 QUESTIONS · 1/3 · 답 필요')])=>v.popup({cols,rows,band,title,body:body(n),sections:['QUESTIONS','ROUTE'],current:0});
+const pop=(cols,rows,band,n=3,title=[P('▶ ◑ 3 QUESTIONS · 1/3 · 답 필요')])=>v.popup({cols,rows,band,title,body:body(n),sections:['QUESTIONS','ROUTE'],current:0});
 assert.deepEqual([160,120,90,80,79,60,28,27,20].map(c=>v.popupWidth(c)),[76,76,76,76,75,56,24,27,20]);
 // 11-18: a table popup stands up to 116 cells, the routes popup alone up to 148; under 80 columns both are the window less 4.
 assert.deepEqual([200,160,152,120,100,80,79,60,28,27].map(c=>v.popupWidth(c,'table')),[116,116,116,116,96,76,75,56,24,27]);
@@ -191,13 +191,13 @@ assert.deepEqual([240,200,160,136,132,120,100,80,79,60,28,27].map(c=>v.popupWidt
 // A popup asked for with no kind keeps the text width (the table and routes popups' and the question popup's are their own).
 assert.deepEqual([240,160,80].map(c=>v.popupWidth(c,'text')),[76,76,76]);
 // The question popup laid out by `popup({kind:'question'})`: 132 cells in a 160-wide window, the frame centred.
-{const q=v.popup({cols:160,rows:40,band:0,kind:'question',title:[P('› ◑ 1 QUESTIONS')],body:body(3),sections:['QUESTIONS','ROUTE'],current:0});
+{const q=v.popup({cols:160,rows:40,band:0,kind:'question',title:[P('▶ ◑ 1 QUESTIONS')],body:body(3),sections:['QUESTIONS','ROUTE'],current:0});
  assert.deepEqual([q.frame.left,q.frame.width],[14,132]);}
 let r=pop(160,40,0);assert.deepEqual(r.frame,{left:42,top:17,width:76,height:6});
 assert.deepEqual([r.left,r.top,r.width,r.height],[41,16,78,8]);
 const rows=text(r);
 assert.equal(rows[0],' '.repeat(78));assert.equal(rows.at(-1),' '.repeat(78));
-assert(/^ ╭─ › ◑ 3 QUESTIONS · 1\/3 · 답 필요 ─+ ✕ ─╮ $/.test(rows[1]),rows[1]);
+assert(/^ ╭─ ▶ ◑ 3 QUESTIONS · 1\/3 · 답 필요 ─+ ✕ ─╮ $/.test(rows[1]),rows[1]);
 assert(/^ ╰─ QUESTIONS · ROUTE ─+╯ $/.test(rows.at(-2)),rows.at(-2));
 assert(rows[rows.length-3].includes('Enter 보내기'),rows.join('\n'));
 // 11-15: the thin line is bright (`popupLine`) on the popup's own ground (`popup`); the current section
@@ -216,7 +216,7 @@ r=pop(60,16,4,20);assert.deepEqual(r.frame,{left:2,top:1,width:56,height:10});
 // Narrower than 28: the whole window, no side margin.
 r=pop(24,12,2);assert.deepEqual([r.frame.left,r.frame.width,r.left,r.width],[0,24,0,24]);
 // A long title ends in `…` and the `✕` stays; every row is exactly its width.
-r=pop(40,20,0,2,[P('› ◑ 3 QUESTIONS · 1/3 · '+'아주 긴 상태 낱말 '.repeat(4))]);
+r=pop(40,20,0,2,[P('▶ ◑ 3 QUESTIONS · 1/3 · '+'아주 긴 상태 낱말 '.repeat(4))]);
 const cells=s=>[...s].reduce((n,c)=>n+(c.codePointAt(0)>0x2e7f?2:1),0);
 assert(text(r)[1].includes('…')&&text(r)[1].includes('✕ ─╮'),text(r)[1]);
 assert(text(r).every(s=>cells(s)===r.width),text(r).join('\n'));

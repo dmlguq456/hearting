@@ -51,6 +51,7 @@ PROGRESS_FRESH_SECONDS = 600
 ETA_ATTENTION_RATIO = 1.5
 ETA_ATTENTION_UNPLANNED_SECONDS = 6 * 3600
 ETA_ATTENTION_KINDS = frozenset({"eta-over-plan", "eta-over-six-hours"})
+STAGNATION_SECONDS = 2.0 * 3600  # no increase this long is stagnant, unless the run's step is longer
 ATTENTION_IDENTITY_KEYS = ("kind", "metric", "epoch", "op", "threshold", "episode_id",
                            "generation", "since", "source_value_hash")
 _SAFE_RUN_ID = re.compile(r"[A-Za-z0-9._-]{1,160}\Z")
@@ -1034,7 +1035,28 @@ def _progress_signal(progress, samples, metric_root, run, decision_metric, now):
     return streams[chosen]
 
 
-def _advance_progress_tracker(previous, signal, now):
+def _step_seconds(value):
+    """`value` as a finite positive number of seconds, or None: anything else is no value."""
+    try:
+        seconds = float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+    except OverflowError:
+        return None
+    return seconds if 0 < seconds < math.inf else None
+
+
+def _stagnation_seconds(tracker, planned_seconds=None):
+    """Two hours, or 1.5x (the time rule's own margin) the longest stretch this comparison already
+    went without an increase before one came; before any, the plan's time per unit (planned / total).
+    Never shorter than two hours, and two hours whenever the stretched value is not finite."""
+    step, plan = _step_seconds(tracker.get("longest_quiet_seconds")), _step_seconds(planned_seconds)
+    total = _step_seconds(tracker["total"]) if type(tracker.get("total")) is int else None
+    if step is None and plan and total:
+        step = plan / total
+    threshold = ETA_ATTENTION_RATIO * step if step else 0.0
+    return threshold if STAGNATION_SECONDS < threshold < math.inf else STAGNATION_SECONDS
+
+
+def _advance_progress_tracker(previous, signal, now, planned_seconds=None):
     if not isinstance(signal, dict):
         return None, None, None
     value = signal.get("completed")
@@ -1090,6 +1112,12 @@ def _advance_progress_tracker(previous, signal, now):
         duration = sample_at - float(last_sample_at)
         if rate_time_valid and 0 < duration <= 600:
             rate = delta / duration
+        # The stretch this increase ended is a step (from a late first observation, part of one).
+        quiet_from = _number(previous.get("last_increase_at"))
+        quiet_from = _number(previous.get("first_observed_at")) if quiet_from is None else quiet_from
+        if quiet_from is not None and sample_at > quiet_from:
+            tracker["longest_quiet_seconds"] = max(sample_at - quiet_from,
+                                                   _step_seconds(previous.get("longest_quiet_seconds")) or 0)
         tracker.update(last_increase_at=sample_at, active_episode_id=None)
     tracker.update(last_sample=value, last_sample_at=sample_at)
     anchor = tracker.get("last_increase_at")
@@ -1097,16 +1125,17 @@ def _advance_progress_tracker(previous, signal, now):
     if not isinstance(anchor, (int, float)) or isinstance(anchor, bool):
         anchor, anchor_kind = tracker.get("first_observed_at"), "first-observation"
     stagnation = None
+    threshold = _stagnation_seconds(tracker, planned_seconds)
     if isinstance(anchor, (int, float)) and not isinstance(anchor, bool):
         seconds = float(now) - float(anchor)
         if seconds >= 0:
             episode = tracker.get("active_episode_id")
-            if seconds >= 7200 and not isinstance(episode, str):
+            if seconds >= threshold and not isinstance(episode, str):
                 grace = tracker.get("stagnation_grace_until")
                 episode_material = f"{identity!r}|{anchor_kind}|{float(anchor):.6f}|{grace!r}"
                 episode = hashlib.sha256(episode_material.encode()).hexdigest()[:20]
                 tracker["active_episode_id"] = episode
-            if seconds >= 7200:
+            if seconds >= threshold:
                 stagnation = {"state": "stagnant", "signal": "counter", "unit": unit,
                     "since": anchor_kind, "seconds_since_anchor": seconds,
                     "last_increase_at": tracker.get("last_increase_at"),
@@ -1985,7 +2014,7 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
     does not read as a lost observation. Without that evidence nothing is refreshed and a silent
     run still turns stale; so does a run whose tracked progress source can no longer be read.
     The observed time is never the progress time: the last increase (`stagnation`) is kept
-    apart and a value that stopped turns stagnant under the two-hour rule.
+    apart and a value that stopped turns stagnant under the two-hour rule (`_stagnation_seconds`).
     """
     run = run if isinstance(run, dict) else {}
     run_id = run.get("run_id")
@@ -2151,7 +2180,7 @@ def observe_experiment(run, registry, now, *, root=None, row_key=None,
                                            decision_metric, now)
         old_tracker = previous.get("progress_tracker")
         progress_tracker, next_progress, tracker_result = _advance_progress_tracker(
-            old_tracker, progress_signal, now)
+            old_tracker, progress_signal, now, plan)
         # A progress source this observer was tracking can no longer be read: progress cannot be
         # judged. Keep the tracker (its last-increase clock survives a gap) and say so; the observer
         # does not vouch for such a run (`refresh_due` below), so its record turns stale.

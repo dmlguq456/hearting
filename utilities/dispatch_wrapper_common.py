@@ -19,6 +19,7 @@ import os
 import re
 import secrets
 import signal
+import stat
 import subprocess
 import sys
 import frame_repository
@@ -208,6 +209,111 @@ def prepare_runtime_root(artifact_root: str, environ=None, *, repository_kind=No
     candidate = worker_bootstrap.runtime_dir_candidate(
         artifact_root, values, repository_kind=repository_kind, source_root=source_root)
     return worker_bootstrap.prepare_runtime_dir(candidate)
+
+
+# Every temp variable a worker or its children read: POSIX tools and Bun/Python
+# (TMPDIR, TMP, TEMP) and Claude Code's per-uid folder (CLAUDE_CODE_TMPDIR).
+WORKER_TEMP_ENV_KEYS = ("TMPDIR", "TMP", "TEMP", "CLAUDE_CODE_TMPDIR")
+
+
+# The base of the next candidate when the inherited TMPDIR lies inside the
+# source or artifact boundary (a fixture points it at its own folder).
+WORKER_TEMP_FALLBACK_BASE = Path("/tmp")
+
+
+def prepare_worker_temp_dir(environ=None, *, source_root, route_file, create=True) -> str:
+    """The one temp folder a non-Git worker may write, or "" to keep the inherited temp.
+
+    A non-Git Codex worker runs under a read-only OS profile with exact write
+    roots, so `/tmp` is read-only inside it and for everything it starts (a
+    child wrapper's `mktemp`, a Claude child's `/tmp/claude-<uid>`). The launch
+    gives the worker `<TMPDIR or /tmp>/hearting-<uid>` instead and grants only
+    that folder. A nested launch already runs with it as TMPDIR and reuses it,
+    so the path stays short enough for AF_UNIX sockets.
+
+    This is the one acceptance rule for start and recovery. A folder is taken
+    only when the route is sealed unversioned, the non-Git profile's source
+    protection keeps it as a write root and it is not inside the artifact root,
+    and it is a directory (not a link) of this uid, mode exactly 0700, that this
+    process can write. The boundary is judged first, on the candidate's real
+    path: a candidate whose real path is inside the source or artifact boundary
+    (a link pointing there included) yields to `/tmp/hearting-<uid>`; any other
+    refusal keeps the inherited temp. An existing folder is never changed;
+    ``create=False`` (recovery) makes none either. Never raises.
+
+    Each candidate's parent is resolved once, to `<real parent>/hearting-<uid>`;
+    the boundary check, the mkdir, the link/owner/mode/write check and the
+    return all use that one string. So the temp variables, both Codex grants,
+    the write roots and the launch record carry the one folder this check
+    judged, even if a parent link changes during the launch.
+    """
+    from codex_permission_profile import recordish_write_root
+    values = os.environ if environ is None else environ
+    name = f"hearting-{os.getuid()}"
+    try:
+        route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+        if route.get("source_commit") != "unversioned":
+            return ""
+        cwd = Path(source_root).resolve()
+        artifact = Path(route["artifact_root"]).resolve()
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return ""
+
+    def judged(parent: Path) -> str:
+        # NOTE: The parent is resolved here and nowhere else. The boundary,
+        # mkdir, lstat, access and the return all use this one string, so a
+        # parent link changed after this line moves nothing.
+        resolved = os.path.join(os.path.realpath(parent), name)
+        kept = recordish_write_root(resolved, cwd, artifact)
+        inside = kept is None or Path(kept) == artifact or artifact in Path(kept).parents
+        return "" if inside else resolved
+
+    inherited = values.get("TMPDIR", "")
+    base = Path(inherited) if os.path.isabs(inherited) else WORKER_TEMP_FALLBACK_BASE
+    try:
+        resolved = (judged(base.parent if base.name == name else base)
+                    or judged(WORKER_TEMP_FALLBACK_BASE))
+        if not resolved:
+            return ""
+        if create:
+            try:
+                os.mkdir(resolved, 0o700)
+            except FileExistsError:
+                pass
+        status = os.lstat(resolved)
+    except (OSError, RuntimeError, ValueError):
+        return ""
+    # A symlink, another user's folder in a shared /tmp, a looser mode, or a
+    # read-only mount is never adopted or repaired: the inherited temp stays.
+    if (not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid()
+            or stat.S_IMODE(status.st_mode) != 0o700 or not os.access(resolved, os.W_OK)):
+        return ""
+    return resolved
+
+
+def recorded_worker_temp_dir(record, writable_roots, *, source_root, route_file) -> str:
+    """The worker temp folder a non-Git launch recorded, when it still holds, or "".
+
+    Only the value the start chose and sealed in its launch record counts; a
+    write root is never picked by its name. Git launches and older records
+    without the value keep the inherited temp. The value is never resolved
+    again: that exact string must be in the recorded write roots, and the same
+    acceptance rule (read only) must return it unchanged, which it does only
+    while no link sits on that path (its real path is the value itself).
+    """
+    value = record.get("worker_temp_dir") if isinstance(record, dict) else None
+    if not isinstance(value, str) or not value:
+        return ""
+    if value not in {str(root) for root in writable_roots}:
+        return ""
+    found = prepare_worker_temp_dir({"TMPDIR": value}, source_root=source_root,
+                                    route_file=route_file, create=False)
+    return value if found == value else ""
+
+
+def worker_temp_environment(path: str) -> dict[str, str]:
+    """Point every temp variable at the worker's temp folder; empty keeps the inherited ones."""
+    return {key: path for key in WORKER_TEMP_ENV_KEYS} if path else {}
 
 
 def prepare_raw_data_root(artifact_root: str, runtime_dir: str, environ=None, *, source_root=None) -> str:

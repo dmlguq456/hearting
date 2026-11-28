@@ -51,6 +51,7 @@ shared-utility-deferred	dispatch_resource_wait.py
 shared-utility-deferred	dispatch_replacement_batch.py
 shared-utility-deferred	dispatch_replacement_subsession.py
 shared-utility-deferred	dispatch_supervision.py
+shared-utility-deferred	environment_inheritance.py
 shared-utility-deferred	execution-access-diagnose.py
 shared-utility-deferred	execution_access.py
 shared-utility-deferred	execution_access_diagnose.py
@@ -84,6 +85,7 @@ shared-utility-deferred	harness_behavior_cases_owner_fail.py
 shared-utility-deferred	harness_behavior_cases_unit_explore.py
 shared-utility-deferred	harness_behavior_cases_request.py
 shared-utility-deferred	harness_behavior_cases_parked.py
+shared-utility-deferred	harness_behavior_cases_panel_route.py
 shared-utility-deferred	harness_behavior_scenarios.py
 shared-utility-deferred	hearting_gates.py
 shared-utility-deferred	herdr_integration_live.py
