@@ -409,7 +409,7 @@ linked worktrees use the primary checkout's canonical artifact root.|primary art
 depth, tests, safety, and validation on fallback|fallback preservation guarantee
 before committing|expose-change-before-committing clause
 large scope, destructive work, or an external-system outcome|destructive-work structured-input clause
-using `--shape staged --capability <kind> --graph <stage,…>` for person-named stages|person-named stage shape clause
+using `--shape team --capability <kind> --graph <stage,…>` for person-named stages|person-named stage shape clause
 are handles, not orders|resume/correction handle clause
 BOOTSTRAP_PARITY_EOF
 done

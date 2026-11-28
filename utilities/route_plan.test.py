@@ -297,6 +297,19 @@ class ExtractionTest(unittest.TestCase):
         self.assertNotIn("budget", proposal["legs"][0])
         self.assertEqual(notes, ["ignored:note", "ignored:done_when", "ignored:legs[0]:budget"])
 
+    def test_a_proposal_may_write_team_and_it_is_the_same_proposal_as_staged(self):
+        # `team` is the person's word for the recorded shape `staged`; the leg keeps `staged`, and `staged` is still read.
+        staged, _, staged_notes = RP.parse_proposal_with_notes(brief([CODE_STAGED]))
+        team, _, team_notes = RP.parse_proposal_with_notes(brief([{**CODE_STAGED, "shape": "team"}]))
+        self.assertEqual(team["legs"][0]["shape"], "staged")
+        self.assertEqual(team, staged)
+        self.assertEqual(team_notes, staged_notes)
+        self.assertTrue(RP.same_proposal(team, staged))
+        kept, _, notes = RP.parse_proposal_with_notes(brief([{**CODE_STAGED, "shape": "team", "size": "one-pass"}]))
+        self.assertEqual((kept["legs"][0]["shape"], notes), ("staged", ["kept:legs[0].shape:staged-for-size-one-pass"]))
+        self.assertEqual(self.reason(brief([{"capability": "autopilot-code", "shape": "teams"}])),
+                         "schema-invalid:legs[0].shape")
+
     def test_size_chooses_an_omitted_shape_and_a_different_shape_is_kept_and_shown(self):
         for size, shape in RP.SIZE_SHAPE.items():
             with self.subTest(size=size):

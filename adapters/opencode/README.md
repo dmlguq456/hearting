@@ -150,18 +150,15 @@ owns model and context fields.
 route commands reach it with the sealed tuple. Monitor `preflight.sh liveness
 [jobs.log]` and harvest via `preflight.sh harvest`; for an attempt you
 launched, its receipt outranks that general monitoring. OpenCode is eligible
-for the registered standard+ dispatch-depth-2 path — exact parent binding,
+for the registered team dispatch-depth-2 path — exact parent binding,
 foreground lifecycle, and supervisor parity are implemented. Dispatch contract
 v3 atomically claims one stable attempt row before spawn and starts no child
 for a duplicate claim. Broker v1/v2 routes are read-only migration inputs; the
 retired broker exposes only legacy `status`/`stop`. The completion carrier is
 `opencode-turn` (`core/ADAPTATION.md` §7.4); nested leg receipts remain
-evidence and add no child waits. Registered standard+ dispatch-depth-2
+evidence and add no child waits. Registered team dispatch-depth-2
 continuations use the shared external supervisor rather than a runtime bridge.
-`standard+` uses a dispatch-depth-1 capability owner and separable
-dispatch-depth-2 `code-plan -> code-execute -> code-test -> code-report`
-workers; `direct` is inline and `quick` is one registered-headless
-dispatch-depth-1 one-shot conductor. After merge, integrated verification, and
+`direct` is inline; a `solo` route is one registered-headless dispatch-depth-1 owner that makes the work itself (at `quick` with no child node; from `standard`, where the kind declares a one-shot review, it starts that kind's verification nodes at dispatch depth 2); a `team` route (`standard+`) uses a dispatch-depth-1 capability owner and, when separable, dispatch-depth-2 `code-plan -> code-execute -> code-test -> code-report` stage workers (`core/CONVENTIONS.md §1`). After merge, integrated verification, and
 push, use `preflight.sh worktree-cleanup --check` before `--apply`; a
 `session.idle` or other session-end event never owns destructive worktree
 cleanup. The main/orchestrator chooses portable roles and concrete model
@@ -467,7 +464,7 @@ provide `profile_demand` on every ad-hoc unit. Missing fields fail closed.
 `stages [--capability <name>] [--json]` prints the part catalog a graph is
 assembled from: every stage as `capability:stage` with its one-line summary,
 inputs and outputs, `unit_choices`, `shareable`, `start_approval`, optional parts,
-and the parts of other recipes this host can borrow. `compose --shape staged --graph` accepts a
+and the parts of other recipes this host can borrow. `compose --shape team --graph` accepts a
 host stage id or a shareable `capability:stage` (for example
 `inspect,autopilot-research:retrieval,autopilot-research:synthesis,report`); a
 borrowed part is written under `parts/<capability>/<stage>/` inside the host's own
@@ -475,7 +472,7 @@ artifact scope. Claude reaches both through `adapters/claude/bin/capability-rout
 Codex and OpenCode through `preflight.sh compose|stages`; every surface forwards
 the arguments unmodified and prints the same output.
 
-A shape-omitted `--graph` is a frame routing hint. Assemble `staged` routes only
+A shape-omitted `--graph` is a frame routing hint. Assemble `team` routes only
 for a frame brief or person-named stage list; follow the shared
 [WORKFLOW §0.2.1 guidance](../../core/WORKFLOW.md#021-shape-before-preset-sd-135).
 

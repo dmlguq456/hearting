@@ -21,7 +21,7 @@ Adapters may expose this capability through native commands, skill files, prompt
 
 ## Assurance Contract
 
-This sub-capability follows `core/CONVENTIONS.md §1`: plan-check and review rigor is derived from intensity rather than independently selected. `code-plan` is used for durable `standard+` code work cycles; `direct` skips it and `quick` is handled by one registered-headless dispatch-depth-1 one-shot conductor with its inline micro-plan plus `plan-check-lite`. Independent plan review is selected by intensity/risk and is not repeated after every sub-stage by default.
+This sub-capability follows `core/CONVENTIONS.md §1`: plan-check and review rigor is derived from intensity rather than independently selected. `code-plan` is used for the durable code work cycles of a `team` route; `direct` skips it and a `solo` route (`quick`) is handled by one registered-headless dispatch-depth-1 owner with its inline micro-plan plus `plan-check-lite`. Independent plan review is selected by intensity/risk and is not repeated after every sub-stage by default.
 
 
 When a composed graph omits the plan producer, plan-check reads the `plan.md`
@@ -56,7 +56,7 @@ Artifact root: `core/CONVENTIONS.md §5.1`; output placement: `§5`.
 
 ## Artifact Producer Lifecycle
 
-`code-plan` is a `standard+` stage worker: it never issues its own campaign or
+`code-plan` is a `team` stage worker: it never issues its own campaign or
 cycle. It receives the owner's open cycle through
 `AGENT_ARTIFACT_CAMPAIGN_ID`/`AGENT_ARTIFACT_CYCLE_ID`/`AGENT_ARTIFACT_PRODUCER_ID`/
 `AGENT_ARTIFACT_CYCLE_DIR`/`AGENT_ARTIFACT_OUTPUT_DIR` (dispatch env

@@ -130,7 +130,7 @@ def probe_pyyaml() -> dict:
             "step (a framed route, the default when no shape is given) reads its plan "
             "proposal with it and stops before planning without it. Install it for that "
             f"Python (e.g. `{python} -m pip install --user pyyaml`, or the OS package such "
-            "as python3-yaml); a non-framed shape (direct, solo or staged) runs without it"
+            "as python3-yaml); a non-framed shape (direct, solo or team) runs without it"
         ),
     }
 

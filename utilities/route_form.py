@@ -1,9 +1,9 @@
 """The route form: which routes one owner process runs alone, and which intensities each form may carry.
 
-A route's *form* says who makes it -- `direct` (this session, inline), `unit` (one depth-0 leg of a
-read-only unit, no owner), `solo` (one owner process, the `one-shot` node) or `staged`/`framed`
-(stage nodes at depth 2). Its *intensity* says how many independent checks follow; a `unit` route has none
-(one unit does one job and nothing checks it; its record keeps `quick` as `UNIT_RECORDED_INTENSITY`). The two are not the
+A route's *form* says who makes it -- `direct` (this session, inline), `unit` (one leg of a
+read-only unit, no owner), `solo` (one owner process, the `one-shot` node) or `team` (an owner and stage
+workers at depth 2; its recorded word is `staged`, and a `framed` route reads the same). Its *intensity* says how
+many independent checks follow; a `unit` route has none (one unit does one job and nothing checks it; its record keeps `quick` as `UNIT_RECORDED_INTENSITY`). The two are not the
 same axis, so code that needs "does one owner run this route by itself" asks `one_shot_owner(route)`
 here instead of reading the intensity.
 
@@ -52,6 +52,22 @@ FORM_INTENSITIES = {
     "framed": _STAGED,
 }
 SHAPE_INTENSITY = {shape: values[0] for shape, values in FORM_INTENSITIES.items() if shape != "unit"}
+# The form a person names `team` is recorded, and read in every old record, as `staged`: the record's word does not
+# change, the person's word is accepted as an alias for it, and a visible text moves it back (`shape_word`).
+SHAPE_ALIASES = {"team": "staged"}
+_SHAPE_WORDS = {value: key for key, value in SHAPE_ALIASES.items()}
+
+
+def canonical_shape(shape):
+    """The recorded word of a shape a person typed (`team` -> `staged`); any other value stays as it is."""
+    return SHAPE_ALIASES.get(shape, shape) if isinstance(shape, str) else shape
+
+
+def shape_word(shape):
+    """The word a person reads for a recorded shape (`staged` -> `team`); any other value stays as it is."""
+    return _SHAPE_WORDS.get(shape, shape) if isinstance(shape, str) else shape
+
+
 # A route record with no usable `selection.shape` (an older record) reads its form from its intensity.
 INTENSITY_SHAPE = {"direct": "direct", "quick": "solo"}
 
@@ -74,12 +90,14 @@ def nearest_allowed(intensity, allowed):
     return max(below, key=INTENSITY_ORDER.index) if below else None
 
 
-def intensity_mismatch(shape, requested, review_declared=False):
-    """The compose refusal for a shape asked to carry an intensity it does not allow, or None."""
+def intensity_mismatch(shape, requested, review_declared=False, typed=None):
+    """The compose refusal for a shape asked to carry an intensity it does not allow, or None.
+
+    `typed` is the word the person wrote for the shape (`team` for `staged`); the refusal repeats it."""
     if shape in ("direct", "solo", "staged"):
         allowed = allowed_intensities(shape, review_declared)
         if requested not in allowed:
-            return f"compose-shape-intensity-mismatch:{shape} (allowed: {','.join(allowed)})"
+            return f"compose-shape-intensity-mismatch:{typed or shape} (allowed: {','.join(allowed)})"
     return None
 
 
@@ -122,7 +140,8 @@ def route_form(route):
     """A route record's form label, from its capability, `selection.shape` and nodes.
 
     A recorded `solo` above `quick` is the middle cell only when its nodes say one owner makes it; the
-    team route that `compose --shape solo --signal ...` seals (shape `solo`, team nodes) reads `staged`."""
+    team route that `compose --shape solo --signal ...` seals (shape `solo`, team nodes) reads `staged`
+    (the recorded word of the `team` form)."""
     if not isinstance(route, dict):
         return None
     selection = route.get("selection")

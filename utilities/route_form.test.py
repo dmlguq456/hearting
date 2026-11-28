@@ -216,6 +216,24 @@ class AllowanceTableTest(unittest.TestCase):
         self.assertIs(COMPOSE.SHAPE_INTENSITY, RF.SHAPE_INTENSITY)
         self.assertEqual(RF.INTENSITY_SHAPE, {"direct": "direct", "quick": "solo"})
 
+    def test_team_is_the_typed_word_for_the_recorded_staged(self):
+        # The record keeps `staged`; a person types `team`; a text a person reads moves it back.
+        self.assertEqual(RF.SHAPE_ALIASES, {"team": "staged"})
+        self.assertEqual((RF.canonical_shape("team"), RF.canonical_shape("staged"), RF.canonical_shape("solo")),
+                         ("staged", "staged", "solo"))
+        self.assertEqual((RF.shape_word("staged"), RF.shape_word("team"), RF.shape_word("framed")),
+                         ("team", "team", "framed"))
+        self.assertEqual((RF.canonical_shape(None), RF.shape_word(["x"])), (None, ["x"]))
+        # compose accepts the typed word, lists it, and keeps the recorded values for everything it reads
+        self.assertIn("team", COMPOSE.COMPOSE_SHAPE_WORDS)
+        self.assertEqual(set(COMPOSE.COMPOSE_SHAPES) | {"team"}, set(COMPOSE.COMPOSE_SHAPE_WORDS))
+        self.assertNotIn("team", COMPOSE.COMPOSE_SHAPES)
+        # a refusal repeats the word the person typed; the allowed values are the form's own
+        self.assertEqual(RF.intensity_mismatch("staged", "quick", typed="team"),
+                         "compose-shape-intensity-mismatch:team (allowed: standard,strong,thorough,adversarial)")
+        self.assertEqual(RF.intensity_mismatch("staged", "quick"),
+                         "compose-shape-intensity-mismatch:staged (allowed: standard,strong,thorough,adversarial)")
+
     def test_the_refusal_text_is_the_text_compose_always_gave(self):
         self.assertEqual(RF.intensity_mismatch("direct", "standard"),
                          "compose-shape-intensity-mismatch:direct (allowed: direct)")

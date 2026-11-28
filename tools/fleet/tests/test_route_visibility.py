@@ -159,6 +159,12 @@ class RouteVisibilityTests(unittest.TestCase):
         self.assertEqual(desc["verification"]["reviewers"][0]["harness"], "codex")
         self.assertEqual(desc["next"]["kind"], "resume")
         self.assertIn("review 0/1 ✕", rv.summary_text(desc))
+        # The record's word `staged` is the `team` form: texts a person reads say `team`, the code keeps the record's word.
+        self.assertTrue(rv.summary_text(desc).startswith("team·frame proposal"), rv.summary_text(desc))
+        self.assertNotIn("staged", rv.summary_text(desc, current=False))
+        route_line = next(text for label, text, _tone in rv.detail_lines(desc) if label == "route")
+        self.assertTrue(route_line.startswith("team · "), route_line)
+        self.assertEqual((desc["shape"], rv.bounded(desc)["codes"]["shape"]), ("staged", "staged"))
         reviewer = next(text for label, text, _tone in rv.detail_lines(desc) if label == "review")
         self.assertEqual(reviewer, "impl-review · codex · failed")
         record.pop("route_plan")

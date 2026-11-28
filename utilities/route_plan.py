@@ -64,7 +64,7 @@ SIZE_SHAPE = {"one-change": "direct", "one-pass": "solo", "multi-stage": "staged
 from route_form import (  # noqa: E402,F401
     FORM_INTENSITIES, INTENSITIES, INTENSITY_SHAPE, SHAPE_INTENSITY, UNIT_CAPABILITY, allowed_intensities,
     INTENSITY_ORDER, form_of, intensity_mismatch, nearest_allowed, one_shot_owner, route_form, serial_attempt_form, serial_attempt_route,
-    shape_for_intensity, staged_form,
+    shape_for_intensity, staged_form, canonical_shape,
 )
 APPROVAL_KEYS = ("full-run", "deploy", "handback", "preview")
 VALID = "valid"
@@ -487,6 +487,7 @@ def _normal_leg(raw, index, notes=None):
         size = None
     if shape is None and size is not None:
         shape = SIZE_SHAPE[size]
+    shape = canonical_shape(shape)    # a proposal may write `team`; the leg keeps the recorded word `staged`
     if shape not in SHAPES:
         raise ProposalError(f"schema-invalid:legs[{index}].shape")
     if size is not None and SIZE_SHAPE[size] != shape and notes is not None:

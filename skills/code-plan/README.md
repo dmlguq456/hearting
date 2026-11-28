@@ -46,7 +46,7 @@ The `plan/plan-author` unit writes the plan file directly. The orchestrator rece
 
 ## Plan-Check Assurance
 
-`code-plan` is used for durable `standard+` code-work cycles. `direct` skips it; `quick` is one registered-headless dispatch-depth-1 one-shot conductor with an inline micro-plan and plan-check-lite. The rigor tier, derived from `--intensity` per [`CONVENTIONS.md §1.1`](../../core/CONVENTIONS.md#11-verification-rigor-tiers), scales the plan-check budget but does not create the stage graph.
+`code-plan` is used for the durable code-work cycles of a `team` route. `direct` skips it; a `solo` route (`quick`) is one registered-headless dispatch-depth-1 owner with an inline micro-plan and plan-check-lite. The rigor tier, derived from `--intensity` per [`CONVENTIONS.md §1.1`](../../core/CONVENTIONS.md#11-verification-rigor-tiers), scales the plan-check budget but does not create the stage graph.
 
 | Rigor tier | Action |
 |---|---|

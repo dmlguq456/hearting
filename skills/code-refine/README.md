@@ -40,7 +40,7 @@ Return which steps were changed and a brief summary.
 
 ## Rigor Scaling
 
-Derive the verification rigor tier from the plan's selected `--intensity` context per [`CONVENTIONS.md §1.1`](../../core/CONVENTIONS.md#11-verification-rigor-tiers). This is an optional correction of a durable plan, not an automatic stage in `direct` or `quick`.
+Derive the verification rigor tier from the plan's selected `--intensity` context per [`CONVENTIONS.md §1.1`](../../core/CONVENTIONS.md#11-verification-rigor-tiers). This is an optional correction of a durable plan, not an automatic stage in `direct`, `solo` or `quick`.
 
 | Rigor | Review after refinement | Correction budget |
 |---|---|---|

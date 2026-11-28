@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import artifact_locator as ARTIFACT_LOCATOR
+import route_form as ROUTE_FORM
 import route_identity as ROUTE_IDENTITY
 import route_plan as ROUTE_PLAN
 import route_authority as ROUTE_AUTHORITY
@@ -640,7 +641,7 @@ def compose_card(route, plan=None, plan_source=None, *, owner_harness=None,
         header = t("route.card.header_unit", capability=route['capability'], unit=unit,
                    route_id=route['route_id'], gates=gates)
     else:
-        header = t("route.card.header", capability=route['capability'], shape=shape,
+        header = t("route.card.header", capability=route['capability'], shape=ROUTE_FORM.shape_word(shape),
                    intensity=route['effective_intensity'], graph=graph, route_id=route['route_id'], gates=gates)
     card = (
         header

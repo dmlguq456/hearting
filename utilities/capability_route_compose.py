@@ -40,13 +40,16 @@ from capability_route_continuation import (
 #
 # `compile` asks the caller to pick a registry recipe by entry-router trigger
 # and to restate ~15 flags plus evidence files by hand. `compose` inverts that:
-# the caller names the *shape* of the work (direct / solo / staged) and, for a
-# staged shape, the stage subgraph it actually wants; every other flag and both
+# the caller names the *shape* of the work (direct / solo / team, recorded as `staged`) and, for a
+# team shape, the stage subgraph it actually wants; every other flag and both
 # evidence probes default from the checkout and the registry. The result goes
 # through the SAME validator, sealer, verifier and guards as a preset route --
 # composition changes route shape only (WORKFLOW §7 compose-on-demand).
 # ---------------------------------------------------------------------------
 COMPOSE_SHAPES = ("direct", "solo", "staged", "framed")
+# What `--shape` accepts: the recorded shapes plus the person's word for `staged`, `team` (`ROUTE_FORM.SHAPE_ALIASES`).
+# `framed` stays accepted as the old spelling of an omitted `--shape`; `--help` does not list it.
+COMPOSE_SHAPE_WORDS = ("direct", "solo", "team", "staged", "framed")
 SHAPE_INTENSITY = ROUTE_PLAN.SHAPE_INTENSITY
 # The compiler-internal capability behind `--shape framed`. No person and no model names it; a
 # route of any other shape can never seal it (`compose-shape-invalid`).

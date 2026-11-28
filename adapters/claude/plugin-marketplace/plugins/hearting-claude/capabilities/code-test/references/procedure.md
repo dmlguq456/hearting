@@ -1,6 +1,6 @@
 # code-test
 
-> **Stage-session entry (`standard+` dispatch, spec/stage-dispatch SD-2)**: Run in-session or as an isolated dispatch-depth-2 stage worker dispatched by the `autopilot-code` conductor. Read the verification section in `plan.md` and marks in `checklist.md` from disk; never depend on prior-stage conversation. Source is read-only in this stage. The write class is `test_logs/` and `_internal/test_reviews/`. The stage runs as the `qa/test` unit (the node's unit); it dispatches no units itself.
+> **Stage-session entry (`team` dispatch, spec/stage-dispatch SD-2)**: Run in-session or as an isolated dispatch-depth-2 stage worker dispatched by the `autopilot-code` conductor. Read the verification section in `plan.md` and marks in `checklist.md` from disk; never depend on prior-stage conversation. Source is read-only in this stage. The write class is `test_logs/` and `_internal/test_reviews/`. The stage runs as the `qa/test` unit (the node's unit); it dispatches no units itself.
 
 > **Plan resolution**: Treat [arguments-and-decisions.md#plan-resolution](../../autopilot-code/references/arguments-and-decisions.md) as the single authority for resolving `$ARG`. If no plan matches, interpret the argument as the file or directory test target instead of returning a plan-resolution error.
 

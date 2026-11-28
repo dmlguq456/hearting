@@ -43,7 +43,7 @@ contract. It is adapter-owned output, not a legacy compatibility Skill copy.
 
 Artifact root: `core/CONVENTIONS.md §5.1`.
 
-In a `standard+` `autopilot-code` stage cycle, `code-report` owns
+In a `team` `autopilot-code` stage cycle, `code-report` owns
 `final_report.md`, `analysis_project/code/`, and `pipeline_summary.md` (using the
 shared lock where required). It consumes plan, checklist, development, and test
 evidence but must not rewrite source or another stage's evidence class. This is
@@ -67,7 +67,7 @@ when that gate is missing or failing.
 
 ## Artifact Producer Lifecycle
 
-`code-report` is a `standard+` stage worker: it never issues its own campaign or
+`code-report` is a `team` stage worker: it never issues its own campaign or
 cycle. It receives the owner's open cycle through
 `AGENT_ARTIFACT_CAMPAIGN_ID`/`AGENT_ARTIFACT_CYCLE_ID`/`AGENT_ARTIFACT_PRODUCER_ID`/
 `AGENT_ARTIFACT_CYCLE_DIR`/`AGENT_ARTIFACT_OUTPUT_DIR` (dispatch env

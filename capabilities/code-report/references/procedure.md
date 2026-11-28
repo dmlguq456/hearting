@@ -1,6 +1,6 @@
 # code-report
 
-> **Stage-session entry (`standard+` dispatch, spec/stage-dispatch SD-2)**: Run in-session or as an isolated dispatch-depth-2 stage worker dispatched by the `autopilot-code` conductor. Read the plan, checklist, `dev_logs/`, `test_logs/`, `_internal/*_reviews/`, and `pipeline_summary.md` from disk; never assume prior-stage conversation is available. The write class is `final_report.md`, `<artifact-root>/analysis_project/code/*.md`, and lock-protected `pipeline_summary.md`. The stage runs as the `editorial/report` unit (the node's unit); it dispatches no units itself.
+> **Stage-session entry (`team` dispatch, spec/stage-dispatch SD-2)**: Run in-session or as an isolated dispatch-depth-2 stage worker dispatched by the `autopilot-code` conductor. Read the plan, checklist, `dev_logs/`, `test_logs/`, `_internal/*_reviews/`, and `pipeline_summary.md` from disk; never assume prior-stage conversation is available. The write class is `final_report.md`, `<artifact-root>/analysis_project/code/*.md`, and lock-protected `pipeline_summary.md`. The stage runs as the `editorial/report` unit (the node's unit); it dispatches no units itself.
 
 > **Plan resolution**: Treat [arguments-and-decisions.md#plan-resolution](../../autopilot-code/references/arguments-and-decisions.md) as the single authority for resolving `$ARG`.
 

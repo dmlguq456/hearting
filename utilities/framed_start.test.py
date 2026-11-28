@@ -304,7 +304,7 @@ class SelectedLegTest(StartBase):
         record = self.record()
         self.assertEqual(record["first_leg"]["route"]["route_id"], leg["route_id"])
         self.assertEqual(notice.getvalue().count("[경로]"), 1)
-        self.assertIn("[경로] autopilot-code · staged(standard)", notice.getvalue())
+        self.assertIn("[경로] autopilot-code · team(standard)", notice.getvalue())
         self.assertIn("route " + leg["route_id"], notice.getvalue())
         self.assertEqual(record["first_leg"]["start_receipt"]["owner_attempt_id"], result["owner_attempt_id"])
         self.assertEqual(self.cli_calls, ["complete", "close"])

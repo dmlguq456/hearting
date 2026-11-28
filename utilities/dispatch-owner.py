@@ -115,13 +115,13 @@ _HINTS = {
                         "--worker-type owner --owner <capability> --assigned-contract <capability> "
                         "--model-profile deep|balanced-deep|balanced|light (top only from a route that seals it)",
     "route-evidence-arg-mismatch": "omit that flag or pass the route's own value; the route seals it",
-    "route-evidence-direct-route-has-no-owner": "a direct route runs inline; compose --shape solo (quick) or staged to get an owner",
+    "route-evidence-direct-route-has-no-owner": "a direct route runs inline; compose --shape solo (quick) or team to get an owner",
     "route-evidence-unreadable": "pass the route *file* printed by compose as route_file=, not the route id",
     "explicit-adapter-outside-route-evidence": "drop --adapter; the route's sealed candidates decide. To change them, recompose: "
-                                               "solo/quick with --children <harness>, staged with --parent-harness <harness>",
+                                               "solo/quick with --children <harness>, team with --parent-harness <harness>",
     "route-evidence-candidates-outside-policy": "the route sealed no harness this user's policy admits (configured_candidates= above is empty): "
                                                 "your dispatch-defaults.yaml enables <policy-harnesses> for this model profile. Recompose the route "
-                                                "for one of those (solo/quick: --children <harness>; staged: --parent-harness <harness>), or add the "
+                                                "for one of those (solo/quick: --children <harness>; team: --parent-harness <harness>), or add the "
                                                 "harness to harnesses.enabled and this profile's quality bands first. This is not a usage limit -- "
                                                 "see eligibility.* above",
     "no-eligible-route-evidence-candidate": "no sealed candidate is usable: it is usage-limited, gated, or has no positive quota "

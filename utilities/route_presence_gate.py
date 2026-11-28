@@ -506,7 +506,7 @@ def refusal(root: str, top: Path, kind: str, target: str, env) -> str:
             f"For one atomic, reversible inline change, run this once, then retry:\n{command}\n"
             f"{task_guidance} Replace <field> with the work's field, e.g. code or docs "
             "(compose names the others; admin and other also need --capability). "
-            "For other new work, open --shape solo|staged --capability <kind> when the direction is clear; otherwise omit --shape "
+            "For other new work, open --shape solo|team --capability <kind> when the direction is clear; otherwise omit --shape "
             "and use compose --start --prompt-file <task>, and the frame decides the route. "
             "Follow an already-decided frame or person-specified route under core/WORKFLOW.md §0.2.1. "
             "To continue a route you already have: capability-route.py start --route <route-file>.")

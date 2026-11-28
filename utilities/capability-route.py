@@ -194,7 +194,7 @@ from capability_route_compose import (  # noqa: F401
     _route_plan_preparation_key, _seal_framed_worktree, _spec_reads_recorded,
     _turn_peer_source, _unarbitrated_auxiliary_legs, _validate_compose_owner_close,
     _versioned_subgraph, _without_implicit_frame_briefs, COMPOSE_DEFAULT_CAPABILITY,
-    COMPOSE_DEFAULT_CHILDREN, COMPOSE_SHAPES, compose_spec_read, compose_subgraph_recipe,
+    COMPOSE_DEFAULT_CHILDREN, COMPOSE_SHAPES, COMPOSE_SHAPE_WORDS, compose_spec_read, compose_subgraph_recipe,
     DECIDED_SHAPES, DEFAULT_ARTIFACT_GUARD, DEFAULT_DRIFT_VERDICT, INTENSITY_SHAPE,
     parse_graph_spec, proposal_readiness, read_compose_task, ROUTE_FRAME_CAPABILITY, ROUTE_ORIGINS,
     shape_for_intensity, SHAPE_INTENSITY, SPEC_READ_MARKER_PREFIX, SPEC_READ_SHARED_PREFIX,
@@ -1005,7 +1005,7 @@ def _compose_unit_arguments(registry, unit, *, capability, capability_mode, shap
         if value not in allowed:
             if flag == "--intensity":
                 reason = ("a unit route has no intensity: one unit does one job and nothing checks it; to have the work "
-                          "checked open --shape solo or staged with --intensity, and to judge more deeply use --profile")
+                          "checked open --shape solo or team with --intensity, and to judge more deeply use --profile")
             else:
                 reason = "--unit is the kind unit: one leg of that unit"
             raise ValueError(f"compose-unit-conflict:{flag} {value if isinstance(value, str) else ''}".rstrip()
@@ -1018,7 +1018,7 @@ def _compose_unit_arguments(registry, unit, *, capability, capability_mode, shap
         raise ValueError(f"compose-unit-unknown:{unit} (units: {','.join(TOPO.unit_names())})")
     if head["read_only"] != "true":
         raise ValueError(f"compose-unit-writes:{unit} (this unit writes; a unit route opens read-only units "
-                         "only for now, and a writing unit runs inside a staged route)")
+                         "only for now, and a writing unit runs inside a team route)")
     if field is not None:
         return TOPO.UNIT_CAPABILITY, "default", "solo", field, "explicit"
     if head["field"] is None:
@@ -1036,18 +1036,23 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
                   campaign_key=None, parent_cycle_id=None, profile=None, work_request=None, unassigned=False,
                   selection_pins=None, route_plan=None, frameless=False, execution_scope=None,
                   extra_stages=None, selection_only=False, capability_source=None, field=None, unit=None,
-                  campaign_default=None):
+                  campaign_default=None, shape_word=None):
     """Resolve every default, then compile through the ordinary sealer.
 
     `route_plan` (a binding read by `route_plan.read_route_plan`) seals `{decision, digest, index}`
     and compiles without frame nodes; `frameless` alone is the same compile without the seal, the form
-    a proposal leg is validated in. A `solo` or `staged` shape is chosen for work that is already
+    a proposal leg is validated in. A `solo` or `team` (`staged`) shape is chosen for work that is already
     decided, so it compiles without the recipe's frame pair too; `framed` is where a frame runs.
 
     Every decided shape names its kind, its field, or both (routing/prd.md R8): a field alone
     opens that field's default recipe; neither is refused, naming what is missing.
+
+    `team` is the person's word for the recorded shape `staged`: it opens the same route, and a refusal
+    repeats the word that was typed (`shape_word`, or `shape` itself).
     """
     import route_plan as RP
+    typed_shape = shape_word or shape
+    shape = ROUTE_FORM.canonical_shape(shape)
     registry = TOPO.load_registry()
     fields = TOPO.field_vocabulary(registry)
     if field is not None and field not in fields:
@@ -1073,7 +1078,7 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
         field, field_source = (leg_field if leg_field in fields else None), "frame"
     if capability is None and shape != "framed":
         if field is None:
-            raise ValueError(f"compose-capability-required:{shape} (name --capability <capability> "
+            raise ValueError(f"compose-capability-required:{typed_shape} (name --capability <capability> "
                              f"or --field <field>; fields: {','.join(fields)})")
         default = TOPO.field_default_recipe(registry, field)
         if default is None:
@@ -1128,7 +1133,7 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
     requested = intensity or SHAPE_INTENSITY[shape]
     if requested not in ORDER:
         raise ValueError("invalid intensity")
-    mismatch = ROUTE_FORM.intensity_mismatch(shape, requested, one_shot_review_declared(base))
+    mismatch = ROUTE_FORM.intensity_mismatch(shape, requested, one_shot_review_declared(base), typed=typed_shape)
     if mismatch is not None:
         raise ValueError(mismatch)
     cwd = str(Path(cwd).resolve(strict=True))
@@ -1908,15 +1913,15 @@ def main():
     cp.add_argument("--explicit-profiles", help="JSON file mapping node ids to explicit profiles; keys: __owner__ (the owner) or a node id (a parallel-group leg by its realized id, e.g. impl-review-alternative); a value of top is for the owner at any intensity, or for a depth-2 stage worker or review/verification leg you name at strong or higher (set --intensity; one top leg per parallel group; a route-wide worker pin's model still wins; never route-wide)")
     cp.add_argument("--profile", choices=sorted(PROFILE.PORTABLE_PROFILES),
                     help="explicit model budget for owner and model nodes; node-specific --explicit-profiles takes precedence; mini only with --shape direct (a registered owner or stage needs light or higher)")
-    cp.add_argument("--shape",choices=COMPOSE_SHAPES,default=None,help="direct (inline) | solo (one registered owner) | staged (capability recipe, optionally narrowed by --graph) | framed (two top frame legs propose the route by default; explicit quick/direct may use one deep leg for unprotected work; --capability, --capability-mode, --graph and --profile are recorded as hints only); default: framed; use --shape direct for inline work; --graph without --shape is a frame routing hint")
+    cp.add_argument("--shape",choices=COMPOSE_SHAPE_WORDS,metavar="{direct,solo,team}",default=None,help="direct (inline) | solo (one registered owner) | team (an owner and stage workers: the capability recipe, optionally narrowed by --graph; `staged` is the same form) | omit --shape and two top frame legs propose the route (explicit quick/direct may use one deep leg for unprotected work; --capability, --capability-mode, --graph and --profile are recorded as hints only); use --shape direct for inline work; --graph without --shape is a frame routing hint")
     cp.add_argument("--graph",default=None,help="optional staged subgraph in your order (see `capability-route.py stages --capability <cap>` for valid ids); incompatible inherited parallel presets are omitted; optional :unit override, e.g. execute,test,report")
     cp.add_argument("--execution-scope", choices=("complete", "report"), default=None,
                     help="optional scope already selected in the existing start confirmation; it is not approval evidence")
-    cp.add_argument("--capability",default=None,help="the kind (preset recipe); a direct, solo or staged shape names it, --field, or both; a hint only with --shape framed"); cp.add_argument("--capability-mode",default=None)
+    cp.add_argument("--capability",default=None,help="the kind (preset recipe); a direct, solo or team shape names it, --field, or both; a hint only when --shape is omitted"); cp.add_argument("--capability-mode",default=None)
     cp.add_argument("--unit",default=None,metavar="FAMILY/NAME",help="open one read-only unit as a route of its own (the kind unit, one leg, no owner, no intensity); its field is the unit head's `field:`, or name --field; with --start --prompt-file the unit's one worker starts with the brief and its end closes the route")
     cp.add_argument("--ephemeral",action="store_true",help="with --unit: leave nothing in the project's artifact folder or campaign records; the route's files stay in a scratch root under the runtime directory and the worker's answer comes back with its completion")
-    cp.add_argument("--field",default=None,help="the field of the work (plan, design, code, lab, research, docs, admin, other); alone it opens that field's default recipe, and admin or other also need --capability; a hint only with --shape framed")
-    cp.add_argument("--intensity",default=None,help="default by shape: direct/quick/standard; framed defaults to two frame legs, while explicit quick/direct may use one for unprotected work; solo accepts standard and higher where the kind declares a one-shot review; staged accepts standard and higher")
+    cp.add_argument("--field",default=None,help="the field of the work (plan, design, code, lab, research, docs, admin, other); alone it opens that field's default recipe, and admin or other also need --capability; a hint only when --shape is omitted")
+    cp.add_argument("--intensity",default=None,help="default by shape: direct/quick/standard (direct, solo, team); with --shape omitted the frame legs propose it, and explicit quick/direct may use one frame leg for unprotected work; solo accepts standard and higher where the kind declares a one-shot review; team accepts standard and higher")
     cp.add_argument("--cwd",default=None,help="default: current directory"); cp.add_argument("--artifact-root",default=None,help="default: utilities/artifact-root.sh for cwd")
     cp.add_argument("--signal",action="append",default=[],
                     help="promotion signal (repeatable), e.g. shared-contract: promotes shared spec/contract "
@@ -2085,7 +2090,8 @@ def main():
                     print("  borrow "+line(node))
         return 0
     if a.command=="compose":
-        shape=a.shape or ("solo" if a.unit is not None else "framed")
+        shape_word=a.shape or ("solo" if a.unit is not None else "framed")
+        shape=ROUTE_FORM.canonical_shape(shape_word)   # `team` is the typed word for `staged`; records and checks use `staged`
         if a.start and (a.explain or a.prompt_file is None):
             raise ValueError("compose-start-requires-task: use --start --prompt-file <task>, without --explain")
         compose_task = read_compose_task(a.prompt_file)
@@ -2157,7 +2163,7 @@ def main():
                 diagnosis = {"state": "error", "cwd": str(Path(cwd).resolve()),
                              "detail": "invalid AGENT_DISPATCH_DEPTH"}
             requested_shape = (route_plan_binding["leg"].get("shape")
-                               if route_plan_binding is not None else a.shape)
+                               if route_plan_binding is not None else ROUTE_FORM.canonical_shape(a.shape))
             import route_plan as RP
             non_git_decision = _decide_non_git_compose(
                 diagnosis, requested_shape, dispatch_depth,
@@ -2204,7 +2210,8 @@ def main():
         owner_pin=(pins.get("owner") or {}).get("harness")
         compose_args=dict(
             capability=a.capability,field=a.field,unit=a.unit,
-            capability_mode=a.capability_mode,shape=shape,graph=a.graph,
+            capability_mode=a.capability_mode,shape=shape,
+            shape_word=(shape_word if ROUTE_FORM.canonical_shape(shape_word)==shape else None),graph=a.graph,
             slug=a.slug,cwd=cwd,artifact_root=artifact_root,intensity=a.intensity,signals=a.signal,
             campaign_key=a.campaign_key,parent_cycle_id=a.parent_cycle,unassigned=a.unassigned,
             campaign_default=campaign_default,

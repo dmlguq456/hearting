@@ -62,7 +62,7 @@ Follow [OPERATIONS §5.10](../../../core/OPERATIONS.md#510-work-isolation-and-pa
 
 - Every feature, new module, or multi-file change uses a worktree and task branch regardless of intensity. Only a typo or one-line isolated edit belongs directly in main.
 - After creating the worktree, dispatch the whole autopilot-code cycle into a dispatch-depth-1 headless session. Main scouts, dispatches, and harvests; it does not split one pipeline between dispatch depth 0 and headless execution.
-- Inside the dispatch-depth-1 conductor, standard+ dispatches code-plan, code-execute, code-test, and code-report as file-handoff dispatch-depth-2 sessions. File contracts preserve continuity. The conductor reads only verdicts and gate state.
+- Inside the dispatch-depth-1 conductor of a team route, the stages dispatch code-plan, code-execute, code-test, and code-report as file-handoff dispatch-depth-2 sessions. File contracts preserve continuity. The conductor reads only verdicts and gate state.
 - Keep micro-stages with no durable artifact, such as a one-line plan-check, inline. direct and quick remain inline at their intended layer.
 - A new independent request uses another worktree when files do not overlap; overlapping work queues behind the active branch. Merge selection remains with the user or main harvest flow.
 
@@ -70,7 +70,7 @@ Follow [OPERATIONS §5.10](../../../core/OPERATIONS.md#510-work-isolation-and-pa
 
 When `spec/` exists, compare the request with `spec/prd.md` and relevant contract files before planning:
 
-- **spec-significant:** route, schema, entity field, UI flow, external service, stack, migration, or existing spec drift. The plan or code owner updates the affected component PRD before implementation through the same route: run `spec-transaction --node execute` inside `code-execute` for standard+, use the one-shot transaction for quick, and apply it inline for direct. The transaction preserves the exact old PRD snapshot and its revision/CAS guards. An explicit user deferral is the sole exception; no separate spec route or scope reconfirmation is needed. Ask only when classification is genuinely ambiguous.
+- **spec-significant:** route, schema, entity field, UI flow, external service, stack, migration, or existing spec drift. The plan or code owner updates the affected component PRD before implementation through the same route: run `spec-transaction --node execute` inside `code-execute` for a `team` route, use the one-shot transaction for a `solo` route, and apply it inline for direct. The transaction preserves the exact old PRD snapshot and its revision/CAS guards. An explicit user deferral is the sole exception; no separate spec route or scope reconfirmation is needed. Ask only when classification is genuinely ambiguous.
 - **within-spec:** bug fix, refactor, or implementation detail. Continue.
 
 Write one verdict to chat and plan or logs before code-plan:
@@ -112,7 +112,7 @@ This is a partial fallback. Recommend autopilot-spec before entering the code ro
 | Major dependency or framework change | `stack_decision.md`, component and deployment diagrams |
 | Lifecycle state model | `data_model.md`, optional state diagram |
 
-The plan or code owner updates the affected component PRD before implementation through the same route: run `spec-transaction --node execute` inside `code-execute` for standard+, use the one-shot transaction for quick, and apply it inline for direct. Proceed without reconfirming the approved scope; only an explicit user deferral skips the update. The normal route completion publishes an actual seeded authoring change, while the code `final_report` remains cycle-local primary.
+The plan or code owner updates the affected component PRD before implementation through the same route: run `spec-transaction --node execute` inside `code-execute` for a `team` route, use the one-shot transaction for a `solo` route, and apply it inline for direct. Proceed without reconfirming the approved scope; only an explicit user deferral skips the update. The normal route completion publishes an actual seeded authoring change, while the code `final_report` remains cycle-local primary.
 
 ## Experiment-Readiness Branch
 
