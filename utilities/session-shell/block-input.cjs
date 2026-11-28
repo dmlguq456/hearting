@@ -73,7 +73,8 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
     return remote==='submitted'||local==='submitted'?'sent':null;
   };
   const flat=()=>items.filter(item=>!phase(item)).flatMap(item=>(item.questions||[]).map(question=>({item,question})));
-  const current=()=>frozen||viewing||flat()[index];
+  // (Fix 1: the sent answer pressed comes before a changed question kept with its draft, which stays under it.)
+  const under=()=>frozen||flat()[index],current=()=>viewing||under();
   const text=(name,fallback)=>labels[name]||fallback;
   const span=(value,style='dim')=>({text:String(value),...(styles[style]||{dim:style==='dim'})});
   const choices=row=>row.item.answer_kind==='decision'?['approve','reject','defer']:row.question.choices||[];
@@ -172,7 +173,7 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
   function release(){if(!focused)items=items.filter(item=>!settled(item));}
   function update(rows,guidance,presentation={}) {
     labels=presentation.labels||labels;styles=presentation.styles||styles;help=guidance||help;
-    const previous=current();items=Array.isArray(rows)?rows.slice():[];
+    const previous=under();items=Array.isArray(rows)?rows.slice():[];
     for(const item of items){
       if(['submitted','received','applied','expired','cancelled'].includes(item.request_state)){
         const local=state(item);if(local.state!=='applied')local.state=item.request_state;if(item.request_state==='applied')local.notice='';
@@ -185,14 +186,15 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
     }
     items=items.filter(item=>phase(item)!=='done');
     release();
-    // The sent answer being read stays while its line stands (its newest values); gone, the popup goes on as for a question that left.
-    if(viewing){
-      const again=items.find(item=>item.id===viewing.item.id&&phase(item)==='sent');
-      viewing=again?{item:again,question:(again.questions||[])[0]||{}}:null;
-      if(viewing){prune(flat());changed();return;}
-    }
     const listed=flat();
     const found=previous?listed.findIndex(row=>key(row.item)===key(previous.item)&&row.question.id===previous.question.id):-1;
+    // Fix 1: the sent answer being read is the one pressed: its newest values while its line stands, and as it was once
+    // the line goes (taken, ten minutes). Only the person moves on from it (Tab, Esc/Ctrl+], another press).
+    if(viewing){
+      const again=items.find(item=>item.id===viewing.item.id&&phase(item)==='sent');
+      if(again)viewing={item:again,question:(again.questions||[])[0]||{}};
+      if(found>=0){index=found;frozen=undefined;stale=false;}prune(listed);changed();return;
+    }
     const firstOpen=listed.findIndex(row=>row.item.answerable===true&&!state(row.item).state);
     if(!focused&&previous&&state(previous.item).state&&firstOpen>=0){index=firstOpen;frozen=undefined;stale=false;scroll=0;follow=true;}
     else if(found>=0){index=found;frozen=undefined;stale=false;}
@@ -210,7 +212,7 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
     changed();
   }
   function prune(listed){
-    const active=new Set(listed.map(row=>key(row.item)));if(frozen)active.add(key(frozen.item));
+    const active=new Set(listed.map(row=>key(row.item)));if(frozen)active.add(key(frozen.item));if(viewing)active.add(key(viewing.item));
     for(const item of items)if(phase(item)==='sent')active.add(key(item));
     // Bounded volatile history, never a new question/answer store.
     for(const old of entries.keys())if(!active.has(old)&&entries.size>8)entries.delete(old);
@@ -225,16 +227,15 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
     if(sent){viewing={item:sent,question:(sent.questions||[])[0]||{}};changed();return;}
     const at=open?flat().findIndex(r=>key(r.item)===open):-1;
     if(at>=0){index=at;frozen=undefined;stale=false;}
-    const row=current();
-    if(!frozen&&(!row||!active(row))){const open=flat().findIndex(r=>active(r));if(open>=0)index=open;}
-    changed();
+    opening();changed();
   }
+  function opening(){const row=current();if(!frozen&&(!row||!active(row))){const open=flat().findIndex(r=>active(r));if(open>=0)index=open;}}
   function forgetPlaces(){for(const entry of entries.values())entry.caret={};}
   function leave(){forgetPlaces();clearFullNotice(current());viewing=null;focused=false;escapedAt=0;changeArmed=false;resetParser();scroll=0;follow=true;release();index=Math.min(index,Math.max(0,flat().length-1));changed();}
   const seatOf=row=>row?key(row.item)+'\0'+row.question.id:null;
   function move(delta){
-    // From a sent answer being read, Tab goes back to the question it stood over.
-    if(viewing){viewing=null;delta=0;}
+    // From a sent answer being read, Tab goes where Ctrl+] opens (fix 1): a question waiting, not a place the board left.
+    if(viewing){viewing=null;scroll=0;follow=true;resetParser();opening();changed();return;}
     const count=flat().length;index=(index+delta+count+1)%(count+1);
     moves++;changeArmed=false;forgetPlaces();seat=seatOf(flat()[index]);
     frozen=undefined;stale=false;scroll=0;follow=true;resetParser();changed();
@@ -337,7 +338,7 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
         const front=lead+shownChars.slice(one.start,at).join(''),rest=shownChars.slice(at,one.end).join('');
         tail.push(chosenRow([{...mark,text:front,caret:true},...(rest?[{...span(rest,'loc_repo'),answerRow:true}]:[])],true));
       }
-    }else if(phase(row.item)==='sent'){tail.push(sentLine(row.item));
+    }else if(row===viewing){tail.push(sentLine(row.item));
     }else if(picked&&!choosing(row)){
       const selected=picked.map(v=>{if(row.question.secret)return '•'.repeat([...String(v)].length);const n=choices(row).findIndex(c=>value(c)===v);return (n>=0?String(n+1)+' · ':'')+v;});
       tail.push(chosenRow([span('▶ '+selected.join(', '),'loc_repo')],active(row)));
@@ -736,15 +737,16 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
   // 11-15 (popup design A): the panel's summary of the questions waiting here: how many there are and
   // (11-28, the person: "선지는 미리 보기를 날리고 … 앞에 답 대기를 붉은 색으로 쓴다던지해서 답 보냄과 표현 일관성을 맞추되")
   // each waiting request's one row, `◑ to answer · <its first line>` (`답 대기`, the folded strip's word), in order: `word`,
-  // `line` (its first question's first line), `answerable` (a press answers it here, now; else `word` is where it is
-  // answered) and `open` (a press on its row opens on it). `answerable`: one of them is. The popup reads each whole.
+  // `line` (its first question's first line that draws), `answerable` (a press answers it here, now; else `word` is its
+  // state's) and `open` (a press on its row opens on it). Fix 1: only a request answered here has a row (a display reference
+  // of one that left this session's waits has none). `answerable`: one of them is. The popup reads each whole.
   function summary(){
     const listed=flat();if(!listed.length)return null;
     const waiting=text('waiting','◑ to answer').replace(/^◑\s*/u,'');
-    const waits=items.filter(item=>!phase(item)&&(item.questions||[]).length).map(item=>{
+    const waits=items.filter(item=>!phase(item)&&item.answerable===true&&(item.questions||[]).length).map(item=>{
       const row={item,question:item.questions[0]},view=row.question.display||{},status=terminalState(row);
-      const first=String(row.question.question||'').split('\n').map(line=>line.trim()).find(Boolean)||'?';
-      return {word:active(row)?waiting:text(status==='open'?unanswerable(row):status,status),answerable:active(row),open:key(item),
+      const first=String(row.question.question||'').split('\n').map(line=>line.replace(/[\x00-\x1f\x7f-\x9f]/g,' ').trim()).find(Boolean)||'?';
+      return {word:status==='open'?waiting:text(status,status),answerable:active(row),open:key(item),
         line:view.brief_line||[span(first,'loc_repo')]};
     });
     return {count:listed.length,label:text('questions','QUESTIONS'),waits,answerable:waits.some(w=>w.answerable)};

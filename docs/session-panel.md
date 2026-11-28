@@ -125,9 +125,10 @@ choice leads with `▶` (the place, as the question being answered and the setti
 | Click | A section's head or rows open its popup; a name on the popup's bottom line moves there; the wheel reads a long table on |
 
 Choices and drafts survive moving between questions. Once an answer is sent,
-the panel keeps one line, `✓ answer sent · <choice>`, until the session has
-it; a press on that line shows the question and the answer sent (the answer
-cannot be changed there). A transport receipt is
+the panel keeps one line, `✓ answer sent · <choice>`, for ten minutes from
+when it was sent, whether the session has it yet or not; a press on that line
+shows the question and the answer sent, as it was, until you leave it with Tab
+or Esc (the answer cannot be changed there). A transport receipt is
 shown separately from proved consumption, and expired or cancelled questions
 cannot be submitted. In a question, **↑/↓** scroll long content and an explicit
 count marks the hidden lines; a question section with nothing in it is not

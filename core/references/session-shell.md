@@ -551,18 +551,22 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   screen: the folded strip's word, `fleet.session_line.ANSWER_WAIT_WORDS`): the word in the answer wait's rose
   (`accent`, 174 on a dark or unknown face, 131 on a light one; weight in mono and `NO_COLOR`), the ` · ` dim, the
   line in the body color (253 / 237), never dimmed and no weight added, on no ground of their own (no fill, no chip,
-  no bar). A wait not answered here reads `◑ <where> · <its first line>`, its `◑` alone in the rose, its word dim.
-  The panel shows no choices: they are the popup's (the backend sends the panel each waiting question's first line,
-  `brief_line`). Three rows at most; more waiting, the last row shown ends in the hidden count (`+2`, dim; waits
-  answered elsewhere and answers sent are not in it). Short of cells the line is cut (`…`) before the word, which
-  stands whole while it fits. Under them `↵ answer · Ctrl+]` keeps its rose at the right. Inside the box the red
+  no bar). One not answered now (its delivery not confirmed) reads `◑ <its state> · <its first line>`, its `◑` alone in
+  the rose, its word dim. Only a request answered here has a row (fix 1): a display reference of one that has left this
+  session's waits has none and is in no hidden count, and a changed question held with its draft changes no row's word.
+  The panel shows no choices: they are the popup's (the backend sends the panel each waiting question's first line that
+  draws, `brief_line`; a line of control characters alone is blank). Three rows at most; more waiting, the last row shown
+  ends in the hidden count (`+2`, dim; waits answered elsewhere and answers sent are not in it). Short of cells the
+  line is cut (`…`) before the word, which stands whole while it fits. Under them `↵ answer · Ctrl+]` keeps its rose at the right. Inside the box the red
   letters stand still while the box's line blinks (11-16, the person: "G1에서 질문 바운더리만 붉게 하고, 내용은 흰색으로
   해": the line carries the red, the words the body color); folded back to the plain section (short of rows) the
   word and the action row blink as in 11-15. Short of rows the extra rows go first (the third, then the second),
   then the action row; the first row stays to the last. A press on a sent line opens that answer's question to read
-  (its words and the line, a secret `•••`, nothing read for it; Tab goes back to the waits; the answer cannot be
-  changed there), a press on a waiting row that question, a press anywhere else on the box the question popup as
-  before (the question it stood on). Eight colors, mono and `NO_COLOR` tell a question to answer here from the
+  (its words and the line, a secret `•••`, nothing read for it; the answer cannot be changed there). It stays the answer
+  pressed, as it was, when the board changes and when its line leaves the panel (taken, ten minutes): it never moves on to
+  another question by itself; Tab goes to the question `Ctrl+]` would open, Esc/Ctrl+] closes it, a press on another
+  row opens that row's. A press on a waiting row opens that question, a press anywhere else on the box the question
+  popup as before (the question it stood on). Eight colors, mono and `NO_COLOR` tell a question to answer here from the
   rest by the box line's weight and by the two words. Nothing else is red but the box's line, the waiting word,
   a wait answered elsewhere's `◑` and the guide line's count (11-15: what waits blinks, above): not an answer on
   its way, not the guide line's words or `질문 변경됨`.
