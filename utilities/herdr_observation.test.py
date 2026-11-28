@@ -251,17 +251,30 @@ class _HerdrApiFixture:
 
 
 class ObservationSocketOwnershipTest(unittest.TestCase):
-    def test_inherited_socket_owner_is_herdr_session_or_default(self):
-        socket_path = "/fixture/default.sock"
-        env = {"HERDR_SOCKET_PATH": socket_path, "AGENT_HERDR_SESSION": "second"}
-        self.assertEqual(observation.socket_path_for_endpoint("default", env), socket_path)
-        self.assertIsNone(observation.socket_path_for_endpoint("second", env))
+    def test_a_socket_without_herdr_session_owns_the_default_only_at_its_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            default_socket = os.path.join(tmp, "herdr", "herdr.sock")
+            own = {"XDG_CONFIG_HOME": tmp}
+            self.assertEqual(
+                observation.socket_path_for_endpoint("default", {**own, "HERDR_SOCKET_PATH": default_socket}),
+                default_socket)
+            # An inherited socket somewhere else names no owner; default must not claim it.
+            self.assertIsNone(
+                observation.socket_path_for_endpoint("default", {**own, "HERDR_SOCKET_PATH": "/fixture/default.sock"}))
+            self.assertIsNone(
+                observation.socket_path_for_endpoint("second", {**own, "HERDR_SOCKET_PATH": default_socket}))
+            self.assertEqual(
+                observation.socket_path_for_endpoint("default", {
+                    **own, "HERDR_SOCKET_PATH": default_socket, "HERDR_SESSION": ""}), default_socket)
+
+    def test_an_explicit_herdr_session_owns_its_inherited_socket(self):
         env = {"HERDR_SOCKET_PATH": "/fixture/second.sock", "HERDR_SESSION": "second",
                "AGENT_HERDR_SESSION": "default"}
         self.assertEqual(observation.socket_path_for_endpoint("second", env), "/fixture/second.sock")
         self.assertIsNone(observation.socket_path_for_endpoint("default", env))
         self.assertEqual(observation.socket_path_for_endpoint("default", {
-            "HERDR_SOCKET_PATH": socket_path, "HERDR_SESSION": ""}), socket_path)
+            "HERDR_SOCKET_PATH": "/fixture/default.sock", "HERDR_SESSION": "default"}),
+            "/fixture/default.sock")
 
 
 class ObservationTransportTest(unittest.TestCase):
