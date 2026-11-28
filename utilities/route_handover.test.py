@@ -23,7 +23,9 @@ from unittest import mock
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
+import dispatch_pending_delivery as pending  # noqa: E402
 import dispatch_seat_handover as handover  # noqa: E402
+import dispatch_session_sweep as sweep_module  # noqa: E402
 import dispatch_supervision  # noqa: E402
 import peer_address  # noqa: E402
 import peer_request as pr  # noqa: E402
@@ -131,6 +133,38 @@ class Cases:
         self.assertEqual(sorted(sessions.glob("*.jsonl")) if sessions.exists() else [], [])
         self.assertEqual(pr.session_requests(self.harness, A)["out"], [])
 
+    def waiting(self, name, **record):
+        directory = pending.record_directory(self.jobs.parent, A)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / ("delivery-%s.json" % name)).write_text(json.dumps(record))
+
+    def finish(self, *attempts):
+        """The registry row's own terminal edge, in place (one row per attempt, as the batch reader needs)."""
+        lines = self.jobs.read_text().splitlines()
+        self.jobs.write_text("".join((line.replace("\trunning\t", "\tdone\t", 1)
+                                      if any("attempt_id=%s," % a in line for a in attempts) else line) + "\n"
+                                     for line in lines))
+
+    def completion(self, meta, *, success=False):
+        h = self.harness
+        child = dict(attempt_id=meta["attempt_id"], status="done", readiness="ready", harness=h,
+                     required_action="advance-completed" if success else "inspect-done-failure",
+                     reason="terminal-complete" if success else "terminal-failure-or-unclosed")
+        receipt = dict(schema_version=2, state="ready" if success else "delivered", parent_attempt_id="att-parent",
+                       job_registry=str(self.jobs), children=[dict(child, delivery_classification="success")]
+                       if success else [child], **({"delivery_classification": "success"} if success else {}))
+        return pending.create(root=self.jobs.parent, recipient_kind=parent_completion(h)["carrier"],
+                              recipient_key=meta["parent_sid"], delivery_id=meta.get("delivery_id") or "delivery-" + meta["attempt_id"],
+                              session_generation="", session_generation_supported="0", attempt_ids=[meta["attempt_id"]],
+                              parent_attempt_id="att-parent", route_id=meta["route_id"], route_node=meta["route_node"],
+                              receipt=receipt, receipt_digest=pending._canonical_receipt_digest(receipt),
+                              row_revisions={meta["attempt_id"]: meta.get("delivery_row_revision", "original")})
+
+    def sweep(self, sid):
+        with mock.patch("dispatch_notice_state.keep_claim", return_value=True):
+            claimed, _count = sweep_module.sweep_deliver(self.jobs.parent, parent_completion(self.harness)["carrier"], sid)
+        return sorted(a for record in claimed for a in record["attempt_ids"])
+
     # --- cases
     def test_the_stream_moves_and_everything_else_stays(self):
         h = self.harness
@@ -156,59 +190,129 @@ class Cases:
                 route_authority.require_owner(meta, A, self.jobs, "parent-close-owner-not-owned")
             route_authority.require_owner(meta, B, self.jobs, "parent-close-owner-not-owned")
         self.assertEqual(self.holder(other), A)
-        # A completion stored under the registered parent goes to the receiver, once, not to the sender.
-        record = {"attempt_ids": ["att-r1"]}
-        self.assertEqual(handover.record_recipient_binding(record, A, harness=h, jobs=self.jobs), (h, B))
-        self.assertFalse(handover.record_for_session(record, None, session=A, harness=h, storage_key=A, jobs=self.jobs))
-        self.assertTrue(handover.record_for_session(record, None, session=B, harness=h, storage_key=A, jobs=self.jobs))
-        scopes = dict(handover.storage_recipients(B, harness=h))
-        self.assertEqual(set(scopes[A]), {"att-r1", "att-r2"})
-        # An attention notice asks the attempt's parent: the same holder answers.
         notice = handover.resolve_recipient("attempt-parent", metadata={
             "session_id": A, "harness": h, "attempt_id": "att-r1"}, jobs=self.jobs)
         self.assertEqual((notice.session_id, notice.harness), (B, h))
-        # Questions, requests and the steward's own succession stay with the sender.
         self.assertEqual(handover.session_successor(A, harness=h), ("", ""))
         self.assertEqual([r["id"] for r in pr.session_requests(h, A)["out"]], [request_id])
         self.assertEqual(self.ledger_rows(A), [])
-        self.assertIn("--- handed route (runtime) ---", self.body_of(request_id))
+        # These rows name no route file: the note has no lines for them and the request still goes.
+        self.assertEqual(self.body_of(request_id), "이 흐름을 맡아 주세요")
 
-    def test_only_the_holder_can_hand_a_route_on(self):
+    def test_the_completion_reaches_the_receiver_once(self):
+        meta = self.row("att-r1", "rt-r1")
+        self.assertEqual(self.hand(B, "rt-r1")[0], 0)
+        self.finish("att-r1")
+        self.completion(meta)
+        self.assertEqual(self.sweep(A), [])
+        self.assertEqual(self.sweep(B), ["att-r1"])
+        self.assertEqual(self.sweep(B), [], "a claimed completion is not claimed again")
+        self.assertEqual(self.sweep(A), [])
+
+    def batch(self, *names, cycle="cycle-shared"):
+        from route_identity import route_hash
+        rows = []
+        for name in names:
+            route = {"route_id": "rt-" + name, "parent_cycle_id": cycle, "nodes": [{"id": "execute"}]}
+            route["route_hash"] = route_hash(route)
+            path = self.root / ("rt-%s.json" % name)
+            path.write_text(json.dumps(route, sort_keys=True))
+            receipt_key = "revision-" + name
+            rows.append(self.row("att-" + name, "rt-" + name, node="execute", route_hash=route["route_hash"],
+                                 route_file=str(path), registered_worker="1", delivery_intent="1",
+                                 delivery_intent_at_ns="1", failure_class="pass", note="completed-marker",
+                                 delivery_id="delivery-" + name, delivery_row_revision=receipt_key,
+                                 delivery_recipient_kind=parent_completion(self.harness)["carrier"]))
+        return rows
+
+    def test_a_completion_batch_moves_whole_or_not_at_all(self):
+        first, second = self.batch("b1", "b2")
+        self.assertEqual(self.hand(B, "rt-b1"),
+                         (1, "request=- delivery=refused reason=batch-split route=rt-b1,rt-b2"))
+        self.nothing_written()
+        rc, out = self.hand(B, "rt-b1", "rt-b2")
+        self.assertEqual(rc, 0, out)
+        self.finish("att-b1", "att-b2")
+        records = [self.completion(meta, success=True) for meta in (first, second)]
+        self.assertBatched(records)
+        self.assertEqual(self.sweep(A), [])
+        self.assertEqual(self.sweep(B), ["att-b1", "att-b2"])
+
+    def test_without_a_hand_off_the_batch_is_claimed_as_before(self):
+        rows = self.batch("b1", "b2")
+        self.finish("att-b1", "att-b2")
+        records = [self.completion(meta, success=True) for meta in rows]
+        self.assertBatched(records)
+        self.assertEqual(self.sweep(A), ["att-b1", "att-b2"])
+
+    def assertBatched(self, records):
+        from dispatch_notice_state import resolve_delivery_batch
+        batch = resolve_delivery_batch(self.jobs, records[0], recipient_key=A, delivery_root=self.jobs.parent)
+        self.assertEqual(sorted(batch["delivery_ids"]), sorted(r["delivery_id"] for r in records))
+
+    def test_only_a_running_route_with_nothing_waiting_moves(self):
+        self.row("att-r1", "rt-r1")
+        for name, record in (("completion", {"state": "pending", "route_id": "rt-other", "attempt_ids": ["att-r1"]}),
+                             ("attention", {"state": "claimed", "route_id": "rt-r1", "attempt_ids": []}),
+                             ("notice", {"state": "sent-ambiguous", "route_id": "route-free", "attempt_ids": [],
+                                         "lineage": ["x:" + json.dumps({"attempt_id": "att-r1"})]})):
+            with self.subTest(waiting=name):
+                self.waiting(name, **record)
+                self.assertEqual(self.hand(B, "rt-r1"),
+                                 (1, "request=- delivery=refused reason=route-finishing route=rt-r1"))
+                self.waiting(name, **dict(record, state="acked"))
+        self.row("att-done", "rt-done", status="done")
+        self.waiting("done", state="pending", route_id="rt-done", attempt_ids=["att-done"])
+        self.assertEqual(self.hand(B, "rt-done"),
+                         (1, "request=- delivery=refused reason=route-finishing route=rt-done"))
+        self.waiting("done", state="acked", route_id="rt-done", attempt_ids=["att-done"])
+        self.assertEqual(self.hand(B, "rt-done"),
+                         (1, "request=- delivery=refused reason=route-closed route=rt-done"))
+        self.nothing_written()
+        self.assertEqual(self.hand(B, "rt-r1")[0], 0)
+
+    def test_a_route_never_returns_to_a_session_that_held_it(self):
         h = self.harness
         meta = self.row("att-r1", "rt-r1")
         self.assertEqual(self.hand(B, "rt-r1")[0], 0)
-        rc, out = self.hand(C, "rt-r1")
-        self.assertEqual((rc, out), (1, "request=- delivery=refused reason=route-not-held route=rt-r1"))
+        self.assertEqual(self.hand(C, "rt-r1"), (1, "request=- delivery=refused reason=route-not-held route=rt-r1"))
         self.assertEqual(pr.session_requests(h, C)["in"], [])
-        self.assertEqual(self.ledger_rows(C), [])
         self.assertEqual(self.holder(meta), B)
-        self.assertFalse(handover.lineage_graph().binding_conflicts)
-        self.assertEqual(handover.record_recipient_binding({"attempt_ids": ["att-r1"]}, A, harness=h,
-                                                           jobs=self.jobs), (h, B))
-        rc, out = self.hand(C, "rt-r1", who=B)
+        with mock.patch.object(st, "now_epoch", return_value=1.0):  # a clock that went backwards
+            rc, out = self.hand(C, "rt-r1", who=B)
         self.assertEqual(rc, 0, out)
-        self.assertTrue(out.endswith(" route=rt-r1 holder=[cc]"), out)
+        self.assertEqual(self.holder(meta), C)
+        for back in (A, B):
+            with self.subTest(back=back):
+                self.assertEqual(self.hand(back, "rt-r1", who=C),
+                                 (1, "request=- delivery=refused reason=route-held-before route=rt-r1"))
         self.assertEqual(self.holder(meta), C)
         self.assertFalse(handover.lineage_graph().binding_conflicts)
+        self.assertEqual(handover.record_recipient_binding({"attempt_ids": ["att-r1"]}, A, harness=h,
+                                                           jobs=self.jobs), (h, C))
 
     def test_refusals_send_and_record_nothing(self):
         held = self.row("att-r1", "rt-r1")
         self.row("att-x", "rt-x", parent=C)
-        self.row("att-done", "rt-done", status="done")
+        other = OTHER_HARNESS[self.harness]
+        self.row("att-pair", "rt-pair", parent_harness=other, harness=other,
+                 parent_completion_delivery=parent_completion(other)["carrier"])  # same SID, other harness
         cases = [((B, "rt-x"), "route-not-held route=rt-x"),
-                 ((B, "rt-done"), "route-closed route=rt-done"),
                  ((B, "rt-unknown"), "route-not-held route=rt-unknown"),
-                 ((B, "rt-r1", "rt-x"), "route-not-held route=rt-r1,rt-x"),
+                 ((B, "rt-r1", "rt-x"), "route-not-held route=rt-x"),
+                 ((B, "rt-pair"), "route-not-held route=rt-pair"),
+                 ((A, "rt-r1"), "request-to-self"),
                  (("sid-dddd-5555", "rt-r1"), "harness-mismatch route=rt-r1")]
         for argv, reason in cases:
             with self.subTest(argv=argv):
-                self.assertEqual(self.hand(*argv), (1, "request=- delivery=refused reason=" + reason))
-        self.liveness[B] = "ended"
-        self.assertEqual(self.hand(B, "rt-r1"), (1, "request=- delivery=refused reason=receiver-not-live route=rt-r1"))
+                self.assertEqual(self.hand(*argv)[1], "request=- delivery=refused reason=" + reason)
+        for state in ("ended", "unknown"):
+            with self.subTest(liveness=state):
+                self.liveness[B] = state
+                self.assertEqual(self.hand(B, "rt-r1"),
+                                 (1, "request=- delivery=refused reason=receiver-not-live route=rt-r1"))
         self.assertEqual(self.holder(held), A)
         self.nothing_written()
-        self.assertEqual(sorted(peer_message._pending_dir().glob("*.json"))
-                         if hasattr(peer_message, "_pending_dir") else [], [])
 
     def test_without_route_the_request_is_unchanged(self):
         self.row("att-r1", "rt-r1")
@@ -216,7 +320,6 @@ class Cases:
         self.assertEqual(rc, 0, out)
         self.assertRegex(out, r"^request=rq-[0-9a-f]{6} delivery=queued-not-delivered to=\[bb\] harness=%s "
                               r"via=\S+ reason=\S+ next=\S+$" % self.harness)
-        self.assertNotIn("route=", out)
         self.assertEqual(self.body_of(out.split()[0].split("=")[1]), "이 흐름을 맡아 주세요")
         sessions = st.state_root() / "sessions"
         self.assertEqual(sorted(sessions.glob("*.jsonl")) if sessions.exists() else [], [])
@@ -224,36 +327,34 @@ class Cases:
         self.assertEqual(rc, 1)
         self.assertTrue(out.endswith("reason=route-needs-new-request"), out)
 
-    def test_a_failed_write_or_seal_leaves_no_half_handover(self):
+    def test_a_send_that_fails_after_the_move_says_so_and_takes_nothing_back(self):
         h = self.harness
         meta = self.row("att-r1", "rt-r1")
-        # The ownership row cannot be written: nothing is sealed or sent.
         with mock.patch.object(handover, "_append_transition_row", side_effect=OSError("disk")):
             self.assertEqual(self.hand(B, "rt-r1"),
                              (1, "request=- delivery=refused reason=handover-unrecorded route=rt-r1"))
         self.assertEqual(self.holder(meta), A)
         self.nothing_written()
-        # The row was written but no seal happened: the row is taken back.
         with mock.patch.object(peer_message, "prepare_peer_message", side_effect=OSError("seal")):
-            rc, out = self.hand(B, "rt-r1")
-        self.assertEqual(rc, 5, out)
-        self.assertNotIn("route=", out)
-        self.assertEqual(self.holder(meta), A)
-        self.assertEqual(self.ledger_rows(B), [])
+            self.assertEqual(self.hand(B, "rt-r1"), (5, "request=- delivery=refused reason=peer-pending-unavailable "
+                                                        "route=rt-r1 holder=[bb] note=undelivered"))
+        self.assertEqual(self.holder(meta), B, "the route stays with the receiver")
         self.assertEqual(pr.session_requests(h, A)["out"], [])
-        # Sealed but its record update failed: the request is still delivered, so the route stays moved.
+        rc, out = self.hand(B)  # the text goes again as a plain request
+        self.assertEqual(rc, 0, out)
+        meta2 = self.row("att-r2", "rt-r2")
         with mock.patch.object(pr, "confirm", side_effect=ValueError("record")):
-            rc, out = self.hand(B, "rt-r1")
+            rc, out = self.hand(B, "rt-r2")
         self.assertEqual(rc, 5, out)
-        self.assertTrue(out.endswith(" route=rt-r1 holder=[bb]"), out)
-        self.assertEqual(self.holder(meta), B)
+        self.assertTrue(out.endswith(" route=rt-r2 holder=[bb] note=undelivered"), out)
+        self.assertEqual(self.holder(meta2), B)
 
     def test_receiver_clear_and_retire_follow_the_existing_lineage(self):
         h = self.harness
         meta = self.row("att-r1", "rt-r1")
         self.assertEqual(self.hand(B, "rt-r1")[0], 0)
         handover._append_transition_row(st._pane_seat_of("w1:pB"), {
-            "ts": time.time(), "harness": h, "sid": B2, "event": "handover", "source": "clear",
+            "ts": time.time() + 5, "harness": h, "sid": B2, "event": "handover", "source": "clear",
             "from": {"harness": h, "sid": B}, "bindings": []})
         self.assertEqual(self.holder(meta), B2)
         self.assertEqual(handover.record_recipient_binding({"attempt_ids": ["att-r1"]}, A, harness=h,
@@ -263,8 +364,10 @@ class Cases:
         self.assertEqual([b["attempt"] for b in row["bindings"]], ["att-r1"])
         self.assertEqual(self.holder(meta), C)
         self.assertFalse(handover.lineage_graph().binding_conflicts)
+        self.assertEqual(self.hand(B, "rt-r1", who=C)[1],
+                         "request=- delivery=refused reason=route-held-before route=rt-r1")
 
-    def test_folding_keeps_an_assign_row_while_its_route_is_open(self):
+    def test_folding_never_drops_an_assign_row(self):
         h = self.harness
         meta = self.row("att-r1", "rt-r1")
         self.assertEqual(self.hand(B, "rt-r1")[0], 0)
@@ -274,48 +377,54 @@ class Cases:
                    "source": "retire", "from": {"harness": h, "sid": "sid-y%04d" % i}, "bindings": []}
                   for i in range(st.HANDOVER_KEEP_ROWS + 5)]
         filler += [{"ts": time.time(), "harness": h, "sid": B, "event": "prompt"}] * st.LEDGER_FOLD_LINES
+        self.finish("att-r1")  # even a finished route keeps its row: folding reads no registry
         with path.open("a") as handle:
             handle.writelines(json.dumps(item) + "\n" for item in filler)
-        st._fold_ledger(seat)
+        with mock.patch("dispatch_registry_cache.registry_view", side_effect=AssertionError("registry read")):
+            st._fold_ledger(seat)
         self.assertEqual([r["source"] for r in self.ledger_rows(B) if r.get("source") == "assign"], ["assign"])
+        self.assertEqual(len(self.ledger_rows(B)) < len(filler), True)
         self.assertEqual(self.holder(meta), B)
-        self.row("att-r1", "rt-r1", status="done")      # finished, no open route or delivery
-        with path.open("a") as handle:
-            handle.writelines(json.dumps(item) + "\n" for item in filler)
-        st._fold_ledger(seat)
-        self.assertEqual([r for r in self.ledger_rows(B) if r.get("source") == "assign"], [])
 
-    def test_running_routes_count_for_the_holder(self):
+    def test_a_missed_generation_bump_still_changes_the_inbox_digest(self):
+        import dispatch_recipient_inbox as inbox
         self.row("att-r1", "rt-r1")
+        before = handover.lineage_graph()
+        self.assertEqual(handover.notice_edges(before), tuple(before.edges), "no hand-off: the same digest as main")
+        with mock.patch.object(handover, "_bump_dispatch_edge_generation"):
+            self.assertEqual(self.hand(B, "rt-r1")[0], 0)
+        scopes = handover.storage_recipients(B, harness=self.harness)
+        self.assertNotEqual(inbox.edge_digest(scopes.edges), inbox.edge_digest(before.edges))
+        self.assertEqual(inbox.edge_digest(scopes.edges),
+                         inbox.edge_digest(handover.notice_edges(handover.lineage_graph())))
+
+    def test_the_sender_still_counts_a_handed_route_as_running(self):
+        """A known limit: running_route_ids stays on the registered parent (main, byte for byte)."""
+        self.row("att-r1", "rt-r1")
+        self.assertEqual(self.hand(B, "rt-r1")[0], 0)
         with mock.patch.object(dispatch_supervision, "update_attempt_stall_observation",
                                return_value={"state": "active"}):
             self.assertEqual(dispatch_supervision.running_route_ids(self.jobs, ["rt-r1"], A), {"rt-r1"})
-            self.assertEqual(self.hand(B, "rt-r1")[0], 0)
-            self.assertEqual(dispatch_supervision.running_route_ids(self.jobs, ["rt-r1"], A), set())
-            self.assertEqual(dispatch_supervision.running_route_ids(self.jobs, ["rt-r1"], B), {"rt-r1"})
+            self.assertEqual(dispatch_supervision.running_route_ids(self.jobs, ["rt-r1"], B), set())
 
-    def test_a_continuation_joins_the_holders_chain(self):
+    def test_the_route_chain_is_display_only_and_the_completion_follows_the_binding(self):
         import capability_route_base as base
         h = self.harness
         rc = base._route_chain_module()
-
-        def chain(sid, route):
-            rc.append(h, sid, {"v": rc.SCHEMA, "harness": h, "session_id": sid, "route_id": route,
-                               "route_file": "/synthetic/%s.json" % route})
-        chain(A, "rt-r1")
-        self.row("att-r1", "rt-r1")
+        rc.append(h, A, {"v": rc.SCHEMA, "harness": h, "session_id": A, "route_id": "rt-r1",
+                         "route_file": "/synthetic/rt-r1.json"})
+        meta = self.row("att-r1", "rt-r1")
+        self.assertEqual(self.hand(B, "rt-r1")[0], 0)
         os.environ.update(AGENT_DISPATCH_DEPTH="1", AGENT_DISPATCH_PARENT_SESSION_ID=A,
                           AGENT_DISPATCH_ATTEMPT_ID="att-r1")
-        identity = base._route_chain_identity("continuation", {"source_route_id": "rt-r1"})
-        self.assertEqual(identity, (h, A, 1, "att-r1"))
-        self.assertEqual(self.hand(B, "rt-r1")[0], 0)
-        identity = base._route_chain_identity("continuation", {"source_route_id": "rt-r1"})
-        self.assertEqual(identity, (h, B, 1, "att-r1"))
-        chain(B, "rt-r1-next")
-        identity = base._route_chain_identity("continuation", {"source_route_id": "rt-r1-next"})
-        self.assertEqual(identity, (h, B, 1, "att-r1"))
+        self.assertEqual(base._route_chain_identity("continuation", {"source_route_id": "rt-r1"}),
+                         (h, A, 1, "att-r1"))
+        self.finish("att-r1")
+        self.completion(meta)
+        self.assertEqual((self.sweep(A), self.sweep(B)), ([], ["att-r1"]))
 
     def test_the_note_carries_record_facts_within_two_kilobytes(self):
+        import peer_request_cmd
         import work_intent
         from dispatch_terminal_commit import terminal_slot
         h = self.harness
@@ -342,22 +451,26 @@ class Cases:
                       "마지막 완료 요약: %s · 산출물: /synthetic/report.md\n"
                       "이제 [bb]가 받음: 완료 · 주의 알림 · start/correct/close" % (slot / work_intent.SUMMARY_NAME), body)
         self.assertNotIn("감독 카드", body)
-        # With the sender's card: its path, update time and how many of the person's words it keeps.
         card = st.card_json_path(handover._assignment_seat(h, B))
         card.parent.mkdir(parents=True, exist_ok=True)
         card.write_text(json.dumps({"authored_at_epoch": 0, "body": "사용자 요구 원문 발췌:\n- \"하나\"\n- \"둘\""}))
-        line = handover._assignment_seat(h, B)
         rc, out = self.hand(C, "rt-r1", who=B)
         self.assertEqual(rc, 0, out)
         body = self.body_of(out.split()[0].split("=")[1])
         self.assertRegex(body, r"\n감독 카드: %s \(갱신 \d\d-\d\d \d\d:\d\d · 사용자 요구 원문 발췌 2건\) — "
                                r"이 흐름에 맞는 것만 따르세요$" % re.escape(str(card)))
-        self.assertTrue(line)
-        import peer_request_cmd
+        me = {"harness": h, "session_id": C}
         with mock.patch.object(peer_request_cmd, "_card_line", return_value="x" * 5000):
-            note = peer_request_cmd._route_notes({"harness": h, "session_id": C}, "[aa]", ["rt-r1"])
-        self.assertLessEqual(len(note.split("\n", 1)[1].encode("utf-8")), peer_request_cmd._ROUTE_NOTE_BYTES)
-        self.assertTrue(note.split("\n", 1)[1].startswith("route rt-r1 · autopilot-code"))
+            note = peer_request_cmd._route_notes(me, "[aa]", ["rt-r1"]).split("---\n", 1)[1]
+        self.assertLessEqual(len(note.encode("utf-8")), peer_request_cmd._ROUTE_NOTE_BYTES)
+        self.assertTrue(note.startswith("route rt-r1 · autopilot-code"))
+        # Another route's file at that path, or text that cannot be encoded: no lines for it, no failure.
+        for doc in ({"route_id": "rt-elsewhere", "route_hash": "sha256:rt-r1", "work_request": {"text": "남의 글"}},
+                    {"route_id": "rt-r1", "route_hash": "sha256:rt-r1", "capability": "\ud800",
+                     "artifact_root": str(artifacts), "work_request": {"text": "x"}}):
+            with self.subTest(doc=doc["route_id"]):
+                route_file.write_text(json.dumps(doc))
+                self.assertEqual(peer_request_cmd._route_notes(me, "[aa]", ["rt-r1"]), "")
 
 
 class ClaudePair(Cases, unittest.TestCase):

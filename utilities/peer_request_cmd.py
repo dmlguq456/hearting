@@ -189,8 +189,8 @@ def request(args, steward):
         # then again under the writers' locks (record_route_assignment).
         refusal = _route_refusal(me, recipient, routes)
         if refusal:
-            return _refuse("request=-", refusal, 1, route=",".join(routes))
-        body += "\n\n" + _route_notes(me, holder, routes)
+            return _refuse("request=-", refusal[0], 1, route=",".join(refusal[1] or routes))
+        body += _route_notes(me, holder, routes)
     title = args.title or body.strip().splitlines()[0]
     label = args.rev or ""
     record, reserved = pr.open_request(_endpoint(steward, me), _endpoint(steward, recipient),
@@ -207,25 +207,25 @@ def request(args, steward):
         committed.append(ref)
 
     refs = [pr.ref_for(request_id, 1, "request")]
-    assigned = None
+    assigned = False
     if routes:
-        # Order: the ownership row first, then the seal. A seal that never happened
-        # takes the row back below; a sealed request is delivered and the row stays.
+        # Order: reserved request -> ownership row (checked again under the locks) -> seal.
+        # Nothing is taken back afterwards: a send that fails says so (note=undelivered).
         import dispatch_seat_handover as handover
         try:
-            assigned = handover.record_route_assignment(
-                me["harness"], me["session_id"], recipient["harness"], sid, routes, request=request_id)
+            assigned = bool(handover.record_route_assignment(
+                me["harness"], me["session_id"], recipient["harness"], sid, routes, request=request_id))
         except (OSError, ValueError) as exc:
             pr.abort(request_id, reserved["ref"])
-            return _refuse("request=-", _route_word(exc), 1, route=",".join(routes))
+            refusal = _route_word(exc)
+            return _refuse("request=-", refusal[0], 1, route=",".join(refusal[1] or routes))
     moved = "".join(" route=%s holder=%s" % (route, holder) for route in routes)
     rc, outcome, ref, via, why = _send(steward, _label(steward, recipient), body, recipient, seal,
                                        line, refs, commit, ref=reserved["ref"])
     if not committed:
-        dropped = pr.abort(request_id, reserved["ref"])
-        if assigned and not (dropped and _withdraw(assigned)):
-            # Sealed after all (or not taken back): the request still arrives, so the route stays moved.
-            print("request=- delivery=refused reason=%s%s" % (why or "seal-failed", moved))
+        pr.abort(request_id, reserved["ref"])
+        if assigned:
+            print("request=- delivery=refused reason=%s%s note=undelivered" % (why or "seal-failed", moved))
             return rc or 5
         return _refuse("request=-", why or "seal-failed", rc or 5)
     print("%s delivery=%s to=%s harness=%s via=%s reason=%s next=%s%s" % (
@@ -240,85 +240,71 @@ _ROUTE_NOTE_BYTES = 2048
 
 
 def _route_word(exc):
+    """``(word, routes)`` for a hand-off that did not record."""
     import dispatch_seat_handover as handover
     if isinstance(exc, handover.RouteAssignmentRefused):
-        return str(exc)
-    return "registry-unreadable" if isinstance(exc, (handover.RegistryUnreadable, TypeError)) else "handover-unrecorded"
+        return exc.args[0], exc.args[1:]
+    return ("registry-unreadable" if isinstance(exc, (handover.RegistryUnreadable, TypeError))
+            else "handover-unrecorded"), ()
 
 
 def _route_refusal(me, recipient, routes):
-    """The refusal word for handing ``routes`` to ``recipient`` now, or ``""``."""
+    """``(word, routes)`` refusing to hand ``routes`` to ``recipient`` now, or ``None``."""
     import dispatch_seat_handover as handover
     import steward_check
-    if me["harness"] != recipient["harness"]:
-        return "harness-mismatch"  # first slice: same harness only
-    if steward_check._session_liveness(recipient["harness"], recipient["session_id"]) == "ended":
-        return "receiver-not-live"
     try:
-        handover.route_assignment_bindings(me["harness"], me["session_id"], routes,
-                                           handover._default_jobs())
+        if me["harness"] == recipient["harness"] and steward_check._session_liveness(
+                recipient["harness"], recipient["session_id"]) != "live":
+            raise handover.RouteAssignmentRefused("receiver-not-live")  # only a proven live session
+        handover.check_route_assignment(me["harness"], me["session_id"], recipient["harness"],
+                                        recipient["session_id"], routes, handover._default_jobs())
     except (OSError, ValueError, TypeError) as exc:
         return _route_word(exc)
-    return ""
-
-
-def _withdraw(row):
-    import dispatch_seat_handover as handover
-    try:
-        return handover.withdraw_route_assignment(row)
-    except (OSError, ValueError, KeyError):
-        return False
 
 
 def _route_notes(me, holder, routes):
-    """C: what the records say about each handed route, appended by the runtime.
-
-    Facts only (route, sealed intent, the person's words, the last sealed summary, who
-    now receives what, the sender's card); which instructions belong to this stream is
-    the receiver's reading. At most 2 KB per route, cut from the end."""
+    """C: record facts about each handed route (which instructions belong to this stream is the
+    receiver's reading). At most 2 KB per route, cut from the end; a route whose records do not
+    read cleanly contributes no lines, and the request goes either way."""
     import dispatch_seat_handover as handover
     jobs = handover._default_jobs()
     rows = list(handover.latest_rows(jobs).values()) if jobs else []
     try:
         card = _card_line(me)
-    except Exception:  # noqa: BLE001 - the note is reference text; it never blocks the hand-off
+    except Exception:  # noqa: BLE001 - reference text never blocks the hand-off
         card = ""
     notes = []
     for route in routes:
-        mine = [(status, meta) for status, meta in rows if handover.route_identity(meta)[0] == route]
         try:
-            lines = _route_lines(route, mine)
+            mine = [(status, meta) for status, meta in rows if handover.route_identity(meta)[0] == route]
+            lines = _route_lines(route, mine) + [
+                "이제 %s가 받음: 완료 · 주의 알림 · start/correct/close" % holder] + ([card] if card else [])
+            notes.append("\n".join(lines).encode("utf-8")[:_ROUTE_NOTE_BYTES].decode("utf-8", "ignore"))
         except Exception:  # noqa: BLE001
-            lines = ["route %s · 기록을 읽지 못함" % route]
-        lines += [
-            "이제 %s가 받음: 완료 · 주의 알림 · start/correct/close" % holder] + ([card] if card else [])
-        data = "\n".join(lines).encode("utf-8")
-        notes.append(data[:_ROUTE_NOTE_BYTES].decode("utf-8", "ignore"))
-    return "--- handed route (runtime) ---\n" + "\n\n".join(notes)
+            continue
+    return "\n\n--- handed route (runtime) ---\n" + "\n\n".join(notes) if notes else ""
 
 
 def _route_lines(route, mine):
     import json
+    import dispatch_seat_handover as handover
     import work_intent
     owners = [(status, meta) for status, meta in mine if meta.get("dispatch_depth") == "1"]
-    status, meta = owners[-1] if owners else ("-", {})
+    status, meta = owners[-1]
     stage = next((m.get("route_node") for s, m in reversed(mine)
                   if m.get("dispatch_depth") == "2" and s in ("open", "running")), None)
-    try:
-        doc = json.loads(Path(meta.get("owner_route_file") or meta.get("route_file")).read_text("utf-8"))
-    except (OSError, ValueError, TypeError):
-        doc = {}
-    intent = work_intent.route_intent(doc) if doc else {}
+    doc = json.loads(Path(meta.get("owner_route_file") or meta.get("route_file")).read_text("utf-8"))
+    if doc.get("route_id") != route or doc.get("route_hash") != handover.route_identity(meta)[1]:
+        raise ValueError("route-record-mismatch")  # a file at that path for another route
+    intent = work_intent.route_intent(doc)
     lines = ["route %s · %s · %s · stage %s" % (route, doc.get("capability") or meta.get("capability") or "-",
                                                status, stage or meta.get("route_node") or "-")]
-    if intent.get("intent"):
-        lines.append("[의도] " + intent["intent"][:160])
-    if intent.get("original"):
-        lines.append('사용자 원문: "%s"' % intent["original"][:160])
+    lines += ["[의도] " + intent["intent"][:160]] if intent.get("intent") else []
+    lines += ['사용자 원문: "%s"' % intent["original"][:160]] if intent.get("original") else []
     last = "마지막 완료 요약: 없음"
     for _status, owner in reversed(owners):
         text = work_intent.sealed_summary(owner, owner.get("attempt_id", ""))
-        if text and doc.get("artifact_root"):
+        if text:
             from dispatch_terminal_commit import terminal_slot
             path = terminal_slot(Path(doc["artifact_root"]), route, owner["attempt_id"]) / work_intent.SUMMARY_NAME
             artifact = next((item.split(":", 1)[1].strip() for item in text.splitlines()
@@ -334,9 +320,7 @@ def _card_line(me):
     import dispatch_seat_handover as handover
     import session_card_format as card_format
     import session_tidy as st
-    seat = handover._assignment_seat(me["harness"], me["session_id"])
-    path = st.card_json_path(seat) if seat else None
-    card = st.read_json(path) if path else None
+    card = st.read_json(path := st.card_json_path(handover._assignment_seat(me["harness"], me["session_id"])))
     if not isinstance(card, dict) or not isinstance(card.get("body"), str):
         return ""
     quoted = [line for key, _title, text in card_format._sections(card["body"])

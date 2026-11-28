@@ -3710,12 +3710,15 @@ the detail in a file and give its path.
 it); its answer is `report [<rq-id>] [--partial | --reject <why>] --result <line>`, and
 `show [<rq-id>]` prints the sealed body (no id: this session's open requests).
 `request <address> --route <route-id>` (repeatable: one stream at a time) also hands routes
-the sender holds now to that live session of the same harness: their completions, attention
-notices and `start`/`correct`/`close` move to the receiver, the sender keeps its questions,
-requests, steward flag and every other route, and the runtime appends each handed route's
-recorded facts to the body. A route the sender does not hold now, a closed route, an ended
-receiver or another harness is refused with nothing sent or recorded. The line
-that reaches a conversation names the request; the body stays sealed and the model opens
+the sender holds now to that session: their completions, attention notices and
+`start`/`correct`/`close` move to the receiver, the sender keeps its questions, requests,
+steward flag and every other route, and the runtime appends each handed route's recorded
+facts to the body. A route moves only while it runs with no completion or notice waiting,
+only to a session proven live on the same harness that has not held it, and together with the
+other open routes of its completion batch; anything else is refused with nothing sent or
+recorded. When the route moved but the request could not be sent, the line ends
+`note=undelivered`: the receiver holds the route, so send the text again with a plain `request`.
+The line that reaches a conversation names the request; the body stays sealed and the model opens
 it with `show`. Delivery and work are separate: a receipt does not change a request's state;
 only a final or reject report, or the requester's cancel, closes it, and a partial report
 keeps it open. A report belongs to the revision it answers; for a superseded one it is

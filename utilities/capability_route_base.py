@@ -491,19 +491,6 @@ def _route_chain_parent_ledger(rc, parent_sid, source_route_id):
     return None
 
 
-def _route_chain_holder(registered):
-    """The session that holds this owner's attempt now: a steward may have handed the route to
-    another live session (same harness), whose chain the continuation then joins. An unreadable
-    answer keeps the registered parent."""
-    try:
-        import dispatch_seat_handover as handover
-        jobs, attempt = handover._default_jobs(), os.environ.get("AGENT_DISPATCH_ATTEMPT_ID") or ""
-        found = handover.latest_rows(jobs, [attempt]).get(attempt) if jobs and attempt else None
-        return (handover.effective_parent(found[1], jobs) if found else "") or registered
-    except Exception:  # noqa: BLE001 - the chain is a display sidecar; never fail the route
-        return registered
-
-
 def _route_chain_identity(event, route):
     """`(harness, session_id, dispatch_depth, by_attempt)` | None — never raises (plan §3 B-1.2)."""
     try:
@@ -521,12 +508,11 @@ def _route_chain_identity(event, route):
         rc = _route_chain_module()
         if rc is None:
             return None
-        source, sid = (route or {}).get("source_route_id"), _route_chain_holder(parent_sid)
-        anchor = ((sid != parent_sid and _route_chain_parent_ledger(rc, sid, source))
-                  or _route_chain_parent_ledger(rc, parent_sid, source))
+        anchor = _route_chain_parent_ledger(rc, parent_sid, (route or {}).get("source_route_id"))
         if anchor is None:
             return None
-        return anchor[0], sid, depth, os.environ.get("AGENT_DISPATCH_ATTEMPT_ID")
+        harness, sid = anchor
+        return harness, sid, depth, os.environ.get("AGENT_DISPATCH_ATTEMPT_ID")
     rc = _route_chain_module()
     if rc is None:
         return None

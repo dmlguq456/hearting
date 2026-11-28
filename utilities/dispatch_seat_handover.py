@@ -21,10 +21,9 @@ a later row handed it elsewhere.  Two ways in: a confirmed clear at the same pan
 or the clear booking's own observation; OpenCode has no start hook, so its first message in
 a new session after the snapshot), or the official seat change across panes and harnesses
 (``peer-steward start --beside`` -> ACK -> ``retire`` from the pane started beside the
-predecessor, :func:`record_retire_handover`).  A live holder may also hand single routes to
-another live session without any succession (``source=assign``, :func:`record_route_assignment`).
-Everything here is read-only except :func:`record_locked` / :func:`write_snapshot_locked`
-(caller holds the seat lock), :func:`record_retire_handover` and the route assignment writers.
+predecessor, :func:`record_retire_handover`).  Everything here is read-only except
+:func:`record_locked` / :func:`write_snapshot_locked` (caller holds the seat lock) and
+:func:`record_retire_handover`; :func:`record_route_assignment` hands single routes on without succession.
 
 Two questions, two functions:
 
@@ -41,6 +40,7 @@ keeps the accepted handover pending instead of treating unknown ownership as emp
 
 from __future__ import annotations
 from collections import OrderedDict
+from collections.abc import Mapping
 import contextvars
 import threading
 
@@ -2255,7 +2255,7 @@ def storage_recipients(session: str, env=None, harness: Optional[str] = None, *,
             if expired():
                 return scopes({}, False)
             graph = _pass_lineage_graph(context)
-            observed["edges"] = tuple(getattr(graph, "edges", ()) or ())
+            observed["edges"] = notice_edges(graph)
             vertex = (harness, session)
             if (harness and not any(target == vertex for _origin, target in graph.seat_edges)
                     and not any((name, target) == vertex for name, _origin, target in graph.edges)
@@ -2948,7 +2948,7 @@ def record_retire_handover(predecessor_sid: str, predecessor_harness: str, succe
 # ---------------------------------------------------------------------------
 
 class RouteAssignmentRefused(ValueError):
-    """A route hand-off that records nothing; ``str(exc)`` is the refusal word."""
+    """A hand-off that records nothing: ``args[0]`` is the refusal word, ``args[1:]`` the routes it names."""
 
 
 def _assignment_seat(harness: str, sid: str):
@@ -2958,18 +2958,97 @@ def _assignment_seat(harness: str, sid: str):
     return st.session_seat(st.Seat("native", key, harness=harness), harness, sid) if key else None
 
 
-def route_assignment_bindings(harness: str, sid: str, routes, jobs) -> list[dict]:
-    """The open depth-1 bindings of each route ``sid`` holds now, or :class:`RouteAssignmentRefused`."""
+def notice_edges(graph) -> tuple:  # what a derived inbox digests: confirmed edges and every route hand-off
+    rows = getattr(graph, "ledger_rows", None)
+    return (*(getattr(graph, "edges", ()) or ()), *(("assign", str((r.get("from") or {}).get("sid")), str(r.get("sid")))
+            for ledger in (rows.values() if isinstance(rows, Mapping) else ()) for r in ledger if r.get("source") == "assign"))
+
+
+def _waiting_records(jobs, keys) -> list:
+    """Unsettled completion and notice records stored under these sessions (None: unreadable)."""
+    import dispatch_pending_delivery as pending
+    found = []
+    for path in (p for key in sorted(keys) for p in pending.record_directory(
+            Path(jobs).resolve(strict=False).parent, key).glob("delivery-*.json")):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            found += [value] if value["state"] in pending.OPEN_STATES else []
+        except (OSError, ValueError, TypeError, KeyError):
+            found.append(None)
+    return found
+
+
+def _batch_key(meta: dict):
+    """The completion batch this row joins, as ``dispatch_notice_state.delivery_batch_key`` reads it."""
+    from dispatch_notice_state import delivery_batch_key
+    try:
+        route = json.loads(Path(meta.get("route_file") or meta.get("owner_route_file")).read_text(encoding="utf-8"))
+        cycle = (route.get("parent_cycle_id") or "") if route.get("route_id") == route_identity(meta)[0] else ""
+    except (OSError, ValueError, TypeError):
+        cycle = ""
+    get = lambda key: meta.get(key, "") or ""  # noqa: E731
+    return delivery_batch_key(registry_id="jobs", parent_cycle_id=cycle, route_hash_value=get("route_hash"),
+        sealed_batch_id=get("managed_sealed_batch_id"), sealed_attempt_ids=get("managed_sealed_attempt_ids").split(" "),
+        **{key: get(key) for key in ("parent_sid", "attempt_id", "route_id", "route_node")})
+
+
+def check_route_assignment(sender_harness: str, sender_sid: str, receiver_harness: str,
+                           receiver_sid: str, routes, jobs):
+    """``(bindings, last_ts)`` when the whole stream can move now, else :class:`RouteAssignmentRefused`.
+
+    Read-only, and only what is certain: every open depth-1 row of each route is held by the
+    exact ``(harness, sid)`` sender, the route runs with no completion or notice waiting, the
+    receiver never held it (registered parent included), and its completion batch moves whole.
+    """
+    from dispatch_registry_cache import registry_view
+    from peer_read_context import PeerReadContext
+    if sender_harness != receiver_harness:
+        raise RouteAssignmentRefused("harness-mismatch")  # first slice: same harness only
+    if _assignment_seat(receiver_harness, receiver_sid) is None or receiver_sid == sender_sid:
+        raise RouteAssignmentRefused("receiver-not-live")
+    context, sender = PeerReadContext(), (sender_sid, sender_harness)
+    graph = _pass_lineage_graph(context)
+    rows = [(status, meta) for status, meta in registry_view(Path(jobs)).handover_latest().values()
+            if eligible_row(meta)]
     held = {}
-    for binding, _status in _handover_candidates(harness, sid, jobs):
-        held.setdefault(binding["route"], []).append(binding)
-    for route in routes:
-        if route not in held:
-            mine = [meta for _status, meta in latest_rows(jobs).values()
-                    if eligible_row(meta) and route_identity(meta)[0] == route
-                    and effective_parent(meta, jobs) == sid]
-            raise RouteAssignmentRefused("route-closed" if mine else "route-not-held")
-    return _deduplicate_bindings(binding for route in routes for binding in held[route])
+    for route in dict.fromkeys(routes):
+        mine = [(status, meta) for status, meta in rows if route_identity(meta)[0] == route]
+        owners = [_effective(meta, jobs, read_context=context) for _status, meta in mine]
+        if not mine or sender not in owners or any(
+                status in OPEN_ROW_STATUSES and owner != sender for (status, _m), owner in zip(mine, owners)):
+            raise RouteAssignmentRefused("route-not-held", route)
+        held[route] = [(status, meta) for (status, meta), owner in zip(mine, owners) if owner == sender]
+    parents = {meta.get("parent_sid", "") for mine in held.values() for _status, meta in mine}
+    waiting, last, keys = _waiting_records(jobs, parents | {sender_sid}), 0.0, set()
+    for route, mine in held.items():
+        attempts = {meta["attempt_id"] for _status, meta in mine}
+        waits = any(value is None or value.get("route_id") == route or attempts & set(value.get("attempt_ids") or ())
+                    or any(attempt in str(value.get("lineage")) for attempt in attempts) for value in waiting)
+        if waits or not any(status in OPEN_ROW_STATUSES for status, _meta in mine):
+            finishing = waits or any(_route_open(jobs, meta) for _s, meta in mine)
+            raise RouteAssignmentRefused("route-finishing" if finishing else "route-closed", route)
+        logical = {(_jobs_key(jobs), *route_identity(meta)) for _status, meta in mine}
+        before = {meta.get("parent_sid") for _status, meta in mine}
+        for ledger in graph.ledger_rows.values():
+            for row in ledger:
+                if any(_lineage_identity_key(b) in logical for b in row.get("bindings") or ()):
+                    before.update((row.get("sid"), (_st()._handover_origin(row) or ("", ""))[1]))
+                    last = max(last, float(row.get("ts") or 0))
+        while grown := {target for _h, origin, target in graph.edges if origin in before} - before:
+            before |= grown  # a /clear successor of anyone who held it held it too
+        if receiver_sid in before:
+            raise RouteAssignmentRefused("route-held-before", route)
+        keys.update(key for _status, meta in mine if (key := _batch_key(meta)))
+    if keys:
+        unsettled = {attempt for value in waiting if value for attempt in value.get("attempt_ids") or ()}
+        behind = sorted({route_identity(meta)[0] for status, meta in rows
+                         if meta.get("parent_sid") in parents and route_identity(meta)[0] not in held
+                         and (status in OPEN_ROW_STATUSES or meta.get("attempt_id") in unsettled)
+                         and _batch_key(meta) in keys})
+        if behind:
+            raise RouteAssignmentRefused("batch-split", *held, *behind)
+    return _deduplicate_bindings(binding_of(jobs, meta) for mine in held.values()
+                                 for status, meta in mine if status in OPEN_ROW_STATUSES), last
 
 
 def record_route_assignment(sender_harness: str, sender_sid: str, receiver_harness: str,
@@ -2977,79 +3056,33 @@ def record_route_assignment(sender_harness: str, sender_sid: str, receiver_harne
                             now: Optional[float] = None) -> dict:
     """Hand the sender's open depth-1 attempts of ``routes`` to a live receiver.
 
-    :func:`record_retire_handover` without succession: one ``source=assign`` row in
-    the receiver's session ledger carries only these bindings, so completion,
-    attention, start/correct/close follow them (every reader already asks the
-    binding's holder), while questions, requests, the steward flag and other routes
-    stay with the sender. Registry rows are never rewritten. Only the current holder
-    may hand a route on, so two hand-offs of one route never fork it. Same harness
-    only in this slice. Raises :class:`RouteAssignmentRefused` or :class:`RegistryUnreadable`.
+    :func:`record_retire_handover` without succession: one ``source=assign`` row in the
+    receiver's session ledger carries only these bindings, so completion, attention and
+    start/correct/close follow them (every reader asks the binding's holder); questions,
+    requests, the steward flag and other routes stay. Registry rows are never rewritten and
+    no row is taken back. :func:`check_route_assignment` runs again under the writers' locks.
     """
-    if sender_harness != receiver_harness:
-        raise RouteAssignmentRefused("harness-mismatch")
-    seat, jobs = _assignment_seat(receiver_harness, receiver_sid), jobs or _default_jobs()
-    if seat is None or jobs is None or receiver_sid == sender_sid:
-        raise RouteAssignmentRefused("receiver-unresolved")
-    st, routes = _st(), list(dict.fromkeys(routes))
-    now = st.now_epoch() if now is None else now
+    jobs, st = jobs or _default_jobs(), _st()
+    seat = _assignment_seat(receiver_harness, receiver_sid)
+    if seat is None or jobs is None:
+        raise RegistryUnreadable("registry-unknown") if seat else RouteAssignmentRefused("receiver-not-live")
+    args = (sender_harness, sender_sid, receiver_harness, receiver_sid, routes, jobs)
     # The lock order of record_retire_handover: destination -> lineage write -> source -> bindings.
     with st.seat_lock(seat.key), st.seat_lock(LINEAGE_WRITE_KEY), \
             source_session_mutex(sender_harness, sender_sid):
-        bindings = route_assignment_bindings(sender_harness, sender_sid, routes, jobs)
+        bindings, _last = check_route_assignment(*args)
         with binding_mutexes(bindings):
-            # An effect that held a binding while this waited has settled; read the holder again.
-            if route_assignment_bindings(sender_harness, sender_sid, routes, jobs) != bindings:
+            # An effect that held a binding while this waited has settled; read everything again.
+            again, last = check_route_assignment(*args)
+            if again != bindings:
                 raise RouteAssignmentRefused("route-not-held")
-            row = {"ts": now, "harness": receiver_harness, "sid": receiver_sid, "event": ROW_EVENT,
+            row = {"ts": max(st.now_epoch() if now is None else now, last + 0.001),  # after its last binding
+                   "harness": receiver_harness, "sid": receiver_sid, "event": ROW_EVENT,
                    "from": {"harness": sender_harness, "sid": sender_sid}, "source": "assign",
                    "bindings": bindings, "request": request}
             _append_transition_row(seat, row)
     _bump_dispatch_edge_generation(jobs)
     return row
-
-
-def withdraw_route_assignment(row: dict) -> bool:
-    """Remove an ``assign`` row whose request was never sealed; False leaves it in force.
-
-    Only while it is still the latest binding of every route it moved (nobody handed
-    them further). The ledger is rewritten whole, like :func:`_append_transition_row`."""
-    st, seat = _st(), _assignment_seat(row["harness"], row["sid"])
-    with st.seat_lock(seat.key), st.seat_lock(LINEAGE_WRITE_KEY), binding_mutexes(row["bindings"]):
-        latest = lineage_graph().binding_rows
-        if any(dict(latest.get(_lineage_identity_key(b)) or {}) != row for b in row["bindings"]):
-            return False
-        path = st._ledger_path(seat)
-        kept = [line for line in (st.read_bytes(path) or b"").splitlines(keepends=True)
-                if _ledger_row(line) != row]
-        tmp = _write_fsynced_temp(path, b"".join(kept))
-        try:
-            os.replace(tmp, path)
-        finally:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
-    _bump_dispatch_edge_generation(row["bindings"][0]["jobs"])
-    return True
-
-
-def _ledger_row(line: bytes):
-    try:
-        return json.loads(line)
-    except ValueError:
-        return None
-
-
-def assignment_open(row: dict) -> bool:
-    """Whether an ``assign`` row still binds an attempt that owes work; unreadable keeps it."""
-    from dispatch_registry_cache import registry_view
-    try:
-        for binding in row.get("bindings") or ():
-            found = registry_view(Path(binding["jobs"])).handover_attempt(binding["attempt"])
-            if found and (found[0] in OPEN_ROW_STATUSES or _delivery_open(binding["jobs"], found[1])
-                          or _route_open(binding["jobs"], found[1])):
-                return True
-        return False
-    except Exception:  # noqa: BLE001 - an unknown answer never drops a hand-off
-        return True
 
 
 def _confirmed_clear(seat, harness: str, old: str, sid: str, event: str, source: str) -> bool:
