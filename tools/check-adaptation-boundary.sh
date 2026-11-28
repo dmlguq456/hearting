@@ -2884,9 +2884,18 @@ check_opencode_native_plugin_projection() {
   if [ -L "$plugin" ]; then
     fail_msg "$plugin must be a concrete adapter-owned OpenCode plugin"
   fi
-  if ! node --check "$plugin" >/tmp/opencode-plugin-check.out 2>/tmp/opencode-plugin-check.err; then
+  plugin_check=$(mktemp -d "${TMPDIR:-/tmp}/hearting-plugin-check.XXXXXX") || {
+    fail_msg "cannot create a private directory to parse $plugin"
+    return
+  }
+  cp "$plugin" "$plugin_check/plugin.mjs"
+  if ! node --check "$plugin_check/plugin.mjs" >"$plugin_check/out" 2>"$plugin_check/err"; then
+    plugin_error=$(cat "$plugin_check/err")
+    rm -rf "$plugin_check"
     fail_msg "$plugin must parse as JavaScript"
-    cat /tmp/opencode-plugin-check.err
+    printf '%s\n' "$plugin_error" >&2
+  else
+    rm -rf "$plugin_check"
   fi
 
   if ! grep -Fq '"tool.execute.after"' "$plugin"; then
