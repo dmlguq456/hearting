@@ -630,7 +630,7 @@ class StartTest(Base):
                                         "no record). It waits for a free worker and does not run natively."), line)
         self.assertIn("comes back to this session as a completion notice", line)
         self.assertNotIn("idle", line)
-        self.assertIn("If this session is idle by then, it comes with the next message.",
+        self.assertIn("If this session went idle before the queued worker started, the notice comes with the next message.",
                       redirect.reason_for(receipt, "light", "claude"))
 
     def test_the_first_capacity_refusal_of_this_start_arms_the_runtime_s_resume(self):
