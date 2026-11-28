@@ -476,9 +476,9 @@ class Base(unittest.TestCase):
         self.addCleanup(self.fixture.__exit__, None, None, None)
 
     def forget(self):
-        # Each waiting question closes by its own id (a session holds several since #1927).
+        """Withdraw every open question: a message question is closed (it is never removed)."""
         for signal in HWS.read_signals():
-            if signal.get("mode") == "message" and signal.get("lifecycle") == "open":
+            if signal.get("mode") == "message":
                 HWS.close_message(signal["harness"], signal["session_id"], signal["seat_key"], signal["id"])
             else:
                 HWS._remove_signal_source(signal, HWS._signal_path(signal))
