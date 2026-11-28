@@ -319,6 +319,40 @@ def wrap_segments(parts, columns):
     return result
 
 
+def wrap_words(parts, columns):
+    """Wrap semantic spans at spaces first, the MESSAGES and MEM popups' rule (``makeWrapText``),
+    retaining their colors: the spaces where a row folds are dropped, a line's leading indent and
+    inner spaces stay, and only a word wider than a row is cut at cell boundaries."""
+    columns = max(1, columns)
+    runs = []                                   # [is_space, [(char, key), ...]]
+    for text, key in parts:
+        for char in str(text):
+            char = " " if ord(char) < 32 or ord(char) == 127 else char
+            if not runs or runs[-1][0] != char.isspace():
+                runs.append([char.isspace(), []])
+            runs[-1][1].append((char, key))
+    result, row, width, gap, worded = [], [], 0, [], False
+    for space, chars in runs:
+        if space:
+            gap = chars
+            continue
+        # A word that does not fit after the row's words starts the next row, its gap dropped.
+        if worded and width + sum(cell_width(char) for char, _key in gap + chars) > columns:
+            result.append(row); row, width, gap = [], 0, []
+        for char, key in gap + chars:
+            if width + cell_width(char) > columns and row:
+                result.append(row); row, width = [], 0
+            if row and row[-1][1] == key:
+                row[-1] = (row[-1][0] + char, key)
+            else:
+                row.append((char, key))
+            width += cell_width(char)
+        gap, worded = [], True
+    if row:
+        result.append(row)
+    # Nothing but spaces: drawn as before.
+    return result or wrap_segments(parts, columns)
+
 
 def status_lines(values, columns, *, wrap_long=False, reported_only=False, fields=None):
     """Wrap complete native fields in expanded mode; compact mode may shorten."""
