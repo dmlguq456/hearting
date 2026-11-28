@@ -476,8 +476,12 @@ class Base(unittest.TestCase):
         self.addCleanup(self.fixture.__exit__, None, None, None)
 
     def forget(self):
+        """Withdraw every open question: a message question is closed (it is never removed)."""
         for signal in HWS.read_signals():
-            HWS._remove_signal_source(signal, HWS._signal_path(signal))
+            if signal.get("mode") == "message":
+                HWS.close_message(signal["harness"], signal["session_id"], signal["seat_key"], signal["id"])
+            else:
+                HWS._remove_signal_source(signal, HWS._signal_path(signal))
 
     def text(self, drawn):
         return "\n".join(drawn["lines"])
@@ -608,6 +612,10 @@ class Answers(Base):
                             (["2", ENTER], ["관찰 기록"])):
             with self.subTest(keys=keys):
                 self.forget()
+                # each ask is a later prompt: the same registration at one prompt reads back its closed record
+                import session_tidy as tidy
+                import time
+                tidy.bump_prompt_seq(self.f.seat("claude", SID), "claude", SID, time.time())
                 drawn = popup(self.native(), cols=64, keys=keys)
                 self.assertEqual(drawn["sent"]["answers"]["message-response"], value)
 

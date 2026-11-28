@@ -3749,21 +3749,29 @@ def build_human_history_notice(seat: Seat, harness: str, sid: str, *, env=None,
 
 
 def _open_question_line(waits, harness, sid, seat_key):
-    """After a physical prompt, one context line for this session's still-open question.
+    """After a physical prompt, ``(line, folded)`` for this seat's still-open questions.
 
     The prompt was handled as an ordinary prompt; if it was in fact the answer,
-    the agent records it through the existing ``questions answer`` path."""
-    own = waits._read(waits._signal_path({"harness": harness, "session_id": sid,
-                                          "seat_key": seat_key}))
-    if not own or own.get("mode") != "message" or own.get("lifecycle") != "open":
-        return None
+    the agent records it through the existing ``questions answer`` path. One open
+    question gets its own line on each such prompt; two or more get one count line
+    (``folded``: it goes with the ``[답변 필요]`` lines an unchanged repeat leaves out)."""
+    opened = waits.seat_open_messages(harness, sid, seat_key) or []
+    unanswered = [row for row in opened if not waits.message_answer_pending(row)]
+    if len(unanswered) > 1:
+        return ("[답변 필요] 이 자리에 열린 질문 %d건: 입력 줄의 번호·선지 글·문장은 어느 질문의 답으로도 "
+                "기록하지 않습니다. 사람은 질문 패널·Fleet에서 질문마다 답합니다; 사람이 어느 질문에 답했는지 "
+                "분명하면 `hearting run questions answer ID`로 기록하세요(목록: `hearting run questions`)."
+                % len(unanswered)), True
+    own = unanswered[0] if unanswered else opened[0] if len(opened) == 1 else None
+    if own is None:
+        return None, False
     question = " ".join(str(own.get("question") or "").split())[:120]
-    if waits.message_answer_pending(own):
+    if not unanswered:
         return "[답변 필요] 질문 %s: Fleet에서 고른 답이 전달 대기 중입니다(방금 입력은 답으로 기록하지 않음). %s" % (
-            own["id"], question)
+            own["id"], question), False
     return ("[답변 필요] 질문 %s이 아직 열려 있습니다(방금 입력은 답으로 기록하지 않음): %s — 방금 입력이 "
             "이 질문의 답이면 `hearting run questions answer %s --choice N` 또는 `--text-file`로 기록하세요."
-            % (own["id"], question, own["id"]))
+            % (own["id"], question, own["id"])), False
 
 
 def answer_wait_text(questions, limit: int = 3) -> list[str]:
@@ -3922,16 +3930,19 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
             # producer copy so a just-closed prompt cannot be resurrected.
             own = human_wait_state._read(human_wait_state._signal_path(
                 {"harness": harness, "session_id": sid, "seat_key": seat.key}))
-            projected["items"] = [item for item in projected["items"]
-                                   if not (item.get("source") == "S4"
-                                           and (item.get("owner") or {}).get("seat_key") == seat.key
-                                           and (item.get("owner") or {}).get("harness") == harness
-                                           and (item.get("owner") or {}).get("session_id") == sid)]
-            if own and (own.get("mode") != "message" or own.get("lifecycle") == "open"):
-                projected["items"].append(
-                    {"id": own["id"], "source": "S4", "question": None if own.get("mode") == "message" else own.get("question"),
-                     "since": own.get("since"), "stale": False,
-                     "owner": {"harness": harness, "session_id": sid, "seat_key": seat.key}})
+            opened = human_wait_state.seat_open_messages(harness, sid, seat.key)
+            if opened is not None:
+                projected["items"] = [item for item in projected["items"]
+                                       if not (item.get("source") == "S4"
+                                               and (item.get("owner") or {}).get("seat_key") == seat.key
+                                               and (item.get("owner") or {}).get("harness") == harness
+                                               and (item.get("owner") or {}).get("session_id") == sid)]
+                for record in ([own] if own and own.get("mode") != "message" else []) + opened:
+                    projected["items"].append(
+                        {"id": record["id"], "source": "S4",
+                         "question": None if record.get("mode") == "message" else record.get("question"),
+                         "since": record.get("since"), "stale": False,
+                         "owner": {"harness": harness, "session_id": sid, "seat_key": seat.key}})
             ids = set(projected.get("by_session", {}).get((harness, sid), ()))
             for item in projected.get("items", ()):
                 owner = item.get("owner") or {}
@@ -4002,16 +4013,18 @@ def _run_hook(harness: str, event: str, sid: str, *, source: str = "", transcrip
                 if isinstance(prompt_text, str) and prompt_text.strip():
                     with contextlib.suppress(BaseException):
                         import human_wait_state
-                        open_wait = human_wait_state._read(human_wait_state._signal_path(
-                            {"harness": harness, "session_id": sid, "seat_key": seat.key}))
+                        own = human_wait_state._read(human_wait_state._signal_path(
+                            {"harness": harness, "session_id": sid, "seat_key": seat.key})) or {}
+                        open_wait = (own.get("mode") != "message" or own.get("lifecycle") == "open") and own \
+                            or human_wait_state.seat_open_messages(harness, sid, seat.key)
                         closed_wait = human_wait_state.close_signal(
                             seat.key, sequence=sequence, harness=harness, session_id=sid,
                             answer=prompt_text)
                         answered_wait = bool(open_wait and closed_wait)
-                        line = render_context and _open_question_line(
-                            human_wait_state, harness, sid, seat.key)
+                        line, folded = _open_question_line(
+                            human_wait_state, harness, sid, seat.key) if render_context else (None, False)
                         if line:
-                            open_question_lines.append(line)
+                            (answer_wait_lines if folded else open_question_lines).append(line)
             with contextlib.suppress(BaseException):
                 import session_tidy_clear as clear
                 claimed = clear.observe_prompt_locked(seat, harness, sid, prompt_text, now, sequence)

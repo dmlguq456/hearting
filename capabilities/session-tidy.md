@@ -80,7 +80,11 @@ card and memory work remain available. Recognize the runtime's
 transport wrapping of an exact recorded self-request without treating the
 wrapper as user input. Keep this classification after booking expiry. A newer
 compaction boundary cancels an unsent idle booking; pre-compaction usage cannot
-qualify the shortened conversation. Only an actual new user prompt rearms it.
+qualify the shortened conversation. Only an actual new user prompt rearms it,
+with one exception: a booking that ended before any request was sent because,
+at the due time, the input box held writing or a question or selection form was
+open, does not spend the interval, so the session's next turn end books again
+(as an open route does); the draft and the question are left as they are.
 Use the existing session ledger and booking; add no gate or state store.
 Unresolved clear lineage does not block this same-session operation. A source
 with a confirmed successor remains ineligible.
@@ -167,9 +171,16 @@ again and sends at most once; nothing already handed to the receiver is asked tw
 session still on a turn of its own holds the continue back, and the helper, the one process
 that lives through the window on every harness, asks again inside it (a hook process, Claude's
 Stop or UserPromptSubmit or a peer receive, asks once and ends; OpenCode has no end-of-turn
-callback that asks again). A Claude continue is typed only into an empty prompt; a Codex or
-OpenCode continue starts its turn only over an empty input box, read before and after the claim
-(15 seconds between asks while a draft or an open form holds the input box). It preserves the
+callback that asks again). Every harness reads the input box before the claim, so a draft or an
+open form holds the continue without binding it (15 seconds between asks while it does). A Claude
+continue is then typed only into an empty prompt, read again just before typing; a Codex or
+OpenCode continue starts its turn only over an empty input box, read again after the claim.
+Claude's private connection holds a draft the same way, before or after its claim: no claim stays
+bound, and the helper asks again. When the booked card
+generation already reached the continuing session (that generation's receipt of the booked harness
+and session id; another card or session proves nothing), a continue that was not sent ends without
+a line; the line asking the person to type the continue appears only while the card still waits
+for the session. It preserves the
 booking, claim, card generation, seat, unchanged prompt count and expiry. An
 exact-native seat with a supported attachment keeps that bounded path: it
 rechecks the booked process, idle state, form and empty input, then writes the

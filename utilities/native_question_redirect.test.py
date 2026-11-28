@@ -60,10 +60,10 @@ class Base(unittest.TestCase):
             self.addCleanup(patch.stop)
 
     def answered(self, harness):
-        """The person answered this session's waiting question: its source is gone, so a new one may register."""
+        """This session's waiting questions are done (closed by their ids), so the next one stands alone."""
         for signal in state.read_signals():
             if signal["harness"] == harness and signal["session_id"] == SID:
-                state._remove_signal_source(signal, state._signal_path(signal))
+                state.close_message(harness, SID, signal["seat_key"], signal["id"])
 
     def registered(self, harness, reason):
         """The one registered question a refusal names."""
@@ -181,7 +181,8 @@ class RedirectTest(Base):
 
 
 class PassThroughTest(Base):
-    """A question the person cannot see is the only failure that matters: every doubt lets it through."""
+    """A question the person cannot see is the only failure that matters: a failure before any write,
+    with no same question read, lets it through (native_question_intercept_1128.test.py: the rest)."""
 
     def board_empty(self):
         self.assertEqual(list(Path(os.environ["XDG_STATE_HOME"]).rglob("*message*")), [])
@@ -198,27 +199,32 @@ class PassThroughTest(Base):
                         code = redirect.main([flag], stdin=io.StringIO(json.dumps(payload)))
                     self.assertEqual((code, out.getvalue()), (0, ""))
 
-    def test_a_waiting_hearting_question_is_kept_and_the_native_call_goes_through(self):
-        """A new registration would cancel the session's earlier waiting question (`replaced`)."""
+    def test_a_waiting_hearting_question_stays_and_the_native_one_is_added_beside_it(self):
+        """3a (11-28): registration no longer refuses beside another open question, so the native
+        call is registered as a second question; the earlier one, its draft and id stay."""
         import session_tidy as tidy
         for harness, payload in (("claude", claude_payload()), ("codex", codex_payload()),
                                  ("opencode", opencode_payload())):
             earlier, envelope = self.f.ask(harness, SID, text="Which scope first?",
                                            choices=["Small", "Large"], recommended=0)
+            state.write_selected_draft(envelope, "kept draft")
+            added = set()
             for turn in ("same turn", "next turn after an unrelated human prompt"):
                 with self.subTest(harness=harness, turn=turn):
                     if turn != "same turn":
                         seat = self.f.seat(harness, SID)
                         tidy.bump_prompt_seq(seat, harness, SID, time.time())
-                    self.assertIsNone(redirect.redirect(harness, payload))
-                    self.assertEqual(state._read(state._signal_path(earlier))["id"], earlier["id"])
-                    self.assertEqual(state._selected_entry(envelope)["state"], "open")
-                    self.assertEqual([item["id"] for item in state.read_signals() if item["harness"] == harness],
-                                     [earlier["id"]])
-            # asking again with the same question is the same registration, not a second one
+                    reason = redirect.redirect(harness, payload)
+                    added.add(re.search(r"(S4:[0-9a-f]{64})", reason).group(1))
+                    self.assertEqual(state._read(state._signal_path(earlier))["lifecycle"], "open")
+                    self.assertEqual(state._selected_entry(envelope)["draft"], "kept draft")
+            # the same native question at the next turn is the one already open
+            self.assertEqual(len(added), 1)
+            self.assertEqual(sorted(item["id"] for item in state.read_signals() if item["harness"] == harness),
+                             sorted([earlier["id"], *added]))
+            # asking the earlier question again, at a later turn, is that open question
             again, _ = self.f.ask(harness, SID, text="Which scope first?", choices=["Small", "Large"], recommended=0)
-            self.assertNotEqual(again["id"], earlier["id"])                  # the turn moved on: `questions ask` still replaces
-            self.assertEqual(state._selected_entry(envelope)["result"]["status"], "replaced")
+            self.assertEqual(again["id"], earlier["id"])
             self.answered(harness)
 
     def test_a_question_whose_earlier_one_was_answered_still_registers(self):
@@ -242,7 +248,7 @@ class PassThroughTest(Base):
             self.assertIsNone(redirect.redirect("claude", claude_payload(agent_id="sub-1")))
             register.assert_not_called()
 
-    def test_other_tools_secrets_and_malformed_calls_are_left_alone(self):
+    def test_other_tools_and_malformed_calls_are_left_alone(self):
         cases = [("claude", {**claude_payload(), "tool_name": "Bash"}),
                  ("claude", {"session_id": SID, "tool_name": "AskUserQuestion", "tool_input": {}}),
                  ("claude", claude_payload([{"question": " ", "options": []}])),
@@ -250,9 +256,6 @@ class PassThroughTest(Base):
                  ("codex", {**codex_payload(), "tool_name": "update_plan"}),
                  ("opencode", {**opencode_payload(), "tool": "read"}),
                  ("claude", "not a payload"), ("claude", None)]
-        secret = codex_payload()
-        secret["tool_input"]["questions"][0]["isSecret"] = True
-        cases.append(("codex", secret))
         for harness, payload in cases:
             with self.subTest(harness=harness, payload=str(payload)[:60]), \
                  mock.patch.object(state, "register_message") as register:
