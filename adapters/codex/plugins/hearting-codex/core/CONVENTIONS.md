@@ -32,7 +32,7 @@ Intensity supplies the default recipe below; an explicit graph selects its stage
 | `thorough` | Strong groups plus deeper synthesis/verification | A declared group may add a third implementation-risk, failure-mode, or contrarian leg; unchanged groups remain width two | The base recipe realizes only registry-declared 2–4-way siblings; composed routes may add other bounded dispatch-depth-2 perspectives | thorough |
 | `adversarial` | Thorough plus adversarial failure-mode/security verification | Use the route-declared width and adversarial perspective; no undeclared fan-out | Bounded declared group or composed adversary/verifier; dispatch depth remains at most 2 | adversarial |
 
-The Stage graph and Dispatch columns describe the `staged` (team) form; a `solo` route keeps the `quick` graph and adds its declared verification nodes (see the allowed pairs below): one review at `standard`, the kind's review legs from `strong`, with the same retry limit and rigor as the `staged` route at that intensity.
+The Stage graph and Dispatch columns describe the `staged` (team) form; a `solo` route keeps the `quick` graph and adds its declared verification nodes (see the allowed pairs below): one review at `standard`, the kind's review legs and then its test from `strong`, with the same retry limit and rigor as the `staged` route at that intensity.
 
 Intensity controls procedure and default rigor; the recorded request, released decisions, approved endpoint, and node scope control delivery. Quick examples and concise procedures do not replace requested investigation, deliverables, or verification. Complete feasible assigned work, honor report endpoints, and report unfinished duties with the existing outcome semantics. A bounded stage stops at its assigned portion. A stage that produces the work is judged by the checks its own environment can run; the leg's wider verification belongs to the later verification stage and the owner, and a check the producing environment cannot run is recorded as a `handed-over:` line (exact command and reason) for them rather than as an unfinished duty; a check that ran and failed stays a FAIL.
 
@@ -44,7 +44,7 @@ interactive sessions, including peers and steward sessions; dispatch depth 1 own
 the capability pipeline; dispatch depth 2
 serves bounded review, perspective, and pipeline-stage nodes. Direct stays inline
 at dispatch depth 0. Quick is semantically one registered-headless one-shot
-conductor at dispatch depth 1 and opens no child node. A `solo` route at `standard` or higher (where the kind declares a one-shot review) keeps that one owner, which makes the work itself; its children are the route's declared verification nodes at dispatch depth 2 (one review at `standard`; the kind's review legs from `strong`, the same declared group a `staged` route realizes). The owner starts them with the command its task gives (one command starts the whole group) and cannot close any of them itself. Its transport/schema
+conductor at dispatch depth 1 and opens no child node. A `solo` route at `standard` or higher (where the kind declares a one-shot review) keeps that one owner, which makes the work itself; its children are the route's declared verification nodes at dispatch depth 2 (one review at `standard`; from `strong` the kind's review legs, the same declared group a `staged` route realizes, and then its test). The owner starts them with the command its task gives (one command starts the whole group) and cannot close any of them itself. Its transport/schema
 compatibility identity remains `worker_type=owner`, `unit=_kernel/owner`,
 `owner_model_profile`, and `one-shot-owner`; those names do not make it a
 standard+ capability owner. Standard+ fallback attempts retain their node's dispatch depth when the
@@ -258,7 +258,14 @@ portable **unit catalog** at `roles/units/<family>/<unit>.md`. A unit is the sin
 declaration of one dispatchable behavior atom; its frontmatter binds the portable role
 name, worker type, floor, and I/O semantics (`roles/units/_schema.md` is the authoring
 contract). `family` is a grouping label only — no runtime team agent exists on any
-harness; per-harness native agents are reduced to kernel helpers (e.g. `memory-scout`).
+harness. The native agents Hearting ships (`light`, `balanced`, `deep`,
+`general-purpose`) are the depth names of a native subagent call, which the pre-tool
+hook starts as a `general/explore` unit route on Claude and Codex
+(`core/OPERATIONS.md` §5.10c) only when that is certain: a person's session, the
+definition the harness picks is Hearting's shipped one or a built-in, and nothing
+else decides the call (`capabilities/unit.md`, A native subagent call). A user's own
+definition of the name, another hook or permission rule, or a worker's call runs
+natively.
 
 Role binding rules:
 

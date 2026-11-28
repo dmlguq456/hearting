@@ -327,8 +327,10 @@ needs an independent review is not direct. For one-pass work that needs independ
 review, open `--shape solo --intensity standard` if the kind declares a one-shot review
 (one session, one independent review).
 `strong` has two review legs, `thorough` and
-`adversarial` three. The owner starts them with the task's command and cannot close
-them itself. Use `staged` for work sized for stages, or for independent review where
+`adversarial` three, and where the kind declares a test, an independent test follows them.
+The owner starts the review legs with the task's group command and the test with the
+command the receipt prints once the current reviews pass, and cannot close any of them
+itself. Use `staged` for work sized for stages, or for independent review where
 the kind has no one-shot review. The session checks a direct change itself, including
 requested tests. An optional second look is a short check that keeps no record (below).
 
@@ -1624,7 +1626,7 @@ Autopilot entrypoints choose `intensity`; verification rigor is derived from it 
 | Complex cross-domain or cross-harness work | `thorough` | Bounded dispatch-depth-2 perspective and verifier workers |
 | High-stakes, irreversible, security, or external-facing work | `adversarial` | Thorough plus an explicit adversary, failure-mode, or security pass |
 
-The rows from `standard` up describe the `staged` (team) form. A `solo` route (`--shape solo`, one owner that makes the work) can carry `standard` through `adversarial` where its kind declares a one-shot review (code does): it keeps its `balanced` owner and adds only that kind's review legs after the work (one at `standard`, two at `strong`, three at `thorough` and `adversarial`), with no frame bootstrap, plan or plan check.
+The rows from `standard` up describe the `staged` (team) form. A `solo` route (`--shape solo`, one owner that makes the work) can carry `standard` through `adversarial` where its kind declares a one-shot review (code does): it keeps its `balanced` owner and adds only that kind's review legs after the work (one at `standard`, two at `strong`, three at `thorough` and `adversarial`) and, from `strong`, its independent test after them, with no frame bootstrap, plan or plan check.
 
 The quick row describes the lighter procedure, not a smaller deliverable. The original request, approved endpoint, and assigned scope remain the completion boundary: examples and concise reports do not replace requested investigation, results, or verification. A report endpoint ends with the approved report; a bounded stage finishes only its assigned work and reports any actual unfinished duty through the existing outcome semantics.
 

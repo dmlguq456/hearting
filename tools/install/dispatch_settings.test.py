@@ -121,6 +121,18 @@ class DispatchSettingsTest(unittest.TestCase):
         with self.assertRaisesRegex(settings.DispatchSettingsUsageError, "allocation.strategy must be one of"):
             settings.set_allocation({"window": 40})
 
+    def test_an_unhashable_schema_version_gets_the_validator_error_not_a_type_error(self):
+        # The editor computes the previous applied values before the
+        # validator; `schema_version: {}` must not TypeError there.
+        for bad, shown in (("{}", "{}"), ("[]", "[]")):
+            with self.subTest(schema_version=bad):
+                text = USER.replace("schema_version: 3\n", f"schema_version: {bad}\n")
+                self.write(text)
+                with self.assertRaises(settings.DispatchSettingsUsageError) as caught:
+                    settings.set_allocation({"window": 40})
+                self.assertIn("schema_version must be an integer, got " + shown, str(caught.exception))
+                self.assertEqual(self.path.read_text(), text)
+
     def test_invalid_values_and_unknown_keys_leave_the_file_unchanged(self):
         self.write()
         for updates in ({"usage_gate_used_percent": 101}, {"harness_weights.codex": 0.0},

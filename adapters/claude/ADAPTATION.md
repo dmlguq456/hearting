@@ -426,14 +426,13 @@ Concrete model names belong here and in Claude-native files only.
 Behavior personas live in the portable unit catalog `roles/units/` and carry
 portable role names only — they have no Claude `model:` frontmatter. The former
 per-team agent files (plan-team, dev-team, qa-team, and the other five) were
-removed in the unit-catalog migration. The only kernel helper agent under
-`adapters/claude/agents/` is `memory-scout`. Unlike the Codex kernel helper (derived
-from `CFG_PROFILE_MEMORY_SCOUT`), this one is hand-authored and pins `haiku` — a model
-**no tier in `config/models.conf` declares**, since the mini tier moved to `sonnet` on
-2026-08-07. It rides a whole-file `check-model-config.py` exemption, so retuning every
-tier leaves it where it is. Read it as an explicit pin, not as "the mini tier". Every other
-native subagent spawn resolves its model through the native-subagent default
-below.
+removed in the unit-catalog migration, and the hand-written `memory-scout` helper was
+retired on 2026-11-28: `adapters/claude/agents/` holds only the generated depth names
+(`light`, `balanced`, `deep`, `general-purpose`). A call naming `memory-scout` starts a
+light `general/explore` unit route only under the next section's conditions (a person's
+session, nothing defines that name, no other hook or rule decides the call); a definition
+the user kept under that name, in any YAML form, runs natively. A spawn
+that names none of them resolves its model through the native-subagent default below.
 
 ## A Native Subagent Call Becomes a Unit Route (H1)
 
@@ -464,6 +463,22 @@ the old line (no `--redirect`, 15 s) and redirects nothing until Claude's settin
 settings. Measured in isolated TUIs (`harness_behavior_cases_subagent_redirect.py`): the hook sees `Agent`
 with `description`, `prompt`, `subagent_type`; a hook that exits 1, is killed, prints garbage or runs past
 its timeout lets the native call run; exit 2 blocks it (the redirect always exits 0).
+A supervised owner's call (K) is judged the same way in its masked home, and only when the hook proves the
+owner from its registry row (Claude, owner, detached, live), its current route (`resolve_owner_route_lifecycle`:
+the launch route until a child adopts a continuation; an owner with no route binding has none to adopt) and the
+Claude session its supervisor bound to that attempt
+(`dispatch_owner_input.bound_input_thread`, not the attempt log); a route sealing a native stage fallback, a leg
+that would launch foreground-scoped, and a stage, review or sub-session worker keep the call native. The owner launch's own command line layers count
+only if they decide the call: its `--settings` is exactly the park hook (`registered-parent-park.py`), outside the
+terminal cleanup in which alone it refuses (read with the hook's own `load_active_cleanup_scope`); each `--add-dir`
+folder is absolute and holds no `.claude`; `--allowedTools`/`--disallowedTools` hold plain rules naming neither
+`Agent` nor `Task`. The start runs in the owner's environment (the leg hangs below it). Its line gives the wait in
+the form the launch's allow list names (`parent_next_directive.worker_utility`, which `_allowlist_rules` uses too),
+and the call stays native unless that rule is on the launch, the launch's mode and the payload's `permission_mode`
+are the same `bypassPermissions` or `acceptEdits`, no deny or ask rule whose tool name or tool-name glob takes Bash
+is in the launch or a settings file the hook reads, and no `PreToolUse` hook names or patterns Bash (hooks on every
+tool are not counted; Hearting's own pass a worker). The wait's running receipt gives the same string again
+(`work_start`, a leg a Claude worker started) and its window (540 s) ends inside the Bash call's default 600 s.
 
 ## Native Subagent Default Model (2026-07-23)
 

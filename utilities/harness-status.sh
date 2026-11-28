@@ -71,28 +71,12 @@ if [ -n "$sibling_slug" ]; then
 fi
 
 notes_root=${AGENT_NOTES_ROOT:-${WORKLOG_NOTES_ROOT:-}}
-board_app=${CAIRN_APP:-${WORKLOG_BOARD_APP:-}}
-board_wt=${CAIRN_WT:-${WORKLOG_BOARD_WT:-}}
 if [ -n "$notes_root" ]; then
   printf 'agent_notes_root=%s\n' "$notes_root"
   [ -d "$notes_root" ] && printf 'agent_notes_root_exists=1\n' || printf 'agent_notes_root_exists=0\n'
 else
   printf 'agent_notes_root=unset\n'
   printf 'agent_notes_root_exists=0\n'
-fi
-if [ -n "$board_app" ]; then
-  printf 'worklog_board_app=%s\n' "$board_app"
-  [ -e "$board_app" ] && printf 'worklog_board_app_exists=1\n' || printf 'worklog_board_app_exists=0\n'
-else
-  printf 'worklog_board_app=unset\n'
-  printf 'worklog_board_app_exists=0\n'
-fi
-if [ -n "$board_wt" ]; then
-  printf 'worklog_board_wt=%s\n' "$board_wt"
-  [ -e "$board_wt" ] && printf 'worklog_board_wt_exists=1\n' || printf 'worklog_board_wt_exists=0\n'
-else
-  printf 'worklog_board_wt=unset\n'
-  printf 'worklog_board_wt_exists=0\n'
 fi
 
 # Open headless dispatch jobs (canonical dispatch registry; tab fields:

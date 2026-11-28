@@ -34,14 +34,14 @@ def _post(base, path, payload):
 
 class NativeCallTest(unittest.TestCase):
     def test_spawn_call_uses_each_harness_sub_agent_tool(self):
-        call = ce.spawn_call("memory-scout", "do it")
+        call = ce.spawn_call("light", "do it")
         self.assertEqual(call.build("anthropic", [])[0], "Agent")
-        self.assertEqual(call.build("anthropic", [])[1]["subagent_type"], "memory-scout")
+        self.assertEqual(call.build("anthropic", [])[1]["subagent_type"], "light")
         name, args = call.build("responses", [])
         self.assertEqual(name, "multi_agent_v1::spawn_agent")
-        self.assertEqual(args, {"agent_type": "memory-scout", "message": "do it"})
+        self.assertEqual(args, {"agent_type": "light", "message": "do it"})
         name, args = call.build("chat", [])
-        self.assertEqual((name, args["agent"]), ("subagent", "memory-scout"))
+        self.assertEqual((name, args["agent"]), ("subagent", "light"))
         self.assertTrue(str(call).startswith("spawn:"))
         self.assertEqual(ce.wait_call("a1").build("responses", [])[1]["targets"], ["a1"])
 

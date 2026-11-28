@@ -365,7 +365,8 @@
           "cross-harness-headless"
         ],
         "model_profile": "deep",
-        "owner_model_profile": "balanced"
+        "owner_model_profile": "balanced",
+        "verify_node": "test"
       },
       "standard_plus": {
         "topology": "staged",
