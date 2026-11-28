@@ -3424,13 +3424,8 @@ class NativeAgentRenderTest(unittest.TestCase):
                 self.assertEqual(models["deep"], "fixture-user-deep")
                 self.assertEqual(models["light"], "fixture-user-light")
                 self.assertEqual(models["balanced"], "fixture-user-light")
-                if runtime == "codex":
-                    scout = self.agent(runtime, "memory-scout")
-                    self.assertFalse(scout.is_symlink())
-                    self.assertEqual(self.model_of(scout), "fixture-user-light")
-                if runtime == "claude":
-                    # The hand-written definition is not generated and stays a shipped link.
-                    self.assertTrue(self.agent(runtime, "memory-scout").is_symlink())
+                self.assertEqual(sorted(self.installed_agents(runtime)),
+                                 sorted(f"{name}{self.EXT[runtime]}" for name in self.CATALOG))
         self.assertEqual(self.shipped_snapshot(), before)
 
     # -- T2: a copy equal to the shipped file projects the shipped files ------
@@ -3449,7 +3444,7 @@ class NativeAgentRenderTest(unittest.TestCase):
                                  if runtime == "opencode" else
                                  sorted(Path(e["dest"]).relative_to(self.home(runtime)).as_posix() for e in agents)
                                  if runtime == "codex" else [])
-                self.assertEqual(len(agents), 5)
+                self.assertEqual(len(agents), 4)
                 for entry in agents:
                     dest = Path(entry["dest"])
                     if runtime == "codex":
@@ -3519,20 +3514,17 @@ class NativeAgentRenderTest(unittest.TestCase):
 
     # -- T3: known defect 1 --------------------------------------------------
     def test_every_model_main_session_only_projects_no_agents_and_never_falls_back_to_shipped(self):
-        for runtime in ("codex", "claude"):
+        for runtime in ("codex", "claude", "opencode"):
             with self.subTest(runtime):
                 activation.activate(runtime, "linked", str(REPO_ROOT))
                 before = self.installed_agents(runtime)
                 self.assertIn(f"deep{self.EXT[runtime]}", before)
                 self.write_conf(runtime, {"CFG_MAIN_SESSION_ONLY_MODELS": " ".join(self.shipped_models(runtime))})
                 report = activation.refresh(runtime)
-                expected = ["memory-scout.md"] if runtime == "claude" else []
-                self.assertEqual(self.installed_agents(runtime), expected)
+                self.assertEqual(self.installed_agents(runtime), [])
                 text = self.lines(report)
                 for name in self.CATALOG:
                     self.assertIn(f"native agent {name} withheld", text)
-                if runtime == "codex":
-                    self.assertIn("native agent memory-scout withheld", text)
                 self.assertEqual(report["freshness"], "fresh", report)
 
     # -- T3b: catalog entries removed from the selected config ---------------
@@ -3542,12 +3534,10 @@ class NativeAgentRenderTest(unittest.TestCase):
         self.assertTrue(general.is_file() and not general.is_symlink())
         self.write_conf("codex", {"CFG_NATIVE_AGENT_CATALOG": "deep:deep light:light"})
         report = activation.refresh("codex")
-        self.assertEqual(self.installed_agents("codex"), ["deep.toml", "light.toml", "memory-scout.toml"])
+        self.assertEqual(self.installed_agents("codex"), ["deep.toml", "light.toml"])
         text = self.lines(report)
         for name in ("general-purpose", "balanced"):
             self.assertIn(f"native agent {name} not-in-selected-catalog", text)
-        # memory-scout is a kernel helper: rendered whatever the catalog lists.
-        self.assertTrue(self.agent("codex", "memory-scout").exists())
         self.assertEqual(report["freshness"], "fresh", report)
 
     # -- T4: known defect 2 --------------------------------------------------
@@ -3575,7 +3565,7 @@ class NativeAgentRenderTest(unittest.TestCase):
             path = self.agent("codex", name)
             self.assertFalse(path.exists() or path.is_symlink(), path)
         self.assertIn("native agent deep withheld", self.lines(report))
-        for name in ("light", "balanced", "memory-scout"):
+        for name in ("light", "balanced"):
             self.assertTrue(self.agent("codex", name).exists(), name)
         self.assertEqual(mine.read_text(encoding="utf-8"), 'name = "mine"\n')
         self.assertTrue(theirs.is_symlink() and Path(os.readlink(theirs)) == outside)
@@ -3622,6 +3612,44 @@ class NativeAgentRenderTest(unittest.TestCase):
         report = activation.refresh("codex")
         self.assertEqual(deep.read_bytes(), edited)
         self.assertIn(str(deep), report["preserved"])
+
+    # -- a definition this source no longer ships (memory-scout) -------------
+    def test_reactivation_removes_a_retired_definition_and_keeps_a_user_edited_one(self):
+        old_source = self.root / "older-release"
+        for runtime in ("claude", "codex", "opencode"):
+            with self.subTest(runtime):
+                activation.activate(runtime, "linked", str(REPO_ROOT))
+                # What an older release's activation left: a link to its file (Claude,
+                # OpenCode) or an activation-owned file (Codex), recorded as owned.
+                # The user then edited the second one.
+                state = activation._load_json(activation._state_path(runtime))
+                for name in ("memory-scout", "old-helper"):
+                    left = self.agent(runtime, name)
+                    self.assertFalse(left.exists() or left.is_symlink(), f"this source projects {name}")
+                    shipped = old_source / runtime / left.name
+                    shipped.parent.mkdir(parents=True, exist_ok=True)
+                    shipped.write_text(f"old {name}\n", encoding="utf-8")
+                    if runtime == "codex":
+                        left.write_text(f"old {name}\n", encoding="utf-8")
+                        record = activation._entry(shipped, left, "agent", kind="render")
+                        record["content_sha256"] = hashlib.sha256(left.read_bytes()).hexdigest()
+                    else:
+                        left.symlink_to(shipped)
+                        record = activation._entry(shipped, left, "agent")
+                    state["owned_paths"].append(record)
+                activation._atomic_json(activation._state_path(runtime), state)
+                edited = self.agent(runtime, "old-helper")
+                edited.unlink()
+                edited.write_text("my own helper\n", encoding="utf-8")
+                report = activation.refresh(runtime)
+                scout = self.agent(runtime, "memory-scout")
+                self.assertFalse(scout.exists() or scout.is_symlink(), scout)
+                self.assertEqual(edited.read_text(encoding="utf-8"), "my own helper\n")
+                self.assertIn(str(edited), report["preserved"])
+                edited.unlink()
+                self.assertEqual(sorted(self.installed_agents(runtime)),
+                                 sorted(f"{name}{self.EXT[runtime]}" for name in self.CATALOG))
+                activation.deactivate(runtime)
 
     # -- T5 ------------------------------------------------------------------
     def test_deactivate_removes_rendered_files_and_keeps_user_files(self):

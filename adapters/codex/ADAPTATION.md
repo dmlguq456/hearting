@@ -261,8 +261,8 @@ Each file defines Codex's required custom agent fields (`name`, `description`,
 and `developer_instructions`) and the Codex-native runtime config fields
 `model`, `model_reasoning_effort`, and `sandbox_mode`. Adapter defaults follow
 the current Codex documentation shape: the fast/deep model tuple defined in
-**Model Mapping** below, and read-only sandboxing for QA, external-adversary,
-and memory-scout agents. The generated instructions also
+**Model Mapping** below, and read-only sandboxing for QA and external-adversary
+agents. The generated instructions also
 encode role-specific runtime boundaries such as QA read-only behavior,
 depth-one delegation, write preflight requirements, and external-adversary
 independence. Mixed or variable role profiles include `Codex role-map inputs`
@@ -372,12 +372,12 @@ or surface-dependent, so this adapter treats TOML generation as the source
 projection and keeps runtime validation separate.
 
 permission-model caveat: Claude's per-agent `tools:` frontmatter allowlist
-(for example `memory-scout` lists `Bash, Read, Grep, Glob`) has no Codex
+(the retired `memory-scout` listed `Bash, Read, Grep, Glob`) has no Codex
 custom-agent-schema equivalent — Codex custom agent TOML exposes no per-agent
 `tools` field, only `model`, `model_reasoning_effort`, and `sandbox_mode`. The
 closest Codex approximation is `sandbox_mode` plus `mcp_servers`, which cannot
-express a fine-grained tool allowlist; Codex narrows `memory-scout` with
-`sandbox_mode = "read-only"` instead (PG-21).
+express a fine-grained tool allowlist; Codex narrowed `memory-scout` with
+`sandbox_mode = "read-only"` instead (PG-21). No agent Hearting ships now needs one.
 
 See Model Mapping below for the corresponding model-tier asymmetry across
 these same custom agents.

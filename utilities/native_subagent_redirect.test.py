@@ -249,7 +249,7 @@ class DefinitionTest(Homes):
         self.write(self.claude_home / "agents/deep.md", shipped.replace("\nmodel: opus\n", "\nmodel: haiku\n")
                    .replace("\neffort: xhigh\n", "\neffort: low\n").replace("(tier deep)", "(tier light)"))
         self.assertTrue(self.check("claude", "deep"))
-        self.assertFalse(self.check("claude", "memory-scout"))             # no definition at all: not certain
+        self.assertFalse(self.check("claude", "balanced-deep"))            # no definition and not built in
 
     def test_claude_a_changed_frontmatter_or_body_is_not_hearting_s(self):
         shipped = (ROOT / "adapters/claude/agents/light.md").read_text()
@@ -330,6 +330,22 @@ class DefinitionTest(Homes):
         self.assertTrue(self.check("codex", "default"))
         self.write(self.codex_home / "config.toml", '[agents.team_scout]\nconfig_file = "private/missing.toml"\n')
         self.assertFalse(self.check("codex", "default"))                  # a file that cannot be read
+
+    def test_a_retired_name_nothing_defines_starts_at_its_depth(self):
+        # Hearting no longer ships `memory-scout`; a call by that habit still becomes a light unit route.
+        self.register("claude")
+        payload = {**claude(subagent_type="memory-scout"), "cwd": str(self.project)}
+        for harness in ("claude", "codex"):
+            self.assertTrue(self.check(harness, "memory-scout"), harness)
+        with mock.patch.object(redirect, "start", return_value=None) as start, \
+                mock.patch.object(session_identity, "known_sub_session_root", return_value=SID):
+            redirect.redirect("claude", payload)
+        self.assertEqual(start.call_args.args[2], "light")
+        # A definition the user kept (activation keeps an edited file) runs natively, as does a project's.
+        self.write(self.claude_home / "agents/memory-scout.md", "---\nname: memory-scout\n---\nMine.\n")
+        self.assertFalse(self.check("claude", "memory-scout"))
+        self.write(self.project / ".codex/agents/scout.toml", 'name = "memory-scout"\ndescription = "p"\n')
+        self.assertFalse(self.check("codex", "memory-scout"))
 
     def test_the_redirect_starts_nothing_for_a_collision(self):
         self.ship("claude", "light")

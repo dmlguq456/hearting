@@ -5,7 +5,8 @@ Claude `Agent` (older `Task`) and Codex `spawn_agent` (multi-agent v1) are inter
 (`PreToolUse`). Whether Hearting takes the call is decided once, before anything is registered; anything
 that is not certain leaves the native call exactly as it was, with nothing printed and nothing registered:
 - The definition the harness picks for the name is Hearting's shipped one (apart from the lines activation
-  renders for the user's models) or the harness's built-in, and the call carries nothing a brief cannot.
+  renders for the user's models) or the harness's built-in, or a retired name (`memory-scout`) nothing defines,
+  and the call carries nothing a brief cannot.
 - Nothing else decides the same call: no other hook or permission rule in a configuration the hook reads,
   no layer added on the harness's command line, and Hearting's own hook registered exactly once.
 - The caller is a person's session: not a registered worker, not a native subagent (unknown counts as not).
@@ -62,6 +63,9 @@ UNNAMED = {"claude": "balanced-deep", "codex": "balanced"}
 # The agent a call without a name runs as, and the agents the harness itself defines.
 DEFAULT_AGENT = {"claude": "general-purpose", "codex": "default"}
 BUILT_IN = {"claude": {"Explore", "Plan", "general-purpose"}, "codex": {"default", "worker", "explorer"}}
+# Names Hearting once shipped a definition for and no longer does: with no definition anywhere the native call
+# has nothing to run, so such a call is taken like a built-in's.
+RETIRED = {"memory-scout"}
 _SUFFIX = {"claude": ".md", "codex": ".toml"}
 # Lines activation renders into a shipped definition for the user's models (`sync-native-agents.py`).
 _RENDERED = {"claude": re.compile(r"(# profile:|model:|effort:)"),
@@ -213,11 +217,13 @@ def _definitions(harness: str, cwd: str, name: str) -> tuple[list[Path], list[Pa
 
 
 def require_shipped_definition(harness: str, name: str, cwd: str) -> None:
-    """`Skip` unless the definition the harness picks for `name` is Hearting's shipped one or its built-in."""
+    """`Skip` unless the definition the harness picks for `name` is Hearting's shipped one or its built-in (a
+    retired name counts as built in)."""
     user, others = _definitions(harness, cwd, name)
     if others:
         raise Skip("definition-elsewhere")          # a project, managed or declared definition comes first
-    if not ((len(user) == 1 and _is_shipped(harness, user[0], name)) or (not user and name in BUILT_IN[harness])):
+    if not ((len(user) == 1 and _is_shipped(harness, user[0], name))
+            or (not user and name in BUILT_IN[harness] | RETIRED)):
         raise Skip("definition-not-shipped")
 
 

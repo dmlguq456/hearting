@@ -150,7 +150,7 @@ one bounded line.
   missing or changed target is evidence that the memory pointer may be stale,
   not a reason to substitute the remembered summary for the file.
 - **Inline recall:** for a simple agent-chosen search, run `tools/memory/recall.sh "<query>"` directly for one or two queries. If a hit needs context, follow with `mem show <id>` or `recall --full --limit N`.
-- **Memory-scout capability:** use this read-only capability for deep searches across raw sessions, multiple query angles, many full bodies, or multiple working directories. Start with narrow recall and useful synonyms in any relevant language; inspect hit IDs through `show` or a few full results; widen to `--all` on a miss, then to raw sessions; finish with one line cross-checking live code. Do not bypass the interface through direct DB or `dump.jsonl` reads. Return at most 15 lines: verdict—present, absent, or ambiguous—up to three key quotations, record IDs, and one application instruction. All writes are forbidden, including `add`, `note`, `consume`, `restore`, `delete`, `reinforce`, `merge`, `prune`, or file edits.
+- **Deep memory search:** hand a search that needs raw sessions, several query angles, many full bodies, or several working directories to `general/explore` (`compose --start --unit general/explore --ephemeral --prompt-file <brief>`; its text carries the read-only procedure, from narrow recall to one line checked against live code).
 
 Per-cwd isolation remains the default. Use `--all` only for an explicit cross-project need. A mass `--fix` touches gitignored live user data under `projects/` and therefore belongs in a user-directed flow; automated paths may report missing pointers but not repair them.
 

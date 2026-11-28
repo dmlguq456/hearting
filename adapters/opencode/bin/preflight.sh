@@ -229,15 +229,9 @@ opencode_runtime_projection_check() {
     printf 'check=failed\nreason=opencode-hearting-missing\nopencode_home=%s\nexpected=%s\n' "$opencode_home" "$harness"
     return 69
   fi
-  # Kernel helper is the projection liveness probe: runtime team agents retired
-  # 2026-07-22 (재홈, CONVENTIONS §2.3) — memory-scout is the only projected native agent.
-  native_agent="$opencode_home/agents/memory-scout/memory-scout.md"
-  [ -f "$native_agent" ] || native_agent="$opencode_home/agents/memory-scout.md"
-  [ -f "$native_agent" ] || native_agent="$opencode_home/agent/memory-scout.md"
-  if [ ! -f "$native_agent" ]; then
-    printf 'check=failed\nreason=opencode-native-agents-missing\nopencode_home=%s\nexpected=%s|%s\n' "$opencode_home" "$opencode_home/agents/memory-scout/memory-scout.md" "$opencode_home/agents/memory-scout.md"
-    return 69
-  fi
+  # The command below is the projection liveness probe. No agent is: the native
+  # agents left (light, balanced, deep, general-purpose) are withheld when the
+  # selected models.conf makes their model main-session-only.
   native_command="$opencode_home/commands/autopilot-code.md"
   [ -f "$native_command" ] || native_command="$opencode_home/command/autopilot-code.md"
   if [ ! -f "$native_command" ]; then
@@ -279,11 +273,11 @@ PY
     return 69
   fi
   if rg -q 'adapters/claude|claude_setting|settings\.json|statusline\.sh|CLAUDE\.md|agent-modes|allowedTools|/\.claude/' \
-    "$native_agent" "$native_command" 2>/dev/null; then
+    "$native_command" 2>/dev/null; then
     printf 'check=failed\nreason=opencode-runtime-projection-exposes-claude-surface\nopencode_home=%s\n' "$opencode_home"
     return 69
   fi
-  printf 'runtime_projection=ok\nopencode_home=%s\nnative_agent=%s\nnative_command=%s\n' "$opencode_home" "$native_agent" "$native_command"
+  printf 'runtime_projection=ok\nopencode_home=%s\nnative_command=%s\n' "$opencode_home" "$native_command"
   return 0
 }
 

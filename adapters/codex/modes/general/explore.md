@@ -83,13 +83,16 @@ the defaults below.
   answer, then the evidence.
 - To transcribe or fill a template from several sources, the answer is the filled text;
   the caller writes it into a file.
-- **A question about remembered conventions or earlier decisions.** Run
+- **A question about remembered conventions or earlier decisions** (also the deep memory
+  search `core/MEMORY.md` §7.4 hands here: raw sessions, several query angles, many full
+  bodies, several working directories). Run a narrow
   `tools/memory/recall.sh "<query>" --no-touch` first, with useful synonyms in any
   relevant language, then `mem show <id> --no-touch` for the hits that matter (or
   `recall --full --limit N`). On a miss widen to `--all`, then to raw sessions
   (`--sessions`). Do not read the store's database or dump files directly. Finish with
   one line checking the remembered claim against the live code, since a memory is a
-  pointer and the file is the fact. Use `--no-touch` every time and never `add`, `note`,
+  pointer and the file is the fact. Use `--no-touch` every time (such a read changes no
+  access date and consumes no pending handoff) and never `add`, `note`,
   `consume`, `restore`, `delete`, `reinforce`, `merge`, `prune` or any other write.
   In the answer give whether it is present, absent or ambiguous, up to three key
   quotations, the record ids, and one line on how to apply it.

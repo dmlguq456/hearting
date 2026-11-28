@@ -196,7 +196,7 @@ PY
   test "$(count_dirs "$HOME/.config/opencode/skills")" = "$EXPECTED_OC_SKILLS" || fail "$mode OpenCode skill count"
   test "$(count_dirs "$HOME/.config/opencode/commands")" = "$EXPECTED_CAPABILITIES" || fail "$mode OpenCode command count"
 
-  # Kernel helpers (memory-scout) plus the native subagent type catalog;
+  # The native subagent type catalog (no kernel helper ships);
   # runtime team agents retired 2026-07-22 (재홈) and stay unprojected.
   # Codex agents are activation-owned regular files (Codex 0.163.0 refuses a linked
   # role file): every shipped agent, by name and bytes, and nothing else of Hearting's.

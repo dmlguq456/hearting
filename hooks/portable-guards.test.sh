@@ -1705,9 +1705,9 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 agents = sorted(root.glob("*.toml"))
-# The current native catalog carries the three general worker profiles plus the
-# kernel memory scout. Keep this list exact so stale or accidental agents fail.
-expected = ["balanced.toml", "deep.toml", "general-purpose.toml", "light.toml", "memory-scout.toml"]
+# The current native catalog carries the depth names only (memory-scout retired).
+# Keep this list exact so stale or accidental agents fail.
+expected = ["balanced.toml", "deep.toml", "general-purpose.toml", "light.toml"]
 if [a.name for a in agents] != expected:
     raise SystemExit(f"expected {expected}, got {[a.name for a in agents]}")
 for agent in agents:
@@ -1730,15 +1730,13 @@ else
   bad "codex native agent projection should have valid custom agent TOML without Claude paths"
 fi
 # 재홈 2026-07-22: per-team TOML boundaries retired — role-specific runtime boundaries now
-# live in unit-catalog frontmatter enforced by tools/check-unit-config.py; the kernel
-# memory-scout TOML stays read-only.
+# live in unit-catalog frontmatter enforced by tools/check-unit-config.py.
 if python3 "$ROOT/tools/check-unit-config.py" >"$TMP/codex_unit_config.out" 2>"$TMP/codex_unit_config.err" \
   && grep -q '^read_only: true$' "$ROOT/roles/units/qa/test.md" \
   && grep -q '^worker_type: review$' "$ROOT/roles/units/qa/test.md" \
   && grep -q '^read_only: true$' "$ROOT/roles/units/qa/security-review.md" \
   && grep -q '^read_only: false$' "$ROOT/roles/units/dev/backend.md" \
-  && grep -q '^worker_type: stage$' "$ROOT/roles/units/dev/backend.md" \
-  && grep -q 'sandbox_mode = "read-only"' "$TMP/codex_agent_home/agents/memory-scout.toml"; then
+  && grep -q '^worker_type: stage$' "$ROOT/roles/units/dev/backend.md"; then
   ok "codex native agent projection enforces role-specific runtime boundaries"
 else
   bad "codex native agent projection should encode role-specific runtime boundaries"
@@ -1757,39 +1755,6 @@ if grep -q '^role: fast reviewer$' "$ROOT/roles/units/qa/test.md" \
   ok "codex native agent projection preserves mixed role sets"
 else
   bad "codex native agent projection should preserve mixed role sets"
-fi
-memory_scout_model_ok=0
-if python3 - "$ROOT" "$TMP/codex_agent_home/agents/memory-scout.toml" <<'PY'
-import importlib.util
-import re
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1])
-agent_path = Path(sys.argv[2])
-spec = importlib.util.spec_from_file_location(
-    "codex_native_agent_resolver", root / "adapters/codex/bin/sync-native-agents.py")
-resolver = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(resolver)
-expected_model, expected_effort, expected_sandbox = resolver.codex_config("memory-scout")
-text = agent_path.read_text(encoding="utf-8")
-fields = dict(re.findall(r'^(model|model_reasoning_effort|sandbox_mode) = "([^"]+)"$',
-                         text, re.MULTILINE))
-if fields.get("model") != expected_model:
-    raise SystemExit(f"memory-scout model {fields.get('model')!r} != configured {expected_model!r}")
-if (expected_effort, expected_sandbox) != ("low", "read-only"):
-    raise SystemExit("memory-scout shipped profile must remain low-effort and read-only")
-PY
-then
-  memory_scout_model_ok=1
-fi
-if [ "$memory_scout_model_ok" -eq 1 ] \
-  && grep -q 'model_reasoning_effort = "low"' "$TMP/codex_agent_home/agents/memory-scout.toml" \
-  && grep -q 'sandbox_mode = "read-only"' "$TMP/codex_agent_home/agents/memory-scout.toml" \
-  && grep -q 'Never run memory mutation commands' "$TMP/codex_agent_home/agents/memory-scout.toml"; then
-  ok "codex native memory-scout projection is low-cost read-only"
-else
-  bad "codex native memory-scout projection should be low-cost read-only"
 fi
 if [ -L "$ROOT/codex_setting/codex-modes" ] \
   && [ "$(readlink "$ROOT/codex_setting/codex-modes")" = "../adapters/codex/modes" ] \
@@ -2389,7 +2354,7 @@ if AGENT_HOME="$ROOT" CODEX_HOME="$RPHOME" "$ROOT/adapters/codex/bin/install-run
   && grep -q '^check=skill-link:autopilot-code:ok' "$TMP/codex_rp2.out" \
   && grep -q '^check=skill-discovery:native' "$TMP/codex_rp2.out" \
   && grep -q '^check=skills-linked:ok' "$TMP/codex_rp2.out" \
-  && grep -q '^check=agent-link:memory-scout.toml:ok' "$TMP/codex_rp2.out" \
+  && grep -q '^check=agent-link:light.toml:ok' "$TMP/codex_rp2.out" \
   && grep -q '^check=agents-linked:ok' "$TMP/codex_rp2.out" \
   && grep -q '^status=ok' "$TMP/codex_rp2.out"; then
   ok "codex install-runtime-projection wires the home and the checker passes"
@@ -2444,10 +2409,10 @@ RPBAD="$TMP/codex-runtime-home-bad"
 rm -rf "$RPBAD"; mkdir -p "$RPBAD"
 if AGENT_HOME="$ROOT" CODEX_HOME="$RPBAD" "$ROOT/adapters/codex/bin/install-runtime-projection.sh" >"$TMP/codex_rp_bad_install.out" 2>"$TMP/codex_rp_bad_install.err" \
   && ln -sfn "$TMP" "$RPBAD/skills/autopilot-code" \
-  && ln -sfn "$TMP" "$RPBAD/agents/memory-scout.toml" \
+  && ln -sfn "$TMP" "$RPBAD/agents/light.toml" \
   && ! AGENT_HOME="$ROOT" CODEX_HOME="$RPBAD" "$ROOT/adapters/codex/bin/check-runtime-projection.sh" >"$TMP/codex_rp_bad.out" 2>"$TMP/codex_rp_bad.err" \
   && grep -q '^check=skill-link:autopilot-code:failed' "$TMP/codex_rp_bad.out" \
-  && grep -q '^check=agent-link:memory-scout.toml:failed' "$TMP/codex_rp_bad.out" \
+  && grep -q '^check=agent-link:light.toml:failed' "$TMP/codex_rp_bad.out" \
   && grep -q '^status=failed' "$TMP/codex_rp_bad.out"; then
   ok "codex check-runtime-projection rejects miswired skill and agent links"
 else
@@ -2704,9 +2669,8 @@ mkdir -p "$TMP/opencode_headless_home/.config/opencode/agents" \
   "$TMP/opencode_headless_home/.config/opencode/plugins"
 ln -s "$ROOT" "$TMP/opencode_headless_home/.config/opencode/hearting"
 ln -s "$ROOT/opencode_setting/opencode-skills/autopilot-code" "$TMP/opencode_headless_home/.config/opencode/skills/autopilot-code"
-# 재홈 2026-07-22: runtime team agents retired — the projected native agent is the
-# kernel helper memory-scout (agents/memory-scout/memory-scout.md).
-ln -s "$ROOT/opencode_setting/opencode-agents/memory-scout" "$TMP/opencode_headless_home/.config/opencode/agents/memory-scout"
+# The headless check probes the projected command; no native agent is required
+# (the catalog agents can be withheld by the selected models.conf).
 ln -s "$ROOT/opencode_setting/opencode-commands/autopilot-code.md" "$TMP/opencode_headless_home/.config/opencode/commands/autopilot-code.md"
 ln -s "$ROOT/opencode_setting/opencode-plugins/hearting-guards.js" "$TMP/opencode_headless_home/.config/opencode/plugins/hearting-guards.js"
 # The fixture projects the OpenCode 1.x guard file; the launch generation is pinned
@@ -2716,7 +2680,6 @@ if cli_absent opencode; then
 elif OPENCODE_RUNTIME_VERSION=1.14.0 HOME="$TMP/opencode_headless_home" XDG_CONFIG_HOME="$TMP/opencode_headless_home/.config" \
   "$OPENCODE" headless --check "$TMP/repo" >"$TMP/opencode_headless_check.out" 2>"$TMP/opencode_headless_check.err" \
   && grep -q '^runtime_projection=ok$' "$TMP/opencode_headless_check.out" \
-  && grep -q '/agents/memory-scout/memory-scout.md$' "$TMP/opencode_headless_check.out" \
   && grep -q '/commands/autopilot-code.md$' "$TMP/opencode_headless_check.out" \
   && grep -q '^check=ok$' "$TMP/opencode_headless_check.out"; then
   ok "opencode headless check validates plural native runtime projection"
@@ -2727,8 +2690,7 @@ mkdir -p "$TMP/opencode_headless_config_home/.config/opencode/agent" \
   "$TMP/opencode_headless_config_home/.config/opencode/command" \
   "$TMP/opencode_headless_config_home/.config/opencode/plugins"
 ln -s "$ROOT" "$TMP/opencode_headless_config_home/.config/opencode/hearting"
-# 재홈 2026-07-22: singular-layout variant keeps a flat agent/memory-scout.md link.
-ln -s "$ROOT/opencode_setting/opencode-agents/memory-scout/memory-scout.md" "$TMP/opencode_headless_config_home/.config/opencode/agent/memory-scout.md"
+# Singular-layout variant (command/ and agent/ folders).
 ln -s "$ROOT/opencode_setting/opencode-commands/autopilot-code.md" "$TMP/opencode_headless_config_home/.config/opencode/command/autopilot-code.md"
 ln -s "$ROOT/opencode_setting/opencode-plugins/hearting-guards.js" "$TMP/opencode_headless_config_home/.config/opencode/plugins/hearting-guards.js"
 if cli_absent opencode; then
@@ -3119,38 +3081,15 @@ if opencode_v1_cli; then
     [ -f "$f" ] || continue
     ln -s "$f" "$TMP/opencode_home/.config/opencode/agent/$(basename "$f")"
   done
-  # 재홈 2026-07-22: team profiles retired — the discoverable native agent is the kernel
-  # helper memory-scout, which declares its portable source (core/MEMORY.md §7.4).
+  # Team profiles retired (재홈 2026-07-22) and memory-scout with them: the catalog depth
+  # names are the discoverable native agents.
   if HOME="$TMP/opencode_home" XDG_CONFIG_HOME="$TMP/opencode_home/.config" XDG_DATA_HOME="$TMP/opencode_home/.local/share" \
-    opencode debug agent memory-scout --pure >"$TMP/opencode_agent.out" 2>"$TMP/opencode_agent.err" \
-    && grep -q '"description": "Read-only memory scout for agent-initiated deep memory reconnaissance."' "$TMP/opencode_agent.out" \
-    && grep -q 'core/MEMORY.md' "$TMP/opencode_agent.out" \
+    opencode debug agent light --pure >"$TMP/opencode_agent.out" 2>"$TMP/opencode_agent.err" \
+    && grep -q '"description": "Breadth fan-out agent on the portable light budget' "$TMP/opencode_agent.out" \
     && ! grep -q '/.claude/' "$TMP/opencode_agent.out"; then
     ok "opencode native agent projection is discoverable without Claude paths"
   else
     bad "opencode native agent projection should be discoverable without Claude paths"
-  fi
-  # 재홈 2026-07-22: qa-team projection retired — read-only/depth-one runtime enforcement
-  # is preserved on the kernel memory-scout projection (edit/write/task off + deny rules).
-  if HOME="$TMP/opencode_home" XDG_CONFIG_HOME="$TMP/opencode_home/.config" XDG_DATA_HOME="$TMP/opencode_home/.local/share" \
-    opencode debug agent memory-scout --pure >"$TMP/opencode_agent_qa.out" 2>"$TMP/opencode_agent_qa.err" \
-    && python3 - "$TMP/opencode_agent_qa.out" <<'PY'
-import json
-import sys
-
-agent = json.load(open(sys.argv[1], encoding="utf-8"))
-tools = agent.get("tools", {})
-rules = {(r.get("permission"), r.get("action")) for r in agent.get("permission", [])}
-assert tools.get("edit") is False, tools
-assert tools.get("write") is False, tools
-assert tools.get("task") is False, tools
-assert ("edit", "deny") in rules, rules
-assert ("task", "deny") in rules, rules
-PY
-  then
-    ok "opencode qa agent projection enforces read-only and depth-one tools"
-  else
-    bad "opencode qa agent projection should disable edit/write/task"
   fi
 else
   ok "opencode native agent runtime discovery skipped (no OpenCode 1.x CLI)"

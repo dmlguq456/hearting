@@ -361,15 +361,7 @@
       "argument_hint": "[정리] | 정리만 | 인계 <받을 세션>"
     }
   ],
-  "agents": [
-    {
-      "slug": "agent__memory-scout",
-      "name": "memory-scout",
-      "model": "",
-      "modes": [],
-      "blurb": "Kernel agent projected into every activation."
-    }
-  ],
+  "agents": [],
   "units": {
     "analysis/analyze": {
       "family": "analysis",

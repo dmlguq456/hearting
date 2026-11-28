@@ -722,7 +722,7 @@ def _keep_edited_opencode_bootstrap(previous: Optional[dict], scope: str):
 def _kernel_agents(source_root: Path) -> set[str]:
     manifest_path = source_root / harness_manifest.MANIFEST_NAME
     if not manifest_path.is_file():
-        return {"memory-scout"}
+        return {"memory-scout"}  # a source older than the manifest shipped this one helper
     try:
         canonical = harness_manifest.load(manifest_path)
     except harness_manifest.ManifestError as exc:
@@ -906,7 +906,7 @@ def _run_native_agent_plan(
                 lines.append(f"{runtime} native agent {name} {status}: {row.get('reason', '')}")
         except (KeyError, TypeError, ValueError, OSError) as exc:
             raise ActivationError(f"{runtime} native agent plan row unusable: {exc}") from exc
-    # Hand-written shipped definitions the renderer never decides (Claude memory-scout).
+    # Hand-written shipped definitions the renderer never decides (an older source's Claude memory-scout).
     entries.extend(_shipped_agent_links(runtime, active_root, home, static_names))
     for name in sorted(projected - decided - static_names):
         lines.append(f"{runtime} native agent {name} not-in-selected-catalog: "
@@ -1075,6 +1075,8 @@ def _linked_entries(
         )
     required_surfaces = {"instructions", "skill", "agent", "hook_config"}
     present_surfaces = {entry["surface"] for entry in existing}
+    if any((source_root / "adapters" / runtime / "agents").glob("*")):
+        present_surfaces.add("agent")  # shipped, even when the selected models.conf withholds every one
     missing = sorted(required_surfaces - present_surfaces)
     if missing:
         raise ActivationError(
