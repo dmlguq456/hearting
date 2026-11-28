@@ -3109,18 +3109,25 @@ def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock, re
             if step.get("reason") == "replacement-capacity-wait":
                 return _capacity_pause({**result, "result": outcome}, step, resume, unit=True)
             if step.get("state") == "needs-attention":
+                # Say why the turn stopped; with no instruction of its own, the step keeps its claimed
+                # continuation for the same start (the owner's receipt says the same).
                 return {**result, "state": "needs-attention", "reason": step["reason"],
                         "result": outcome, "replacement_attention": [step],
                         "parent_next": "inspect-receipt", "parent_next_command": "",
-                        "next_step": step.get("retry_when") or step.get("next_step")
-                            or "Inspect the unit recovery receipt before continuing this route."}
+                        "next_step": "The unit worker stopped at a usage limit. " + (
+                            step.get("retry_when") or step.get("next_step")
+                            or "This route keeps its continuation; retry resume_command after the exact "
+                               "launch settles, and it starts that same continuation.")}
         # Ordinary failed or missing results keep the existing inspection and compose path.
         command = _compose_again(route)
+        limited = source.get("note") == "dead-capacity" or source.get("failure_class") == "capacity"
         return {**result, "state": "needs-attention", "reason": "unit-outcome-needs-inspection",
                 "result": outcome, "required_action": "compose-again", "parent_next": "compose",
                 "parent_next_command": command,
-                "next_step": "The unit worker ended without a pass. Read its result and report; to run the "
-                    "same unit again, run parent_next_command (a new route; this one stays as it ended)."}
+                "next_step": ("The unit worker stopped at a usage limit and this route cannot continue it."
+                              if limited else "The unit worker ended without a pass.")
+                    + " Read its result and report; to run the same unit again, run parent_next_command "
+                    "(a new route; this one stays as it ended)."}
     if wait:
         return _wait_expired(result)
     status, metadata = _rows(jobs).get(aid, rows[aid])

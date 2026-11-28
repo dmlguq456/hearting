@@ -292,6 +292,25 @@ class RunTest(unittest.TestCase):
         self.assertEqual(C.run(self.path, sleep=self.sleep, now=lambda: self.clock[0],
                                call=lambda *a, **k: self.fail("resumed twice")), 0)
 
+    def test_a_resume_that_needs_attention_records_why_and_a_plain_one_adds_nothing(self):
+        record = json.loads(self.path.read_text())
+        for receipt, kept in (
+                ({"state": "needs-attention", "reason": "replacement-launch-pending", "next_action": "same-command"},
+                 {"result_reason": "replacement-launch-pending", "result_next_action": "same-command"}),
+                ({"state": "needs-attention", "reason": "unit-outcome-needs-inspection",
+                  "required_action": "compose-again"},
+                 {"result_reason": "unit-outcome-needs-inspection", "result_next_action": "compose-again"}),
+                ({"state": "running", "owner_attempt_id": "att-1"}, {})):
+            with self.subTest(receipt=receipt):
+                self.path.write_text(json.dumps(record))
+                done = SimpleNamespace(returncode=0, stdout=json.dumps(receipt) + "\n")
+                with mock.patch.object(C, "_notify"):
+                    C.run(self.path, sleep=self.sleep, now=lambda: self.clock[0], call=lambda argv, **kw: done)
+                saved = json.loads(self.path.read_text())
+                self.assertEqual({key: saved[key] for key in saved if key in
+                                  {"result_reason", "result_next_action"}}, kept)
+                self.assertEqual(saved["result_state"], receipt["state"])
+
     def test_a_closed_route_is_started_and_only_a_plain_completed_skips_the_notice(self):
         # Four of five Codex waits armed on 10-29 named routes that were
         # continued and closed by other paths. `start` still runs (it retries
@@ -666,6 +685,25 @@ class ReceiptAndNoticeTest(unittest.TestCase):
             self.assertIn("the parent's replacement start needs attention", text)
             self.assertIn("state needs-attention", text)
             self.assertNotIn("answer another session sent", text)
+            # A resume whose start needs attention carries the same start: its receipt says what is needed,
+            # and a continuation that is only claimed starts from it.
+            with mock.patch.dict("os.environ", {"CLAUDE_CODE_SESSION_ID": "sid-9"}, clear=True):
+                C._notify({**record, "retry_at": "2026-10-07T12:04:00Z", "cause": "capacity",
+                           "route_file": str(route), "exit_code": 0},
+                          {"state": "needs-attention", "reason": "replacement-launch-pending"})
+            claimed, _ = sweep.sweep_deliver(jobs.parent, "claude-parent-runtime", "sid-9")
+            text = sweep.delivery_context([(jobs.parent, claimed)])
+            self.assertIn("resumed after the usage limit reset: state needs-attention, reason "
+                          "replacement-launch-pending; to see what it needs and continue, run: ", text)
+            self.assertIn(f"capability-route.py start --route {route}", text)
+            self.assertIn("required_action=run-resume-command", text)
+            with mock.patch.dict("os.environ", {"CLAUDE_CODE_SESSION_ID": "sid-9"}, clear=True):
+                C._notify({**record, "retry_at": "2026-10-07T12:05:00Z", "cause": "capacity",
+                           "route_file": str(route), "exit_code": 0}, {"state": "running", "owner_attempt_id": "a"})
+            claimed, _ = sweep.sweep_deliver(jobs.parent, "claude-parent-runtime", "sid-9")
+            text = sweep.delivery_context([(jobs.parent, claimed)])
+            self.assertNotIn("capability-route.py start", text)
+            self.assertIn("required_action=report-to-user", text)
 
 
 if __name__ == "__main__":

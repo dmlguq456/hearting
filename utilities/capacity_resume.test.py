@@ -813,6 +813,41 @@ class CapacityResumeTest(unittest.TestCase):
         missing = unit_continue.session_plan(self.jobs, original, "claude")
         self.assertEqual(missing.row_value, "fresh:session-missing")
 
+    def test_a_unit_continuation_that_did_not_start_names_the_limit_and_the_same_start(self):
+        from start_receipt import next_line
+        original = self.seed_unit("claude")
+        self.launch_error = "fixture-launch-broke"
+        receipt = self.start()
+        self.assertEqual((receipt["state"], receipt["reason"]), ("needs-attention", "replacement-launch-pending"),
+                         receipt)
+        self.assertTrue(receipt["next_step"].startswith("The unit worker stopped at a usage limit. "), receipt)
+        self.assertIn("retry resume_command", receipt["next_step"])
+        self.assertIn("resume_command=" + receipt["resume_command"], next_line(receipt))
+        # The claim stays; the same start launches that continuation, once.
+        self.launch_error = None
+        receipt = self.start()
+        self.assertEqual((receipt["state"], receipt["unit_attempt_id"]), ("running", self.replacement_id(original)))
+        self.assertEqual((len(self.calls), len(self.claims())), (2, 1))
+
+    def test_a_record_free_unit_at_a_usage_limit_says_so_when_it_cannot_continue(self):
+        import unit_ephemeral
+        scratch = self.root / "ephemeral" / "123456789abc" / ".agent_reports"
+        scratch.mkdir(parents=True)
+        (scratch / unit_ephemeral.MARKER).touch()
+        self.route["artifact_root"] = str(scratch)
+        aid = self.seed_unit("claude", artifact_root=str(scratch))
+        self.ready = True
+        with mock.patch.object(W, "_outcome", return_value={"classification": "failure"}):
+            receipt = self.start()
+        self.assertEqual((receipt["reason"], receipt["required_action"]),
+                         ("unit-outcome-needs-inspection", "compose-again"), receipt)
+        self.assertTrue(receipt["next_step"].startswith(
+            "The unit worker stopped at a usage limit and this route cannot continue it."), receipt)
+        self.assertEqual(self.calls, [])
+        self.set_status(aid, "done", note="dead-exit-1", failure_class="runtime")
+        with mock.patch.object(W, "_outcome", return_value={"classification": "failure"}):
+            self.assertTrue(self.start()["next_step"].startswith("The unit worker ended without a pass."))
+
     def test_only_a_launched_recording_unit_capacity_end_can_continue(self):
         import unit_ephemeral
         original = self.seed_unit("claude")

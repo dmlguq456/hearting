@@ -401,9 +401,13 @@ def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cle
     quiet = (done.returncode == 0 and receipt.get("state") == "completed"
              and not receipt.get("next_leg") and _route_finished(record)
              and (not unit_advanced or handed_off))
+    # Why the resumed start stopped, and its own next action, as the receipt says them.
+    why = {"result_reason": receipt.get("reason"),
+           "result_next_action": receipt.get("required_action") or receipt.get("next_action")}
     record.update(state="resumed", resumed_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                   exit_code=done.returncode, result_state=receipt.get("state"),
                   owner_attempt_id=receipt.get("owner_attempt_id"), **({"early": True} if early else {}),
+                  **{key: value for key, value in why.items() if value},
                   **({"notice": "skipped-route-completed"} if quiet else {}))
     if receipt.get("unit_attempt_id"):
         record["unit_attempt_id"] = receipt["unit_attempt_id"]
@@ -415,7 +419,7 @@ def run(path: Path, *, sleep=time.sleep, now=time.time, call=subprocess.run, cle
 
 def _notify(record: dict, receipt: dict, capped: bool = False) -> None:
     """One notice to the session that owns the route; a resume that paused again says so, and
-    one whose `start` failed or left no receipt carries the command to run it again."""
+    one whose `start` failed, left no receipt or needs attention carries the command to run it again."""
     try:
         from parent_next_directive import resume_command
         from session_identity import identity
@@ -426,6 +430,9 @@ def _notify(record: dict, receipt: dict, capped: bool = False) -> None:
         state = receipt.get("state") or "unknown"
         again = state == "waiting-capacity"
         failed = not again and (record.get("exit_code") not in (None, 0) or not receipt.get("state"))
+        # A start that needs attention is answered by its own receipt; the same start shows it again
+        # (and launches a continuation that is still only claimed).
+        attention = not failed and state == "needs-attention"
         why = {"launch-not-started": "started again after a launch that did not start",
                "launch-capacity": "started again after the worker start budget freed",
                "answer": "continued with the answer another session sent"}.get(record.get("cause"))
@@ -447,12 +454,14 @@ def _notify(record: dict, receipt: dict, capped: bool = False) -> None:
                    if state == "needs-interview" and receipt.get("required_action") else "")
                 + (f"; paused again until {receipt.get('retry_at', 'an unknown time')}" if again else "")
                 + (f"; start exited {record.get('exit_code')}, run it again: "
-                   f"{resume_command(record['route_file'], record['jobs'], agent_home=ROOT)}" if failed else ""))
+                   f"{resume_command(record['route_file'], record['jobs'], agent_home=ROOT)}" if failed else "")
+                + ("; to see what it needs and continue, run: "
+                   f"{resume_command(record['route_file'], record['jobs'], agent_home=ROOT)}" if attention else ""))
         if state == "completed" and receipt.get("unit_attempt_id") and receipt.get("summary"):
             summary = receipt["summary"]
             report = next((line for line in summary.splitlines() if line.startswith("Artifact: ")), "")
             text = f"{text}. {report} {summary}"
-        action = "report-pause" if again else "run-resume-command" if failed else "report-to-user"
+        action = "report-pause" if again else "run-resume-command" if failed or attention else "report-to-user"
         notify(caller.harness, caller.session_id, key=f"capacity-resume:{record['route_id']}:{record['retry_at']}",
                subject="capacity resume", text=text, route_id=record["route_id"], jobs=record["jobs"],
                required_action=action)

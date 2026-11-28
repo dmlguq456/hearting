@@ -226,6 +226,9 @@ def notice_lines(jobs, meta, agent_home=None) -> tuple:
     head = ""
     if meta.get("continues_attempt_id"):
         head = f"Turn {meta.get('turn') or '?'} of this unit route (session: {meta.get('session') or 'unknown'})."
+    elif jobs and continued_by_later_turn(jobs, meta):
+        # A late notice of a turn a later one took over: its result is not the route's latest.
+        head = "An earlier turn of this unit route; a later turn continued it, so this is not its latest result."
     note = ""
     if jobs and meta.get("route_file") and waiting_request(jobs, meta):
         from parent_next_directive import resume_command
