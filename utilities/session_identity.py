@@ -104,19 +104,24 @@ def _codex_state_db(home: str) -> str | None:
     return os.path.join(home, max(found)[1]) if found else None
 
 
-def _codex_root(session_id: str, env) -> str:
-    """The root thread of a Codex `spawn_agent` thread, else ``session_id``."""
+def _codex_root(session_id: str, env, strict: bool = False) -> str | None:
+    """The root thread of a Codex `spawn_agent` thread, else ``session_id``. When the state DB is absent or
+    cannot be read the answer is ``session_id``, or None with ``strict`` (not known), which also asks the DB
+    to hold the thread itself: a DB without its row says nothing about it."""
+    unknown = None if strict else session_id
     home = env.get("CODEX_HOME") or os.path.expanduser("~/.codex")
     key = (home, session_id)
     if key in _ROOTS:
         return _ROOTS[key]
     db = _codex_state_db(home)
     if not db:
-        return session_id
+        return unknown
     current = session_id
     try:
         connection = sqlite3.connect("file:" + db + "?mode=ro", uri=True, timeout=0.5)
         try:
+            if strict and connection.execute("SELECT 1 FROM threads WHERE id = ?", (session_id,)).fetchone() is None:
+                return None
             for _ in range(ROOT_WALK_LIMIT):
                 parents = {row[0] for row in connection.execute(
                     "SELECT parent_thread_id FROM thread_spawn_edges WHERE child_thread_id = ?",
@@ -130,7 +135,7 @@ def _codex_root(session_id: str, env) -> str:
         finally:
             connection.close()
     except sqlite3.Error:
-        return session_id
+        return unknown
     if current != session_id:
         _ROOTS[key] = current  # a thread's root never changes; a root may still gain an edge
     return current
@@ -151,6 +156,23 @@ def sub_session_root(harness: str, session_id: str, environ=None) -> str:
     if how.startswith("env:"):
         return env.get(how[4:]) or session_id
     return session_id
+
+
+def known_sub_session_root(harness: str, session_id: str, environ=None) -> str | None:
+    """`sub_session_root`, or None when the harness's sub-session record cannot be read (a Codex state DB
+    that is absent, fails, or holds no row for the thread): a caller that must be certain treats that as
+    not a root."""
+    env = os.environ if environ is None else environ
+    if not session_id:
+        return None
+    try:
+        from harness_capabilities import sub_session_roots
+        how = sub_session_roots().get(harness, "shared-id")
+    except Exception:
+        return None
+    if how == "spawn-edges":
+        return _codex_root(session_id, env, strict=True)
+    return sub_session_root(harness, session_id, env)
 
 
 def _rooted(found: SessionIdentity, env) -> SessionIdentity:
