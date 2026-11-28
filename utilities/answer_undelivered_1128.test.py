@@ -6,12 +6,13 @@ older release's courier ended right after an install because it could not read t
 1799, advisory 1), stayed `submitted`: the panel kept `✓ answer sent`, no count held it, and the question could
 not be answered again. Now the courier pass that retires the ended delivery's duty releases that exact action
 (`session_notice.release_undelivered_answer`): the question stands and counts again, and the next answer goes as a
-new delivery, once, while the ended record stays as its receipt (past its retention, as its prune mark). Only
-`rejected` proves nothing was handed over: an operator's `expired` may follow a queue that already took the answer,
-so it stays "sent" as before (review 1926, round 1, #4). An answer that arrived, or that may have arrived, is never
-released; an answer record that cannot be read keeps the duty for the next pass (#1). The managed Codex watcher
-leaves answers to the peer courier (#6). A correction sent to a blocked worker (S3, follow-up 6) is no sent line
-in its parent's panel.
+new delivery, once, while the ended record stays as its receipt. Only `rejected` proves nothing was handed over:
+an operator's `expired` may follow a queue that already took the answer, so it stays "sent" as before (review 1926,
+round 1, #4). An answer that arrived, or that may have arrived, is never released. The pass retires the duty as
+main does, also when it cannot read the answer record, and a later answer gets its own delivery only while the
+refused record is kept (round 2: "sent" stays, or the answer is blocked, as known limits). The managed Codex
+watcher leaves answers to the peer courier (#6). A correction sent to a blocked worker (S3, follow-up 6) is no sent
+line in its parent's panel.
 
 The questions are registered, answered, carried and taken through the real code in a private state root
 (fixtures/message_questions.py); only native census, RPC and I/O are fixtures. No window, process or model is used.
@@ -194,9 +195,10 @@ class AnswerUndeliveredTest(unittest.TestCase):
                         self.assertIsNone(self.carry(signal))
                     self.assertEqual(len(self.sends), 1 if taken else 0, "the session gets the answer at most once")
 
-    def test_an_answer_record_that_cannot_be_read_keeps_the_duty_for_the_next_pass(self):
-        # Review 1926, round 1, #1: the pass that retired a refused delivery could not read the answer record; it
-        # closed the duty anyway and "sent" stayed for good. Now the duty stays open and the next pass releases it.
+    def test_a_pass_that_cannot_read_the_answer_record_still_retires_the_duty_as_on_main(self):
+        # Review 1926, round 2, #1: a duty kept open while the answer record could not be read let the retention prune
+        # remove the refused record first, and the duty then stayed `pending` for good. The pass retires the duty
+        # whatever the release returns, as main does; "sent" then stays, as on main (a known limit).
         for harness in HARNESSES:
             with self.fresh(harness=harness):
                 signal, _ = self.ask(harness, "unreadable-" + harness)
@@ -210,62 +212,56 @@ class AnswerUndeliveredTest(unittest.TestCase):
                         raise OSError("fixture: the answer record cannot be read in this pass")
                     return real(path, *args, **kwargs)
                 with mock.patch.object(Path, "read_text", unreadable):
-                    self.assertEqual(self.carry(signal), "", "the duty stays; nothing is sent")
-                    self.assertIsNone(session_notice.release_undelivered_answer(ended))
+                    self.assertIsNone(self.carry(signal), "the pass retires the ended duty, sends nothing")
+                    self.assertIs(session_notice.release_undelivered_answer(ended), False)
                 self.assertTrue(failed)
-                open_duties = [duty["intent"]["delivery_id"]
-                               for duty in obligations.ObligationStore(self.f.root).list(kinds={"run-notice"})]
-                self.assertIn(ended["delivery_id"], open_duties)
+                left = [duty["state"] for duty in obligations.ObligationStore(self.f.root).list(kinds={"run-notice"})
+                        if duty["intent"]["delivery_id"] == ended["delivery_id"] and duty["state"] != "complete"]
+                self.assertEqual(left, [], "no open duty is left")
+                self.assertIsNone(self.carry(signal), "no later pass reads the record again")
                 self.assertEqual((self.entry(signal)["state"], self.entry(signal)["action_id"]),
                                  ("submitted", "action-one"))
-                self.assertIsNone(self.carry(signal), "the next pass releases it and retires the duty")
-                self.assert_standing_again(signal, ended)
-                self.assert_arrives_once(signal, ["other"], "action-two")
+                seen = self.seen(signal)
+                self.assertEqual((seen["panel"], seen["counted"]), ("sent", False))
+                self.assertEqual(self.sends, [])
 
-    def test_a_later_answer_does_not_depend_on_the_first_records_retention(self):
-        # Review 1926, round 1, #5: after the refused first record was pruned (7 days) only its prune mark stayed at the
-        # question's key, and the answer to the question that stood again ended `unknown` (`record-pruned`). The later
-        # answer now goes as its own delivery whether the first record was pruned before or after it was given; the
-        # prune mark stays, and the earlier answer is never made again.
+    def test_an_answer_after_the_refused_record_is_pruned_makes_no_new_delivery(self):
+        # Review 1926, round 2, #2: reading the prune mark gave the earlier, refused submission id a new delivery. The
+        # prune mark is not read: a later answer gets its own delivery only while the refused record is kept. Past its
+        # retention (7 days) an answer to the question that stood again ends `unknown` (`record-pruned`), the earlier
+        # submission id too, and nothing is sent (a known limit); the prune mark stays. An answer given before the prune
+        # keeps its own delivery and arrives once.
         import hashlib
         for harness in HARNESSES:
-            for when in ("before", "after"):
-                with self.fresh(harness=harness, pruned=when + " the later answer"):
-                    signal, _ = self.ask(harness, "pruned-%s-%s" % (harness, when))
+            for again in ("action-two", "action-one", "given-before"):
+                with self.fresh(harness=harness, again=again):
+                    signal, _ = self.ask(harness, "pruned-%s-%s" % (harness, again))
                     self.answer(signal, ["original-value"], "action-one")
-                    old = self.f.record(signal)["receipt"]["answer_binding"]
                     ended = self.end(signal, "rejected")
                     self.assertIsNone(self.carry(signal))
                     self.assert_standing_again(signal, ended)
                     first = pending.record_path(self.f.root, signal["session_id"], ended["delivery_id"])
                     key = "question-answer:" + signal["id"]
-                    later = "delivery-" + hashlib.sha256(("notice\0%s\0action-two" % key).encode()).hexdigest()
 
                     def prune():
                         pending.prune_bounded(self.f.root, now=time.time() + pending.TERMINAL_RETENTION_SECONDS + 86400)
                         self.assertFalse(first.exists())
                         self.assertTrue(pending.tombstone_path(first).exists())
-
-                    def observe_again():
-                        if when == "before":
-                            prune()
-                        record = self.f.record(signal)
-                        self.assertEqual(record["delivery_id"], later)
-                        binding = record["receipt"]["answer_binding"]
-                        options = dict(key=key, subject="Question answer", required_action="read-question-answer",
-                                       exact_text=True, jobs=self.f.jobs)
-                        again = session_notice.notify(harness, signal["session_id"], answer_binding=binding,
-                                                      text=waits.message_answer_body(binding), **options)
-                        self.assertEqual(again["delivery_id"], later, "the same answer is the same delivery")
-                        with self.assertRaises(ValueError):
-                            session_notice.notify(harness, signal["session_id"], answer_binding=old,
-                                                  text="original-value", **options)
-                        self.assertFalse(first.exists(), "the earlier answer is never made again")
-                        self.assertTrue(pending.tombstone_path(first).exists(), "its prune mark stays")
-                    if when == "after":
-                        prune()
-                    completion = self.assert_arrives_once(signal, ["other"], "action-two", between=observe_again)
-                    self.assertEqual(completion["answer"], "other")
+                    if again == "given-before":
+                        completion = self.assert_arrives_once(signal, ["other"], "action-two", between=prune)
+                        self.assertEqual(completion["answer"], "other")
+                        continue
+                    prune()
+                    mark = pending.tombstone_path(first).read_bytes()
+                    result = self.answer(signal, ["other"], again)
+                    self.assertEqual((result["state"], result["action_id"]), ("unknown", again), result.get("result"))
+                    for action in ("action-one", "action-two"):
+                        own = "delivery-" + hashlib.sha256(("notice\0%s\0%s" % (key, action)).encode()).hexdigest()
+                        self.assertIsNone(pending.read(self.f.root, signal["session_id"], own), action)
+                    self.assertFalse(first.exists(), "no new delivery at the question's key")
+                    self.assertEqual(pending.tombstone_path(first).read_bytes(), mark, "the prune mark stays")
+                    self.assertIsNone(self.carry(signal), "nothing is sent")
+                    self.assertEqual(self.sends, [])
 
     def test_a_managed_codex_watcher_leaves_answers_to_the_peer_courier(self):
         # Review 1926, round 1, #6 (main's first answer too): with an app-server queue, the managed watcher took an
