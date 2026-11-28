@@ -1213,8 +1213,12 @@ def query_user_rules_opencode(config):
 
 
 def _scan_user_rules(text):
-    """Only the switch's own lines, for a file the full parser rejects."""
-    found, section = {}, None
+    """Only the switch's own lines, for a file the full parser rejects.
+
+    Under `user_rules:` only a direct child (the depth of the first line under
+    it) is the switch; an `opencode:` nested deeper belongs to another key.
+    """
+    found, section, child = {}, None, None
     for raw in text.splitlines():
         line = _strip_comment(raw).rstrip()
         if not line.strip():
@@ -1225,7 +1229,7 @@ def _scan_user_rules(text):
         if not colon:
             continue
         if indent == 0:
-            section = None
+            section, child = None, None
             if key == "user_rules":
                 if value:
                     found["user_rules"] = _scalar(value)
@@ -1233,8 +1237,10 @@ def _scan_user_rules(text):
                     section = found["user_rules"] = {}
             elif key == USER_RULES_DOTTED:
                 found[key] = _scalar(value)
-        elif section is not None and key == "opencode":
-            section["opencode"] = _scalar(value) if value else {}
+        elif section is not None:
+            child = indent if child is None else child
+            if indent == child and key == "opencode":
+                section["opencode"] = _scalar(value) if value else {}
     return found
 
 

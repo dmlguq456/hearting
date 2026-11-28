@@ -772,6 +772,33 @@ class DispatchDefaultsV4Tests(unittest.TestCase):
             self.assertEqual(D.load_user_rules_opencode(str(path)), "carry")
             self.assertEqual(D.load_user_rules_opencode(str(Path(temporary) / "absent.yaml")), "carry")
 
+    def test_a_nested_opencode_key_does_not_override_off_in_a_rejected_file(self):
+        # 2026-11-28: a line under `key: {}` fails the parse, and the line scan
+        # then read `note:` / `opencode: carry` as the switch, carrying the
+        # user's rules into OpenCode despite an explicit off.
+        broken = (self.V3_TEXT.replace("schema_version: 3\n", "schema_version: 4\n")
+                  .replace("  window: 30\n", "  depth_affinity: {}\n    window: 30\n"))
+        deep_line = broken.splitlines().index("    window: 30") + 1
+        nested = "  note:\n    opencode: carry\n"
+        cases = (
+            ("user_rules:\n  opencode: off\n" + nested, "off"),
+            ("user_rules.opencode: off\nuser_rules:\n" + nested, "off"),
+            ("user_rules: opencode: off\n", "off"),
+            ("user_rules:\n" + nested + "  opencode: off\n", "off"),
+            ("user_rules:\n  opencode: on\n  note:\n    opencode: off\n", "carry"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "dispatch-defaults.yaml"
+            for switch, expected in cases:
+                with self.subTest(switch=switch):
+                    path.write_text(broken + switch, encoding="utf-8")
+                    result = subprocess.run(
+                        [sys.executable, str(MODULE), "validate", "--config", str(path)],
+                        text=True, capture_output=True)
+                    self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
+                    self.assertIn(f"line {deep_line}: ", result.stderr)
+                    self.assertEqual(D.load_user_rules_opencode(str(path)), expected)
+
     def test_user_config_path_follows_the_override(self):
         self.assertEqual(D.user_config_path({"DISPATCH_DEFAULTS_CONFIG": "/x/defaults.yaml"}),
                          "/x/defaults.yaml")
