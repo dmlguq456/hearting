@@ -90,7 +90,8 @@ def questions_of(envelope):
     """``[{id, question, choices, recommended}]`` from one selected request envelope.
 
     A registered question (``questions ask``) takes words beside its choices, as ``[value, text]`` or text
-    alone (11-22): a native form keeps the schema's own ``is_other``."""
+    alone (11-22): a native form keeps the schema's own ``is_other``. A question whose choices say
+    something under their names also has ``descriptions`` (one per choice, ``""`` for none)."""
     registered = _registered(envelope)
     detail = envelope.get("detail") if isinstance(envelope, dict) else None
     listed = detail.get("questions") if isinstance(detail, dict) else None
@@ -101,14 +102,20 @@ def questions_of(envelope):
                 continue
             choices = question.get("choices") if isinstance(question.get("choices"), list) else []
             recommended = question.get("recommended")
-            out.append({"id": str(question["id"]), "question": str(question.get("question") or ""),
-                        "choices": choices,
-                        "recommended": recommended if type(recommended) is int
-                        and 0 <= recommended < len(choices) else None,
-                        "free_text": bool(question.get("is_other", registered or not choices)) and not (
-                            choices and (envelope.get("native_ref") or {}).get("transport") == "opencode-http-v2"
-                            and question.get("field_type") != "multiselect"),
-                        "secret": bool(question.get("is_secret"))})
+            row = {"id": str(question["id"]), "question": str(question.get("question") or ""),
+                   "choices": choices,
+                   "recommended": recommended if type(recommended) is int
+                   and 0 <= recommended < len(choices) else None,
+                   "free_text": bool(question.get("is_other", registered or not choices)) and not (
+                       choices and (envelope.get("native_ref") or {}).get("transport") == "opencode-http-v2"
+                       and question.get("field_type") != "multiselect"),
+                   "secret": bool(question.get("is_secret"))}
+            # 11-27 (design 가): each choice's words under its name, for the board to draw; only where one
+            # has any, so a question without them reads exactly as before. Never part of an answer.
+            described = HWS.choice_descriptions(question)
+            if any(described):
+                row["descriptions"] = described
+            out.append(row)
         return out
     question_id = envelope.get("question_id") if isinstance(envelope, dict) else None
     if question_id is None:
@@ -227,10 +234,14 @@ def render(board, rows, folded):
             lines.append(prefix + body_lines[0])
             continuation = " " * len(prefix)
             lines.extend(continuation + line for line in body_lines[1:])
+            described = question.get("descriptions") or ()
             for number, choice in enumerate(question["choices"], 1):
                 mark = ("  (" + recommended_label + ")"
                         if question["recommended"] == number - 1 else "")
                 lines.append("      %d) %s%s" % (number, _choice_label(choice), mark))
+                # The choice's words, under its name as the board draws them (a relay keeps them).
+                if number <= len(described) and described[number - 1]:
+                    lines.extend("         " + said for said in described[number - 1].splitlines())
         if row.get("answerable"):
             listed = row.get("questions") or ()
             if row.get("answer_kind") == "decision":
@@ -431,6 +442,24 @@ def _answer(args):
     return code
 
 
+def _choice_description_args(choices, given):
+    """``--choice-description N=WORDS`` as ``{choice value: words}`` (N counts the choices from 1), or None.
+
+    Optional: a choice given none has none, and a question asked without any reads as it always did."""
+    out = {}
+    for raw in given:
+        number, sep, words = str(raw).partition("=")
+        if not sep or not number.strip().isascii() or not number.strip().isdigit() \
+                or not 1 <= int(number) <= len(choices):
+            raise ValueError("--choice-description takes N=WORDS, N a choice number 1..%d: %r"
+                             % (len(choices), raw))
+        value = choices[int(number) - 1]
+        if value in out:
+            raise ValueError("--choice-description: choice %d is given twice" % int(number))
+        out[value] = words
+    return out or None
+
+
 def _ask(args):
     import session_tidy as tidy
     from dispatch_parent_completion import interactive_parent_identity
@@ -454,7 +483,8 @@ def _ask(args):
         value = HWS.register_message(harness, sid, seat, text,
             sequence=tidy.read_prompt_seq(seat), choices=args.choice or (),
             recommended=args.recommend - 1 if args.recommend is not None else None,
-            secret=args.secret, incarnation=incarnation)
+            secret=args.secret, incarnation=incarnation,
+            descriptions=_choice_description_args(args.choice or (), args.choice_description or ()))
     except (OSError, ValueError, RuntimeError) as exc:
         print("questions: " + str(exc), file=sys.stderr)
         return 2
@@ -485,6 +515,8 @@ def main(argv=None):
     ask.add_argument("--text-file")
     ask.add_argument("--choice", action="append",
                      help="one choice the person can pick (repeat); list what is to be chosen here, not in the text")
+    ask.add_argument("--choice-description", action="append", metavar="N=WORDS",
+                     help="words shown under choice N (1-based; repeat; optional)")
     ask.add_argument("--recommend", type=int)
     ask.add_argument("--secret", action="store_true")
     ask.add_argument("--json", action="store_true")

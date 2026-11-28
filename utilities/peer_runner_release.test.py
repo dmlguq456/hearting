@@ -361,6 +361,32 @@ print(json.dumps(result))
             time.sleep(0.01)
         self.fail(f"timed out waiting for fixture state: {path.name}")
 
+    def _receive_as_callbacks(self, text, timeout=10):
+        """Receive ``text`` as the recipient's callbacks do.
+
+        A runner writes ``queued`` while it still holds the row's pending lock
+        and takes that lock again on its later passes. A receiver that finds the
+        lock held raises BlockingIOError and its next normal callback receives
+        (``peer-message.py`` ``_flock_current``); seeing ``queued`` therefore
+        does not mean the lock is free.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                return peer_message.receive_peer_message(text, self.recipient)
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.01)
+
+    @staticmethod
+    def _stop_runner(proc):
+        # Runs before the temp cleanup: a runner left by a failed assertion
+        # must not keep writing into the state root being removed.
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=5)
+
     def _pending(self, root=None, ref=None):
         environ = self._environment(root or self.b)
         with mock.patch.dict(os.environ, environ, clear=True):
@@ -856,6 +882,7 @@ print(json.dumps(result))
             first_id = "message-" + first_ref
             self.assertEqual(first_duty["id"], first_id)
             first_runner = obligations._RUNNERS[-1]
+        self.addCleanup(self._stop_runner, first_runner)
         self.assertEqual(first_runner.wait(timeout=15), 0)
         self.assertEqual(store.get(first_id)["state"], "complete")
 
@@ -873,12 +900,12 @@ print(json.dumps(result))
             duty_id = "message-" + ref
             self.assertEqual(duty["id"], duty_id)
             second_runner = obligations._RUNNERS[-1]
+        self.addCleanup(self._stop_runner, second_runner)
         self._wait_for(self.submissions)
         # The fixture send records the submission inside the runner's queue
         # call; the runner then publishes the delivery as queued in a short
-        # pending-row section. A receiver never blocks on that lock (it is
-        # deferred to its next callback), so receive once the delivery is
-        # published, as the recipient would.
+        # pending-row section. Receive once the delivery is published, as the
+        # recipient would.
         deadline = time.monotonic() + 10
         with mock.patch.dict(os.environ, second_env, clear=True):
             while (peer_message._read_pending(ref) or {}).get("state") != "queued":
@@ -894,7 +921,7 @@ print(json.dumps(result))
         self.assertEqual(os.environ.get("AGENT_HOME", lifecycle_env["AGENT_HOME"]),
                          lifecycle_env["AGENT_HOME"])
         with mock.patch.dict(os.environ, second_env, clear=True):
-            self.assertEqual(peer_message.receive_peer_message(text, self.recipient), 0)
+            self.assertEqual(self._receive_as_callbacks(text), 0)
         self.assertEqual(second_runner.wait(timeout=15), 0)
         self.assertEqual(store.get(duty_id)["state"], "complete")
         submitted = [json.loads(line) for line in self.submissions.read_text().splitlines()]

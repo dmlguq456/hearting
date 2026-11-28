@@ -18,6 +18,8 @@ KEY_ALIASES = {
     # `fam_*` model keys pass through unchanged: one key per family keeps every viewer
     # on the same hue. A local alias here is how Sol/Astra/Luna once shared one yellow.
     "bold": "section_head", "code": "fam_sonnet", "tool": "g_work",
+    # A question's choice words under its name (11-27): the dim words' look (``session_block.CHOICE_DETAIL``).
+    "choice_detail": "dim",
 }
 
 REFERENCE_STYLES = {
