@@ -6802,6 +6802,7 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                                         delivery_holds_secret_answer, fit)
     from dispatch_recipient_receipt import claimed_send_current, release_unsubmitted_claim
     from peer_read_context import PeerReadContext
+    import human_wait_state
     import session_notice
 
     root = store.root.parent.parent.resolve()
@@ -7123,6 +7124,14 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                         != (harness, item_sid)
                         or not recipient_current()):
                     return
+                answer = (fresh.get("receipt") or {}).get("answer_binding")
+                if (answer is not None
+                        and not human_wait_state.message_answer_submission_current(answer)
+                        and session_notice.notice_is_current(fresh)):
+                    # The queue would refuse the whole transfer for this one answer (its window
+                    # changed, or one read failed). It sits out this pass unclaimed and unchanged
+                    # and the rest go; keep_claim below still refuses an obsolete answer.
+                    continue
                 owner = "retained-rewake:" + item_duty["id"]
                 prior = retargeted.get((storage_sid, fresh["delivery_id"]))
                 try:
@@ -7163,18 +7172,6 @@ def _resume_session_notice_pass(duties, store, *, read_context=None,
                             release_unsubmitted_claim(root, storage_sid,
                                 {**original, IDENTITY_KEY: original_identity}, owner, item_sid)
                             return
-                    answer = (claim.get("receipt") or {}).get("answer_binding")
-                    if answer is not None:
-                        import human_wait_state
-                        if not human_wait_state.message_answer_submission_current(answer):
-                            # The transport refuses a whole delivery before writing it when one
-                            # answer may no longer be written (a Codex panel answer whose window
-                            # changed). Refuse that member alone, as keep_claim refuses an obsolete
-                            # notice: its question stands again (release_undelivered_answer) and
-                            # the others go now.
-                            pending.reject_claimed(root, storage_sid, fresh["delivery_id"],
-                                                   claim_owner=owner, reason="answer-submission-not-current")
-                            continue
                     if not keep_claim(root, storage_sid, fresh["delivery_id"], claim, owner, jobs=source_jobs):
                         # d7: a run notice whose exact parent completion is already
                         # recorded is folded, not sent alone. It stays rejected (its

@@ -4,10 +4,11 @@ reach it together, in the order the person gave them, and one refused answer doe
 The courier already sends a recipient's ready notices as one body. A person's answers in it now stand in the order
 they were given (each answer's delivery record is created as it is submitted: its ``created_at_ns``), both where the
 courier picks its batch and where the text is written, on the window path and the hook path. Every other notice keeps
-its place. An answer the transport would refuse before writing (a Codex panel answer whose window changed) leaves the
-bundle alone: it is refused, its question stands again, and the others go in that pass. A bundle larger than one
-transfer sends its front and keeps the rest, in order, for the next pass. An answer that was handed over (queued, its
-receipt pending) is never sent again; the next answers wait for it as before.
+its place. An answer the transport may not write now (its Codex window changed, or one read of its window or answer
+record failed) sits out that pass: it is not claimed, refused or changed, and the others go. It goes as it is on a
+later pass once it may be written; an obsolete answer is still refused as before. A bundle larger than one transfer
+sends its front and keeps the rest, in order, for the next pass. An answer that was handed over (queued, its receipt
+pending) is never sent again; the next answers wait for it as before.
 
 The questions are registered, answered, carried and received through the real code in a private state root
 (fixtures/message_questions.py); only native census, RPC and I/O are fixtures. No window, process or model is used.
@@ -16,8 +17,10 @@ import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
 import contextlib
+import errno
 import hashlib
 import re
+import subprocess
 import time
 import unittest
 from pathlib import Path
@@ -212,65 +215,273 @@ class AnswerBundleTest(unittest.TestCase):
                 for label in "ABCDE":
                     self.assertEqual(self.completion(label)["answer"], long(label))
 
-    # -- rule 2: one refused answer leaves the bundle alone -------------------------------------------
+    # -- rule 2: an answer that may not be written now sits out the pass; the others go ------------
 
     def attachment(self):
         return {"schema": session_shell.SCHEMA, "harness": "codex", "sid": SID, "incarnation": "0" * 32,
                 "host_pid": 4242, "host_start": "1", "native_pid": 4243, "native_start": "1",
                 "socket": "/tmp/answer-bundle-fixture.sock"}
 
-    def test_an_answer_whose_window_changed_leaves_the_bundle_and_the_others_go_now(self):
-        # The review's scene (Codex): A was answered at a shell panel that is gone, B at Fleet.
+    def kept(self, label):
+        """All this answer has: its delivery record and side files (claim, attempts, retry wait), its duty and
+        observation, its answer record and question."""
+        record = self.f.record(self.signals[label])
+        path = pending.record_path(self.f.root, SID, record["delivery_id"])
+        files = {found.name: found.read_bytes() for found in sorted(path.parent.glob(path.name + "*"))
+                 if not found.name.endswith(".lock")}
+        duty = next(item for item in obligations.ObligationStore(self.f.root).list(kinds={"run-notice"})
+                    if item["intent"]["delivery_id"] == record["delivery_id"])
+        return files, duty, self.states()[label]
+
+    def refused(self):
+        return [label for label in self.signals if (self.f.record(self.signals[label]) or {}).get("state") == "rejected"]
+
+    @contextlib.contextmanager
+    def codex_window(self):
+        """A Codex shell attachment over a real native process (the current-root check runs as it is); only the
+        native root lookup and the stable screen read are scripted by ``self.reads``: "EIO" (the lookup failed),
+        None (no root this time), "screen" (two frames of the same id differ, `Context 86%` -> `85%`)."""
+        from fleet.collectors import codex
+        native = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.buffer.read()"], stdin=subprocess.PIPE)
+        try:
+            me, child = session_shell.process(os.getpid()), session_shell.process(native.pid)
+            binding = dict(schema=session_shell.SCHEMA, harness="codex", sid=SID, incarnation="a" * 48,
+                           host_pid=me["pid"], host_start=me["start"], native_pid=child["pid"],
+                           native_start=child["start"], socket=str(self.f.root / "control.sock"))
+            self.assertTrue(session_shell.publish_binding(binding))
+            self.reads = []
+            real_selected = session_shell._codex_selected_root
+
+            def root(_pid, **_kwargs):
+                if self.reads and self.reads[0] != "screen":
+                    if self.reads.pop(0) == "EIO":
+                        raise OSError(errno.EIO, "fixture root lookup")
+                    return None
+                return SID
+
+            def selected(value):
+                if self.reads and self.reads[0] == "screen":
+                    self.reads.pop(0)
+                    return {"selected_sid": None}   # what the reader returns for a changed frame
+                return real_selected(value)
+
+            with mock.patch.object(codex, "session_id_of_process", side_effect=root), \
+                    mock.patch.object(session_shell, "_codex_selected_root", side_effect=selected):
+                yield binding
+        finally:
+            native.stdin.close()
+            native.wait(timeout=5)
+
+    @contextlib.contextmanager
+    def codex_hook(self):
+        """The Codex prompt hook's own retry of the session's prepared transfers (`retry_pending_codex`)."""
+        import codex_queue_delivery as queue
+        import codex_queue_dispatch
+        sent = []
+
+        def rpc(_endpoint, method, params, **_kwargs):
+            if method == "thread/queue/list":
+                return {"data": []}
+            if method == "thread/turns/list":
+                return {"data": [{"id": "turn-fixture", "status": "completed"}]}
+            if method == "thread/queue/add":
+                sent.extend(item["text"] for item in params["input"] if item.get("type") == "text")
+                return {"queuedSubmission": {"id": "queued-fixture-%d" % len(sent)}}
+            raise AssertionError("unexpected native RPC " + method)
+
+        def retry():
+            before = len(sent)
+            self.f.peer.retry_pending_codex({"harness": "codex", "session_id": SID})
+            return sent[before:]
+
+        with mock.patch.object(queue, "_rpc", side_effect=rpc), \
+                mock.patch.object(queue, "_known_consumed", return_value=None), \
+                mock.patch.object(codex_queue_dispatch, "resolve_queue_socket", return_value=self.f.root / "fixture.sock"):
+            yield retry
+
+    def test_an_answer_whose_window_changed_sits_out_and_every_other_notice_goes(self):
+        # The review's scene (Codex): A was answered at a shell panel whose window really changed, B at Fleet.
         with self.fresh(harness="codex"):
-            self.ask("codex", "AB")
-            live = {"on": True}
+            self.ask("codex", "A")
             attachment = self.attachment()
+            window = {"up": True}
             with mock.patch.object(session_shell, "answer_attachment_current",
-                                   lambda value: live["on"] and value == attachment):
+                                   lambda value: window["up"] and value == attachment):
                 self.answer("A", answer_attachment=attachment)
+                window["up"] = False
+                before = self.kept("A")
+                self.assertEqual(self.carry()[1], [], "A alone: nothing goes")
+                self.assertEqual(self.kept("A"), before, "and nothing changes")
+                self.signals = self.ask_more("B")
                 self.answer("B")
-                live["on"] = False
                 bodies, calls, row = self.carry()
                 self.assertEqual((len(calls), self.order(bodies[0])), (1, "B"), "one send, B alone")
-                self.assertEqual(self.states(), {"A": "rejected/submitted/open", "B": "sent-ambiguous/submitted/open"})
-                self.assertEqual(self.f.record(self.signals["A"])["expiry_reason"], "answer-submission-not-current")
+                self.assertEqual(self.kept("A"), before, "A is not claimed, refused or changed")
+                self.consume(calls, row)
+                for seconds in (40, 80):
+                    with self.later(seconds):
+                        self.assertEqual(self.carry()[1], [])
+                self.assertEqual(self.kept("A"), before)
+                # A later notice is not held behind A.
+                note = session_notice.notify("codex", SID, key="work-done:fixture-1", subject="Work finished",
+                                             text="fixture work finished", required_action="report-to-user")
+                bodies, calls, _row = self.carry()
+                self.assertEqual(len(calls), 1)
+                self.assertIn("Work finished", bodies[0])
+                self.assertEqual(self.order(bodies[0]), "")
+                self.assertEqual(pending.read(self.f.root, SID, note["delivery_id"])["state"], "sent-ambiguous")
+                self.assertEqual(self.kept("A"), before)
+            # A stays an answer on its way, as on main: no signal tells a changed window from one failed read.
+            self.assertEqual(self.states(), {"A": "pending/submitted/open", "B": "acked/applied/answered"})
+            self.assertEqual(self.refused(), [])
+
+    def ask_more(self, labels):
+        more = {label: self.f.ask("codex", SID, text="Question %s?" % label, choices=["Dogwood", "Field Guide"])[0]
+                for label in labels}
+        return {**self.signals, **more}
+
+    def test_one_failed_read_of_a_window_holds_only_that_answer_and_it_arrives_once_after(self):
+        # Review 1 (Codex): one root lookup failed (EIO, or no root), or the same id repainted between two frames.
+        for outcome in ("EIO", None, "screen"):
+            with self.fresh(harness="codex", outcome=outcome), self.codex_window() as binding:
+                self.ask("codex", "AB")
+                self.answer("A", answer_attachment=binding)
+                self.answer("B")
+                before = self.kept("A")
+                self.reads = [outcome]
+                bodies, calls, row = self.carry()
+                self.assertEqual(self.reads, [], "the failed read was taken")
+                self.assertEqual((len(calls), self.order(bodies[0])), (1, "B"))
+                self.assertEqual(self.kept("A"), before, "A is not claimed, refused or changed")
+                self.assertEqual(self.refused(), [])
+                self.consume(calls, row)
+                bodies, calls, row = self.carry()
+                self.assertEqual((len(calls), self.order(bodies[0])), (1, "A"), "the original answer, once")
                 self.consume(calls, row)
                 self.assertEqual(self.carry()[1], [])
-            # Nothing is left unknown: A's question stands again and its next answer arrives once.
-            self.assertEqual(self.states(), {"A": "rejected/open/open", "B": "acked/applied/answered"})
-            self.answer("A", ["Field Guide"], "action-A2")
-            bodies, calls, row = self.carry()
-            self.assertEqual((len(calls), self.order(bodies[0])), (1, "A"))
-            self.consume(calls, row)
-            self.assertEqual(self.completion("A")["answer"], "Field Guide")
-            self.assertEqual(self.carry()[1], [])
+                self.assertEqual(set(self.states().values()), {"acked/applied/answered"})
+                self.assertEqual(self.completion("A")["answer"], "answer-A")
 
-    def test_a_window_change_at_the_queue_itself_holds_the_others_one_lease_as_before(self):
-        # The same change a moment later, at the queue's own check: nothing is written, both wait out the claim
-        # lease (as on main), and the next pass refuses A alone and sends B.
+    def test_one_failed_read_of_an_answer_record_holds_only_that_answer(self):
+        # Review 1, answers with no window (Fleet, CLI): one read of the answer records (`projection.json`) failed.
+        real = waits._selected_lookup
+        for harness in HARNESSES:
+            with self.fresh(harness=harness):
+                self.ask(harness, "AB")
+                self.answer("A")
+                self.answer("B")
+                before = self.kept("A")
+                fails = [1]
+
+                def lookup(envelope):
+                    if fails[0]:
+                        fails[0] -= 1
+                        return None, False   # an answer record that exists and could not be read
+                    return real(envelope)
+
+                with mock.patch.object(waits, "_selected_lookup", side_effect=lookup):
+                    bodies, calls, row = self.carry()
+                self.assertEqual(fails, [0])
+                self.assertEqual((len(calls), self.order(bodies[0])), (1, "B"))
+                self.assertEqual(self.kept("A"), before)
+                self.assertEqual(self.refused(), [])
+                self.consume(calls, row)
+                bodies, calls, row = self.carry()
+                self.assertEqual((len(calls), self.order(bodies[0])), (1, "A"))
+                self.consume(calls, row)
+                self.assertEqual(set(self.states().values()), {"acked/applied/answered"})
+
+    def test_a_prepared_transfer_whose_check_fails_for_a_while_is_written_once(self):
+        # Review 2 (Codex): A·B were prepared and refused at the queue (not written), C was answered, and the
+        # window check failed for a while. The prepared transfer stays the one that goes: once, as on main.
         with self.fresh(harness="codex"):
-            self.ask("codex", "AB")
-            live = {"on": True}
+            self.ask("codex", "ABC")
             attachment = self.attachment()
-            real = obligations.session_notice_delivery_current
+            window = {"up": True}
+            queue_refuses = [1]
+            real_check = obligations.message_answer_submission_current
 
             def at_the_queue(message):
-                live["on"] = False
-                return real(message)
+                if queue_refuses[0]:
+                    queue_refuses[0] -= 1
+                    return False
+                return real_check(message)
 
             with mock.patch.object(session_shell, "answer_attachment_current",
-                                   lambda value: live["on"] and value == attachment), \
-                    mock.patch.object(obligations, "session_notice_delivery_current", at_the_queue):
+                                   lambda value: window["up"] and value == attachment), \
+                    mock.patch.object(obligations, "message_answer_submission_current", at_the_queue), \
+                    self.codex_hook() as hook:
                 self.answer("A", answer_attachment=attachment)
                 self.answer("B")
-                bodies, calls, _row = self.carry()
-                self.assertEqual((len(bodies), calls), (1, []), "RPC 0")
+                bodies, calls, first = self.carry()
+                self.assertEqual((len(bodies), calls, first["state"]), (1, [], "pending"), "prepared, not written")
+                self.answer("C")
+                window["up"] = False
                 with self.later(40):
+                    self.assertEqual(self.carry()[1], [])
+                    self.assertEqual(hook(), [])
+                window["up"] = True
+                with self.later(80):
+                    sent = hook() + self.carry()[1]
+                self.assertEqual([sorted(self.order(text)) for text in sent], [["A", "B"]], "the prepared transfer, once")
+                self.consume(sent, None)
+                with self.later(80):
                     bodies, calls, row = self.carry()
-                self.assertEqual((len(calls), self.order(bodies[-1])), (1, "B"))
+                self.assertEqual([self.order(text) for text in calls], ["C"], "C alone, never A or B again")
                 self.consume(calls, row)
-            self.assertEqual(self.states()["B"], "acked/applied/answered")
-            self.assertEqual(self.states()["A"].split("/")[0], "rejected")
+            self.assertEqual(set(self.states().values()), {"acked/applied/answered"})
+
+    def test_an_obsolete_answer_is_still_refused_in_that_pass(self):
+        # An answer whose question already ended is refused by the existing keep_claim, even while its window is
+        # also gone: it does not sit out forever.
+        with self.fresh(harness="codex"):
+            self.ask("codex", "AB")
+            attachment = self.attachment()
+            window = {"up": True}
+            with mock.patch.object(session_shell, "answer_attachment_current",
+                                   lambda value: window["up"] and value == attachment):
+                self.answer("A", answer_attachment=attachment)
+                self.answer("B")
+                window["up"] = False
+                ended = waits._read(waits._signal_path(self.signals["A"]))
+                with __import__("session_tidy").seat_lock(ended["seat_key"]):
+                    waits._write_message(dict(ended, lifecycle="cancelled"))
+                bodies, calls, _row = self.carry()
+            self.assertEqual((len(calls), self.order(bodies[0])), (1, "B"))
+            record = self.f.record(self.signals["A"])
+            self.assertEqual((record["state"], record["expiry_reason"]), ("rejected", "notice-obligation-resolved"))
+
+    def test_a_window_change_after_the_claim_waits_with_its_transfer_as_on_main(self):
+        # The same change a moment later, at the queue's own check: nothing is written and the prepared transfer
+        # waits, A and B together, as on main. Nothing is refused; it goes once the window is back.
+        with self.fresh(harness="codex"):
+            self.ask("codex", "AB")
+            attachment = self.attachment()
+            window = {"up": True}
+            real_check = obligations.message_answer_submission_current
+
+            def at_the_queue(message):
+                window["up"] = False
+                return real_check(message)
+
+            with mock.patch.object(session_shell, "answer_attachment_current",
+                                   lambda value: window["up"] and value == attachment), \
+                    self.codex_hook() as hook:
+                self.answer("A", answer_attachment=attachment)
+                self.answer("B")
+                with mock.patch.object(obligations, "message_answer_submission_current", at_the_queue):
+                    bodies, calls, row = self.carry()
+                    self.assertEqual((len(bodies), calls, row["state"]), (1, [], "pending"), "RPC 0")
+                    with self.later(40):
+                        self.assertEqual(self.carry()[1], [])
+                        self.assertEqual(hook(), [])
+                self.assertEqual(self.states(), {"A": "sent-ambiguous/submitted/open",
+                                                 "B": "sent-ambiguous/submitted/open"})
+                window["up"] = True
+                sent = hook()
+                self.assertEqual([sorted(self.order(text)) for text in sent], [["A", "B"]])
+                self.consume(sent, None)
+            self.assertEqual(set(self.states().values()), {"acked/applied/answered"})
 
     def test_a_handed_over_answer_is_not_sent_again_and_the_next_waits_for_it(self):
         for harness in HARNESSES:
