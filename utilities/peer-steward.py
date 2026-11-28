@@ -2897,7 +2897,9 @@ def cmd_retire(args):
     if _retire_foreground(pane, harness) != identity:
         return finish("foreground-changed", pending=True)
     lines = _read_screen(target)
-    screen_reason = (_native_trust_reason(harness, lines) or _screen_ready(harness, lines)) if lines else "screen-unavailable"
+    # A shell seat's own reason for no screen (too large, an editor open) is the wait's.
+    screen_reason = ((_native_trust_reason(harness, lines) or _screen_ready(harness, lines)) if lines
+                     else _shell_screen_reason(target) or "screen-unavailable")
     if screen_reason:
         return finish(screen_reason, pending=True)
     # A tmux pane in a mode, with input off or synchronized takes no keys: nothing is
@@ -3055,7 +3057,8 @@ def _retire_claude_background_confirm(target, pane, harness, ident, identity, fi
     lines = _read_screen(target)
     tasks = _retire_background_dialog_lines(lines)
     if tasks is None:
-        return finish("agent-still-running", pending=True)
+        return finish("agent-still-running" if lines else _shell_screen_reason(target) or "screen-unavailable",
+                      pending=True)
     stopped = " stopped-background=" + json.dumps(tasks, ensure_ascii=False) if tasks else ""
     if _retire_foreground(pane, harness) != identity:
         return finish("foreground-changed", pending=True)
@@ -3066,7 +3069,7 @@ def _retire_claude_background_confirm(target, pane, harness, ident, identity, fi
         current_tasks = _retire_background_dialog_lines(current)
         if current_tasks is not None:
             return current_tasks, None
-        return None, _blocking_screen(harness, current)
+        return None, _blocking_screen(harness, current) if current else _shell_screen_reason(target)
 
     current_tasks, screen_block = observed_dialog()
     if current_tasks is None:
@@ -6469,14 +6472,12 @@ def _publish_watch_readiness(store, snapshot, *, read_context, incarnation):
                 state in {"idle", "done"} and (
                     state in until or (initial_state not in {None, "unknown", state}
                                        and previous_state != state)))
-            # A watch that already took this change up asks the runner, through a
-            # token in its observation, for one fresh authority read before it
-            # publishes; that request is answered here even though the native
-            # state no longer changes.
-            serving = (previous_wait.get("state") == "result" and previous_state == state
-                       and state in {"idle", "done"}
-                       and isinstance(previous.get("readiness_transition"), dict))
-            if not trigger and not serving:
+            # Recheck an accepted idle/done result while its watch is pending,
+            # including before the observer has a reason to request fresh authority.
+            recheck = (state in {"idle", "done"} and previous_state == state
+                       and (previous.get("state") == "pending"
+                            or isinstance(previous.get("readiness_transition"), dict)))
+            if not trigger and not recheck:
                 if previous.get("state") == "terminal_pending":
                     # A confirmed end/replacement request waits for its watcher; a
                     # no-notice observation must never overwrite it.
@@ -8435,6 +8436,16 @@ def _read_screen(target):
     return _read_screen_reason(target)[0]
 
 
+def _shell_screen_reason(target):
+    """Why a shell seat gave no screen (``shell-screen-large``, an open editor), else ``""``."""
+    seat = _shell_seat(target)
+    if seat is None:
+        return ""
+    import session_shell
+    lines, why = session_shell.native_screen_reason(seat)
+    return why if lines is None else ""
+
+
 def _read_screen_reason(target):
     """``(lines | None, reason)``: :func:`_read_screen` and, for a shell seat's None, why."""
     seat = _shell_seat(target)
@@ -8826,7 +8837,7 @@ def cmd_idle_card_request(args):
 
 
 # Screen doubts that pass on their own; an older shell host does not, so it is not waited for.
-_SCREEN_WAIT = frozenset({"screen-unknown", "shell-editor-open", "shell-no-answer"})
+_SCREEN_WAIT = frozenset({"screen-unknown", "shell-editor-open", "shell-no-answer", "shell-screen-large"})
 
 
 def _look_outcome(reason):

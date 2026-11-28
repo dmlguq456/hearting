@@ -12,7 +12,7 @@ from ..palette import harness_spin
 STAGE_HUES = ("l", "c", "g", "y", "m")          # blue · cyan · green · yellow · magenta
 LANE_HEAD_LEFT, LANE_HEAD_RIGHT = "<", ">"
 STATE_MARKS = {"working": ("⠏", "spin"), "active": ("⠏", "spin"), "idle": ("●", "idle"),
-               "blocked": ("●", "blocked"), "failed": ("✕", "dead"), "done": ("✓", "done"),
+               "blocked": ("◑", "blocked"), "failed": ("✕", "dead"), "done": ("✓", "done"),
                "dead": ("✕", "dead")}
 
 
@@ -71,6 +71,8 @@ def _draw_card(grid, session, tag, bx, by, box_w, right, border, extra, owners):
         put(xx, yy, glyph, border)
     harness = str(session.get("harness") or "other")
     glyph, glyph_key = STATE_MARKS.get(str(session.get("state") or ""), ("·", "dim"))
+    if tables.answer_waits(session):        # 11-27: the session table's judgment, an older record's `●` marker too
+        glyph, glyph_key = STATE_MARKS["blocked"]
     steward = bool(session.get("steward"))
     xx = put(bx + 2, by, " ", "branch_s")
     xx = put(xx, by, glyph, harness_spin(glyph_key, harness))      # 11-18: a working spinner in its harness's color
@@ -157,7 +159,7 @@ def _clear_text(seat):
     """The recent-clear label a seat puts on its card's bottom border, if it has one."""
     recent = re.search(r"· (\S+) ago$", str(seat[3])) if len(seat) > 3 else None
     if recent and str(seat[2]).isdigit():
-        return f"◂ gen {int(seat[2]) - 1} · {recent.group(1)}"
+        return f"← gen {int(seat[2]) - 1} · {recent.group(1)}"     # 11-27: the arrow HISTORY's ``gen 5 → [4f]`` answers
     return None
 
 

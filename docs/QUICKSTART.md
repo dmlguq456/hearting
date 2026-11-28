@@ -80,7 +80,7 @@ the expected change is one line:
 While the agent works, the panel's `NOW` row says what it is doing, and a
 request that needs a route shows under `ROUTE` in the panel with its current
 stage; press it for the route in Fleet's table. If the agent asks you something, the
-question stands in a rose-bordered box under `QUESTIONS` in the panel: press
+question stands in a rose-bordered box under `QUESTIONS` in the panel (the session, and its routes waiting on you, read `◑` there and in Fleet): press
 **Ctrl+]** and it opens in a popup in the middle of the window; answer with
 **Tab**, **1–9**, and **Enter**, and the popup closes and your keys go back to
 the agent (**Esc** closes it unanswered).
@@ -104,7 +104,7 @@ Tell the first session, using the second session's number:
 > Ask session [b2] to re-run the tests and report back.
 
 The request gets a number (`rq-…`) and shows in the route box of both panels:
-`→` in the session that asked, `◂` in the one asked. The second session opens the request
+`→` in the session that asked, `←` in the one asked. The second session opens the request
 body itself, works, and reports; a partial report keeps the request open, and
 a final report closes it and wakes the first session. Neither herdr nor tmux is
 needed. In a terminal without the panel, an idle Claude Code or OpenCode

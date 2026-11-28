@@ -1184,7 +1184,7 @@ def _entrance_line(route, primary, t):
 
 
 def completion_summary(route, primary, *, route_file=None, t=None, cost=None, corrections=None, assessment=None,
-                       publication=None, owner=None) -> str:
+                       publication=None, owner=None, tier_notes=None) -> str:
     """The runtime's close text for one completed owner: intent, result, cost, changes, checks, the rest.
 
     Every value comes from the sealed route, the route outcome, the registered
@@ -1194,6 +1194,9 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
     come from the shared UI-text catalog (`t`; English unless Korean is declared).
     A shared-spec `publication` the settlement observed as pending is named on
     one line right after the result: it does not hold the completion back.
+    `tier_notes` (`model_profile.top_stage_tier_notes`) name each stage the person selected at `top`
+    that ran below it, on one line beside the review-independence one. That line takes only the room
+    the summary leaves, so it never pushes the artifact path out; without it the summary is unchanged.
     """
     t = t or ui_translator()
     request = route.get("work_request") if isinstance(route.get("work_request"), dict) else {}
@@ -1247,6 +1250,7 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
         lines.append(t("completion.unreadable"))
     if degraded:
         lines.append(t("completion.degraded", nodes=", ".join(degraded)))
+    tier_at = len(lines)
     asked = request.get("text")
     published = report_publication(text, asked)
     if published:
@@ -1258,7 +1262,34 @@ def completion_summary(route, primary, *, route_file=None, t=None, cost=None, co
     artifact = t("completion.artifact", path=primary) if primary else t("completion.no_artifact")
     lines.append(artifact + (" · PR " + " ".join(prs) if prs else ""))
     rendered = "\n".join(line for line in lines if line.strip())
+    tier_line = _tier_note_line(tier_notes, t, MAX_SUMMARY_CHARS - len(rendered) - 1) if tier_notes else ""
+    if tier_line:
+        lines.insert(tier_at, tier_line)
+        rendered = "\n".join(line for line in lines if line.strip())
     return rendered[:MAX_SUMMARY_CHARS].rstrip() + "\n" + _results_tables(text)
+
+
+def _tier_note_line(tier_notes, t, room) -> str:
+    """`Ran below the selected tier: <node> (selected top, ran <what ran> ×2 / <what ran>); ...` in at
+    most ``room`` characters: one item per stage, later stages folded into `+N more` when they do not
+    fit; "" when there is nothing to say or no room for one whole item."""
+    from model_profile import TIER_NOTE_KEY, TOP_PROFILE, tier_note_ran
+    stages: dict[str, dict[str, int]] = {}
+    for item in tier_notes or ():
+        ran = tier_note_ran(item.get(TIER_NOTE_KEY)) if isinstance(item, dict) else ""
+        if ran:
+            runs = stages.setdefault(str(item.get("node") or "-"), {})
+            runs[ran] = runs.get(ran, 0) + 1
+    items = [t("completion.tier_note_item", node=node, selected=TOP_PROFILE,
+               ran=" / ".join(ran + (f" ×{count}" if count > 1 else "") for ran, count in runs.items()))
+             for node, runs in stages.items()]
+    for shown in range(len(items), 0, -1):
+        rest = len(items) - shown
+        line = t("completion.tier_note", items="; ".join(
+            items[:shown] + ([t("completion.tier_note_more", count=rest)] if rest else [])))
+        if len(line) <= room:
+            return line
+    return ""
 
 
 def completion_line(summary: str, t=None) -> str | None:

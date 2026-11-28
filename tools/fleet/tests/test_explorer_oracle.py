@@ -62,7 +62,7 @@ def normalize_new_tree_viewport_row(actual_cells, expected_cells, actual_hits, e
 def normalize_session_open_link(cells, hits):
     """Remove only the unfolded OVERVIEW session's page link, an intended delta from r14.
 
-    The frozen captures predate the ``PAGE (open ▸)`` row on the unfolded session's spacer
+    The frozen captures predate the ``PAGE (open ›)`` row on the unfolded session's spacer
     row, and the r14 reference renderer is external, so it is not re-frozen. Each
     ``("page", "session", tag)`` hit is dropped and exactly its label and link cells go back
     to the blank spacer. Any other content in those cells raises; a frame without the link is

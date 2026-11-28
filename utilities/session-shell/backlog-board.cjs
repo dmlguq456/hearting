@@ -150,7 +150,8 @@ function entries(board, bs, { width = 96, measure = defaultMeasure } = {}) {
   const cols = columns(board, inner, measure);
   for (const g of groups(shown, bs.axis)) {
     const head = mark => one([S('  '), S(mark + ' ', 'soft'), S(g.word, g.style), S(' ' + number(g.items.length), 'dim')]);
-    out.push(narrow ? E(head('▾')) : E(head('›'), { key: 'g:' + g.id, group: g.id, alt: head('▾') }));
+    // 11-27 (the eight marks): a closed group is `▸`, an open one `▾` (`›` is a press that opens another place).
+    out.push(narrow ? E(head('▾')) : E(head('▸'), { key: 'g:' + g.id, group: g.id, alt: head('▾') }));
     for (const r of g.items) {
       const it = itemRow(board, r, cols, inner, measure);
       out.push(E([it.row], { key: r.key, lazy: true, ...(it.cut ? { text: r.title } : {}), ...(narrow ? {} : { group: g.id, when: 'open' }) }));

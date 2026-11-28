@@ -876,12 +876,13 @@ _REFERENCE_NARROW_HEADER = re.compile(
     r"^\s*(?P<working>\d+)\s+working\s*●\s*(?P<idle>\d+)\s+idle\s*●\s*"
     r"(?P<blocked>\d+)\s+answer needed\s+(?:hearting\s+)?(?P<version>\S+)\s+"
     r"(?P<clock>\d{2}:\d{2})\s*$")
+# 11-27 (the eight marks): the current Fleet draws the answer wait's count with `◑`; the frozen reference keeps its `●`.
 _CANDIDATE_NARROW_HEADER = re.compile(
-    r"^\s*(?P<working>\d+)\s+●\s*(?P<idle>\d+)\s+●\s*(?P<blocked>\d+)\s+"
+    r"^\s*(?P<working>\d+)\s+●\s*(?P<idle>\d+)\s+◑\s*(?P<blocked>\d+)\s+"
     r"hearting\s+(?P<version>\S+)\s+·\s+(?P<method>\S+)\s+"
     r"(?P<clock>\d{2}:\d{2})\s*$")
 _CANDIDATE_WIDE_HEADER = re.compile(
-    r"^\s*(?P<working>\d+)\s+working\s*●\s*(?P<idle>\d+)\s+idle\s*●\s*"
+    r"^\s*(?P<working>\d+)\s+working\s*●\s*(?P<idle>\d+)\s+idle\s*◑\s*"
     r"(?P<blocked>\d+)\s+answer needed\s+hearting\s+(?P<version>\S+)\s+·\s+"
     r"(?P<method>\S+)\s+(?P<clock>\d{2}:\d{2})\s*$")
 _F70_METHODS = frozenset({"managed/stable", "managed/pinned", "linked", "packaged",
@@ -996,7 +997,7 @@ def _r14_narrow_host_identity(record, band):
     census_parts = [
         ("⠏", "g_spin"), (" " + candidate_match.group("working"), "g_spin"), (" ", None),
         ("●", "g_work_off"), (" " + candidate_match.group("idle"), "g_work_off"), (" ", None),
-        ("●", "g_blocked"), (" " + candidate_match.group("blocked"), "g_blocked"), (" ", None),
+        ("◑", "g_blocked"), (" " + candidate_match.group("blocked"), "g_blocked"), (" ", None),
         ("hearting", "hearting_name"), (" " + expected_version, "version_release"),
         (" · ", "dim"),
         (expected_method, "version_method"), ("  " + candidate_match.group("clock"), "dim"),
@@ -1068,6 +1069,8 @@ def _r14_wide_f70_method(record, band):
     spinner = candidate_spinners[0]
     normalized = (list(candidate_cells[:spinner]) + [(" ", None, None)] * inserted +
                   list(candidate_cells[spinner:method_start]) + list(candidate_cells[method_end:]))
+    # 11-27 (the eight marks, approved): the answer wait's `◑` stands where the frozen reference drew `●`.
+    normalized = [("●", *cell[1:]) if cell[0] == "◑" and cell[1] == "g_blocked" else cell for cell in normalized]
     return (len(normalized) == 168 and
             [tuple(cell) for cell in normalized] == [tuple(cell) for cell in references[0]])
 

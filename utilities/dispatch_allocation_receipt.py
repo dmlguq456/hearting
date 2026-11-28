@@ -79,6 +79,24 @@ def _policy_fields(allocation) -> dict:
     return fields
 
 
+def changed_raw_headroom(capacity, *, freshness=None) -> dict:
+    """Return actual quota where it differs from the allocation score."""
+    if not isinstance(capacity, dict):
+        return {}
+    raw = {}
+    for harness in _HARNESSES:
+        score = capacity.get(harness)
+        detail = (freshness or {}).get(harness)
+        value = detail.get("raw_headroom") if isinstance(detail, dict) else getattr(score, "raw_headroom", None)
+        if score is not None and value is not None and value != score:
+            raw[harness] = value
+    return raw
+
+
+def raw_headroom_lines(raw) -> list[str]:
+    return [f"capacity_raw_headroom.{harness}={round(value, 1)}" for harness, value in raw.items()]
+
+
 def _append(path: Path, payload: bytes) -> bool:
     os.makedirs(path.parent, exist_ok=True)
     deadline = time.monotonic() + 0.25
@@ -144,6 +162,7 @@ def record_allocation_receipt(
     try:
         if writer not in _WRITERS or child_harness not in _HARNESSES:
             return None
+        raw = changed_raw_headroom(capacity)
         row = {
             "schema_version": SCHEMA_VERSION,
             "kind": KIND,
@@ -162,6 +181,7 @@ def record_allocation_receipt(
             "preferred": preferred,
             "rank": list(rank) if rank else None,
             "capacity": {h: capacity.get(h) for h in _HARNESSES} if isinstance(capacity, dict) else None,
+            **({"capacity_raw_headroom": raw} if raw else {}),
             "counts": {h: int(counts.get(h, 0)) for h in _HARNESSES} if isinstance(counts, dict) else None,
             "states": {h: states.get(h) for h in _HARNESSES} if isinstance(states, dict) else None,
             "quality_band": quality_band,
@@ -259,7 +279,7 @@ def format_row(row: dict) -> str:
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(float(row.get("ts") or 0)))
     inert = ",".join(sorted((row.get("inert_keys") or {}).keys())) or "-"
     honored = row.get("preferred_honored")
-    return (
+    line = (
         f"{ts} {row.get('route_id') or '-'} {row.get('route_node') or '-'} "
         f"unit={row.get('unit') or '-'} d={row.get('dispatch_depth')} "
         f"child={row.get('child_harness')} hop={row.get('fallback_hop') or '-'} "
@@ -271,6 +291,7 @@ def format_row(row: dict) -> str:
         f"attempt={row.get('attempt_id') or '-'} event={row.get('event_id')} "
         f"{_field_segment(row)}"
     )
+    return "\n".join([line, *raw_headroom_lines(row.get("capacity_raw_headroom") or {})])
 
 
 def summarize(rows: list[dict]) -> dict:

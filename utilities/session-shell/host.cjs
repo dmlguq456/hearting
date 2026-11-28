@@ -6,6 +6,10 @@ const crypto = require('node:crypto');
 const cp = require('node:child_process');
 const path = require('node:path');
 const readline = require('node:readline');
+// The release this host runs from stays visible to the installer's /proc scan for as long as the
+// window lives, as dispatch_contract._CODE_ROOT_FD does; Node opens it close-on-exec, so the
+// native child never sees it. An update moves the link this host was started through.
+try { fs.openSync(path.resolve(__dirname, '..', '..'), 'r'); } catch {}
 const args = process.argv.slice(2), harness = args.shift(), command = args;
 let activated = false, child, inputOwner, mouseInput, backend, server, projectionTimer, frameTimer, ended = false;
 function startupResult(value) {
@@ -167,7 +171,7 @@ let typed = 0;
 // Why the last reading kept the window from taking a message (`status().hold`): what this host
 // knows, for the sender's record (`peer-message` pending row `held`). Empty while it takes one.
 let lastHold = 'unsettled';
-const HOLD_OF={'form-open':'form','native-trust-wait':'form','draft':'draft','draft-unknown':'draft'};
+const HOLD_OF={'form-open':'form','native-trust-wait':'form','draft':'draft','draft-unknown':'draft','screen-large':'screen-large'};
 const QUIET_KEY=/^(?:\x1b|\x1b\[[\d;]*[DEGHPQRSZ]|\x1b\[(?:[1-3567]|1\d|2[0-689]|3[0-4])(?:;\d+)*~|\x1bO[DHP-S]|\x1b\[<[\d;]*[Mm]|\x1b\[[?>=][\d;:$ ]*[@-~]|\x1b\[[\d;]*[nt]|\x1b[\]P_][^\x07\x1b]*(?:\x07|\x1b\\))$/;
 // How long the keys must have been quiet before a screen read after them may stand for them: right
 // after a person's Enter the composer is empty before that turn's prompt callback comes, and a slow
@@ -217,8 +221,8 @@ function live() { const row = native && processRow(native.pid); return !!row && 
 function status() {
   const ready=empty && !keyTail && !paste && (!block.focused||block.waitingForReceipt) && !table && !settings && !fleetView;
   // `busy` a turn runs, `form` a native or shell menu/question is open, `draft` text stands in the
-  // composer, `paste` one is under way, `unsettled` keys are not settled yet, `unobserved` the
-  // native's rest is not confirmed.
+  // composer, `paste` one is under way, `unsettled` keys are not settled yet, `screen-large` the
+  // screen is too large for its input box to be read, `unobserved` the native's rest is not confirmed.
   const hold=ready&&state==='idle'?'':paste?'paste':state==='blocked'?'form':state!=='idle'?'busy'
     :table||settings||fleetView||block.focused&&!block.waitingForReceipt?'form':keyTail?'unsettled':lastHold||'unsettled';
   return {...identity(),epoch,state,empty:ready,hold,alive:live(),expanded,focused:block.focused||!!table||!!settings||!!fleetView,held_bytes:heldBytes,projection_state:relay||sourceError?"unavailable":"current"};
@@ -236,7 +240,14 @@ function projectionAnswered(data){
   if(!data.ok){projectionMissed();return;}
   clearTimeout(staleTimer);staleTimer=undefined;if(stale){stale=false;projectionKey='';}
 }
+// One line to the backend or one answer on the control socket stays within 64 KiB, so neither side
+// buffers an unbounded line from its peer. A line that carries the native screen (these requests and
+// the `screen` answer) gets SCREEN_BYTES instead, the whole frame counted once (session_shell
+// MAX_SCREEN_BYTES is the same number): a 300 × 800 window filled to the width is about 440 KB.
+// Past it the screen is `screen-large`, its input box not read; a cut screen is never judged.
+const SCREEN_BYTES=1024*1024;
 function source(op, extra={}) {
+  const SCREEN_OPS=new Set(['readiness','payload']),limit=SCREEN_OPS.has(op)?1024*1024:65536;
   if(op==='action'||op==='answer')return readAction(extra,op);
   if (!backend || backend.exitCode !== null || !sid&&!['display-settings','display-bootstrap','display-model','register','unregister'].includes(op)) return Promise.resolve({ok:false,reason:'source-unavailable'});
   return new Promise(resolve => {
@@ -248,7 +259,8 @@ function source(op, extra={}) {
       setTimeout(()=>{if(op==='projection'){projectionMissed();return;}calls.delete(id);resolve({ok:false,reason:'source-unavailable'});},1500);
     calls.set(id,{resolve:op==='projection'?data=>{projectionAnswered(data);resolve(data);}:resolve,timer});
     const frame=JSON.stringify({id,op,binding:binding(),...extra})+'\n';
-    if(Buffer.byteLength(frame)>65536){calls.delete(id);clearTimeout(timer);resolve({ok:false,reason:'source-request-too-large'});return;}
+    if(Buffer.byteLength(frame)>limit){calls.delete(id);clearTimeout(timer);
+      resolve({ok:false,reason:SCREEN_OPS.has(op)?'screen-large':'source-request-too-large'});return;}
     backend.stdin.write(frame);
   });
 }
@@ -867,7 +879,8 @@ function popupNow(){
     table.space=space;
     title=tableTitle(table.kind);
     body=[...all.slice(table.scroll,table.scroll+space),...guide];
-    view=panelView.popup({cols,rows,band,kind,title,body,sections:names,current,model:panelModel,configuration:displayConfiguration,cellWidth,background:terminalBackground});
+    view=panelView.popup({cols,rows,band,kind,title,body,sections:names,current,model:panelModel,configuration:displayConfiguration,cellWidth,background:terminalBackground,
+      fixedTop:table.kind==='ROUTE'&&table.page});
     // The table's own press targets, moved to where its rows stand on the screen.
     const first=view.frame.top+1,left=view.frame.left+2;
     view.tableHits=(table.hits||[]).filter(h=>h.row>=table.scroll&&h.row<table.scroll+space)
@@ -889,7 +902,8 @@ function popupNow(){
   view.strings=view.rows.map(row=>'\x1b[0m'+row.map(part=>(part.margin?'\x1b[0m \x1b[D':'')+`\x1b[${cellAttr(part)}m${String(part.text).replace(/[\x00-\x1f\x7f-\x9f]/g,' ')}`).join('')+'\x1b[0m');
   if(table)return view;
   // The editor identifies the live draft, including its empty first cell.
-  // Question text and a picked answer can also start with `› `; neither is an editor.
+  // Question text can also start with `› `; it is not an editor. (11-27: the question this popup is on and a picked
+  // answer lead with `▶ `, the place's mark, so only the answer row's own `› ` lead is read here.)
   const edit=block.typing?part=>part.caret===true:part=>String(part.text).startsWith('› ')&&String(part.text).length>2;
   const at=body.slice(0,view.body).findIndex(row=>Array.isArray(row)&&row.some(edit));
   if(at>=0){const parts=body[at],upto=parts.slice(0,parts.findIndex(edit)+1).map(part=>part.text).join('');
@@ -920,13 +934,14 @@ function askTable(){
   // The NOW list folds to the lines the popup has: its rows less the key line and the place (3).
   const room=now?Math.max(3,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-3)):Math.max(6,Math.min(200,panelView.popupRoom(rows,expanded?0:height())-2));
   const status=listed(t.kind);
-  const routeTable=t.kind==='ROUTE',pageAsked=!!t.page;
+  // (`framedAsked`: the first screen this route's page showed was its frame (`routeFirst` noted it), so the reading stands that frame first where it fits)
+  const routeTable=t.kind==='ROUTE',pageAsked=!!t.page,framedAsked=routeTable&&!!t.page&&!!t.framed;
   // The routes popup's held backend draws a route unfolded or its page from the collection it already made while the
   // panel's route rows are the ones that collection was read for (`reuse`); else it collects (a first read, a changed key).
   const collect=!!t.collect;t.collect=false;
   const reuse=routeTable&&!collect&&t.readKey!==undefined&&t.readKey===(popupKeys.ROUTE??null);
   const ask=extra=>{
-    const asked={kind:POPUP_KIND[t.kind],columns,open:now?t.sel||'':t.open||'',page:!!t.page,rows:room,
+    const asked={kind:POPUP_KIND[t.kind],columns,open:now?t.sel||'':t.open||'',page:!!t.page,rows:room,...(framedAsked?{framed:true}:{}),
       ...(status?{cwd:process.cwd(),routes:statusRoutes(),status:statusHeld(),own:ownFolder(),...extra}:{}),...(reuse?{reuse:true}:{})};
     if(!(now||routeTable)||t.noWorker)return readAction(asked,'popup',true);
     // The popup's own backend answers. A read it did not answer is made the one-shot way (and the popup reads
@@ -947,6 +962,12 @@ function askTable(){
     if(stale())return;
     // Read at a width the popup no longer has: its rows are not this popup's; the read made for the new width stands.
     if(t.width!==width){tableAgain=true;return;}
+    if(routeTable){
+      // A collected view is reusable on either screen, even if its rows are for the screen just left.
+      if(result?.ok){t.readKey=keyAsked??null;t.readAt=Number(result.read_at)||atAsked;}
+      // (and one asked for a first screen this popup no longer shows: a page opened again since on another first screen)
+      if(pageAsked!==t.page||framedAsked!==(!!t.page&&!!t.framed)){tableAgain=true;return;}
+    }
     if(now){
       // A part that could not be asked for goes back to the list; a list that could not be read says so.
       if(!result?.ok){t.queued=[];if(t.page){t.page=false;t.scroll=t.listScroll||0;t.reveal=true;}else t.error=!t.list;queueDisplay();return;}
@@ -968,7 +989,7 @@ function askTable(){
     const anchor=route?routeAnchor(t):null;
     t.hits=Array.isArray(result.hits)?result.hits:[];t.loaded=true;t.error=false;loaded=true;
     if(t.kind==='ROUTE'){
-      t.stale=null;t.readKey=keyAsked??null;t.readAt=Number(result.read_at)||atAsked;
+      t.stale=null;
       // A held collection (`reuse`) that this answer says was made over a minute ago is drawn with the words (its time is when it was
       // collected) and collected again behind them. Judged by the answer's own `read_at`: a read made afresh (no held backend, the
       // 12 s cut, a backend that died) is new, and is not read a second time.
@@ -1181,16 +1202,21 @@ function openPopup(name,open='',page=false){
   queueDisplay();
 }
 // What a routes popup shows before its own reading comes: what was read last for this session (same width, same
-// route, table or page as it opens, the panel's route values unchanged since), else for a route's page the stage boxes
+// route, table or page as it opens, the panel's route values unchanged since), else for a route's page the page's frame
 // the panel's values draw (`panelView.routePageFirst`), else the panel's route box at the popup's width; nothing
-// where there is neither (the popup's spinner). Its rows are not this reading's, so it carries `stale`.
+// where there is neither (the popup's spinner). Its rows are not this reading's, so it carries `stale`; `framed` notes whether it is a page
+// whose frame stands first (the reading asked for it follows that, not the panel's values when it is asked).
 function routeFirst(t){
   const r=routePopup;
-  if(r&&r.sid===sid&&r.width===t.width&&r.open===t.open&&r.key===popupKeys.ROUTE&&!!r.page===!!t.page)return {rows:r.rows,hits:r.hits,routes:r.routes,loaded:true,stale:{at:r.at,failed:false}};
+  if(r&&r.sid===sid&&r.width===t.width&&r.open===t.open&&r.key===popupKeys.ROUTE&&!!r.page===!!t.page)
+    return {rows:r.rows,hits:r.hits,routes:r.routes,loaded:true,stale:{at:r.at,failed:false},framed:!!r.page&&/^╔═/.test((r.rows[0]||[]).map(p=>p.text).join(''))};
   const args={model:panelModel,columns:Math.max(20,Math.min(200,t.width-4)),cellWidth,configuration:displayConfiguration,background:terminalBackground};
-  // A route with no stage line (the owner alone, a unit's) has no stage boxes: its first screen stays the panel's box.
-  const b=(t.page&&panelView.routePageFirst({...args,id:t.open}))||panelView.routesBody(args);
-  return b?{rows:b.rows,hits:b.hits,routes:b.routes,loaded:true,stale:{at:Number(panelModel.route_read_at)||0,failed:false}}:null;
+  // (11-27: every form's page, unit, solo and team, draws its frame from the panel's values; a route the panel holds no leg band for, or a
+  // drawing that throws, stays the panel's box: the first screen is a picture the popup can do without, never the reason the panel is lost.)
+  let page=null;
+  if(t.page)try{page=panelView.routePageFirst({...args,id:t.open});}catch{page=null;}
+  const b=page||panelView.routesBody(args);
+  return b?{rows:b.rows,hits:b.hits,routes:b.routes,loaded:true,stale:{at:Number(panelModel.route_read_at)||0,failed:false},framed:!!page&&panelView.routeFramed({model:panelModel,id:t.open})}:null;
 }
 // The panel's route order for its popup (failed, running, waiting, finished): the first unfolded route.
 function rankedRoutes(){
@@ -1231,9 +1257,16 @@ function enterRow(){
   if(t.kind==='NOW'){enterNow(t);return;}
   if(listed(t.kind)&&t.listing){if(t.screen==='full')statusBack(t);else statusActivate(t,statusList.layout(t.listing,t).sel);return;}
   // (A popup opened on a route's page has not followed the unfolded row yet: back at the table it does.)
-  if(t.kind==='ROUTE'&&t.open){t.page=!t.page;t.scroll=0;t.pageTop=t.page;if(!t.page)t.follow=true;askTable();}
+  if(t.kind==='ROUTE'&&t.open){
+    t.page=!t.page;t.scroll=0;t.pageTop=t.page;t.follow=!t.page;
+    if(t.page){
+      Object.assign(t,{rows:[],hits:[],routes:[],loaded:false,stale:null,error:false,framed:false},routeFirst(t));
+      queueDisplay();
+    }
+    askTable();
+  }
 }
-// 11-21: Enter or a press on a line of the status popup's list screen. A heading or `all N ›` opens or closes its group, an item
+// 11-21: Enter or a press on a line of the status popup's list screen. A heading or `all N ▸` opens or closes its group, an item
 // its whole text, and `full document ›` the document read whole (Fleet's lines are asked for then, not before); Esc or Enter there
 // goes back to the list, on the line it left.
 function statusActivate(t,key){
@@ -1361,7 +1394,11 @@ function observeSelectedModel(lines){
   const key=displayModelKey(lines);
   if(key===modelReadKey||!/\? for shortcuts/.test(key)||!/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/.test(key))return;
   modelReadKey=key;modelReading=true;const selected=selection,start=native.start;
-  source('display-model',{lines}).then(data=>{
+  // The same short evidence the native selection carries (nativeSelectionFrame: the composer mark, the
+  // identity fields of the footer row and its key hint); none, or an invalid one, asks nothing.
+  const frame=nativeSelectionFrame();
+  if(frame.invalid||!frame.lines.length){modelReading=false;return;}
+  source('display-model',{lines:frame.lines}).then(data=>{
     const now=Array.from({length:terminal.rows},(_,i)=>terminal.buffer.active.getLine(terminal.buffer.active.viewportY+i)?.translateToString(true)||'');
     if(data.ok&&!relay&&live()&&native.start===start&&selection===selected&&displayModelKey(now)===key){
       nativeSelected={...data.display};bootstrapModel=true;displayValues={...displayValues,...nativeSelected};publishNativeDisplay();queueDisplay();
@@ -1504,7 +1541,7 @@ function queueLayout(){
   if(layoutQueued)return;layoutQueued=true;
   setImmediate(()=>{layoutQueued=false;try{applyLayout();}catch{rawRelay();}});
 }
-const block=require('./block-input.cjs')({changed:queueDisplay,cellWidth,
+const block=require('./block-input.cjs')({changed:queueDisplay,cellWidth,hold:()=>empty?'':lastHold,
   answer:async fields=>{const result=await source('answer',fields);queueProjection();return result;},
   action:key=>blockAction(key)});
 let actionLines=[];
@@ -1789,6 +1826,11 @@ async function releaseHeld(ref,cancel=false) {
   if(currentDelivery===ref){currentDelivery=undefined;heldBytes=0;if(state==='submitting'){state='unknown';eventMark=++clock;}queueProjection();}
   releasing=undefined;process.stdin.resume();rebuildDisplay();
 }
+// The native cells the form and draft judgments read (session_shell.screen_lines), as [text, dim]
+// runs per row, the whole viewport. A row ends at its last cell that is not a blank: no judgment
+// reads a blank at a row's end (each strips it and reads no brightness of a space), and carrying
+// them made every request grow with the window's width (11-27: a 121 × 537 window's empty screen
+// alone was 65 KB). A screen too large for one request is never cut: it is not read (`screen-large`).
 function screenSnapshot() {
   const lines=[],buffer=terminal.buffer.active;
   for(let y=0;y<terminal.rows;y++){
@@ -1798,6 +1840,7 @@ function screenSnapshot() {
       const dim=!!cell.isDim(),text=cell.getChars()||' ',previous=runs[runs.length-1];
       if(previous&&previous[1]===dim)previous[0]+=text;else runs.push([text,dim]);
     }
+    while(runs.length){const run=runs[runs.length-1];run[0]=run[0].replace(/ +$/,'');if(run[0])break;runs.pop();}
     lines.push(runs);
   }
   return lines;
@@ -1836,7 +1879,7 @@ async function refreshReadiness() {
   lastHold=empty?'':HOLD_OF[result.reason]||'unobserved';
   if(empty&&!inputSettled){submitted=frontier;lastEnter=Math.max(lastEnter,frontier);if(loneEscape)keyTail='';}
   if(empty&&state!=='idle'){state='idle';queueDisplay();queueProjection();}
-  return result.ok===true?'':'unavailable';
+  return result.ok===true||result.reason==='screen-large'?'':'unavailable';
 }
 function observeInput(data) {
   // All keys invalidate an in-flight observation, but only native-bound bytes
@@ -2301,7 +2344,11 @@ async function request(req) {
   if(req.op==='native-selection')return {ok:!relay,native_frame:nativeSelectionFrame()};
   if(req.op==='status'){await refreshReadiness();if(empty)checkRelease();return {ok:true,...status()};}
   // The native cells under the panel and frame: the seat's own screen for draft/form judgments.
-  if(req.op==='screen')return relay?{ok:false,reason:'display-unavailable'}:{ok:true,screen:screenSnapshot(),...status()};
+  if(req.op==='screen'){
+    if(relay)return {ok:false,reason:'display-unavailable'};
+    const answer={ok:true,screen:screenSnapshot(),...status()};
+    return Buffer.byteLength(JSON.stringify({...answer,...identity()}))+1>SCREEN_BYTES?{ok:false,reason:'screen-large'}:answer;
+  }
   if(req.op==='panel'&&relay)return {ok:false,reason:'display-unavailable'};
   if(req.op==='panel'){foldByHand(req.expanded!==true);applyLayout();return {ok:true,...status()};}
   if(req.op!=='inject'||harness==='codex')return {ok:false,reason:'unsupported-operation',not_started:true};

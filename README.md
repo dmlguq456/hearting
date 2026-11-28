@@ -86,7 +86,7 @@ waiting on whom. Each has its own place in the panel and in Fleet.
 |---|---|---|---|---|
 | **QUESTIONS** | A question waiting for your answer or approval | An agent that needs you | When you answer it (from the panel or Fleet), or the work ends; a wait answered elsewhere says where | Panel: the rose-bordered box · Fleet: QUESTIONS |
 | **ROUTE** | The work this session started: its stages, who runs each, and how each is checked (what the session does itself stands in the box's `direct` zone, what it started in `dispatch`) | This session, once a request needs a route (the route then starts its owner) | When the route finishes; its result stays one line until your next input or ten minutes | Panel: the route box · Fleet: ROUTES |
-| **PEER REQUEST** | Work handed to another session, with a number, revisions, and reports | The session that asks | By the other session's final report or rejection, or the asker's cancel; a partial report keeps it open | Panel: rows in the route box's `request` zone, under its own named rule, each with the other session's number, its repository's name when that is another one, harness, model, and effort (`→` handed out, `◂` handed to you, `✓` finished, `✕` rejected or cancelled), whole in the MESSAGES popup · Fleet: the session page's `request` rows and a PEERS link |
+| **PEER REQUEST** | Work handed to another session, with a number, revisions, and reports | The session that asks | By the other session's final report or rejection, or the asker's cancel; a partial report keeps it open | Panel: rows in the route box's `request` zone, under its own named rule, each with the other session's number, its repository's name when that is another one, harness, model, and effort (`→` handed out, `←` handed to you, `✓` finished, `✕` rejected or cancelled), whole in the MESSAGES popup · Fleet: the session page's `request` rows and a PEERS link |
 | **MESSAGES** | A short note, read and done | Any session | Nothing to close | Panel: MESSAGES · Fleet: the session page and PEERS |
 | **PEERS** | The sessions linked by messages, requests, supervision, or a handover | Those links themselves | — | Fleet: PEERS |
 
@@ -106,7 +106,7 @@ when Hearting confirms the handover. A report is not an approval or an answer
 from you.
 
 <p align="center">
-  <img src="docs/fleet/requests.png" alt="Two panels side by side. Left, the Claude Code session [4f] that asked: in its route box, under the request rule, an arrow to [b2] with its harness, model, and effort, Test run, partial answer, and a finished review; under it MESSAGES with a reply from [b2] and a note to [9c]. Right, the Codex session [b2] that was asked: in its route box, under the request rule, an arrow from [4f] with its harness, model, and effort, Test run, partial answer; under it its reply to [4f]." width="80%">
+  <img src="docs/fleet/requests.png" alt="Two panels side by side. Left, the Claude Code session [4f] that asked: in its route box, under the request rule, an arrow to [b2] with its harness, model, and effort, Test run, partial answer, and a finished review, its check mark followed by the arrow it went; under it MESSAGES with a reply from [b2] and a note to [9c]. Right, the Codex session [b2] that was asked: in its route box, under the request rule, an arrow from [4f] with its harness, model, and effort, Test run, partial answer; under it its reply to [4f]." width="80%">
 </p>
 <p align="center"><sub>The same request in the panel of the session that asked (<code>[4f]</code>) and the one asked (<code>[b2]</code>). Demo data.</sub></p>
 
