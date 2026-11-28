@@ -320,6 +320,14 @@ class SkippedSuiteFixture(RunTestsFixtureBase):
                 def test_b(self): self.skipTest('no node')
             unittest.main()
         """),
+        # two passing tests, one printing another run's summary (`s` / `Ran 1` / `OK (skipped=1)`) to stdout:
+        # the file's own summary is the one on stderr
+        "stdout_summary_and_pass.test.py": ("PASS", """
+            class T(unittest.TestCase):
+                def test_a(self): print('s\\n' + '-' * 70 + '\\nRan 1 test in 0.001s\\n\\nOK (skipped=1)')
+                def test_b(self): pass
+            unittest.main()
+        """),
         # (d) skips beside an expected failure
         "expected_failure_mixed.test.py": ("PASS", """
             class T(unittest.TestCase):
