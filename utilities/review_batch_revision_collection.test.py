@@ -31,6 +31,7 @@ EXPECTED = Counter({
     "test_terminal_no_start_reuses_group_start_for_the_exact_gap": 1,
     "test_current_owner_closure_peer_precedes_round_admission": 1,
     "test_replacement_owner_starts_only_primary_and_preserves_original_fail_peer": 1,
+    "test_a_dead_primary_beside_a_current_owner_closure_keeps_the_design_binding_refusal": 1,
 })
 
 

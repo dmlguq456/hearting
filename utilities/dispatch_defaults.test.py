@@ -193,6 +193,20 @@ class DispatchDefaultsV3Tests(unittest.TestCase):
                 self.assertIn(fragment, result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
 
+    def test_an_unhashable_schema_version_reaches_the_wrong_value_branch_in_queries(self):
+        # The settings editor reads the previous applied values before the
+        # validator runs. A hand-written `schema_version: {}` or `[]` must take
+        # the same wrong-value branch as `schema_version: "x"`, not TypeError
+        # from a set lookup; every hashable value keeps its previous answer.
+        allocation = {"allocation": {"strategy": "balanced", "window": 30}}
+        wrong = D.query_allocation(dict(allocation, schema_version="x"))
+        for bad in ({}, []):
+            self.assertEqual(D.query_allocation(dict(allocation, schema_version=bad)), wrong)
+        self.assertEqual(D.query_owners({"schema_version": 3, "harnesses": {"enabled": ["codex"]}}), ["codex"])
+        self.assertEqual(D.query_owners({"schema_version": "3", "depth1_owner": ["claude"]}), ["claude"])
+        self.assertEqual(D.query_owners({"schema_version": True, "depth1_owner": ["claude"]}), ["claude"])
+        self.assertEqual(D.query_owners({"depth1_owner": ["claude"]}), ["claude"])
+
     def test_a_line_indented_under_an_empty_mapping_is_refused_with_its_line(self):
         allocation = "schema_version: 3\nallocation:\n  strategy: balanced\n  depth_affinity: {}\n"
         # A sibling at the same depth, a blank line and comments (even an
@@ -1109,6 +1123,22 @@ class ShippedBaselineMergeTests(unittest.TestCase):
             config, capmap, baseline={"autopilot-code": {"frame": "codex"}}
         )
         self.assertNotIn("frame", merged["capabilities"].get("autopilot-code", {}))
+
+    def test_baseline_cell_holding_a_mapping_or_list_is_dropped_like_a_wrong_value(self):
+        # A shipped baseline cell that parses as `{}` or `[]` is outside
+        # AFFINITY_VALUES exactly like an unknown string, and the documented
+        # path for that is to drop it, never to raise TypeError.
+        config = D.parse_yaml_subset(self.sparse_v3_text())
+        capmap = D.load_topology_capabilities(D.default_topology_path())
+        wrong = D.merge_capability_baseline(
+            config, capmap, baseline={"autopilot-code": {"frame": "unknown"}}
+        )["capabilities"]
+        for bad in ({}, []):
+            merged = D.merge_capability_baseline(
+                config, capmap, baseline={"autopilot-code": {"frame": bad}}
+            )
+            self.assertEqual(merged["capabilities"], wrong)
+            self.assertNotIn("frame", merged["capabilities"].get("autopilot-code", {}))
 
     def test_baseline_cell_for_an_unknown_capability_or_stage_is_dropped(self):
         config = D.parse_yaml_subset(self.sparse_v3_text())
