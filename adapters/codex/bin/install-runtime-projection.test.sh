@@ -9,11 +9,11 @@ T=$(mktemp -d); trap 'rm -rf "$T"' 0 HUP INT TERM
 HOME_DIR=$T/home; CH=$T/codex
 mkdir -p "$HOME_DIR/.config" "$CH/skills" "$CH/agents" "$T/user"
 SRC_AGENTS=$ROOT/codex_setting/codex-agents; SRC_SKILLS=$ROOT/codex_setting/codex-skills
-set -- $(cd "$SRC_AGENTS" && ls *.toml | sed -n '1,5p'); A_FOREIGN=$1 A_REAL=$2 A_DANGLING=$3 A_OWNED=$4 A_ABSENT=$5
+# Four shipped agents (the depth names); a user's own link is the skill's case.
+set -- $(cd "$SRC_AGENTS" && ls *.toml | sed -n '1,4p'); A_REAL=$1 A_DANGLING=$2 A_OWNED=$3 A_ABSENT=$4
 set -- $(cd "$SRC_SKILLS" && ls | sed -n '1,4p'); S_FOREIGN=$1 S_DIR=$2 S_DANGLING=$3 S_OWNED=$4
 
-printf 'USER AGENT\n' > "$T/user/agent.toml"; mkdir "$T/user/skill"; printf 'USER SKILL\n' > "$T/user/skill/SKILL.md"
-ln -s "$T/user/agent.toml" "$CH/agents/$A_FOREIGN"
+mkdir "$T/user/skill"; printf 'USER SKILL\n' > "$T/user/skill/SKILL.md"
 printf 'REAL AGENT\n' > "$CH/agents/$A_REAL"
 ln -s "$T/missing/agent.toml" "$CH/agents/$A_DANGLING"
 ln -s "$SRC_AGENTS/$A_OWNED" "$CH/agents/$A_OWNED"
@@ -32,8 +32,6 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 for mode in native both; do
   run "$T/$mode.out" --skills-mode "$mode" || { cat "$T/$mode.out.err" >&2; fail "$mode install exited nonzero"; }
   grep -q '^status=ok$' "$T/$mode.out" || fail "$mode: status=ok missing"
-  [ "$(readlink "$CH/agents/$A_FOREIGN")" = "$T/user/agent.toml" ] || fail "$mode: foreign agent link rewritten"
-  [ "$(cat "$T/user/agent.toml")" = "USER AGENT" ] || fail "$mode: foreign agent target changed"
   [ ! -L "$CH/agents/$A_REAL" ] && [ "$(cat "$CH/agents/$A_REAL")" = "REAL AGENT" ] || fail "$mode: real agent file replaced"
   [ "$(readlink "$CH/skills/$S_FOREIGN")" = "$T/user/skill" ] || fail "$mode: foreign skill link rewritten"
   [ ! -e "$T/user/skill/$S_FOREIGN" ] && [ "$(ls -A "$T/user/skill")" = "SKILL.md" ] || fail "$mode: nested link written into user skill target"
@@ -42,11 +40,10 @@ for mode in native both; do
               "skills/$S_DANGLING:$SRC_SKILLS/$S_DANGLING" "skills/$S_OWNED:$SRC_SKILLS/$S_OWNED"; do
     [ "$(readlink "$CH/${pair%%:*}")" = "${pair#*:}" ] || fail "$mode: ${pair%%:*} not linked to harness source"
   done
-  grep -q "^skip=$CH/agents/$A_FOREIGN reason=foreign-symlink-exists$" "$T/$mode.out" || fail "$mode: foreign agent skip missing"
   grep -q "^skip=$CH/agents/$A_REAL reason=non-symlink-exists$" "$T/$mode.out" || fail "$mode: real agent skip missing"
   grep -q "^skip=$CH/skills/$S_FOREIGN reason=foreign-symlink-exists$" "$T/$mode.out" || fail "$mode: foreign skill skip missing"
   grep -q "^skip=$CH/skills/$S_DIR reason=non-symlink-exists$" "$T/$mode.out" || fail "$mode: real skill dir skip missing"
-  grep -q '^leaves_preserved=4$' "$T/$mode.out" || fail "$mode: leaves_preserved != 4"
+  grep -q '^leaves_preserved=3$' "$T/$mode.out" || fail "$mode: leaves_preserved != 3"
   echo "ok: $mode preserves user entries and refreshes owned/dangling/absent"
 done
 

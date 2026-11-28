@@ -362,7 +362,7 @@ class PassSharedViewTest(unittest.TestCase):
             getattr(herdr, name).clear()
         self.tmp = tempfile.TemporaryDirectory()
         self.path = os.path.join(self.tmp.name, "h.sock")
-        env = mock.patch.dict(os.environ, {"HERDR_SOCKET_PATH": self.path})
+        env = mock.patch.dict(os.environ, {"HERDR_SOCKET_PATH": self.path, "HERDR_SESSION": "default"})
         env.start()
         gap = mock.patch.object(herdr, "_OBSERVATION_MIN_REFRESH_S", 0.03)
         gap.start()
@@ -377,7 +377,7 @@ class PassSharedViewTest(unittest.TestCase):
                 getattr(herdr, name).update(value)
 
         self.addCleanup(restore)
-        os.environ.pop("HERDR_SESSION", None)
+        os.environ["HERDR_SESSION"] = "default"   # the default server owns this socket
         os.environ.pop("AGENT_HERDR_SESSION", None)
         self.panes = [{"pane_id": "w1:p%d" % i, "agent": "claude", "cwd": "/x",
                        "agent_session": {"agent": "claude", "value": "s%d" % i}} for i in range(12)]

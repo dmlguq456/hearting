@@ -89,7 +89,9 @@ def assert_primary_context_pipeline(case, env, records):
             case.assertEqual(sess.session_id, row["session_id"])
             case.assertEqual(sess.context_window_tokens, row["policy"]["effective_window_tokens"])
             case.assertIsNone(sess.context_display_window_tokens)
-            case.assertIsNone(sess.ctx_pct, "an unknown v2 trigger must stay unknown")
+            # An unknown trigger reads usage against the declared window:
+            # 450,000 of 900,000 (twice) and 200,000 of 1,000,000.
+            case.assertEqual(sess.ctx_pct, (50, 50, 20)[i])
             case.assertEqual(sess.session_input_tokens, 9999999)
             sessions.append(sess)
         assert_opencode_context_surface(case, sessions, [(50, .9), (50, .9), (20, 1.0)])
@@ -97,8 +99,8 @@ def assert_primary_context_pipeline(case, env, records):
         # request, whose own updated time still controls policy acceptance.
         first = records[0]
         for active, completed, late, expected in (
-                (0, True, False, (0, .9)), (None, True, False, (None, .9)),
-                (0, False, True, (None, None))):
+                (0, True, False, (0, .9)), (None, True, False, (50, .9)),
+                (0, False, True, (50, .9))):
             observed = observation(first["session_id"])
             if late:
                 observed["messages"][0]["started"] -= 3000
@@ -113,8 +115,10 @@ def assert_primary_context_pipeline(case, env, records):
             sess = sessions[0]
             opencode.enrich(sess)
             if late:
-                case.assertIsNone(sess.context_window_tokens,
-                                  "new session metadata cannot freshen an older assistant's policy")
+                # A record whose request is older still lends its measured
+                # window; only its trigger-bearing fields need the exact pairing.
+                case.assertEqual(sess.context_window_tokens, 900000,
+                                 "the record's window still stands for an older request")
             assert_opencode_context_surface(case, [sess], [expected])
 
 
@@ -183,11 +187,14 @@ def assert_primary_request_cases(case, env, cases):
                 opencode.enrich(sess)
                 case.assertEqual(db.read_bytes(), before, "native reader modified its fixture DB")
                 case.assertEqual(sess.session_id, row["session_id"])
-                case.assertEqual(sess.context_window_tokens, item["window"])
+                # A null recorded window falls back to the model catalogue.
+                window = (item["window"] or row["policy"]["effective_window_tokens"]
+                          or opencode._model_ctx_limit(
+                              request["model"].get("id"), request["model"].get("providerID")))
+                case.assertEqual(sess.context_window_tokens, window)
                 case.assertIsNone(sess.context_display_window_tokens)
-                case.assertIsNone(sess.ctx_pct)
-                window = item["window"]
                 expected = (round(message["tokens"]["total"] * 100 / window), window / 1000000) if window else (None, None)
+                case.assertEqual(sess.ctx_pct, expected[0])
                 assert_opencode_context_surface(case, [sess], [expected])
                 results.append({"case": item["name"], "saved_window": row["policy"]["effective_window_tokens"],
                                 "native_event_seq": native_seq,
@@ -669,14 +676,17 @@ class CurrentSessionBindingTest(unittest.TestCase):
                           "state": "unknown", "runtime_version": "2.0.32",
                           "source": "opencode-v2-request", "effective_window_tokens": 950000,
                           "session_id": "ses_b", "reason": "native-v2-compaction-behavior-unverified"}}
+            # A record that still belongs to this pid/start/session/model lends
+            # its measured window even when its request no longer pairs with the
+            # newest row; only the trigger-bearing fields need the exact pairing.
             for change, expected in (({}, 950000), ({"observed_at": 2002.0}, 950000),
                                      ({"model": "p/other"}, None),
                                      ({"session_id": "ses_other"}, None),
                                      ({"proc_start": "124"}, None),
-                                     ({"request": None}, None),
-                                     ({"request": {**record["request"], "assistant_message_id": "msg-prior"}}, None),
-                                     ({"request": {**record["request"], "started_at_ms": 1999400}}, None),
-                                     *(({"request": {**record["request"], key: value}}, None)
+                                     ({"request": None}, 950000),
+                                     ({"request": {**record["request"], "assistant_message_id": "msg-prior"}}, 950000),
+                                     ({"request": {**record["request"], "started_at_ms": 1999400}}, 950000),
+                                     *(({"request": {**record["request"], key: value}}, 950000)
                                        for key, value in (("started_at_ms", True),
                                                           ("event_seq", None), ("event_seq", True),
                                                           ("observed_event_seq", None),
@@ -695,7 +705,9 @@ class CurrentSessionBindingTest(unittest.TestCase):
                     self.assertEqual(sess.active_context_tokens, 123456)
                     self.assertEqual(sess.context_window_tokens, expected)
                     self.assertEqual(sess.session_input_tokens, 999999)
-                    self.assertIsNone(sess.ctx_pct)
+                    # An exact request whose trigger stays unknown still reads usage
+                    # against the declared window (13% of 950,000 for 123,456).
+                    self.assertEqual(sess.ctx_pct, 13 if expected is not None else None)
                     self.assertIsNone(sess.context_display_window_tokens)
             path.write_text(json.dumps(record))
             for cursor in (None, True, 9, 11, "10"):
@@ -703,10 +715,41 @@ class CurrentSessionBindingTest(unittest.TestCase):
                     sess, _ = self._run_v2(self._session(),
                                            ("ses_b", "opencode-tui-selection"),
                                            {**observed, "event_seq": cursor}, policy_reader=read_policy)
-                    self.assertIsNone(sess.context_window_tokens)
+                    # A missing or stale cursor blocks the exact request pairing,
+                    # not the record's measured window.
+                    self.assertEqual(sess.context_window_tokens, 950000)
                     self.assertEqual(sess.active_context_tokens, 123456)
+                    self.assertEqual(sess.ctx_pct, 13)
 
-    def test_v2_missing_or_malformed_latest_tokens_do_not_reuse_an_older_request(self):
+    def test_v2_a_record_without_a_window_uses_the_model_catalogue(self):
+        observed = {"state": "observed", "generation": "v2", "cursor": 8, "event_seq": 10,
+                    "session": {"model": {"id": "m", "providerID": "p"},
+                                "time_updated": 2000000, "tokens_input": 999999},
+                    "messages": [{"type": "assistant", "id": "msg-current", "started": 1999500,
+                                  "model": {"id": "m", "providerID": "p"},
+                                  "tokens": {"total": 123456}, "updated": 2000000}]}
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.root / "state"),
+                                          "FLEET_SESSION_REGISTRY_DIR": str(self.root / "sessions")}):
+            path = policy_path("opencode", pid=4242, proc_start="123")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            record = {"schema": SCHEMA, "harness": "opencode", "session_id": "ses_b",
+                      "pid": 4242, "proc_start": "123", "attempt_id": None, "model": "p/m",
+                      "observed_at": 1999.0, "request": {
+                          "kind": "opencode-v2-primary", "assistant_message_id": "msg-current",
+                          "event_seq": 10, "observed_event_seq": 10,
+                          "started_at_ms": 1999500, "context_at_ms": 1999000,
+                          "context_returned_at_ms": 1999001}, "policy": {
+                          "state": "unknown", "source": "opencode-v2-request",
+                          "effective_window_tokens": None,
+                          "session_id": "ses_b", "reason": "native-v2-compaction-behavior-unverified"}}
+            path.write_text(json.dumps(record))
+            with mock.patch.object(opencode, "_model_ctx_limit", return_value=1_000_000):
+                sess, _ = self._run_v2(self._session(), ("ses_b", "opencode-tui-selection"),
+                                       observed, policy_reader=read_policy)
+        self.assertEqual(sess.context_window_tokens, 1_000_000)
+        self.assertEqual(sess.ctx_pct, 12)      # 123,456 of 1,000,000
+
+    def test_v2_a_streaming_step_reuses_the_last_measured_context(self):
         for tokens in (None, {"total": -1}, {"total": "invalid"}):
             with self.subTest(tokens=tokens):
                 observed = {"state": "observed", "generation": "v2", "cursor": 8,
@@ -716,7 +759,10 @@ class CurrentSessionBindingTest(unittest.TestCase):
                                 {"type": "assistant", "tokens": tokens, "completed": 1000}]}
                 sess, _ = self._run_v2(self._session(),
                                        ("ses_b", "opencode-tui-selection"), observed)
-                self.assertIsNone(sess.active_context_tokens)
+                # The newest step has no reading yet; the last measured step (123)
+                # is the best known current context. Without a policy record there
+                # is no window, so no percentage is invented.
+                self.assertEqual(sess.active_context_tokens, 123)
                 self.assertEqual(sess.session_input_tokens, 999999)
                 self.assertIsNone(sess.ctx_pct)
 

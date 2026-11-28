@@ -199,12 +199,10 @@ class OpenCodeNativeLeafPreservationTest(unittest.TestCase):
             p.name for p in (SOURCE_ROOT / "opencode_setting/opencode-agents").glob("*/*.md"))
         command_names = sorted(
             p.name for p in (SOURCE_ROOT / "opencode_setting/opencode-commands").glob("*.md"))
-        (self.foreign_agent, self.real_agent, self.dangling_agent,
-         self.owned_agent, self.absent_agent) = agent_names[:5]
+        # Four shipped agents (the depth names); a user's own link is the command's case.
+        (self.real_agent, self.dangling_agent,
+         self.owned_agent, self.absent_agent) = agent_names[:4]
         self.real_command_dir, self.foreign_command = command_names[:2]
-        self.user_target = self.root / "user-owned.md"
-        self.user_target.write_bytes(b"USER AGENT\n")
-        (self.agents / self.foreign_agent).symlink_to(self.user_target)
         (self.agents / self.real_agent).write_bytes(b"REAL AGENT\n")
         (self.agents / self.dangling_agent).symlink_to(self.root / "gone" / "agent.md")
         stale = next((SOURCE_ROOT / "opencode_setting/opencode-agents").glob(
@@ -224,8 +222,6 @@ class OpenCodeNativeLeafPreservationTest(unittest.TestCase):
         return proc.returncode, json.loads(proc.stdout)
 
     def _assert_user_entries_untouched(self):
-        self.assertEqual(os.readlink(self.agents / self.foreign_agent), str(self.user_target))
-        self.assertEqual(self.user_target.read_bytes(), b"USER AGENT\n")
         self.assertFalse((self.agents / self.real_agent).is_symlink())
         self.assertEqual((self.agents / self.real_agent).read_bytes(), b"REAL AGENT\n")
         self.assertFalse((self.commands / self.real_command_dir).is_symlink())
@@ -243,8 +239,7 @@ class OpenCodeNativeLeafPreservationTest(unittest.TestCase):
             self.assertTrue(
                 os.readlink(link).startswith(str(SOURCE_ROOT / "opencode_setting")), name)
         checks = {c["id"]: c for c in report["checks"]}
-        for leaf in (self.foreign_agent, self.real_agent, self.real_command_dir,
-                     self.foreign_command):
+        for leaf in (self.real_agent, self.real_command_dir, self.foreign_command):
             check = checks[f"opencode.symlink.{leaf}"]
             self.assertTrue(check["ok"], check)
             self.assertIn("preserved", check["detail"])
@@ -261,8 +256,7 @@ class OpenCodeNativeLeafPreservationTest(unittest.TestCase):
         self.assertEqual(code, 0)
         dry_checks = {c["id"]: c for c in dry["checks"]}
         applied_checks = {c["id"]: c for c in applied["checks"]}
-        for leaf in (self.foreign_agent, self.real_agent, self.real_command_dir,
-                     self.foreign_command):
+        for leaf in (self.real_agent, self.real_command_dir, self.foreign_command):
             key = f"opencode.symlink.{leaf}"
             self.assertEqual(dry_checks[key]["detail"], applied_checks[key]["detail"])
         for leaf in (self.dangling_agent, self.owned_agent, self.absent_agent):
@@ -276,7 +270,7 @@ class OpenCodeNativeLeafPreservationTest(unittest.TestCase):
         for result in (dry, applied):
             self.assertFalse(result["blocked"])
             by_dest = {a["dest"]: a for a in result["actions"] if a.get("dest")}
-            for path in (self.agents / self.foreign_agent, self.agents / self.real_agent,
+            for path in (self.agents / self.real_agent,
                          self.commands / self.real_command_dir,
                          self.commands / self.foreign_command):
                 self.assertEqual(by_dest[str(path)]["status"], "preserved", path)

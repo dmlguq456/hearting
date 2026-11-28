@@ -113,6 +113,26 @@ def context_policy_used_pct(active_context_tokens, policy):
     return min(99, (200 * active + trigger) // (2 * trigger))
 
 
+def opencode_context_used_pct(active_context_tokens, policy):
+    """OpenCode's reading: the applied trigger when known, else its declared window.
+
+    OpenCode reports a measured context window but usually leaves the applied
+    compaction trigger unknown; its own TUI still reads usage against that
+    window. Claude and Codex keep the trigger-only reading in
+    ``context_policy_used_pct``. Same rounding as that function.
+    """
+    pct = context_policy_used_pct(active_context_tokens, policy)
+    if pct is not None:
+        return pct
+    active = _policy_tokens(active_context_tokens)
+    window = _policy_tokens(policy.get("effective_window_tokens")) if isinstance(policy, dict) else None
+    if active is None or window is None or window <= 0:
+        return None
+    if active >= window:
+        return 100
+    return min(99, (200 * active + window) // (2 * window))
+
+
 @dataclass
 class TokenTelemetry:
     """Normalized read-only session telemetry; ``None`` means not exposed."""

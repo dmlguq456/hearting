@@ -85,7 +85,7 @@ from dispatch_contract import (
     source_lineage_row_fields,
     diff_attribution_lines,
 )
-from parent_next_directive import receipt_lines as parent_next_receipt_lines  # noqa: E402
+from parent_next_directive import receipt_lines as parent_next_receipt_lines, worker_utility  # noqa: E402
 import launch_receipt  # noqa: E402
 from dispatch_contract_rows import is_unit_leg_launch  # noqa: E402
 import dispatch_wrapper_common as WRAPPER_COMMON  # noqa: E402
@@ -592,9 +592,9 @@ def _allowlist_rules(agent_home: Path, worktree: str | Path | None, artifact_roo
     if not merge_observation_only:
         for name in HARNESS_ALLOWLIST_UTILITIES:
             utility = agent_home / "utilities" / name
-            rules += [
-                f"Bash(python3 {utility} *)",
-                f"Bash(python3 {utility})",
+            rules += [   # the form the unit route redirect builds a worker's wait in (`worker_utility`)
+                f"Bash({worker_utility(agent_home, name)} *)",
+                f"Bash({worker_utility(agent_home, name)})",
                 f"Bash({utility} *)",
                 f"Bash({utility})",
             ]

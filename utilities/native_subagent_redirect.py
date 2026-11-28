@@ -5,10 +5,12 @@ Claude `Agent` (older `Task`) and Codex `spawn_agent` (multi-agent v1) are inter
 (`PreToolUse`). Whether Hearting takes the call is decided once, before anything is registered; anything
 that is not certain leaves the native call exactly as it was, with nothing printed and nothing registered:
 - The definition the harness picks for the name is Hearting's shipped one (apart from the lines activation
-  renders for the user's models) or the harness's built-in, and the call carries nothing a brief cannot.
+  renders for the user's models) or the harness's built-in, or a retired name (`memory-scout`) nothing defines,
+  and the call carries nothing a brief cannot.
 - Nothing else decides the same call: no other hook or permission rule in a configuration the hook reads,
   no layer added on the harness's command line, and Hearting's own hook registered exactly once.
-- The caller is a person's session: not a registered worker, not a native subagent (unknown counts as not).
+- The caller is a person's session or the one worker form below, and not a native subagent (unknown counts as
+  not).
 
 Then the hook runs, as a session that typed it would,
 
@@ -23,6 +25,15 @@ never stops a start. Two windows are left where both can run: a hook ended from 
 harness's timeout) between the registration and its refusal line, and a compose that fails after registering
 without writing such a receipt.
 
+The one worker taken is a live Claude owner the session supervisor runs detached, still on the route it was launched
+on, proven by its row and the session its supervisor bound to that attempt, on a route sealing no native stage
+fallback, whose launch and current mode let it run its wait with nothing else deciding Bash (`_supervised_owner`,
+`_wait_allowed`; its own launch layers count only when they decide the call). It starts in its own environment, so
+the leg stops with it (`capabilities/unit.md`), and is told that wait, to run again only while its receipt says the
+leg still runs. A start whose route compose closed (the governor's wait, a usage limit right after registration)
+lets the native call run; a registered leg that was stopped is refused as ended. Every other worker (stage, review,
+sub-session, foreground-scoped, a unit route's leg, Codex's `-c`) stays native.
+
 OpenCode is not intercepted (`adapters/opencode/ADAPTATION.md`).
 
 Usage (stdin: the harness payload):
@@ -30,9 +41,11 @@ Usage (stdin: the harness payload):
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -62,6 +75,9 @@ UNNAMED = {"claude": "balanced-deep", "codex": "balanced"}
 # The agent a call without a name runs as, and the agents the harness itself defines.
 DEFAULT_AGENT = {"claude": "general-purpose", "codex": "default"}
 BUILT_IN = {"claude": {"Explore", "Plan", "general-purpose"}, "codex": {"default", "worker", "explorer"}}
+# Names Hearting once shipped a definition for and no longer does: with no definition anywhere the native call
+# has nothing to run, so such a call is taken like a built-in's.
+RETIRED = {"memory-scout"}
 _SUFFIX = {"claude": ".md", "codex": ".toml"}
 # Lines activation renders into a shipped definition for the user's models (`sync-native-agents.py`).
 _RENDERED = {"claude": re.compile(r"(# profile:|model:|effort:)"),
@@ -71,6 +87,7 @@ _LAUNCH_LAYERS = {"claude": {"--settings", "--agents", "--add-dir", "--plugin-di
                              "--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools",
                              "--permission-prompt-tool"},
                   "codex": {"-c", "--config", "-p", "--profile", "--enable", "--disable"}}
+_TOOL_FLAGS = ("--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools")
 # The managed (Claude) and system (Codex) configuration roots the harness reads before the user's.
 MANAGED = {"claude": (Path("/etc/claude-code"), Path("/Library/Application Support/ClaudeCode")),
            "codex": (Path("/etc/codex"),)}
@@ -176,15 +193,21 @@ def _is_shipped(harness: str, path: Path, name: str) -> bool:
 
 def _gives(harness: str, path: Path, name: str) -> bool:
     """The definition file can give the agent `name`. Hearting's own file gives its own name; Codex reads the
-    TOML `name` (the file name without one); any other Claude file counts when the name stands anywhere in
-    its frontmatter, so a comment, quotes or another YAML form cannot hide it."""
+    TOML `name` (the file name without one); any other Claude file counts when its YAML frontmatter `name`
+    (read as YAML, so quotes and escapes are undone; the file name without one) is it, or when the name stands
+    anywhere in that frontmatter. A file that cannot be read or parsed raises: not certain, so native."""
     if _is_shipped(harness, path, path.stem):
         return path.stem == name
-    text = path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8" if harness == "codex" else "utf-8-sig")  # Claude reads past a BOM
     if harness == "codex":
         found = tomllib.loads(text).get("name", path.stem)
         return isinstance(found, str) and found.strip() == name
-    return re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text.split("\n---", 1)[0]) is not None
+    import yaml  # PyYAML, the parser Hearting already requires (route proposals, the manifest's frontmatter)
+    head = text.split("\n---", 1)[0]
+    front = yaml.safe_load(head[3:]) if text.startswith("---") else None
+    found = front.get("name", path.stem) if isinstance(front, dict) else path.stem
+    return ((isinstance(found, str) and found.strip() == name)
+            or re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", head) is not None)
 
 
 def _definitions(harness: str, cwd: str, name: str) -> tuple[list[Path], list[Path]]:
@@ -213,11 +236,13 @@ def _definitions(harness: str, cwd: str, name: str) -> tuple[list[Path], list[Pa
 
 
 def require_shipped_definition(harness: str, name: str, cwd: str) -> None:
-    """`Skip` unless the definition the harness picks for `name` is Hearting's shipped one or its built-in."""
+    """`Skip` unless the definition the harness picks for `name` is Hearting's shipped one or its built-in (a
+    retired name counts as built in)."""
     user, others = _definitions(harness, cwd, name)
     if others:
         raise Skip("definition-elsewhere")          # a project, managed or declared definition comes first
-    if not ((len(user) == 1 and _is_shipped(harness, user[0], name)) or (not user and name in BUILT_IN[harness])):
+    if not ((len(user) == 1 and _is_shipped(harness, user[0], name))
+            or (not user and name in BUILT_IN[harness] | RETIRED)):
         raise Skip("definition-not-shipped")
 
 
@@ -236,10 +261,12 @@ def _hook_matches(harness: str, matcher, tools: set) -> bool:
         return True
 
 
-def _rules_decide(settings: dict) -> bool:
-    """A Claude deny or ask rule names the subagent tool: it applies whatever a hook returns."""
+def _rules_decide(settings: dict, glob_of: str = "") -> bool:
+    """A Claude deny or ask rule names the subagent tool: it applies whatever a hook returns. For `glob_of` (the Bash
+    a worker's wait runs) a rule counts whose tool name, read as Claude's tool-name glob, matches it (`Ba*`)."""
     permissions = settings.get("permissions") if isinstance(settings.get("permissions"), dict) else {}
-    return any(isinstance(rule, str) and re.match(r"\s*(Agent|Task)\s*(\(|$)", rule)
+    return any(isinstance(rule, str) and (fnmatch.fnmatchcase(glob_of, rule.split("(", 1)[0].strip()) if glob_of
+                                          else re.match(r"\s*(Agent|Task)\s*(\(|$)", rule))
                for kind in ("deny", "ask") for rule in permissions.get(kind) or [])
 
 
@@ -294,19 +321,76 @@ def _harness_argv() -> list[str]:
     raise OSError("no harness process above this hook")
 
 
-def require_sole_decision(harness: str, tool: str, cwd: str) -> None:
+def _values(argv: list[str], index: int) -> list[str]:
+    """What the flag at `index` was given: after its `=`, or the arguments up to the next flag."""
+    if "=" in argv[index]:
+        return [argv[index].split("=", 1)[1]]
+    values = []
+    for arg in argv[index + 1:]:
+        if arg.startswith("-"):
+            break
+        values.append(arg)
+    return values
+
+
+def _given(argv: list[str], flags: tuple) -> list[str]:
+    """Every rule the `flags` were given, one each; an empty value or no plain name with an optional `(…)` is `?`."""
+    rules = [rule for index, arg in enumerate(argv) if arg.split("=", 1)[0] in flags
+             for value in _values(argv, index) or [""]
+             for rule in re.findall(r"[^\s,()]+(?:\([^()]*\))?|[()]", value) or [""]]
+    return [rule if re.fullmatch(r"[A-Za-z][\w-]*(\([^()]*\))?", rule) else "?" for rule in rules]
+
+
+def _worker_layer(flag: str, values: list[str]) -> bool:
+    """A layer the owner's launch writes (`claude-session-supervisor.py`) that leaves this call alone: its park hook
+    outside the terminal cleanup it alone refuses in, absolute folders with no `.claude`, rules naming no subagent."""
+    if flag == "--settings" and len(values) == 1:
+        park = shlex.quote(str(ROOT / "adapters" / "claude" / "hooks" / "registered-parent-park.py"))
+        import dispatch_terminal_commit
+        return json.loads(values[0]) == {"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": park, "timeout": 10}]}]}} and dispatch_terminal_commit.load_active_cleanup_scope(
+            Path(os.environ["AGENT_DISPATCH_JOBS"]).parent, os.environ["AGENT_DISPATCH_ATTEMPT_ID"]) is None
+    if flag == "--add-dir":
+        return bool(values) and all(os.path.isabs(value) and not (Path(value) / ".claude").exists() for value in values)
+    rules = _given([flag, *values], (flag,)) if flag in _TOOL_FLAGS else ["?"]
+    return "?" not in rules and not {rule.split("(")[0] for rule in rules} & {"Agent", "Task"}
+
+
+def _wait_allowed(argv: list[str], cwd: str, mode) -> bool:
+    """The owner can run its wait (`_worker_command`) unprompted: its launch's own allow rule for it in a mode that
+    applies it and is the mode the call runs in (`mode`, the payload's), and no Bash deny or ask rule, by name or
+    tool-name glob, in its launch or a settings file the hook reads (no bare Bash grant)."""
+    from parent_next_directive import worker_utility
+    home = os.environ["AGENT_HOME"]
+    return (bool(home) and shlex.quote(home) == home
+            and mode in ("bypassPermissions", "acceptEdits") and _given(argv, ("--permission-mode",)) == [mode]
+            and f"Bash({worker_utility(home, 'capability-route.py')} *)" in _given(argv, _TOOL_FLAGS[:2])
+            and not any(rule.split("(")[0] in ("Bash", "?") for rule in _given(argv, _TOOL_FLAGS[2:]))
+            and not any(_rules_decide(settings, "Bash") for _, settings in _decision_sources("claude", cwd)))
+
+
+def require_sole_decision(harness: str, tool: str, cwd: str, worker: bool = False, mode=None) -> None:
     """`Skip` unless this hook is the only decision on the call it can see: the harness runs matching hooks
-    side by side and applies deny/ask rules after them, so another decision would come after the start."""
-    for arg in _harness_argv()[1:]:
+    side by side and applies deny/ask rules after them, so another decision would come after the start. For the
+    owner's call (`worker`) the layers its launch adds count only when they decide it, and its wait must run: a hook on
+    Bash decides that wait as one on the call would (Hearting's own pass a worker), so it is judged the same way."""
+    argv = _harness_argv()[1:]
+    for index, arg in enumerate(argv):
         if arg.split("=", 1)[0] in _LAUNCH_LAYERS[harness] or (harness == "codex" and re.match(r"-[cp].", arg)):
-            raise Skip("launch-layer")
+            if not worker or not _worker_layer(arg.split("=", 1)[0], _values(argv, index)):
+                raise Skip("launch-layer")
+    if worker and not _wait_allowed(argv, cwd, mode):
+        raise Skip("wait-not-allowed")
     if harness == "claude" and (_home(harness) / "remote-settings.json").exists():
         raise Skip("server-managed-settings")      # the copy of settings an organization's server manages
     path, name = _REGISTRATION[harness]
-    ours = {handler.get("command") for group in _json(ROOT / "adapters" / harness / path)["hooks"]["PreToolUse"]
-            if name in str(group.get("matcher")).split("|") for handler in group["hooks"]}
+    groups = _json(ROOT / "adapters" / harness / path)["hooks"]["PreToolUse"]
+    ours = {handler.get("command") for group in groups if name in str(group.get("matcher")).split("|")
+            for handler in group["hooks"]}
+    own = {handler.get("command") for group in groups for handler in group["hooks"]} - ours if worker else set()
     # Codex also picks `spawn_agent` hooks by the alias `Agent` (core/src/tools/hook_names.rs).
-    tools, registered = {tool} | ({"Agent", "Task"} if harness == "claude" else {"Agent"}), 0
+    tools = {tool} | ({"Agent", "Task"} if harness == "claude" else {"Agent"}) | ({"Bash"} if worker else set())
+    registered = 0
     for hooks, settings in _decision_sources(harness, cwd):
         if harness == "claude" and _rules_decide(settings):
             raise Skip("another-decision")
@@ -319,6 +403,8 @@ def require_sole_decision(harness: str, tool: str, cwd: str) -> None:
             # started.
             every_tool = group.get("matcher") in (None, "", "*")
             for handler in group.get("hooks") or []:
+                if isinstance(handler, dict) and handler.get("command") in own:
+                    continue
                 if not (isinstance(handler, dict) and handler.get("type", "command") == "command"
                         and handler.get("command") in ours):
                     rule = handler.get("if") if isinstance(handler, dict) else None
@@ -333,15 +419,52 @@ def require_sole_decision(harness: str, tool: str, cwd: str) -> None:
 
 # --- Who calls --------------------------------------------------------------------------------------------
 
-def _is_registered_worker(harness: str, payload: dict, session: str) -> bool:
-    """Registered workers and native subagents keep their own behavior (the question redirect's test). A
-    sub-session record that cannot be read counts as a native subagent: nothing is certain about it."""
-    import session_tidy as tidy
-    if (tidy.is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower()
-            in {"owner", "worker", "auxiliary", "reviewer"} or bool(payload.get("agent_id"))):
-        return True
+def _supervised_owner(session: str) -> None:
+    """`Skip` unless the caller is a live Claude owner the session supervisor runs detached (its registry row; the
+    environment only names it), whose current route is still the one it was launched on (`owner_route_binding`: an
+    adopted continuation moves it on; with no binding there is none to adopt), this hook's Claude session the one its
+    supervisor bound to that very attempt (`dispatch_owner_input`), the route sealing no native stage fallback (whose
+    evidence would be lost), and a leg started here launching detached too (the receipt comes back at once, the leg
+    stops with the owner: `dispatch-reap-watch.py`). Anything else stays native."""
+    from dispatch_contract import attempt_governed_process_quiescence, row_is_subsession
+    from dispatch_lifecycle import DETACHED, select_launch_lifecycle
+    from dispatch_owner_input import bound_input_thread
+    from dispatch_registry_cache import registry_view
+    from owner_route_binding import CURRENT_ROUTE_STATUSES, resolve_owner_route_lifecycle
+    route = json.loads(Path(os.environ["AGENT_ROUTE_FILE"]).read_text(encoding="utf-8"))
+    capability, route_id = route.get("capability"), route["route_id"]
+    if any(hop.get("fallback_hop") == "native-subagent" and hop.get("candidates")
+           for node in route["nodes"] for hop in node.get("fallback_hops") or []):
+        raise Skip("native-stage-fallback")
+    jobs, attempt = os.environ["AGENT_DISPATCH_JOBS"], os.environ["AGENT_DISPATCH_ATTEMPT_ID"]
+    record, error = registry_view(Path(jobs)).completion_attempt(attempt)
+    meta = {**record.completion_metadata(), "_status": record.status} if record is not None and not error else {}
+    current, status = resolve_owner_route_lifecycle(jobs, owner_attempt_id=attempt)
+    if not (isinstance(capability, str) and capability.strip() and capability != "unit"
+            and route_id and os.environ.get("AGENT_ROUTE_ID") == route_id
+            and os.environ.get("AGENT_DISPATCH_COMPLETION_MODE") == "supervised" and meta.get("_status") in {"open", "running"}
+            and meta.get("harness") == "claude" and meta.get("worker_type") == "owner" and not row_is_subsession(meta)
+            and meta.get("launch_lifecycle") == DETACHED and attempt_governed_process_quiescence(meta).state == "live"
+            and (status == "owner-route-binding-absent" or status in CURRENT_ROUTE_STATUSES
+                 and current.route_file == str(Path(os.environ["AGENT_ROUTE_FILE"]).resolve()))
+            and bound_input_thread(jobs, attempt) == session and select_launch_lifecycle() == DETACHED):
+        raise Skip("not-the-supervised-owner")
+
+
+def caller(harness: str, payload: dict, session: str) -> str:
+    """`session` (a person's) or `worker` (`_supervised_owner`); `Skip` for a native subagent, any other worker
+    (the question redirect's test) or what cannot be told. A sub-session record that cannot be read counts as a
+    native subagent: nothing is certain about it."""
     import session_identity
-    return session_identity.known_sub_session_root(harness, session) != session
+    import session_tidy as tidy
+    if payload.get("agent_id") or session_identity.known_sub_session_root(harness, session) != session:
+        raise Skip("native-subagent")
+    if harness == "claude" and os.environ.get("AGENT_DISPATCH_CHILD") == "1":
+        _supervised_owner(session)
+        return "worker"
+    if tidy.is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower() in {"owner", "worker", "auxiliary", "reviewer"}:
+        raise Skip("worker")
+    return "session"
 
 
 def brief(call: dict) -> str:
@@ -377,16 +500,27 @@ def _last_json(text: str) -> dict:
     return {}
 
 
-def registered(receipt: dict) -> bool:
-    """The start receipt says Hearting holds the call: running, waiting for a worker, or already ended."""
-    return bool(receipt.get("route_id")) and (receipt.get("state") in {"running", "waiting-capacity", "completed"}
-                                              or bool(receipt.get("registered_attempts") or receipt.get("result")))
+def _stopped(receipt: dict) -> bool:
+    """A registered leg the person or its parent stopped (the start's typed cancellation receipt)."""
+    result = receipt.get("result") if isinstance(receipt.get("result"), dict) else {}
+    return bool(result.get("stopped") or result.get("cancellation_requested"))
 
 
-def start(harness: str, call: dict, depth: str, cwd: str) -> dict | None:
-    """Run the start as a session would; its receipt when Hearting holds the call, else None. The hook returns
-    once the receipt is written and never stops the start: the compose process finishes on its own."""
-    env = compose_env(harness, call["session"])
+def registered(receipt: dict, worker: bool = False) -> bool:
+    """The start receipt says Hearting holds the call: running, waiting for a worker, or already ended. A worker's
+    start that follows no attempt holds nothing: compose closed that route (`_close_unstarted_record_free`: the
+    governor's wait, or a leg stopped at a usage limit right after its registration; no later start is armed). A
+    registered leg that was stopped is held: that stop stands."""
+    held = receipt.get("state") in {"running", "completed"} or bool(receipt.get("registered_attempts"))
+    return bool(receipt.get("route_id")) and (held or (bool(receipt.get("auto_resume")) or _stopped(receipt) if worker
+                                                       else receipt.get("state") == "waiting-capacity" or bool(receipt.get("result"))))
+
+
+def start(harness: str, call: dict, depth: str, cwd: str, worker: bool = False) -> dict | None:
+    """Run the start as the caller would (a worker in its own environment); its receipt when Hearting holds the
+    call, else None. The hook returns once the receipt is written and never stops the start: the compose process
+    finishes on its own."""
+    env = dict(os.environ) if worker else compose_env(harness, call["session"])
     with tempfile.TemporaryFile() as given, tempfile.TemporaryFile() as out:
         # Files, not pipes: no write waits on the start, and a worker it launches holds nothing the harness
         # waits on.
@@ -401,18 +535,36 @@ def start(harness: str, call: dict, depth: str, cwd: str) -> dict | None:
             out.seek(0)
             receipt = _last_json(out.read().decode("utf-8", "replace"))
             if receipt.get("state") or ended:
-                return receipt if registered(receipt) else None
+                return receipt if registered(receipt, worker) else None
             time.sleep(POLL_SECONDS)
 
 
-def reason_for(receipt: dict, depth: str, harness: str = "") -> str:
-    """The refusal line: the route, and how its answer reaches this session (the receipt's own directive)."""
+def _worker_command(command: str) -> str:
+    """The receipt's `capability-route.py start …` on the owner's launch release, as its allow rules name it (the
+    string the wait's own running receipt gives again: `work_start._advance_unit`)."""
+    from parent_next_directive import worker_utility
+    if Path((argv := shlex.split(command))[1]).name != "capability-route.py" or argv[2] != "start":
+        raise ValueError(f"not a start command: {command}")
+    return worker_utility(os.environ["AGENT_HOME"], "capability-route.py", command)
+
+
+def reason_for(receipt: dict, depth: str, harness: str = "", worker: bool = False) -> str:
+    """The refusal line: the route, and how its answer reaches this session (the receipt's own directive; a
+    worker gets no completion notice, so its line gives the receipt's wait, one start window per run)."""
     waiting = receipt.get("state") == "waiting-capacity"
     head = (f"{'Queued' if waiting else 'Started'} as Hearting unit route {receipt['route_id']} ({UNIT}, {depth}, "
             "no record)." + (" It waits for a free worker and does not run natively." if waiting else ""))
     if receipt.get("state") == "completed" and str(receipt.get("summary") or "").strip():
         return f"{head} It has already finished; its answer:\n{str(receipt['summary']).strip()}\nDo not call it again."
     ended, command = receipt.get("state") == "completed" or receipt.get("result"), receipt.get("resume_command")
+    if worker and _stopped(receipt):   # stopped before its answer: nothing to read and nothing to run
+        return f"{head} It has already ended with nothing to read. Do not call it again."
+    if worker:   # no notice reaches a worker: the receipt's own command, in the form its allow rules let it run
+        run = _worker_command(command if ended else receipt.get("parent_next_command") or command + " --wait")
+        return (f"{head} It has already ended; read its result once with: {run} Do not call it again." if ended else
+                f"{head} No completion notice reaches a worker: run {run} to receive its answer. One run waits up to "
+                "nine minutes; run it again only while its receipt says running and bounded-wait. Any other receipt "
+                "says why no answer came: read it. Do not call the subagent again.")
     if ended and str(command or "").strip():
         return f"{head} It has already ended; read its result once with: {command} Do not call it again."
     if ended or receipt.get("parent_next") == "end-turn":   # ended with no command to read it: a cancelled unit
@@ -432,19 +584,18 @@ def redirect(harness: str, payload: dict) -> str | None:
     try:
         sys.path.insert(0, str(UTILITIES))
         call = normalized(harness, payload)
-        if _is_registered_worker(harness, payload, call["session"]):
-            return None
+        worker = caller(harness, payload, call["session"]) == "worker"
         depth = depth_for(harness, call)
         cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) and payload.get("cwd") else os.getcwd()
         if not os.path.isdir(cwd):
             return None
         require_shipped_definition(harness, call["name"] or DEFAULT_AGENT[harness], cwd)
-        require_sole_decision(harness, str(payload.get("tool_name") or ""), cwd)
+        require_sole_decision(harness, str(payload.get("tool_name") or ""), cwd, worker, payload.get("permission_mode"))
     except BaseException:  # noqa: BLE001 -- any doubt or failure before the start lets the native call run
         return None
     try:
-        receipt = start(harness, call, depth, cwd)
-        return None if receipt is None else reason_for(receipt, depth, harness)
+        receipt = start(harness, call, depth, cwd, worker)
+        return None if receipt is None else reason_for(receipt, depth, harness, worker)
     except BaseException:  # noqa: BLE001 -- a start that cannot be read registered nothing this hook knows of
         return None
 
