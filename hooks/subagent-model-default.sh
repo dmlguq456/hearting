@@ -1,5 +1,10 @@
 #!/bin/sh
-# PreToolUse(Agent|Task): give native Claude subagent spawns the config-declared
+# PreToolUse(Agent|Task): the native call's model policy below decides first. With
+# `--redirect`, Hearting may then take a call the policy lets through as a unit
+# route (utilities/native_subagent_redirect.py, only when that is certain; the
+# call is refused with one line naming the route). When Hearting does not, or
+# without `--redirect` (the registration of a session opened before it), the
+# native call runs as below: give native Claude subagent spawns the config-declared
 # default model tier instead of silently inheriting the interactive session
 # model (core/ADAPTATION.md §3). Injection re-emits the FULL tool_input with a
 # `model` field added. Explicit eligible pins remain untouched; inherited/fork
@@ -109,11 +114,8 @@ def agent_definition(name):
 
 
 def deny(reason):
-    print(json.dumps({"hookSpecificOutput": {
-        "hookEventName": "PreToolUse",
-        "permissionDecision": "deny",
-        "permissionDecisionReason": reason,
-    }}))
+    return {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+            "permissionDecisionReason": reason}
 
 
 def restricted_model(model, restricted):
@@ -130,27 +132,25 @@ def restricted_model(model, restricted):
 
 
 def apply_policy(tool_input):
+    """The native call's decision: a deny, the input with the model added, or None (as it is)."""
     hook_dir = os.path.dirname(os.path.realpath(__file__))
     conf = model_conf(hook_dir)
     if conf is None:
-        deny("native-subagent-model-policy-unavailable")
-        return
+        return deny("native-subagent-model-policy-unavailable")
     if "CFG_MAIN_SESSION_ONLY_MODELS" not in conf:
-        deny("native-subagent-model-policy-unavailable")
-        return
+        return deny("native-subagent-model-policy-unavailable")
     restricted = conf.get("CFG_MAIN_SESSION_ONLY_MODELS", "").split()
 
     explicit = str(tool_input.get("model") or "").strip()
     if explicit:
         if explicit.lower() == "inherit":
-            deny("native-subagent-model-inheritance-ineligible")
-        elif restricted_model(explicit, restricted):
-            deny("native-subagent-main-session-only-model")
-        return
+            return deny("native-subagent-model-inheritance-ineligible")
+        if restricted_model(explicit, restricted):
+            return deny("native-subagent-main-session-only-model")
+        return None
     subagent_type = str(tool_input.get("subagent_type") or "")
     if subagent_type == "fork":
-        deny("native-subagent-model-inheritance-ineligible")
-        return
+        return deny("native-subagent-model-inheritance-ineligible")
     # Namespaced plugin types (`plugin:agent`) resolve to the last segment.
     name = subagent_type.rsplit(":", 1)[-1]
     if name:
@@ -159,16 +159,14 @@ def apply_policy(tool_input):
             pinned = frontmatter_model(definition)
             if pinned:
                 if restricted_model(pinned, restricted):
-                    deny("native-subagent-main-session-only-model")
-                return
+                    return deny("native-subagent-main-session-only-model")
+                return None
     override = os.environ.get("CLAUDE_NATIVE_SUBAGENT_MODEL", "").strip()
     if override.lower() == "inherit":
-        deny("native-subagent-model-inheritance-ineligible")
-        return
+        return deny("native-subagent-model-inheritance-ineligible")
     if override:
         if restricted_model(override, restricted):
-            deny("native-subagent-main-session-only-model")
-            return
+            return deny("native-subagent-main-session-only-model")
         target = override
     else:
         tier = conf.get("CFG_NATIVE_SUBAGENT", "").strip()
@@ -177,14 +175,23 @@ def apply_policy(tool_input):
         tier_key = tier.upper().replace("-", "_")
         target = conf.get("CFG_TIER_%s_MODEL" % tier_key, "").strip() if tier else ""
     if not target or restricted_model(target, restricted):
-        deny("native-subagent-eligible-model-unavailable")
-        return
+        return deny("native-subagent-eligible-model-unavailable")
     updated = dict(tool_input)
     updated["model"] = target
-    print(json.dumps({"hookSpecificOutput": {
-        "hookEventName": "PreToolUse",
-        "updatedInput": updated,
-    }}))
+    return {"hookEventName": "PreToolUse", "updatedInput": updated}
+
+
+def started_as_unit_route(payload):
+    """The refusal line when the shared redirect took the call as a unit route, else None."""
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    if not os.path.isfile(os.path.join(root, "utilities", "native_subagent_redirect.py")):
+        return None
+    try:
+        sys.path.insert(0, os.path.join(root, "utilities"))
+        import native_subagent_redirect
+        return native_subagent_redirect.redirect("claude", payload)
+    except BaseException:
+        return None
 
 
 def main():
@@ -200,9 +207,17 @@ def main():
     if not isinstance(tool_input, dict):
         return
     try:
-        apply_policy(tool_input)
+        decision = apply_policy(tool_input)
     except Exception:
-        deny("native-subagent-model-policy-unavailable")
+        decision = deny("native-subagent-model-policy-unavailable")
+    # A call this policy refuses is refused as before: nothing starts for it.
+    refused = bool(decision) and decision.get("permissionDecision") == "deny"
+    if "--redirect" in sys.argv[1:] and not refused:
+        reason = started_as_unit_route(payload)
+        if reason is not None:
+            decision = deny(reason)
+    if decision:
+        print(json.dumps({"hookSpecificOutput": decision}))
 
 
 if __name__ == "__main__":
