@@ -261,7 +261,11 @@ contract). `family` is a grouping label only — no runtime team agent exists on
 harness. The native agents Hearting ships (`light`, `balanced`, `deep`,
 `general-purpose`) are the depth names of a native subagent call, which the pre-tool
 hook starts as a `general/explore` unit route on Claude and Codex
-(`core/OPERATIONS.md` §5.10c).
+(`core/OPERATIONS.md` §5.10c) only when that is certain: a person's session, the
+definition the harness picks is Hearting's shipped one or a built-in, and nothing
+else decides the call (`capabilities/unit.md`, A native subagent call). A user's own
+definition of the name, another hook or permission rule, or a worker's call runs
+natively.
 
 Role binding rules:
 

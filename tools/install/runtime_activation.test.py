@@ -3407,6 +3407,17 @@ class NativeAgentRenderTest(unittest.TestCase):
     def lines(self, report):
         return "\n".join(report.get("report_lines", []))
 
+    def opencode_preflight(self):
+        """`preflight.sh headless --check` against this home, with a stand-in `opencode` on PATH."""
+        stub = self.root / "bin" / "opencode"
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub.write_text("#!/bin/sh\necho 2.0.32\n", encoding="utf-8")
+        stub.chmod(0o755)
+        env = {**os.environ, "PATH": f"{stub.parent}{os.pathsep}{os.environ.get('PATH', '')}",
+               "AGENT_HOME": str(REPO_ROOT)}
+        return subprocess.run(["sh", str(REPO_ROOT / "adapters/opencode/bin/preflight.sh"), "headless", "--check",
+                               str(REPO_ROOT)], env=env, capture_output=True, text=True, timeout=600)
+
     # -- T1 / T6: the verify condition ---------------------------------------
     def test_all_three_adapters_follow_the_user_models_and_never_touch_shipped_files(self):
         before = self.shipped_snapshot()
@@ -3526,6 +3537,40 @@ class NativeAgentRenderTest(unittest.TestCase):
                 for name in self.CATALOG:
                     self.assertIn(f"native agent {name} withheld", text)
                 self.assertEqual(report["freshness"], "fresh", report)
+                if runtime == "codex":  # the mode files are still applied beside no agent file
+                    self.assertTrue((self.home("codex") / "agent-modes/plan/frame.md").is_symlink())
+                if runtime == "opencode":
+                    check = self.opencode_preflight()
+                    self.assertIn("check=ok", check.stdout, check.stdout + check.stderr)
+
+    # -- T3a: an empty agent surface is not the policy's unless the plan says so (review 🔴2) ------
+    def test_a_plan_that_lost_its_rows_or_a_home_that_lost_its_files_is_not_fresh(self):
+        real_run = subprocess.run
+
+        def empty_plan(argv, *args, **kwargs):  # a renderer answering with a valid but empty envelope
+            if any(str(part).endswith("sync-native-agents.py") for part in argv[:2]):
+                return subprocess.CompletedProcess(argv, 0, json.dumps(
+                    {"schema": "hearting.native-agents/v1", "agents": [], "static_names": []}), "")
+            return real_run(argv, *args, **kwargs)
+        for runtime in ("codex", "claude", "opencode"):
+            with self.subTest(runtime):
+                activation.activate(runtime, "linked", str(REPO_ROOT))
+                activation._NATIVE_AGENT_PLANS.clear()
+                with mock.patch.object(activation.subprocess, "run", side_effect=empty_plan):
+                    with self.assertRaisesRegex(activation.ActivationError, "activation surfaces: agent"):
+                        activation.refresh(runtime)     # Codex: its mode files do not stand in
+                    self.assertEqual(activation.status(runtime)["freshness"], "missing")
+                activation._NATIVE_AGENT_PLANS.clear()
+                self.assertTrue((self.home(runtime) / "agents" / f"deep{self.EXT[runtime]}").exists())
+                for name in self.CATALOG:               # the plan is whole; the home lost its files
+                    # destructive-ok: reason=simulate a home that lost its projected agent files; boundary=agent leaves this test's activation wrote in its private runtime home
+                    self.agent(runtime, name).unlink()
+                self.assertEqual(activation.status(runtime)["freshness"], "missing")
+                if runtime == "opencode":
+                    check = self.opencode_preflight()
+                    self.assertNotEqual(check.returncode, 0, check.stdout)
+                    self.assertIn("reason=opencode-native-agents-missing", check.stdout)
+                self.assertEqual(activation.refresh(runtime)["freshness"], "fresh")
 
     # -- T3b: catalog entries removed from the selected config ---------------
     def test_catalog_entries_missing_from_the_selected_config_leave_no_definition(self):
@@ -3614,44 +3659,78 @@ class NativeAgentRenderTest(unittest.TestCase):
         self.assertIn(str(deep), report["preserved"])
 
     # -- a definition this source no longer ships (memory-scout) -------------
-    def test_reactivation_removes_a_retired_definition_and_keeps_a_user_edited_one(self):
+    def test_reactivation_removes_a_retired_definition_only_on_its_exact_record(self):
         old_source = self.root / "older-release"
+        (old_source / "harness-manifest.json").parent.mkdir(parents=True, exist_ok=True)
+        (old_source / "harness-manifest.json").write_text("{}\n", encoding="utf-8")
         for runtime in ("claude", "codex", "opencode"):
             with self.subTest(runtime):
                 activation.activate(runtime, "linked", str(REPO_ROOT))
                 # What an older release's activation left: a link to its file (Claude,
                 # OpenCode) or an activation-owned file (Codex), recorded as owned.
-                # The user then edited the second one.
+                # The user then edited one, pointed one at another file of the activated
+                # source, and linked one more to an older release's file with no record.
                 state = activation._load_json(activation._state_path(runtime))
-                for name in ("memory-scout", "old-helper"):
+                for name in ("memory-scout", "old-helper", "relinked", "handmade"):
                     left = self.agent(runtime, name)
                     self.assertFalse(left.exists() or left.is_symlink(), f"this source projects {name}")
-                    shipped = old_source / runtime / left.name
+                    shipped = old_source / "adapters" / runtime / "agents" / left.name
                     shipped.parent.mkdir(parents=True, exist_ok=True)
                     shipped.write_text(f"old {name}\n", encoding="utf-8")
-                    if runtime == "codex":
+                    if runtime == "codex" and name in ("memory-scout", "old-helper"):
                         left.write_text(f"old {name}\n", encoding="utf-8")
                         record = activation._entry(shipped, left, "agent", kind="render")
                         record["content_sha256"] = hashlib.sha256(left.read_bytes()).hexdigest()
                     else:
                         left.symlink_to(shipped)
                         record = activation._entry(shipped, left, "agent")
-                    state["owned_paths"].append(record)
+                    if name != "handmade":
+                        state["owned_paths"].append(record)
                 activation._atomic_json(activation._state_path(runtime), state)
-                edited = self.agent(runtime, "old-helper")
-                # destructive-ok: reason=replace the fixture's own planted leaf with the user's edit; boundary=one agent leaf this test created in its private runtime home
-                edited.unlink()
+                edited, relinked, handmade = (self.agent(runtime, name)
+                                              for name in ("old-helper", "relinked", "handmade"))
+                # destructive-ok: reason=replace the fixture's own planted leaves with the user's changes; boundary=two agent leaves this test created in its private runtime home
+                for leaf in (edited, relinked):
+                    leaf.unlink()
                 edited.write_text("my own helper\n", encoding="utf-8")
+                relinked.symlink_to(REPO_ROOT / "README.md")
                 report = activation.refresh(runtime)
                 scout = self.agent(runtime, "memory-scout")
                 self.assertFalse(scout.exists() or scout.is_symlink(), scout)
                 self.assertEqual(edited.read_text(encoding="utf-8"), "my own helper\n")
-                self.assertIn(str(edited), report["preserved"])
-                # destructive-ok: reason=retire the fixture's kept file before deactivating; boundary=one agent leaf this test created in its private runtime home
-                edited.unlink()
+                self.assertEqual(Path(os.readlink(relinked)), REPO_ROOT / "README.md")
+                self.assertTrue(handmade.is_symlink())
+                self.assertEqual(sorted(report["preserved"]), sorted([str(edited), str(relinked)]))
+                self.assertEqual(report["freshness"], "duplicate", report)
+                self.assertIn(f"unmanaged-extra:agents/{handmade.name}", report["duplicate_sources"])
+                self.assertIn(f"user-changed:agents/{relinked.name}", report["duplicate_sources"])
+                status = activation.status(runtime)
+                self.assertEqual((status["freshness"], status["preserved"]),
+                                 ("duplicate", report["preserved"]))
+                # destructive-ok: reason=the user removes the kept leaves before deactivating; boundary=three agent leaves this test created in its private runtime home
+                for leaf in (edited, relinked, handmade):
+                    leaf.unlink()
+                self.assertEqual(activation.status(runtime)["freshness"], "fresh")
                 self.assertEqual(sorted(self.installed_agents(runtime)),
                                  sorted(f"{name}{self.EXT[runtime]}" for name in self.CATALOG))
                 activation.deactivate(runtime)
+
+    def test_a_link_no_activation_recorded_is_named_and_left_in_place(self):
+        old_source = self.root / "older-release"
+        target = old_source / "adapters/codex/agents/handmade.toml"
+        target.parent.mkdir(parents=True)
+        target.write_text('name = "handmade"\n', encoding="utf-8")
+        (old_source / "harness-manifest.json").write_text("{}\n", encoding="utf-8")
+        activation.activate("codex", "linked", str(REPO_ROOT))
+        self.agent("codex", "handmade").symlink_to(target)
+        status = activation.status("codex")
+        self.assertEqual(status["freshness"], "duplicate")
+        self.assertIn("agents/handmade.toml", status["next_action"])
+        self.assertNotIn("runtime activate", status["next_action"])
+        activation.refresh("codex")
+        self.assertTrue(self.agent("codex", "handmade").is_symlink())
+        activation.deactivate("codex")
+        self.assertTrue(self.agent("codex", "handmade").is_symlink())
 
     # -- T5 ------------------------------------------------------------------
     def test_deactivate_removes_rendered_files_and_keeps_user_files(self):

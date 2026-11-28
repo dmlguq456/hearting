@@ -229,9 +229,10 @@ opencode_runtime_projection_check() {
     printf 'check=failed\nreason=opencode-hearting-missing\nopencode_home=%s\nexpected=%s\n' "$opencode_home" "$harness"
     return 69
   fi
-  # The command below is the projection liveness probe. No agent is: the native
-  # agents left (light, balanced, deep, general-purpose) are withheld when the
-  # selected models.conf makes their model main-session-only.
+  # The command below is the projection liveness probe; the native agents are
+  # checked against the activation's own plan in the Python step (the depth
+  # agents are withheld when the selected models.conf makes their model
+  # main-session-only, so no fixed agent file can stand in).
   native_command="$opencode_home/commands/autopilot-code.md"
   [ -f "$native_command" ] || native_command="$opencode_home/command/autopilot-code.md"
   if [ ! -f "$native_command" ]; then
@@ -259,10 +260,21 @@ for filename in scan:
             issues.append(f"opencode-runtime-projection-exposes-claude-surface: {filename}")
     except (OSError, UnicodeError):
         issues.append(f"guard dependency unreadable: {filename}")
+# The agent part of the judgment `runtime status` makes: every agent file the plan for this home
+# expects is in place (a plan whose models.conf withholds every agent expects none).
+agents = []
+if state.get("mode"):
+    try:
+        planned = runtime_activation._desired_entries("opencode", state["mode"], pathlib.Path(state["source_root"]),
+                                                      root, state.get("active_revision"), "global")
+        if runtime_activation._entries_healthy([e for e in planned if e["surface"] == "agent"])[0]:
+            agents.append("an agent file the plan expects is missing")
+    except (KeyError, runtime_activation.ActivationError) as exc:
+        agents.append(str(exc))
 print(f"guard_layout={layout['detail']}")
-if issues:
-    print("check=failed\nreason=opencode-guard-projection-invalid")
-    print("detail=" + "; ".join(issues))
+if issues or agents:
+    print("check=failed\nreason=" + ("opencode-guard-projection-invalid" if issues else "opencode-native-agents-missing"))
+    print("detail=" + "; ".join(issues or agents))
     sys.exit(1)
 PY
   then

@@ -420,8 +420,10 @@ portable role names only — they have no Claude `model:` frontmatter. The forme
 per-team agent files (plan-team, dev-team, qa-team, and the other five) were
 removed in the unit-catalog migration, and the hand-written `memory-scout` helper was
 retired on 2026-11-28: `adapters/claude/agents/` holds only the generated depth names
-(`light`, `balanced`, `deep`, `general-purpose`), and a call naming `memory-scout` starts a
-light `general/explore` unit route while nothing defines that name (next section). A spawn
+(`light`, `balanced`, `deep`, `general-purpose`). A call naming `memory-scout` starts a
+light `general/explore` unit route only under the next section's conditions (a person's
+session, nothing defines that name, no other hook or rule decides the call); a definition
+the user kept under that name, in any YAML form, runs natively. A spawn
 that names none of them resolves its model through the native-subagent default below.
 
 ## A Native Subagent Call Becomes a Unit Route (H1)

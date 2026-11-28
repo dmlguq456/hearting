@@ -347,6 +347,44 @@ class DefinitionTest(Homes):
         self.write(self.project / ".codex/agents/scout.toml", 'name = "memory-scout"\ndescription = "p"\n')
         self.assertFalse(self.check("codex", "memory-scout"))
 
+    def test_a_name_read_as_yaml_in_the_home_or_a_project_is_the_user_s_definition(self):
+        # Quotes and escapes are undone as the harness reads YAML (review 🔴3): the user picked this one.
+        self.register("claude")
+        payload = {**claude(subagent_type="memory-scout"), "cwd": str(self.project)}
+        for text in ('---\nname: "memory\\u002Dscout"\ndescription: Mine\n---\nMine.\n',
+                     '---\nname: "memory\\x2dscout"\ndescription: Mine\n---\nMine.\n',
+                     "---\n'name': 'memory-scout'\ndescription: Mine\n---\nMine.\n"):
+            for folder in (self.claude_home / "agents", self.project / ".claude/agents"):
+                with self.subTest(text=text, folder=folder.parent.name):
+                    mine = self.write(folder / "alternative-filename.md", text)
+                    self.assertFalse(self.check("claude", "memory-scout"))
+                    with mock.patch.object(redirect, "start") as start, \
+                            mock.patch.object(session_identity, "known_sub_session_root", return_value=SID):
+                        self.assertIsNone(redirect.redirect("claude", payload))
+                    start.assert_not_called()
+                    mine.unlink()
+        self.assertTrue(self.check("claude", "memory-scout"))             # nothing defines it
+        self.write(self.codex_home / "agents/other.toml", 'name = "memory\\u002Dscout"\ndescription = "m"\n')
+        self.assertFalse(self.check("codex", "memory-scout"))             # Codex reads its TOML as TOML
+
+    def test_a_definition_that_cannot_be_read_leaves_the_call_native(self):
+        # Not knowing whether a file defines the name is not knowing that nothing does (R37).
+        self.register("claude")
+        payload = {**claude(subagent_type="memory-scout"), "cwd": str(self.project)}
+        for folder in (self.claude_home / "agents", self.project / ".claude/agents"):
+            for data in (b"---\nname: [memory\ndescription: x\n---\nx\n",     # not YAML
+                         b"---\nname: other\ndescription: \xff\n---\nx\n"):  # not UTF-8
+                with self.subTest(folder=folder.parent.name, data=data):
+                    folder.mkdir(parents=True, exist_ok=True)
+                    (folder / "broken.md").write_bytes(data)
+                    self.assertFalse(self.check("claude", "memory-scout"))
+                    with mock.patch.object(redirect, "start") as start, \
+                            mock.patch.object(session_identity, "known_sub_session_root", return_value=SID):
+                        self.assertIsNone(redirect.redirect("claude", payload))
+                    start.assert_not_called()
+                    (folder / "broken.md").unlink()
+        self.assertTrue(self.check("claude", "memory-scout"))
+
     def test_the_redirect_starts_nothing_for_a_collision(self):
         self.ship("claude", "light")
         self.write(self.project / ".claude/agents/light.md", "---\nname: light\n---\nMine.\n")

@@ -180,15 +180,21 @@ def _is_shipped(harness: str, path: Path, name: str) -> bool:
 
 def _gives(harness: str, path: Path, name: str) -> bool:
     """The definition file can give the agent `name`. Hearting's own file gives its own name; Codex reads the
-    TOML `name` (the file name without one); any other Claude file counts when the name stands anywhere in
-    its frontmatter, so a comment, quotes or another YAML form cannot hide it."""
+    TOML `name` (the file name without one); any other Claude file counts when its YAML frontmatter `name`
+    (read as YAML, so quotes and escapes are undone; the file name without one) is it, or when the name stands
+    anywhere in that frontmatter. A file that cannot be read or parsed raises: not certain, so native."""
     if _is_shipped(harness, path, path.stem):
         return path.stem == name
     text = path.read_text(encoding="utf-8")
     if harness == "codex":
         found = tomllib.loads(text).get("name", path.stem)
         return isinstance(found, str) and found.strip() == name
-    return re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text.split("\n---", 1)[0]) is not None
+    import yaml  # PyYAML, the parser Hearting already requires (route proposals, the manifest's frontmatter)
+    head = text.split("\n---", 1)[0]
+    front = yaml.safe_load(head[3:]) if text.startswith("---") else None
+    found = front.get("name", path.stem) if isinstance(front, dict) else path.stem
+    return ((isinstance(found, str) and found.strip() == name)
+            or re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", head) is not None)
 
 
 def _definitions(harness: str, cwd: str, name: str) -> tuple[list[Path], list[Path]]:

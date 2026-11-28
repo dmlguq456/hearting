@@ -265,6 +265,18 @@ PY
   fi
   # destructive-ok: reason=restore the simulated missing package; boundary=exact rendered package in this fixture's private runtime home
   mv "$guard_package.fixture-missing" "$guard_package"
+  # The agent part of the status judgment: a home that lost the agent links its plan expects fails.
+  mkdir -p "$TMP/$mode-agents-aside"
+  # destructive-ok: reason=simulate a home that lost its agent links; boundary=agent leaves this fixture's activation projected in its private runtime home
+  mv "$HOME/.config/opencode/agents/"*.md "$TMP/$mode-agents-aside/"
+  if AGENT_HOME="$ROOT" "$ROOT/adapters/opencode/bin/preflight.sh" headless --check "$ROOT" \
+    > "$TMP/$mode-opencode-missing-agents.log" 2>&1; then
+    fail "$mode OpenCode preflight accepted a home that lost its agent links"
+  fi
+  grep -q '^reason=opencode-native-agents-missing$' "$TMP/$mode-opencode-missing-agents.log" \
+    || { cat "$TMP/$mode-opencode-missing-agents.log" >&2; fail "$mode OpenCode preflight reason for lost agents"; }
+  # destructive-ok: reason=restore the simulated lost agent links; boundary=agent leaves moved aside just above
+  mv "$TMP/$mode-agents-aside/"*.md "$HOME/.config/opencode/agents/"
   if [ "$mode" = packaged ]; then
     guard_module=$(python3 - "$TMP/$mode-status.json" <<'PY'
 import json, pathlib, sys
@@ -300,7 +312,66 @@ assert data["exit"] == 0, data
 PY
 }
 
+# assert_retired_agents <mode> — what this activation no longer wants is removed only on
+# its exact record: a recorded link or rendered file goes, a recorded link the user
+# pointed elsewhere and a link no activation recorded stay and are named.
+assert_retired_agents() {
+  mode=$1
+  python3 - "$ROOT" "$TMP/older-release" <<'PY' || fail "$mode planting retired agents"
+import hashlib, sys
+from pathlib import Path
+root, old = Path(sys.argv[1]), Path(sys.argv[2])
+sys.path.insert(0, str(root / "tools/install"))
+import runtime_activation as activation
+old.mkdir(parents=True, exist_ok=True)
+(old / "harness-manifest.json").write_text("{}\n")
+for runtime, ext in (("claude", ".md"), ("codex", ".toml"), ("opencode", ".md")):
+    state = activation._load_json(activation._state_path(runtime))
+    agents = activation.paths.runtime_home(runtime) / "agents"
+    for name in ("old-scout", "relinked", "handmade"):
+        left, shipped = agents / f"{name}{ext}", old / "adapters" / runtime / "agents" / f"{name}{ext}"
+        shipped.parent.mkdir(parents=True, exist_ok=True)
+        shipped.write_text(f"old {name}\n")
+        if runtime == "codex" and name == "old-scout":
+            left.write_text(f"old {name}\n")
+            record = activation._entry(shipped, left, "agent", kind="render")
+            record["content_sha256"] = hashlib.sha256(left.read_bytes()).hexdigest()
+        else:
+            left.symlink_to(Path(state["active_root"]) / "README.md" if name == "relinked" else shipped)
+            record = activation._entry(shipped, left, "agent")
+        if name != "handmade":
+            state["owned_paths"].append(record)
+    activation._atomic_json(activation._state_path(runtime), state)
+PY
+  harness runtime refresh --runtime all --json > "$TMP/$mode-retire.json" || true
+  python3 - "$TMP/$mode-retire.json" <<'PY' || { cat "$TMP/$mode-retire.json" >&2; fail "$mode retired agents"; }
+import json, sys
+from pathlib import Path
+for row in json.load(open(sys.argv[1]))["runtimes"]:
+    ext = ".toml" if row["runtime"] == "codex" else ".md"
+    agents = Path(row["model_config_path"]).parents[1] / "agents"
+    scout, relinked, handmade = (agents / f"{name}{ext}" for name in ("old-scout", "relinked", "handmade"))
+    assert not (scout.exists() or scout.is_symlink()), scout
+    assert relinked.is_symlink() and handmade.is_symlink(), row
+    assert row["preserved"] == [str(relinked)], row
+    assert row["freshness"] == "duplicate", row
+    assert f"user-changed:agents/relinked{ext}" in row["duplicate_sources"], row
+    assert f"unmanaged-extra:agents/handmade{ext}" in row["duplicate_sources"], row
+PY
+  for agents in "$HOME/.claude/agents" "$CODEX_HOME/agents" "$HOME/.config/opencode/agents"; do
+    # destructive-ok: reason=the user removes the two links activation kept; boundary=two agent leaves this function planted in the fixture's private runtime homes
+    rm -f "$agents/relinked.md" "$agents/relinked.toml" "$agents/handmade.md" "$agents/handmade.toml"
+  done
+  harness runtime status --runtime all --json > "$TMP/$mode-retired-status.json"
+  python3 - "$TMP/$mode-retired-status.json" <<'PY' || fail "$mode status after the user removed kept links"
+import json, sys
+for row in json.load(open(sys.argv[1]))["runtimes"]:
+    assert row["freshness"] == "fresh", row
+PY
+}
+
 assert_projection linked
+assert_retired_agents linked
 
 # The source install path (`harness install`, projector) still links each shipped
 # Codex agent; its plan names every one of them, by name, as a link to the source.
@@ -339,6 +410,7 @@ sha256sum \
 
 stat -c '%n %y' "$HOME/.claude/agent-config/models.conf" "$HOME/.codex/agent-config/models.conf" "$HOME/.config/opencode/agent-config/models.conf" > "$TMP/user-model-config.mtime"
 assert_projection packaged
+assert_retired_agents packaged
 stat -c '%n %y' "$HOME/.claude/agent-config/models.conf" "$HOME/.codex/agent-config/models.conf" "$HOME/.config/opencode/agent-config/models.conf" > "$TMP/user-model-config.after-mtime"
 cmp "$TMP/user-model-config.mtime" "$TMP/user-model-config.after-mtime" || fail "packaged reapply changed model config mtime"
 sha256sum -c "$TMP/user-model-config.sha256" >/dev/null \
@@ -383,9 +455,10 @@ assert "--profile" not in row["next_action"], row
 assert f"--source {sys.argv[1]}" in row["next_action"], row
 PY
 
-# A reactivation reports and removes an untracked native link left by an older
-# all-capabilities installer, while preserving unrelated user entries. The
-# duplicate-source prefix is `unmanaged-extra:` (renamed from `profile-extra:`).
+# An untracked native link to a harness file (an older all-capabilities installer's,
+# or one the user made: nothing tells them apart) is reported and left in place by
+# a reactivation, as are unrelated user entries. The duplicate-source prefix is
+# `unmanaged-extra:` (renamed from `profile-extra:`).
 ln -s "$ROOT/adapters/codex/agents/external-adversary.toml" \
   "$HOME/.codex/agents/legacy-external.toml"
 printf '%s\n' 'user-owned' > "$HOME/.codex/agents/user-owned.toml"
@@ -395,19 +468,23 @@ import json, sys
 row = json.load(open(sys.argv[1]))
 assert row["freshness"] == "duplicate", row
 assert "unmanaged-extra:agents/legacy-external.toml" in row["duplicate_sources"], row
+assert "agents/legacy-external.toml" in row["next_action"], row
+assert "runtime activate" not in row["next_action"], row
 PY
 
-harness runtime activate --runtime codex --mode linked --source "$ROOT" --json > "$TMP/reactivate.json"
+harness runtime activate --runtime codex --mode linked --source "$ROOT" --json > "$TMP/reactivate.json" || true
 python3 - "$TMP/reactivate.json" <<'PY'
 import json, sys
 row = json.load(open(sys.argv[1]))
 assert "profile" not in row, row
-assert row["freshness"] == "fresh", row
+assert row["freshness"] == "duplicate", row
 PY
-test ! -e "$HOME/.codex/agents/legacy-external.toml" \
-  || fail "reactivation retained a legacy harness agent"
+test -L "$HOME/.codex/agents/legacy-external.toml" \
+  || fail "reactivation removed a harness link no activation recorded"
 test -f "$HOME/.codex/agents/user-owned.toml" \
   || fail "reactivation removed a user-owned agent"
+# destructive-ok: reason=the user removes the link they did not make, as status asks; boundary=the one link planted just above in the fixture's private Codex home
+rm "$HOME/.codex/agents/legacy-external.toml"
 
 # [C6.6] Legacy activation state read-compat: an activation.json still
 # carrying the six retired `profile*` fields must not break status, strict
