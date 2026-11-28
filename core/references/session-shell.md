@@ -408,16 +408,20 @@ cut with `…` within that row and absent without a Git reading; Fleet's own Git
 words are unchanged. Beside the
 native area one empty row then parts the repository, Git and peers from the model
 (without Git, the repository from the model);
-model and effort, then `context` with its gauge and percent (two rows beside
+model and effort, then `context` with its gauge and percent (one row beside
 the native area, one `│`-separated row with the repo row at the bottom). Beside
-the native area these two rows take the same dim labels, `MODEL` and `CTX`
-(`MODEL  Fable 5.2 high`, `MODEL  Checking` before the model is known;
-`CTX    ━━━━──── 41%`, the label standing for the word `context`); short of
-cells the model name is cut with `…` and the effort stays whole, and narrower
-than 30 cells inside they go with the other labels;
+the native area the row takes the dim label `MODEL` (`MODEL  Fable 5.2 high  ━━━━────── 41%`,
+`MODEL  Checking` before the model is known) and the context gauge and percent end it at the right edge, in their level's color,
+with no row and no word of its own (11-27, the person: "패널에서 MODEL + CTX를 그냥 한줄로 고치자. CTX 단어도 필요 없을듯. 라우팅이랑
+일관성을 맞추자는것", then "게이지는 놔두고"). Short of cells the identity gives up whole words first, in the route doers' order
+(the effort, then the runtime; this row names none), then the gauge shortens (ten cells down to five, each at Fleet's own fill),
+then the model name is cut with `…` beside the five-cell gauge while six cells of it stand, and only where no gauge can stand
+(narrower than the side panel's 32 cells) does the percent stand alone; with no reading nothing stands there. The route box's
+owner and worker rows keep their own rule (below: the five-cell gauge from 50 panel cells, the percent alone narrower). OpenCode's
+MCP count and cost take the row under it, in the value column. Narrower than 30 cells inside the label goes with the other labels;
 running jobs and the repo's open work (`◌ N open · headline`, giving way with
 the jobs). Beside the native area no rule parts the metadata from this session's content any more
-(11-22, the person: "두칸이 아니라 한칸만 띄우도록 하자 그러면": the line between CTX and TITLE is gone); the SESSION head's rule
+(11-22, the person: "두칸이 아니라 한칸만 띄우도록 하자 그러면": the line that stood between CTX and TITLE is gone); the SESSION head's rule
 (the thin `─` in the messages rules' color, in every state; 11-26, panel B: the head is that rule alone, no word) is the line `rule motion` moves: under the default `rule motion` a light
 passes over it while the session runs (above), otherwise it stands still (the session's state is told by the outer frame and the head's state
 glyph). The
@@ -467,7 +471,7 @@ at no height is a BACKLOG row left short while an empty row is left). B's rows u
 the messages (one row each, as many as stood before), the SESSION rule over MODEL's own row (where the head had taken MODEL's row, below), the
 BACKLOG items the person ranked (the last go first short of rows), then the rule over the equipment (below: a rule gives way before what is read,
 as the rule above the last row always did); what is left stands empty above MESSAGES, where the panel's free rows stand. So NOW, QUESTIONS, the
-route box, PEERS, MODEL, CTX, TITLE, MEM, RESOURCES, USAGE, the notices and the last row have the rows, the places and the form they have without
+route box, PEERS, MODEL, TITLE, MEM, RESOURCES, USAGE, the notices and the last row have the rows, the places and the form they have without
 B, and none has more; a message that had folded stays folded. Where the two heads do not stand the REPO row ends in the two buttons,
 `STATUS 5 ›  BACKLOG +139 ›` (11-26, fix 1 of #1863: the numbers mean what the heads' do, STATUS the board's whole count without `+`, none for zero,
 BACKLOG `+N` every item of the document, none drawn). They give way as step 3 of the repository row's one order (above): beside the counted
@@ -481,7 +485,7 @@ rest of the row opens the status popup). The two parts' items come with the stat
 where a document changed (the host sends the documents' path, modification time, size, inode and change time back as `have` and, for the backlog,
 the folder it was read for; an unchanged one is neither read nor parsed again); the panel's drawing reads no file. SESSION is this session's: its
 head (11-26, panel B) is one rule without a word across the row, standing where the empty row between the two groups of metadata stood; then
-MODEL, CTX, TITLE, NOW (one cell in), QUESTIONS, the route box, MESSAGES, MEM. Short of rows, where the head used to take MODEL's value and row
+MODEL (its context gauge and percent at the right end, 11-27), TITLE, NOW (one cell in), QUESTIONS, the route box, MESSAGES, MEM. Short of rows, where the head used to take MODEL's value and row
 (`SESSION Opus 5.5 xhigh ────`), MODEL stands on its own row and the rule over it takes one of the rows B left (above); where none is left the rule
 goes and MODEL stands alone. Beside RESOURCES (11-26, panel B): one still rule without a word right above the `RESOURCES` name (above `USAGE`
 where the equipment's rows are all folded), in a section head's rule color; the names keep their place and shape. **The line forms (11-22, the
@@ -490,7 +494,7 @@ person chose the one-cell indent over the two-cell draft; 11-26, panel B):**
 | Layer | Form | Where |
 |---|---|---|
 | Group head | REPO: its row, the dim label in the labels' column; SESSION: one rule without a word | REPO, SESSION |
-| Dependent row | one cell in | PEERS, STATUS, BACKLOG (under REPO); MODEL, CTX, TITLE, NOW (under SESSION) |
+| Dependent row | one cell in | PEERS, STATUS, BACKLOG (under REPO); MODEL, TITLE, NOW (under SESSION) |
 | Dependent's item | one cell more (two in all) | the BACKLOG items |
 | Activity | rounded box, `›` at the right end of its top line (`╭─ 3 QUESTIONS ───── ›─╮`) | QUESTIONS, ROUTE |
 | Lower section | the name alone (no rule) and `›` at the right end; an item one cell in, one row | MESSAGES, MEM (RESOURCES and USAGE: the name alone, no `›`, their rows as they were, RESOURCES folded to one row a host until its head is pressed; one rule over them) |
@@ -610,29 +614,28 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   staying), the chain of kinds it
   continues leading it (`frame ✓ → code(team·standard)`: what is behind dim with `✓`, this one bold;
   `research ✓ → draft ✓ → code(team·standard)`), then its title two cells in on at most two rows
-  (the second ending in `…`), then the owner two cells in (the mark, the doer's recorded role as
-  a dim label in one column, then harness, model and effort, no tool: `● owner  claude Opus 5.5 xhigh`; 11-18, the person:
-  "CTX는 게이지를 포함해서 아래줄로 내리자. 그리고 NOW를 두줄까지는 허용치를 늘려주고 (owner, worker 둘다)": under it, four
-  cells in, its `CTX ━━━━━───── 41%` row (the gauge at the panel's width and its number, then ` · 12m` only where the time is that
-  session's own: a worker's, never the owner's, whose time is the route's and stands at the end of the route's first row; short of
-  cells the gauge narrows to the number, then the time, then the word `CTX` go), under that the session's NOW on at most two rows
+  (the second ending in `…`), then the owner two cells in (the mark, the doer's recorded role as a dim label, then harness,
+  model and effort). In the expanded side panel, the owner's and workers' CTX values end in one column at the right edge of
+  the workers' content, inside the border of a closed box. At 50 panel cells and wider the percent has a five-cell gauge.
+  Narrower panels show the percent alone. Short of cells, effort goes first, then the harness, then the model is shortened.
+  Under it the session's NOW stands on at most two rows
   four cells in (the value Fleet's session rows carry for that session, handed over by the cache producer from the job it already
   read: no read of its own; broken between words, a word wider than a row by cells so no row is wider than the box; the second row
-  ends in `…` where it runs over; none, no row, where the session has none; a session whose values are not known leads its `CTX`
-  row with its mark), and, for a route with a stage list, the stage line (`staged 3/7: execute`,
+  ends in `…` where it runs over, with no row where the session has no NOW), and, for a route with a stage list, the stage line (`staged 3/7: execute`,
   `map-reduce 2/3: analyze`: the route's own shape word, none when the record names none, then the
   position; a failed stage keeps `✕`, a done one `✓`; with no stage running the next stage and
   what it waits for). A route whose owner is not known keeps its `CTX` row; its time is on the first row.
   The owner's mark spins while it works alone and is a dim `●` while its workers run. A route its owner
   does alone has no stage line. An owner's live workers (`workers_live`) stand under it, each as a session of its own
-  (its first row with its mark, `worker`, harness, model and effort; its `CTX ━━──────── 22% · 12m` row; its NOW on up to two
-  rows; the stage name and the open tool are not drawn: the stage line has the stage, 11-16's stage color is that line's).
+  (its mark, `worker`, harness, model, effort and right-aligned context, then its NOW on up to two rows). The worker's time
+  ends the last NOW row. With no NOW it stands before the context on the first row. With no context the worker's time ends
+  the first row when it fits. The stage line carries the stage name and its color.
   11-18, the person: "worker 부를떄 stage ~ 부분을 블록의 상단에 그려서 그냥 worker는 박스에 넣어도 되겠는데?" / "박스 여부는 내가
   골라가면서 볼 수 있게 그냥 옵션에 좀 넣어줘": the setting `worker box` (`closed`, the default; `open`; `none`, in the settings editor
   and `session-shell.json` as `worker_box`, previewed at once and saved with Apply) puts the workers of the route's stage in one box
   under the owner, two cells in, the stage text (`staged 3/6: execute`, the current stage's name blinking as it did) on its top
   line and no stage row apart: `closed` has four dim borders (the right one in one column whatever the text's widths), `open`
-  only the top line and the left side, `none` the stage row and the workers hung by `↳` four cells in (their `CTX` and NOW eight
+  only the top line and the left side, `none` the stage row and the workers hung by `↳` four cells in (their NOW eight
   cells in), as before. A route with no workers has no box: its stage text is on its first line (`· 3/6: execute`) where the name has room there, and where it does not (the default width among them) its stage row `staged 3/6: execute` stands under the owner (11-18, round 5); a frame route's legs have none either. Where the closed
   box's text would be under 24 cells wide it is the open one; short of rows its closing line goes first. A frame route has no owner yet: `● frame → ??`, its two legs (`frame`,
   `frame-alt`) hung straight under it two cells in, and, once both are done and the direction
@@ -642,9 +645,9 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   stage line stands (so no `●` follows it), else the first row's mark. The role column is the
   route's own width. Short of cells the values go from the back, whole: the chain behind, then the
   intensity (`● code`), the stage line's word `staged` (`3/7: execute`), effort, the
-  harness; the role and the model stay. Short of rows, in this order: the closed box's closing line, each NOW's second row, each
-  `CTX` row (its number joins the session's first row at the right edge, the one-row fold), each NOW's first row, then the stage line
-  goes (the workers' count, `· worker 2`, ends it), then the workers go, then every route takes one row.
+  harness. Short of rows, the closed box's closing line goes first, then each NOW's second row, then any separate `CTX` rows.
+  When each NOW's first row goes, owner and worker lines take their existing one-row form with its percent and time columns.
+  Then the stage line goes (the workers' count, `· worker 2`, ends it), then the workers go, then every route takes one row.
   A request (11-16, the person: "양식을 맞추자. [6c] claude opus 5.5 xhigh 이런식으로") reads as a
   route's doer: beside the native area its first row is its mark (→ sent, ← received, `✓`/`✕`
   closed; 11-27, the person: "방향만 다르면 화살표 방향만 반대로 하면 되는걸 왜 삼각형을써? 메시지는 안그러잖아":
@@ -744,18 +747,18 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   fetched, and a change to any of the three records redraws the section where the 5h/7d row was redrawn. The last row
   carries the gear and the fold button at its right end; the last harness's row stands there while it fits beside them,
   else it keeps the row above and the buttons stand alone. Every harness window shows the same three rows. 11-27 (the person:
-  "USAGES는 좀 더 이쁘게 행과열을 맞추고"; of the design's two, "USAGE 공통 열"): the three rows share one set of columns, chosen once from
-  the windows any of the three reports (the windows of time in their order, then the model windows in the order seen; a row that gives
+  "USAGES는 좀 더 이쁘게 행과열을 맞추고"; of the design's two, "USAGE 공통 열"): where the three rows report the same windows (11-28, the
+  person on v4.81.0: "usage에 상태 파악해라 진짜 최악이네": the windows of time by name and order, the model windows by name; no window a
+  harness does not report is drawn as `?`), they share one set of columns, chosen once from those windows (the windows of time in their order, then the model windows in the order seen; a row that gives
   way for rows moves no column; 11-28, review of #1911: which window is a window of time and which a model's is what the producer knows,
   `session_panel.quota_windows_parts`, sent as the row's `columns` beside its unchanged `parts`, never guessed from a label such as `wk`,
-  `mo` or `4w`): each window the same width in every row, its name left and its value right-aligned in four cells (a dim
-  `?` there where the row reports none: no 0 is made up), then, where some row has that window's reset time, a time column (a dim
+  `mo` or `4w`): each window the same width in every row, its name left and its value right-aligned in four cells, then, where some row has that window's reset time, a time column (a dim
   `(↻ ?)` where the row has the value and no time; blank where it has no value), two cells between windows, the harness names one
   column (`claude   5h   9%(↻ 45m)     7d  72%(↻ 3d 0h)  opus  86%` at 60 cells: 5h at column 12, 7d at 31, opus at 49). Short of cells
   the time columns go in every row together, then the model windows from the last, each value whole; a window of time with a value
   never gives way to a model window, and 5h and 7d stand side by side to the end (at 44 cells `5h` 12, `7d` 21, `opus` 30; at 36 the
-  model windows go). Where the windows of time cannot all stand in one set of columns (or a backend sends no kinds), each row is fitted
-  on its own: the reset times, then its model windows from the last, then, only where its own windows of time cannot all stand on one
+  model windows go). Where the rows report different windows, where those of time cannot all stand in one set of columns, or where a
+  backend sends no kinds, each row is fitted on its own as before 11-27 (its reset times, `│`, the last row beside the buttons): the reset times, then its model windows from the last, then, only where its own windows of time cannot all stand on one
   row, those from the last (a backend without kinds: the order before, the reset times, 5h, the model windows from the last, 7d). The
   last row is not laid out again beside the buttons (its columns would move): it shares their row only where it fits there as it is (at
   36), else the buttons stand on a row of their own (at 44 and 60: one row more than before, whatever the height; short of rows the
@@ -812,8 +815,8 @@ box's top line the routes popup, the table; a request row the MESSAGES popup).
   painted copy only and keeps reading the native screen (Codex's thread id, OpenCode's context) as before, and Codex's
   `status_line` setting is left as it is. OpenCode has no setting or plugin slot that hides its bottom bar (checked in
   the installed `@opencode-ai/plugin` types and the documentation), so the shell's own paint is the way. Only what the line
-  alone showed moves: OpenCode's cost (from the session record Fleet reads) stands after the context in that window's
-  panel (`CTX ━━━━──── 41% │ $1.23`). A window started without the shell is untouched. The row is found only in the
+  alone showed moves: OpenCode's cost (from the session record Fleet reads) stands in that window's panel on the row under
+  MODEL, in its value column, after the MCP count (`MCP 2/3 │ $1.23`; 11-27: the context gauge and percent end the MODEL row). A window started without the shell is untouched. The row is found only in the
   harness's own layout, and what is not found is not covered (review of #1662): Codex's footer is the status row and the help
   row (or the one thread-id status row) after the composer's last `›` row, the status row opening with a word, a number or a
   path, not a sign (`↳ queued`, `⏎ to send`, `■ stream error`) and not a draft line that begins with an id; OpenCode's bar is the
@@ -830,8 +833,8 @@ then the question's action row, its summary's second row and the guidance line;
 the structural rows (the SESSION head's own row, which then takes MODEL's value and row; 11-26, panel B: MODEL then stands on its own row and the rule over it on a row B's forms left; the question box's two border lines); then the
 route box's own steps (11-17: its zone rules are not among them, they stay while a row of the zone shows), every
 route at the same step (v4.36.4, spec rules 34 (b), 38,
-48 (c); 11-18): the workers' closed box becomes the open one, each NOW's second row goes, each `CTX` row goes (its number joins the first row at the right
-edge), each NOW's first row goes, the workers take one row each, the workers go (the kind row ends with
+48 (c); 11-18): the workers' closed box becomes the open one, each NOW's second row goes, any separate `CTX` row folds into the first row,
+then each NOW's first row goes and the workers take their compact one-row form. Next the workers go (the kind row ends with
 `· worker N`), the kind rows go, every route takes one row; then the box shows fewer
 routes and scrolls in place (the wheel over it), down to one, its border counting
 what it hides (11-27, the eight marks: `↑ 2 more`, `↓ 3 more`, so the counts do not read as Git's `↑2 ↓1` on the REPO row; where
@@ -844,7 +847,7 @@ running jobs and them before MESSAGES); the running jobs; the question's head an
 rows, before the structural rows below them); this window's own usage row last of all. Rows a later step frees beyond its need go back to the steps
 before it, the most important first. A section is placed whole or not at all; the
 rows left over stand above MESSAGES and MEM (which keep to the bottom, with their
-press targets), or under the last section when there are none. A row that gave way and goes back goes back to the next step in this order (MESSAGES, MEM, a list item, a NOW's further row): the line that no longer stands between CTX and TITLE is not one of the steps, so the row it freed goes to whichever of those comes next.
+press targets), or under the last section when there are none. A row that gave way and goes back goes back to the next step in this order (MESSAGES, MEM, a list item, a NOW's further row): the line that no longer stands between CTX and TITLE is not one of the steps, so the row it freed goes to whichever of those comes next (as does the row the CTX row left when it joined the MODEL row, 11-27).
 Groups are divided by `│`, stages joined by `›`. Fixed words are English
 (`context`, `route`, `messages`, stage names, `5h`/`7d`, the section names
 `QUESTIONS`, `ROUTE`, `MESSAGES`, `MEM` with their counts

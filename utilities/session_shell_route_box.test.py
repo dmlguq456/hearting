@@ -84,7 +84,10 @@ for(const c of golden.cases){
  // A who row (mark, role word, harness, model, effort, `CTX`) keeps only its head `● owner` / `↳ ⠋ worker`; the lines that
  // only a session has under it (the golden's gauge and tool rows, a drawn NOW) leave; a stage line stays whole.
  const textOf=r=>r.map(([t])=>t).join('');
- const whoHead=r=>{const t=textOf(r),m=/^(│ +(?:↳ )?\S+ (?:owner|worker|frame-alt|frame)\b)/.exec(t);if(!m)return null;
+ // Below the configured minimum width the new context column can clip the hanging worker's role.
+ // In those renders compare its indent and mark, which are still part of the reference.
+ const whoHead=r=>{const t=textOf(r),m=c.side&&c.width<32&&/^(│ +↳ \S)/.exec(t)||
+  /^(│ +(?:↳ )?\S+ (?:owner|worker|frame-alt|frame)\b)/.exec(t);if(!m)return null;
   const out=[];let n=0;const want=[...m[1]].length;
   for(const [t2,st] of r)for(const ch of t2){if(n>=want)return out;n++;const last=out.at(-1);if(last&&last[1]===st)last[0]+=ch;else out.push([ch,st]);}
   return out;};
