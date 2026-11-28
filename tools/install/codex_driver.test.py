@@ -164,15 +164,13 @@ class CodexNativeLeafPreservationTest(unittest.TestCase):
         self.home = Path(self.env["CODEX_HOME"])
         agents = sorted(p.name for p in (SOURCE_ROOT / "codex_setting/codex-agents").glob("*.toml"))
         skills = sorted(p.name for p in (SOURCE_ROOT / "codex_setting/codex-skills").iterdir())
-        self.foreign_agent, self.real_agent, self.dangling_agent, self.owned_agent, self.absent_agent = agents[:5]
+        # Four shipped agents (the depth names); a user's own link is the skill's case.
+        self.real_agent, self.dangling_agent, self.owned_agent, self.absent_agent = agents[:4]
         self.foreign_skill, self.real_skill = skills[:2]
         self.agents = self.home / "agents"
         self.skills = self.home / "skills"
         self.agents.mkdir(parents=True)
         self.skills.mkdir(parents=True)
-        self.user_target = self.root / "user-owned.toml"
-        self.user_target.write_bytes(b"USER TOML\n")
-        (self.agents / self.foreign_agent).symlink_to(self.user_target)
         (self.agents / self.real_agent).write_bytes(b"REAL AGENT\n")
         (self.agents / self.dangling_agent).symlink_to(self.root / "gone" / "agent.toml")
         # A stale link into the harness's own generated tree is still ours.
@@ -195,8 +193,6 @@ class CodexNativeLeafPreservationTest(unittest.TestCase):
         return {c["id"]: c for c in report["checks"]}
 
     def _assert_user_entries_untouched(self) -> None:
-        self.assertEqual(os.readlink(self.agents / self.foreign_agent), str(self.user_target))
-        self.assertEqual(self.user_target.read_bytes(), b"USER TOML\n")
         self.assertFalse((self.agents / self.real_agent).is_symlink())
         self.assertEqual((self.agents / self.real_agent).read_bytes(), b"REAL AGENT\n")
         self.assertEqual(os.readlink(self.skills / self.foreign_skill), str(self.user_skill_dir))
@@ -213,7 +209,7 @@ class CodexNativeLeafPreservationTest(unittest.TestCase):
         for name in (self.dangling_agent, self.owned_agent, self.absent_agent):
             self.assertEqual(os.readlink(self.agents / name), str(source_agents / name))
         checks = self._checks(report)
-        for leaf in (self.foreign_agent, self.real_agent, self.foreign_skill, self.real_skill):
+        for leaf in (self.real_agent, self.foreign_skill, self.real_skill):
             check = checks[f"codex.symlink.{leaf}"]
             self.assertTrue(check["ok"], check)
             self.assertIn("preserved", check["detail"])
@@ -230,7 +226,7 @@ class CodexNativeLeafPreservationTest(unittest.TestCase):
         code, applied = self._cli()
         self.assertEqual(code, 0)
         dry_checks, applied_checks = self._checks(dry), self._checks(applied)
-        for leaf in (self.foreign_agent, self.real_agent, self.foreign_skill, self.real_skill):
+        for leaf in (self.real_agent, self.foreign_skill, self.real_skill):
             key = f"codex.symlink.{leaf}"
             self.assertEqual(dry_checks[key]["detail"], applied_checks[key]["detail"])
         for leaf in (self.dangling_agent, self.owned_agent, self.absent_agent):
@@ -243,7 +239,7 @@ class CodexNativeLeafPreservationTest(unittest.TestCase):
         for result in (dry, applied):
             self.assertFalse(result["blocked"])
             by_dest = {a["dest"]: a for a in result["actions"] if a.get("dest")}
-            for path in (self.agents / self.foreign_agent, self.agents / self.real_agent,
+            for path in (self.agents / self.real_agent,
                          self.skills / self.foreign_skill, self.skills / self.real_skill):
                 self.assertEqual(by_dest[str(path)]["status"], "preserved", path)
             self.assertEqual(by_dest[str(self.agents / self.absent_agent)]["status"],
