@@ -139,9 +139,9 @@ for(let w=22;w<=60;w++){const f=box(plain(render([wait],w,60)))[0];assert(/ 4m$/
 // No time: the end stays empty (no empty row, no stray digits).
 const none=box(plain(render([route({elapsed:''})],44,60)));
 assert.equal(none[0],'● code(standard) · 3/6: execute');assert(!none.some(s=>/^\s+$/.test(s)));
-// An owner shows no time of its own, at any width: its CTX row is `CTX 41%` and the route's time stays only at the end of the first line.
+// The owner's row carries its context, and the route's time stays only on the kind line.
 const wide=box(plain(render([route()],72,60)));
-assert(wide.some(s=>/^ +CTX 41%$/.test(s)),wide.join('\n'));
+assert(wide.some(s=>/^ +⠋ owner .*41%$/.test(s)),wide.join('\n'));
 assert(!wide.slice(1).some(s=>/1h 52m/.test(s)),wide.join('\n'));
 """)
 
