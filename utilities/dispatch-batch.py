@@ -3175,14 +3175,15 @@ def main(argv: list[str] | None = None) -> int:
             # start cut short (a member reserved but never claimed, or absent from the registry) is resumed
             # whole, as it was before a passed leg could be reused. Look for that batch first, and reuse the
             # passed leg only when there is none.
+            def unfinished_probe(preview):
+                return unfinished_for(admit_pending({}, preview=preview)[0], {}) is not None
             try:
-                probe_admissions, _ = admit_pending({}, preview=True)
-                resume_whole = unfinished_for(probe_admissions, {}) is not None
+                resume_whole = unfinished_probe(True)
             except (BatchError, DispatchContractError, DISPATCH_NODE.DispatchNodeError, ValueError, OSError,
                     subprocess.SubprocessError):
-                # A preview that could not read the history has not shown that no batch was left unfinished: the
-                # real admission makes that judgment without reuse, and `main` reports what it refuses.
-                resume_whole = True
+                # A preview that could not read the history has shown nothing: the real read looks for that batch
+                # (its own failure is what `main` reports), and the passed legs stay reused when it finds none.
+                resume_whole = unfinished_probe(False)
             if resume_whole:
                 reusable_peers = {}
         round_admissions, round_errors = admit_pending(reusable_peers)

@@ -2280,44 +2280,27 @@ def _middle_cell_review_sentence(route, route_file, reviews, missing, jobs):
              "runtime_wait: registered-children")
     no_inline = (f"You cannot {'test' if what == 'independent test' else 'review'} your own work or close this "
                  f"{what.split()[-1]} inline; do not report PASS without it.")
+    if what == "independent test":
+        # The one admission judgment the test's handoff and its refused start read: an open FAIL or no round left.
+        fields = worker_bootstrap.one_shot_test_followup(route, route_file, jobs)
+        if fields:
+            return worker_bootstrap.continuation_followup_text(fields)
     lineage = worker_bootstrap._lineage_rows(route, jobs)
     blocking, ran_without_verdict = [], False
     for review in reviews:
         rows = [(status, meta) for status, meta in lineage.get(review["id"], ())]
         verdicts = [(status, meta) for status, meta in rows   # the test runs as a stage worker: its own type
                     if ROUND.classify_round_row(status, meta, worker_type=meta.get("worker_type") or "review") == "verdict"]
-        if verdicts and ROUND.last_verdict_blocking(rows, "review"):
+        if verdicts and ROUND.last_verdict_blocking(rows, "review") and what == "independent review":
             blocking.append((review, verdicts[-1][1]))
         elif rows and not verdicts:
             ran_without_verdict = True
-    if blocking and what == "independent test":
-        # Whether the reviews stand on a correction of the failing test, the next judgment is the test alone; else a
-        # correction's reviews and then the test. Their round census decides, whether or not its report is readable.
-        changed = _work_changed_since(route, blocking[0], jobs)
-        if worker_bootstrap.one_shot_test_spent(route, jobs, reviewed=changed):
-            node, meta = blocking[0]
-            fields = worker_bootstrap.continuation_followup_fields(route, node, meta, jobs, route_file)
-            return worker_bootstrap.continuation_followup_text({
-                "kind": "review", "owner_fixes": True, "test": True, "closure_spent": True,
-                "attempt": meta.get("attempt_id", ""), "artifact": fields.get("artifact", ""),
-                "corrections": ROUND.max_review_rounds(route["effective_intensity"]) - 1})
-        if changed:
-            return ("Your route's independent test failed on earlier work, and the reviews passed on your change. "
-                    f"Start the test again with exactly: {start}. {no_inline}")
     if blocking:
         # Every blocking leg of a review group is named; the owner fixes them in one pass.
         fixes = [fields for fields in (worker_bootstrap.continuation_followup_fields(route, review, meta, jobs, route_file)
                                        for review, meta in blocking) if fields.get("owner_fixes")]
         if fixes:
             return worker_bootstrap.continuation_followup_text(fixes if len(fixes) > 1 else fixes[0])
-        if what == "independent test":
-            # A failing test sends the fixed work through the reviews again, then the test.
-            first = one_shot_review_nodes(route)[0]
-            start = (f"`{worker_bootstrap.route_start_command(route_file, first.get('parallel_anchor') or first['id'], jobs=jobs)}`"
-                     " and yield runtime_wait: registered-children")
-            return ("Your route's independent test fails on your current work. Fix what its report found, commit, "
-                    f"then start the reviews again with exactly: {start}; the test runs again after they pass. "
-                    f"{no_inline}")
         return ("Your route's independent review blocks your current work. Fix the blocking findings in its report, "
                 f"commit, then start it again with exactly: {start}. {no_inline}")
     stale = [str(missing[review["id"]]).startswith(("completion-review-source-stale", "completion-test-source-stale"))
@@ -2335,17 +2318,6 @@ def _middle_cell_review_sentence(route, route_file, reviews, missing, jobs):
                 f"exactly: {start}. {no_inline}")
     return (f"Your route's {what} has not run. Commit your work, then start it with exactly: "
             f"{start}. {no_inline}")
-
-
-def _work_changed_since(route, verdict, jobs) -> bool:
-    """Whether the source differs from what this verdict judged (False when either cannot be read)."""
-    node, meta = verdict
-    judged = meta.get("review_subject_digest") or meta.get("_review_subject_digest")
-    try:
-        from review_source_subject import observe
-        return bool(judged) and observe(route, node, worktree=route.get("cwd"), jobs=jobs)["digest"] != judged
-    except Exception:  # advisory text only: an unreadable source keeps the failing test's own instruction
-        return False
 
 
 def _historical_request(jobs, status, metadata, *, selected_registry_rows=None, observer=None):

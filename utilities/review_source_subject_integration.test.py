@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT / "utilities"))
 import dispatch_contract as DC  # noqa: E402
 import review_round_cap as CAP  # noqa: E402
 import review_source_subject as SUBJECT  # noqa: E402
+import codex_dispatch_terminal as TERMINAL  # noqa: E402
 from route_identity import route_hash, route_id_from_hash  # noqa: E402
 from split_module_fixture import patch_split  # noqa: E402
 
@@ -1763,25 +1764,30 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
         test = {"id": "test", "kind": "pipeline-stage", "unit": "qa/test", "completion_gate": "code-test",
                 "dispatch_depth": 2, "write_scope": ["test_logs/**"], "depends_on": [leg["id"] for leg in legs]}
         owner = {"id": "one-shot", "kind": "capability-owner", "unit": "_kernel/owner", "dispatch_depth": 1,
-                 "completion_gate": "quick-complete", "write_scope": ["source/**"],
+                 "completion_gate": "quick-complete", "write_scope": ["source/**"], "terminal": True,
                  "depends_on": [*(leg["id"] for leg in legs), "test"]}
         self.route["nodes"] = [*legs, test, owner]
+        self.test_node = test
         self.route["route_hash"] = route_hash(self.route)
         self.route["route_id"] = route_id_from_hash(self.route["route_hash"])
         self.route_file.write_text(json.dumps(self.route, sort_keys=True), encoding="utf-8")
         import route_form
         self.assertEqual(route_form.one_shot_test_node(self.route)["id"], "test")
 
-    def review_leg(self, node_id, attempt_id):
-        """One review leg's PASS on the source the worktree holds now: its exact settled row and its marker."""
-        node = self.get_node(node_id)
+    def finished_process(self):
         process = subprocess.Popen(["true"], start_new_session=True)
         identity = {"pid": str(process.pid), "pgid": str(os.getpgid(process.pid)),
                     "pid_start": str(DC.process_start_ticks(process.pid))}
         process.wait(timeout=5)
-        metadata = self._metadata(node, attempt_id, "review")
+        return identity
+
+    def review_leg(self, node_id, attempt_id, worker_type="review"):
+        """One review leg's (or the test's) PASS on the source the worktree holds now: its exact settled row and its
+        marker."""
+        node = self.get_node(node_id)
+        metadata = self._metadata(node, attempt_id, worker_type)
         metadata.update(SUBJECT.seal_attempt(self.jobs, self.route, node, attempt_id, worktree=self.repo))
-        metadata = self._row(metadata, extra=identity)
+        metadata = self._row(metadata, extra=self.finished_process())
         evidence = self.artifact_root / f"{attempt_id}.md"
         evidence.write_text("independent PASS", encoding="utf-8")
         ROUTE_WRITER._publish_completion_locked(self.route, node, node_id, evidence, jobs=self.jobs,
@@ -1816,6 +1822,155 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
         self.assertIsNone(self.start_test("dry-run"))
         self.commit("C")                                                # the source moved right before registration
         self.assertEqual(self.start_test(), legs)
+
+    # -- after the middle cell's test: its handoff, its owner's end and its refused start read one admission -------
+    def settle_test(self, attempt_id, verdict="FAIL", report="readable", **extra):
+        """One settled test attempt on the source the worktree holds now. Its note and class are what the real terminal
+        parser reads from the worker's final envelope (`verdict: FAIL` naming a report, `artifact: -`, or a report
+        deleted after the row settled); `verdict=None` is a death without one."""
+        node = self.get_node("test")
+        metadata = self._metadata(node, attempt_id, "stage")
+        metadata.update(SUBJECT.seal_attempt(self.jobs, self.route, node, attempt_id, worktree=self.repo))
+        log, artifact = self.base / f"{attempt_id}.jsonl", self.artifact_root / "test_logs" / f"{attempt_id}.md"
+        artifact.parent.mkdir(exist_ok=True)
+        artifact.write_text("the test fails\n", encoding="utf-8")
+        handoff = f"artifact: {'-' if report == 'none' else artifact}\nverdict: {verdict}\nblocker: the test fails"
+        log.write_text("".join(json.dumps(row) + "\n" for row in (
+            {"type": "turn.started"}, {"type": "item.completed", "item": {"type": "agent_message", "text": handoff}},
+            {"type": "turn.completed"})), encoding="utf-8")
+        parsed = TERMINAL.inspect_terminal_log(log) if verdict else {"failure_note": "dead-runtime-exit",
+                                                                       "failure_class": "runtime"}
+        metadata.update(log_file=str(log), artifact_root=str(self.artifact_root), cwd=str(self.repo), **extra)
+        record = self._row(metadata, note=parsed["failure_note"],
+                           extra={"failure_class": parsed["failure_class"], **self.finished_process()})
+        if report != "readable":
+            artifact.unlink()
+        return record
+
+    def told(self, attempt_id=None):
+        """What the owner is told now, with the test's admission: the test's handoff for `attempt_id` (the join's
+        follow-up for that exact row), the owner's end without the test (the workflow-completion text), and a refused
+        start of the test (its recovery fields; None while admission admits it)."""
+        import dispatch_terminal_commit as DTC
+        import route_form
+        import worker_bootstrap as W
+        handoff = None
+        if attempt_id:
+            meta = next(DC.parse_registry_metadata(line.split("\t")[5]) for line in self.jobs.read_text().splitlines()
+                        if f"attempt_id={attempt_id}," in line)
+            handoff = W.continuation_followup_text(W.continuation_followup_for_row(meta, self.jobs, return_fields=True))
+        missing = DTC.owner_workflow_gaps(self.jobs, {"workflow_completion": "runtime-v1"}, self.route)
+        nodes = [n for n in route_form.one_shot_review_nodes(self.route) if n["id"] in missing]
+        end = DTC._middle_cell_review_sentence(self.route, str(self.route_file), nodes, missing, self.jobs) if nodes else ""
+        admission = self.test_admission().budget
+        refusal = None if admission.state == "admit" else CAP.recovery_fields(
+            self.test_node["kind"], admission.state, route=self.route, node=self.get_node("test"), jobs=self.jobs,
+            route_file=self.route_file)
+        return SimpleNamespace(handoff=handoff, end=end, refusal=refusal,
+                               admission=(admission.state, admission.verdict_rounds))
+
+    def start(self, node_id):
+        import worker_bootstrap as W
+        return W.route_start_command(self.route_file, node_id, jobs=self.jobs)
+
+    def both_legs(self, suffix):
+        self.review_leg("impl-review", f"att-review-{suffix}")
+        self.review_leg("impl-review-alternative", f"att-alternative-{suffix}")
+
+    def test_one_failing_test_tells_its_handoff_its_owners_end_and_its_refused_start_one_thing(self):
+        legs = "impl-review"
+        for report in ("readable", "none", "deleted"):
+            with self.subTest(report=report):
+                self.doCleanups()
+                self.setUp()
+                self.solo_strong()
+                self.both_legs("A")
+                self.settle_test("att-test-1", report=report)
+                named = report == "readable"
+                # right after the FAIL: one round each is left, so the owner fixes and the reviews judge it first
+                now = self.told("att-test-1")
+                self.assertEqual(now.admission, ("admit", 1))
+                self.assertIsNone(now.refusal)
+                fix = now.handoff
+                self.assertIn("Test FAIL att-test-1: the independent test of your work fails.", fix)
+                self.assertIn(f"start the reviews again with the same command: {self.start(legs)}", fix)
+                self.assertEqual("test_logs/att-test-1.md" in fix, named, fix)
+                self.assertEqual(now.end, fix)
+                # the owner fixed and the reviews passed the change on their last rounds: the same receipt read late
+                # says what admission now accepts, the test alone (one round left)
+                self.commit("B")
+                self.both_legs("B")
+                late = self.told("att-test-1")
+                self.assertEqual(late.admission, ("admit", 1))
+                self.assertIn("the test failed on earlier work, and the reviews passed your change. Start the test "
+                              f"again with exactly: {self.start('test')}.", late.handoff)
+                self.assertNotIn("Do not correct further", late.handoff)
+                self.assertEqual(late.end, late.handoff)
+                # the second FAIL: no round is left for the reviews or the test; every reader ends the owner
+                self.settle_test("att-test-2", report=report)
+                spent = self.told("att-test-2")
+                self.assertEqual(spent.admission, ("exhausted", 2))
+                self.assertIn("Test FAIL att-test-2: the test still fails, and the one correction allowed is spent. "
+                              "Do not correct further.", spent.handoff)
+                self.assertIn("end with `verdict: FAIL`.", spent.handoff)
+                self.assertEqual("from " in spent.handoff, named, spent.handoff)
+                self.assertNotIn("stage-dispatch-fallback", spent.handoff)
+                self.assertEqual(spent.end, spent.handoff)
+                self.assertEqual(spent.refusal["recovery_hint"], spent.handoff)
+                self.assertEqual((spent.refusal["recovery_surface"], spent.refusal["next_action"]),
+                                 ("owner-report", "owner-report"))
+                self.assertEqual(self.told("att-test-1").handoff, spent.handoff)   # the first receipt read late
+
+    def test_a_sub_session_fail_of_the_test_spends_no_round(self):
+        # A serial sub-session of the test (`stage_authority=0`) fails beside the whole test's FAIL: admission counts
+        # one round, so every reader sends the fix through the reviews and none ends the owner.
+        self.solo_strong()
+        self.both_legs("A")
+        self.settle_test("att-test-1")
+        self.settle_test("att-test-slice-1", stage_authority="0", subsession_id="slice-1")
+        now = self.told("att-test-slice-1")
+        self.assertEqual(now.admission, ("admit", 1))
+        for text in (now.handoff, now.end, self.told("att-test-1").handoff):
+            self.assertIn("Test FAIL att-test-1: the independent test of your work fails.", text)
+            self.assertIn(f"start the reviews again with the same command: {self.start('impl-review')}", text)
+            self.assertNotIn("Do not correct further", text)
+
+    def test_a_test_that_ends_twice_without_a_verdict_is_reported_never_restarted_or_run_inline(self):
+        self.solo_strong()
+        self.both_legs("A")
+        self.settle_test("att-test-dead-1", verdict=None)
+        once = self.told()
+        self.assertEqual((once.admission, once.refusal), (("admit", 0), None))
+        self.assertIn("Your route's independent test ended without a verdict.", once.end)
+        self.assertIn(self.start("test"), once.end)
+        self.settle_test("att-test-dead-2", verdict=None)
+        bound = self.told()
+        self.assertEqual(bound.admission, ("verdictless-bound", 0))
+        self.assertEqual((bound.refusal["recovery_surface"], bound.refusal["next_action"]),
+                         ("owner-report", "owner-report"))
+        for text in (bound.refusal["recovery_hint"], bound.end):
+            self.assertIn("Write in your report that the test could not reach a verdict, and do not report PASS.", text)
+            self.assertNotIn("stage-dispatch-fallback", text)
+        self.assertFalse(any("inline" in str(value) for value in bound.refusal.values()), bound.refusal)
+
+    def test_a_restart_after_the_test_passed_its_correction_is_done_not_a_fail(self):
+        # First FAIL, the fix reviewed, the second test PASS (its exact current marker): the same start is refused
+        # because both rounds are used, and every reader says the test already passed, never `verdict: FAIL`.
+        self.solo_strong()
+        self.both_legs("A")
+        self.settle_test("att-test-1")
+        self.commit("B")
+        self.both_legs("B")
+        self.review_leg("test", "att-test-2", worker_type="stage")
+        import dispatch_terminal_commit as DTC
+        self.assertEqual(DTC.owner_workflow_gaps(self.jobs, {"workflow_completion": "runtime-v1"}, self.route), {})
+        done = self.told("att-test-1")
+        self.assertEqual(done.admission, ("exhausted", 2))
+        self.assertEqual(done.refusal["required_action"], "use-current-pass")
+        for text in (done.refusal["recovery_hint"], done.handoff):
+            self.assertIn("The independent test already passed your current work", text)
+            self.assertNotIn("verdict: FAIL", text)
+            self.assertNotIn("Do not correct further", text)
 
     def test_code_test_owner_closure_remains_refused(self):
         choice = __import__("route_authority").decide_continuation(

@@ -240,21 +240,35 @@ class SoloTestNode(S2.Base):
                 self.assertIn("If the test fails, fix what it found in one pass", text)
                 self.assertIn("start the review group again with the same command", text)
 
-    def test_a_failing_test_is_corrected_no_further_once_the_test_or_a_review_has_used_its_rounds(self):
+    def test_what_judges_after_the_test_is_read_from_the_admission_of_those_nodes_alone(self):
+        # The reviews come first unless every leg passed the source as it is now and the test's open FAIL judged other
+        # bytes; the first refusal among the admissions of what judges next is the answer. (The real census, a real
+        # registry and Git: review_source_subject_integration.test.py.)
         route = self.solo("strong")
-        passed = lambda attempt: ("done", {"attempt_id": attempt, "note": CELL.PASSING, "failure_class": "pass",  # noqa: E731
-                                           "worker_type": "review"})
-        blocked = CELL.row(CELL.BLOCKING, "d1", "att-b")
-        cases = (({"impl-review": [passed("a1")], "impl-review-alternative": [passed("b1")],
-                   "test": [failed_test("d1", "t1")]}, False),
-                 ({"impl-review": [passed("a1")], "impl-review-alternative": [passed("b1")],
-                   "test": [failed_test("d1", "t1"), failed_test("d2", "t2")]}, True),
-                 # a leg blocked once and passed the correction: its two rounds are used, it cannot judge another fix
-                 ({"impl-review": [passed("a1"), passed("a2")], "impl-review-alternative": [blocked, passed("b2")],
-                   "test": [failed_test("d2", "t1")]}, True))
-        for lineage, spent in cases:
-            with mock.patch.object(W, "_lineage_rows", return_value=lineage):
-                self.assertEqual(W.one_shot_test_spent(route, "/jobs.log"), spent, lineage)
+        legs, test = ("impl-review", "impl-review-alternative"), RF.one_shot_test_node(route)
+
+        def judged(states, failed_on="d1", current="d1", stand=True, test_passed=False):
+            def admit(_route, node, _jobs, **_kwargs):
+                passed = test_passed if node["id"] == "test" else stand
+                return SimpleNamespace(budget=SimpleNamespace(state=states.get(node["id"], "admit"),
+                                                              verdict_rounds=1 if passed or node["id"] == "test" else 0),
+                                       requires_next_round=not passed, source_subject_digest=current)
+            failed = [] if failed_on is None else [(["t", "done"], {**failed_test(failed_on, "att-t")[1]})]
+            module = SimpleNamespace(admit_round=admit, prior_round_attempts=lambda *a, **k: failed)
+            with mock.patch("review_input._dispatch_node_module", return_value=module):
+                return W.one_shot_test_next(route, "/jobs.log")
+        self.assertEqual(judged({}), {"state": "admit", "failed": failed_test("d1", "att-t")[1], "start": "impl-review"})
+        self.assertEqual(judged({}, current="d2")["start"], "test")              # the reviews passed the correction
+        self.assertEqual(judged({}, current="d2", stand=False)["start"], "impl-review")
+        self.assertEqual(judged({"impl-review-alternative": "exhausted"})["state"], "exhausted")   # a leg's rounds
+        self.assertEqual(judged({"impl-review-alternative": "exhausted"}, current="d2")["state"], "admit")
+        self.assertEqual(judged({"test": "exhausted"}, current="d2")["state"], "exhausted")
+        self.assertEqual(judged({"test": "verdictless-bound"}, failed_on=None)["state"], "verdictless-bound")
+        self.assertEqual(judged({"test": "exhausted"}, failed_on=None, test_passed=True)["state"], "passed")
+        self.assertEqual(test["id"], "test")
+        self.assertIn(legs[0], RF.one_shot_review_node_ids(route))
+        with mock.patch("review_input._dispatch_node_module", side_effect=OSError("unreadable")):
+            self.assertIsNone(W.one_shot_test_next(route, "/jobs.log"))
 
     def next_ready(self, route, notes, missing, node_id="impl-review"):
         import dispatch_stage_advance as ADVANCE
@@ -290,123 +304,60 @@ class SoloTestNode(S2.Base):
         lines, _ = self.next_ready(route, passed, {})
         self.assertFalse(any("--node test" in line for line in lines), lines)
 
-    def test_a_failing_test_sends_the_fixed_work_through_the_reviews_again(self):
+    def test_the_owners_end_and_a_refused_start_say_what_the_one_judgment_says(self):
         route = self.solo("strong")
-        failed = failed_test("d1", "att-t")
-        passed = ("done", {"attempt_id": "att-p", "note": CELL.PASSING, "failure_class": "pass", "worker_type": "review",
-                           "review_subject_digest": "d1"})
-        fields = {"kind": "review", "attempt": "att-t", "artifact": "/c/test.md", "target": "", "source": True,
-                  "producer_command": "", "owner_fixes": True, "test": True, "command": "python3 start-group",
-                  "closure_spent": False, "corrections": 1}
-        lineage = {"impl-review": [passed], "impl-review-alternative": [passed], "test": [failed]}
-        # only the test is missing and it fails: the test's own instruction (reviews first again)
-        text, path = self.wake(route, lineage=lineage, fields={"test": fields},
-                               reasons={"impl-review": None, "impl-review-alternative": None})
-        self.assertTrue(text.endswith("\n" + W.continuation_followup_text(fields)), text)
-        follow = W.continuation_followup_text(fields)
-        self.assertIn("Test FAIL att-t: the independent test of your work fails.", follow)
-        self.assertIn("start the reviews again with the same command: python3 start-group", follow)
-        spent = W.continuation_followup_text({**fields, "closure_spent": True})
-        self.assertIn("Do not correct further", spent)
-        self.assertIn("`verdict: FAIL`", spent)
-        self.assertNotIn("python3 start-group", spent)
-        # its report cannot be projected: the wake text still sends the work through the review group
-        text, path = self.wake(route, lineage=lineage, reasons={"impl-review": None, "impl-review-alternative": None})
-        self.assertIn("independent test fails on your current work", text)
-        self.assertIn(f"`{W.route_start_command(path, 'impl-review', jobs='/jobs.log')}`", text)
-        # the owner fixed after the failing test and the reviews passed on the change: the test runs again
-        text, path = self.wake(route, lineage=lineage, fields={"test": fields}, current="d2",
-                               reasons={"impl-review": None, "impl-review-alternative": None})
-        self.assertIn("independent test failed on earlier work, and the reviews passed on your change", text)
-        self.assertIn(f"`{W.route_start_command(path, 'test', jobs='/jobs.log')}`", text)
-        self.assertNotIn("Test FAIL", text)
-        # only the test has not run: its own start command
-        text, path = self.wake(route, lineage={"impl-review": [passed], "impl-review-alternative": [passed]},
-                               reasons={"impl-review": None, "impl-review-alternative": None})
+        stand = {"impl-review": None, "impl-review-alternative": None}
+        failed = {**failed_test("d1", "att-t")[1], "log_file": ""}
+        cases = (({"state": "admit", "failed": failed, "start": "impl-review"},
+                  ["Test FAIL att-t: the independent test of your work fails.", "start the reviews again", "impl-review"]),
+                 ({"state": "admit", "failed": failed, "start": "test"},
+                  ["Test FAIL att-t: the test failed on earlier work, and the reviews passed your change.", "--node test"]),
+                 ({"state": "exhausted", "failed": failed, "start": "impl-review"},
+                  ["Test FAIL att-t: the test still fails", "Do not correct further", "end with `verdict: FAIL`."]),
+                 ({"state": "verdictless-bound", "failed": None, "start": "test"},
+                  ["Write in your report that the test could not reach a verdict, and do not report PASS."]),
+                 ({"state": "passed", "failed": None, "start": None},
+                  ["The independent test already passed your current work"]))
+        import review_round_cap as ROUND
+        test = RF.one_shot_test_node(route)
+        for judged, said in cases:
+            with self.subTest(judged["state"], start=judged["start"]), \
+                    mock.patch.object(W, "one_shot_test_next", return_value=judged):
+                text, path = self.wake(route, reasons=stand)
+                refused = ROUND.recovery_fields(test["kind"], "exhausted", route=route, node=test, jobs="/jobs.log",
+                                                route_file=str(path))
+                for phrase in said:
+                    self.assertIn(phrase, text)
+                    if judged["state"] != "admit":
+                        self.assertIn(phrase, refused["recovery_hint"])
+                self.assertEqual((refused["recovery_surface"], refused["next_action"]), ("owner-report", "owner-report"))
+                self.assertEqual(refused.get("required_action") == "use-current-pass", judged["state"] == "passed")
+                if judged["state"] != "admit":
+                    self.assertNotIn("stage-dispatch-fallback", text)
+                self.assertFalse(any(word in str(value) for value in refused.values()
+                                     for word in ("owner-inline", "complete --inline")), refused)
+        # an admission that cannot be read claims nothing: the refused start ends the owner without a FAIL it cannot see
+        refused = ROUND.recovery_fields(test["kind"], "verdictless-bound", route=route, node=test, jobs=None)
+        self.assertNotIn("verdict: FAIL", refused["recovery_hint"])
+        # nothing failed and a start is admitted: the wording of the cell's own state, with the test's start
+        with mock.patch.object(W, "one_shot_test_next", return_value={"state": "admit", "failed": None, "start": "test"}):
+            text, path = self.wake(route, reasons=stand)
         self.assertIn("Your route's independent test has not run.", text)
         self.assertIn(f"`{W.route_start_command(path, 'test', jobs='/jobs.log')}`", text)
-        # the reviews are missing too (the fix made them stale): the review group first, the test's old FAIL unnamed
-        text, path = self.wake(route, reason="completion-review-source-stale", lineage=lineage, fields={"test": fields},
-                               reasons={"test": "completion-marker-absent"})
+        # the reviews are missing too (the fix made them stale): the review group first, the test's FAIL unnamed
+        with mock.patch.object(W, "one_shot_test_next", return_value=cases[0][0]):
+            text, path = self.wake(route, reason="completion-review-source-stale",
+                                   reasons={"test": "completion-marker-absent"})
         self.assertIn("independent review passed, but the work changed after it", text)
         self.assertIn(f"`{W.route_start_command(path, 'impl-review', jobs='/jobs.log')}`", text)
         self.assertNotIn("Test FAIL", text)
-
-    def test_a_failing_test_that_can_be_judged_no_more_ends_the_owner_whether_or_not_its_report_reads(self):
-        # The rounds a further judgment needs decide, not whether the test's report can be read: the test alone once
-        # the reviews passed a correction, otherwise a correction's reviews and then the test.
-        route = self.solo("strong")
-        passed = lambda attempt, digest: ("done", {"attempt_id": attempt, "note": CELL.PASSING,  # noqa: E731
-                                                   "failure_class": "pass", "worker_type": "review",
-                                                   "review_subject_digest": digest})
-        dead = ("done", {"attempt_id": "t-dead", "note": "dead-runtime-exit", "failure_class": "runtime",
-                         "worker_type": "stage", "review_subject_digest": "d2"})
-        legs = ("impl-review", "impl-review-alternative")
-        stand = {leg: None for leg in legs}
-        report = {"kind": "review", "attempt": "t2", "artifact": "/c/test.md", "target": "", "source": True,
-                  "producer_command": "", "owner_fixes": True, "test": True, "command": "python3 start-group",
-                  "closure_spent": True, "corrections": 1}
-        twice = {**{leg: [passed(leg + "-1", "d1"), passed(leg + "-2", "d2")] for leg in legs},
-                 "test": [failed_test("d1", "t1"), failed_test("d2", "t2")]}
-        for label, fields in (("a FAIL that names its report", {"test": report}),
-                              ("a FAIL whose report is absent or gone since", {})):
-            with self.subTest(label):
-                text, path = self.wake(route, lineage=twice, fields=fields, current="d2", reasons=stand)
-                self.assertIn("Test FAIL t2: the test still fails, and the one correction allowed is spent. Do not "
-                              "correct further.", text)
-                self.assertIn("end with `verdict: FAIL`.", text)
-                self.assertEqual("from /c/test.md in your report" in text, bool(fields), text)
-                self.assertNotIn("start the reviews again", text)
-                self.assertNotIn("stage-dispatch-fallback", text)
-        # the test failed once on the work the reviews passed, and a leg has used its rounds: no correction can be
-        # reviewed, so the same end, with no report to read
-        spent_leg = {"impl-review": [passed("a1", "d0"), passed("a2", "d1")],
-                     "impl-review-alternative": [CELL.row(CELL.BLOCKING, "d0", "b1"), passed("b2", "d1")],
-                     "test": [failed_test("d1", "t1")]}
-        text, _ = self.wake(route, lineage=spent_leg, current="d1", reasons=stand)
-        self.assertIn("Test FAIL t1: the test still fails", text)
-        self.assertIn("Do not correct further", text)
-        # the boundary: the owner fixed after the test's FAIL and the reviews passed the change on their last
-        # rounds; the test has a round left, so it starts again
-        reviewed = {**{leg: [passed(leg + "-1", "d1"), passed(leg + "-2", "d2")] for leg in legs},
-                    "test": [failed_test("d1", "t1")]}
-        for label, rows in (("after the FAIL", reviewed), ("after a death without a verdict", {
-                **reviewed, "test": [failed_test("d1", "t1"), dead]})):
-            with self.subTest(label):
-                text, path = self.wake(route, lineage=rows, current="d2", reasons=stand)
-                self.assertIn("independent test failed on earlier work, and the reviews passed on your change", text)
-                self.assertIn(f"`{W.route_start_command(path, 'test', jobs='/jobs.log')}`", text)
-                self.assertNotIn("Do not correct further", text)
-        # a test that only died without a verdict is started again (a death spends no verdict round)
-        text, path = self.wake(route, lineage={**{leg: [passed(leg, "d1")] for leg in legs}, "test": [dead]},
-                               current="d1", reasons=stand)
-        self.assertIn("Your route's independent test ended without a verdict.", text)
-        self.assertIn(f"`{W.route_start_command(path, 'test', jobs='/jobs.log')}`", text)
-        # one round each used and no report: correct once, the reviews first
-        once = {**{leg: [passed(leg, "d1")] for leg in legs}, "test": [failed_test("d1", "t1")]}
-        text, path = self.wake(route, lineage=once, current="d1", reasons=stand)
-        self.assertIn("independent test fails on your current work", text)
-        self.assertIn(f"`{W.route_start_command(path, 'impl-review', jobs='/jobs.log')}`", text)
-
-    def test_a_refused_start_of_the_spent_test_ends_the_owner_and_never_points_inline(self):
-        import review_round_cap as ROUND
-        route = self.solo("strong")
-        test = RF.one_shot_test_node(route)
-        spent = ROUND.recovery_fields(test["kind"], "exhausted", route=route, node=test, jobs="/jobs.log",
-                                      route_file="/route.json")
-        self.assertEqual((spent["recovery_surface"], spent["next_action"]), ("owner-report", "owner-report"))
-        self.assertIn("Do not correct further", spent["recovery_hint"])
-        self.assertIn("`verdict: FAIL`", spent["recovery_hint"])
-        bound = ROUND.recovery_fields(test["kind"], "verdictless-bound", route=route, node=test, jobs="/jobs.log",
-                                      route_file="/route.json")
-        for fields in (spent, bound):
-            self.assertFalse(any("complete --inline" in str(value) for value in fields.values()), fields)
         # a team route's test keeps its own recovery
         team = self.compose(shape="staged", intensity="strong", graph="execute,impl-review,test,report", slug="s3-rf")
         team_test = next(n for n in team["nodes"] if n["id"] == "test")
-        self.assertEqual(ROUND.recovery_fields(team_test["kind"], "exhausted", route=team, node=team_test,
-                                               jobs="/jobs.log", route_file="/route.json")["recovery_surface"],
-                         "capability-route complete --inline")
+        for state in ("exhausted", "verdictless-bound"):
+            self.assertEqual(ROUND.recovery_fields(team_test["kind"], state, route=team, node=team_test,
+                                                   jobs="/jobs.log", route_file="/route.json")["recovery_surface"],
+                             "capability-route complete --inline")
 
     def wake(self, route, reason="completion-marker-absent", lineage=None, fields=None, reasons=None, current="d1"):
         """The owner's wake text when its end lacks the verification nodes: every depth-2 node is missing for

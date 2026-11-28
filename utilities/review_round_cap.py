@@ -273,13 +273,15 @@ def recovery_fields(node_kind, state="exhausted", *, route=None, node=None, jobs
     from route_form import one_shot_test_node
     test = one_shot_test_node(route)
     if test is not None and isinstance(node, Mapping) and node.get("id") == test["id"]:
-        # The middle cell's test: its owner cannot close it inline, and a test with no round left ends the owner
-        # as a failing test whose rounds are spent does.
-        fields["recovery_surface"] = "owner-report"
-        if state == "exhausted":
-            fields.update(next_action="owner-report", recovery_hint=(
-                "The test has used every round. Do not correct further. Write the remaining findings in your "
-                "report and end with `verdict: FAIL`."))
+        # The middle cell's test: its owner cannot close it inline. A refused start says what the one admission
+        # judgment its handoff and its owner's end read says: already passed, an open FAIL, or no verdict.
+        from worker_bootstrap import continuation_followup_text, one_shot_test_followup
+        followup = one_shot_test_followup(route, route_file, jobs)
+        fields.update(recovery_surface="owner-report", next_action="owner-report", recovery_hint=(
+            continuation_followup_text(followup or {"kind": "review", "owner_fixes": True, "test": True,
+                                                    "closure_spent": True})))
+        if followup.get("state") == "passed":
+            fields["required_action"] = "use-current-pass"
     if is_deterministic_check(node) and fields.get("required_action") == "use-current-pass":
         # Registry PASS text is not evidence that the current smoke still passes.
         budget = round_budget(route, node, [])
