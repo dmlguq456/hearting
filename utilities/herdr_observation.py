@@ -42,6 +42,29 @@ def endpoint_name(session: str | None = None) -> str:
     return value.strip() if isinstance(value, str) and value.strip() else "default"
 
 
+def endpoint_env(session: str | None, environ=None) -> dict:
+    """An environment whose ``herdr`` calls reach ``session``'s server alone.
+
+    Herdr follows an inherited ``HERDR_SOCKET_PATH`` or ``HERDR_SESSION`` before its
+    default server, so a call meant for one server from a pane of another would read
+    that other one. Its socket stays only while its ``HERDR_SESSION`` owner is the
+    selected server (no ``HERDR_SESSION`` is the default server's, as a default pane's
+    hooks key it); another server's ``HERDR_SESSION`` is dropped."""
+    selected = endpoint_name(session or "default")
+    env = dict(os.environ if environ is None else environ)
+    if (env.get("HERDR_SESSION") or "default") != selected:
+        env.pop("HERDR_SOCKET_PATH", None)
+    if selected == "default":
+        env.pop("AGENT_HERDR_SESSION", None)
+        if env.get("HERDR_SESSION") not in {None, "", "default"}:
+            env.pop("HERDR_SESSION", None)
+    else:
+        env["AGENT_HERDR_SESSION"] = selected
+        if env.get("HERDR_SESSION") not in {None, "", selected}:
+            env.pop("HERDR_SESSION", None)
+    return env
+
+
 @dataclass(frozen=True)
 class PaneCensus:
     endpoint: str
@@ -53,7 +76,17 @@ class PaneCensus:
 def pane_census(*, session: str | None = None,
                 runner: Callable = subprocess.run,
                 which: Callable = shutil.which) -> PaneCensus | None:
-    """Read one complete ``herdr pane list`` result; return None on uncertainty."""
+    """Read one complete ``herdr pane list`` result; return None on uncertainty.
+
+    A named ``session`` (``"default"`` too) is read on that server alone, so the census's
+    endpoint is the server it actually read; without one the caller's own server is.
+
+    Herdr follows an inherited ``HERDR_SOCKET_PATH`` before its default server, and a
+    socket without ``HERDR_SESSION`` names no owner. A default census therefore keeps it
+    only when its realpath is where Herdr itself finds the default server under this
+    environment's Herdr configuration (``peer_address.herdr_namespace`` without the
+    socket: ``<config>/herdr.sock``); otherwise this read alone drops it and Herdr finds
+    the default server itself (an unreachable one is an unknown census, never absence)."""
     if which("herdr") is None:
         return None
     server = endpoint_name(session)
@@ -61,8 +94,15 @@ def pane_census(*, session: str | None = None,
     if server != "default":
         argv.extend(("--session", server))
     argv.extend(("pane", "list"))
+    bound = {} if session is None else {"env": endpoint_env(server)}
+    inherited = bound.get("env", {}).get("HERDR_SOCKET_PATH")
+    if server == "default" and inherited:
+        import peer_address
+        own = {key: value for key, value in bound["env"].items() if key != "HERDR_SOCKET_PATH"}
+        if os.path.realpath(inherited.strip()) != peer_address.herdr_namespace(own, "default"):
+            bound["env"].pop("HERDR_SOCKET_PATH")
     try:
-        proc = runner(argv, capture_output=True, text=True, timeout=2.0)
+        proc = runner(argv, capture_output=True, text=True, timeout=2.0, **bound)
         if getattr(proc, "returncode", 1) != 0:
             return None
         payload = json.loads(proc.stdout or "")
