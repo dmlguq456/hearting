@@ -426,14 +426,13 @@ Concrete model names belong here and in Claude-native files only.
 Behavior personas live in the portable unit catalog `roles/units/` and carry
 portable role names only — they have no Claude `model:` frontmatter. The former
 per-team agent files (plan-team, dev-team, qa-team, and the other five) were
-removed in the unit-catalog migration. The only kernel helper agent under
-`adapters/claude/agents/` is `memory-scout`. Unlike the Codex kernel helper (derived
-from `CFG_PROFILE_MEMORY_SCOUT`), this one is hand-authored and pins `haiku` — a model
-**no tier in `config/models.conf` declares**, since the mini tier moved to `sonnet` on
-2026-08-07. It rides a whole-file `check-model-config.py` exemption, so retuning every
-tier leaves it where it is. Read it as an explicit pin, not as "the mini tier". Every other
-native subagent spawn resolves its model through the native-subagent default
-below.
+removed in the unit-catalog migration, and the hand-written `memory-scout` helper was
+retired on 2026-11-28: `adapters/claude/agents/` holds only the generated depth names
+(`light`, `balanced`, `deep`, `general-purpose`). A call naming `memory-scout` starts a
+light `general/explore` unit route only under the next section's conditions (a person's
+session, nothing defines that name, no other hook or rule decides the call); a definition
+the user kept under that name, in any YAML form, runs natively. A spawn
+that names none of them resolves its model through the native-subagent default below.
 
 ## A Native Subagent Call Becomes a Unit Route (H1)
 

@@ -5,7 +5,8 @@ Claude `Agent` (older `Task`) and Codex `spawn_agent` (multi-agent v1) are inter
 (`PreToolUse`). Whether Hearting takes the call is decided once, before anything is registered; anything
 that is not certain leaves the native call exactly as it was, with nothing printed and nothing registered:
 - The definition the harness picks for the name is Hearting's shipped one (apart from the lines activation
-  renders for the user's models) or the harness's built-in, and the call carries nothing a brief cannot.
+  renders for the user's models) or the harness's built-in, or a retired name (`memory-scout`) nothing defines,
+  and the call carries nothing a brief cannot.
 - Nothing else decides the same call: no other hook or permission rule in a configuration the hook reads,
   no layer added on the harness's command line, and Hearting's own hook registered exactly once.
 - The caller is a person's session or the one worker form below, and not a native subagent (unknown counts as
@@ -74,6 +75,9 @@ UNNAMED = {"claude": "balanced-deep", "codex": "balanced"}
 # The agent a call without a name runs as, and the agents the harness itself defines.
 DEFAULT_AGENT = {"claude": "general-purpose", "codex": "default"}
 BUILT_IN = {"claude": {"Explore", "Plan", "general-purpose"}, "codex": {"default", "worker", "explorer"}}
+# Names Hearting once shipped a definition for and no longer does: with no definition anywhere the native call
+# has nothing to run, so such a call is taken like a built-in's.
+RETIRED = {"memory-scout"}
 _SUFFIX = {"claude": ".md", "codex": ".toml"}
 # Lines activation renders into a shipped definition for the user's models (`sync-native-agents.py`).
 _RENDERED = {"claude": re.compile(r"(# profile:|model:|effort:)"),
@@ -189,15 +193,21 @@ def _is_shipped(harness: str, path: Path, name: str) -> bool:
 
 def _gives(harness: str, path: Path, name: str) -> bool:
     """The definition file can give the agent `name`. Hearting's own file gives its own name; Codex reads the
-    TOML `name` (the file name without one); any other Claude file counts when the name stands anywhere in
-    its frontmatter, so a comment, quotes or another YAML form cannot hide it."""
+    TOML `name` (the file name without one); any other Claude file counts when its YAML frontmatter `name`
+    (read as YAML, so quotes and escapes are undone; the file name without one) is it, or when the name stands
+    anywhere in that frontmatter. A file that cannot be read or parsed raises: not certain, so native."""
     if _is_shipped(harness, path, path.stem):
         return path.stem == name
-    text = path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8" if harness == "codex" else "utf-8-sig")  # Claude reads past a BOM
     if harness == "codex":
         found = tomllib.loads(text).get("name", path.stem)
         return isinstance(found, str) and found.strip() == name
-    return re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text.split("\n---", 1)[0]) is not None
+    import yaml  # PyYAML, the parser Hearting already requires (route proposals, the manifest's frontmatter)
+    head = text.split("\n---", 1)[0]
+    front = yaml.safe_load(head[3:]) if text.startswith("---") else None
+    found = front.get("name", path.stem) if isinstance(front, dict) else path.stem
+    return ((isinstance(found, str) and found.strip() == name)
+            or re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", head) is not None)
 
 
 def _definitions(harness: str, cwd: str, name: str) -> tuple[list[Path], list[Path]]:
@@ -226,11 +236,13 @@ def _definitions(harness: str, cwd: str, name: str) -> tuple[list[Path], list[Pa
 
 
 def require_shipped_definition(harness: str, name: str, cwd: str) -> None:
-    """`Skip` unless the definition the harness picks for `name` is Hearting's shipped one or its built-in."""
+    """`Skip` unless the definition the harness picks for `name` is Hearting's shipped one or its built-in (a
+    retired name counts as built in)."""
     user, others = _definitions(harness, cwd, name)
     if others:
         raise Skip("definition-elsewhere")          # a project, managed or declared definition comes first
-    if not ((len(user) == 1 and _is_shipped(harness, user[0], name)) or (not user and name in BUILT_IN[harness])):
+    if not ((len(user) == 1 and _is_shipped(harness, user[0], name))
+            or (not user and name in BUILT_IN[harness] | RETIRED)):
         raise Skip("definition-not-shipped")
 
 

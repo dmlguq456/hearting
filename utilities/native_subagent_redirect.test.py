@@ -301,7 +301,7 @@ class DefinitionTest(Homes):
         self.write(self.claude_home / "agents/deep.md", shipped.replace("\nmodel: opus\n", "\nmodel: haiku\n")
                    .replace("\neffort: xhigh\n", "\neffort: low\n").replace("(tier deep)", "(tier light)"))
         self.assertTrue(self.check("claude", "deep"))
-        self.assertFalse(self.check("claude", "memory-scout"))             # no definition at all: not certain
+        self.assertFalse(self.check("claude", "balanced-deep"))            # no definition and not built in
 
     def test_claude_a_changed_frontmatter_or_body_is_not_hearting_s(self):
         shipped = (ROOT / "adapters/claude/agents/light.md").read_text()
@@ -382,6 +382,78 @@ class DefinitionTest(Homes):
         self.assertTrue(self.check("codex", "default"))
         self.write(self.codex_home / "config.toml", '[agents.team_scout]\nconfig_file = "private/missing.toml"\n')
         self.assertFalse(self.check("codex", "default"))                  # a file that cannot be read
+
+    def test_a_retired_name_nothing_defines_starts_at_its_depth(self):
+        # Hearting no longer ships `memory-scout`; a call by that habit still becomes a light unit route.
+        self.register("claude")
+        payload = {**claude(subagent_type="memory-scout"), "cwd": str(self.project)}
+        for harness in ("claude", "codex"):
+            self.assertTrue(self.check(harness, "memory-scout"), harness)
+        with mock.patch.object(redirect, "start", return_value=None) as start, \
+                mock.patch.object(session_identity, "known_sub_session_root", return_value=SID):
+            redirect.redirect("claude", payload)
+        self.assertEqual(start.call_args.args[2], "light")
+        # A definition the user kept (activation keeps an edited file) runs natively, as does a project's.
+        self.write(self.claude_home / "agents/memory-scout.md", "---\nname: memory-scout\n---\nMine.\n")
+        self.assertFalse(self.check("claude", "memory-scout"))
+        self.write(self.project / ".codex/agents/scout.toml", 'name = "memory-scout"\ndescription = "p"\n')
+        self.assertFalse(self.check("codex", "memory-scout"))
+
+    def test_a_name_read_as_yaml_in_the_home_or_a_project_is_the_user_s_definition(self):
+        # Quotes and escapes are undone as the harness reads YAML (review 🔴3): the user picked this one.
+        self.register("claude")
+        payload = {**claude(subagent_type="memory-scout"), "cwd": str(self.project)}
+        for text in ('---\nname: "memory\\u002Dscout"\ndescription: Mine\n---\nMine.\n',
+                     '---\nname: "memory\\x2dscout"\ndescription: Mine\n---\nMine.\n',
+                     "---\n'name': 'memory-scout'\ndescription: Mine\n---\nMine.\n"):
+            for folder in (self.claude_home / "agents", self.project / ".claude/agents"):
+                with self.subTest(text=text, folder=folder.parent.name):
+                    mine = self.write(folder / "alternative-filename.md", text)
+                    self.assertFalse(self.check("claude", "memory-scout"))
+                    with mock.patch.object(redirect, "start") as start, \
+                            mock.patch.object(session_identity, "known_sub_session_root", return_value=SID):
+                        self.assertIsNone(redirect.redirect("claude", payload))
+                    start.assert_not_called()
+                    mine.unlink()
+        self.assertTrue(self.check("claude", "memory-scout"))             # nothing defines it
+        self.write(self.codex_home / "agents/other.toml", 'name = "memory\\u002Dscout"\ndescription = "m"\n')
+        self.assertFalse(self.check("codex", "memory-scout"))             # Codex reads its TOML as TOML
+
+    def test_a_definition_behind_a_utf8_bom_is_the_user_s_definition(self):
+        # Claude reads past a leading BOM (review R2 🔴4): the escaped name behind it is the user's pick.
+        self.register("claude")
+        payload = {**claude(subagent_type="memory-scout"), "cwd": str(self.project)}
+        data = b'\xef\xbb\xbf---\nname: "memory\\x2dscout"\ndescription: Isolated definition.\n---\n'
+        for folder in (self.claude_home / "agents", self.project / ".claude/agents",
+                       self.tmp / "managed/.claude/agents"):
+            with self.subTest(folder=str(folder.relative_to(self.tmp))):
+                folder.mkdir(parents=True, exist_ok=True)
+                (folder / "different-filename.md").write_bytes(data)
+                self.assertFalse(self.check("claude", "memory-scout"))
+                with mock.patch.object(redirect, "start") as start, \
+                        mock.patch.object(session_identity, "known_sub_session_root", return_value=SID):
+                    self.assertIsNone(redirect.redirect("claude", payload))
+                start.assert_not_called()
+                (folder / "different-filename.md").unlink()
+        self.assertTrue(self.check("claude", "memory-scout"))
+
+    def test_a_definition_that_cannot_be_read_leaves_the_call_native(self):
+        # Not knowing whether a file defines the name is not knowing that nothing does (R37).
+        self.register("claude")
+        payload = {**claude(subagent_type="memory-scout"), "cwd": str(self.project)}
+        for folder in (self.claude_home / "agents", self.project / ".claude/agents"):
+            for data in (b"---\nname: [memory\ndescription: x\n---\nx\n",     # not YAML
+                         b"---\nname: other\ndescription: \xff\n---\nx\n"):  # not UTF-8
+                with self.subTest(folder=folder.parent.name, data=data):
+                    folder.mkdir(parents=True, exist_ok=True)
+                    (folder / "broken.md").write_bytes(data)
+                    self.assertFalse(self.check("claude", "memory-scout"))
+                    with mock.patch.object(redirect, "start") as start, \
+                            mock.patch.object(session_identity, "known_sub_session_root", return_value=SID):
+                        self.assertIsNone(redirect.redirect("claude", payload))
+                    start.assert_not_called()
+                    (folder / "broken.md").unlink()
+        self.assertTrue(self.check("claude", "memory-scout"))
 
     def test_the_redirect_starts_nothing_for_a_collision(self):
         self.ship("claude", "light")

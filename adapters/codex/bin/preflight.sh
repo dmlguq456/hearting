@@ -881,7 +881,6 @@ projection=codex_setting/codex-agents
 trigger=explicit-user-request-or-main-dispatch
 auto_spawn=explicit-only
 custom_agent_config=model,model_reasoning_effort,sandbox_mode
-memory_scout=adapters/codex/agents/memory-scout.toml
 dispatch_fallback=adapters/codex/bin/preflight.sh dispatch --dry-run|--register|--start
 constraints=depth-one-owner-with-standard-plus-depth-two,depth-two-standard-plus-via-capability-owner-dispatch,approval-and-sandbox-inherited
 claude_subagent_frontmatter=unsupported

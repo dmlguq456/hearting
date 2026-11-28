@@ -999,9 +999,7 @@
    "hook-config",
    "memory-contract"
   ],
-  "agents": [
-   "memory-scout"
-   ]
+  "agents": []
   },
  "ownership": {
   "generated": [
