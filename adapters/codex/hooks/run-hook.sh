@@ -4,7 +4,7 @@ set -eu
 
 script="${1:-}"
 case "$script" in
-  sessionstart-lifecycle.py|sessionend-lifecycle.py|stop-lifecycle.py|userprompt-lifecycle.py|permissionrequest-lifecycle.py|posttooluse-interaction-clear.py|posttooluse-design-check.py|posttooluse-read-marker.py|posttooluse-frame-answer.py|pretooluse-question-redirect.py|posttooluse-spec-sync.py|worker-state-compact.py|core-write-guard.py|route-presence-gate.py|start-receipt-context.py|turn-carrier.py|git-index-lock-context.py|interrupt-lifecycle.py)
+  sessionstart-lifecycle.py|sessionend-lifecycle.py|stop-lifecycle.py|userprompt-lifecycle.py|permissionrequest-lifecycle.py|posttooluse-interaction-clear.py|posttooluse-design-check.py|posttooluse-read-marker.py|posttooluse-frame-answer.py|pretooluse-question-redirect.py|pretooluse-subagent-redirect.py|posttooluse-spec-sync.py|worker-state-compact.py|core-write-guard.py|route-presence-gate.py|start-receipt-context.py|turn-carrier.py|git-index-lock-context.py|interrupt-lifecycle.py)
     ;;
   *)
     printf '%s\n' "unsupported Codex hook bridge: ${script:-<empty>}" >&2
@@ -52,5 +52,14 @@ if [ -z "${PYTHONPYCACHEPREFIX:-}" ] && [ -z "${PYTHONDONTWRITEBYTECODE:-}" ]; t
     export PYTHONPYCACHEPREFIX
   fi
   unset _state_root
+fi
+if [ "$script" = "pretooluse-subagent-redirect.py" ]; then
+  # This hook only ever refuses a subagent call it started as a Hearting unit route, with deny JSON on
+  # success. A bridge a partial install lacks, or one that fails, lets the native call run: Codex reads
+  # exit 2 with stderr as a refusal, so no failure of this bridge may reach it.
+  if out=$(AGENT_HOME="$agent_root" python3 "$agent_root/adapters/codex/hooks/$script" "$@" 2>/dev/null); then
+    printf '%s' "$out"
+  fi
+  exit 0
 fi
 AGENT_HOME="$agent_root" exec python3 "$agent_root/adapters/codex/hooks/$script" "$@"

@@ -568,7 +568,7 @@ class PrivateTmuxEdgesTest(unittest.TestCase):
             def received():
                 path = case / "received"
                 return path.read_bytes() if path.exists() else b""
-            shown = lambda rows: any("╭─ ›" in row for row in rows)  # noqa: E731
+            shown = lambda rows: any("╭─ ▶" in row for row in rows)  # noqa: E731
             stalled = lambda rows: any("붙여넣기 멈춤" in row for row in rows)  # noqa: E731
             number = [0]
 
@@ -584,7 +584,7 @@ class PrivateTmuxEdgesTest(unittest.TestCase):
                 if not shown(screen()):
                     send("\x1d")
                 def on_it(rows):
-                    top = next((i for i, row in enumerate(rows) if "╭─ ›" in row), None)
+                    top = next((i for i, row in enumerate(rows) if "╭─ ▶" in row), None)
                     return top is not None and any(tag in row for row in rows[top + 1:top + 3])
                 waitfor(on_it, "the popup on it")
                 return len(answers()), len(received())

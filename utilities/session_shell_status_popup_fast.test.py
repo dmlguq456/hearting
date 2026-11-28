@@ -447,10 +447,10 @@ const checks={};
     const spot=await at('BL_ITEM_TWO');await press(spot.x,spot.y,0);
     let r=await until(popupHas('BL_ITEM_ONE'),'the BACKLOG popup');
     const b=box(r.s);checks.title=b.rows[0];checks.band=b.rows.at(-1);
-    checks.stands=body(r.s).some(l=>l.startsWith('> ')&&l.includes('BL_ITEM_TWO'));
-    checks.other_folded=body(r.s).some(l=>l.includes('›')&&l.includes('TBD 2'));
+    checks.stands=body(r.s).some(l=>l.startsWith('▶ ')&&l.includes('BL_ITEM_TWO'));
+    checks.other_folded=body(r.s).some(l=>l.includes('▸')&&l.includes('TBD 2'));
     checks.other_hidden=!popupHas('BL_OTHER_ITEM')(r.s);
-    const chosen=s=>body(s).find(l=>l.startsWith('> '))||'';
+    const chosen=s=>body(s).find(l=>l.startsWith('▶ '))||'';
     // ↑/↓ move the chosen line: each move is waited for before the next key.
     const move=async bytes=>{const was=chosen(await screen());return step(bytes,s=>chosen(s)!==was,'the chosen line moved by '+JSON.stringify(bytes));};
     // Typed as a person types: each letter stands in the finder's line before the next one.
@@ -501,7 +501,7 @@ const checks={};
     r=await until(s=>s.some(l=>folded.test(l)),'the buttons on the REPO row');
     {const y=r.s.findIndex(l=>folded.test(l)),line=r.s[y];checks.folded_row=line.slice(line.lastIndexOf('│',line.indexOf('REPO'))).trim();
      // (by cells, the folder's name and its Git words being the machine's: the last `›` of the row is BACKLOG's button, its label `REPO` lies in STATUS's press)
-     await flush();const c=cellsOf(y),button={x:c.lastIndexOf('›'),y},name=await at(/REPO +/);
+     await whole();const c=cellsOf(y),button={x:c.lastIndexOf('›'),y},name=await at(/REPO +/);
      await press(button.x,button.y,0);let o=await until(s=>{const x=box(s);return !!x&&x.rows[0].includes('BACKLOG')&&popupHas('6 total')(s);},'the board from the folded button');
      checks.folded_backlog=true;await close();   // (16 rows: the board's head lines; its items are below its short window)
      await press(name.x+1,name.y,0);o=await until(s=>{const x=box(s);return !!x&&x.rows[0].includes('STATUS');},'the status popup from the REPO row');
