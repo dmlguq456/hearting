@@ -75,6 +75,8 @@ previews and full-card history remain the read surfaces.
 
 There is no deterministic promote/skip classifier. The acting agent judges whether a memory operation is useful in context, including whether information is durable, non-obvious, recoverable elsewhere, stale, or merely ephemeral. The four storage-purpose labels are a bounded ingress contract after that semantic judgment, not a keyword classifier: code validates the declared purpose but never infers it from content. Manual user-directed memory remains governed by its owning capability.
 
+The tier is part of the same judgment. A direction whose reason is a passing condition (how much usage, limit or credit a harness has left, how long until it resets, a temporary outage) goes to the `working` tier, where it expires, even when the user gave it as a decision or a correction. `durable` holds only what still applies once that condition has changed. Allocation reads usage and reset times live (`utilities/harness-capacity.py`), so neither memory nor a settings default is the place to keep them (2026-11-27 user direction). Code does not infer this from content either.
+
 ### §7.2. Write Mechanics and Deduplication
 
 Tests that accept answers through real workflow code isolate every memory sink

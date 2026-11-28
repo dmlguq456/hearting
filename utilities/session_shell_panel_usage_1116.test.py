@@ -125,9 +125,9 @@ assert.equal(rowOf(30,'codex'),'codex 5h 12% 7d 66%');
 // The last row is not fitted again beside the buttons: it keeps the columns of the rows above.
 assert.equal(rowOf(30,'opencode'),'opencode 5h 12% 7d 66%');
 assert.equal(rowOf(40,'opencode'),'opencode 5h 12% 7d 66%');
-// Narrower than 5h and 7d need, each row is fitted on its own: the reset times, the model windows from the last, then (11-28)
-// the windows of time from the last, as the backend names them (before, a label guess gave 5h up first: `claude 7d 66%`).
-assert.equal(rowOf(24,'claude'),'claude 5h 12%');
+// Narrower than 5h and 7d need, each row is fitted on its own in the order of the design the person approved on 11-13: the reset
+// times, 5h, the model windows from the last, then 7d.
+assert.equal(rowOf(24,'claude'),'claude 7d 66%');
 """)
 
     def test_short_of_rows_the_other_harnesses_go_then_the_name_row_and_mem_goes_before_them(self):
