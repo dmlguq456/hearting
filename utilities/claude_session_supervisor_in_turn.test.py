@@ -35,8 +35,104 @@ from fixture_processes import unique_attempt_id  # noqa: E402
 
 PARENT = unique_attempt_id("att-in-turn-owner")
 
+# Claude Code 2.1.332, probe-final.tar.gz: final/bg-0.json, the first autonomous turn.
+NOTIFICATION = (
+    "<task-notification>\n<task-id>bfsehouqe</task-id>\n"
+    "<tool-use-id>toolu_fx_f68277c69ed248aa86a3</tool-use-id>\n"
+    "<output-file>/dev/shm/pidq/tmp/hearting-direct-test-o7oxwsuq/tmp/pidq-probe/bg-0/tmp/claude-1002/"
+    "-dev-shm-pidq-tmp-hearting-direct-test-o7oxwsuq-tmp-pidq-probe-bg-0-work/"
+    "0552d29c-e466-4844-9b55-9fdd524f2b3c/tasks/bfsehouqe.output</output-file>\n"
+    '<status>completed</status>\n<summary>Background command "probe step" completed (exit code 0)</summary>\n'
+    "</task-notification>"
+)
+NOTIFICATION_TOOL = "toolu_fx_70bec48707564d5594c1"
+
+SUPERVISOR_FIXTURE = r'''
+import errno, importlib.util, json, os, sys, time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+sys.argv = sys.argv[1:]
+sys.path.insert(0, str(path.parent))
+spec = importlib.util.spec_from_file_location('supervisor', path)
+S = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = S
+spec.loader.exec_module(S)
+import dispatch_owner_input as I
+
+plan = json.loads(os.environ['FAKE_PLAN'])
+trace = Path(os.environ['FAKE_TRACE'])
+run_turn, write = S.run_turn, I._write
+
+if plan.get('leading'):
+    def pause_before_stdin(*args, **kwargs):
+        trigger = trace.with_suffix('.ready')
+        if not trigger.exists():
+            trigger.touch()
+            deadline = time.monotonic() + 30
+            while not trace.with_suffix('.notified').exists():
+                if time.monotonic() >= deadline:
+                    raise AssertionError('leading notification never finished')
+                time.sleep(0.01)
+        return run_turn(*args, **kwargs)
+    S.run_turn = pause_before_stdin
+
+if plan.get('retire-eio'):
+    def fail_turn_retirement(path, value, **kwargs):
+        if 'turn' not in value and path.exists():
+            old = json.loads(path.read_text()).get('turn', {})
+            if (not old.get('prompt_id')
+                    and old.get('digest') == I._prompt_digest(S.DECISIONS.EDGE_BLOCK_CONTINUE_PROMPT)):
+                with trace.open('a') as log:
+                    log.write(json.dumps({'event': 'retire-eio'}) + '\n')
+                raise OSError(errno.EIO, 'cannot clear the retry digest')
+        write(path, value, **kwargs)
+    I._write = fail_turn_retirement
+    retry_delay = S.DECISIONS.edge_block_retry_delay
+    def fast_retry(terminal, failures):
+        if retry_delay(terminal, failures) is not None:
+            return 0.01
+    S.DECISIONS.edge_block_retry_delay = fast_retry
+
+raise SystemExit(S.main())
+'''
+
+BIND_FAULT = r'''
+import errno, json, os, runpy, signal, stat, sys
+
+mode = sys.argv[1]
+sys.argv = sys.argv[2:]
+replace, fsync = os.replace, os.fsync
+
+def log(event):
+    with open(os.environ['FAKE_TRACE'], 'a') as trace:
+        trace.write(json.dumps({'event': event, 'mode': mode}) + '\n')
+
+def sync(fd):
+    if stat.S_ISDIR(os.fstat(fd).st_mode):
+        log('directory-fsync')
+        raise OSError(errno.EIO, 'directory fsync after publication')
+    fsync(fd)
+    log('file-fsync')
+
+def publish(src, dest):
+    if mode == 'before-replace':
+        log('failed-before-replace')
+        raise OSError(errno.EIO, 'before publication')
+    replace(src, dest)
+    log('replaced')
+    if mode == 'after-replace':
+        raise OSError(errno.EIO, 'after publication')
+    if mode == 'watchdog':
+        signal.pause()
+
+os.replace, os.fsync = publish, sync
+runpy.run_path(sys.argv[0], run_name='__main__')
+'''
+
 FAKE_CLAUDE = r'''
-import fcntl, json, os, re, shlex, signal, subprocess, sys, time, uuid as U
+import fcntl, json, os, re, select, shlex, signal, subprocess, sys, time, uuid as U
+from pathlib import Path
 args = sys.argv[1:]
 trace, jobs, parent, root = (os.environ[name] for name in ('FAKE_TRACE', 'FAKE_JOBS', 'FAKE_PARENT', 'FAKE_ROOT'))
 plan = json.loads(os.environ.get('FAKE_PLAN', '{}'))
@@ -102,6 +198,22 @@ def hook(kind, request, mode=None, locked=False):
         command = [sys.executable, '-c', MARK_EIO, root, root + '/hooks/registered-parent-park.py']
     if mode == 'no-id':  # Claude Code before 2.1.196
         request.pop('prompt_id', None)
+    if kind == 'prompt' and mode in ('before-replace', 'after-replace', 'watchdog', 'observe-replace'):
+        command = [sys.executable, '-c', os.environ['FAKE_BIND_FAULT'], mode,
+                   root + '/hooks/registered-parent-park.py', 'prompt']
+        with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, env=env) as process:
+            try:
+                stdout, stderr = process.communicate(
+                    json.dumps(request), timeout=hooks['UserPromptSubmit'][0]['hooks'][0]['timeout'])
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate()
+                assert mode == 'watchdog' and process.returncode == -signal.SIGKILL, stderr
+                log(event='bind-watchdog', rc=process.returncode)
+            else:
+                assert mode != 'watchdog' and process.returncode == 0, stderr
+            return stdout
     held = None
     if locked:  # another writer holds the input lock while this hook starts
         held = os.open(str(I._path(jobs, parent)) + '.lock', os.O_RDWR)
@@ -129,8 +241,9 @@ def submit(text, prompt_id, turn, mode=None):
         sent = sent.replace('\n', '\r\n')
     stdout = hook('prompt', {'session_id': SESSION, 'cwd': os.getcwd(), 'prompt_id': prompt_id,
                              'hook_event_name': 'UserPromptSubmit', 'prompt': sent},
-                  'no-id' if mode == 'no-id' else 'eio' if mode == 'eio' else None)
-    log(event='prompt-hook', turn=turn, stdout=stdout)
+                  mode)
+    log(event='prompt-hook', turn=turn, stdout=stdout, prompt_id=prompt_id,
+        bound=input_state().get('turn', {}).get('prompt_id'))
 
 def tools(turn, tag, steps, prompt_id, mode=None):
     for index, step in enumerate(steps, 1):
@@ -179,7 +292,7 @@ def held(until_reserved):
     deadline = time.monotonic() + 30
     while until_reserved and time.monotonic() < deadline:
         if os.path.exists(ledger) and '"terminal-handoff"' in open(ledger, encoding='utf-8').read():
-            log(event='reserved-while-held')
+            log(event='reserved-while-held', recorded='turn' in input_state())
             break
         time.sleep(0.02)
     return handle
@@ -205,10 +318,11 @@ def run_turn(prompt, uuid):
     spec = {'steps': spec} if isinstance(spec, list) else spec
     with open(os.environ['AGENT_DISPATCH_COMPLETION_STATE_FILE'], encoding='utf-8') as handle:
         delivered = json.load(handle)['delivered_attempt_ids']
-    log(event='turn-start', turn=turn, prompt=prompt, session=SESSION,
+    log(event='turn-start', turn=turn, prompt=prompt, session=SESSION, resume='--resume' in args,
+        pid=os.getpid(),
         recorded='digest' in input_state().get('turn', {}))
     if '<owner-corrections>' in prompt:
-        noted = re.search(r'Already shown beside a tool result in the previous turn: ([^.]*)[.]', prompt)
+        noted = re.search(r'May have been shown beside a tool result in the previous turn: ([^.]*)[.]', prompt)
         log(event='read', turn=turn, ids=ids_in(prompt), noted=noted.group(1).split(', ') if noted else [])
     prompt_id = str(U.uuid4())
     fold = spec.get('fold')
@@ -242,6 +356,27 @@ def run_turn(prompt, uuid):
 if not STREAM:
     run_turn(sys.stdin.buffer.read().decode('utf-8'), None)
     sys.exit(0)
+if plan.get('leading'):
+    trigger = Path(trace).with_suffix('.ready')
+    deadline = time.monotonic() + 30
+    while not trigger.exists():
+        assert time.monotonic() < deadline, 'supervisor did not arm its first prompt'
+        time.sleep(0.01)
+    assert '--resume' in args and not select.select([0], [], [], 0)[0], 'stdin already readable'
+    prior = '366193b9-7b1a-428e-b737-400788b25b56'
+    submit(plan['leading'], prior, 0)
+    I.submit(jobs, parent, 'correction C', 'C')
+    tool = 'toolu_fx_70bec48707564d5594c1'
+    stdout = hook('tool', {'hook_event_name': 'PreToolUse', 'session_id': SESSION, 'cwd': os.getcwd(),
+                           'prompt_id': prior, 'tool_use_id': tool, 'tool_name': 'Bash',
+                           'tool_input': {'command': 'echo notif-tool', 'description': 'probe step'}})
+    if stdout:
+        log(event='shown', turn=0, tool=tool, ids=ids_in(json.loads(stdout)['hookSpecificOutput']['additionalContext']))
+    origin = plan.get('leading-origin', {'kind': 'task-notification', 'producer': 'session-task',
+                                         'runId': '0mx01wwwe-9f06986d'})
+    out({'type': 'result', 'subtype': 'success', 'result': 'notification handled', 'origin': origin})
+    log(event='notification-before-stdin', stdout=stdout)
+    Path(trace).with_suffix('.notified').touch()
 buffer = b''
 while True:
     while b'\n' not in buffer:
@@ -326,9 +461,13 @@ class InTurnCorrectionTest(unittest.TestCase):
         self.jobs.write_text(owner_row(lease) + (child_row() if child else ""), encoding="utf-8")
         self.child = child
 
-    def supervise(self, plan: dict, *, rc: int = 0, transport: str = "stream-json", extra=(), env=None) -> list[dict]:
+    def supervise(self, plan: dict, *, rc: int = 0, transport: str = "stream-json", extra=(), env=None,
+                  prompt="initial assignment\nwith two lines") -> list[dict]:
+        python = [sys.executable]
+        if plan.get("leading") or plan.get("retire-eio"):
+            python += ["-c", SUPERVISOR_FIXTURE]
         command = [
-            sys.executable, str(SUPERVISOR), "--worktree", str(self.root), "--jobs", str(self.jobs),
+            *python, str(SUPERVISOR), "--worktree", str(self.root), "--jobs", str(self.jobs),
             "--parent-attempt-id", PARENT, "--state-file", str(self.base / "supervisor-state.json"),
             "--lease-file", str(self.base / "supervisor-state" / f"{PARENT}.lease"),
             "--add-dir", str(self.root), "--claude-command", str(self.claude),
@@ -337,10 +476,11 @@ class InTurnCorrectionTest(unittest.TestCase):
         ]
         env = {**os.environ, "AGENT_ARTIFACT_ROOT": str(self.root / ".agent_reports"),
                "FAKE_TRACE": str(self.trace), "FAKE_JOBS": str(self.jobs), "FAKE_PARENT": PARENT,
-               "FAKE_ROOT": str(ROOT), "FAKE_PLAN": json.dumps(plan), **(env or {})}
+               "FAKE_ROOT": str(ROOT), "FAKE_PLAN": json.dumps(plan), "FAKE_BIND_FAULT": BIND_FAULT,
+               "CLAUDE_CODE_DISABLE_CRON": "1", **(env or {})}
         if not self.child:
             env["FAKE_FINAL_FIRST"] = "1"
-        result = subprocess.run(command, input="initial assignment\nwith two lines", text=True, capture_output=True,
+        result = subprocess.run(command, input=prompt, text=True, capture_output=True,
                                 env=env, timeout=180)
         self.assertEqual(result.returncode, rc, result.stderr[-4000:] + result.stdout[-4000:])
         trace = [json.loads(line) for line in self.trace.read_text(encoding="utf-8").splitlines()]
@@ -393,10 +533,36 @@ class InTurnCorrectionTest(unittest.TestCase):
         trace = self.run_owner({"1": {"steps": [{}], "after": [
             {"hold": "reserve", "steps": [{"file": ["C"]}, {}, {"locked": True}]}]}},
             extra=("--max-continuations", "1"))
-        self.assertIn({"event": "reserved-while-held"}, trace)
+        self.assertIn({"event": "reserved-while-held", "recorded": False}, trace)
         self.assertEqual(self.shown(trace), [])
         self.assertNotIn("shown", self.receipt())
         self.assertEqual(self.reads(trace)[:1], [(2, False)])
+
+    def test_identical_notification_before_supervisor_stdin_cannot_claim_the_hash(self):
+        resumed = "0552d29c-e466-4844-9b55-9fdd524f2b3c"
+        for prompt, copies in ((NOTIFICATION, []), ("a distinct supervisor prompt", ["toolu-1-1"])):
+            with self.subTest(same_body=prompt == NOTIFICATION):
+                trace = self.run_owner({"leading": NOTIFICATION, "1": [{}, {}]}, prompt=prompt,
+                                       extra=("--resume-session", resumed))
+                leading = next(row for row in trace if row["event"] == "notification-before-stdin")
+                self.assertEqual(leading["stdout"], "")
+                self.assertNotIn(NOTIFICATION_TOOL, self.shown(trace))
+                self.assertEqual(self.shown(trace), copies)
+                self.assertEqual(self.reads(trace), [(2, bool(copies))])
+                self.assertEqual(self.history(), DELIVERED)
+                self.assertEqual({row["session"] for row in trace if row["event"] == "turn-start"}, {resumed})
+
+    def test_plain_text_can_also_come_from_the_scheduler_or_peer_inbox(self):
+        prompt = "an otherwise ordinary assignment"
+        for kind, env in (("scheduled-task", {"CLAUDE_CODE_DISABLE_CRON": "0"}),
+                          ("peer", {"CLAUDE_CODE_MESSAGING_SOCKET": str(self.root / "fake.sock")})):
+            with self.subTest(kind=kind):
+                trace = self.run_owner({"leading": prompt, "leading-origin": {"kind": kind}, "1": [{}, {}]},
+                                       prompt=prompt, extra=("--resume-session", "same-session"), env=env)
+                self.assertEqual(self.shown(trace), [])
+                self.assertEqual(self.reads(trace), [(2, False)])
+                self.assertEqual(self.history(), DELIVERED)
+                self.assertNotIn("shown", self.receipt())
 
     def test_a_background_subagent_after_the_result_shows_no_copy(self):
         trace = self.run_owner({"1": {"steps": [{}], "after": [
@@ -454,6 +620,65 @@ class InTurnCorrectionTest(unittest.TestCase):
                 self.assertEqual((self.reads(trace), self.reads(trace, "E")), ([(3, False)], [(4, False)]))
                 self.assertEqual((self.shown(trace, "D"), self.reads(trace, "D")), (["toolu-4-2"], [(5, True)]))
                 self.assertEqual((self.history(), self.history("D")), (DELIVERED, DELIVERED))
+
+    def test_ordinary_edge_retry_can_bind_with_a_new_id_on_the_same_session(self):
+        for transport in ("stream-json", "resume-process"):
+            with self.subTest(transport):
+                trace = self.run_owner({"1": {"error": 403}, "2": [{"file": ["C"]}, {}, {}]},
+                                       transport=transport)
+                turns = [row for row in trace if row["event"] == "turn-start"]
+                self.assertIn("transient service block", turns[1]["prompt"])
+                self.assertEqual(turns[0]["session"], turns[1]["session"])
+                self.assertTrue(turns[1]["resume"])
+                self.assertNotEqual(turns[0]["pid"], turns[1]["pid"])
+                self.assertEqual(self.shown(trace), ["toolu-2-2"])
+                self.assertEqual(self.reads(trace), [(3, True)])
+                self.assertEqual(self.history(), DELIVERED)
+
+    def test_same_body_reserved_retry_cannot_use_the_retired_unbound_hash(self):
+        for transport in ("stream-json", "resume-process"):
+            with self.subTest(transport):
+                trace = self.run_owner({"retire-eio": True, "1": {"error": 403},
+                                        "2": {"prompt": "skip"}, "3": {"error": 403},
+                                        "4": [{"file": ["C"]}, {}, {}]},
+                                       transport=transport, extra=("--max-continuations", "1"))
+                turns = [row for row in trace if row["event"] == "turn-start"]
+                self.assertIn("transient service block", turns[1]["prompt"])
+                self.assertEqual(turns[1]["prompt"], turns[3]["prompt"])
+                self.assertTrue(turns[3]["recorded"], "the failed deletions must leave the old digest present")
+                self.assertGreaterEqual(sum(row["event"] == "retire-eio" for row in trace), 3)
+                retry_hook = next(row for row in trace if row["event"] == "prompt-hook" and row["turn"] == 4)
+                self.assertIsNone(retry_hook["bound"])
+                self.assertEqual(self.shown(trace), [])
+                self.assertEqual(self.reads(trace), [(5, False)])
+                self.assertEqual(self.history(), DELIVERED)
+                self.assertNotIn("shown", self.receipt())
+
+    def test_bind_publication_faults_keep_only_the_matching_turn_id_and_main_delivery(self):
+        def canonical_prompt(trace):
+            prompt = next(row["prompt"] for row in trace if row["event"] == "turn-start" and row["turn"] == 2)
+            return "\n".join(line for line in prompt.split("\n")
+                             if not line.startswith("May have been shown beside a tool result"))
+
+        for transport in ("stream-json", "resume-process"):
+            steps = [{"file": ["C"]}, {}, {}]
+            baseline = self.run_owner({"1": {"prompt": "skip", "steps": steps}}, transport=transport)
+            main_prompt, main_history = canonical_prompt(baseline), self.history()
+            self.assertEqual(main_history, DELIVERED)
+            self.assertEqual(self.reads(baseline), [(2, False)])
+            for mode in ("before-replace", "after-replace", "watchdog", "observe-replace"):
+                with self.subTest(transport=transport, mode=mode):
+                    trace = self.run_owner({"1": {"prompt": mode, "steps": steps}}, transport=transport)
+                    did_publish = mode != "before-replace"
+                    first = next(row for row in trace if row["event"] == "prompt-hook" and row["turn"] == 1)
+                    self.assertEqual(first["bound"], first["prompt_id"] if did_publish else None)
+                    writes = [row["event"] for row in trace if row.get("mode") == mode]
+                    self.assertEqual(writes, ["file-fsync", "replaced" if did_publish else "failed-before-replace"])
+                    if mode == "watchdog":
+                        self.assertIn({"event": "bind-watchdog", "rc": -9}, trace)
+                    self.assertEqual(self.shown(trace), ["toolu-1-2"] if did_publish else [])
+                    self.assertEqual(self.reads(trace), [(2, did_publish)])
+                    self.assertEqual((canonical_prompt(trace), self.history()), (main_prompt, main_history))
 
     def test_without_a_binding_no_copy_is_shown_and_delivery_is_mains(self):
         for name, spec in {

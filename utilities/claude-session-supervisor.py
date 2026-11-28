@@ -1538,14 +1538,14 @@ def main(argv: list[str] | None = None) -> int:
             if args.runtime_harness == "claude":
                 control.open_turn(next_prompt if pending_handoff_intent is None
                                   and ledger.reserved_remaining == turn_reserve else None)
-            result, process_rc = run_turn(
-                args,
-                session_id,
-                next_prompt,
-                resume=resume,
-                stream_session=stream_session,
-                **turn_kwargs,
-            )
+            try:
+                result, process_rc = run_turn(
+                    args, session_id, next_prompt, resume=resume,
+                    stream_session=stream_session, **turn_kwargs,
+                )
+            finally:
+                if args.runtime_harness == "claude":
+                    control.open_turn(None)
             usage_row = turn_token_usage(args, turn_ordinal, turn_transport, result)
             if usage_row is not None:
                 emit(usage_row)

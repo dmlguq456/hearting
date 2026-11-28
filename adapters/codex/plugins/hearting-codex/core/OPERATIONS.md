@@ -1553,23 +1553,35 @@ correction sent after `--register` and before the first consumer attaches is
 queued and handed to the first turn (a relaunch of a never-claimed row keeps
 that queue). Codex uses its existing App Server connection to steer an active
 turn; Claude and OpenCode retain the input for the next turn of the same
-session. A Claude owner may also see an early copy, only in a turn the
-supervisor submitted as ordinary (not a cleanup turn or the reserved last turn).
-Before writing that prompt the supervisor records its trimmed SHA-256 in the
-input state; the same PreToolUse hook script, also run from UserPromptSubmit
-with empty output, records the hook's `prompt_id` when the submitted prompt
-matches. A main-thread tool hook (no `agent_id`) whose `prompt_id` is that
-recorded value then adds queued corrections not yet shown as
+session. A Claude owner may also see an early copy during an ordinary
+supervisor turn. Before writing its prompt the supervisor records the trimmed
+SHA-256 in the input state. The same PreToolUse hook script runs from
+UserPromptSubmit with empty output and binds the matching prompt's `prompt_id`.
+Prompts beginning with an XML tag, a CLI task notice, or the default resume
+message can also come from Claude, so they go through next-turn delivery.
+Scheduled tasks and the peer inbox can submit arbitrary text. Copies are
+available only when native scheduling is already disabled, there is no inbox
+socket and the launch has no remote, automatic-resume or Code Mode text source.
+The hook leaves those native features under their existing settings.
+
+A main-thread tool hook (no `agent_id`) with the bound `prompt_id` adds queued
+corrections that have no copy mark as
 `additionalContext` beside the tool result, if that whole context fits the
 10,000-unit (UTF-16) hook limit and holds no literal `<system-reminder` tag, and
-marks them shown internally. A turn Claude opens itself carries another
-`prompt_id`, so it shows none; a missing `prompt_id` (before Claude Code
-2.1.196), a failed or timed-out UserPromptSubmit hook, a different prompt
-normalization, or an unreadable state binds nothing and shows no copy. Known
-limit: a supervisor prompt that Claude folds into a turn it opened itself takes
-that turn's `prompt_id`, so tools after the fold show the copy. Either way the
-input stays queued and the next turn's prompt delivers it, noting an earlier
-copy; no receipt rests on the copy. Pending input takes precedence over
+records the mark internally. The record expires when the supervisor settles
+the submission, even if clearing it fails. Cleanup turns, the reserved last
+turn and its edge retry have no live record. A missing `prompt_id` (before
+Claude Code 2.1.196), different normalization, unavailable state or a
+UserPromptSubmit failure before the atomic replace leaves next-turn delivery
+alone. An error or timeout after the replace leaves a binding to that
+submission's `prompt_id`.
+
+When Claude folds an eligible supervisor prompt into a turn it opened itself,
+the folded prompt takes that turn's `prompt_id` and tools after the fold can
+show the copy. The supervisor also receives that turn's result as the answer
+to its prompt. The input stays queued for the next turn, whose prompt can
+mention a possible earlier copy. Receipts follow that next-turn delivery.
+Pending input takes precedence over
 automatic stage advancement and terminal closure. A transport receipt proves delivery, not implementation; an
 interrupted send remains unknown (`delivery-unknown`) and is handed back through
 the existing supervision notice carrier. A host whose supervisor probe does not

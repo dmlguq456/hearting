@@ -138,7 +138,7 @@ def _locked(jobs, attempt, *, create=False):
         os.close(fd)
 
 
-def _write(path, value):
+def _write(path, value, *, sync_directory=True):
     fd, name = tempfile.mkstemp(prefix=".owner-input-", dir=path.parent)
     try:
         with os.fdopen(fd, "w") as handle:
@@ -146,6 +146,8 @@ def _write(path, value):
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(name, path)
+        if not sync_directory:
+            return
         directory = os.open(path.parent, os.O_RDONLY)
         try:
             os.fsync(directory)
@@ -702,15 +704,25 @@ def _prompt_digest(prompt):
     return hashlib.sha256(prompt.strip().encode("utf-8")).hexdigest()
 
 
-def bind_prompt(jobs, attempt, prompt, prompt_id):
+def _live_turn(turn):
+    lifetime = turn.get("lifetime")
+    try:
+        return bool(lifetime and os.readlink(lifetime[0]) == lifetime[1])
+    except OSError:
+        return False
+
+
+def bind_prompt(jobs, attempt, prompt, prompt_id, expected_turn):
     """UserPromptSubmit: bind this prompt_id to the ordinary turn whose prompt digest the
     supervisor recorded before writing it (OPERATIONS §5.10). Anything else binds nothing."""
-    digest = _prompt_digest(prompt)
+    if expected_turn.get("digest") != _prompt_digest(prompt):
+        return
     with _locked(jobs, attempt) as (path, value):
         turn = (value or {}).get("turn")
-        if isinstance(turn, dict) and turn.get("digest") == digest and not turn.get("prompt_id"):
+        if turn == expected_turn and not turn.get("prompt_id") and _live_turn(turn):
             turn["prompt_id"] = prompt_id
-            _write(path, value)
+            # The copy is optional. Publish only by the final rename; receipts keep their fsync.
+            _write(path, value, sync_directory=False)
 
 
 def show_in_turn(jobs, attempt, tool_use, prompt_id):
@@ -718,7 +730,8 @@ def show_in_turn(jobs, attempt, tool_use, prompt_id):
     prompt_id is the one bound to the supervisor's ordinary turn. They stay queued for the
     next owner turn; a lost mark only shows them again."""
     with _locked(jobs, attempt) as (path, value):
-        if not prompt_id or ((value or {}).get("turn") or {}).get("prompt_id") != prompt_id:
+        turn = (value or {}).get("turn") or {}
+        if not prompt_id or turn.get("prompt_id") != prompt_id or not _live_turn(turn):
             return ""
         items = [item for item in value["requests"] if item["state"] == "queued" and not item.get("shown")]
         text = OwnerInput.text(items)
@@ -778,8 +791,10 @@ class OwnerInput:
                     _transition(item, "undelivered", reason="owner-thread-changed")
             value.update(thread_id=thread_id, transport=transport, accepting=True,
                          generation=self.generation)
+            value.pop("turn", None)
             _write(path, value)
         self.thread_id = thread_id
+        self.turn_fd = None
         self.active_turn = ""
         self.prepared = []
         self.inflight = {}
@@ -829,7 +844,7 @@ class OwnerInput:
         return ("\n<owner-corrections>\nUser corrections relayed by the parent/operator. "
                 "Acknowledge what changes in the current work and preserve valid prior work; "
                 "do not duplicate active children, forge completed gates, or widen permissions.\n" +
-                (f"Already shown beside a tool result in the previous turn: {', '.join(shown)}. "
+                (f"May have been shown beside a tool result in the previous turn: {', '.join(shown)}. "
                  "If you applied it, only confirm.\n" if shown else "") +
                 "\n".join(json.dumps({"id": i["id"], "text": i["text"]}, ensure_ascii=False)
                           for i in items) + "\n</owner-corrections>")
@@ -840,17 +855,25 @@ class OwnerInput:
         return prompt + self.text(items)
 
     def open_turn(self, prompt):
-        """Record an ordinary turn's prompt digest before the prompt is written (None for any
-        other turn), so a hook can bind its prompt_id; failing to record only shows no copy."""
+        """Arm the optional digest only for this submission; None retires it."""
+        if self.turn_fd is not None:
+            os.close(self.turn_fd)
+            self.turn_fd = None
         try:
             with self.state() as (path, value):
-                if prompt is not None:
-                    value["turn"] = {"digest": _prompt_digest(prompt)}
+                if prompt is not None and hasattr(os, "memfd_create"):
+                    # Closing this anonymous descriptor expires the record even if a rewrite fails.
+                    self.turn_fd = os.memfd_create(f"owner-input-turn-{uuid.uuid4().hex}")
+                    fd_path = f"/proc/{os.getpid()}/fd/{self.turn_fd}"
+                    value["turn"] = {"digest": _prompt_digest(prompt),
+                                     "lifetime": [fd_path, os.readlink(fd_path)]}
                 elif value.pop("turn", None) is None:
                     return
                 _write(path, value)
-        except (OSError, InputError, ValueError):
-            pass
+        except (OSError, ValueError):
+            if self.turn_fd is not None:
+                os.close(self.turn_fd)
+                self.turn_fd = None
 
     def record(self, ids, state, **evidence):
         if not ids:

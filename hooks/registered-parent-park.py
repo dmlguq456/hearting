@@ -55,18 +55,29 @@ def turn_record(registry: Path, attempt: str) -> tuple[dict[str, Any], dict[str,
     return value, mapping(value.get("turn"))
 
 
+def eligible_prompt(prompt: str) -> bool:
+    # Claude's notifications have envelopes, but a scheduled or inbox turn can reuse plain text.
+    return (not prompt.lstrip().startswith(("<", "[TASK NOTIFICATION - NOT USER INPUT]",
+                                           "Continue from where you left off."))
+            and os.environ.get("CLAUDE_CODE_DISABLE_CRON") == "1"
+            and not any(os.environ.get(key) for key in (
+                "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_REMOTE", "CLAUDE_CODE_RESUME_INTERRUPTED_TURN",
+                "CLAUDE_CODE_RESUME_PROMPT", "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE")))
+
+
 def bind_prompt() -> int:
     """UserPromptSubmit: stdout stays empty (Claude adds its plain text to the model context)."""
     try:
         payload = json.load(sys.stdin)
         attempt = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", "")
         if (os.environ.get("AGENT_DISPATCH_COMPLETION_MODE") == "supervised" and attempt
-                and not payload.get("agent_id") and payload.get("prompt_id")):
+                and not payload.get("agent_id") and payload.get("prompt_id")
+                and eligible_prompt(payload["prompt"])):
             registry = jobs_path()
             _, turn = turn_record(registry, attempt)
             if turn.get("digest") and not turn.get("prompt_id"):
                 import dispatch_owner_input
-                dispatch_owner_input.bind_prompt(registry, attempt, payload["prompt"], str(payload["prompt_id"]))
+                dispatch_owner_input.bind_prompt(registry, attempt, payload["prompt"], str(payload["prompt_id"]), turn)
     except Exception:
         pass
     return 0

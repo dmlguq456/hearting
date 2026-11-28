@@ -467,11 +467,12 @@ adapter adds a cancellation command, reason requirement or approval step.
 
 Owner corrections are accepted independently of delivery. Codex active-turn
 steering is only accepted after a matching turn response; Claude and OpenCode
-next-turn transports deliver on a later owner turn; in a turn its supervisor
-submitted as ordinary, a Claude owner's PreToolUse hook may also show a copy
-beside its next main-thread tool result when the hook's `prompt_id` is the one
-its UserPromptSubmit run bound to that prompt, which changes no receipt or
-delivery (otherwise no copy). An owner parked on model
+next-turn transports deliver on a later owner turn. For an eligible ordinary
+Claude supervisor prompt, UserPromptSubmit can bind its `prompt_id` by hash and
+PreToolUse can show a copy beside a main-thread tool result with that ID while
+the submission is live. CLI prompt forms and launches that can inject
+indistinguishable text use next-turn delivery. Receipts follow that delivery.
+See OPERATIONS §5.10 for the binding scope. An owner parked on model
 children receives a queued correction at the next checkpoint of the same
 30-second join pieces that carry resource attention
 (`join_with_resource_attention`): the children are not delivered, keep running

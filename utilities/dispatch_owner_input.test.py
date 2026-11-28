@@ -925,6 +925,7 @@ class InTurnCopyTest(unittest.TestCase):
         held.__enter__()
         self.addCleanup(held.__exit__, None, None, None)
         self.control = I.OwnerInput(self.jobs, self.attempt, 'session-1', 'claude-next-turn', lambda _: None)
+        self.addCleanup(self.control.open_turn, None)
         self.open_turn('P1')
 
     def open_turn(self, prompt_id, *, prompt=PROMPT, ordinary=True, submitted=None):
@@ -936,7 +937,7 @@ class InTurnCopyTest(unittest.TestCase):
     def env(self, route_id=''):
         env = {**os.environ, 'AGENT_HOME': str(ROOT), 'AGENT_DISPATCH_JOBS': str(self.jobs),
                'AGENT_DISPATCH_ATTEMPT_ID': self.attempt, 'AGENT_ROUTE_ID': route_id,
-               'AGENT_DISPATCH_COMPLETION_MODE': 'supervised'}
+               'AGENT_DISPATCH_COMPLETION_MODE': 'supervised', 'CLAUDE_CODE_DISABLE_CRON': '1'}
         env.pop('AGENT_DISPATCH_COMPLETION_STATE_FILE', None)
         return env
 
@@ -1002,7 +1003,7 @@ class InTurnCopyTest(unittest.TestCase):
         self.assertNotIn('"turn"', json.dumps(I.inspect(self.jobs, self.attempt)))
         prompt = self.deliver('2')
         self.assertEqual((prompt.count('use the other dataset'), prompt.count('and keep the seed')), (1, 1))
-        self.assertEqual(prompt.count('Already shown beside a tool result in the previous turn: C, D.'), 1)
+        self.assertEqual(prompt.count('May have been shown beside a tool result in the previous turn: C, D.'), 1)
         self.assertEqual([e['state'] for e in self.item('C')['events']],
                          ['queued', 'sending', 'accepted', 'turn-completed'])
         self.assertNotIn('queued', self.state())
@@ -1049,6 +1050,19 @@ class InTurnCopyTest(unittest.TestCase):
         self.assertEqual(self.prompt_hook(self.PROMPT.strip(), 'P2'), '')
         self.assertEqual(self.state()['turn']['prompt_id'], 'P2')
 
+    def test_cli_prompt_forms_never_bind_even_when_the_trimmed_hash_matches(self):
+        I.submit(self.jobs, self.attempt, 'kept for the next prompt', 'C')
+        for prompt in ('  <task-notification>background agent report</task-notification>\n',
+                       '<channel source="example">peer message</channel>',
+                       '[TASK NOTIFICATION - NOT USER INPUT]\nreported by a background worker',
+                       'Continue from where you left off.'):
+            with self.subTest(prompt=prompt):
+                self.open_turn('P2', prompt=prompt)
+                self.assertNotIn('prompt_id', self.state()['turn'])
+                self.assertEqual(self.hook(prompt_id='P2'), '')
+                self.assertNotIn('shown', self.item('C'))
+        self.assertEqual(self.deliver('2').count('kept for the next prompt'), 1)
+
     def test_a_hook_that_waited_on_the_input_lock_rechecks_the_bound_prompt_id(self):
         I.submit(self.jobs, self.attempt, 'checked under the lock', 'C')
         for name, change, expected in (('the turn changed while it waited', True, ''),
@@ -1070,8 +1084,13 @@ class InTurnCopyTest(unittest.TestCase):
                         I._write(I._path(self.jobs, self.attempt), value)
                 finally:
                     os.close(fd)
-                self.assertIn(expected, self.context(hook.stdout.read()))
+                stdout = hook.stdout.read()
                 self.assertEqual(hook.wait(timeout=60), 0)
+                if change:
+                    self.assertEqual(stdout, '')
+                    self.assertNotIn('shown', self.item('C'))
+                else:
+                    self.assertIn(expected, self.context(stdout))
                 self.open_turn('P1')
 
     def test_writers_during_the_turn_keep_the_binding_and_a_dropped_one_shows_none(self):
@@ -1099,7 +1118,7 @@ class InTurnCopyTest(unittest.TestCase):
         self.assertNotIn('shown', self.item('C'))
         prompt = self.deliver('2')
         self.assertEqual(prompt.count(json.dumps(text)[1:-1]), 1)
-        self.assertNotIn('Already shown', prompt)
+        self.assertNotIn('May have been shown', prompt)
 
     def test_only_a_whole_context_within_the_utf16_limit_is_shown(self):
         def correction(request_id, units):
@@ -1119,13 +1138,16 @@ class InTurnCopyTest(unittest.TestCase):
         I.submit(self.jobs, self.attempt, 'shown twice at most', 'C')
         with mock.patch.object(I, '_write', side_effect=OSError(5, 'EIO')):
             self.assertIn('shown twice at most', I.show_in_turn(self.jobs, self.attempt, 'toolu-1', 'P1'))
-            # The supervisor's record write fails: the old binding stays and a new turn binds nothing.
-            self.control.open_turn('another prompt')
         self.assertEqual((self.item('C')['state'], self.item('C').get('shown')), ('queued', None))
         self.assertIn('shown twice at most', I.show_in_turn(self.jobs, self.attempt, 'toolu-2', 'P1'))
         self.assertEqual(I.show_in_turn(self.jobs, self.attempt, 'toolu-3', 'P1'), '')
+        with mock.patch.object(I, '_write', side_effect=OSError(5, 'EIO')):
+            # The next write fails and leaves the previous binding on disk, expired.
+            self.control.open_turn('another prompt')
         self.assertEqual(self.prompt_hook('another prompt', 'P2'), '')
         self.assertEqual(self.state()['turn']['prompt_id'], 'P1')
+        I.submit(self.jobs, self.attempt, 'filed after retirement', 'D')
+        self.assertEqual(self.hook('toolu-expired'), '')
         self.assertEqual(self.deliver('1').count('shown twice at most'), 1)
 
     def test_a_cleanup_scope_shows_no_copy_even_in_a_bound_turn(self):
