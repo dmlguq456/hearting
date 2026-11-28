@@ -424,6 +424,11 @@ class NoticeWatcher:
                 return
             if queue_socket and self._historical_notice_receipt(record, storage_key):
                 return
+            if "answer_binding" in receipt:
+                # A person's answer goes by the peer courier, which carries its exact text and
+                # receipt; this queue would carry only its private marker. One an older watcher
+                # already queued is still observed above.
+                return
             capability = (
                 {"epoch": 1} if queue_socket
                 else negotiate_human_gate(self.args)

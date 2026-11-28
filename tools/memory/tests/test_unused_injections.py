@@ -135,7 +135,7 @@ class AnswerNeededOnceTest(RepeatCase):
         for harness in HARNESSES:
             with self.subTest(harness=harness):
                 sid = "open-" + harness
-                line = lambda *a: "[답변 필요] 질문 q1이 아직 열려 있습니다: 방금 입력은 답으로 기록하지 않음"  # noqa: E731
+                line = lambda *a: ("[답변 필요] 질문 q1이 아직 열려 있습니다: 방금 입력은 답으로 기록하지 않음", False)  # noqa: E731
                 with mock.patch.object(st, "_open_question_line", side_effect=line):
                     texts = [self.run_prompt(harness, sid, prompt_text=f"something else {n}") for n in range(3)]
                     self.assertTrue(all("질문 q1" in t for t in texts), texts)
@@ -143,7 +143,7 @@ class AnswerNeededOnceTest(RepeatCase):
     def test_status_line_is_still_told_once_while_the_open_question_line_repeats(self):
         import human_wait_state
         harness, sid = "claude", "mixed-claude"
-        line = lambda *a: "[답변 필요] 질문 q1이 아직 열려 있습니다: 방금 입력은 답으로 기록하지 않음"  # noqa: E731
+        line = lambda *a: ("[답변 필요] 질문 q1이 아직 열려 있습니다: 방금 입력은 답으로 기록하지 않음", False)  # noqa: E731
         with mock.patch.object(human_wait_state, "cached_view",
                                side_effect=lambda **kw: self.projected(harness, sid, "which file?")), \
              mock.patch.object(st, "_open_question_line", side_effect=line):
