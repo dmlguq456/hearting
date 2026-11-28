@@ -117,7 +117,7 @@ def _parked(sessions):
 
 
 def _inventory(sessions):
-    from .session_handle import _claude_tag_candidate
+    from .session_handle import _claude_tag_candidate, derived_tag
     from .collectors.herdr import list_agents
     from . import session_registry
     from .collectors.procscan import read_proc_start
@@ -152,13 +152,22 @@ def _inventory(sessions):
             if record.get("procStart") is not None and str(record["procStart"]) != str(start):
                 continue
             sid = record.get("sessionId")
-            if not isinstance(sid, str) or not sid or (harness, sid) in viewers:
+            if not isinstance(sid, str) or not sid:
                 continue
-            row = live.setdefault((harness, sid), {"harness": harness, "session_id": sid,
-                                  "started_at": _started(harness, sid, session_registry._ms_to_sec(record.get("startedAt")))})
-            row.update(pid=pid, proc_start=start)
-            if harness == "claude" and not row.get("tag"):
-                row["tag"] = _claude_tag_candidate(sid)
+            key = (harness, sid)
+            if key not in viewers:
+                row = live.setdefault(key, {"harness": harness, "session_id": sid,
+                                      "started_at": _started(harness, sid, session_registry._ms_to_sec(record.get("startedAt")))})
+                row.update(pid=pid, proc_start=start)
+                if harness == "claude" and not row.get("tag"):
+                    row["tag"] = _claude_tag_candidate(sid)
+            # The session list shows this window as `<folder>-<xx>`: Claude names an interactive
+            # process once, when it registers, and keeps that name across /clear, compaction and
+            # an in-process resume. A window sent to the background shows the held session.
+            named = live.get(viewers.get(key, key))
+            tag = derived_tag(record.get("name")) if record.get("nameSource") == "derived" else None
+            if harness == "claude" and named is not None and tag:
+                named["_registered"] = tag if named.get("_registered", tag) == tag else ""
     agents = list_agents()
     for agent in agents or []:
         identity = agent.get("agent_session") or {}
@@ -295,6 +304,41 @@ def _continuations(live, observed, lineage):
     return edges
 
 
+def _same_process(row, other):
+    return (bool(row.get("pid")) and row.get("proc_start") is not None
+            and (row.get("pid"), str(row.get("proc_start"))) == (other.get("pid"), str(other.get("proc_start"))))
+
+
+def _follow_registered_names(live, observed, registered):
+    """Give a Claude session the number of the name the session list shows for its window.
+
+    ``registered`` is ``{key: xx}`` from the window's live native record (``<folder>-<xx>``,
+    ``nameSource: derived``). That name is fixed when the process registers, while a stored
+    number follows the session id: a resume in a new process, an in-process resume of another
+    session, or a number drawn before the record named the session left the two apart. The
+    number moves to the name's only when no other session holds it, or when its holder is the
+    same window's earlier session (same process, no longer observed), which then retires.
+    Two windows registering one name keep the first; the later one keeps its own number."""
+    moved = True
+    while moved:
+        moved = False
+        holders = {}
+        for key, row in live.items():
+            holders.setdefault(row.get("tag"), []).append(key)
+        for key, row in sorted(live.items(), key=lambda item: _order(item[1])):
+            named = registered.get(key)
+            earlier = [other for other in holders.get(named, ()) if other != key] if named else []
+            if not named or (row.get("tag") == named and not earlier):
+                continue
+            if any(other in observed or not _same_process(live[other], row) for other in earlier):
+                continue
+            for other in earlier:
+                live.pop(other)
+            row["tag"] = named
+            moved = True
+            break
+
+
 def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=None, lineage=None,
             viewers=None):
     """Reserve against the latest snapshot and persist atomically under one lock.
@@ -303,6 +347,7 @@ def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=
     of a window in ``viewers`` ({viewer key: held key}) shows the held session's, and
     is returned with ``held_session`` naming it (the pane header reads that)."""
     from .session_handle import minted_tag
+    registered = {key: row.pop("_registered", None) for key, row in live.items()}
     observed = set(live)
     path = _path()
     try:
@@ -369,6 +414,7 @@ def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=
                     row["pane_id"] = chain[0]["pane_id"]
                 for key in predecessors:
                     live.pop(key, None)
+            _follow_registered_names(live, observed, registered)
             taken = set()
             movable = sorted(live.items(), key=lambda item: (0 if item[0] in old else 1, *_order(item[1])))
             # Reserve every surviving old number before placing newcomers or a
