@@ -2290,10 +2290,20 @@ def _middle_cell_review_sentence(route, route_file, reviews, missing, jobs):
             blocking.append((review, verdicts[-1][1]))
         elif rows and not verdicts:
             ran_without_verdict = True
-    if blocking and what == "independent test" and _work_changed_since(route, blocking[0], jobs):
-        # The test failed on earlier work; the owner fixed it and the reviews stand on the change: test it again.
-        return ("Your route's independent test failed on earlier work, and the reviews passed on your change. Start "
-                f"the test again with exactly: {start}. {no_inline}")
+    if blocking and what == "independent test":
+        # Whether the reviews stand on a correction of the failing test, the next judgment is the test alone; else a
+        # correction's reviews and then the test. Their round census decides, whether or not its report is readable.
+        changed = _work_changed_since(route, blocking[0], jobs)
+        if worker_bootstrap.one_shot_test_spent(route, jobs, reviewed=changed):
+            node, meta = blocking[0]
+            fields = worker_bootstrap.continuation_followup_fields(route, node, meta, jobs, route_file)
+            return worker_bootstrap.continuation_followup_text({
+                "kind": "review", "owner_fixes": True, "test": True, "closure_spent": True,
+                "attempt": meta.get("attempt_id", ""), "artifact": fields.get("artifact", ""),
+                "corrections": ROUND.max_review_rounds(route["effective_intensity"]) - 1})
+        if changed:
+            return ("Your route's independent test failed on earlier work, and the reviews passed on your change. "
+                    f"Start the test again with exactly: {start}. {no_inline}")
     if blocking:
         # Every blocking leg of a review group is named; the owner fixes them in one pass.
         fixes = [fields for fields in (worker_bootstrap.continuation_followup_fields(route, review, meta, jobs, route_file)

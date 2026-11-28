@@ -49,6 +49,7 @@ ROUTE_NODE = re.compile(r"- route_node: (\S+)")
 START_COMMAND = re.compile(r"`(python3 [^`]*stage-dispatch-fallback\.py --route [^`]*--node impl-review --start[^`]*)`")
 # the test's start, from a `Next ready:` line or a wake text (from `strong`)
 TEST_COMMAND = re.compile(r"(python3 \S*stage-dispatch-fallback\.py --route \S+ --node test --start(?: --jobs [^\s`]+)?)")
+NEXT_READY_TEST = re.compile(r"^Next ready: " + TEST_COMMAND.pattern, re.M)
 SID = re.compile(r"guard_session_id: (att-\S+)")
 OUTPUT = re.compile(r"artifact_output_dir: (\S+)")
 FAIL_FINDING = "HB-SOLO-BLOCKER-77"
@@ -336,8 +337,7 @@ class SoloReviewScenario(unit.UnitRouteScenario):
                                for r in owner_requests if "[workflow-completion-pending]" in r["last_text"]]
         ev["test_texts"] = [r["last_text"][r["last_text"].index("Test FAIL"):][:700] for r in owner_requests
                             if "Test FAIL" in r["last_text"]]
-        ev["next_ready_test"] = sum(1 for r in owner_requests if "Next ready:" in r["last_text"]
-                                    and TEST_COMMAND.search(r["last_text"]))
+        ev["next_ready_test"] = sum(1 for r in owner_requests if NEXT_READY_TEST.search(r["last_text"]))
         ev["owner_requests"] = len(owner_requests)
         # the rigor each review worker was told (`- qa:`), one entry per distinct value, from its own task text
         ev["review_qa"] = sorted({m.group(1) for r in run.main_requests() if "- worker_type: review" in r["text"]
@@ -407,6 +407,12 @@ class SoloReviewScenario(unit.UnitRouteScenario):
     def closed(self, ev):
         return bool(ev["route_closed"] and (ev["outcome"] or {}).get("terminal_gate_proven") is True)
 
+    def next_ready_carried(self, ev):
+        """Each test run was handed over once, as the `Next ready:` line of the wake after the review round it follows
+        (where the supervisor's wake of the owner session is proven; an early owner end recovers another way)."""
+        return ("test" not in self.legs or ev["session_proof"] != "proven"
+                or ev["next_ready_test"] == [row["route_node"] for row in ev["review_rows"]].count("test"))
+
     def judge(self, run, ev, owners, reviews):
         steps = next(iter(ev["owner_sessions"].values()), [])
         ok = (len(owners) == 1 and ev["task_paragraph_seen"] and ev["route"]["effective_intensity"] == self.intensity
@@ -415,7 +421,7 @@ class SoloReviewScenario(unit.UnitRouteScenario):
               and ev["review_qa"] in ([self.qa], []))
         # one completion notice reaches the session that started the route (it is watched for QUIET seconds after)
         return (ok and self.closed(ev) and len(reviews) == len(self.legs) and steps[-1] == "final"
-                and ev["completion_notices"] == 1 and ev["session_proof"] != "broken")
+                and ev["completion_notices"] == 1 and ev["session_proof"] != "broken" and self.next_ready_carried(ev))
 
 
 class SoloReviewFixScenario(SoloReviewScenario):
@@ -433,7 +439,7 @@ class SoloReviewFixScenario(SoloReviewScenario):
         rows = 2 * len([leg for leg in self.legs if leg != "test"]) + ("test" in self.legs)
         return (len(owners) == 1 and len(reviews) == rows and verdict and ev["session_proof"] != "broken"
                 and "fix" in steps and steps.count("start") == 2 and steps[-1] == "final"
-                and self.closed(ev))
+                and self.closed(ev) and self.next_ready_carried(ev))
 
 
 class SoloReviewSpentScenario(SoloReviewScenario):
@@ -448,7 +454,8 @@ class SoloReviewSpentScenario(SoloReviewScenario):
         verdict = any("Do not correct further" in text and "`verdict: FAIL`" in text for text in ev["verdict_texts"])
         rows = 2 * len([leg for leg in self.legs if leg != "test"])      # the test never runs: a leg still blocks
         return (len(owners) == 1 and len(reviews) == rows and verdict and steps[-1] == "fail"
-                and ev["session_proof"] != "broken" and not self.closed(ev) and bool(ev["resting_fail_notice"]))
+                and ev["session_proof"] != "broken" and not self.closed(ev) and bool(ev["resting_fail_notice"])
+                and self.next_ready_carried(ev))
 
 
 class SoloReviewSkipScenario(SoloReviewScenario):
@@ -551,7 +558,8 @@ class SoloStrongTestFixScenario(SoloReviewScenario):
         return (len(owners) == 1 and len(reviews) == 6 and nodes.count("test") == 2 and told
                 and sorted(again) == ["impl-review", "impl-review-alternative"]       # reviews before the second test
                 and "fix" in steps and steps.count("start") == 2 and steps.count("test-start") == 2
-                and steps[-1] == "final" and ev["session_proof"] != "broken" and self.closed(ev))
+                and steps[-1] == "final" and ev["session_proof"] != "broken" and self.closed(ev)
+                and self.next_ready_carried(ev))
 
 
 class SoloStrongTestSpentScenario(SoloStrongTestFixScenario):
@@ -566,7 +574,8 @@ class SoloStrongTestSpentScenario(SoloStrongTestFixScenario):
             ev["session_proof"] != "proven")
         nodes = [row["route_node"] for row in ev["review_rows"]]
         return (len(owners) == 1 and len(reviews) == 6 and nodes.count("test") == 2 and spent and steps[-1] == "fail"
-                and ev["session_proof"] != "broken" and not self.closed(ev) and bool(ev["resting_fail_notice"]))
+                and ev["session_proof"] != "broken" and not self.closed(ev) and bool(ev["resting_fail_notice"])
+                and self.next_ready_carried(ev))
 
 
 class SoloThoroughPassScenario(SoloReviewScenario):

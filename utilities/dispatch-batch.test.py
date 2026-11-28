@@ -4482,27 +4482,37 @@ class DispatchBatchTest(unittest.TestCase):
         self.assertEqual((rc, receipt.get("state"), receipt.get("reason")), (70, "partial-failure", None), receipt)
         reserve.assert_not_called()
 
-    def test_the_preview_of_a_restart_decides_nothing_when_its_admission_raises_what_main_refuses(self):
-        # The preview that looks for an unfinished batch leaves every refusal `main` catches to the real admission:
-        # a preview-only `DispatchNodeError` changes neither the reuse nor the receipt.
+    def test_a_preview_that_cannot_read_the_history_leaves_the_judgment_to_the_real_admission(self):
+        # The preview looks for a sealed batch left unfinished before a passed leg is reused. A preview that could not
+        # read the history (any refusal `main` catches, raised to the preview only) has not shown there is none: the
+        # real admission judges the history as a group without reuse does. A start cut short (the other leg reserved,
+        # never claimed) is resumed whole, exactly as a readable preview resumes it; a leg that died without a verdict
+        # gets the receipt of the group without reuse, never a reuse the preview did not establish.
         real = BATCH.DISPATCH_NODE.admit_round
 
-        def preview_raises(*args, **kwargs):
-            if kwargs.get("record_auto_revisions") is False:
-                raise BATCH.DISPATCH_NODE.DispatchNodeError("review-source-snapshot-raced")
-            return real(*args, **kwargs)
+        def preview_raises(error):
+            def admit(*args, **kwargs):
+                if kwargs.get("record_auto_revisions") is False:
+                    raise error
+                return real(*args, **kwargs)
+            return admit
 
-        receipts = []
-        for raising in (False, True):
+        def restart(side_effect, **kwargs):
             self.tearDown()
             self.setUp()
-            with mock.patch.object(BATCH.DISPATCH_NODE, "admit_round",
-                                   side_effect=preview_raises if raising else real):
-                rc, receipt, _popen, reserve = self.restart_receipt(
-                    review_group=True, status="done", note="dead-worker-fail,failure_class=fail")
-            receipts.append((rc, receipt.get("state"), receipt.get("reason"), reserve.call_count, self.reused_nodes))
-        self.assertEqual(receipts[0], receipts[1])
-        self.assertEqual(receipts[1][3:], (1, ["independent-verify"]))
+            with mock.patch.object(BATCH.DISPATCH_NODE, "admit_round", side_effect=side_effect):
+                rc, receipt, _popen, reserve = self.restart_receipt(**kwargs)
+            return rc, receipt.get("state"), receipt.get("reason"), reserve.call_count
+
+        dead = {"status": "done", "note": "dead-worker-fail,failure_class=fail"}
+        without_reuse = restart(real, review_group=False, **dead)
+        for error in (BATCH.DISPATCH_NODE.DispatchNodeError("review-source-snapshot-raced"),
+                      OSError("fixture preview read"), BATCH.subprocess.SubprocessError("fixture preview probe")):
+            with self.subTest(type(error).__name__):
+                self.assertEqual(restart(preview_raises(error), review_group=True, claimed="0"),
+                                 restart(real, review_group=True, claimed="0"))
+                self.assertEqual(restart(preview_raises(error), review_group=True, **dead), without_reuse)
+        self.assertEqual(restart(real, review_group=True, **dead)[3], 1)   # a readable preview reuses the passed leg
 
     def test_terminal_failed_duplicate_is_not_reported_as_existing(self):
         stack, assignments = self.common_patches()

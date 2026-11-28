@@ -327,8 +327,10 @@ needs an independent review is not direct. For one-pass work that needs independ
 review, open `--shape solo --intensity standard` if the kind declares a one-shot review
 (one session, one independent review).
 `strong` has two review legs, `thorough` and
-`adversarial` three, and an independent test follows them. The owner starts them with
-the task's command and cannot close them itself. Use `staged` for work sized for stages, or for independent review where
+`adversarial` three, and where the kind declares a test, an independent test follows them.
+The owner starts the review legs with the task's group command and the test with the
+command the receipt prints once the current reviews pass, and cannot close any of them
+itself. Use `staged` for work sized for stages, or for independent review where
 the kind has no one-shot review. The session checks a direct change itself, including
 requested tests. An optional second look is a short check that keeps no record (below).
 

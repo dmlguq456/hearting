@@ -69,6 +69,73 @@ class SoloTestNode(S2.Base):
                     intensity=intensity, selection_only=True)
                 self.assertEqual([n["id"] for n in preview["nodes"]], self.ids(route))
 
+    def main_registry(self):
+        """The registry before this slice: today's, without the one key it adds (`one_shot_review.verify_node`)."""
+        registry = json.loads(json.dumps(R.TOPO.load_registry()))
+        for recipe in registry["recipes"]:
+            (recipe.get("one_shot_review") or {}).pop("verify_node", None)
+        return registry
+
+    def test_routes_sealed_before_the_test_keep_their_graph_progress_and_text(self):
+        # S3 adds one registry key, so a route sealed before it has another registry digest and route id (as after
+        # every registry change; a team owner's text carries its route id). What stays: an open route keeps its
+        # sealed graph through verify, start and close and only reads `_registry_current=False`, and a new compile of
+        # the same input builds the graph and owner text it built before, for every cell but `solo` from `strong`.
+        import capability_route_close as CLOSE
+        import dispatch_contract as DC
+        from route_lineage import canonical_route_path
+        main, real = self.main_registry(), R.TOPO.load_registry
+        cells = {"solo quick": dict(shape="solo", intensity="quick"),
+                 "solo standard": dict(shape="solo", intensity="standard"),
+                 "team": dict(shape="staged", intensity="strong"),
+                 "solo strong (S2)": dict(shape="solo", intensity="strong")}
+        graph = lambda route: [(n["id"], n.get("unit"), n.get("model_profile"), n.get("depends_on"),  # noqa: E731
+                                n.get("completion_gate")) for n in route["nodes"]]
+
+        def owner_text(route):
+            args = self.owner_args(route)
+            return (W.owner_route_steps_prompt(args, {}).replace(args.route_file, "<route-file>")
+                    .replace(route["route_id"], "<route-id>").replace(route["route_hash"], "<route-hash>"))
+        jobs = Path(self.root) / "dispatch" / "jobs.log"
+        jobs.parent.mkdir(parents=True, exist_ok=True)
+        jobs.write_text("", encoding="utf-8")
+        for index, (label, kw) in enumerate(cells.items()):
+            with self.subTest(label):
+                slug = f"s3-sealed-{index}"
+                with mock.patch.object(R.TOPO, "load_registry",
+                                       side_effect=lambda *a, **k: real(*a, **k) if a or k else json.loads(json.dumps(main))):
+                    before = self.compose(slug=slug, **kw)
+                    self.assertIs(R.verify_route(json.loads(json.dumps(before)), before["cwd"])["_registry_current"],
+                                  True)
+                now = self.compose(slug=slug, **kw)
+                self.assertNotEqual((before["registry_digest"], before["route_id"]), (now["registry_digest"], now["route_id"]))
+                if label != "solo strong (S2)":
+                    self.assertEqual(graph(now), graph(before))
+                    self.assertEqual(owner_text(now), owner_text(before))
+                # the open route under the new registry: verify (the start path's own check) keeps the sealed graph
+                verified = R.verify_route(json.loads(json.dumps(before)), before["cwd"])
+                self.assertIs(verified["_registry_current"], False)
+                self.assertEqual(graph(verified), graph(before))
+                self.assertIsNone(RF.one_shot_test_node(verified))
+                route_file = canonical_route_path(before["artifact_root"], before["route_id"])
+                route_file.parent.mkdir(parents=True, exist_ok=True)
+                route_file.write_text(json.dumps(before), encoding="utf-8")
+                # start: the first node's shared start gate admits it as the sealed graph declares
+                first = next(n["id"] for n in verified["nodes"] if not n.get("depends_on"))
+                DC.completion_marker_gate(str(route_file), first, "dry-run", Path(self.root), jobs)
+                if RF.one_shot_review_route(verified) and label != "solo quick":
+                    # the owner's end waits on the sealed review legs only, and its task names no test
+                    owner = next(n for n in verified["nodes"] if n["id"] == "one-shot")
+                    self.assertEqual(sorted(CLOSE.owner_terminal_prerequisites(verified, owner, jobs)),
+                                     sorted(n["id"] for n in verified["nodes"] if n.get("dispatch_depth") == 2))
+                    self.assertNotIn("independent test", W.one_shot_review_prompt(verified, str(route_file)))
+                # close: the registry verdict is a record; the gates are the sealed graph's
+                outcome, _ = CLOSE.close_route(verified, route_file, commit="a" * 40, summary="fixture",
+                                               registry_current=verified["_registry_current"])
+                self.assertIs(outcome["registry_current"], False)
+                if label != "team":                                     # a team route seals its own test
+                    self.assertNotIn('"test"', json.dumps(outcome["terminal_gates"]))
+
     def test_standard_has_no_test_and_its_record_is_unchanged(self):
         route = self.solo("standard")
         self.assertEqual(self.ids(route), ["impl-review", "one-shot"])
@@ -264,6 +331,82 @@ class SoloTestNode(S2.Base):
         self.assertIn("independent review passed, but the work changed after it", text)
         self.assertIn(f"`{W.route_start_command(path, 'impl-review', jobs='/jobs.log')}`", text)
         self.assertNotIn("Test FAIL", text)
+
+    def test_a_failing_test_that_can_be_judged_no_more_ends_the_owner_whether_or_not_its_report_reads(self):
+        # The rounds a further judgment needs decide, not whether the test's report can be read: the test alone once
+        # the reviews passed a correction, otherwise a correction's reviews and then the test.
+        route = self.solo("strong")
+        passed = lambda attempt, digest: ("done", {"attempt_id": attempt, "note": CELL.PASSING,  # noqa: E731
+                                                   "failure_class": "pass", "worker_type": "review",
+                                                   "review_subject_digest": digest})
+        dead = ("done", {"attempt_id": "t-dead", "note": "dead-runtime-exit", "failure_class": "runtime",
+                         "worker_type": "stage", "review_subject_digest": "d2"})
+        legs = ("impl-review", "impl-review-alternative")
+        stand = {leg: None for leg in legs}
+        report = {"kind": "review", "attempt": "t2", "artifact": "/c/test.md", "target": "", "source": True,
+                  "producer_command": "", "owner_fixes": True, "test": True, "command": "python3 start-group",
+                  "closure_spent": True, "corrections": 1}
+        twice = {**{leg: [passed(leg + "-1", "d1"), passed(leg + "-2", "d2")] for leg in legs},
+                 "test": [failed_test("d1", "t1"), failed_test("d2", "t2")]}
+        for label, fields in (("a FAIL that names its report", {"test": report}),
+                              ("a FAIL whose report is absent or gone since", {})):
+            with self.subTest(label):
+                text, path = self.wake(route, lineage=twice, fields=fields, current="d2", reasons=stand)
+                self.assertIn("Test FAIL t2: the test still fails, and the one correction allowed is spent. Do not "
+                              "correct further.", text)
+                self.assertIn("end with `verdict: FAIL`.", text)
+                self.assertEqual("from /c/test.md in your report" in text, bool(fields), text)
+                self.assertNotIn("start the reviews again", text)
+                self.assertNotIn("stage-dispatch-fallback", text)
+        # the test failed once on the work the reviews passed, and a leg has used its rounds: no correction can be
+        # reviewed, so the same end, with no report to read
+        spent_leg = {"impl-review": [passed("a1", "d0"), passed("a2", "d1")],
+                     "impl-review-alternative": [CELL.row(CELL.BLOCKING, "d0", "b1"), passed("b2", "d1")],
+                     "test": [failed_test("d1", "t1")]}
+        text, _ = self.wake(route, lineage=spent_leg, current="d1", reasons=stand)
+        self.assertIn("Test FAIL t1: the test still fails", text)
+        self.assertIn("Do not correct further", text)
+        # the boundary: the owner fixed after the test's FAIL and the reviews passed the change on their last
+        # rounds; the test has a round left, so it starts again
+        reviewed = {**{leg: [passed(leg + "-1", "d1"), passed(leg + "-2", "d2")] for leg in legs},
+                    "test": [failed_test("d1", "t1")]}
+        for label, rows in (("after the FAIL", reviewed), ("after a death without a verdict", {
+                **reviewed, "test": [failed_test("d1", "t1"), dead]})):
+            with self.subTest(label):
+                text, path = self.wake(route, lineage=rows, current="d2", reasons=stand)
+                self.assertIn("independent test failed on earlier work, and the reviews passed on your change", text)
+                self.assertIn(f"`{W.route_start_command(path, 'test', jobs='/jobs.log')}`", text)
+                self.assertNotIn("Do not correct further", text)
+        # a test that only died without a verdict is started again (a death spends no verdict round)
+        text, path = self.wake(route, lineage={**{leg: [passed(leg, "d1")] for leg in legs}, "test": [dead]},
+                               current="d1", reasons=stand)
+        self.assertIn("Your route's independent test ended without a verdict.", text)
+        self.assertIn(f"`{W.route_start_command(path, 'test', jobs='/jobs.log')}`", text)
+        # one round each used and no report: correct once, the reviews first
+        once = {**{leg: [passed(leg, "d1")] for leg in legs}, "test": [failed_test("d1", "t1")]}
+        text, path = self.wake(route, lineage=once, current="d1", reasons=stand)
+        self.assertIn("independent test fails on your current work", text)
+        self.assertIn(f"`{W.route_start_command(path, 'impl-review', jobs='/jobs.log')}`", text)
+
+    def test_a_refused_start_of_the_spent_test_ends_the_owner_and_never_points_inline(self):
+        import review_round_cap as ROUND
+        route = self.solo("strong")
+        test = RF.one_shot_test_node(route)
+        spent = ROUND.recovery_fields(test["kind"], "exhausted", route=route, node=test, jobs="/jobs.log",
+                                      route_file="/route.json")
+        self.assertEqual((spent["recovery_surface"], spent["next_action"]), ("owner-report", "owner-report"))
+        self.assertIn("Do not correct further", spent["recovery_hint"])
+        self.assertIn("`verdict: FAIL`", spent["recovery_hint"])
+        bound = ROUND.recovery_fields(test["kind"], "verdictless-bound", route=route, node=test, jobs="/jobs.log",
+                                      route_file="/route.json")
+        for fields in (spent, bound):
+            self.assertFalse(any("complete --inline" in str(value) for value in fields.values()), fields)
+        # a team route's test keeps its own recovery
+        team = self.compose(shape="staged", intensity="strong", graph="execute,impl-review,test,report", slug="s3-rf")
+        team_test = next(n for n in team["nodes"] if n["id"] == "test")
+        self.assertEqual(ROUND.recovery_fields(team_test["kind"], "exhausted", route=team, node=team_test,
+                                               jobs="/jobs.log", route_file="/route.json")["recovery_surface"],
+                         "capability-route complete --inline")
 
     def wake(self, route, reason="completion-marker-absent", lineage=None, fields=None, reasons=None, current="d1"):
         """The owner's wake text when its end lacks the verification nodes: every depth-2 node is missing for

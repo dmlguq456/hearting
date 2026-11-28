@@ -270,6 +270,16 @@ def reuse_deterministic_pass(route, node, jobs, budget):
 def recovery_fields(node_kind, state="exhausted", *, route=None, node=None, jobs=None, route_file=None):
     fields = _review_recovery_fields(node_kind, state, route=route, node=node, jobs=jobs,
                                      route_file=route_file)
+    from route_form import one_shot_test_node
+    test = one_shot_test_node(route)
+    if test is not None and isinstance(node, Mapping) and node.get("id") == test["id"]:
+        # The middle cell's test: its owner cannot close it inline, and a test with no round left ends the owner
+        # as a failing test whose rounds are spent does.
+        fields["recovery_surface"] = "owner-report"
+        if state == "exhausted":
+            fields.update(next_action="owner-report", recovery_hint=(
+                "The test has used every round. Do not correct further. Write the remaining findings in your "
+                "report and end with `verdict: FAIL`."))
     if is_deterministic_check(node) and fields.get("required_action") == "use-current-pass":
         # Registry PASS text is not evidence that the current smoke still passes.
         budget = round_budget(route, node, [])

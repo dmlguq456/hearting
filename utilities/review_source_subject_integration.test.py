@@ -1752,6 +1752,71 @@ class SourceSubjectIntegrationTest(unittest.TestCase):
         self.assertEqual(self.test_admission().budget.state, "exhausted")
         self.assertEqual(self.test_admission().budget.verdict_rounds, 2)
 
+    # -- the middle cell's test (`solo` from `strong`): its start needs every review's current PASS --------------
+    def solo_strong(self):
+        """This fixture's route as the middle cell from `strong` seals it: two review legs, the test after both, and
+        the owner's end node after all three."""
+        legs = [{"id": leg, "kind": "review-worker", "unit": "qa/code-review", "completion_gate": "code-impl-review",
+                 "dispatch_depth": 2, "parallel_group": "impl-review", "parallel_anchor": "impl-review",
+                 "write_scope": [f"_internal/dev_reviews{suffix}/**"], "depends_on": []}
+                for leg, suffix in (("impl-review", ""), ("impl-review-alternative", "-alternative"))]
+        test = {"id": "test", "kind": "pipeline-stage", "unit": "qa/test", "completion_gate": "code-test",
+                "dispatch_depth": 2, "write_scope": ["test_logs/**"], "depends_on": [leg["id"] for leg in legs]}
+        owner = {"id": "one-shot", "kind": "capability-owner", "unit": "_kernel/owner", "dispatch_depth": 1,
+                 "completion_gate": "quick-complete", "write_scope": ["source/**"],
+                 "depends_on": [*(leg["id"] for leg in legs), "test"]}
+        self.route["nodes"] = [*legs, test, owner]
+        self.route["route_hash"] = route_hash(self.route)
+        self.route["route_id"] = route_id_from_hash(self.route["route_hash"])
+        self.route_file.write_text(json.dumps(self.route, sort_keys=True), encoding="utf-8")
+        import route_form
+        self.assertEqual(route_form.one_shot_test_node(self.route)["id"], "test")
+
+    def review_leg(self, node_id, attempt_id):
+        """One review leg's PASS on the source the worktree holds now: its exact settled row and its marker."""
+        node = self.get_node(node_id)
+        process = subprocess.Popen(["true"], start_new_session=True)
+        identity = {"pid": str(process.pid), "pgid": str(os.getpgid(process.pid)),
+                    "pid_start": str(DC.process_start_ticks(process.pid))}
+        process.wait(timeout=5)
+        metadata = self._metadata(node, attempt_id, "review")
+        metadata.update(SUBJECT.seal_attempt(self.jobs, self.route, node, attempt_id, worktree=self.repo))
+        metadata = self._row(metadata, extra=identity)
+        evidence = self.artifact_root / f"{attempt_id}.md"
+        evidence.write_text("independent PASS", encoding="utf-8")
+        ROUTE_WRITER._publish_completion_locked(self.route, node, node_id, evidence, jobs=self.jobs,
+                                                attempt_id=attempt_id, attempt_metadata=metadata)
+
+    def start_test(self, action="start"):
+        """The shared start gate for the test (every harness wrapper calls it before registration): the missing
+        predecessors it names, or None when it admits the start."""
+        try:
+            DC.completion_marker_gate(str(self.route_file), "test", action, self.agent_home, self.jobs)
+        except DC.DispatchContractError as refused:
+            self.assertEqual(refused.reason, "completion-marker-missing")
+            return sorted(refused.detail.split(","))
+        return None
+
+    def commit(self, value):
+        (self.repo / "engine.py").write_text(f"value = '{value}'\n", encoding="utf-8")
+        self.git("commit", "-qam", f"source {value}")
+
+    def test_the_solo_test_starts_only_on_reviews_that_passed_the_current_source(self):
+        self.solo_strong()
+        self.review_leg("impl-review", "att-solo-review-A")
+        self.review_leg("impl-review-alternative", "att-solo-alternative-A")
+        self.assertIsNone(self.start_test("dry-run"))                  # both legs passed the current source
+        self.commit("B")                                                # the owner changed the work after them
+        legs = ["impl-review", "impl-review-alternative"]
+        self.assertEqual(self.start_test("dry-run"), legs)
+        self.assertEqual(self.start_test(), legs)
+        self.review_leg("impl-review", "att-solo-review-B")             # one leg judged the change, one did not
+        self.assertEqual(self.start_test(), ["impl-review-alternative"])
+        self.review_leg("impl-review-alternative", "att-solo-alternative-B")
+        self.assertIsNone(self.start_test("dry-run"))
+        self.commit("C")                                                # the source moved right before registration
+        self.assertEqual(self.start_test(), legs)
+
     def test_code_test_owner_closure_remains_refused(self):
         choice = __import__("route_authority").decide_continuation(
             self.route, action="owner-closure", node=self.test_node, rows=[], jobs=self.jobs,

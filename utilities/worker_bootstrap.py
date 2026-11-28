@@ -1333,15 +1333,16 @@ def continuation_followup_fields(route, node, metadata, jobs, route_file):
     return {}
 
 
-def one_shot_test_spent(route, jobs) -> bool:
+def one_shot_test_spent(route, jobs, *, reviewed=False) -> bool:
     """Whether a failing test of the middle cell can be corrected no further: the test, or a review leg that must
-    judge the correction first, has used every round of its own lineage."""
+    judge the correction first, has used every round of its own lineage. `reviewed`: the reviews already passed the
+    correction, so the test alone judges next."""
     import review_round_cap as ROUND
     cap = ROUND.max_review_rounds(route["effective_intensity"])
     lineage = _lineage_rows(route, jobs)
     return any(sum(1 for st, m in lineage.get(n["id"], ())
                    if ROUND.classify_round_row(st, m, worker_type=m.get("worker_type") or "stage") == "verdict") >= cap
-               for n in one_shot_review_nodes(route))
+               for n in one_shot_review_nodes(route) if not reviewed or n.get("unit") == "qa/test")
 
 
 def continuation_followup_text(fields):
@@ -1388,9 +1389,9 @@ def continuation_followup_text(fields):
         if fields.get("closure_spent"):
             allowed = ("the one correction allowed is" if fields.get("corrections", 1) == 1
                        else f"the {fields['corrections']} corrections allowed are")
+            source = f" from {bounded(fields['artifact'])}" if fields.get("artifact") else ""
             return (f"Test FAIL {fields['attempt']}: the test still fails, and {allowed} spent. Do not correct "
-                    f"further. Write the remaining findings from {bounded(fields['artifact'])} in your report and "
-                    "end with `verdict: FAIL`.")
+                    f"further. Write the remaining findings{source} in your report and end with `verdict: FAIL`.")
         return (f"Test FAIL {fields['attempt']}: the independent test of your work fails. Fix what it found in "
                 f"{bounded(fields['artifact'])} in this worktree in one pass, run the same checks you ran before, "
                 f"commit, then start the reviews again with the same command: {command(fields['command'])}. The "
