@@ -283,33 +283,39 @@ def tools(turn, tag, steps, prompt_id, mode=None):
         if step.get('close'):
             os._exit(0)
 
-def held(until_reserved):
-    """Hold the supervisor state lock, delaying its next turn state (and so its next record),
-    optionally until it reserved its last turn."""
-    handle = open(os.environ['AGENT_DISPATCH_COMPLETION_STATE_FILE'] + '.lock', 'a+')
-    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+def wait_until_reserved():
     ledger = os.path.join(os.path.dirname(jobs), 'supervisor-budget', parent + '.jsonl')
     deadline = time.monotonic() + 30
-    while until_reserved and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
         if os.path.exists(ledger) and '"terminal-handoff"' in open(ledger, encoding='utf-8').read():
             log(event='reserved-while-held', recorded='turn' in input_state())
-            break
+            return
         time.sleep(0.02)
-    return handle
+    raise AssertionError('the supervisor did not reserve its last turn while the state lock was held')
 
-def claude_turn(turn, spec, prompt_id):
+def claude_turn(turn, spec, prompt_id, preceding_result):
     """What Claude does on its own after a result: a task-notification turn or a subagent."""
-    lock = held(spec['hold'] == 'reserve') if spec.get('hold') else None
-    if spec.get('kind') == 'subagent':  # a background subagent keeps its parent's prompt_id
-        tools(turn, f'sub{turn}', spec['steps'], prompt_id)
-    else:
-        own = str(U.uuid4())
-        submit('<task-notification>\n<task-id>bg</task-id>\n</task-notification>', own, turn)
-        tools(turn, f'n{turn}', spec['steps'], own)
-        out({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'noted',
-             'origin': {'kind': 'task-notification'}})
-    if lock is not None:
-        lock.close()
+    hold = spec.get('hold')
+    lock = open(os.environ['AGENT_DISPATCH_COMPLETION_STATE_FILE'] + '.lock', 'a+') if hold else None
+    try:
+        # Acquire before the result lets the supervisor race to its next submission.
+        if lock is not None:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if preceding_result is not None:
+            out(preceding_result)
+        if hold == 'reserve':
+            wait_until_reserved()
+        if spec.get('kind') == 'subagent':  # a background subagent keeps its parent's prompt_id
+            tools(turn, f'sub{turn}', spec['steps'], prompt_id)
+        else:
+            own = str(U.uuid4())
+            submit('<task-notification>\n<task-id>bg</task-id>\n</task-notification>', own, turn)
+            tools(turn, f'n{turn}', spec['steps'], own)
+            out({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'noted',
+                 'origin': {'kind': 'task-notification'}})
+    finally:
+        if lock is not None:
+            lock.close()
 
 def run_turn(prompt, uuid):
     with open(trace, encoding='utf-8') as handle:
@@ -347,9 +353,11 @@ def run_turn(prompt, uuid):
               'result': 'artifact: -\nverdict: PASS\nblocker: none' if final else 'runtime_wait: registered-children'}
     if fold is not None:
         result['origin'] = {'kind': 'task-notification'}
-    out(result)
-    for after in spec.get('after', []):
-        claude_turn(turn, after, prompt_id)
+    after_turns = spec.get('after', [])
+    if not after_turns:
+        out(result)
+    for index, after in enumerate(after_turns):
+        claude_turn(turn, after, prompt_id, result if index == 0 else None)
     if os.environ.get('FAKE_VANISH_AFTER') == str(turn):
         os.rename(sys.argv[0], sys.argv[0] + '.gone')  # the next turn's process cannot start
 
