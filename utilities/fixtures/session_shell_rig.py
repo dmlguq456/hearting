@@ -123,7 +123,10 @@ def close_menu(word):
     global menu,last
     menu=False;last=word;record('idle');note(local=word);paint()
 tty.setraw(0)
-event('start')
+# `ARI_NATIVE_UNSELECTED`: as OpenCode on its home route, no session is selected until the first
+# prompt's start hook (sent with the prompt, after an `ARI_NATIVE_GATE` a `slow` prompt waits on).
+unselected=os.environ.get('ARI_NATIVE_UNSELECTED')=='1'
+if not unselected:event('start')
 print('\x1b[?2004h'+('\x1b[?1000h\x1b[?1006h' if os.environ.get('ARI_NATIVE_MOUSE') else ''),end='',flush=True);paint()
 buffer='';draft='';pasting=False;prompts=0;warmed=False;history=[]
 while True:
@@ -176,6 +179,7 @@ while True:
             menu=True;record('waiting','dialog open');note(local=line);paint();continue
         prompts+=1
         context=take(line)
+        if unselected:unselected=False;event('start')
         event('prompt')
         note(number=prompts,prompt=line,context=context)
         last='DONE_PROMPT_%d'%prompts;paint();event('stop')
@@ -243,8 +247,11 @@ class ShellRig:
         self.master = None
         self.binding = None
 
-    def start(self, idle=True):
-        """Start the window and its warm-up turn; ``idle``: until it reads idle with an empty composer."""
+    def start(self, idle=True, selected=True):
+        """Start the window and its warm-up turn; ``idle``: until it reads idle with an empty composer.
+
+        ``selected=False`` (a native started with ``ARI_NATIVE_UNSELECTED``): stop at the seat's
+        unselected attachment (``sid="-"``), before any key or turn."""
         master, slave = os.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", self.rows, self.cols, 0, 0))
         command = [sys.executable, str(self.entry), self.harness, sys.executable, str(self.test.root / "native.py"),
@@ -256,6 +263,10 @@ class ShellRig:
         threading.Thread(target=self._drain, daemon=True).start()
         self.test.addCleanup(self.stop)
         self.wait_for(b"READY", "the native never painted")
+        if not selected:
+            self.binding = self.wait(lambda: next((row for row in self.session_shell.bindings(
+                harness=self.harness) if row["sid"] == "-"), None), "the shell never published its attachment")
+            return self
         self.binding = self.wait(lambda: self.session_shell.exact_binding(self.harness, SID)[0],
                                  "the shell never published its attachment")
         self.type("warm\r")
