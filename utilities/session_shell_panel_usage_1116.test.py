@@ -3,7 +3,8 @@ the scanner's acceleration, the one last line in every harness, OpenCode's cost 
 
 1. `USAGE ───` names the section the thin rule above the last row became; under it one row per harness (Claude,
    Codex, OpenCode, Fleet's header order): the harness dim, then its windows as the last row showed them (`?` when
-   none is reported). The last of them stands on the last row with the gear and the fold button when it fits there.
+   none is reported; 11-27: the three rows share one set of columns). The last of them stands on the last row with the gear and
+   the fold button when it fits there.
    Short of rows the other harnesses' rows go (the last first), then the name row, MEM before them; this window's own
    harness stays. Every harness window shows the same three rows.
 2. QUESTIONS is one thin rounded box (`╭─ N QUESTIONS › ─╮`), rose where this window has a question to answer, dim
@@ -36,9 +37,9 @@ const styles={dim:{dim:true},loc_repo:{foreground:253},lvl_g:{foreground:150},lv
 for(const [i,c] of [147,116,150,186,176].entries()){styles['stg'+i+'_on']={foreground:c,bold:true};styles['stg'+i+'_off']={foreground:c,dim:true};}
 const t=(text,key='dim')=>({text,...(styles[key]||{dim:key==='dim'})});
 const USAGE=[
- {harness:'claude',parts:[t('5h '),t('12%','lvl_g'),t('(↻ 2h)'),t(' │ '),t('7d '),t('66%','lvl_y'),t('(↻ 5d)'),t(' │ '),t('fable ','dim'),t('3%','lvl_g')]},
- {harness:'codex',parts:[t('5h '),t('30%','lvl_g'),t('(↻ 1h)'),t(' │ '),t('7d '),t('8%','lvl_g'),t('(↻ 6d)')]},
- {harness:'opencode',parts:[]}];
+ {harness:'claude',parts:[t('5h '),t('12%','lvl_g'),t('(↻ 2h)'),t(' │ '),t('7d '),t('66%','lvl_y'),t('(↻ 5d)'),t(' │ '),t('fable ','dim'),t('3%','lvl_g')],columns:['period','period','model']},
+ {harness:'codex',parts:[t('5h '),t('30%','lvl_g'),t('(↻ 1h)'),t(' │ '),t('7d '),t('8%','lvl_g'),t('(↻ 6d)')],columns:['period','period']},
+ {harness:'opencode',parts:[],columns:[]}];   // (11-28: each window's kind, as the backend sends it)
 function model(o={}){
   return {styles,colors:o.colors??256,no_color:o.no_color===true,tag:'[e9]',repo_side:[t('hearting','loc_repo')],git_side:[t('main'),t(' ✓','lvl_g')],
     selected:[t('Opus 5.5','hb_claude'),t(' xhigh')],context_side:[t('━━━━','lvl_g'),t('────'),t(' 41%')],
@@ -72,9 +73,10 @@ const v=draw(),L=inside(v),a=at(v,'USAGE');
 assert(a>0,lines(v).join('\n'));
 assert.match(L[a],/^USAGE +$/,L[a]);                         // the name alone (11-22: no thin line), no `›`
 assert.deepEqual(L.slice(a+1,a+4).map(l=>l.trimEnd().split(/\s+/)[0]),['claude','codex','opencode'],L.slice(a).join('\n'));
-assert.match(L[a+1],/^claude +5h 12%\(↻ 2h\) │ 7d 66%\(↻ 5d\) │ fable 3%/,L[a+1]);   // the windows as the last row showed them
-assert.match(L[a+2].trimEnd(),/^codex +5h 30%\(↻ 1h\) │ 7d 8%\(↻ 6d\)$/,L[a+2]);
-assert.match(L[a+3],/^opencode +\? +⚙ +▾$/,L[a+3]);        // none reported: `?` dim; the last row keeps the buttons
+// 11-27 ("USAGE 공통 열"): the windows the three rows report, one set of columns (the reset times go first at this width).
+assert.match(L[a+1],/^claude   5h  12%  7d  66%  fable   3% *$/,L[a+1]);
+assert.match(L[a+2].trimEnd(),/^codex    5h  30%  7d   8%  fable    \?$/,L[a+2]);
+assert.match(L[a+3],/^opencode 5h    \?  7d    \?  fable    \? +⚙ +▾$/,L[a+3]);   // none reported: `?` dim in each column; the last row keeps the buttons
 assert.equal(L.length-2,a+3,'the last row is the harness row');
 // Looks: the name dim, the section name as MESSAGES' and MEM's (dim, title role), the line in the messages' line role.
 const row=v.rows[a+1];assert.equal(row.find(p=>p.text.startsWith('claude')).role,'harness-name');
@@ -91,16 +93,16 @@ assert.equal(lines(v)[last].slice(-9),' ⚙   ▾ │'.padStart(9));
 
     def test_the_last_harness_row_steps_aside_for_the_buttons_when_it_does_not_fit(self):
         self.node(r"""
-// A harness whose only window has a name too wide to stand beside the buttons (20 cells at 30 wide): the row keeps its own
-// row (as far as it fits there) and the buttons theirs.
-const odd=[{harness:'claude',parts:USAGE[0].parts},{harness:'codex',parts:USAGE[1].parts},{harness:'opencode',parts:[t('fable-long-name '),t('100%','lvl_r')]}];
+// 11-27: the last row is laid out in the three rows' columns and is not fitted again beside the buttons: where it does not fit
+// there as it is (20 cells at 30 wide), it keeps its own row and the buttons theirs. (A model window goes before 5h and 7d.)
+const odd=[USAGE[0],USAGE[1],{harness:'opencode',parts:[t('fable-long-name '),t('100%','lvl_r')],columns:['model']}];
 let v=draw({usage:odd,width:30}),a=at(v,'USAGE'),L=inside(v);
-assert.equal(L[a+3].trimEnd(),'opencode',L.slice(a).join('\n'));
+assert.equal(L[a+3].trimEnd(),'opencode 5h    ?  7d    ?',L.slice(a).join('\n'));
 assert.match(L[a+4],/^ +⚙ +▾$/,L[a+4]);
 assert.equal(L.length-2,a+4);
 // Wider, the same row stands beside the buttons again.
 v=draw({usage:odd,width:40});L=inside(v);a=at(v,'USAGE');
-assert.match(L[a+3],/^opencode +fable-long-name 100% +⚙ +▾$/,L.slice(a).join('\n'));
+assert.match(L[a+3],/^opencode 5h    \?  7d    \? +⚙ +▾$/,L.slice(a).join('\n'));
 // Nothing of any usage row is under the gear or the button, at any width; every row is the panel's width.
 for(const width of [30,34,38,44,50,60]){
   v=draw({usage:odd,width,height:30});L=lines(v);const last=L.length-2;
@@ -111,16 +113,21 @@ for(const width of [30,34,38,44,50,60]){
 
     def test_short_of_cells_each_row_gives_up_what_the_last_row_gave_up(self):
         self.node(r"""
-const wide=[{harness:'claude',parts:USAGE[0].parts},{harness:'codex',parts:USAGE[1].parts},{harness:'opencode',parts:USAGE[0].parts}];
+const wide=[USAGE[0],USAGE[1],{...USAGE[0],harness:'opencode'}];
 const rowOf=(width,name)=>{const v=draw({usage:wide,width,height:30});return inside(v).find(l=>l.startsWith(name)).replace(/ [⚙▾ ]+$/,'').trimEnd().replace(/ +/g,' ');};
-// The reset times first, then 5h, then the model windows from the last, then 7d; each value whole.
-assert.equal(rowOf(50,'claude'),'claude 5h 12%(↻ 2h) │ 7d 66%(↻ 5d) │ fable 3%');
-assert.equal(rowOf(40,'claude'),'claude 5h 12% │ 7d 66% │ fable 3%');
-assert.equal(rowOf(34,'claude'),'claude 7d 66% │ fable 3%');
-assert.equal(rowOf(30,'codex'),'codex 5h 30% │ 7d 8%');
-// The last row, beside the buttons, has six cells fewer: it goes further at the same width.
-assert.equal(rowOf(30,'opencode'),'opencode 7d 66%');
-assert.equal(rowOf(40,'opencode'),'opencode 7d 66% │ fable 3%');
+// 11-27 ("USAGE 공통 열"): one set of columns for the three rows: short of cells the reset times go in every row together, then the
+// model windows from the last; 5h and 7d stand side by side to the end; each value whole.
+assert.equal(rowOf(60,'claude'),'claude 5h 12%(↻ 2h) 7d 66%(↻ 5d) fable 3%');
+assert.equal(rowOf(50,'claude'),'claude 5h 12% 7d 66% fable 3%');
+assert.equal(rowOf(50,'codex'),'codex 5h 30% 7d 8% fable ?');
+assert.equal(rowOf(34,'claude'),'claude 5h 12% 7d 66%');
+assert.equal(rowOf(30,'codex'),'codex 5h 30% 7d 8%');
+// The last row is not fitted again beside the buttons: it keeps the columns of the rows above.
+assert.equal(rowOf(30,'opencode'),'opencode 5h 12% 7d 66%');
+assert.equal(rowOf(40,'opencode'),'opencode 5h 12% 7d 66%');
+// Narrower than 5h and 7d need, each row is fitted on its own: the reset times, the model windows from the last, then (11-28)
+// the windows of time from the last, as the backend names them (before, a label guess gave 5h up first: `claude 7d 66%`).
+assert.equal(rowOf(24,'claude'),'claude 5h 12%');
 """)
 
     def test_short_of_rows_the_other_harnesses_go_then_the_name_row_and_mem_goes_before_them(self):
@@ -158,8 +165,8 @@ const base=rows('claude');
 assert.equal(base.length,4);
 for(const harness of ['codex','opencode'])assert.deepEqual(rows(harness),base,harness);
 // A value that changes shows at the next paint: the same rows from a model with other values.
-const other=USAGE.map(u=>u.harness==='codex'?{...u,parts:[t('5h '),t('77%','lvl_y')]}:u);
-const v=draw({usage:other});assert(inside(v).some(l=>/^codex +5h 77%$/.test(l.trimEnd())),lines(v).join('\n'));
+const other=USAGE.map(u=>u.harness==='codex'?{...u,parts:[t('5h '),t('77%','lvl_y')],columns:['period']}:u);
+const v=draw({usage:other});assert(inside(v).some(l=>/^codex +5h +77%  7d +\?  fable +\?$/.test(l.trimEnd())),lines(v).join('\n'));
 // A model without `usage` (an older backend) keeps the one row of 5h/7d.
 const old=draw({usage:null});assert(!inside(old).some(l=>l.startsWith('USAGE')));
 assert(inside(old).some(l=>/^5h 12%\(↻ 2h\) │ 7d 66%/.test(l)));
@@ -480,7 +487,7 @@ for(const o of [{theme:'mono'},{model:{colors:8}}]){
 const F=view.FACES,hb={claude:173,codex:147,opencode:153};   // 11-18: the harness hues: Claude orange 173, Codex lavender 147, OpenCode sky 153
 const L=(n)=>{const c=[0,95,135,175,215,255],m=n-16,rgb=[c[Math.floor(m/36)],c[Math.floor(m/6)%6],c[m%6]].map(x=>x/255).map(x=>x<=0.04045?x/12.92:((x+0.055)/1.055)**2.4);
   const y=0.2126*rgb[0]+0.7152*rgb[1]+0.0722*rgb[2];return 116*Math.cbrt(y)-16;};
-const none=[{harness:'claude',parts:USAGE[0].parts},{harness:'codex',parts:[]},{harness:'opencode',parts:[]}];
+const none=[USAGE[0],{harness:'codex',parts:[],columns:[]},{harness:'opencode',parts:[],columns:[]}];
 const nameOf=(v,name)=>v.rows.flat().find(p=>p.role==='harness-name'&&p.text===name);
 for(const [opt,table,face] of [[{},{claude:130,codex:104,opencode:110},'dark'],[{light:true,theme:'light'},{claude:166,codex:68,opencode:31},'light']]){
   assert.deepEqual(F[face].harnessName,table);

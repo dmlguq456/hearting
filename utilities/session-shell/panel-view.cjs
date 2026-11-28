@@ -46,6 +46,10 @@ const MESSAGES_MAX=3;
 // 11-16 (the person: "메모리도 메시지랑 같은 맥락이야"): MEM shows the newest MEM_MAX records at most, each its
 // dim head row and its headline on up to two rows (spec rule 46 (b)). 11-18 (the person: "MEM는 최대 최근 3개만 띄워도 되겠다"): three at most.
 const MEM_MAX=3;
+// 11-27 (MEM's kinds, "세 무리"): the backend's group of a record's kind (`session_panel.memory_group`) as the style its kind word takes: a work-style
+// preference the request zone's teal, another kind a worker's guidance may come from the dispatch zone's violet, the rest dim as before.
+const MEM_GROUP_KEYS={work:'zone_request',guide:'zone_dispatch'};
+const memGroupKey=group=>Object.prototype.hasOwnProperty.call(MEM_GROUP_KEYS,group)?MEM_GROUP_KEYS[group]:'';
 const defaults={layout:'side',side_width:40,side_min_columns:100,narrow:'bottom',auxiliary:'summary',bottom_rows:14,
   position:'right',theme:'terminal',shade:'none',route_line:'time',worker_box:'closed',rule_motion:'rule'};
 // Panel color schemes (spec rule 22: the reviewed set A, the question rose one
@@ -318,7 +322,7 @@ function change(value,key,step){
   const bounds={side_width:[32,80,1],bottom_rows:[8,20,1],side_min_columns:[80,1000,10]},[lo,hi,n]=bounds[key];
   return {...value,[key]:Math.max(lo,Math.min(hi,value[key]+step*n))};
 }
-function render({frame=0,since,width,height,side,fill=side,model={},native={},state,sid,brief,sent,sections,configuration,settings,routeScroll=0,focused=false,cwd='',harness='',cellWidth,background='',folded=false}){
+function render({frame=0,since,width,height,side,fill=side,model={},native={},state,sid,brief,sent,sections,configuration,settings,routeScroll=0,focused=false,cwd='',harness='',cellWidth,background='',folded=false,resourcesOpen=false}){
   // Spec rule 49 (c): a folded panel is the strip under the native area, in every placement.
   folded=folded===true&&!settings;
   width=Math.max(folded?1:12,width);height=Math.max(folded?1:4,height);
@@ -845,7 +849,7 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     const memItems=(()=>{
       if(!side)return [];
       if(Array.isArray(model.memory_items))return model.memory_items.filter(m=>m&&typeof m==='object'&&clean(m.text).trim()).slice(0,MEM_MAX)
-        .map(m=>({kind:clean(m.kind).trim(),age:clean(m.age).trim(),text:clean(m.text).trim(),tier:clean(m.tier).trim(),scope:clean(m.scope).trim()}));
+        .map(m=>({kind:clean(m.kind).trim(),age:clean(m.age).trim(),text:clean(m.text).trim(),tier:clean(m.tier).trim(),scope:clean(m.scope).trim(),group:memGroupKey(m.group)}));
       const old=painted(model.memory),body=old.length?clean(old.at(-1).text).trim():'',first=old.length>1?clean(old[0].text).trim():'';
       return body?[{kind:'',age:/^\d+[mhd](?: \d+[mh])?$/.test(first)?first:'',text:body}]:[];
     })();
@@ -1959,11 +1963,14 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // 11-20 (the person: "메모리 내용은 한줄로 바꾸고 (지금은 두줄이네) 메시지 처럼 팝업이 가능하게"): a record is one row, as a message's one-row form
     // (`messageLine`): its mark, age and kind dim, then the headline in the body color (`…` where it goes on; the kind goes first where the
     // headline would be left under 14 cells). A press on it opens the MEM popup (below, `memoryBody`: the record whole).
+    // 11-27 (the person: "그 앞의 종류가 중요한데 그거 에따라서 컬러를 부여해주고"): the kind word alone takes its group's color (`memGroupKey`); the
+    // mark, the age, the cells and the order are as they were.
     const memLine=m=>itemIn(()=>{
       const mark=m.tier==='durable'?'◆':m.tier==='working'?'◇':'·';
       for(const lead of [[mark,m.age,m.kind],[mark,m.age]]){
-        const head=text(lead.filter(Boolean).join(' ')+' ','dim');
-        if(inner-size([head])>=14||lead.length===2)return cut([head,text(m.text,'loc_repo')],inner);
+        const words=lead.filter(Boolean),key=lead.length===3&&m.kind?m.group:'';
+        const head=key?[text(words.slice(0,-1).join(' ')+' ','dim'),text(m.kind,key),text(' ','dim')]:[text(words.join(' ')+' ','dim')];
+        if(inner-size(head)>=14||lead.length===2)return cut([...head,text(m.text,'loc_repo')],inner);
       }
     });
     const memRows=m=>[memLine(m)];
@@ -2019,8 +2026,17 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       for(const part of parts){if(String(part.text)===' │ '){sep=sep||part;if(current.length)groups.push(current);current=[];}else current.push(part);}
       if(current.length)groups.push(current);
       const name=usageName(u),mark=text(name,'dim'),lead=pad=>[{...mark,role:'harness-name',harness:u.harness},text(' '.repeat(Math.max(1,pad)))];
-      const tries=[];
+      const tries=[],kinds=usageKindsOf(u,groups.length);
       if(!groups.length)tries.push([text('?','dim')]);
+      else if(kinds){
+        // 11-28 (review of #1911): the kinds the producer sent: the reset times go, then the model windows from the last; a window of
+        // time goes only where its row cannot hold them all (from the last, so 5h and 7d stay longest).
+        const join=gs=>gs.flatMap((g,i)=>i&&sep?[sep,...g.parts]:g.parts);
+        let left=groups.map((g,i)=>({kind:kinds[i],parts:g.filter(part=>!/^\(↻/.test(String(part.text)))}));
+        tries.push(join(groups.map(g=>({parts:g}))),join(left));
+        for(const kind of ['model','period'])while(left.filter(g=>g.kind===kind).length>(kind==='period'?1:0)){
+          const at=left.map(g=>g.kind).lastIndexOf(kind);left=left.filter((_,i)=>i!==at);tries.push(join(left));}
+      }
       else{
         const kind=g=>{const label=g.map(part=>String(part.text)).join('').trim().split(/\s+/)[0];return label==='7d'?'week':/^\d+[mhd]$/.test(label)?'window':'model';};
         const join=gs=>gs.flatMap((g,i)=>i&&sep?[sep,...g]:g);
@@ -2037,6 +2053,73 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       return {row:cut([{...mark,role:'harness-name',harness:u.harness}],room),values:false};
     };
     const usageLines=()=>keepQuota&&usageOn?usageData.filter((_u,i)=>keepLine[i]):[];
+    // 11-27 (the person: "USAGES는 좀 더 이쁘게 행과열을 맞추고"; of the design's two, "USAGE 공통 열"): the harness rows share one set of columns,
+    // chosen once for the three of them (whichever of them short rows leave standing: a row that gives way moves no column). The columns are the
+    // windows any of the three reports (the windows of time in their order, then the model windows in the order first seen; 11-28, review of
+    // #1911: which is which is the producer's `columns`, never guessed from a label), each the same width in every row: its name left, its value
+    // right-aligned in four cells (`?` there, dim, where the row reports none: no 0 is made up), and, where some row has its reset time, a time
+    // column (`(↻ ?)` where the row has a value and no time), two cells between columns, the names one column. Short of cells the time columns
+    // go in every row together, then the model windows from the last; a window of time never goes: where those cannot all stand (or the backend
+    // sent no kinds) each row is fitted on its own. The last row is not laid out again beside the buttons: it shares their row where it fits
+    // there as it is, else the buttons stand on a row of their own.
+    const usageKindsOf=(u,count)=>{const k=Array.isArray(u.columns)?u.columns:null;return k&&k.length===count&&k.every(x=>x==='period'||x==='model')?k:null;};
+    const usageGroupsOf=u=>{
+      const groups=[];let current=[];
+      for(const part of painted(u.parts).filter(p=>p&&typeof p==='object')){if(String(part.text)===' │ '){if(current.length)groups.push(current);current=[];}else current.push(part);}
+      if(current.length)groups.push(current);
+      const kinds=usageKindsOf(u,groups.length);
+      if(!kinds)return null;
+      return groups.map((g,i)=>{
+        const at=g.findIndex(part=>clean(String(part.text)).trim());
+        if(at<0)return null;
+        const reset=g.find(part=>/^\(↻/.test(String(part.text)))||null;
+        return {label:clean(String(g[at].text)).trim(),kind:kinds[i],labelPart:g[at],pct:g.filter((part,j)=>j>at&&part!==reset),reset};
+      }).filter(g=>g&&g.label);
+    };
+    let usageLaid;
+    const usageLayout=()=>{
+      if(usageLaid!==undefined)return usageLaid;
+      const list=usageData,rows=list.map(usageGroupsOf),periods=[],models=[];
+      usageLaid=null;
+      if(rows.some(r=>!r))return null;
+      for(const groups of rows){
+        let prev=-1;
+        for(const g of groups){
+          if(g.kind==='model'){if(!models.includes(g.label))models.push(g.label);continue;}
+          let at=periods.indexOf(g.label);
+          if(at<0){at=prev+1;periods.splice(at,0,g.label);}
+          prev=at;
+        }
+      }
+      const cols=[...periods.map(label=>[label,'period']),...models.map(label=>[label,'model'])].map(([label,kind])=>{
+        const cells=rows.map(groups=>groups.find(g=>g.label===label&&g.kind===kind)||null),shown=cells.filter(Boolean);
+        return {label,model:kind==='model',cells,nameW:measure(label),pctW:Math.max(4,...shown.map(g=>size(g.pct))),
+          timeW:Math.max(0,...shown.filter(g=>g.reset).map(g=>size([g.reset])))};
+      });
+      const tries=[cols.map(c=>({...c,time:c.timeW>0}))];
+      let kept=cols.map(c=>({...c,time:false}));tries.push(kept);
+      while(kept.some(c=>c.model)){const at=kept.map(c=>c.model).lastIndexOf(true);kept=kept.filter((_,i)=>i!==at);tries.push(kept);}
+      const wide=cs=>usageWide+1+cs.reduce((n,c,i)=>n+(i?2:0)+c.nameW+1+c.pctW+(c.time?c.timeW:0),0);
+      const chosen=tries.find(cs=>cs.length&&wide(cs)<=inner);
+      if(!chosen)return null;
+      return usageLaid=new Map(list.map((u,i)=>{
+        const name=usageName(u),out=[{...text(name,'dim'),role:'harness-name',harness:u.harness},pad(usageWide+1-measure(name))];
+        chosen.forEach((c,k)=>{
+          const g=c.cells[i];
+          if(k)out.push(pad(2));
+          out.push(g?{...g.labelPart,text:c.label+' '}:text(c.label+' ','dim'));
+          if(g)out.push(pad(c.pctW-size(g.pct)),...g.pct);else out.push(pad(c.pctW-1),text('?','dim'));
+          if(c.time){
+            const time=g&&g.reset?[g.reset]:g?[text('(↻ ?)','dim')]:[];
+            out.push(...time,pad(c.timeW-size(time)));
+          }
+        });
+        while(out.length&&/^ *$/.test(String(out.at(-1).text)))out.pop();
+        return [u,out];
+      }));
+    };
+    // One harness's row: the shared columns' (above), else its own fit within `room`.
+    const usageRowOf=(u,room)=>{const laid=usageLayout();return laid&&laid.has(u)?laid.get(u):usageFit(u,room).row;};
     // 11-18 (the person: "패널 제일 하단에 RESOURCES도 띄우자. USAGE 위에 그리고 어떤 세션이 잡고 있는지만 추가로 표시하고"; then, on v4.54.0,
     // "RESOURCE는 세로로 차지하는 공간이 너무 많은데, 이걸 게이지는 없애자 그리고 가로로 나열이 가능하면 가로로 나열을 좀 하자"): RESOURCES stands
     // right above USAGE. One row for each host: its name and `CPU 34%  MEM 61%`. Under it every GPU of the host in its number's order, side by
@@ -2134,7 +2217,26 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       }
       return rows.map(r=>cut(r,inner));
     };
+    // 11-27 (the person: "RESOURCES는 기본값을 접은것으로 두고 그때는 서버별로 1줄로만 뜨는 형식으로 좀 고쳐보자"; of the design's two, "세션 먼저"): the
+    // section stands folded unless the person opened it: one row a host, its name then the fields the backend summed up (`brief`: `GPU 2/4`,
+    // the sessions that hold them, `max 92%`, `CPU 34%`, `MEM 61%`), as many as fit from the first, one cell apart (`atlas GPU 2/4 [4f][b2]
+    // max 92%`). A press on the RESOURCES head opens the rows above as they stood and folds them again (`resources`; the host keeps which, for
+    // this window only: a new panel stands folded). A backend that sends no summary draws the open rows.
+    // (11-28, review of #1911: only a section that can fold has the press; a backend that sends no summary draws it open, nothing to turn.)
+    const resourceFoldable=resourceData.length>0&&resourceData.every(h=>Array.isArray(h.brief));
+    const resourceFolded=!resourcesOpen&&resourceFoldable;
+    const resourceBriefRow=h=>{
+      const name=painted(h.host);
+      if(size(name)>inner)return cut(name,inner);
+      const out=[...name];
+      for(const field of painted(h.brief).filter(x=>Array.isArray(x)&&x.length).map(painted).filter(f=>f.length)){
+        if(size(out)+1+size(field)>inner)break;
+        out.push(text(' '),...field);
+      }
+      return out;
+    };
     const resourceLines=()=>{
+      if(resourceFolded)return resourceData.slice(0,resHosts).map(resourceBriefRow);
       const out=[];let room=resGpus;
       resourceData.slice(0,resHosts).forEach(h=>{
         out.push(resourceHostRow(h));
@@ -2144,9 +2246,9 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     };
     const resourceHead=()=>sectionHead([],'RESOURCES',[],[[]],false);
     const resourceCount=()=>side&&resHosts>0?1+resourceLines().length:0;
-    const resourceGpuTotal=()=>resourceData.reduce((n,h)=>n+resourceGpuRows(h).length,0);
+    const resourceGpuTotal=()=>resourceFolded?0:resourceData.reduce((n,h)=>n+resourceGpuRows(h).length,0);
     // The last row beside the buttons: that harness's row when its values fit there.
-    const usageShared=u=>u&&usageFit(u,quotaRoom).values;
+    const usageShared=u=>{if(!u)return false;const laid=usageLayout();return laid&&laid.has(u)?size(laid.get(u))<=quotaRoom:usageFit(u,quotaRoom).values;};
     const footBase=()=>{
       if(usageOn){const list=usageLines();return list.length?(keepUsageHead?1:0)+list.length-1+(usageShared(list.at(-1))?0:1):0;}
       return side&&keepFootRule&&(kept.MESSAGES||kept.MEM)?1:0;
@@ -2371,15 +2473,15 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
     // 11-26 (panel B; the person: "RESOURCES이나 USAGE에 구분선도 없어" / "패널네서 RESOURCES랑 USAGES 글자는 원래 위치로 두지?"): one still rule without
     // a word right above RESOURCES (above USAGE where the equipment is folded); the names stand where and as they stood.
     const bottomRuleRow=()=>({parts:[{...text('─'.repeat(inner),'dim'),role:'messages'}]});
-    if(resourceCount()){if(bottomRule)lower.push(bottomRuleRow());lower.push({parts:resourceHead()});for(const line of resourceLines())lower.push({parts:line});}
+    if(resourceCount()){if(bottomRule)lower.push(bottomRuleRow());lower.push({parts:resourceHead(),...(resourceFoldable?{action:'resources'}:{})});for(const line of resourceLines())lower.push({parts:line});}
     let lastUsage=[];
     if(usageOn&&usageLines().length){
       const list=usageLines(),own=u=>u.harness===harness?['quota']:[];
       if(bottomRule&&!resourceCount())lower.push(bottomRuleRow());
       if(keepUsageHead)lower.push({parts:sectionHead([],'USAGE',[],[[]],false)});
-      list.slice(0,-1).forEach(u=>lower.push({parts:usageFit(u,inner).row,groups:own(u)}));
+      list.slice(0,-1).forEach(u=>lower.push({parts:usageRowOf(u,inner),groups:own(u)}));
       const end=list.at(-1);
-      if(usageShared(end))lastUsage=usageFit(end,quotaRoom).row;else lower.push({parts:usageFit(end,inner).row,groups:own(end)});
+      if(usageShared(end))lastUsage=usageRowOf(end,quotaRoom);else lower.push({parts:usageRowOf(end,inner),groups:own(end)});
     }
     const ruled=!usageOn&&lower.length&&footBase()?1:0;
     if(fill&&lower.length)while(content.length+lower.length+ruled<height-2-1)add([]);
@@ -2775,8 +2877,14 @@ function memoryBody({model={},columns=72,cellWidth}={}){
     if(out.length)out.push([]);
     out.starts.push(out.length);
     const mark=m.tier==='durable'?'◆':m.tier==='working'?'◇':'·';
-    const head=[mark,...[m.scope,m.kind].map(v=>clean(v).trim()).filter(Boolean),clean(m.age).trim()].filter(Boolean).join(' · ').replace(/^(.) · /,'$1 ');
-    out.push([text(head,'dim')]);
+    const scope=clean(m.scope).trim(),kind=clean(m.kind).trim();
+    const words=[mark,scope,kind,clean(m.age).trim()].filter(Boolean);
+    const head=words.join(' · ').replace(/^(.) · /,'$1 '),key=kind?memGroupKey(m.group):'';
+    // 11-27: the kind word in its group's color (the panel's MEM row's), the rest of the head dim as before.
+    const at=key?(scope?2:1):-1;
+    if(at>0){const before=words.slice(0,at).join(' · ').replace(/^(.) · /,'$1 ')+(at===1?' ':' · '),after=words.slice(at+1);
+      out.push([text(before,'dim'),text(kind,key),text(after.length?' · '+after.join(' · '):'','dim')].filter(part=>part.text));}
+    else out.push([text(head,'dim')]);
     const title=clean(m.text).trim(),body=clean(m.body).trim();
     // (a body that goes on from the headline, a record with no headline of its own, is read once, whole.)
     if(!body.startsWith(title))out.push(...wrapText(title,'loc_repo',columns));

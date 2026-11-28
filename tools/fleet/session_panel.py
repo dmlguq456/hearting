@@ -1,5 +1,7 @@
 """Bounded shell presentation of Fleet-owned facts, never input authority."""
+import functools
 import re
+from pathlib import Path
 from .config import ui_text
 from .session_line import route_text, status_lines, _clean_model, _model_key, _effort_text, _eff_key, _percent, _level
 from .session_handle import sanitize_title
@@ -750,6 +752,60 @@ def memory_kind(kind):
     return word if len(word) <= 12 else word[:11] + "…"
 
 
+# 11-27 (the person, on the MEM row: "그 앞의 종류가 중요한데 그거 에따라서 컬러를 부여해주고"; of the design's two, "세 무리"): the
+# kind word's color says what that kind of record can be for a worker. ``work``: a preference carrying a ``unit:`` or ``field:`` label
+# (the work-style records a worker's prompt is given by its labels); ``guide``: another type the worker bootstrap's own type fence
+# takes (``mem_base.BOOTSTRAP_TYPE_FENCE``: read from that file and evaluated as it is, never copied); ``""``: every other type, and
+# any type where the fence cannot be read. It is the kind's qualification, not whether a worker was given the record, as stored now.
+MEMORY_LABEL_KINDS = ("unit:", "field:")
+_MEM_BASE = Path(__file__).resolve().parents[1] / "memory" / "mem_base.py"
+
+
+@functools.lru_cache(maxsize=1)
+def _bootstrap_type_fence():
+    """``mem_base.BOOTSTRAP_TYPE_FENCE`` as that file defines it (its literal, parsed, not imported), or None."""
+    import ast
+    try:
+        tree = ast.parse(_MEM_BASE.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError):
+        return None
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "BOOTSTRAP_TYPE_FENCE" for t in node.targets)):
+            try:
+                value = ast.literal_eval(node.value)
+            except ValueError:
+                return None
+            return value if isinstance(value, str) else None
+    return None
+
+
+@functools.lru_cache(maxsize=256)
+def _bootstrap_type(kind):
+    """True where the fence takes a record of type ``kind``, False where it does not, None where it cannot be asked."""
+    import sqlite3
+    fence = _bootstrap_type_fence()
+    if not fence:
+        return None
+    try:
+        con = sqlite3.connect(":memory:")
+        try:
+            return bool(con.execute("SELECT " + fence + " FROM (SELECT ? AS type) AS r", (kind,)).fetchone()[0])
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+
+
+def memory_group(kind, topics=None):
+    """``work``, ``guide`` or ``""`` for a record of type ``kind`` (as stored, uncut) whose capsule topics are ``topics``."""
+    if not isinstance(kind, str) or not kind or not _bootstrap_type(kind):
+        return ""
+    labelled = isinstance(topics, (list, tuple)) and any(
+        isinstance(topic, str) and topic.casefold().startswith(MEMORY_LABEL_KINDS) and topic.split(":", 1)[1].strip()
+        for topic in topics)
+    return "work" if labelled and "preference" in kind.casefold() else "guide"
+
+
 # 11-15 (panel polish 5): the memory system's own tier and scope names, as its records carry them.
 MEMORY_TIERS = ("durable", "working")
 MEMORY_SCOPES = ("project", "global")
@@ -766,36 +822,46 @@ def session_memory_items(values, now=None):
     for row in values.get("memory_recent") or ():
         if not isinstance(row, dict):
             continue
-        text, age, kind = _memory_values(row, now)
+        text, age, _kind = _memory_values(row, now)
         if text:
-            items.append({"kind": memory_kind(kind), "age": age, "text": text,
+            # 11-27: the shown record's stored type (whole) and topics where the read has them, else the journal row's type.
+            record = row.get("record") if isinstance(row.get("record"), dict) else {}
+            kind = record["type"] if isinstance(record.get("type"), str) and record["type"] else row.get("type")
+            items.append({"kind": memory_kind(sanitize_title(str(kind or "")).strip()[:32]), "age": age, "text": text,
                           "tier": row.get("tier") if row.get("tier") in MEMORY_TIERS else "",
                           "scope": row.get("scope") if row.get("scope") in MEMORY_SCOPES else "",
-                          "body": _memory_body(row, text)})
+                          "body": _memory_body(row, text), "group": memory_group(kind, record.get("topics"))})
         if len(items) >= MEMORY_ITEMS:
             break
     return items
 
 
-def quota_row(values):
-    """``5h 12%(↻ 2h) │ 7d 66%(↻ 5d)`` and per-model quotas; unreported values left out."""
+def quota_windows_parts(values):
+    """The reported windows, each ``(kind, parts)``: ``period`` for a window of time (the producer's ``quota_windows``:
+    5h, 7d, a week, a month …), ``model`` for a model's own quota (``model_quotas``). 11-27 (review of #1911): the USAGE
+    section takes the kind from here; the panel never guesses it from the label."""
     from .session_line import _remaining, _text
-    parts = []
+    out = []
     windows = [window for window in values.get("quota_windows") or () if _percent(window[1]) != "?"]
     if not windows and _percent(values.get("weekly_pct")) != "?":
         windows = [("7d", values["weekly_pct"], None)]
     for label, used, reset in windows:
-        if parts:
-            parts.append((" │ ", "dim"))
-        parts += [(_text(label) + " ", "dim"), (_percent(used), _level(used))]
+        parts = [(_text(label) + " ", "dim"), (_percent(used), _level(used))]
         left = _remaining(reset)
         if left:
             parts.append(("(↻ " + left + ")", "dim"))
+        out.append(("period", parts))
     for label, used in values.get("model_quotas") or ():
         if _percent(used) != "?":
-            if parts:
-                parts.append((" │ ", "dim"))
-            parts += [(_text(label) + " ", _model_key(label)), (_percent(used), _level(used))]
+            out.append(("model", [(_text(label) + " ", _model_key(label)), (_percent(used), _level(used))]))
+    return out
+
+
+def quota_row(values):
+    """``5h 12%(↻ 2h) │ 7d 66%(↻ 5d)`` and per-model quotas; unreported values left out."""
+    parts = []
+    for _kind, window in quota_windows_parts(values):
+        parts += ([(" │ ", "dim")] if parts else []) + window
     return parts
 
 
@@ -822,7 +888,9 @@ def usage_rows(harness, values):
                 payload = {}
             source = {"quota_windows": quota_windows(payload), "weekly_pct": weekly_quota(payload),
                       "model_quotas": payload.get("rl_ms") or []}
-        rows.append({"harness": name, "parts": quota_row(source)})
+        windows = quota_windows_parts(source)
+        # (11-27: ``columns``, each window's kind in its order, for the shared columns; the parts are as they were.)
+        rows.append({"harness": name, "parts": quota_row(source), "columns": [kind for kind, _parts in windows]})
     return rows
 
 
@@ -880,8 +948,33 @@ def resource_rows(value, now):
             if number is not None:
                 stats.append([(word + " ", "dim"), (percent(number), "loc_repo")])
         row["stats"] = stats
+        row["brief"] = resource_brief(host, stats)
         rows.append(row)
     return rows
+
+
+def resource_brief(host, stats):
+    """11-27 (the person: "RESOURCES는 기본값을 접은것으로 두고 그때는 서버별로 1줄로만 뜨는 형식으로"; of the design's two, "세션 먼저"): the host's
+    folded row after its name, its fields in the order the panel lets them in from the first: ``GPU 2/4`` (the GPUs a process runs on, of
+    all), the sessions that hold them (each once, in GPU order; ``[?]`` for a busy GPU whose holder is not known), ``max 92%`` (the highest
+    use the sample observed; ``max ?`` where it observed none), then ``CPU`` and ``MEM`` as the host row has them. A host with no GPU has
+    ``GPU 0/0`` and no use; no value is made up."""
+    gpus = host["gpus"]
+    fields = [[("GPU ", "dim"), ("%d/%d" % (sum(1 for gpu in gpus if gpu["busy"]), len(gpus)), "loc_repo")]]
+    users = []
+    for gpu in gpus:
+        if not gpu["busy"]:
+            continue
+        for tag in gpu["users"] or ["?"]:
+            mark = "[" + str(tag).strip("[]") + "]"
+            if mark not in users:
+                users.append(mark)
+    if users:
+        fields.append([("".join(users), "loc_repo")])
+    if gpus:
+        known = [gpu["util"] for gpu in gpus if gpu["util"] is not None]
+        fields.append([("max ", "dim"), ("%d%%" % round(max(known)), "loc_repo")] if known else [("max ?", "dim")])
+    return fields + [list(stat) for stat in stats]
 
 
 # A finished route's result row (the producer keeps the two most recent after the current
