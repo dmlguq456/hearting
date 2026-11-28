@@ -217,7 +217,7 @@ class AllocationReceiptTest(unittest.TestCase):
         self.assertEqual(row.pop("capacity_raw_headroom"), {"codex": 10.0})
         raw_row = {**row, "capacity_raw_headroom": {"codex": 10.0}}
         self.assertEqual(self.receipt.format_row(raw_row).splitlines(), [
-            self.receipt.format_row(row), "capacity_raw_headroom.codex=10.0",
+            self.receipt.format_row(row) + " raw=codex:10.0",
         ])
 
     def test_cli_list_and_summary_are_one_line_per_answer(self):
