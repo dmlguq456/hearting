@@ -169,7 +169,7 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
   function release(){if(!focused)items=items.filter(item=>!settled(item));}
   function update(rows,guidance,presentation={}) {
     labels=presentation.labels||labels;styles=presentation.styles||styles;help=guidance||help;
-    const previous=current();items=Array.isArray(rows)?rows.slice(0,8):[];
+    const previous=current();items=Array.isArray(rows)?rows.slice():[];
     for(const item of items){
       if(['submitted','received','applied','expired','cancelled'].includes(item.request_state)){
         const local=state(item);if(local.state!=='applied')local.state=item.request_state;if(item.request_state==='applied')local.notice='';
@@ -238,7 +238,7 @@ module.exports=function({changed,answer,action,cellWidth,hold=()=>'',pasteIdle=P
     return result;
   }
   function complete(row,values){return row.item.answer_kind==='decision'?!!values[row.question.id]:(row.item.questions||[]).every(q=>values[q.id]);}
-  function references(){return items.slice(0,8).map(item=>({id:item.id,revision:item.revision}));}
+  function references(){return items.map(item=>({id:item.id,revision:item.revision}));}
   function preview({budget=10,columns=100}={}) {
     // Every key line is packed by the popup's one rule: broken between its ` · ` pieces, the closing key last.
     const keys=(pieces,rows)=>keyRows(pieces.flatMap(piece=>String(piece).split(' · ')),columns,{rows,cellWidth}).map(line=>[span(line)]);

@@ -3518,7 +3518,7 @@ class SessionRouteDisplayCacheTests(unittest.TestCase):
                                             sequence=0, cwd=self.tmp.name)
             path = state._signal_path(signal)
             self.assertEqual(state.cached_statusline("claude", "sid-a")[0], (-1, 1))
-            state._write(path, {**state._read(path), "since": time.time() - state.OLDER_AFTER - 60})
+            state._write_message({**state._read(path), "since": time.time() - state.OLDER_AFTER - 60})
             self.assertEqual(state.cached_statusline("claude", "sid-a")[0], (-1, 0))
             # Thirty sources last written four days ago are never opened.
             then = time.time() - 4 * 86400
@@ -3535,7 +3535,9 @@ class SessionRouteDisplayCacheTests(unittest.TestCase):
 
             with mock.patch.object(state.os, "open", side_effect=counting):
                 self.assertEqual(state.cached_statusline("claude", "sid-a")[0], (-1, 0))
-            self.assertEqual(len(opened), 3, opened)   # the three recent sources only
+            # The session's own question file is read by its exact name; of the older one-question
+            # files only recent ones are opened: these three questions are in their sessions' files.
+            self.assertEqual(len(opened), 0, opened)
 
     def test_statusline_tidy_notice_is_a_third_line_only_when_asked(self):
         # PG-20: the OpenCode footer asks for the waiting session-tidy result the
@@ -3966,7 +3968,8 @@ class MessageCompletionTests(unittest.TestCase):
             "source-expired":  {"ok": (DROP, DROP), "fail": (LOAD, DROP)},
             "source-cancelled": {"ok": (DROP, DROP), "fail": (LOAD, DROP)},
             "source-gone":     {"ok": (DROP, DROP), "fail": (DROP, DROP)},
-            "replaced":        {"ok": (DROP, DROP), "fail": (LOAD, DROP)},
+            # 3a (11-28): another question of the same session is added beside A; A stays open.
+            "another":         {"ok": (LOAD, LOAD), "fail": (LOAD, LOAD)},
             "reopened":        {"ok": (LOAD, LOAD), "fail": (DROP, DROP)},
         }
         def collect():
@@ -3997,6 +4000,12 @@ class MessageCompletionTests(unittest.TestCase):
                                 self.assertEqual(self.source(a)["lifecycle"], "answered")
                                 self.assertNotIn(a["id"], [row["id"] for row in state._read_cache_file()["items"]])
                             if change == "reopened":
+                                # Its answered row left the session's file (only the newest ended
+                                # rows are kept), so the same registration writes it open again.
+                                rows = state._read_questions_file(source)
+                                rows.pop(a["id"])
+                                state._write(source, {"schema_version": 1, "source": "S4-questions",
+                                                      "harness": harness, "session_id": sid, "questions": rows})
                                 self.f.ask(harness, sid, "question C %d" % cell)
                                 again, _ = self.f.ask(harness, sid, "question A %d" % cell)
                                 self.assertEqual(again["id"], a["id"])
@@ -4007,13 +4016,14 @@ class MessageCompletionTests(unittest.TestCase):
                                 # Reflected in the source only; its completion has not settled yet.
                                 signal = self.source(a)
                                 signal["lifecycle"] = change.split("-", 1)[1]
-                                state._write_signal_source(signal)
+                                state._write_message(signal)
                             elif change == "source-gone":
                                 source.unlink()
-                            elif change == "replaced":
-                                replacement, _ = self.f.ask(harness, sid, "next question %d" % cell)
-                                self.assertNotEqual(replacement["id"], a["id"])
-                                self.assertEqual(state._signal_path(replacement), source)
+                            elif change == "another":
+                                another, _ = self.f.ask(harness, sid, "next question %d" % cell)
+                                self.assertNotEqual(another["id"], a["id"])
+                                self.assertEqual(state._signal_path(another), source)   # the same file
+                                self.assertEqual(self.source(a)["lifecycle"], "open")
                             published = earlier if collection == "late" else collect()
                             original = Path.read_text
                             def unreadable(path, *args, **kwargs):
@@ -4033,12 +4043,10 @@ class MessageCompletionTests(unittest.TestCase):
                                     "fleet": a["id"] in [row["id"] for row in fleet["items"]],
                                     "panel": a["id"] in [item["id"] for item in panel]}
                             expect = dict.fromkeys(seen, want == LOAD)
-                            if change == "replaced" and want == LOAD:
-                                # 11-14: the panel's block holds what the person can answer here.
-                                # A late publication still lists the replaced question, which its
-                                # session's next question ended: it is the guidance line instead.
+                            if change == "source-cancelled" and want == LOAD:
+                                # Still listed by a publication that could not read it, yet its own
+                                # request reads cancelled: no question to answer here, no receipt.
                                 expect["panel"] = False
-                                self.assertIn(a["id"], [item["id"] for item in elsewhere])
                             self.assertEqual(seen, expect)
                             for view in (shared, fleet):
                                 self.assertIn(b["id"], [row["id"] for row in view["items"]])
@@ -4255,9 +4263,11 @@ class MessageCompletionTests(unittest.TestCase):
                   "1": "Alpha plan", "3.": "Gamma plan", "Beta plan": "Beta plan",
                   "  beta PLAN.  ": "Beta plan", "gamma plan。": "Gamma plan"}
         for harness in ("claude", "codex", "opencode"):
+            # One open question per session here: two or more open take no prompt as an answer.
             for index, text in enumerate(kept):
                 with self.subTest(harness=harness, kept=text):
-                    signal, envelope = self.f.ask(harness, text="kept %d" % index, choices=choices)
+                    signal, envelope = self.f.ask(harness, "kept-%d" % index, text="kept %d" % index,
+                                                  choices=choices)
                     context = self.prompt(signal, text)
                     self.assertEqual(self.source(signal)["lifecycle"], "open")
                     self.assertIn("[답변 필요] 질문 %s이 아직 열려 있습니다" % signal["id"], context)
@@ -4265,20 +4275,21 @@ class MessageCompletionTests(unittest.TestCase):
                     self.assertEqual(state.read_selected_request(envelope)["state"], "open")
             for index, (text, answer) in enumerate(closed.items()):
                 with self.subTest(harness=harness, closed=text):
-                    signal, envelope = self.f.ask(harness, text="closed %d" % index, choices=choices)
+                    signal, envelope = self.f.ask(harness, "closed-%d" % index, text="closed %d" % index,
+                                                  choices=choices)
                     context = self.prompt(signal, text)
                     completion = self.source(signal)["completion"]
                     self.assertEqual((completion["actor"], completion["answer"]), ("direct", answer))
                     self.assertNotIn(signal["id"], context)
 
     def test_ambiguous_choice_wording_or_number_leaves_the_question_open(self):
-        signal, _ = self.f.ask(text="same key", choices=["Ship", "ship."])
+        signal, _ = self.f.ask(sid="same-key", text="same key", choices=["Ship", "ship."])
         self.prompt(signal, "ship")
         self.assertEqual(self.source(signal)["lifecycle"], "open")
-        signal, _ = self.f.ask(text="number wording", choices=["2", "two"])
+        signal, _ = self.f.ask(sid="number-wording", text="number wording", choices=["2", "two"])
         self.prompt(signal, "1")   # number 1 is "2"; wording "1" matches none
         self.assertEqual(self.source(signal)["completion"]["answer"], "2")
-        signal, _ = self.f.ask(text="number clash", choices=["2", "two"])
+        signal, _ = self.f.ask(sid="number-clash", text="number clash", choices=["2", "two"])
         self.prompt(signal, "2")   # number 2 is "two" but wording "2" is choice 1
         self.assertEqual(self.source(signal)["lifecycle"], "open")
 
@@ -4589,7 +4600,8 @@ class MessageCompletionTests(unittest.TestCase):
         self.f.direct(signal, wire)
         self.f.peer.receive_peer_message(wire, {"harness": signal["harness"], "session_id": signal["session_id"]})
         self.assertEqual(self.source(signal)["lifecycle"], "open")
-        self.assertFalse(state.close_signal(signal["seat_key"]))
+        state.close_signal(signal["seat_key"])          # a seat alone names no session's question
+        self.assertEqual(self.source(signal)["lifecycle"], "open")
 
     def test_the_same_session_in_a_new_process_still_answers_its_question(self):
         # 11-14: a native resume, a restart or a compaction keeps the session id; the question

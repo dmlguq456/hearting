@@ -14,6 +14,9 @@ who answers it now, and whether it is current, older or ownerless. A steward rel
 that summary with the recommendation to its person through its own native question
 surface; it never answers on the person's behalf.
 
+``hearting run questions close ID`` withdraws one of this session's own questions: only that
+id closes, every other question and draft stays.
+
 ``hearting run questions answer ID ...`` sends the person's chosen answer through the
 same selected-request path Fleet uses (``human_wait_state.submit_selected_response``):
 S2 releases the route gate, S3 continues the blocked owner with a correction, S1 Codex
@@ -431,22 +434,45 @@ def _answer(args):
     return code
 
 
-def _ask(args):
+def _caller():
+    """This interactive session's ``(harness, sid, seat)``; a worker or an unproven seat is refused."""
     import session_tidy as tidy
     from dispatch_parent_completion import interactive_parent_identity
+    if (tidy.is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower()
+            in {"owner", "worker", "auxiliary", "reviewer"}):
+        raise ValueError("question-caller-is-worker")
+    harness, sid = interactive_parent_identity()
+    if harness not in {"claude", "codex", "opencode"} or not HWS._safe_native_ref(sid):
+        raise ValueError("question-caller-unknown")
+    seat = tidy.resolve_seat(harness, os.getcwd(), os.environ, sid)
+    if not seat.key:
+        raise ValueError("question-seat-unproven")
+    return harness, sid, seat
+
+
+def _close(args):
+    """Withdraw one of this session's own questions by its full id; every other stays open."""
     try:
-        if (tidy.is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower()
-                in {"owner", "worker", "auxiliary", "reviewer"}):
-            raise ValueError("question-caller-is-worker")
-        harness, sid = interactive_parent_identity()
-        if harness not in {"claude", "codex", "opencode"} or not HWS._safe_native_ref(sid):
-            raise ValueError("question-caller-unknown")
+        harness, sid, seat = _caller()
+        result = HWS.close_message(harness, sid, seat.key, args.id)
+    except (OSError, ValueError, RuntimeError) as exc:
+        print("questions: " + str(exc), file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print("questions: %s %s" % (result["id"], result["state"]) + (
+            " (its answer is on the way; its receipt ends it)" if result["state"] == "submitted" else ""))
+    return 0 if result["state"] == "cancelled" else 1
+
+
+def _ask(args):
+    import session_tidy as tidy
+    try:
+        harness, sid, seat = _caller()
         if (args.text is None) == (args.text_file is None):
             raise ValueError("give TEXT or --text-file, exclusively")
         text = Path(args.text_file).read_text(encoding="utf-8") if args.text_file else args.text
-        seat = tidy.resolve_seat(harness, os.getcwd(), os.environ, sid)
-        if not seat.key:
-            raise ValueError("question-seat-unproven")
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
         from fleet.process_identity import current_launch_context
         launch = current_launch_context(harness, sid)
@@ -458,18 +484,10 @@ def _ask(args):
     except (OSError, ValueError, RuntimeError) as exc:
         print("questions: " + str(exc), file=sys.stderr)
         return 2
-    replaced = value.get("replaced")
-    if replaced:
-        first = (replaced["question"].strip().splitlines() or [""])[0].strip()
-        replaced = {"id": replaced["id"], "first_line": first if len(first) <= 80 else first[:79] + "…"}
     if args.json:
-        print(json.dumps({"id": value["id"], "state": value["lifecycle"],
-                          **({"replaced": replaced} if replaced else {})}, ensure_ascii=False))
+        print(json.dumps({"id": value["id"], "state": value["lifecycle"]}, ensure_ascii=False))
     else:
         print(value["id"])
-        if replaced:
-            # One session keeps one open question: say which earlier unanswered one this closed.
-            print("questions: replaced %s — %s" % (replaced["id"], replaced["first_line"]))
         print(HWS.ui_translator()("questions.registered_choices" if args.choice
                                   else "questions.registered"))
     return 0
@@ -490,6 +508,10 @@ def main(argv=None):
     ask.add_argument("--json", action="store_true")
     answer = sub.add_parser("answer", allow_abbrev=False,
                             help="send the person's chosen answer the existing way")
+    close = sub.add_parser("close", allow_abbrev=False,
+                           help="withdraw one of this session's own questions (only that id)")
+    close.add_argument("id", help="the full question id")
+    close.add_argument("--json", action="store_true")
     for target, default in ((parser, False), (listing, argparse.SUPPRESS)):
         target.add_argument("--json", action="store_true", default=default)
         target.add_argument("--all", action="store_true", default=default,
@@ -509,6 +531,8 @@ def main(argv=None):
         return _ask(args)
     if args.command == "answer":
         return _answer(args)
+    if args.command == "close":
+        return _close(args)
     return _list(args)
 
 
