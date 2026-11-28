@@ -2082,6 +2082,11 @@ function render({frame=0,since,width,height,side,fill=side,model={},native={},st
       const list=usageData,rows=list.map(usageGroupsOf),periods=[],models=[];
       usageLaid=null;
       if(rows.some(r=>!r))return null;
+      // 11-28 (the person, on v4.81.0: "usage에 상태 파악해라 진짜 최악이네"): the columns stand only where every row reports the same windows
+      // (the windows of time by name and order, the model windows by name), so no cell is left to fill: a window a harness does not report
+      // is never drawn as an unknown `?`. Otherwise each row is fitted on its own, as before 11-27 (its reset times, `│`, the buttons beside it).
+      const same=groups=>groups.map(g=>g.kind+' '+g.label).join('\n');
+      if(rows.some(groups=>same(groups)!==same(rows[0])))return null;
       for(const groups of rows){
         let prev=-1;
         for(const g of groups){
