@@ -16,31 +16,8 @@ def _path():
     return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "agent-fleet/tag-assignments.json"
 
 
-def _stamp(meta):
-    """File generation, including a metadata-only reaffirmation (``os.utime``)."""
-    return meta.st_dev, meta.st_ino, meta.st_size, meta.st_mtime_ns, meta.st_ctime_ns
-
-
-def _read_stamped(path):
-    """The snapshot rows and the generation of exactly the file they came from.
-
-    A generation that moved during the read never equals a later one, so a
-    racing reaffirmation is treated as unknown rather than as absent.
-    """
-    before = _stamp(os.stat(path))
-    rows = _read(path)
-    after = _stamp(os.stat(path))
-    return rows, (before if before == after else object())
-
-
 def _read(path):
     return _parse(path.read_text(encoding="utf-8"))
-
-
-def _content(rows):
-    """Row meaning without the reaffirmation counter."""
-    return {key: {name: value for name, value in row.items() if name != "observation_revision"}
-            for key, row in rows.items()}
 
 
 def _parse(text):
@@ -94,6 +71,12 @@ def _order(row):
     return row["first_seen"], row["started_at"], row["harness"], row["session_id"]
 
 
+def _held(row):
+    """Numbers a live session moved off to follow its name: its earlier addresses stay its own."""
+    held = row.get("held")
+    return [tag for tag in held if isinstance(tag, str) and _HEX.fullmatch(tag)] if isinstance(held, list) else []
+
+
 def _started(harness, sid, started=None):
     if isinstance(started, (int, float)) and not isinstance(started, bool) and math.isfinite(started):
         return started
@@ -117,24 +100,30 @@ def _parked(sessions):
 
 
 def _inventory(sessions):
-    from .session_handle import _claude_tag_candidate
+    from .session_handle import _claude_tag_candidate, derived_tag
     from .collectors.herdr import list_agents
     from . import session_registry
     from .collectors.procscan import read_proc_start
     live = {}
+    claude_processes = {}
     viewers = _parked(sessions)
+    chosen = {(sess.harness, sess._parked_viewer): tuple(map(str, getattr(sess, "_parked_viewer_process", ())))
+              for sess in sessions if getattr(sess, "_parked_viewer", None)}
     for sess in sessions:
         harness, sid = sess.harness, getattr(sess, "session_id", None)
         if harness not in {"claude", "codex", "opencode"} or not isinstance(sid, str) or not sid:
             continue
-        if (harness, sid) in viewers:
+        key = (harness, sid)
+        if key in viewers:
             continue
         row = {"harness": harness, "session_id": sid,
                "started_at": _started(harness, sid, getattr(sess, "started_at", None)),
                "pid": getattr(sess, "pid", None), "proc_start": getattr(sess, "proc_start", None)}
         if harness == "claude":
             row["tag"] = getattr(sess, "session_tag", None) or _claude_tag_candidate(sid)
-        live[(harness, sid)] = row
+            if row["pid"] and row["proc_start"]:
+                claude_processes.setdefault(key, set()).add((str(row["pid"]), str(row["proc_start"])))
+        live[key] = row
     # Native/managed registry evidence also reserves sessions outside Herdr or
     # a harness-filtered collection. PID/start agreement prevents recycled PIDs.
     for harness in ("claude", "codex", "opencode"):
@@ -152,13 +141,35 @@ def _inventory(sessions):
             if record.get("procStart") is not None and str(record["procStart"]) != str(start):
                 continue
             sid = record.get("sessionId")
-            if not isinstance(sid, str) or not sid or (harness, sid) in viewers:
+            if not isinstance(sid, str) or not sid:
                 continue
-            row = live.setdefault((harness, sid), {"harness": harness, "session_id": sid,
-                                  "started_at": _started(harness, sid, session_registry._ms_to_sec(record.get("startedAt")))})
-            row.update(pid=pid, proc_start=start)
-            if harness == "claude" and not row.get("tag"):
-                row["tag"] = _claude_tag_candidate(sid)
+            key = (harness, sid)
+            if key not in viewers:
+                row = live.setdefault(key, {"harness": harness, "session_id": sid,
+                                      "started_at": _started(harness, sid, session_registry._ms_to_sec(record.get("startedAt")))})
+                # Only a record that carries its start time confirms the row's process.
+                row.update(pid=pid, proc_start=start, proc_confirmed=record.get("procStart") is not None)
+                if harness == "claude":
+                    if record.get("procStart") is not None:
+                        claude_processes.setdefault(key, set()).add((str(pid), str(start)))
+                    if not row.get("tag"):
+                        row["tag"] = _claude_tag_candidate(sid)
+            # The session list shows this window as `<folder>-<xx>`: Claude names an interactive
+            # process once, when it registers, and keeps that name across /clear, compaction and
+            # an in-process resume. Only a record carrying this process's start time counts. A
+            # window sent to the background names the held session, from the window #1849 chose.
+            named = live.get(viewers.get(key, key))
+            tag = derived_tag(record.get("name")) if record.get("nameSource") == "derived" else None
+            if (harness == "claude" and named is not None and tag and record.get("kind") == "interactive"
+                    and record.get("procStart") is not None
+                    and (chosen.get(key) == (str(pid), str(start)) if key in viewers
+                         else key not in viewers.values())):
+                bundle = (tag, str(pid), str(start))   # the name with the process that bears it
+                named["_registered"] = bundle if named.get("_registered", bundle) == bundle else ""
+    for key, processes in claude_processes.items():
+        # A merged background row already has a specific naming process chosen by #1849.
+        if len(processes) > 1 and key not in viewers.values():
+            live[key].pop("_registered", None)
     agents = list_agents()
     for agent in agents or []:
         identity = agent.get("agent_session") or {}
@@ -212,15 +223,22 @@ def _keep(row, agents):
 
 def assign(sessions):
     """Collect normal inventory before attempting the nonblocking shared writer."""
+    from . import session_registry
     try:
         try:
-            baseline, stamp = _read_stamped(_path())
+            baseline = _read(_path())
         except FileNotFoundError:
-            baseline, stamp = {}, None
+            baseline = {}
         live, agents = _inventory(sessions)
         viewers = _parked(sessions)
-        return _assign(live, agents, baseline=baseline, baseline_stamp=stamp,
-                       lineage={held: viewer for viewer, held in viewers.items()}, viewers=viewers)
+        carried = set()
+        if viewers:
+            with session_registry._STEADY_LOCK:
+                carried = {held for (_, viewer), held in viewers.items()
+                           if viewer in session_registry._STEADY_UNCONFIRMED}
+        return _assign(live, agents, baseline=baseline,
+                       lineage={held: viewer for viewer, held in viewers.items()},
+                       viewers=viewers, carried=carried)
     except (OSError, ValueError, TypeError, ImportError):
         return []
 
@@ -237,6 +255,8 @@ def assign_observed(harness, sid, *, pane_id=None, pid=None, proc_start=None):
     row.update({key: value for key, value in
                 (("pane_id", pane_id), ("pid", pid), ("proc_start", proc_start))
                 if value is not None})
+    if pid is not None and proc_start is not None:
+        row["proc_confirmed"] = True   # a native report names its own process
     if harness == "claude":
         from .session_handle import _claude_tag_candidate
         row["tag"] = _claude_tag_candidate(sid)
@@ -295,15 +315,70 @@ def _continuations(live, observed, lineage):
     return edges
 
 
-def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=None, lineage=None,
-            viewers=None):
+def _same_process(row, pid, start):
+    """``row`` was stored from a record or native report of this very process (PID and start time)."""
+    return row.get("proc_confirmed") is True and (str(row.get("pid")), str(row.get("proc_start"))) == (pid, start)
+
+
+def _renumber(row, tag, keep=()):
+    """Give ``row`` the number ``tag``; the numbers in ``keep`` (and its own) stay reserved for it."""
+    held = sorted((set(_held(row)) | set(keep)) - {tag})
+    row["tag"] = tag
+    if held:
+        row["held"] = held
+    else:
+        row.pop("held", None)
+
+
+def _follow_registered_names(live, observed, registered, stored, protected, owner):
+    """Give a Claude window's session the number of the name the session list shows for it.
+
+    ``registered`` maps a session to its name suffix and the live process that bears it.
+    Claude fixes that name when the process registers, while a stored number follows the session
+    id: a resume in a new process,
+    an in-process resume, or a number drawn before the record named the session leave the two
+    apart. The number moves to the name's only when no stored session holds or keeps it, or its
+    holder is this window's earlier session (same harness, its row confirmed in the very process
+    that bears the name, not observed, no newer row than this census read), which retires and
+    hands its seat evidence and its numbers over. A number the session owned (``owner``: the
+    earliest stored row of a number) stays reserved for it (``held``) while it lives. A newer row
+    (``protected``) is not this census's to rename. Among windows sharing a name, the one Fleet
+    stored first takes its number."""
+    for key in sorted((key for key, named in registered.items() if named and key in live
+                       and key not in protected), key=lambda key: _order(live[key])):
+        row, (named, pid, start) = live[key], registered[key]
+        holders = [other for other, kept in live.items() if other != key
+                   and (kept.get("tag") == named and other in stored or named in _held(kept))]
+        if (row.get("tag") == named and not holders) or any(
+                other in observed or other in protected or other[0] != key[0]
+                or not _same_process(live[other], pid, start) for other in holders):
+            continue
+        if holders:
+            # Binding publication can succeed while its narrow tag report misses the lock.
+            from session_shell import bindings
+            if any((str(binding["native_pid"]), str(binding["native_start"])) != (pid, start)
+                   for harness, sid in holders for binding in bindings(harness=harness, sid=sid)):
+                continue
+        keep = [row["tag"]] if owner.get(row.get("tag")) == key else []
+        for other in holders:
+            earlier = live.pop(other)
+            first = min(earlier, row, key=_order)
+            row["first_seen"], row["started_at"] = first["first_seen"], first["started_at"]
+            if row.get("pane_id") is None and earlier.get("pane_id") is not None:
+                row["pane_id"] = earlier["pane_id"]
+            keep += _held(earlier) + ([earlier["tag"]] if owner.get(earlier.get("tag")) == other else [])
+        _renumber(row, named, keep)
+
+
+def _assign(live, agents, *, observed_only=False, baseline=None, lineage=None, viewers=None, carried=()):
     """Reserve against the latest snapshot and persist atomically under one lock.
 
     The agents returned are the panes whose header shows an assigned number: a pane
     of a window in ``viewers`` ({viewer key: held key}) shows the held session's, and
     is returned with ``held_session`` naming it (the pane header reads that)."""
     from .session_handle import minted_tag
-    observed = set(live)
+    registered = {key: row.pop("_registered", None) for key, row in live.items()}
+    observed, protected = set(live), set()
     path = _path()
     try:
         import fcntl
@@ -311,16 +386,10 @@ def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=
         with (path.parent / "tag-assignments.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             try:
-                old, stamp = _read_stamped(path)
+                old = _read(path)
             except FileNotFoundError:
-                old, stamp = {}, None
+                old = {}
             baseline = baseline or {}
-            # An unchanged reaffirmation only advances the file's generation
-            # (no rewrite). A census that started before it cannot tell which
-            # rows were reaffirmed, so it treats every existing row as newer.
-            # A rewritten snapshot still carries its per-row revisions.
-            reaffirmed = (not observed_only and baseline_stamp is not None
-                          and stamp != baseline_stamp and old == baseline)
             if not observed_only:
                 # A newer full writer's deletion wins over this stale census.
                 for key in baseline.keys() - old.keys():
@@ -328,12 +397,14 @@ def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=
                     observed.discard(key)
             for key, row in old.items():
                 # Only unchanged rows can be retired/refreshed by this census.
-                # Newer pane/PID evidence wins even when live contains the SID.
-                if ((not observed_only and (reaffirmed or row != baseline.get(key)))
-                        or (key not in live and (observed_only or _keep(row, agents)))):
+                # The row's revision also counts a report with unchanged pane/PID evidence.
+                newer = not observed_only and row != baseline.get(key)
+                if newer or (key not in live and (observed_only or _keep(row, agents))):
                     live[key] = row.copy()
                     if not observed_only:
                         observed.discard(key)
+                    if newer:
+                        protected.add(key)
             now = time.time()
             for key, row in live.items():
                 previous = old.get(key, {})
@@ -345,41 +416,61 @@ def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=
                         live[key] = row
                     row["started_at"] = previous["started_at"]
                 row["first_seen"] = previous.get("first_seen", now)
-                if key in observed:
+                if key in observed and key not in carried:
                     # A real reaffirmation is newer even if pane/PID data match.
-                    # Carried or superseded census rows are not new observations.
                     row["observation_revision"] = previous.get("observation_revision", 0) + 1
+                elif "observation_revision" in previous:
+                    # A parked link carried through a failed read keeps its last revision.
+                    row["observation_revision"] = previous["observation_revision"]
                 if previous:
                     row["tag"] = previous["tag"]
+                    if _held(previous):
+                        row["held"] = _held(previous)
                 elif not _HEX.fullmatch(str(row.get("tag") or "")):
                     row["tag"] = minted_tag(row["session_id"])
             # The same seat keeps its number: the successor takes the number of
             # the earliest session it continues, and those ended ids retire.
+            stored = set(old)
             for successor, predecessors in _continuations(live, observed, lineage).items():
-                if successor not in live:
+                # A newer row (``protected``) is not this census's to retire or hand over; a new
+                # successor waits for the next pass without a number rather than with a passing one.
+                if successor not in live or protected & {successor, *predecessors}:
+                    if successor not in old:
+                        live.pop(successor, None)
                     continue
                 chain = [live[key] for key in predecessors if key in live]
                 if not chain:
                     continue
                 first = min(chain + [live[successor]], key=_order)
                 row = live[successor]
-                for field in ("tag", "first_seen", "started_at"):
+                for field in ("first_seen", "started_at"):
                     row[field] = first[field]
+                _renumber(row, first["tag"], [tag for earlier in chain for tag in _held(earlier)])
+                stored.add(successor)
                 if row.get("pane_id") is None and chain[0].get("pane_id") is not None:
                     row["pane_id"] = chain[0]["pane_id"]
                 for key in predecessors:
                     live.pop(key, None)
+            # One owner per stored number, decided once before any name moves: the row that
+            # keeps it in allocation order (a legacy Claude duplicate's earliest row).
+            owner = {}
+            for key in sorted(stored & live.keys(), key=lambda key: (key not in old, *_order(live[key]))):
+                owner.setdefault(live[key].get("tag"), key)
+            _follow_registered_names(live, observed, registered, stored, protected, owner)
             taken = set()
+            held = {tag for row in live.values() for tag in _held(row)}
             movable = sorted(live.items(), key=lambda item: (0 if item[0] in old else 1, *_order(item[1])))
             # Reserve every surviving old number before placing newcomers or a
-            # displaced number. A new hash must never evict an existing session.
+            # displaced number. A new hash must never evict an existing session,
+            # nor take a number a live session moved off (its earlier address).
             displaced = []
             for key, row in movable:
                 tag = row.get("tag")
-                if tag and tag not in taken:
+                if tag and tag not in taken and (owner.get(tag) == key or tag not in held):
                     taken.add(tag)
                 else:
                     displaced.append(row)
+            taken |= held
             for row in displaced:
                 base = int(row["tag"], 16)
                 tag = next((f"{(base + step) % 256:02x}" for step in range(256)
@@ -391,19 +482,7 @@ def _assign(live, agents, *, observed_only=False, baseline=None, baseline_stamp=
                     taken.add(tag)
             rows = [row for row in live.values() if row.get("tag")]
             current = {(row["harness"], row["session_id"]): row for row in rows}
-            reaffirmed = False
-            if (stamp is not None and _content(old) == _content(current)):
-                # Same assignments: keep the file and its readers untouched.
-                # A real reaffirmation still marks a newer generation so a
-                # concurrent stale census cannot retire the observed rows;
-                # when that mark fails, the normal rewrite below records it.
-                reaffirmed = True
-                if observed & current.keys():
-                    try:
-                        os.utime(path)
-                    except OSError:
-                        reaffirmed = False
-            if not reaffirmed and (not path.exists() or old != current):
+            if old != current or not path.exists():
                 fd, temp = tempfile.mkstemp(prefix=".tag-assignments-", dir=path.parent)
                 try:
                     with os.fdopen(fd, "w", encoding="utf-8") as output:

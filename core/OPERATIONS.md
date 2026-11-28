@@ -1780,8 +1780,55 @@ Fleet's two-hex session numbers have one shared resolver,
 and Herdr titles. All three harnesses reserve distinct live numbers in the existing
 XDG state file. Surviving assignments keep their numbers before newcomers take free
 ones; initial collection orders unassigned sessions by known start time. Claude's
-native suffix is a preferred candidate, with the native name unchanged. Legacy
-Claude duplicates keep the earliest assignment and move later colliding rows.
+native suffix is a preferred candidate, with the native name unchanged. A full
+Fleet collection also moves a live Claude window's number to the name the session
+list shows for it (`<folder>-<xx>`, `nameSource: derived`, read from that
+interactive process's own record with its start time; a window sent to the
+background names the held session from the window #1849 chose, and the held
+session keeps that number after the link ends). Windows try in the order Fleet
+first stored them. A number moves only when it is free or its holder is the
+same window's earlier session, confirmed in that process, absent from the
+collection, and unchanged since the collection started. A live shell binding
+for the earlier session in another process keeps its number. When several
+processes report the same session, its name-based move waits for one confirmed
+owner. A native report alone moves no numbers to match names. Legacy Claude
+duplicates keep the earliest assignment and move later colliding rows.
+
+A live assignment reserves the numbers it moved off when following the
+registered name. Each reserved number uses one of the 256 slots. After an
+install, earlier writers that still use the same state file can drop or overlap
+those reservations. A remembered `[xx]` can be missing, ambiguous, or resolve
+to another session. An earlier full collection can remove a reservation and
+give its number to another session in the same write. Earlier seat inheritance
+can also drop a reservation. Current readers report ambiguity while both claims
+remain. Earlier readers ignore held numbers.
+
+Full collections happen in the Fleet window, `fleet --once/--json`, the session
+shell's Fleet and ROUTES/STATUS popup backends, tidy's idle-route check, and
+the human-wait cache producer when it builds a display view. Narrow writes
+come from the Claude and Codex projection hooks, the OpenCode publisher, shell
+binding publication, `peer-steward start`, and tidy seat inheritance. A new
+invocation uses the new version when its launcher resolves the current
+projection. An inherited `AGENT_HOME` can keep hooks on an earlier release.
+OpenCode can keep using its pinned publisher root and helper while they exist.
+It falls back to paths including managed `current` when they disappear. Its
+tidy hook uses a separate, module-relative path. A call already running can
+finish on its original version.
+
+A managed Fleet checks for a newer finalized `current` with the install lock
+released, normally every two seconds, and switches at an idle input boundary
+(`getch` waits up to 200 ms). Buffered keys, an open prompt or confirmation,
+and terminal backpressure can delay the switch. The waiting notice after
+30 seconds gives no deadline. A blocked screen update can pause collection.
+A shell host needs a succession-capable broker, a changed launch path, and an
+idle, confirmed empty input box. An earlier host can still start its release's
+popup collectors after install, and an open popup delays its own succession.
+The human-wait cache producer can refresh once more on the earlier release
+before its next check. Its default loop can sleep for up to 30 seconds, and
+handover depends on the release path, receipt, and install lock. Checkouts,
+unversioned runs, or processes whose handover conditions stay unmet have no
+fixed transition time.
+
 Normal start, native reports and collection attempt these reservations without
 waiting for a writer lock; allocation failure does not fail the observed work.
 Readers use confirmed assignments for every harness, including while a writer
