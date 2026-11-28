@@ -1717,6 +1717,15 @@ def cmd_start(args, *, retain_failure=True):
     result = output.getvalue()
     if result:
         print(result, end="")
+    if code == 0 and requester[0]:
+        try:  # a steward hears which of its sessions already wait; the start is already done
+            started = re.search(r"\bsession_id=(\S+)", result)
+            line = _steward_check_module().start_waiting_line(
+                requester[1], requester[0], exclude={args.name, started and started.group(1)} - {None, "-"})
+            if line:
+                print(line)
+        except Exception:  # noqa: BLE001
+            pass
     # No herdr is not a failed attempt: a retry cannot succeed either, so no retained
     # notice asks this session to repeat it. The one printed line is the whole answer.
     if (code != 0 and retain_failure and "reason=herdr-not-found" not in result

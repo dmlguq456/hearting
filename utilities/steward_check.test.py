@@ -2519,5 +2519,78 @@ class LabRegressionTest(CheckBase):
                 self.assertEqual(self.tick(labs), int(index in (0, 5)))
 
 
+class StewardStreamsTest(CheckBase):
+    """The holder hears how many open routes it parents and which targets wait, open record or not."""
+
+    def test_check_lists_waiting_targets_without_open_records_and_the_routes_held(self):
+        b2, c3, d4 = target("b2", state="idle"), target("c3"), target("d4")
+        self.seen = {"targets": [b2, c3, d4], "pending_messages": 0, "open_work": [], "parented_routes": 18}
+        self.register()
+        self.check(T0)
+        self.seen["targets"] = [b2, target("c3", state="done"), d4]
+        self.check(T0 + 87 * 60)
+        out = self.check(T0 + 182 * 60)
+        self.assertIn("pending_messages=0 undelivered_notices=0 open_work=0 parented_routes=18\n", out)
+        self.assertIn("\nwaiting=[b2] 182 min,[c3] 95 min\n", out)
+        self.assertNotIn("[d4]", out.split("waiting=")[1])  # a working target is not waiting
+        self.seen = {"targets": [d4], "pending_messages": 0, "open_work": [], "parented_routes": None}
+        out = self.check(T0 + 200 * 60)
+        self.assertNotIn("waiting=", out)
+        self.assertNotIn("parented_routes", out)
+
+    def test_the_periodic_notice_ends_with_routes_held_and_waiting_targets(self):
+        self.seen = {"targets": [target("b2", state="idle"), target("c3", state="idle"), target("d4")],
+                     "pending_messages": 0, "open_work": [], "parented_routes": 18}
+        self.register()
+        self.step(T0 + INTERVAL)
+        self.assertEqual(self.notice()["text"],
+                         SC.TEXT_RUN_CHECK + " | You parent 18 open routes; waiting: [b2], [c3].")
+        since = {"sid-b2": T0 - 182 * 60, "sid-c3": T0 - 95 * 60}
+        self.assertEqual(SC._notice_text(SC.TEXT_RUN_CHECK, self.seen, "run-steward-check", "k", since, T0),
+                         SC.TEXT_RUN_CHECK + " | You parent 18 open routes; waiting: [b2] 3 h, [c3] 95 min.")
+        one = {**self.seen, "targets": [target("d4")], "parented_routes": 1}
+        self.assertEqual(SC._notice_text(SC.TEXT_RUN_CHECK, one, "run-steward-check", "k", {}, T0),
+                         SC.TEXT_RUN_CHECK + " | You parent 1 open route.")
+
+    def test_a_full_notice_shortens_the_closing_piece_and_keeps_every_existing_word(self):
+        seen = {"targets": [target("b2", state="idle"), target("c3", state="idle")],
+                "pending_messages": 0, "open_work": [], "parented_routes": 18}
+        since = {"sid-b2": T0 - 182 * 60, "sid-c3": T0 - 95 * 60}
+        middle = " | You parent 18 open routes; waiting: [b2] 3 h, +1 more."
+        filler = session_notice.MAX_TEXT - len(middle) - len(SC.TEXT_RUN_CHECK + " | LAB: ")
+        line = "LAB: " + "x" * filler
+        existing = SC.TEXT_RUN_CHECK + " | " + line
+        text = SC._notice_text(SC.TEXT_RUN_CHECK, seen, "run-steward-check", "k", since, T0, line)
+        self.assertEqual(text, existing + middle)
+        self.assertEqual(len(text), session_notice.MAX_TEXT)
+        line += "x" * (len(middle) - len(" | You parent 18 open routes.") + 1)  # too little room left
+        self.assertEqual(SC._notice_text(SC.TEXT_RUN_CHECK, seen, "run-steward-check", "k", since, T0, line),
+                         SC.TEXT_RUN_CHECK + " | " + line)
+        many = {"targets": [target(f"t{i}", state="idle") for i in range(8)], "pending_messages": 0,
+                "open_work": ["x" * 200 + str(i) for i in range(10)], "parented_routes": 18}
+        with mock.patch.object(SC, "_streams_tails", return_value=[]):
+            alone = SC._notice_text("", many, "assign-next", "k", {}, T0)
+        text = SC._notice_text("", many, "assign-next", "k", {}, T0)
+        self.assertTrue(text.startswith(alone), (alone, text))
+        self.assertLessEqual(len(text), session_notice.MAX_TEXT)
+
+    def test_start_names_targets_already_waiting_only_for_a_steward(self):
+        self.seen = {"targets": [target("b2", state="idle"), target("c3", state="unused"),
+                                 target("n1", state="unused"), target("d4")],
+                     "pending_messages": 0, "open_work": []}
+        self.register()
+        duty = self.duty()
+        self.store.update(duty["id"], observation={**duty["observation"],
+                                                   "waiting_since": {"sid-b2": T0 - 42 * 60}})
+        with mock.patch.object(SC, "_now", return_value=T0):
+            self.assertEqual(SC.start_waiting_line(HARNESS, SID, exclude={"n1", "sid-n1"}),
+                             "already-waiting=[b2] 42 min,[c3] (sessions you supervise that are idle now)")
+            self.flagged = False  # not a steward: no line
+            self.assertEqual(SC.start_waiting_line(HARNESS, SID, exclude={"n1"}), "")
+            self.flagged = True
+            self.seen["targets"] = [target("n1", state="unused"), target("d4")]  # nobody else waits
+            self.assertEqual(SC.start_waiting_line(HARNESS, SID, exclude={"n1"}), "")
+
+
 if __name__ == "__main__":
     unittest.main()

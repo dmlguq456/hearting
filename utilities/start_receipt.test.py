@@ -1,6 +1,7 @@
 import os, sys  # noqa: E401
 if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a direct run re-enters under tools/run-tests.py isolation
     os.execv(sys.executable, [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tools/run-tests.py"), "--direct-run", sys.executable, *sys.orig_argv[1:]])
+import io
 import json
 import os
 from pathlib import Path
@@ -284,6 +285,49 @@ class NextLineTest(unittest.TestCase):
         self.assertEqual(json.loads(proc.stdout), {'state': 'running', 'parent_next': 'end-turn'})
         self.assertEqual(proc.stderr.splitlines()[-1],
                          'next: end this turn; the runtime brings the result back to this session')
+
+
+def owner_row(attempt, route, parent='sid-a', status='open', depth='1'):
+    meta = dict(attempt_id=attempt, dispatch_depth=depth, worker_type='owner', parent_sid=parent,
+                parent_completion_delivery='claude-parent-runtime', owner_route_id=route)
+    return f"2026-11-28T00:00:00Z\t{status}\t/r\t/w\ttest\t" + ",".join(f"{k}={v}" for k, v in meta.items()) + "\n"
+
+
+class LaunchLineRoutesTest(unittest.TestCase):
+    """A launch's last line names the open routes the launching session parents, read from the registry."""
+
+    OLD = 'next: end this turn; the runtime brings the result back to this session'
+    END = {'state': 'running', 'parent_next': 'end-turn'}
+
+    def line(self, jobs, sid='sid-a'):
+        stream = io.StringIO()
+        with patch.object(receipt, 'identity', return_value=SessionIdentity('claude', sid, 'test', 'sole')):
+            receipt.print_next_line(self.END, stream=stream, jobs=jobs)
+        return stream.getvalue().splitlines()[-1]
+
+    def test_zero_one_and_eighteen_open_routes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            jobs = Path(temp) / 'jobs.log'
+            jobs.write_text(owner_row('att-x', 'rt-x', parent='sid-b') + owner_row('att-d', 'rt-d', status='done'))
+            self.assertEqual(self.line(jobs), self.OLD)
+            jobs.write_text(owner_row('att-1', 'rt-1') + owner_row('att-s', 'rt-s', depth='2'))
+            self.assertEqual(self.line(jobs), self.OLD + ' · this session now parents 1 open route')
+            jobs.write_text(''.join(owner_row(f'att-{i}', f'rt-{i}') for i in range(18)))
+            self.assertEqual(self.line(jobs), self.OLD + ' · this session now parents 18 open routes')
+            # The hook's republished receipt and any other caller without a registry keep the old line.
+            self.assertEqual(receipt.next_line(self.END), self.OLD)
+
+    def test_a_count_that_fails_or_cannot_be_read_leaves_the_receipt_as_it_was(self):
+        with tempfile.TemporaryDirectory() as temp:
+            jobs = Path(temp) / 'jobs.log'
+            jobs.write_text(owner_row('att-1', 'rt-1'))
+            with patch('dispatch_supervision.open_route_count', side_effect=RuntimeError('broken')):
+                self.assertEqual(self.line(jobs), self.OLD)
+            self.assertEqual(self.line(Path(temp) / 'missing.log'), self.OLD)
+            with patch.object(receipt, 'identity', return_value=SessionIdentity()):
+                stream = io.StringIO()
+                receipt.print_next_line(self.END, stream=stream, jobs=jobs)
+                self.assertEqual(stream.getvalue().splitlines()[-1], self.OLD)
 
 
 if __name__ == '__main__':

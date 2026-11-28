@@ -1566,6 +1566,34 @@ class SupervisedPromptContractTest(_TmpRootMixin, unittest.TestCase):
             self.assertEqual(peer_steward.cmd_start(args), 1)
         retain.assert_called_once()
 
+    def test_a_started_session_is_followed_by_the_stewards_waiting_sessions_only_when_there_are_some(self):
+        args = peer_steward.build_parser().parse_args(
+            ["start", "n1", "--kind", "codex", "--beside", "w1:p0"])
+
+        def started(_args):
+            print("started=true agent=codex name=n1 pane=w1:p1 permission_mode=auto session_id=sid-n1 "
+                  "managed=- surface=tmux")
+            return 0
+
+        for line in ("already-waiting=[b2] 42 min,[c3] (sessions you supervise that are idle now)", ""):
+            check = SimpleNamespace(start_waiting_line=mock.Mock(return_value=line))
+            out = io.StringIO()
+            with self.subTest(line=line), \
+                 mock.patch.object(peer_steward, "_start_request", side_effect=started), \
+                 mock.patch.object(peer_steward, "_current_session_identity", return_value=("sid-a", "claude")), \
+                 mock.patch.object(peer_steward, "_steward_check_module", return_value=check), \
+                 contextlib.redirect_stdout(out):
+                self.assertEqual(peer_steward.cmd_start(args), 0)
+            printed = out.getvalue().splitlines()
+            self.assertTrue(printed[0].startswith("started=true"))
+            self.assertEqual(printed[1:], [line] if line else [])
+            check.start_waiting_line.assert_called_once_with("claude", "sid-a", exclude={"n1", "sid-n1"})
+        with mock.patch.object(peer_steward, "_start_request", return_value=1), \
+             mock.patch.object(peer_steward, "_retain_start_failure"), \
+             mock.patch.object(peer_steward, "_steward_check_module") as module:
+            self.assertEqual(peer_steward.cmd_start(args), 1)
+        module.assert_not_called()  # a failed start says nothing more
+
 
 class SharedDaemonCodexStartTest(_TmpRootMixin, unittest.TestCase):
     """Exercise the real steward start path with Codex's shared defaults."""

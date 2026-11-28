@@ -2354,5 +2354,30 @@ class StallNoticeRunningToolTest(unittest.TestCase):
         self.assertNotIn("tool command", self.notice(gone))
 
 
+class OpenRouteCountTest(unittest.TestCase):
+    """The open routes a session parents: its open dispatch-depth-1 owner attempts, by route."""
+
+    def test_only_open_depth_one_owner_routes_of_that_parent_count(self):
+        with tempfile.TemporaryDirectory() as temp:
+            jobs = Path(temp) / "jobs.log"
+            owner = dict(dispatch_depth="1", worker_type="owner", parent_sid="sid-a",
+                         parent_completion_delivery="claude-parent-runtime", route_id="")
+            jobs.write_text(
+                row("att-r1", owner_route_id="rt-one", **owner)
+                + row("att-r2", status="running", owner_route_id="rt-two", **owner)
+                + row("att-closed", status="done", owner_route_id="rt-closed", **owner)
+                + row("att-stage", **{**owner, "dispatch_depth": "2", "worker_type": "stage",
+                                      "route_id": "rt-stage"})
+                + row("att-nested", owner_route_id="rt-nested", **{**owner, "dispatch_depth": "2"})
+                + row("att-other", owner_route_id="rt-other", **{**owner, "parent_sid": "sid-b"}))
+            self.assertEqual(supervision.open_route_count(jobs, "sid-a"), 2)
+            self.assertEqual(supervision.open_route_count(jobs, "sid-b"), 1)
+            self.assertEqual(supervision.open_route_count(jobs, "sid-none"), 0)
+            self.assertIsNone(supervision.open_route_count(jobs, ""))
+            self.assertIsNone(supervision.open_route_count(Path(temp) / "missing.log", "sid-a"))
+            with mock.patch.object(supervision, "registry_view", side_effect=OSError("unreadable")):
+                self.assertIsNone(supervision.open_route_count(jobs, "sid-a"))
+
+
 if __name__ == "__main__":
     unittest.main()

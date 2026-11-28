@@ -1127,6 +1127,24 @@ def _open_attempt_rows(jobs):
     return result
 
 
+def open_route_count(jobs, session_id):
+    """How many routes ``session_id`` parents now: its open dispatch-depth-1 owner attempts,
+    counted by route, from one cached registry read with no per-row liveness observation.
+
+    ``None`` when the session is unknown or the registry cannot be read; a caller then says
+    nothing about the count rather than a wrong number.
+    """
+    try:
+        if not session_id or not Path(jobs).is_file():
+            return None
+        return len({metadata.get("owner_route_id") or metadata.get("route_id")
+                    for _status, metadata in _open_attempt_rows(jobs)
+                    if metadata.get("parent_sid") == session_id
+                    and metadata.get("dispatch_depth") == "1" and metadata.get("worker_type") == "owner"})
+    except (OSError, ValueError, TypeError, UnicodeError):
+        return None
+
+
 def running_route_ids(jobs, candidates, session_id=None):
     """Which of the ``candidates`` route ids have a worker that works or waits on its own work now.
 

@@ -666,7 +666,18 @@ def _observe_role(harness: str, session_id: str) -> dict:
     work, decisions = _open_work(harness, session_id)
     lab = _observe_lab(cwds)
     return {"targets": targets, "pending_messages": pending,
-            "open_work": work, "user_decisions": decisions, "lab": lab}
+            "open_work": work, "user_decisions": decisions, "lab": lab,
+            "parented_routes": _parented_routes(session_id)}
+
+
+def _parented_routes(session_id):
+    """Open routes this holder parents (cached registry count), or None when unreadable."""
+    try:
+        import dispatch_supervision
+        import session_notice
+        return dispatch_supervision.open_route_count(session_notice._registry(None), session_id)
+    except Exception:  # noqa: BLE001 - a count is a hint; the check goes on without it
+        return None
 
 
 def _lengthen_shared_prefixes(targets: list) -> None:
@@ -720,6 +731,54 @@ def _track_waiting(previous, targets: list[dict], now: float) -> dict:
 def _label(name: str) -> str:
     name = str(name or "-")
     return name if name.startswith("[") else f"[{name}]"
+
+
+def waiting_targets(observation: dict, waiting_since=None, now: float | None = None,
+                    *, hours=False, exclude=()) -> list[str]:
+    """Live targets waiting for their next step with no request queued (``_waiting``),
+    longest first, each as ``[name] 182 min`` (``3 h`` with ``hours``) or bare when new."""
+    now = _now() if now is None else now
+    since = waiting_since or {}
+    rows = []
+    for t in observation.get("targets") or ():
+        if not _waiting(t) or _queued_for(t) or {t.get("name"), t.get("session_id")} & set(exclude):
+            continue
+        minutes = int(max(0.0, now - float(since.get(str(t.get("session_id")), now))) // 60)
+        span = f" {minutes // 60} h" if hours and minutes >= 120 else f" {minutes} min" if minutes else ""
+        rows.append((-minutes, _label(t["name"]) + span))
+    return [text for _key, text in sorted(rows, key=lambda row: row[0])]
+
+
+def start_waiting_line(harness: str, session_id: str, exclude=()) -> str:
+    """After a steward's successful ``peer-steward start``: the targets it already has that
+    are idle now (the just-started session excluded), else "". Reads only; never blocks."""
+    try:
+        if not session_id or not _role_held(harness, session_id)["held"] \
+                or not _role_flagged(harness, session_id):
+            return ""
+        duty = _store().get(duty_id(harness, session_id)) or {}
+        waiting = waiting_targets(_observe_role(harness, session_id),
+                                  (duty.get("observation") or {}).get("waiting_since"), exclude=exclude)
+    except Exception:  # noqa: BLE001 - the session is already open; this line is only a hint
+        return ""
+    return ("already-waiting=" + ",".join(waiting) + " (sessions you supervise that are idle now)"
+            if waiting else "")
+
+
+def _streams_tails(seen: dict, waiting_since, now) -> list[str]:
+    """The notice's closing piece, fullest first: routes held and waiting targets."""
+    count = seen.get("parented_routes")
+    held = (f"You parent {count} open route{'' if count == 1 else 's'}"
+            if isinstance(count, int) and count > 0 else "")
+    waiting = waiting_targets(seen, waiting_since, now, hours=True)
+    tails = []
+    for shown in range(len(waiting), -1, -1):
+        names = ", ".join(waiting[:shown]) + (f", +{len(waiting) - shown} more" if shown < len(waiting) else "")
+        part = ("waiting: " if held else "Waiting: ") + names if shown else ""
+        text = "; ".join(item for item in (held, part) if item)
+        if text:
+            tails.append(" | " + text + ".")
+    return tails
 
 
 def next_actions(observation: dict, waiting_since=None, now: float | None = None) -> list[str]:
@@ -841,7 +900,9 @@ def _notice_text(base: str, seen: dict, action: str, key: str, waiting_since, no
                                                  names=_names(seen["targets"], count))
         text = " ".join((advice + (" | " + line if line else "")).split())
         if fits(text):
-            return text + names if names and fits(text + names) else text
+            text = text + names if names and fits(text + names) else text
+            return next((text + tail for tail in _streams_tails(seen, waiting_since, now)
+                         if fits(text + tail)), text)
     return base
 
 
@@ -1290,10 +1351,15 @@ def cmd_check(harness: str, session_id: str, *, now: float | None = None, out=No
         print(f"target name={target['name']} harness={target['harness']} "
               f"state={target['state']} liveness={target['liveness']}"
               + (f" owed={owed}" if owed else ""), file=out)
+    routes = seen.get("parented_routes")
     print(f"pending_messages={seen['pending_messages']} undelivered_notices={undelivered}"
           f" open_work={len(seen.get('open_work') or ())}"
-          + (f" user_decisions={len(seen['user_decisions'])}" if seen.get("user_decisions") else ""),
+          + (f" user_decisions={len(seen['user_decisions'])}" if seen.get("user_decisions") else "")
+          + (f" parented_routes={routes}" if isinstance(routes, int) else ""),
           file=out)
+    waiting = waiting_targets(seen, waiting_since, now)
+    if waiting:
+        print("waiting=" + ",".join(waiting), file=out)
     for action in actions:
         print(f"next={action}", file=out)
     if actions:

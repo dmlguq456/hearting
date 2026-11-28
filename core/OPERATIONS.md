@@ -2842,6 +2842,10 @@ append-only ledger below is the only record of them (SD-122 §13.37.2-(1)).
 Keep work in this session's route by default; start another interactive session
 (`peer-steward start`) only for long work that needs its own human answers or
 recovery, because each one adds a seat, a model context, and supervision.
+A steward may also run routes itself, and no count limits it. When it holds several
+independent flows, its default is to hand a whole flow — its routes, its instructions
+and its next step — to a session it already supervises, using a waiting one before
+starting another; the user decides how many sessions run.
 
 **Optional session shell.** An opt-in PTY attachment supplies a collapsed status
 line, a read-only panel and guarded idle wake. Its exact-session transport and
