@@ -669,14 +669,17 @@ class CurrentSessionBindingTest(unittest.TestCase):
                           "state": "unknown", "runtime_version": "2.0.32",
                           "source": "opencode-v2-request", "effective_window_tokens": 950000,
                           "session_id": "ses_b", "reason": "native-v2-compaction-behavior-unverified"}}
+            # A record that still belongs to this pid/start/session/model lends
+            # its measured window even when its request no longer pairs with the
+            # newest row; only the trigger-bearing fields need the exact pairing.
             for change, expected in (({}, 950000), ({"observed_at": 2002.0}, 950000),
                                      ({"model": "p/other"}, None),
                                      ({"session_id": "ses_other"}, None),
                                      ({"proc_start": "124"}, None),
-                                     ({"request": None}, None),
-                                     ({"request": {**record["request"], "assistant_message_id": "msg-prior"}}, None),
-                                     ({"request": {**record["request"], "started_at_ms": 1999400}}, None),
-                                     *(({"request": {**record["request"], key: value}}, None)
+                                     ({"request": None}, 950000),
+                                     ({"request": {**record["request"], "assistant_message_id": "msg-prior"}}, 950000),
+                                     ({"request": {**record["request"], "started_at_ms": 1999400}}, 950000),
+                                     *(({"request": {**record["request"], key: value}}, 950000)
                                        for key, value in (("started_at_ms", True),
                                                           ("event_seq", None), ("event_seq", True),
                                                           ("observed_event_seq", None),
@@ -705,10 +708,13 @@ class CurrentSessionBindingTest(unittest.TestCase):
                     sess, _ = self._run_v2(self._session(),
                                            ("ses_b", "opencode-tui-selection"),
                                            {**observed, "event_seq": cursor}, policy_reader=read_policy)
-                    self.assertIsNone(sess.context_window_tokens)
+                    # A missing or stale cursor blocks the exact request pairing,
+                    # not the record's measured window.
+                    self.assertEqual(sess.context_window_tokens, 950000)
                     self.assertEqual(sess.active_context_tokens, 123456)
+                    self.assertEqual(sess.ctx_pct, 13)
 
-    def test_v2_missing_or_malformed_latest_tokens_do_not_reuse_an_older_request(self):
+    def test_v2_a_streaming_step_reuses_the_last_measured_context(self):
         for tokens in (None, {"total": -1}, {"total": "invalid"}):
             with self.subTest(tokens=tokens):
                 observed = {"state": "observed", "generation": "v2", "cursor": 8,
@@ -718,7 +724,10 @@ class CurrentSessionBindingTest(unittest.TestCase):
                                 {"type": "assistant", "tokens": tokens, "completed": 1000}]}
                 sess, _ = self._run_v2(self._session(),
                                        ("ses_b", "opencode-tui-selection"), observed)
-                self.assertIsNone(sess.active_context_tokens)
+                # The newest step has no reading yet; the last measured step (123)
+                # is the best known current context. Without a policy record there
+                # is no window, so no percentage is invented.
+                self.assertEqual(sess.active_context_tokens, 123)
                 self.assertEqual(sess.session_input_tokens, 999999)
                 self.assertIsNone(sess.ctx_pct)
 
