@@ -138,13 +138,28 @@ class SameQuestionTest(Base):
                     self.done(harness)
 
     def test_an_earlier_native_record_with_its_descriptions_in_the_text_is_the_same(self):
-        built = redirect.build(redirect._normalized("claude", payloads()["claude"])[1])
-        self.assertIn("- Edit: Change the plan", built["text"])            # the form the builder writes now
+        # what the builder wrote before #1908 moved the descriptions to `choice_descriptions`
+        earlier = "Start now?\n- Proceed: Start the work\n- Edit: Change the plan\n- Stop: Do not start"
         for harness in HARNESSES:
             with self.subTest(harness=harness):
-                old, _ = self.f.ask(harness, SID, text=built["text"], choices=built["choices"])
+                old, _ = self.f.ask(harness, SID, text=earlier, choices=["Proceed", "Edit", "Stop"])
                 self.next_prompt(harness)
                 self.assertEqual(self.the_id(redirect.decide(harness, payloads()[harness])), old["id"])
+                self.done(harness)
+                # only that exact text: one more line of the person's own is another question
+                other, _ = self.f.ask(harness, SID, text=earlier + "\n- Note: ask me first",
+                                      choices=["Proceed", "Edit", "Stop"])
+                self.assertNotEqual(self.the_id(redirect.decide(harness, payloads()[harness])), other["id"])
+                self.done(harness)
+
+    def test_a_native_question_keeps_its_choice_descriptions_by_their_choices(self):
+        for harness in HARNESSES:
+            with self.subTest(harness=harness):
+                found = self.the_id(redirect.decide(harness, payloads()[harness]))
+                envelope = state.read_selected_request({"id": found, "harness": harness, "session_id": SID})
+                (question,) = questions.questions_of(envelope)
+                self.assertEqual(question["question"], "Start now?")
+                self.assertEqual(question["descriptions"], ["Start the work", "Change the plan", "Do not start"])
                 self.done(harness)
 
     def test_other_choice_values_order_or_secrecy_is_another_question(self):

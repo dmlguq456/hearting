@@ -2663,11 +2663,11 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
         self.assertEqual(asked["required_action"], "ask-registered-question")
         expected = ("Run the two commands and preserve their actual results.\n\n"
                     "이 순서로 진행할까요?\n"
-                    "- 예, 이 순서로: 예, 이 순서로\n"
-                    "- 아니요, 다르게: 아니요, 다르게\n\n"
+                    "- 예, 이 순서로\n  예, 이 순서로\n"
+                    "- 아니요, 다르게\n  아니요, 다르게\n\n"
                     "긴 실험을 지금 시작해도 될까요?\n"
-                    "- 예, 시작: 예, 시작\n"
-                    "- 아니요, 나중에: 아니요, 나중에")
+                    "- 예, 시작\n  예, 시작\n"
+                    "- 아니요, 나중에\n  아니요, 나중에")
         self.assertEqual(asked["human_wait"], {"state": "pending", "fallback": "ordinary-conversation",
                                               "question_block": expected})
         self.assertNotIn("Confirm this understanding", asked["human_wait"]["question_block"])

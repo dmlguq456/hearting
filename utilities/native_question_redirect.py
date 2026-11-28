@@ -8,8 +8,9 @@ panel, Fleet and the input line can answer it. A call has one of three outcomes 
 each hook carries it as it is:
 
 - registered: a new id, or the id of the same question already open in this session (text up to
-  line ends and edge spaces, choice values in order, answer form, secrecy; with or without the
-  option descriptions this module puts into the text, the exact text rebuilt from this call). The
+  line ends and edge spaces, choice values in order, answer form, secrecy; a record an earlier
+  release wrote with the option descriptions in its text is the same only as that exact text,
+  rebuilt from this call). The
   native call is refused with one short line: the id, "end the turn". Another wait of the session
   (a Hearting question, a route gate, a native wait), a retry or a late screen is never a reason
   to let the native question open.
@@ -26,9 +27,11 @@ Registered workers and native subagents do nothing here.
 
 One native call may carry several questions; a Hearting question record holds one. A single
 question keeps its choices, its recommendation (a label ending `(권장)` or `(Recommended)`) and
-its secrecy. Several questions, a multi-select question or a preview are written as one text
-question the person answers in words, with the options and their descriptions listed; several
-questions with a secret among them cannot keep it apart, so they pass.
+its secrecy, and each option's description goes with its choice (the board draws it under the
+choice's name; 11-27 design 가), not into the question's text. Several questions, a multi-select
+question or a preview are written as one text question the person answers in words, with the
+options and their descriptions listed; several questions with a secret among them cannot keep
+it apart, so they pass.
 
 Usage (stdin: the harness payload):
   native_question_redirect.py --claude|--codex   print the PreToolUse deny JSON when refused
@@ -134,7 +137,9 @@ def _line(option: dict, number: int | None, *, detail: bool) -> str:
 
 
 def build(rows: list, *, detail: bool = True) -> dict:
-    """`{text, choices, recommend, secret}` for one Hearting question (`recommend` is 1-based or None)."""
+    """`{text, choices, recommend, descriptions, secret}` for one Hearting question (`recommend` is
+    1-based or None; `descriptions` maps a choice to its option's description, None when there is
+    none or `detail` is off)."""
     only = rows[0] if len(rows) == 1 else None
     secret = bool(only and only["secret"])
     if not only and any(row["secret"] for row in rows):
@@ -146,11 +151,10 @@ def build(rows: list, *, detail: bool = True) -> dict:
         if len(set(labels)) == len(labels):
             recommend = next((index + 1 for index, option in enumerate(only["options"])
                               if _RECOMMENDED.search(option["label"])), None)
-            lines = [only["question"]]
-            described = [f"- {label}: {option['description']}" for label, option in
-                         zip(labels, only["options"]) if detail and option["description"]]
-            return {"text": "\n".join(lines + described), "choices": labels, "recommend": recommend,
-                    "secret": secret}
+            described = {label: option["description"] for label, option in zip(labels, only["options"])
+                         if detail and option["description"]}
+            return {"text": only["question"], "choices": labels, "recommend": recommend,
+                    "descriptions": described or None, "secret": secret}
     blocks = []
     for index, row in enumerate(rows, 1):
         title = (f"Q{index}. " if len(rows) > 1 else "") + row["question"]
@@ -159,7 +163,7 @@ def build(rows: list, *, detail: bool = True) -> dict:
         lines = [title] + [_line(option, number, detail=detail)
                            for number, option in enumerate(row["options"], 1)]
         blocks.append("\n".join(lines))
-    return {"text": "\n\n".join(blocks), "choices": [], "recommend": None, "secret": secret}
+    return {"text": "\n\n".join(blocks), "choices": [], "recommend": None, "descriptions": None, "secret": secret}
 
 
 def _key(built: dict) -> tuple:
@@ -167,6 +171,17 @@ def _key(built: dict) -> tuple:
     import human_wait_state as HWS
     return HWS._question_key({"detail": {"questions": [{
         "question": built["text"], "choices": built["choices"], "is_other": True, "is_secret": built["secret"]}]}})
+
+
+def _keys(rows: list) -> set:
+    """This call's same-question candidates: its record with and without the option descriptions, and
+    the text an earlier release wrote (each description a `- choice: words` line after the question)."""
+    builds = [build(rows, detail=detail) for detail in (True, False)]
+    words = builds[0]["descriptions"] or {}
+    if words:
+        builds.append(dict(builds[0], text="\n".join([builds[0]["text"]] + [
+            f"- {choice}: {words[choice]}" for choice in builds[0]["choices"] if choice in words])))
+    return {_key(built) for built in builds}
 
 
 def _same_open(found: dict, keys: set):
@@ -200,7 +215,7 @@ def register(harness: str, session_id: str, rows: list, *, cwd: str | None = Non
         found, state = HWS.message_questions(harness, session_id, seat.key)
         if state != "ok":
             raise OSError("question-storage-unreadable")
-        same = _same_open(found, {_key(built) for built in builds})
+        same = _same_open(found, _keys(rows))
     if same:
         return same["id"]
     sys.path.insert(0, str(ROOT / "tools"))
@@ -213,7 +228,7 @@ def register(harness: str, session_id: str, rows: list, *, cwd: str | None = Non
                 harness, session_id, seat, built["text"], sequence=tidy.read_prompt_seq(seat),
                 choices=built["choices"],
                 recommended=built["recommend"] - 1 if built["recommend"] else None,
-                secret=built["secret"], cwd=cwd, incarnation=incarnation)
+                descriptions=built["descriptions"], secret=built["secret"], cwd=cwd, incarnation=incarnation)
             return value["id"]
         except ValueError as exc:
             if str(exc) != "question-detail-too-large" or built is builds[-1]:
@@ -291,7 +306,7 @@ def decide(harness: str, payload, *, seconds: float = BUDGET_SECONDS, settle: fl
         with _budget(seconds):
             if rows is None:
                 raise Unfit("question-shape")
-            keys = {_key(build(rows, detail=detail)) for detail in (True, False)}
+            keys = _keys(rows)
             if announce:
                 announce()
             return Outcome("registered", reason_for(register(harness, session_id, rows, cwd=cwd, seen=seen)))
