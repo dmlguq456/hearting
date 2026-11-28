@@ -174,10 +174,14 @@ Stop or UserPromptSubmit or a peer receive, asks once and ends; OpenCode has no 
 callback that asks again). Every harness reads the input box before the claim, so a draft or an
 open form holds the continue without binding it (15 seconds between asks while it does). A Claude
 continue is then typed only into an empty prompt, read again just before typing; a Codex or
-OpenCode continue starts its turn only over an empty input box, read again after the claim. When
-the card already reached a turn of the session (a notice or result turn took it first), a continue
-that was not sent ends without a line; the line asking the person to type the continue appears
-only while the card still waits for the session. It preserves the
+OpenCode continue starts its turn only over an empty input box, read again after the claim. Every
+path that finds the box holding writing (the read before the claim, the guard just before typing,
+Claude's private connection) ends the same way: no claim and no ref stay bound, so the person's
+next prompt does not carry the continue, and the helper asks again. When the booked card
+generation already reached the continuing session (that generation's receipt of the booked harness
+and session id; another card or session proves nothing), a continue that was not sent ends without
+a line; the line asking the person to type the continue appears only while the card still waits
+for the session. It preserves the
 booking, claim, card generation, seat, unchanged prompt count and expiry. An
 exact-native seat with a supported attachment keeps that bounded path: it
 rechecks the booked process, idle state, form and empty input, then writes the
@@ -192,9 +196,12 @@ existing result rules. `정리만` (`enqueue --no-clear`) keeps the window as it
 and cancels a pending booking; `enqueue --no-continue` compacts without the
 continue action. `취소` (`cancel`) writes no card and queues no memory work: it
 stops what the window's booking would still type, a /compact not typed yet or
-the continue after a confirmed compaction. A /compact already typed, or a
-continue already handed to the session's own carrier, cannot be taken back; the
-result line says so. Outside herdr or tmux the session prints the manual `/compact`
+the continue after a confirmed compaction. It decides and answers from the
+booking's current record under the booking's lock; a booking the same user
+turn's prompt already ended counts as cancelled by it, and that turn's own end
+books no new idle tidy (the next prompt does). A /compact or continue whose
+typing or handing already started cannot be taken back and may still arrive;
+the result line says only that. Outside herdr or tmux the session prints the manual `/compact`
 command. A handoff compacts only the calling window, never the target, and that
 window does not continue from a card marked as handed off; failed delivery
 preserves the card for normal continuation.

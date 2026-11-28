@@ -5260,7 +5260,115 @@ class ContinueHelperTest(TidyCase):
         self.assertEqual(self.booking(seat)["continued"]["state"], "unverified")
         self.assertEqual(self.notices(seat), [])
 
+    # --- "the card arrived" is the booking's own card generation and its continuing session only ---
+
+    def receipts(self, seat, generation, *receipts, raw=None):
+        with self.iso.patched_environ(self.extra):
+            req = self.booking(seat)
+            path = st._consumed_path(st.seat_from_dict(req["seat"]))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if raw is not None:
+                path.write_bytes(raw)
+            else:
+                st.atomic_write_json(path, {"schema": st.SCHEMA, "generation": generation,
+                                            "receipts": list(receipts)})
+            return clear.continue_card_reason(self.booking(seat))
+
+    def test_only_the_booked_card_taken_by_the_continuing_session_counts_as_arrived(self):
+        # RV-PR1931 (5): the latest card's receipt, or any receipt, made a waiting continue "taken".
+        seat, req = self.booked()
+        self.assertEqual(self.run_helper(seat, req, cont={"continued": "queued",
+                                                          "reason": "awaiting-native-receiver"}), "cleared")
+        booked = req["card_generation"]
+        self.assertEqual(self.receipts(seat, booked, "claude:sid-A:1"), "card-taken")        # arrived
+        self.assertIsNone(self.receipts(seat, booked + 1, "claude:sid-A:2"))               # another card
+        self.assertIsNone(self.receipts(seat, booked, "claude:sid-Z:1"))                   # another session
+        self.assertIsNone(self.receipts(seat, booked, "codex:sid-A:1"))                    # another harness
+        self.assertIsNone(self.receipts(seat, booked, "claude:sid-A"))                     # not a receipt
+        self.assertIsNone(self.receipts(seat, booked, raw=b"\xff"))                        # unreadable
+
+    def test_a_later_cards_receipt_does_not_hide_the_type_it_line_of_an_earlier_booking(self):
+        # The reviewer's sequence: booking 1's card never reached the session; after a later
+        # compaction card 2 rode a notice turn. Booking 1's continue expired: its line still shows.
+        seat, req = self.booked()
+        self.assertEqual(self.run_helper(seat, req, cont={"continued": "queued",
+                                                          "reason": "peer-delivery-already-claimed",
+                                                          "transfer_ref": "b" * 32}), "cleared")
+        with self.iso.patched_environ(self.extra):
+            caller = st.session_seat(seat, "claude", "sid-A")
+            with st.session_state_lock(caller):
+                second = st.write_card(caller, "claude", "sid-A", "진행 중: 다음 일\n다음 할 일: 표식 쓰기")
+        self.assertEqual(second["generation"], req["card_generation"] + 1)
+        self.compact_then(seat)
+        shown = []
+        with self.iso.patched_environ(self.extra):
+            st.run_hook("claude", "prompt", "sid-A", cwd=str(self.cwd), prompt_text=self.NOTICE_TURN,
+                        emit=shown.append)
+            self.assertIsNone(clear.continue_card_reason(self.booking(seat)))
+        self.assertIn("다음 일", "".join(shown))                       # card 2 rode the notice's turn
+        self.expire(seat, continued=True)
+        with self.iso.patched_environ(self.extra):
+            self.assertEqual(clear._continue(seat.key, req["nonce"], lambda *_a: self.fail("asked past the window")),
+                             "cleared")
+        held = self.booking(seat)["continued"]
+        self.assertEqual((held["state"], held["reason"]), ("skipped", "expired"))
+        self.assertEqual(len(self.notices(seat)), 1)
+        self.assertIn("이어서해", self.notices(seat)[0])
+
     # --- `session_tidy.py cancel` (취소): stop what the booking would still type, write no card ---
+
+    HANDED_SAY = ("say=압축 뒤 이어서해를 더 입력하지 않습니다. 이미 세션 쪽으로 넘기기 시작한 이어서해는 거둘 수 없어 "
+                  "다음 차례에 함께 갈 수 있습니다.")
+
+    def pending_continue(self):
+        seat, req = self.booked()
+        self.assertEqual(self.run_helper(seat, req, cont={"continued": "queued",
+                                                          "reason": "awaiting-native-receiver"}), "cleared")
+        held = self.booking(seat)["continued"]
+        self.assertEqual((held["state"], held.get("transfer_ref")), ("pending", None))
+        return seat, req, self.state / "clear" / f"{seat.key}.json"
+
+    def test_cancel_while_the_continue_is_claimed_stays_after_the_claim_is_released(self):
+        # RV-PR1931 (2): a cancel during `sending` answered `cancel=none` and wrote nothing, so the
+        # steward's release put the continue back and the helper sent it again.
+        seat, req, path = self.pending_continue()
+        with self.iso.patched_environ(self.extra):
+            claim, why = clear.claim_continue(path, req["nonce"])        # the steward's claim
+        self.assertEqual(why, "")
+        self.assertEqual(self.cancel_cli(), ("cancel=continue continue=sending", self.HANDED_SAY))
+        with self.iso.patched_environ(self.extra):
+            self.assertFalse(clear.release_unsent_continue(claim))       # a busy window: claim let go
+            self.assertFalse(clear.bind_continue_transfer(claim, "d" * 32))
+            self.assertEqual(clear._continue(seat.key, req["nonce"], lambda *_a: self.fail("sent after cancel"),
+                                             sleep=self.slept.append, ask_again=True), "cleared")
+        held = self.booking(seat)["continued"]
+        self.assertEqual((held["state"], held["reason"]), ("skipped", "explicit-cancelled"))
+        self.assertEqual(self.notices(seat), [])
+
+    def test_cancel_answers_from_the_row_it_changes_when_a_ref_is_bound_meanwhile(self):
+        # RV-PR1931 (2): the cancel read a pending continue with no ref; before it took the lock,
+        # Codex handed its queue the ref. It said "nothing is typed" from its earlier copy.
+        seat, req, path = self.pending_continue()
+        real_read, raced = clear.read_reservation, []
+
+        def read_then_codex_binds(key):
+            copy = real_read(key)
+            if not raced and copy and copy.get("status") == "cleared":
+                raced.append(1)
+                bound = {**copy, "continued": {**copy["continued"], "transfer_ref": "e" * 32}}
+                clear._write_reservation(bound)                         # the ref went to Codex meanwhile
+            return copy
+        with self.iso.patched_environ(self.extra), \
+                mock.patch.object(clear, "read_reservation", side_effect=read_then_codex_binds):
+            caller = st.session_seat(seat, "claude", "sid-A")
+            line = clear.cancel_booking(caller)
+        self.assertEqual(raced, [1])
+        self.assertEqual(line, "cancel=continue handed=native")
+        self.assertEqual("say=" + st.cancel_report_line(line), self.HANDED_SAY)
+        held = self.booking(seat)["continued"]
+        self.assertEqual((held["state"], held["reason"], held["transfer_ref"]),
+                         ("skipped", "explicit-cancelled", "e" * 32))
+
 
     def cancel_cli(self):
         result = self.cli("cancel", "--harness", "claude", "--session-id", "sid-A", extra=self.extra)
@@ -5300,8 +5408,9 @@ class ContinueHelperTest(TidyCase):
                                        continuer=lambda *a: self.calls.append("continue") or {"continued": "true"},
                                        sleep=cancel_while_compacting)
         self.assertEqual(outcome, "superseded")
-        self.assertEqual(cancelled[0][0], "cancel=booking typed=compact")
-        self.assertIn("이미 입력한 /compact는 되돌릴 수 없지만", cancelled[0][1])
+        # Only what is known: the claimed /compact may already be on its way (RV-PR1931 (2)).
+        self.assertEqual(cancelled[0][0], "cancel=booking compact=sending")
+        self.assertIn("이미 넣기 시작한 /compact는 멈추지 못할 수 있지만", cancelled[0][1])
         self.assertEqual(self.calls, [])                                 # no continue after it
         self.assertEqual(self.booking(seat)["status"], "cancelled")
 
@@ -5310,9 +5419,7 @@ class ContinueHelperTest(TidyCase):
                 ({"continued": "queued", "reason": "awaiting-native-receiver"}, "cancel=continue",
                  "say=압축 뒤 이어서해 입력을 취소했습니다. 이 창에 아무것도 입력하지 않습니다."),
                 ({"continued": "queued", "reason": "peer-delivery-already-claimed", "transfer_ref": "c" * 32},
-                 "cancel=continue handed=native",
-                 "say=압축 뒤 이어서해를 더 입력하지 않습니다. 이미 세션에 넘긴 이어서해는 거둘 수 없어 "
-                 "다음 차례에 함께 갈 수 있습니다.")):
+                 "cancel=continue handed=native", self.HANDED_SAY)):
             with self.subTest(line=line):
                 self.calls = []
                 seat, req = self.booked()

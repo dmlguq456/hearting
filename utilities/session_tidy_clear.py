@@ -335,36 +335,66 @@ def cancel_booking(seat: "st.Seat") -> str:
     """The tidy command's ``cancel``: stop what this window's booking would still type; no card is
     written and no memory work is queued. The ``cancel=`` words ``session_tidy.py cancel`` prints:
 
-    ``cancel=booking``                a booked /compact not typed yet: it is not typed;
-    ``cancel=booking typed=compact``  the /compact was already typed and cannot be taken back,
-                                      but nothing is typed after it (no second /compact, no continue);
-    ``cancel=continue``               the compaction was confirmed: its continue is not typed;
-    ``cancel=continue handed=native`` as above, but a continue already handed to the session's own
-                                      carrier (a Codex queue, OpenCode's idle plugin, a Claude prompt
-                                      hook) cannot be taken back and may still arrive with its next turn;
-    ``cancel=none reason=sending``    the continue is being typed right now;
-    ``cancel=none``                   nothing of this window's booking is left to type.
+    ``cancel=booking``                  a booked /compact not typed yet: it is not typed;
+    ``cancel=booking compact=sending``  the /compact claim was already taken: its typing may not
+                                        stop, but nothing is typed after it (no second /compact, no
+                                        continue);
+    ``cancel=continue``                 the compaction was confirmed: its continue is not typed;
+    ``cancel=continue handed=native``   as above, but a continue already handed to the session's own
+                                        carrier (a Codex queue, OpenCode's idle plugin, a Claude prompt
+                                        hook) cannot be taken back and may still arrive with its next turn;
+    ``cancel=continue continue=sending`` as above, while the continue was being handed or typed;
+    ``cancel=none``                     nothing of this window's booking is left to type.
 
-    The booking stays on file as ``cancelled`` (an idle booking keeps its event tombstone), so its
-    helper and the steward's claim, which recheck the booking under the same lock, end by themselves.
+    The decision, the write and the words come from the one current row read under the booking's
+    lock (the lock every claim, release and settle of this booking takes), never from an earlier
+    copy. A booking the same user turn's prompt already ended as ``new-input`` (the prompt that
+    asked for this cancel) is recorded as the explicit cancel it is. Every cancel stores that
+    turn's user prompt number (``cancelled.user_seq``) so the turn's own Stop books no new idle
+    tidy (``observe_idle_event``); the next real prompt books again. The booking stays on file as
+    ``cancelled`` (an idle booking keeps its event tombstone) and a continue as
+    ``skipped/explicit-cancelled``, so a claim released afterwards, the helper and the steward
+    all find nothing to send.
     """
-    with st.seat_lock(seat.key):
+    harness, sid = st.session_identity(seat)
+    initial = read_reservation(seat.key)
+    target = seat
+    if initial:
+        target = st.session_seat(_booked_seat(initial, seat.key), str(initial.get("harness") or ""),
+                                 str(initial.get("new_session") or initial.get("sid") or ""))
+    with st.session_state_lock(target):
         req = read_reservation(seat.key)
-        if req and req.get("status") == "reserved":
-            claim = req.get("clear_claim") if isinstance(req.get("clear_claim"), dict) else {}
-            now = st.now_epoch()
-            req.update(status="cancelled", reason="explicit-cancelled", finished=now)
-            req["cancelled"] = {"at": now, "identity": (req.get("idle") or {}).get("identity")
-                                or req.get("event_identity") or (req.get("compact") or {}).get("identity")}
-            _write_reservation(req)
-            return "cancel=booking typed=compact" if claim.get("state") == "sending" else "cancel=booking"
-    held = (req or {}).get("continued") if isinstance((req or {}).get("continued"), dict) else {}
-    if not req or req.get("status") != "cleared" or held.get("state") not in ("pending", "sending"):
-        return "cancel=none"
-    if held.get("state") == "pending" and _finish_continue(seat.key, str(req.get("nonce") or ""),
-                                                           "skipped", "explicit-cancelled"):
-        return "cancel=continue handed=native" if held.get("transfer_ref") else "cancel=continue"
-    return "cancel=none reason=sending"
+        if not req:
+            return "cancel=none"
+        frontier = st.real_prompt_frontier(seat, harness, sid) if harness and sid else None
+        user_seq = int((frontier or {}).get("sequence", 0) or 0)
+        now = st.now_epoch()
+        claim = req.get("clear_claim") if isinstance(req.get("clear_claim"), dict) else {}
+        held = req.get("continued") if isinstance(req.get("continued"), dict) else {}
+        ended = req.get("cancelled") if isinstance(req.get("cancelled"), dict) else {}
+        if req.get("status") == "reserved" or (
+                req.get("status") == "cancelled" and req.get("reason") == "new-input"
+                and (req.get("harness"), req.get("sid")) == (harness, sid)
+                and type(ended.get("prompt_seq")) is int and ended["prompt_seq"] == user_seq):
+            words = "cancel=booking" + (" compact=sending" if claim.get("state") == "sending" else "")
+            if req.get("status") == "reserved":
+                req["finished"] = now
+            req.update(status="cancelled", reason="explicit-cancelled")
+            req["cancelled"] = {**ended, "at": now, "user_seq": user_seq,
+                                "identity": (req.get("idle") or {}).get("identity") or req.get("event_identity")
+                                or (req.get("compact") or {}).get("identity")}
+        elif req.get("status") == "cleared" and held.get("state") in ("pending", "sending"):
+            words = ("cancel=continue handed=native" if held.get("transfer_ref")
+                     else "cancel=continue continue=sending" if held.get("state") == "sending"
+                     else "cancel=continue")
+            # An in-flight claim stays its steward's: its release, bind or settle now finds this
+            # row no longer ``sending`` and leaves it as it is.
+            req["continued"] = {**held, "state": "skipped", "reason": "explicit-cancelled", "finished": now}
+            req["cancelled"] = {**ended, "at": now, "user_seq": user_seq}
+        else:
+            return "cancel=none"
+        _write_reservation(req)
+        return words
 
 
 def _proc_start(pid: int) -> str:
@@ -638,6 +668,12 @@ def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provi
             old_idle.update(activity_event_id=event_id, activity_at=now)
             existing.update(idle=old_idle, status="cancelled", reason="new-activity", finished=now)
             _write_reservation(existing)
+            return "booking=skipped reason=not-rearmed"
+        # The tidy command's cancel covers the user turn it was given in: that turn's Stop, and a
+        # repeated one, book nothing; the next real prompt raises ``generation`` and books again.
+        ended = (existing or {}).get("cancelled") if isinstance((existing or {}).get("cancelled"), dict) else {}
+        if (existing and (existing.get("harness"), existing.get("sid")) == (harness, sid)
+                and type(ended.get("user_seq")) is int and ended["user_seq"] >= generation):
             return "booking=skipped reason=not-rearmed"
         # A claim's rows are appended in order; its last row says whether the request went out
         # (a claim released before the send leaves its earlier ``preparing``/``sending`` row).
@@ -1086,8 +1122,11 @@ def note_real_prompt_locked(seat: "st.Seat", harness: str, sid: str, sequence: i
     if (req.get("status") == "reserved" and req.get("origin") in ("idle", "compact")
             and req.get("harness") == harness and req.get("sid") == sid):
         req.update(status="cancelled", reason="new-input", finished=now)
-        req["cancelled"] = {"at": now, "identity": (req.get("idle") or {}).get("identity")
-                             or compact.get("identity") or req.get("event_identity")}
+        # ``prompt_seq``: the prompt that ended it, so a cancel asked for by that same prompt
+        # (``cancel_booking``) can tell it is its own user turn.
+        req["cancelled"] = {"at": now, "prompt_seq": sequence,
+                            "identity": (req.get("idle") or {}).get("identity")
+                            or compact.get("identity") or req.get("event_identity")}
         _write_reservation(req)
 
 
@@ -2061,13 +2100,28 @@ def observe_continue_receipt(harness: str, sid: str, transfer_ref: str = "") -> 
 
 
 def continue_card_reason(req: dict) -> Optional[str]:
-    """``card-taken`` when another automatic turn of the booked session already received the
-    booked card (its consumption receipt is the card's own generation), else None."""
+    """``card-taken`` when the booking's own card reached the session that continues it, else None.
+
+    The one judgement for "the card arrived" (the steward's look, the turn-end settle, the
+    result line and Claude's private connection all ask here): the consumption record holds the
+    booked ``card_generation`` and a receipt (``harness:sid:epoch``) of the booked harness and the
+    continuing session id. The latest card, another generation or another session's receipt says
+    nothing. An unreadable record is None, so the existing result line is still written."""
     seat = st.seat_from_dict(req.get("seat") or {})
-    card = st.read_latest_card(seat)
     consumed = st.read_json(st._consumed_path(seat))
-    held = isinstance(consumed, dict) and bool(card) and consumed.get("generation") == card.get("generation")
-    return "card-taken" if held and consumed.get("receipts") else None
+    if (not isinstance(consumed, dict) or type(consumed.get("generation")) is not int
+            or consumed["generation"] != req.get("card_generation")):
+        return None
+    harness = str(req.get("harness") or "")
+    new = str(req.get("new_session") or "")
+    sid = new if new not in ("", "-") else str(req.get("sid") or "")
+    receipts = consumed.get("receipts")
+    for receipt in receipts if isinstance(receipts, list) else ():
+        who, _, rest = str(receipt).partition(":")
+        taker, _, epoch = rest.rpartition(":")
+        if harness and sid and (who, taker) == (harness, sid) and epoch.isdigit():
+            return "card-taken"
+    return None
 
 
 def settle_unsent_continue(harness: str, sid: str, *, now: Optional[float] = None) -> int:
@@ -2110,17 +2164,27 @@ def settle_unsent_continue(harness: str, sid: str, *, now: Optional[float] = Non
     return settled
 
 
-def release_unsent_continue(claim):
-    """Return only this unsent claim to the same booking's pending state."""
+def release_unsent_continue(claim, *, unbind: bool = False):
+    """Return only this unsent claim to the same booking's pending state.
+
+    ``unbind`` also drops the transfer ref this claim bound (``bind_continue_transfer``), so
+    the continue waits with no ref and the helper asks again (``hold_continue_for_input``)."""
     key = claim["seat"]["key"]
     harness = str(claim.get("harness") or "")
     target_sid = str(claim.get("new_session") or "")
     booked = _booked_seat(claim, key)
     target_seat = st.session_seat(booked, harness, target_sid)
+
+    def same(held):
+        if not unbind:
+            return held == claim.get("continued")
+        def unbound(c):
+            return {k: v for k, v in (c or {}).items() if k != "transfer_ref"}
+        return unbound(held) == unbound(claim.get("continued"))
     with st.session_state_lock(target_seat):
         req = read_reservation(key)
         if (not req or req.get("nonce") != claim.get("nonce")
-                or req.get("continued") != claim.get("continued")
+                or not same(req.get("continued"))
                 or (req.get("continued") or {}).get("state") != "sending"
                 or str(req.get("harness") or "") != harness
                 or str(req.get("new_session") or "") != target_sid):
@@ -2136,8 +2200,33 @@ def release_unsent_continue(claim):
                              sent_seq=int(held.get("sent_seq", 0) or 0), state="released",
                              target_sid=target_sid)
         req["continued"] = {**req["continued"], "state": "pending"}
+        if unbind:
+            req["continued"].pop("transfer_ref", None)
         _write_reservation(req)
         return True
+
+
+def hold_continue_for_input(claim: Optional[dict], reason: str, *,
+                            unbind: Optional[Callable[[], bool]] = None) -> Optional[str]:
+    """The one rule for a continue the input box holds back, on every path that reads it: a pane
+    read before the claim, the last guard before typing, and Claude's private connection.
+
+    It waits unbound: no claim, no transfer ref, ``queued``, and the helper asks again after
+    ``CONTINUE_INPUT_RETRY_SEC`` (``_continue``). A claim taken before the refusal goes back to
+    pending, and so does a ref it bound: ``unbind`` first takes that ref off the prompt hook (so the
+    person's next prompt cannot carry the continue) and answers False when a receiver already took
+    it; that continue is on its way and keeps its existing result.
+
+    Returns ``"queued"``; ``"skipped"`` when the claim changed meanwhile (a cancel, a settle: the
+    caller answers ``superseded``); None for any reason that is not the input box's, or a ref
+    already on its way (the caller keeps its existing result)."""
+    if reason not in CONTINUE_INPUT_WAIT:
+        return None
+    if unbind is not None and not unbind():
+        return None
+    if claim is not None and not release_unsent_continue(claim, unbind=True):
+        return "skipped"
+    return "queued"
 
 
 # ---------------------------------------------------------------------------

@@ -8991,7 +8991,7 @@ def cmd_continue(args):
         if reason.startswith("not-idle-") or reason == "new-session-unknown" and (
                 transfer_ref or str(req.get("new_session") or "-") == "-"):
             return "queued"
-        if reason in clear.CONTINUE_INPUT_WAIT:
+        if clear.hold_continue_for_input(None, reason):
             return "queued"     # the writing in the box or a passing doubt; nothing was bound
         return _look_outcome(reason)
 
@@ -9029,11 +9029,15 @@ def cmd_continue(args):
     if not reason and harness in ("codex", "opencode"):
         reason = _continue_composer_reason(target, harness)
     if reason:
+        hold = None if transfer_ref else clear.hold_continue_for_input(req, reason)
+        if hold:
+            return finish(hold, reason if hold == "queued" else "superseded", native_ref=None)
         clear.release_unsent_continue(req)
         return finish(held(reason), reason)
 
     seat = _booked_seat(req)[1]
     seq_before = int(req.get("prompt_seq", 0) or 0)
+    bound_here = not transfer_ref       # a ref this call binds, not one already handed earlier
     if transfer_ref:
         row = peer_message._read_pending(transfer_ref)
     else:
@@ -9050,6 +9054,9 @@ def cmd_continue(args):
             clear.release_unsent_continue(req)
             return finish("unverified", "continue-transfer-unavailable", native_ref=None)
     if not clear.bind_continue_transfer(req, transfer_ref):
+        # A cancel or a settle took the claim first: nobody will deliver or settle this ref.
+        if bound_here and _continue_ref_off_hook(transfer_ref, "continue-claim-changed"):
+            return finish("skipped", "continue-claim-changed", native_ref=None)
         return finish("skipped", "continue-claim-changed", native_ref=transfer_ref)
 
     if harness == "codex":
@@ -9065,6 +9072,14 @@ def cmd_continue(args):
             verify, outcome, reason = "native-queue-unverified", "queued", result.get("reason")
     elif harness == "claude":
         verify, outcome, reason = _continue_claude_prompt(target, pane, new_sid, transfer_ref, text)
+        if verify == "native-pending" and outcome == "queued" and bound_here:
+            # The box changed between the look above and the typing: the claim and the ref it
+            # bound go back together, so the person's next prompt does not carry the continue.
+            ref = transfer_ref
+            hold = clear.hold_continue_for_input(
+                req, str(reason or ""), unbind=lambda: _continue_ref_off_hook(ref, str(reason or "")))
+            if hold:
+                return finish(hold, reason if hold == "queued" else "superseded", native_ref=None)
     else:
         # The OpenCode idle plugin owns the next native delivery.
         # It will retain this exact no-trailer ref until the booked SID consumes it.
@@ -9076,13 +9091,30 @@ def cmd_continue(args):
     return finish(outcome, reason, native_ref=transfer_ref)
 
 
+def _continue_ref_off_hook(ref, reason):
+    """Take an unsent continue ref back from the prompt hook, which carries a no-trailer row only
+    while its receipt names the booked continue (`session-tidy-continue`). The refusal becomes
+    its receipt, as the guard after the reservation already wrote. False once a receiver holds
+    or took it: that continue is on its way."""
+    try:
+        row = peer_message._read_pending(ref)
+        if not row or row.get("state") != "pending" or row.get("rpc_claim"):
+            return False
+        return bool(peer_message.release_unsent_herdr_claim({"ref": ref, "rpc_claim": None},
+                                                            receipt=reason or "continue-held"))
+    except (OSError, ValueError, BlockingIOError):
+        return False
+
+
 def _continue_claude_prompt(target, pane, sid, ref, text):
     """Type the booked continue once into the exact idle Claude TUI.
 
     A fresh Claude session after /clear reaches no hook boundary until something is
     typed, so leaving the ref for the hook leaves the window empty. The guards are the
-    idle Claude prompt path of `cmd_prompt`; any refusal keeps the ref pending for the
-    hook. A sent ref is never released, so the hook cannot deliver it a second time.
+    idle Claude prompt path of `cmd_prompt`; a refusal keeps the ref pending, and
+    `cmd_continue` takes a ref it bound itself back when the refusal is the input box's
+    (`hold_continue_for_input`). A sent ref is never released, so the hook cannot
+    deliver it a second time.
     """
     reason, proof = _native_idle_prompt_guard(target, "claude", sid, pane)
     if reason:

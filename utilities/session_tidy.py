@@ -4538,10 +4538,10 @@ def cancel_report_line(cancelled: str) -> str:
     t = _ui_translator()
     fields = str(cancelled or "").split()
     if "cancel=booking" in fields:
-        return t("tidy.say.cancelled_after_compact" if "typed=compact" in fields else "tidy.say.cancelled")
+        return t("tidy.say.cancelled_after_compact" if "compact=sending" in fields else "tidy.say.cancelled")
     if "cancel=continue" in fields:
-        return t("tidy.say.cancelled_continue_handed" if "handed=native" in fields
-                 else "tidy.say.cancelled_continue")
+        on_its_way = "handed=native" in fields or "continue=sending" in fields
+        return t("tidy.say.cancelled_continue_handed" if on_its_way else "tidy.say.cancelled_continue")
     return t("tidy.say.nothing_to_cancel")
 
 
