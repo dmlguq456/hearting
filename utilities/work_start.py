@@ -3050,11 +3050,12 @@ def _advance_open(route, path, jobs, result, request, resume, *, wait, interview
 
 def _unit_stop(row, capacity=False) -> str:
     """How a unit turn's capacity end reads, or "". Any recorded capacity evidence reads the same broad way:
-    none of it tells a usage limit from a provider at capacity (`dead-usage-limit` also holds a 503 retry
-    exhaustion)."""
+    none of it tells a usage limit from a provider at capacity. `dead-usage-limit` alone is no evidence: the
+    early-death watcher also writes it for any retry exhaustion (a 503, a reset connection, a 401)."""
     from dispatch_capacity_evidence import _LEGACY_QUOTA_NOTES
     from dispatch_supervisor_terminal import _CODEX_CAPACITY_STRUCTURED_CODES as codes
-    if (capacity or row.get("note") in {"dead-capacity", *_LEGACY_QUOTA_NOTES} or row.get("failure_class") == "capacity"
+    notes = {"dead-capacity", *_LEGACY_QUOTA_NOTES} - {"dead-usage-limit"}
+    if (capacity or row.get("note") in notes or row.get("failure_class") == "capacity"
             or row.get("api_status") == "429" or row.get("quota_window")
             or row.get("provider_failure_kind") in {*codes, "provider.rate-limit", "provider.quota"}):
         return "stopped for capacity (a usage limit or a provider at capacity)"

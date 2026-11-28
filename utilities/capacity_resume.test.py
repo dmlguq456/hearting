@@ -895,12 +895,9 @@ class CapacityResumeTest(unittest.TestCase):
         tail = " Read its result and report; to run the same unit again, run parent_next_command (a new route; " \
                "this one stays as it ended)."
         none = {"note": "dead-exit-1", "failure_class": "runtime"}
-        # The detached watcher's note for a provider's 503 after its retries: the usage-limit alias.
-        label, _ = route_authority.scan_death("APIError: exceeded retry limit, last status: 503 Service Unavailable")
         for changes in (
                 {},                                                   # a detached watcher's capacity end
                 {"api_status": "503"},                                # a recorded provider at capacity
-                {"note": f"dead-{label}", "failure_class": ""},       # dead-usage-limit, from a 503
                 {"note": "dead-session-limit", "failure_class": ""},
                 {"api_status": "429"},
                 {**none, "quota_window": "seven_day"},
@@ -914,9 +911,21 @@ class CapacityResumeTest(unittest.TestCase):
                 self.assertEqual((receipt["reason"], receipt["required_action"]),
                                  ("unit-outcome-needs-inspection", "compose-again"), receipt)
                 self.assertEqual(receipt["next_step"], self.BROAD + "." + tail)
-        self.set_status(aid, "done", **{**none, "api_status": "", "quota_window": "", "provider_failure_kind": ""})
-        with mock.patch.object(W, "_outcome", return_value={"classification": "failure"}):
-            self.assertEqual(self.start()["next_step"], "The unit worker ended without a pass." + tail)
+        # The early-death watcher writes the usage-limit alias for any retry exhaustion (a provider's 503, a
+        # reset connection, a 401 after retries), so that alias alone keeps the main sentence.
+        endings = []
+        for line in ("APIError: exceeded retry limit, last status: 503 Service Unavailable",
+                     "APIError: exceeded retry limit, last error: connection reset by peer",
+                     "APIError: exceeded retry limit, last status: 401 Unauthorized"):
+            label, _ = route_authority.scan_death(line)
+            self.assertEqual(label, "usage-limit", line)
+            endings.append({"note": f"dead-{label}", "failure_class": ""})
+        for changes in (none, *endings):
+            with self.subTest(changes=changes):
+                self.set_status(aid, "done", **{"api_status": "", "quota_window": "", "provider_failure_kind": "",
+                                                **changes})
+                with mock.patch.object(W, "_outcome", return_value={"classification": "failure"}):
+                    self.assertEqual(self.start()["next_step"], "The unit worker ended without a pass." + tail)
         self.assertEqual(self.calls, [])
 
     def test_only_a_launched_recording_unit_capacity_end_can_continue(self):
