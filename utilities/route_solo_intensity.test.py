@@ -52,7 +52,7 @@ LEGS["adversarial"] = LEGS["thorough"]
 CAP = {"strong": 2, "thorough": 3, "adversarial": 3}
 HOPS = ["same-harness-headless", "cross-harness-headless"]
 
-UNCHANGED = {   # label: ((intensity, shape, topology, owner profile, max depth, review round cap), "id:model:depends_on ...")
+EXPECTED_SIGNATURES = {   # label: ((intensity, shape, topology, owner profile, max depth, review round cap), "id:model:depends_on ...")
     'direct': (('direct', 'direct', 'inline', None, 0, 1),
         'inline:light:-'),
     'docs staged': (('standard', 'solo', 'staged', 'deep', 2, 2),
@@ -65,8 +65,8 @@ UNCHANGED = {   # label: ((intensity, shape, topology, owner profile, max depth,
         'frame:top:- frame-alternative:top:- route-decision:-:frame+frame-alternative'),
     'lab solo quick': (('quick', 'solo', 'one-shot-owner', 'balanced-deep', 1, 1),
         'one-shot:balanced-deep:-'),
-    'preset quick': (('quick', 'solo', 'one-shot-owner', 'balanced-deep', 1, 1),
-        'frame:top:- frame-alternative:top:- one-shot:balanced-deep:frame+frame-alternative'),
+    'preset quick': (('quick', 'solo', 'one-shot-owner', 'balanced', 1, 1),
+        'frame:top:- frame-alternative:top:- one-shot:balanced:frame+frame-alternative'),
     'preset standard': (('standard', 'staged', 'staged', 'deep', 2, 2),
         'frame:top:- frame-alternative:top:- plan:balanced-deep:frame+frame-alternative plan-check:light:plan '
         'execute:balanced:plan-check impl-review:light:execute test:light:impl-review '
@@ -89,8 +89,8 @@ UNCHANGED = {   # label: ((intensity, shape, topology, owner profile, max depth,
         'impl-review:balanced-deep:execute impl-review-alternative:light:execute '
         'impl-review-failure-mode:deep:execute '
         'test:light:impl-review+impl-review-alternative+impl-review-failure-mode report:balanced-deep:test'),
-    'solo quick': (('quick', 'solo', 'one-shot-owner', 'balanced-deep', 1, 1),
-        'one-shot:balanced-deep:-'),
+    'solo quick': (('quick', 'solo', 'one-shot-owner', 'balanced', 1, 1),
+        'one-shot:balanced:-'),
     'solo standard explicit': (('standard', 'solo', 'one-shot-owner', 'balanced', 2, 2),
         'impl-review:deep:- one-shot:balanced:impl-review'),
     'solo standard profile light': (('standard', 'solo', 'one-shot-owner', 'light', 2, 2),
@@ -237,7 +237,7 @@ class SoloIntensity(Base):
                 self.verify(again)
 
     # -- the cells that must stay as they were -----------------------------------------------------------
-    def build_unchanged(self):
+    def build_signature_cases(self):
         return {
             "solo quick": self.compose(shape="solo", slug="eq-q"),
             "solo standard explicit": self.compose(shape="solo", intensity="standard", slug="eq-s"),
@@ -261,13 +261,12 @@ class SoloIntensity(Base):
         }
 
     def test_quick_standard_direct_unit_framed_and_every_team_cell_record_what_they_recorded(self):
-        """The signatures were taken from `origin/main` before this piece (the same fixture calls): the nodes, their
-        models and dependencies, the intensity, the owner's model, the depth and the retry limit of each cell."""
-        built = self.build_unchanged()
-        self.assertEqual(sorted(built), sorted(UNCHANGED))
+        """Compare node profiles and dependencies, owner profile, depth and review rounds for each cell."""
+        built = self.build_signature_cases()
+        self.assertEqual(sorted(built), sorted(EXPECTED_SIGNATURES))
         for label, route in built.items():
             with self.subTest(label):
-                head, nodes = UNCHANGED[label]
+                head, nodes = EXPECTED_SIGNATURES[label]
                 got = (route["effective_intensity"], (route.get("selection") or {}).get("shape"),
                        route.get("execution_topology"), route.get("owner_model_profile"),
                        route.get("max_dispatch_depth"), route["continuation_budget"]["review_round_cap"])

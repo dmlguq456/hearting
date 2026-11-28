@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import artifact_locator as ARTIFACT_LOCATOR
+import model_profile as PROFILE
 import route_identity as ROUTE_IDENTITY
 import route_plan as ROUTE_PLAN
 import route_authority as ROUTE_AUTHORITY
@@ -642,6 +643,20 @@ def compose_card(route, plan=None, plan_source=None, *, owner_harness=None,
     else:
         header = t("route.card.header", capability=route['capability'], shape=shape,
                    intensity=route['effective_intensity'], graph=graph, route_id=route['route_id'], gates=gates)
+    if route.get("profile_selection_contract_version") == PROFILE.CODE_ONE_SHOT_PROFILE_CONTRACT:
+        selection = route["owner_profile_selection"]
+        pin = ROUTE_AUTHORITY.selection_pin_rows(route).get("owner", {})
+        if pin.get("model"):
+            reason = t("route.card.code_owner_pin", model=pin["model"])
+        elif selection["source"] == "matrix":
+            demand = route["owner_profile_demand"]
+            axis = "execution_reason" if demand["judgment_requirement"] == "predetermined" else "judgment_reason"
+            reason = " ".join(demand[axis].split())
+        elif selection["source"] == "explicit":
+            reason = t("route.card.code_owner_explicit")
+        else:
+            reason = t("route.card.code_owner_no_evidence")
+        header += " · " + t("route.card.code_owner_profile", profile=selection["resolved_profile"], reason=reason)
     card = (
         header
         + f"\n  cwd {route['cwd']} · slug {route.get('slug', '-')}\n"

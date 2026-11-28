@@ -173,11 +173,108 @@ class RouteDemand(unittest.TestCase):
     args=F.TestRoute.args
     dispatch=F.TestRoute.dispatch
     nested=F.TestRoute.nested
+    registered_headless=F.TestRoute.registered_headless
 
     def compile(self, **kwargs):
         return R.compile_route(**self.args(requested_intensity="standard", predicates=[],
             signals=["shared-contract"], transport="headless", inline_reason=None,
             dispatch_evidence=self.dispatch(self.nested()), **kwargs))
+
+    def compose(self, **kwargs):
+        options = dict(capability="autopilot-code", capability_mode="dev", shape="solo",
+                       graph=None, slug="code-owner-profile", cwd=ROOT,
+                       artifact_root=self._tmp_home.name, spec_read="fixture", unassigned=True,
+                       registered_headless_evidence=self.registered_headless(),
+                       dispatch_evidence=self.dispatch(self.nested()))
+        return R.compose_route(**(options | kwargs))
+
+    def test_quick_code_owner_seals_one_selection_and_opening_line(self):
+        easy = demand(execution_reason="규칙이 정해진 한 곳 수정")
+        cases = [
+            ({}, "balanced", "product-default", "profile-demand/v2", "unknown", "난이도 근거 없음"),
+            ({"profile_demands": {"one-shot": easy}}, "light", "matrix", "profile-demand/v1",
+             "none", easy["execution_reason"]),
+            ({"profile_demands": {"__owner__": demand("important")}}, "balanced-deep", "matrix",
+             "profile-demand/v1", "balanced-deep", demand()["judgment_reason"]),
+            ({"profile_demands": {"__owner__": demand("difficult-uncertain")}}, "deep", "matrix",
+             "profile-demand/v1", "deep", demand()["judgment_reason"]),
+            ({"profile_demands": {"one-shot": easy}, "profile": "deep"}, "deep", "explicit",
+             "profile-demand/v1", "none", "등급 직접 지정"),
+            ({"profile_demands": {"__owner__": easy}, "explicit_profiles": {"one-shot": "deep"}},
+             "deep", "explicit", "profile-demand/v1", "none", "등급 직접 지정"),
+        ]
+        korean = R.UI_TEXT.translator("ko")
+        for options, profile, source, resolver, floor, reason in cases:
+            with self.subTest(options=options):
+                route = self.compose(**options)
+                node, = route["nodes"]
+                selected = route["owner_profile_selection"]
+                self.assertEqual((selected["source"], selected["resolver_version"], selected["judgment_floor"]),
+                                 (source, resolver, floor))
+                self.assertEqual((route["owner_model_profile"], node["model_profile"]), (profile, profile))
+                self.assertEqual(node["profile_selection"], selected)
+                self.assertEqual(node["profile_demand"], route["owner_profile_demand"])
+                self.assertEqual(node.get("profile_explicit", False), source == "explicit")
+                if not options:
+                    self.assertEqual((selected["reason"], selected["demand_digest"]),
+                                     ("no-difficulty-evidence", None))
+                with mock.patch.object(R.UI_TEXT, "translator", return_value=korean):
+                    line = R.compose_card(route).splitlines()[0]
+                self.assertTrue(line.startswith("[경로]"))
+                self.assertTrue(line.endswith(f"제작 owner {profile} · {reason}"), line)
+                R.verify_route(route, ROOT)
+
+    def test_quick_code_owner_keeps_a_model_pin_in_force(self):
+        route = self.compose(profile_demands={"__owner__": demand()},
+                             selection_pins={"owner": {"harness": "codex", "model": "fixture-model",
+                                                       "effort": "high"}})
+        R.verify_route(route, ROOT)
+        self.assertEqual(route["owner_model_profile"], "light")
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "route.json"
+            path.write_text(json.dumps(route), encoding="utf-8")
+            pin = P.route_selection_pin(path, adapter="codex", worker_type="owner")
+        self.assertEqual((pin["status"], pin["model"], pin["effort"]), ("applied", "fixture-model", "high"))
+
+    def test_same_owner_demand_in_solo_and_staged_leaves_review_profiles_alone(self):
+        options = {"profile_demands": {"__owner__": demand("important")}}
+        quick = self.compose(**options)
+        solo_review = self.compose(intensity="standard", **options)
+        staged = self.compose(shape="staged", graph="execute,impl-review,test,report", **options)
+        self.assertEqual(quick["owner_profile_selection"], staged["owner_profile_selection"])
+        self.assertEqual(quick["owner_profile_selection"], solo_review["owner_profile_selection"])
+        self.assertEqual([n["id"] for n in quick["nodes"]], ["one-shot"])
+        self.assertEqual([n["id"] for n in solo_review["nodes"]], ["impl-review", "one-shot"])
+        self.assertEqual([n["id"] for n in staged["nodes"]], ["execute", "impl-review", "test", "report"])
+        self.assertEqual(solo_review["nodes"][0]["model_profile"], "deep")
+        self.assertEqual(staged["nodes"][1]["model_profile"], "light")
+        for route in (quick, solo_review, staged):
+            R.verify_route(route, ROOT)
+
+    def test_old_quick_seals_and_continuations_keep_their_original_selection(self):
+        with patch_split(R, "_code_one_shot_profile", return_value=False):
+            legacy_default = self.compose()
+            legacy_demand = self.compose(profile_demands={"__owner__": demand()})
+        current = self.compose(profile_demands={"one-shot": demand()})
+        self.assertEqual(legacy_default["owner_model_profile"], "balanced-deep")
+        self.assertEqual(legacy_demand["owner_profile_selection"]["source"], "matrix")
+        self.assertEqual(legacy_demand["nodes"][0]["profile_selection"]["source"], "explicit")
+        for source in (legacy_default, legacy_demand, current, self.compose()):
+            with self.subTest(version=source["profile_selection_contract_version"],
+                              source=source["owner_profile_selection"]["source"]):
+                original = R.canonical(source)
+                verified = R.verify_route(source, ROOT)
+                self.assertTrue(verified["_registry_current"])
+                continuation = R.build_continuation_route(
+                    source, resume_from_node="one-shot", requested_boundary="one-shot",
+                    reason="fixture retry", artifact_root=source["artifact_root"])
+                for key in ("profile_selection_contract_version", "owner_model_profile",
+                            "owner_profile_selection", "owner_profile_demand", "profile_demands"):
+                    self.assertEqual(continuation[key], source[key])
+                self.assertEqual(continuation["nodes"][0]["profile_selection"],
+                                 source["nodes"][0]["profile_selection"])
+                self.assertEqual(R.canonical(source), original)
+                R.verify_route(continuation, ROOT)
 
     def test_compile_compose_same_resolver_and_hash_sensitivity(self):
         demands={"execute":demand("important")}
@@ -517,10 +614,10 @@ class TopExceptionRoute(unittest.TestCase):
         node = next(n for n in route["nodes"] if n["id"] == "one-shot")
         self.assertEqual(node["model_profile"], "top")
         self.assertEqual(node["profile_selection"], route["owner_profile_selection"])
-        # a plain quick route is untouched
+        # A plain quick code maker now starts from the product default.
         plain = self.quick()
-        self.assertEqual(plain["owner_model_profile"], "balanced-deep")
-        self.assertEqual(next(n for n in plain["nodes"] if n["id"] == "one-shot")["model_profile"], "balanced-deep")
+        self.assertEqual(plain["owner_model_profile"], "balanced")
+        self.assertEqual(next(n for n in plain["nodes"] if n["id"] == "one-shot")["model_profile"], "balanced")
         R.verify_route(plain, R.ROOT)
         # a route that claims top for the owner but not the node is refused by verify
         forged = json.loads(json.dumps(route))

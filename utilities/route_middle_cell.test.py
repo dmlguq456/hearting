@@ -106,7 +106,7 @@ class Cell(FORM.FormFixtures):
     def test_the_commands_around_the_cell(self):
         quick = self.compose(shape="solo", slug="around-quick")
         self.assertEqual(([n["id"] for n in quick["nodes"]], quick["effective_intensity"], quick["max_dispatch_depth"],
-                          quick["owner_model_profile"]), (["one-shot"], "quick", 1, "balanced-deep"))
+                          quick["owner_model_profile"]), (["one-shot"], "quick", 1, "balanced"))
         with self.assertRaisesRegex(ValueError, r"compose-shape-intensity-mismatch:solo \(allowed: quick,standard,strong,"
                                                 r"thorough,adversarial\)"):
             self.compose(shape="solo", intensity="direct", slug="around-direct")
@@ -149,7 +149,7 @@ class Cell(FORM.FormFixtures):
         self.assertEqual((picked["owner_model_profile"], picked["nodes"][1]["model_profile"],
                           picked["nodes"][0]["model_profile"]), ("deep", "deep", "deep"))
         self.verify(picked)
-        self.assertEqual(self.preset("autopilot-code", "dev", "quick")["owner_model_profile"], "balanced-deep")
+        self.assertEqual(self.preset("autopilot-code", "dev", "quick")["owner_model_profile"], "balanced")
 
     # -- verify refuses a cell that is not exactly the declared one -------------------------------------
     def test_verify_refuses_a_cell_that_differs_from_the_declaration(self):

@@ -2846,6 +2846,22 @@
    "en": "Task kind undecided — set it with `--capability`",
    "ko": "작업 종류 미정 — `--capability`로 지정"
   },
+  "route.card.code_owner_explicit": {
+   "en": "explicit profile",
+   "ko": "등급 직접 지정"
+  },
+  "route.card.code_owner_no_evidence": {
+   "en": "no difficulty evidence",
+   "ko": "난이도 근거 없음"
+  },
+  "route.card.code_owner_pin": {
+   "en": "pinned model {model}",
+   "ko": "모델 {model} 고정"
+  },
+  "route.card.code_owner_profile": {
+   "en": "code owner {profile} · {reason}",
+   "ko": "제작 owner {profile} · {reason}"
+  },
   "route.card.confirmation": {
    "en": "Confirmation {method} · origin {origin}",
    "ko": "확인 방식 {method} · 출처 {origin}"
