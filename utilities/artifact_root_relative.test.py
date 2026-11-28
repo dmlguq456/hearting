@@ -60,10 +60,12 @@ RUN_SPECIFIC = (".runtime/artifact-admission/v1/index.json.head.json", ".runtime
                 ".runtime/artifact-producer/v1/cycles/.cycle-routes-index.json")
 HISTORY = ".runtime/artifact-producer/v1/history/"
 # The campaign documents are written by the detached entrance worker, which FROZEN does not reach: it reads the
-# real clock and the checkout's `origin/main` at its own moment. Its caches (the pass mark, each campaign's
-# horizon and git base) are set aside whole, and in a document only the minute of the pass stands apart
-# (CI 11-27: `08:09` against `08:10`; locally main moved between two runs).
+# real clock and the checkout's `origin/main` at its own moment. Only what it took from them stands apart: its pass
+# mark (the clock), the base commit each campaign's git entries were last asked against (`origin/main`), and in a
+# document the minute of the pass (CI 11-27: `08:09` against `08:10`; locally main moved between two runs). The
+# rest of each campaign's cache is compared byte for byte like any other file.
 WORKER_CACHE = ".runtime/campaign-document/"
+WORKER_PASS_MARK = WORKER_CACHE + "watermark.json"
 _PASS_TIME = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}")
 
 
@@ -78,10 +80,25 @@ def _without_pass_time(value):
     return _PASS_TIME.sub("<pass time>", text)
 
 
+def _without_git_base(value):
+    try:
+        cache = json.loads(bytes.fromhex(value).decode("utf-8"))
+    except (TypeError, ValueError):
+        return value
+    entries = cache.get("git") if isinstance(cache, dict) else None
+    for entry in (entries.values() if isinstance(entries, dict) else ()):
+        if isinstance(entry, dict) and entry.get("base") is not None:
+            entry["base"] = "<origin/main at the pass>"
+    return json.dumps(cache, sort_keys=True)
+
+
 def comparable(snapshot, root_name):
-    kept = {k: _without_pass_time(v) for k, v in snapshot.items()
+    def value(key, raw):
+        relative = key[len(root_name) + 1:]
+        return _without_git_base(raw) if relative.startswith(WORKER_CACHE) else _without_pass_time(raw)
+    kept = {k: value(k, v) for k, v in snapshot.items()
             if not k.startswith(root_name + "/" + HISTORY) and k[len(root_name) + 1:] not in RUN_SPECIFIC
-            and not k[len(root_name) + 1:].startswith(WORKER_CACHE)}
+            and k[len(root_name) + 1:] != WORKER_PASS_MARK}
     history = sorted(k for k in snapshot if k.startswith(root_name + "/" + HISTORY) and k.endswith(".jsonl"))
     return kept, len(history)
 

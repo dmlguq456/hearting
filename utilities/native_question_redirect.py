@@ -7,33 +7,36 @@ The question is registered on the same board as `hearting run questions ask`, so
 panel, Fleet and the input line can answer it. A call has one of three outcomes (`decide`), and
 each hook carries it as it is:
 
-- registered: a new id, or the id of the same question already open in this session (text up to
-  line ends and edge spaces, choice values in order, answer form, secrecy; a record an earlier
-  release wrote with the option descriptions in its text is the same only as that exact text,
-  rebuilt from this call). The
-  native call is refused with one short line: the id, "end the turn". Another wait of the session
-  (a Hearting question, a route gate, a native wait), a retry or a late screen is never a reason
-  to let the native question open.
-- pass: registration failed before anything was written (a shape a record cannot carry, no proven
-  seat, a refused or failed write, this very registration already ended at this prompt, the budget
-  ran out) and the session's questions were read
-  without a same one. The native question opens, counted as the session's native wait: Claude's
+- registered: each of the call's questions is a new id or the id of the same question already
+  open in this session (text up to line ends and edge spaces, choice values in order, answer form,
+  secrecy; a record an earlier release wrote with the option descriptions in its text, or as the
+  call's one text question, is the same only as that exact text, rebuilt from this call). The new
+  ones are written at once, so they appear together. The native call is refused with one short
+  line: the ids in the call's order, "end the turn". Another wait of the session (a Hearting
+  question, a route gate, a native wait), a retry or a late screen is never a reason to let the
+  native question open.
+- pass: registration failed before anything was written (a question a record cannot carry, no
+  proven seat, a refused or failed write, this very registration already ended at this prompt, the
+  budget ran out) and the session's questions were read without a same one for any of them. The
+  whole call opens natively, counted as the session's native wait: Claude's
   hook and OpenCode's `question.asked` publish that marker as before, and Codex's is published
   here as `codex-question` (`fleet.interaction`, no text). The marker is observation only; one that
   cannot be written never holds the question back. The same call again is decided anew.
 - unknown: the question storage cannot be read, or a write's result was lost and cannot be read
-  back. Nothing opens; the refusal says so once, and the same call again reads as one of the
-  other two.
+  back; or some of the call's questions are open and another cannot be registered. Nothing opens;
+  the refusal says so once. In the first two cases the same call again reads as one of the other
+  two; in the last it is unknown again, and the refusal names the open ids and asks only the other
+  questions again.
 
 Registered workers and native subagents do nothing here.
 
-One native call may carry several questions; a Hearting question record holds one. A single
-question keeps its choices, its recommendation (a label ending `(권장)` or `(Recommended)`) and
-its secrecy, and each option's description goes with its choice (the board draws it under the
-choice's name; 11-27 design 가), not into the question's text. Several questions, a multi-select
-question or a preview are written as one text question the person answers in words, with the
-options and their descriptions listed; several questions with a secret among them cannot keep
-it apart, so they pass.
+A Hearting question record holds one question, so a call's questions are registered one record
+each, with `origin: "native-question-tool"`. A single-choice question keeps its choices, its
+recommendation (a label ending `(권장)` or `(Recommended)`) and its secrecy, and each option's
+description goes with its choice (the board draws it under the choice's name; 11-27 design 가),
+not into the question's text. A multi-select question or one with a preview is written as a text
+question the person answers in words, with its options and their descriptions listed. A secret
+question keeps the secret answer form. One too large with its descriptions goes without them.
 
 Usage (stdin: the harness payload):
   native_question_redirect.py --claude|--codex   print the PreToolUse deny JSON when refused
@@ -60,6 +63,7 @@ BUDGET_SECONDS = 5          # hook timeouts are 10 s (OpenCode 8 s); registratio
 SETTLE_SECONDS = 1          # then reading back what a failed registration left (and Codex's wait marker)
 REGISTERING = "native-question-redirect: registering"
 MAX_CHOICES = 8
+ORIGIN = "native-question-tool"     # a record's `origin`: an intercepted native call (piece 4's popup reads it)
 _RECOMMENDED = re.compile(r"\s*[(（]\s*(?:권장|recommended)\s*[)）]\s*$", re.IGNORECASE)
 _PREVIEW_LIMIT = 240
 _TOOLS = {"claude": {"AskUserQuestion"}, "codex": {"request_user_input", "request_user_input_async"},
@@ -85,7 +89,7 @@ def _text(value) -> str:
 
 def _normalized(harness: str, payload: dict) -> tuple[str, list | None]:
     """`(session id, [{question, header, options:[{label, description, preview}], multi, secret}])`;
-    the list is None when a question record cannot carry the call's shape."""
+    the list is None without questions, and an item is None when a question record cannot carry it."""
     if harness == "opencode":
         name, session = payload.get("tool"), payload.get("sessionID")
         args = payload.get("args")
@@ -99,23 +103,24 @@ def _normalized(harness: str, payload: dict) -> tuple[str, list | None]:
     listed = args.get("questions") if isinstance(args, dict) else None
     if not isinstance(listed, list) or not listed:
         return session, None
-    rows = []
-    for raw in listed:
-        if not isinstance(raw, dict) or not _text(raw.get("question")):
-            return session, None
-        options = []
-        for option in raw.get("options") or ():
-            if isinstance(option, str):
-                option = {"label": option}
-            if not isinstance(option, dict) or not _text(option.get("label")):
-                return session, None
-            options.append({"label": _text(option["label"]), "description": _text(option.get("description")),
-                            "preview": _text(option.get("preview"))})
-        rows.append({"question": _text(raw["question"]), "header": _text(raw.get("header")),
-                     "options": options,
-                     "multi": bool(raw.get("multiSelect") or raw.get("multiple")),
-                     "secret": bool(raw.get("isSecret") or raw.get("is_secret") or raw.get("secret"))})
-    return session, rows
+    return session, [_row(raw) for raw in listed]
+
+
+def _row(raw):
+    if (not isinstance(raw, dict) or not _text(raw.get("question"))
+            or not isinstance(raw.get("options") or [], list)):     # an integer or an object lists no options
+        return None
+    options = []
+    for option in raw.get("options") or ():
+        if isinstance(option, str):
+            option = {"label": option}
+        if not isinstance(option, dict) or not _text(option.get("label")):
+            return None
+        options.append({"label": _text(option["label"]), "description": _text(option.get("description")),
+                        "preview": _text(option.get("preview"))})
+    return {"question": _text(raw["question"]), "header": _text(raw.get("header")), "options": options,
+            "multi": bool(raw.get("multiSelect") or raw.get("multiple")),
+            "secret": bool(raw.get("isSecret") or raw.get("is_secret") or raw.get("secret"))}
 
 
 def _is_registered_worker(payload: dict) -> bool:
@@ -139,7 +144,7 @@ def _line(option: dict, number: int | None, *, detail: bool) -> str:
 def build(rows: list, *, detail: bool = True) -> dict:
     """`{text, choices, recommend, descriptions, secret}` for one Hearting question (`recommend` is
     1-based or None; `descriptions` maps a choice to its option's description, None when there is
-    none or `detail` is off)."""
+    none or `detail` is off). Several rows make the one text question an earlier release wrote."""
     only = rows[0] if len(rows) == 1 else None
     secret = bool(only and only["secret"])
     if not only and any(row["secret"] for row in rows):
@@ -184,6 +189,16 @@ def _keys(rows: list) -> set:
     return {_key(built) for built in builds}
 
 
+def _item_keys(rows: list) -> list:
+    """Each question's candidates (`_keys`; none for one a record cannot carry), each with the one text
+    question an earlier release wrote for the whole call (so that open record is not asked again)."""
+    whole = set()
+    if len(rows) > 1 and all(rows):
+        with contextlib.suppress(Unfit):
+            whole = {_key(build(rows, detail=detail)) for detail in (True, False)}
+    return [_keys([row]) | whole if row else set() for row in rows]
+
+
 def _same_open(found: dict, keys: set):
     """The oldest open question of this session that is the same as one of `keys`, or None."""
     return next((row for row in sorted(found.values(), key=lambda row: (row["since"], row["id"]))
@@ -198,49 +213,67 @@ def _key_of(row: dict):
         return None
 
 
+def _item(row, same: set) -> dict:
+    """One question as the registrar takes it, with its option descriptions or, too large with them,
+    without; `Unfit` when a record cannot carry it."""
+    import human_wait_state as HWS
+    if row is None:
+        raise Unfit("question-shape")
+    for detail in (True, False):
+        built = build([row], detail=detail)
+        item = {"text": built["text"], "choices": built["choices"], "descriptions": built["descriptions"],
+                "recommended": built["recommend"] - 1 if built["recommend"] else None,
+                "secret": built["secret"], "same": same}
+        try:
+            HWS._message_detail(item)
+            return item
+        except ValueError as exc:
+            if str(exc) != "question-detail-too-large" or not detail:
+                raise Unfit(str(exc)) from exc
+
+
 def register(harness: str, session_id: str, rows: list, *, cwd: str | None = None,
-             seen: dict | None = None) -> str:
-    """The id of this question on this session's seat: the same one already open, else a new one.
-    Every error is raised before the write (`Unfit`) or reads back (`decide`). `seen` gets the seat."""
+             seen: dict | None = None, keys: list | None = None) -> list:
+    """The ids of these questions on this session's seat, in their order: each the same one already
+    open, else new, every new one in one write. Every error is raised before the write (`Unfit`) or
+    reads back (`decide`). `seen` gets the seat."""
     import human_wait_state as HWS
     import session_tidy as tidy
     cwd = cwd or os.getcwd()
-    builds = [build(rows, detail=detail) for detail in (True, False)]
     seat = tidy.resolve_seat(harness, cwd, os.environ, session_id, hook=True)
     if not seat.key:
         raise Unfit("question-seat-unproven")
     if seen is not None:
         seen["seat_key"] = seat.key
-    with tidy.seat_lock(seat.key):
-        found, state = HWS.message_questions(harness, session_id, seat.key)
-        if state != "ok":
-            raise OSError("question-storage-unreadable")
-        same = _same_open(found, _keys(rows))
-    if same:
-        return same["id"]
+    items = [_item(row, same) for row, same in zip(rows, keys or _item_keys(rows))]
     sys.path.insert(0, str(ROOT / "tools"))
     from fleet.process_identity import current_launch_context
     launch = current_launch_context(harness, session_id)
     incarnation = {key: launch[key] for key in ("pid", "proc_start")} if launch else None
-    for built in builds:
-        try:
-            value = HWS.register_message(
-                harness, session_id, seat, built["text"], sequence=tidy.read_prompt_seq(seat),
-                choices=built["choices"],
-                recommended=built["recommend"] - 1 if built["recommend"] else None,
-                descriptions=built["descriptions"], secret=built["secret"], cwd=cwd, incarnation=incarnation)
-            if value.get("lifecycle") != "open":     # this very registration already ended at this prompt
-                raise Unfit("question-already-ended")
-            return value["id"]
-        except ValueError as exc:
-            if str(exc) != "question-detail-too-large" or built is builds[-1]:
-                raise Unfit(str(exc)) from exc
-    raise Unfit("question-detail-too-large")
+    try:
+        values = HWS.register_messages(harness, session_id, seat, items, sequence=tidy.read_prompt_seq(seat),
+                                       cwd=cwd, incarnation=incarnation, origin=ORIGIN, open_only=True)
+    except ValueError as exc:      # one ended at this prompt is one that cannot be made
+        raise Unfit(str(exc)) from exc
+    return [value["id"] for value in values]
 
 
-def reason_for(question_id: str) -> str:
-    return (f"Registered as Hearting question {question_id}; it replaces this native question. "
-            "End your turn now. The answer comes as a later prompt marked with this id.")
+def reason_for(ids: list) -> str:
+    if len(set(ids)) == 1:
+        return (f"Registered as Hearting question {ids[0]}; it replaces this native question. "
+                "End your turn now. The answer comes as a later prompt marked with this id.")
+    return (f"Registered as Hearting questions {', '.join(ids)}, in this call's order; they replace this "
+            "native question. End your turn now. Each answer comes as a later prompt marked with its id.")
+
+
+def reason_partial(same: list) -> str:
+    """Some of the call's questions are open and the others could not be registered."""
+    open_ = ", ".join(f"{index} ({row['id']})" for index, row in enumerate(same, 1) if row)
+    other = [str(index) for index, row in enumerate(same, 1) if not row]
+    named = ("question " if len(other) == 1 else "questions ") + ", ".join(other)
+    return (f"Of this call's questions, these are open as Hearting questions: {open_}; Hearting could not "
+            f"register {named}. Ask {named} again without the others: it is then registered or opens "
+            "natively. Each answer comes as a later prompt marked with its id.")
 
 
 def reason_unknown(why: str) -> str:
@@ -285,28 +318,31 @@ def decide(harness: str, payload, *, seconds: float = BUDGET_SECONDS, settle: fl
         cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) and payload.get("cwd") else None
     except Exception:  # noqa: BLE001 -- not a question call of a person's session
         return Outcome("none")
-    keys, seen = set(), {}
+    keys, seen = [], {}
     try:
         with _budget(seconds):
             if rows is None:
                 raise Unfit("question-shape")
-            keys = _keys(rows)
+            keys = _item_keys(rows)
             if announce:
                 announce()
-            return Outcome("registered", reason_for(register(harness, session_id, rows, cwd=cwd, seen=seen)))
+            return Outcome("registered", reason_for(register(harness, session_id, rows, cwd=cwd, seen=seen,
+                                                             keys=keys)))
     except BaseException:  # noqa: BLE001 -- what it left is read back below
         pass
     checked = False
     try:
         with _budget(settle):
-            if keys:
+            if any(keys):
                 import human_wait_state as HWS
                 found, state = HWS.message_questions(harness, session_id, seen.get("seat_key"))
                 if state != "ok":
                     return Outcome("unknown", reason_unknown("its question storage cannot be read"))
-                same = _same_open(found, keys)
-                if same:
-                    return Outcome("registered", reason_for(same["id"]))
+                same = [_same_open(found, item) for item in keys]
+                if all(same):
+                    return Outcome("registered", reason_for([row["id"] for row in same]))
+                if any(same):
+                    return Outcome("unknown", reason_partial(same))
             checked = True
             if harness == "codex":      # Claude's hook and OpenCode's question.asked mark their own
                 _interaction().set_wait(session_id, harness, "decision", "codex-question")

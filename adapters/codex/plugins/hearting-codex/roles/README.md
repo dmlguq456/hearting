@@ -4,7 +4,7 @@ This directory describes runtime-neutral delegation roles. It is not a native
 agent registry for any one tool.
 
 Claude Code projects only the model-tier helper agents (`balanced`, `deep`,
-`light`, `general-purpose`) and `memory-scout` as native Agent files under
+`light`, `general-purpose`) as native Agent files under
 `adapters/claude/agents/`; unit personas are read from `roles/units/`. Codex and
 OpenCode read this directory for role meaning, then map each role to their own
 model, tool, and delegation mechanism through adapter-owned wrappers or native

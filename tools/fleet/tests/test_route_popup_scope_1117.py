@@ -13,7 +13,6 @@ if __name__ == "__main__" and not os.environ.get("HEARTING_TEST_ISOLATED"):  # a
 import copy
 import dataclasses
 import json
-import tempfile
 import time
 import unittest
 from contextlib import ExitStack
@@ -25,6 +24,7 @@ ROOT = TOOLS.parent
 sys.path.insert(0, str(TOOLS))
 sys.path.insert(0, str(ROOT / "utilities"))
 
+import fixture_processes  # noqa: E402
 import resource_run_registry  # noqa: E402
 import session_shell as shell  # noqa: E402
 from fleet import collectors, route  # noqa: E402
@@ -53,7 +53,10 @@ class ScopedCollectionFixture(unittest.TestCase):
     def setUp(self):
         stack = ExitStack()
         self.addCleanup(stack.close)
-        self.root = root = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+        # A popup asks for the board's producer (`human_wait_state --refresh-cache`), started detached with this
+        # root's state folder in its environment; it keeps writing `state/hearting/human-waits` for minutes.
+        # The fixture's root is removed only after the processes that carry it are gone (CI #1911, shard 3).
+        self.root = root = Path(stack.enter_context(fixture_processes.TemporaryDirectory()))
         self.work = root / "work"
         self.work.mkdir()
         # Each folder is its own repository root, so the project test does not

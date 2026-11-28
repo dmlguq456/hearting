@@ -3,7 +3,7 @@
   "canonical_manifest": "harness-manifest.json",
   "topology_registry": {
     "source": "capabilities/topologies.json",
-    "digest": "sha256:d85489b2bb1f599c74f144b70c2eaa108c2394b21004e7cde4631e1e02d07267",
+    "digest": "sha256:c1e060339862c0ae7d1cc9b524e2f1e836cd054d1b0e0b063993083007821549",
     "capabilities": 14,
     "recipes": 30
   },
@@ -358,18 +358,10 @@
       "invocation_class": "model-support",
       "use_when": "Use when context fills, before compact, on handoff to another session, after a large task, or on request.",
       "not_for": "Not for primary routing or memory writes.",
-      "argument_hint": "[정리] | 정리만 | 인계 <받을 세션>"
+      "argument_hint": "[정리] | 정리만 | 취소 | 인계 <받을 세션>"
     }
   ],
-  "agents": [
-    {
-      "slug": "agent__memory-scout",
-      "name": "memory-scout",
-      "model": "",
-      "modes": [],
-      "blurb": "Kernel agent projected into every activation."
-    }
-  ],
+  "agents": [],
   "units": {
     "analysis/analyze": {
       "family": "analysis",

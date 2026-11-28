@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Generate OpenCode-native Agent projections for kernel agents.
+"""Generate OpenCode-native Agent projections from the models.conf catalog.
 
 Team agents are retired: former team behavior lives in the portable unit catalog
 (`roles/units/**`) and runs as dispatched depth-2 nodes, never as native agents.
-Only kernel helpers (`kernel.agents` in `harness-manifest.json`) project here.
+The catalog agents are the depth names a native subagent call gives (`light`,
+`balanced`, `deep`, `general-purpose`); no kernel helper ships (`kernel.agents`
+in `harness-manifest.json` is empty).
 
 This file holds the OpenCode spec text and body format; the shared renderer in
 `utilities/native_agents.py` plans, generates and checks them.
@@ -24,34 +26,6 @@ sys.path.insert(0, str(ROOT / "utilities"))
 import harness_manifest
 import native_agents
 from model_profile import resolve_profile_values
-
-
-KERNEL_AGENTS = {
-    "memory-scout": {
-        "description": "Read-only memory scout for agent-initiated deep memory reconnaissance.",
-        "instructions": """You are the OpenCode-native memory-scout custom agent.
-This is adapter-owned output generated from `core/MEMORY.md` §7.4, not a non-OpenCode Agent copy.
-
-## Contract
-
-1. Read-only only. Do not edit files or write memory.
-2. Never run memory mutation commands such as mem add, mem note, mem consume, mem restore, mem delete, mem reinforce, mem merge, mem prune, mem graduate, or mem reattribute.
-3. Use `<agent-home>/tools/memory/recall.sh` first in the current cwd with `--no-touch` and narrow synonym and Korean/English variants.
-4. Read one selected hit with `python3 <agent-home>/tools/memory/mem.py show <id> --no-touch`, or a small ranked set with `<agent-home>/tools/memory/recall.sh "<query>" --full --limit 3 --no-touch`. These reads do not update access dates or lookup events and do not consume pending handoffs.
-5. If misses matter, expand to `--all --no-touch`, then `--sessions`. Never bypass the CLI with direct SQLite or `dump.jsonl` reads.
-6. Cross-check one live file/code fact when the memory result implies an actionable convention.
-
-Output at most 15 lines:
-- verdict: found / not-found / ambiguous
-- hits: up to 3 short quotes or paraphrases with record id / session pointer
-- apply: one line telling the main agent what to do now
-- check: one live-code or file cross-check line, or not checked with reason
-""",
-    }
-}
-
-# Backward-compatible alias for callers that patched/consumed the old constant name.
-EXTRA_AGENTS = KERNEL_AGENTS
 
 
 # Native subagent type catalog (CFG_NATIVE_AGENT_CATALOG in this adapter's
@@ -126,29 +100,9 @@ def compact(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip()).replace('"', "'")
 
 
-def render_kernel_agent(name: str, spec: dict[str, str]) -> str:
-    tool_lines = ["  task: false", "  edit: false", "  write: false"]
-    permission_lines = ["  task: deny", "  edit: deny"]
-    description = compact(spec["description"])
-    return f"""---
-description: "{description}"
-mode: subagent
-tools:
-{chr(10).join(tool_lines)}
-permission:
-{chr(10).join(permission_lines)}
----
-
-{spec["instructions"]}"""
-
-
 def render(name: str, profile: Optional[str], cfg: Mapping[str, str]) -> tuple[str, Optional[str]]:
     if profile is None:
-        spec = KERNEL_AGENTS.get(name)
-        if spec is None:
-            raise native_agents.RenderError(f"unknown kernel agent (no OpenCode projection defined): {name}")
-        # A kernel helper is read-only and pins no model, so it can never be withheld.
-        return render_kernel_agent(name, spec), None
+        raise native_agents.RenderError(f"no OpenCode kernel agent ships: {name}")
     return render_catalog_agent(name, profile, cfg)
 
 
