@@ -720,7 +720,11 @@ def claude_command(
                         }
                     ],
                 }
-            ]
+            ],
+            # Binds an ordinary turn's prompt_id for an early correction copy (OPERATIONS §5.10).
+            "UserPromptSubmit": [
+                {"hooks": [{"type": "command", "command": hook_command + " prompt", "timeout": 10}]}
+            ],
         }
     }
     command += ["--settings", json.dumps(hook_settings, separators=(",", ":"))]
@@ -1416,6 +1420,8 @@ def main(argv: list[str] | None = None) -> int:
     # can flip it for the whole loop -- the reserve is spendable exactly once
     # per owner lifetime (D47-4's "gross_remaining == reserved boundary" case).
     terminal_handoff_issued = [False]
+    # A turn the reserve opened is not ordinary until it completes (OPERATIONS §5.10).
+    turn_reserve = ledger.reserved_remaining
     pending_handoff_intent = None
     handoff_claim = None
     next_prompt = initial_prompt
@@ -1529,6 +1535,9 @@ def main(argv: list[str] | None = None) -> int:
                 turn_kwargs["owner_input"] = control
             if pending_handoff_intent is None:
                 next_prompt = control.prepare(next_prompt)
+            if args.runtime_harness == "claude":
+                control.open_turn(next_prompt if pending_handoff_intent is None
+                                  and ledger.reserved_remaining == turn_reserve else None)
             result, process_rc = run_turn(
                 args,
                 session_id,
@@ -1627,6 +1636,7 @@ def main(argv: list[str] | None = None) -> int:
                 emit(result)
                 return process_rc or 3
             edge_block_failures = 0
+            turn_reserve = ledger.reserved_remaining
             DECISIONS.refresh_owner_route(args)
             rows = current_children(Path(args.jobs), args.parent_attempt_id,
                                     route_id=args.route_id, route_hash=args.route_hash)

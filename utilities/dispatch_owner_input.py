@@ -25,6 +25,8 @@ import route_authority
 
 PLACEHOLDER_THREAD = "pending-native-session"
 ROOT = Path(__file__).resolve().parents[1]
+# Claude Code keeps one hook context whole up to 10,000 JavaScript (UTF-16) units.
+HOOK_CONTEXT_UNITS = 10000
 
 
 class InputError(ValueError):
@@ -236,6 +238,9 @@ def _public(value, *, live=False, reachable=None, owner_phase=None, metadata=Non
                             "refuses it, it waits for the next owner turn."),
             "phase-unavailable": "Queued corrections may wait for the next owner turn."}.get(
                 timing, "Queued corrections are delayed until the next owner turn.")
+    if value["transport"] == "claude-next-turn":
+        lead += (" In an ordinary Claude owner turn a copy may also appear beside its next tool "
+                 "result when conditions allow; the next owner turn still delivers it.")
     notice = (lead + " An owner parked on its children gets that turn at its next wait checkpoint, "
               "within about 30 seconds, and the children keep running; an owner waiting only on "
               "resources gets it within seconds. A serial sub-session chain starts no further "
@@ -257,7 +262,7 @@ def _public(value, *, live=False, reachable=None, owner_phase=None, metadata=Non
             "supervisor_live": live, "owner_phase": phase,
             "delivery_timing": timing, "delivery_notice": notice,
             "one_shot": one_shot, "application_guaranteed": False,
-            "requests": [{key: item[key] for key in item if key != "text"}
+            "requests": [{key: item[key] for key in item if key not in ("text", "shown")}
                          for item in value["requests"]],
             "applied": "not-verified",
             "next_step": "Inspect delivery receipts; do not replay an unknown send or restart the owner."}
@@ -692,6 +697,44 @@ def blocked_owner_answers(jobs, attempt):
     return kept
 
 
+def _prompt_digest(prompt):
+    # Claude hands a stream-json prompt to UserPromptSubmit with its outer whitespace trimmed.
+    return hashlib.sha256(prompt.strip().encode("utf-8")).hexdigest()
+
+
+def bind_prompt(jobs, attempt, prompt, prompt_id):
+    """UserPromptSubmit: bind this prompt_id to the ordinary turn whose prompt digest the
+    supervisor recorded before writing it (OPERATIONS §5.10). Anything else binds nothing."""
+    digest = _prompt_digest(prompt)
+    with _locked(jobs, attempt) as (path, value):
+        turn = (value or {}).get("turn")
+        if isinstance(turn, dict) and turn.get("digest") == digest and not turn.get("prompt_id"):
+            turn["prompt_id"] = prompt_id
+            _write(path, value)
+
+
+def show_in_turn(jobs, attempt, tool_use, prompt_id):
+    """A copy of queued corrections not yet shown, for a Claude main-thread tool hook whose
+    prompt_id is the one bound to the supervisor's ordinary turn. They stay queued for the
+    next owner turn; a lost mark only shows them again."""
+    with _locked(jobs, attempt) as (path, value):
+        if not prompt_id or ((value or {}).get("turn") or {}).get("prompt_id") != prompt_id:
+            return ""
+        items = [item for item in value["requests"] if item["state"] == "queued" and not item.get("shown")]
+        text = OwnerInput.text(items)
+        # Claude rewrites a literal reminder tag before injecting, so its length is not certain.
+        if (not text or len(text.encode("utf-16-le", "surrogatepass")) // 2 > HOOK_CONTEXT_UNITS
+                or re.search(r"</?system-reminder", text, re.IGNORECASE)):
+            return ""
+        for item in items:
+            item["shown"] = tool_use
+        try:
+            _write(path, value)
+        except OSError:
+            pass
+        return text
+
+
 def initialize_owner_input(jobs, attempt, transport):
     """Open input admission for a registered owner before its consumer exists.
 
@@ -782,9 +825,12 @@ class OwnerInput:
     def text(items):
         if not items:
             return ""
+        shown = [i["id"] for i in items if i.get("shown")]
         return ("\n<owner-corrections>\nUser corrections relayed by the parent/operator. "
                 "Acknowledge what changes in the current work and preserve valid prior work; "
                 "do not duplicate active children, forge completed gates, or widen permissions.\n" +
+                (f"Already shown beside a tool result in the previous turn: {', '.join(shown)}. "
+                 "If you applied it, only confirm.\n" if shown else "") +
                 "\n".join(json.dumps({"id": i["id"], "text": i["text"]}, ensure_ascii=False)
                           for i in items) + "\n</owner-corrections>")
 
@@ -792,6 +838,19 @@ class OwnerInput:
         items = self.take("next-turn")
         self.prepared = [i["id"] for i in items]
         return prompt + self.text(items)
+
+    def open_turn(self, prompt):
+        """Record an ordinary turn's prompt digest before the prompt is written (None for any
+        other turn), so a hook can bind its prompt_id; failing to record only shows no copy."""
+        try:
+            with self.state() as (path, value):
+                if prompt is not None:
+                    value["turn"] = {"digest": _prompt_digest(prompt)}
+                elif value.pop("turn", None) is None:
+                    return
+                _write(path, value)
+        except (OSError, InputError, ValueError):
+            pass
 
     def record(self, ids, state, **evidence):
         if not ids:

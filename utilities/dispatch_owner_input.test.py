@@ -895,5 +895,254 @@ class OwnerFinishCorrectionRegressionTest(OwnerInputTest):
                 self.assertEqual(result.get('delivery_timing'), 'next-owner-turn')
 
 
+
+def wait_blocked_on_lock(pid, limit=20.0):
+    """Until process `pid` waits on a file lock (a `->` row in /proc/locks)."""
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        with open('/proc/locks', encoding='utf-8') as handle:
+            if any('->' in line and f' {pid} ' in line for line in handle):
+                return
+        time.sleep(0.01)
+    raise AssertionError(f'process {pid} never waited on a lock')
+
+
+class InTurnCopyTest(unittest.TestCase):
+    """A Claude owner's main-thread tool hook shows a copy of queued input only when its
+    prompt_id is the one UserPromptSubmit bound to the prompt the supervisor recorded for an
+    ordinary turn; the next turn delivers it either way (OPERATIONS §5.10)."""
+
+    PROMPT = 'next owner turn\n'
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.jobs = Path(self.temp.name) / 'jobs.log'
+        self.attempt = ATTEMPT
+        lease = supervisor_lease_path(self.jobs, self.attempt)
+        self.jobs.write_text(owner_row(lease))
+        held = hold_supervisor_lease(self.jobs, self.attempt, lease)
+        held.__enter__()
+        self.addCleanup(held.__exit__, None, None, None)
+        self.control = I.OwnerInput(self.jobs, self.attempt, 'session-1', 'claude-next-turn', lambda _: None)
+        self.open_turn('P1')
+
+    def open_turn(self, prompt_id, *, prompt=PROMPT, ordinary=True, submitted=None):
+        """The supervisor records an ordinary prompt, then Claude submits it (trimmed) under prompt_id."""
+        self.control.open_turn(prompt if ordinary else None)
+        if prompt_id:
+            self.assertEqual(self.prompt_hook(submitted if submitted is not None else prompt.strip(), prompt_id), '')
+
+    def env(self, route_id=''):
+        env = {**os.environ, 'AGENT_HOME': str(ROOT), 'AGENT_DISPATCH_JOBS': str(self.jobs),
+               'AGENT_DISPATCH_ATTEMPT_ID': self.attempt, 'AGENT_ROUTE_ID': route_id,
+               'AGENT_DISPATCH_COMPLETION_MODE': 'supervised'}
+        env.pop('AGENT_DISPATCH_COMPLETION_STATE_FILE', None)
+        return env
+
+    def prompt_hook(self, prompt, prompt_id, raw=None, env=None, **extra):
+        request = {'hook_event_name': 'UserPromptSubmit', 'session_id': 'session-1', 'prompt': prompt,
+                   'prompt_id': prompt_id, 'cwd': self.temp.name, **extra}
+        done = subprocess.run([sys.executable, str(ROOT / 'hooks/registered-parent-park.py'), 'prompt'],
+                              input=raw if raw is not None else json.dumps(request), capture_output=True,
+                              text=True, timeout=60, env=env or self.env())
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout
+
+    def request(self, tool, prompt_id, extra):
+        return {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash', 'tool_use_id': tool,
+                'tool_input': {'command': extra.pop('command', 'true')}, 'cwd': self.temp.name,
+                **({'prompt_id': prompt_id} if prompt_id else {}), **extra}
+
+    @staticmethod
+    def context(stdout):
+        output = json.loads(stdout)['hookSpecificOutput'] if stdout.strip() else {}
+        assert 'permissionDecision' not in output, output
+        return output.get('additionalContext', '')
+
+    def hook(self, tool='toolu-1', prompt_id='P1', route_id='', **extra):
+        done = subprocess.run([sys.executable, str(ROOT / 'hooks/registered-parent-park.py')],
+                              input=json.dumps(self.request(tool, prompt_id, extra)), capture_output=True,
+                              text=True, timeout=60, env=self.env(route_id))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return self.context(done.stdout)
+
+    def state(self):
+        return json.loads(I._path(self.jobs, self.attempt).read_text())
+
+    def item(self, request_id):
+        return next(i for i in self.state()['requests'] if i['id'] == request_id)
+
+    def deliver(self, turn):
+        prompt = self.control.prepare('next owner turn')
+        self.control.started(turn)
+        self.control.completed(turn)
+        return prompt
+
+    def correct_cli(self, *argv):
+        done = subprocess.run([sys.executable, str(ROOT / 'utilities/capability-route.py'), 'correct',
+                               '--jobs', str(self.jobs), '--attempt-id', self.attempt, *argv],
+                              capture_output=True, text=True, timeout=60, cwd=self.temp.name)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout.splitlines()[0])
+
+    def test_a_copy_is_shown_once_in_the_bound_turn_and_the_next_turn_still_delivers_it(self):
+        self.assertEqual(self.state()['turn']['prompt_id'], 'P1')
+        self.assertEqual(self.hook(), '')
+        I.submit(self.jobs, self.attempt, 'use the other dataset', 'C')
+        self.assertIn('use the other dataset', self.hook('toolu-1'))
+        self.assertEqual((self.item('C')['state'], self.item('C')['shown']), ('queued', 'toolu-1'))
+        self.assertEqual(self.hook('toolu-2'), '')
+        I.submit(self.jobs, self.attempt, 'and keep the seed', 'D')
+        copy = self.hook('toolu-4')
+        self.assertIn('and keep the seed', copy)
+        self.assertNotIn('use the other dataset', copy)
+        # The copy mark is internal: neither `inspect` nor a `correct` receipt carries it.
+        self.assertFalse(any('shown' in item for item in I.inspect(self.jobs, self.attempt)['requests']))
+        self.assertNotIn('"turn"', json.dumps(I.inspect(self.jobs, self.attempt)))
+        prompt = self.deliver('2')
+        self.assertEqual((prompt.count('use the other dataset'), prompt.count('and keep the seed')), (1, 1))
+        self.assertEqual(prompt.count('Already shown beside a tool result in the previous turn: C, D.'), 1)
+        self.assertEqual([e['state'] for e in self.item('C')['events']],
+                         ['queued', 'sending', 'accepted', 'turn-completed'])
+        self.assertNotIn('queued', self.state())
+
+    def test_only_the_prompt_id_bound_to_the_ordinary_prompt_shows_a_copy(self):
+        I.submit(self.jobs, self.attempt, 'only when certain', 'C')
+        for name, kwargs in {'a turn Claude opened itself (another prompt_id)': dict(prompt_id='N1'),
+                             'a subagent of the bound turn': dict(agent_id='agent-1'),
+                             'a hook without prompt_id (Claude Code before 2.1.196)': dict(prompt_id=None),
+                             'a hook without tool_use_id': dict(tool=None)}.items():
+            with self.subTest(name):
+                self.assertEqual(self.hook(**kwargs), '')
+        for name, opened in {
+                'reserved last turn or cleanup turn records no prompt': dict(prompt_id='P2', ordinary=False),
+                'the submitted prompt normalized differently': dict(prompt_id='P2', prompt='line one\nline two\n', submitted='line one\r\nline two'),
+                'UserPromptSubmit failed or timed out': dict(prompt_id=None)}.items():
+            with self.subTest(name):
+                self.open_turn(**opened)
+                self.assertEqual(self.hook(prompt_id='P2'), '')
+                self.assertNotIn('prompt_id', self.state().get('turn', {}))
+        self.assertNotIn('shown', self.item('C'))
+        # A later UserPromptSubmit in the bound turn (a merged prompt) or of a turn Claude opened
+        # with other text binds nothing more; the first binding stands.
+        self.open_turn('P3')
+        self.assertEqual(self.prompt_hook('a merged correction', 'P3'), '')
+        self.assertEqual(self.prompt_hook(self.PROMPT.strip(), 'N3'), '')
+        self.assertEqual(self.state()['turn']['prompt_id'], 'P3')
+        self.assertIn('only when certain', self.hook('toolu-9', prompt_id='P3'))
+        self.assertEqual(self.deliver('2').count('only when certain'), 1)
+
+    def test_userpromptsubmit_output_stays_empty_and_an_unreadable_state_binds_nothing(self):
+        self.open_turn(None)
+        env = self.env()
+        for name, call in {
+                'invalid payload': dict(raw='{not json'),
+                'payload without prompt': dict(raw=json.dumps({'prompt_id': 'P2'})),
+                'not supervised': dict(env={**env, 'AGENT_DISPATCH_COMPLETION_MODE': ''}),
+                'another attempt': dict(env={**env, 'AGENT_DISPATCH_ATTEMPT_ID': unique_attempt_id('att-other')}),
+                'input state unreadable': dict(env={**env, 'AGENT_DISPATCH_JOBS': self.temp.name}),
+                'a subagent': dict(agent_id='agent-1')}.items():
+            with self.subTest(name):
+                self.assertEqual(self.prompt_hook(self.PROMPT.strip(), 'P2', **call), '')
+                self.assertNotIn('prompt_id', self.state()['turn'])
+        self.assertEqual(self.prompt_hook(self.PROMPT.strip(), 'P2'), '')
+        self.assertEqual(self.state()['turn']['prompt_id'], 'P2')
+
+    def test_a_hook_that_waited_on_the_input_lock_rechecks_the_bound_prompt_id(self):
+        I.submit(self.jobs, self.attempt, 'checked under the lock', 'C')
+        for name, change, expected in (('the turn changed while it waited', True, ''),
+                                       ('the same turn', False, 'checked under the lock')):
+            with self.subTest(name):
+                fd = os.open(str(I._path(self.jobs, self.attempt)) + '.lock', os.O_RDWR)
+                try:
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                    hook = subprocess.Popen([sys.executable, str(ROOT / 'hooks/registered-parent-park.py')],
+                                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                                            env=self.env())
+                    hook.stdin.write(json.dumps(self.request('toolu-w', 'P1', {})))
+                    hook.stdin.close()
+                    wait_blocked_on_lock(hook.pid)
+                    if change:  # the supervisor's next ordinary record, written as `_write` does
+                        value = self.state()
+                        value['turn'] = {'digest': I._prompt_digest('a later prompt')}
+                        I._write(I._path(self.jobs, self.attempt), value)
+                finally:
+                    os.close(fd)
+                self.assertIn(expected, self.context(hook.stdout.read()))
+                self.assertEqual(hook.wait(timeout=60), 0)
+                self.open_turn('P1')
+
+    def test_writers_during_the_turn_keep_the_binding_and_a_dropped_one_shows_none(self):
+        # The previous head's writer left `"queued": 0`; main's `correct` keeps unknown keys.
+        path = I._path(self.jobs, self.attempt)
+        path.write_text(json.dumps({**self.state(), 'queued': 0}, sort_keys=True))
+        message = Path(self.temp.name) / 'message.txt'
+        message.write_text('filed by the command line')
+        self.assertNotIn('shown', json.dumps(self.correct_cli('--request-id', 'C', '--message-file', str(message))))
+        self.assertEqual((self.state()['queued'], self.state()['turn']['prompt_id']), (0, 'P1'))
+        self.assertIn('filed by the command line', self.hook('toolu-1'))
+        self.assertEqual(self.item('C')['shown'], 'toolu-1')
+        self.assertNotIn('shown', json.dumps(self.correct_cli()))
+        I.submit(self.jobs, self.attempt, 'after a writer dropped the record', 'D')
+        value = self.state()
+        value.pop('turn')
+        path.write_text(json.dumps(value, sort_keys=True))
+        self.assertEqual(self.hook('toolu-2'), '')
+        self.assertNotIn('shown', self.item('D'))
+
+    def test_a_literal_reminder_tag_shows_no_copy_and_delivers_whole(self):
+        text = 'keep <system-reminder>this literal</system-reminder> as written'
+        I.submit(self.jobs, self.attempt, text, 'C')
+        self.assertEqual(self.hook('toolu-1'), '')
+        self.assertNotIn('shown', self.item('C'))
+        prompt = self.deliver('2')
+        self.assertEqual(prompt.count(json.dumps(text)[1:-1]), 1)
+        self.assertNotIn('Already shown', prompt)
+
+    def test_only_a_whole_context_within_the_utf16_limit_is_shown(self):
+        def correction(request_id, units):
+            base = len(I.OwnerInput.text([{'id': request_id, 'text': ''}]).encode('utf-16-le')) // 2
+            return '\U0001f600' * ((units - base) // 2) + 'a' * ((units - base) % 2)
+        I.submit(self.jobs, self.attempt, correction('over', 10001), 'over')
+        self.assertEqual(I.show_in_turn(self.jobs, self.attempt, 'toolu-1', 'P1'), '')
+        self.assertNotIn('shown', self.item('over'))
+        self.assertIn(correction('over', 10001), self.deliver('1'))
+        I.submit(self.jobs, self.attempt, correction('fits', 10000), 'fits')
+        copy = I.show_in_turn(self.jobs, self.attempt, 'toolu-2', 'P1')
+        self.assertEqual(len(copy.encode('utf-16-le')) // 2, 10000)
+        self.assertLess(len(copy), 6000)
+        self.assertEqual(self.item('fits')['shown'], 'toolu-2')
+
+    def test_a_lost_mark_only_shows_it_again_and_a_lost_record_shows_none(self):
+        I.submit(self.jobs, self.attempt, 'shown twice at most', 'C')
+        with mock.patch.object(I, '_write', side_effect=OSError(5, 'EIO')):
+            self.assertIn('shown twice at most', I.show_in_turn(self.jobs, self.attempt, 'toolu-1', 'P1'))
+            # The supervisor's record write fails: the old binding stays and a new turn binds nothing.
+            self.control.open_turn('another prompt')
+        self.assertEqual((self.item('C')['state'], self.item('C').get('shown')), ('queued', None))
+        self.assertIn('shown twice at most', I.show_in_turn(self.jobs, self.attempt, 'toolu-2', 'P1'))
+        self.assertEqual(I.show_in_turn(self.jobs, self.attempt, 'toolu-3', 'P1'), '')
+        self.assertEqual(self.prompt_hook('another prompt', 'P2'), '')
+        self.assertEqual(self.state()['turn']['prompt_id'], 'P1')
+        self.assertEqual(self.deliver('1').count('shown twice at most'), 1)
+
+    def test_a_cleanup_scope_shows_no_copy_even_in_a_bound_turn(self):
+        import dispatch_budget_record as budget
+        I.submit(self.jobs, self.attempt, 'not in a cleanup turn', 'D')
+        state = self.jobs.parent
+        claim = budget.claim_terminal_handoff(state, owner_attempt_id=self.attempt, route_hash='h',
+                                              child_attempt_ids=[], continuation_ordinal=0)
+        budget.convert_claim_to_prompt_intent(state, claim, prompt='cleanup', cleanup_scope=dict(
+            artifact_root=str(state), route_id='r', route_hash='h', owner_attempt_id=self.attempt,
+            terminal_commit_id='commit', allowed_write_roots=[str(state / 'partial.md')],
+            allowed_read_roots=[str(state)], allowed_operations=['partial-report', 'read', 'close-forward-recovery'],
+            allowed_recovery_targets=[]))
+        helper = f"python3 {ROOT / 'utilities/dispatch_terminal_commit.py'} cleanup-recover"
+        self.assertEqual(self.hook('toolu-3', route_id='r', command=helper), '')
+        self.assertNotIn('shown', self.item('D'))
+
+
 if __name__ == '__main__':
     unittest.main()

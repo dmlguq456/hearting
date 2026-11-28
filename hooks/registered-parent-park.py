@@ -3,6 +3,8 @@
 
 Batch delivery and waiting belong to the supervisor, not a tool allowlist.
 Ordinary launch/write gates continue to enforce their own authorization.
+It also shows queued owner corrections early in an ordinary turn (OPERATIONS §5.10):
+run as `prompt` from UserPromptSubmit it only binds that turn's prompt_id.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
-from dispatch_contract import dispatch_state_roots  # noqa: E402
+from dispatch_contract import dispatch_state_roots, supervisor_lease_path  # noqa: E402
 
 
 def deny(reason: str) -> int:
@@ -47,7 +49,32 @@ def mapping(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def turn_record(registry: Path, attempt: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The supervisor's ordinary-turn record, read without the lock: only a cheap pre-check."""
+    value = json.loads(supervisor_lease_path(registry, attempt).with_suffix(".input.json").read_text())
+    return value, mapping(value.get("turn"))
+
+
+def bind_prompt() -> int:
+    """UserPromptSubmit: stdout stays empty (Claude adds its plain text to the model context)."""
+    try:
+        payload = json.load(sys.stdin)
+        attempt = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID", "")
+        if (os.environ.get("AGENT_DISPATCH_COMPLETION_MODE") == "supervised" and attempt
+                and not payload.get("agent_id") and payload.get("prompt_id")):
+            registry = jobs_path()
+            _, turn = turn_record(registry, attempt)
+            if turn.get("digest") and not turn.get("prompt_id"):
+                import dispatch_owner_input
+                dispatch_owner_input.bind_prompt(registry, attempt, payload["prompt"], str(payload["prompt_id"]))
+    except Exception:
+        pass
+    return 0
+
+
 def main() -> int:
+    if sys.argv[1:] == ["prompt"]:
+        return bind_prompt()
     if os.environ.get("AGENT_DISPATCH_COMPLETION_MODE") != "supervised":
         return 0
     try:
@@ -74,6 +101,27 @@ def main() -> int:
             return 0
     except Exception:
         return deny("cleanup-scope: authority unavailable")
+    return show_owner_input(registry, parent_attempt, payload)
+
+
+def show_owner_input(registry: Path, attempt: str, payload: dict[str, Any]) -> int:
+    """Copy queued owner corrections beside this tool's result only when its prompt_id is the
+    one bound to the supervisor's ordinary turn; a subagent's hook carries its parent's."""
+    if payload.get("agent_id") or not payload.get("tool_use_id") or not payload.get("prompt_id"):
+        return 0
+    try:
+        value, turn = turn_record(registry, attempt)
+        if turn.get("prompt_id") != payload["prompt_id"] or not any(
+                item.get("state") == "queued" and not item.get("shown") for item in value["requests"]):
+            return 0
+        import dispatch_owner_input
+        text = dispatch_owner_input.show_in_turn(registry, attempt, str(payload["tool_use_id"]),
+                                                 str(payload["prompt_id"]))
+    except Exception:
+        return 0
+    if text:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                                 "additionalContext": text}}, separators=(",", ":")))
     return 0
 
 

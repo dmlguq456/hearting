@@ -1553,8 +1553,24 @@ correction sent after `--register` and before the first consumer attaches is
 queued and handed to the first turn (a relaunch of a never-claimed row keeps
 that queue). Codex uses its existing App Server connection to steer an active
 turn; Claude and OpenCode retain the input for the next turn of the same
-session. Pending input takes precedence over automatic stage advancement and
-terminal closure. A transport receipt proves delivery, not implementation; an
+session. A Claude owner may also see an early copy, only in a turn the
+supervisor submitted as ordinary (not a cleanup turn or the reserved last turn).
+Before writing that prompt the supervisor records its trimmed SHA-256 in the
+input state; the same PreToolUse hook script, also run from UserPromptSubmit
+with empty output, records the hook's `prompt_id` when the submitted prompt
+matches. A main-thread tool hook (no `agent_id`) whose `prompt_id` is that
+recorded value then adds queued corrections not yet shown as
+`additionalContext` beside the tool result, if that whole context fits the
+10,000-unit (UTF-16) hook limit and holds no literal `<system-reminder` tag, and
+marks them shown internally. A turn Claude opens itself carries another
+`prompt_id`, so it shows none; a missing `prompt_id` (before Claude Code
+2.1.196), a failed or timed-out UserPromptSubmit hook, a different prompt
+normalization, or an unreadable state binds nothing and shows no copy. Known
+limit: a supervisor prompt that Claude folds into a turn it opened itself takes
+that turn's `prompt_id`, so tools after the fold show the copy. Either way the
+input stays queued and the next turn's prompt delivers it, noting an earlier
+copy; no receipt rests on the copy. Pending input takes precedence over
+automatic stage advancement and terminal closure. A transport receipt proves delivery, not implementation; an
 interrupted send remains unknown (`delivery-unknown`) and is handed back through
 the existing supervision notice carrier. A host whose supervisor probe does not
 report support runs the owner as the existing one-shot, creates no input state,
