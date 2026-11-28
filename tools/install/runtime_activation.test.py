@@ -3639,6 +3639,7 @@ class NativeAgentRenderTest(unittest.TestCase):
                     state["owned_paths"].append(record)
                 activation._atomic_json(activation._state_path(runtime), state)
                 edited = self.agent(runtime, "old-helper")
+                # destructive-ok: reason=replace the fixture's own planted leaf with the user's edit; boundary=one agent leaf this test created in its private runtime home
                 edited.unlink()
                 edited.write_text("my own helper\n", encoding="utf-8")
                 report = activation.refresh(runtime)
@@ -3646,6 +3647,7 @@ class NativeAgentRenderTest(unittest.TestCase):
                 self.assertFalse(scout.exists() or scout.is_symlink(), scout)
                 self.assertEqual(edited.read_text(encoding="utf-8"), "my own helper\n")
                 self.assertIn(str(edited), report["preserved"])
+                # destructive-ok: reason=retire the fixture's kept file before deactivating; boundary=one agent leaf this test created in its private runtime home
                 edited.unlink()
                 self.assertEqual(sorted(self.installed_agents(runtime)),
                                  sorted(f"{name}{self.EXT[runtime]}" for name in self.CATALOG))
