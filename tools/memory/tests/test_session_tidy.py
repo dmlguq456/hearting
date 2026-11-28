@@ -5345,6 +5345,42 @@ class ContinueHelperTest(TidyCase):
         self.assertEqual((held["state"], held["reason"]), ("skipped", "explicit-cancelled"))
         self.assertEqual(self.notices(seat), [])
 
+    def continue_prompt_after_cancel(self, *, typing_started):
+        """Claim the continue, cancel it, then let the claim go (nothing typed) or not (its typing
+        had started); then ``이어서해`` reaches the continuing session as a prompt and that turn
+        ends. Returns (the prompt's source, that turn end's booking words)."""
+        seat, req, path = self.pending_continue()
+        with self.iso.patched_environ(self.extra):
+            claim, why = clear.claim_continue(path, req["nonce"])
+        self.assertEqual(why, "")
+        self.assertEqual(self.cancel_cli()[0], "cancel=continue continue=sending")
+        sid = self.booking(seat)["new_session"]
+        with self.iso.patched_environ(self.extra), \
+                mock.patch.object(clear, "_ensure_helper", return_value=(True, "")), \
+                mock.patch.object(clear, "_idle_route_reason", return_value=""):     # no route here
+            caller = st.session_seat(seat, "claude", sid)
+            if not typing_started:
+                self.assertFalse(clear.release_unsent_continue(claim))     # the booking stays cancelled
+            ledger = st.tidy_claim_by_id(caller, claim["continued"]["claim_id"])
+            self.assertEqual(ledger["state"], "sending" if typing_started else "released")
+            st.run_hook("claude", "prompt", sid, cwd=str(self.cwd), prompt_text=clear.CONTINUE_TEXT)
+            source = st.prompt_state(caller)["source"]
+            booked = clear.observe_idle_event("claude", sid, str(self.cwd), event_id="continue-turn",
+                                              tokens=600000)
+        return source, booked
+
+    def test_a_claim_let_go_after_a_cancel_ends_released_so_the_persons_own_continue_counts(self):
+        # RV-PR1931 round 2 (2): a cancel landed on a claim that had typed nothing; the steward's
+        # release then found the booking cancelled and left the ledger at `sending`. The person's own
+        # next `이어서해` read as that claim (source=claim) and its turn end booked no idle tidy.
+        self.assertEqual(self.continue_prompt_after_cancel(typing_started=False), ("real", "booking=scheduled"))
+
+    def test_a_continue_whose_typing_had_started_still_reads_as_the_claim_when_it_arrives_late(self):
+        # The contrast: the claim was not let go (its typing had started before the cancel), so the
+        # continue arriving late is still the tidy's own prompt, not the person's.
+        self.assertEqual(self.continue_prompt_after_cancel(typing_started=True),
+                         ("claim", "booking=skipped reason=not-rearmed"))
+
     def test_cancel_answers_from_the_row_it_changes_when_a_ref_is_bound_meanwhile(self):
         # RV-PR1931 (2): the cancel read a pending continue with no ref; before it took the lock,
         # Codex handed its queue the ref. It said "nothing is typed" from its earlier copy.

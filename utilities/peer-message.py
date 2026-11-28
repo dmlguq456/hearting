@@ -2765,6 +2765,21 @@ def _request_withdrawn(row):
         return False
 
 
+def _continue_ref_deliverable(row):
+    """The booked session-tidy continue's one delivery answer, from its booking's current state
+    (``session_tidy_clear.continue_ref_deliverable``): True or False for a continue row, None for
+    any other row, whose carrier keeps its own rule. Each carrier asks once, under the lock it
+    takes the ref with: Claude's prompt hook, the Codex queue's ``before_add`` and OpenCode's
+    idle ``begin-write``. An ordinary peer message (it has its trailer) never asks."""
+    if not isinstance(row, dict) or not row.get("no_trailer"):
+        return None
+    try:
+        from session_tidy_clear import continue_ref_deliverable
+        return continue_ref_deliverable(row)
+    except Exception:  # noqa: BLE001 - an unreadable booking hands over nothing it may have cancelled
+        return False
+
+
 def _registered_delivery_settled(row, *, read_context=None):
     try:
         from peer_obligations import registered_delivery_settled
@@ -3094,7 +3109,7 @@ def schedule_acceptance_reply(handoff_ref, sender, recipient):
 
 
 def reserve_pending_herdr(ref, recipient, *, receipt="herdr-delivery-inflight",
-                          allow_hook_context_recovery=False, claimant=None):
+                          allow_hook_context_recovery=False, claimant=None, deliverable=None):
     if not _valid_transfer_endpoint(recipient):
         return None
     from session_tidy_clear import peer_input_slot
@@ -3102,17 +3117,20 @@ def reserve_pending_herdr(ref, recipient, *, receipt="herdr-delivery-inflight",
         if blocked:
             return None
         return _reserve_pending_herdr(ref, recipient, receipt=receipt,
-            allow_hook_context_recovery=allow_hook_context_recovery, claimant=claimant)
+            allow_hook_context_recovery=allow_hook_context_recovery, claimant=claimant,
+            deliverable=deliverable)
 
 
 def _reserve_pending_herdr(ref, recipient, *, receipt,
-                           allow_hook_context_recovery=False, claimant=None):
+                           allow_hook_context_recovery=False, claimant=None, deliverable=None):
     """Reserve an exact deferred row while retaining its pending state.
 
     Other senders and native callbacks cannot submit it again once it is
     unverified/inflight. An ambiguous send preserves the payload for actual
     receiver acknowledgement rather than blindly typing it a second time.
 
+    ``deliverable`` is a carrier's own check of the current row, asked under the
+    same lock that publishes the reservation (the prompt hook's continue rule).
     """
     if not _valid_transfer_endpoint(recipient):
         return None
@@ -3146,6 +3164,8 @@ def _reserve_pending_herdr(ref, recipient, *, receipt,
             return None
         if _registered_delivery_settled(row):
             return None
+        if deliverable is not None and not deliverable(row):
+            return None
         claim = {"token": secrets.token_hex(16), "pid": claimant.get("pid"),
                  "start": claimant.get("start"), "receipt": receipt,
                  "recipient": _rpc_claim_recipient(recipient)}
@@ -3164,9 +3184,11 @@ def _registered_submission_current(row):
     return registered_submission_current(row, original_body=body)
 
 
-def begin_pending_write(row, *, recipient=None, receipt=None, claimant=None):
+def begin_pending_write(row, *, recipient=None, receipt=None, claimant=None, deliverable=None):
     """Mark an exact reserved pending transfer unverified immediately before I/O.
 
+    ``deliverable`` is a carrier's own check of the current row, asked under the
+    same lock that starts the write (OpenCode's idle write: the continue rule).
     """
     if not isinstance(row, dict) or not isinstance(row.get("rpc_claim"), dict):
         return None
@@ -3198,6 +3220,8 @@ def begin_pending_write(row, *, recipient=None, receipt=None, claimant=None):
             # not written; this is the same pending lock a cancel reads it under.
             return None
         if not _registered_submission_current(current):
+            return None
+        if deliverable is not None and not deliverable(current):
             return None
         updated = dict(current, state="unverified", receipt=receipt or claim.get("receipt")
                        or "delivery-inflight")
@@ -3512,6 +3536,10 @@ def _deliver_pending_codex_row(ref, *, timeout, start_interrupted, before_submit
                 raise QueueDeliveryError("request-withdrawn-before-add")
             if not _registered_submission_current(current):
                 raise QueueDeliveryError("peer-dispatch-recipient-changed-before-add")
+            if _continue_ref_deliverable(current) is False:
+                # A booked continue its booking no longer sends (cancelled, held, replaced):
+                # the row stays pending and is not added. Any other row keeps this queue's rule.
+                raise QueueDeliveryError("continue-not-deliverable-before-add")
             current = {key: value for key, value in current.items() if key != "steer_turn_id"}
             _save_pending(dict(current, state="unverified", receipt="native-queue-inflight"))
 
@@ -5209,6 +5237,13 @@ def _runtime_completion_copy(row):
     return True
 
 
+def _hook_may_carry(row):
+    """A hook boundary carries a no-trailer row only as the booked continue its booking still
+    sends (``_continue_ref_deliverable`` is True); a plain no-trailer prompt is never hook context.
+    A row with its trailer does not ask."""
+    return not row.get("no_trailer") or _continue_ref_deliverable(row) is True
+
+
 def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
                       native_delivery=False, deadline=None):
     """Use an existing native context boundary, settling only exact native delivery.
@@ -5268,12 +5303,10 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
                 continue
             if recipient["harness"] == "claude" and _runtime_completion_copy(row):
                 continue
-            # The sole no-trailer context is the booked session-tidy continue;
+            # The sole no-trailer context is the booked session-tidy continue, carried only
+            # while its booking still sends it (`_hook_may_carry`, under the reservation's lock);
             # ordinary peer bodies still require their exact sealed trailer.
-            if row.get("no_trailer"):
-                if row.get("receipt") != "session-tidy-continue":
-                    continue
-            else:
+            if not row.get("no_trailer"):
                 parsed = parse_peer_trailer(row.get("text"), recipient, include_ref=True)
                 if not parsed or parsed.get("transfer_ref") != row["ref"]:
                     continue
@@ -5286,7 +5319,7 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None,
             try:
                 claimed = reserve_pending_herdr(
                     row["ref"], recipient, receipt="hook-context-inflight",
-                    allow_hook_context_recovery=native_boundary)
+                    allow_hook_context_recovery=native_boundary, deliverable=_hook_may_carry)
             except BlockingIOError:
                 continue
             if claimed:
@@ -5485,7 +5518,8 @@ def cmd_pending(args):
             return 0 if release_pending_herdr_claim(
                 row, receipt="opencode-prompt-reservation-released") else 1
         begun = begin_pending_write(row, recipient=recipient,
-                                    receipt="opencode-prompt-inflight", claimant=claimant)
+                                    receipt="opencode-prompt-inflight", claimant=claimant,
+                                    deliverable=lambda current: _continue_ref_deliverable(current) is not False)
         if not begun:
             return 1
         print(json.dumps(begun, ensure_ascii=False))
