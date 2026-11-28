@@ -1184,7 +1184,11 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             if len(exact_sessions) == 1:
                 owner = exact_sessions[0]
         owner_tag = None
-        for session in slot["sessions"]:
+        holder = _get(owner, "_route_holder") if owner is not None else None
+        if holder:  # handed on with `request --route`: shown once, under the exact session holding it now
+            owner_tag = next((tag for tag, info in session_index.items() if holder[1] in info["ids"]
+                              and _text(_get(info["session"], "harness", "adapter", "h")) == holder[0]), None)
+        for session in slot["sessions"] if owner_tag is None else ():
             tag = _text(_get(session, "session_tag"))
             if tag in by_tag:
                 owner_tag = tag
