@@ -242,10 +242,22 @@ def socket_path_for_endpoint(session: str | None = None, environ=None) -> str | 
     if not isinstance(value, str) or not value.strip():
         return None
     requested = endpoint_name(session)
+    owner = env.get("HERDR_SESSION")
+    if not (isinstance(owner, str) and owner.strip()):
+        # A socket without HERDR_SESSION names no owner. It belongs to the
+        # default server only when it is where Herdr itself finds that server
+        # under this environment, as pane_census reads it; otherwise the
+        # default read alone drops it and Herdr finds the default server.
+        if requested != "default":
+            return None
+        import peer_address
+        own = {key: item for key, item in env.items() if key != "HERDR_SOCKET_PATH"}
+        if os.path.realpath(value.strip()) != peer_address.herdr_namespace(own, "default"):
+            return None
+        return value.strip()
     # AGENT_HERDR_SESSION selects a herdr CLI target.  The inherited socket's
-    # owner is the actual HERDR_SESSION, with an unset value belonging to default.
-    socket_owner = endpoint_name(env.get("HERDR_SESSION") or "default")
-    if socket_owner != requested:
+    # owner is the actual HERDR_SESSION.
+    if endpoint_name(owner) != requested:
         return None
     return value.strip()
 
