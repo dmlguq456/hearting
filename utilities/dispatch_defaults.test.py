@@ -126,6 +126,118 @@ class DispatchDefaultsV3Tests(unittest.TestCase):
             errors = D.validate(config, capmap)
             self.assertTrue(any(fragment in error for error in errors), (key, errors))
 
+    def write_policy(self, td, allocation_lines):
+        path = Path(td) / "dispatch-defaults.yaml"
+        path.write_text(
+            "schema_version: 3\nharnesses:\n  enabled: [claude, codex]\nprofiles:\n"
+            + "".join(
+                f"  {profile}:\n    primary: [claude, codex]\n    relief: []\n    last_resort: []\n    promote_relief_below: 0\n"
+                for profile in ("deep", "balanced-deep", "light", "mini")
+            )
+            + "allocation:\n  strategy: balanced\n  window: 30\n" + allocation_lines + "capabilities:\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def test_an_empty_flow_mapping_reads_as_an_empty_mapping(self):
+        # 2026-11-27: a hand-cleared `depth_affinity: {}` read as the string
+        # "{}" and made the whole user policy invalid for every dispatch.
+        for text in ("{}", "{ }", "{}   # cleared"):
+            parsed = D.parse_yaml_subset(f"allocation:\n  depth_affinity: {text}\n")
+            self.assertEqual(parsed["allocation"]["depth_affinity"], {}, text)
+        self.assertEqual(D.parse_yaml_subset("profiles:\n  deep: []\n")["profiles"]["deep"], [])
+        with tempfile.TemporaryDirectory() as td:
+            path = self.write_policy(td, "  depth_affinity: {}\n  depth_affinity_weight: 0.85\n")
+            config, warnings = D.load_validated(str(path), D.default_topology_path())
+            self.assertEqual(warnings, [])
+            self.assertEqual(D.query_allocation(config)["depth_affinity"], {})
+            result = subprocess.run(
+                [sys.executable, str(MODULE), "allocation", "--config", str(path)],
+                text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("depth_affinity=\n", result.stdout)
+
+    def test_one_wrong_optional_allocation_key_is_ignored_not_fatal(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self.write_policy(
+                td, "  depth_affinity_weight: 1.2\n  usage_headroom_exponent: 2\n"
+                    "  depth_affinity:\n    worker: codex\n")
+            config, warnings = D.load_validated(str(path), D.default_topology_path())
+            self.assertEqual(
+                warnings, ["allocation.depth_affinity_weight must be a number from 0.0 to 1.0: ignored"])
+            allocation = D.query_allocation(config)
+            self.assertEqual(allocation["depth_affinity_weight"], 0.5)
+            self.assertEqual(allocation["usage_headroom_exponent"], 2)
+            self.assertEqual(allocation["depth_affinity"], {"worker": "codex"})
+            # The strict validator still names the error (the settings editor uses it).
+            raw = D.parse_yaml_subset(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                D.validate(raw, D.load_topology_capabilities(D.default_topology_path())),
+                ["allocation.depth_affinity_weight must be a number from 0.0 to 1.0"])
+            result = subprocess.run(
+                [sys.executable, str(MODULE), "validate", "--config", str(path)],
+                text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(
+                "warning=allocation.depth_affinity_weight must be a number from 0.0 to 1.0: ignored",
+                result.stdout.splitlines())
+
+    def test_every_rejected_optional_allocation_value_drops_only_its_key(self):
+        capmap = D.load_topology_capabilities(D.default_topology_path())
+        cases = [
+            ("usage_gate_used_percent", 101),
+            ("owner_order", ["claude", "claude"]),
+            ("depth_affinity_weight", True),
+            ("usage_headroom_exponent", 0),
+            ("depth_affinity", {"stage": "codex"}),
+            ("depth_affinity", "{owner: codex}"),
+            ("harness_weights", {"gemini": 0.5}),
+            ("harness_weights", "opencode: 0.3"),
+            ("harness_weights", {"design": {"codex": 0}}),
+        ]
+        for key, value in cases:
+            config = self.config(); config["harnesses"]["enabled"] = ["claude", "codex"]
+            config["allocation"]["usage_headroom_exponent"] = 2
+            config["allocation"][key] = value
+            errors = D.validate(config, capmap)
+            self.assertTrue(errors, key)
+            kept, remaining, ignored = D._drop_invalid_optional_allocation(config, capmap, None, errors)
+            self.assertEqual(remaining, [], (key, remaining))
+            self.assertEqual(ignored, errors, key)
+            self.assertFalse(kept["allocation"].get(key), key)
+            self.assertEqual(kept["allocation"].get("usage_headroom_exponent"), 2 if key != "usage_headroom_exponent" else None)
+            self.assertEqual(D.validate(kept, capmap), [], key)
+            self.assertIs(config["allocation"][key], value, "the parsed input is not mutated")
+
+    def test_a_wrong_entry_of_a_mapping_key_drops_only_that_entry(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self.write_policy(
+                td, "  depth_affinity:\n    owner: claude\n    worker: gemini\n"
+                    "  harness_weights:\n    codex: 0.7\n    gemini: 0.5\n")
+            config, warnings = D.load_validated(str(path), D.default_topology_path())
+            self.assertEqual(config["allocation"]["depth_affinity"], {"owner": "claude"})
+            self.assertEqual(config["allocation"]["harness_weights"], {"codex": 0.7})
+            self.assertEqual(warnings, [
+                "allocation.depth_affinity values must name known harnesses: ignored",
+                "allocation.harness_weights names an unknown harness or field: 'gemini': ignored",
+            ])
+
+    def test_a_structural_error_still_fails_the_file_naming_every_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self.write_policy(td, "  depth_affinity_weight: 1.2\n")
+            path.write_text(path.read_text(encoding="utf-8").replace("  window: 30\n", "  window: 2\n"), encoding="utf-8")
+            with self.assertRaises(D.DefaultsConfigError) as caught:
+                D.load_validated(str(path), D.default_topology_path())
+            self.assertIn("allocation.window must be an integer from 3 to 300", str(caught.exception))
+            self.assertIn("allocation.depth_affinity_weight must be a number from 0.0 to 1.0", str(caught.exception))
+            result = subprocess.run(
+                [sys.executable, str(MODULE), "validate", "--config", str(path)],
+                text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
+
     def test_a_harness_left_out_of_a_profile_is_normal_not_a_finding(self):
         # "This profile does not use that harness" (for example OpenCode absent
         # from deep) is a valid choice, never an error or a warning.
@@ -494,8 +606,13 @@ class DispatchDefaultsV3Tests(unittest.TestCase):
                            "    painting: 0.5\ncapabilities:\n", encoding="utf-8")
             loaded, _warnings = D.load_validated(str(cfg), str(path))
             self.assertEqual(loaded["allocation"]["harness_weights"], {"painting": 0.5})
-            with self.assertRaises(D.DefaultsConfigError):
-                D.load_validated(str(cfg), D.default_topology_path())
+            # Under the shipped registry the unknown field is dropped on read
+            # and named as ignored, instead of failing the whole file.
+            loaded, warnings = D.load_validated(str(cfg), D.default_topology_path())
+            self.assertNotIn("harness_weights", loaded["allocation"])
+            self.assertEqual(
+                warnings[:1],
+                ["allocation.harness_weights names an unknown harness or field: 'painting': ignored"])
 
     def test_only_the_balanced_strategy_reads_a_field_row(self):
         for strategy in ("capacity-aware", "least-recent-attempts"):

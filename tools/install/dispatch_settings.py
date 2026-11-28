@@ -121,7 +121,13 @@ def edit_text(text: str, updates: dict, section: str = "allocation") -> str:
             raise DispatchSettingsUsageError(f"{section}.{name} is not an editable key")
         head = _find(lines, top + 1, end, 2, parent)
         if head is not None and _split(lines[head])[2]:
-            raise DispatchSettingsError(f"allocation.{parent} must be a block mapping to be edited")
+            if _split(lines[head])[2].replace(" ", "") != "{}":
+                raise DispatchSettingsError(f"allocation.{parent} must be a block mapping to be edited")
+            if value is UNSET:
+                continue
+            # `parent: {}` is an empty mapping: open it as a block for the child.
+            comment = _split(lines[head])[3]
+            lines[head] = f"  {parent}:" + (" " + comment if comment else "")
         if head is None:
             if value is UNSET:
                 continue

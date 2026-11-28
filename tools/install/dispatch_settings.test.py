@@ -87,6 +87,20 @@ class DispatchSettingsTest(unittest.TestCase):
         settings.set_allocation({"depth_affinity.owner": None, "depth_affinity.worker": None})
         self.assertNotIn("depth_affinity:", self.path.read_text())
 
+    def test_an_empty_flow_mapping_opens_as_a_block_for_a_nested_key(self):
+        # A hand-cleared `depth_affinity: {}` reads as an empty mapping, so the
+        # editor opens it as a block instead of refusing it as a scalar.
+        cleared = USER.replace("  depth_affinity:\n    worker: codex\n", "  depth_affinity: {}   # cleared\n")
+        self.write(cleared)
+        self.assertEqual(settings.set_allocation({"depth_affinity.owner": None})["status"], "unchanged")
+        self.assertEqual(self.path.read_text(), cleared)
+        settings.set_allocation({"depth_affinity.worker": "claude"})
+        self.assertIn("  depth_affinity: # cleared\n    worker: claude\n  depth_affinity_weight: 0.85\n",
+                      self.path.read_text())
+        self.write(USER.replace("  depth_affinity:\n    worker: codex\n", "  depth_affinity: {owner: claude}\n"))
+        with self.assertRaises(settings.DispatchSettingsError):
+            settings.set_allocation({"depth_affinity.worker": "claude"})
+
     def test_invalid_values_and_unknown_keys_leave_the_file_unchanged(self):
         self.write()
         for updates in ({"usage_gate_used_percent": 101}, {"harness_weights.codex": 0.0},

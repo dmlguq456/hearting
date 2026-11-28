@@ -245,7 +245,8 @@ def _scalar(value):
 
 def parse_yaml_subset(text):
     """Parse the narrow schema: comments, blank lines, 2-space indent,
-    'key: value', 'key: [a, b]', and 'key:' mapping starts only."""
+    'key: value', 'key: [a, b]', 'key: {}' (an empty mapping), and 'key:'
+    mapping starts only."""
     entries = []
     for lineno, raw in enumerate(text.splitlines(), start=1):
         stripped = _strip_comment(raw).rstrip()
@@ -283,6 +284,12 @@ def parse_yaml_subset(text):
             child = {}
             parent[key] = child
             stack.append((indent, child))
+        elif value.startswith("{") and value.endswith("}") and not value[1:-1].strip():
+            # `key: {}` is how a person writes "nothing here" (for example
+            # clearing allocation.depth_affinity); reading it as the string
+            # "{}" made the whole file invalid. Only the empty form is read:
+            # inline `{a: 1}` mappings stay a scalar the validator names.
+            parent[key] = {}
         elif value.startswith("[") and value.endswith("]"):
             items = [v.strip() for v in value[1:-1].split(",") if v.strip()]
             parent[key] = [_scalar(v) for v in items]
@@ -785,20 +792,71 @@ def normalize_policy(config):
     return result
 
 
+# Optional allocation tuning keys: each reads as neutral when absent
+# (`query_allocation`). A wrong value in one of them is dropped on read and its
+# validator error comes back as an `...: ignored` warning, so one bad cell no
+# longer turns every dispatch read of the file into `defaults-invalid`.
+# `validate()` stays strict: the settings editor and the `validate` warnings
+# still name the same error, and every other error still fails the file.
+OPTIONAL_ALLOCATION_KEYS = (
+    "usage_gate_used_percent", "depth_affinity", "depth_affinity_weight",
+    "usage_headroom_exponent", "harness_weights", "owner_order",
+)
+
+
+def _drop_invalid_optional_allocation(config, capmap, topology_path, errors):
+    """Return `(config, remaining_errors, ignored_errors)`.
+
+    For each optional allocation key, a wrong entry of a mapping value
+    (`harness_weights.<name>`, `depth_affinity.<role>`) is dropped first, then
+    the whole key if errors still point at it. A drop is kept only when it
+    clears some of the current errors and adds none; the errors it cleared are
+    returned as ignored. Attribution is by revalidation, not by message text,
+    so a reworded validator message cannot widen what is dropped."""
+    allocation = config.get("allocation")
+    if not errors or not isinstance(allocation, dict):
+        return config, errors, []
+    remaining = list(errors)
+    ignored = []
+    kept = dict(allocation)
+    for key in OPTIONAL_ALLOCATION_KEYS:
+        if key not in kept:
+            continue
+        entries = list(kept[key]) if isinstance(kept[key], dict) else []
+        for entry in [*entries, None]:
+            if key not in kept:
+                break
+            if entry is None:
+                trial = {name: value for name, value in kept.items() if name != key}
+            else:
+                trial = {**kept, key: {name: value for name, value in kept[key].items() if name != entry}}
+            trial_errors = validate({**config, "allocation": trial}, capmap, topology_path)
+            if set(trial_errors) < set(remaining):
+                ignored.extend(error for error in remaining if error not in trial_errors)
+                remaining = trial_errors
+                kept = trial
+    if not ignored:
+        return config, errors, []
+    return {**config, "allocation": kept}, remaining, ignored
+
+
 def load_validated(config_path, topology_path):
     """Load, validate structure, normalize, and return `(config, warnings)`.
 
-    Structural errors raise `DefaultsConfigError`; recommendation findings come
-    back as warning strings and the returned config is already normalized.
+    Structural errors raise `DefaultsConfigError` naming every error found; a
+    wrong optional allocation key alone is dropped and its error comes back as
+    an `...: ignored` warning. Recommendation findings come back as warning
+    strings too, and the returned config is already normalized.
     """
     with open(config_path, encoding="utf-8") as f:
         text = f.read()
     config = parse_yaml_subset(text)
     capmap = load_topology_capabilities(topology_path)
     errors = validate(config, capmap, topology_path)
-    if errors:
+    config, remaining, ignored = _drop_invalid_optional_allocation(config, capmap, topology_path, errors)
+    if remaining:
         raise DefaultsConfigError("; ".join(errors))
-    warnings = policy_warnings(config)
+    warnings = [f"{error}: ignored" for error in ignored] + policy_warnings(config)
     config = normalize_policy(config)
     # Merging before validation would turn a valid user file into a loud
     # failure for every user the moment the shipped baseline goes stale, so
