@@ -6,10 +6,8 @@ Claude `Agent` (older `Task`) and Codex `spawn_agent` (multi-agent v1) are inter
 that is not certain leaves the native call exactly as it was, with nothing printed and nothing registered:
 - The definition the harness picks for the name is Hearting's shipped one (apart from the lines activation
   renders for the user's models) or the harness's built-in, and the call carries nothing a brief cannot.
-- Nothing else decides the same call: no other hook that names or patterns the subagent tool and no
-  permission rule in a configuration the hook reads, no layer added on the harness's command line, and
-  Hearting's own hook registered exactly once. A hook on every tool (matcher none, empty or `*`) does not
-  count: where such a hook would refuse or ask about the call, the read-only route has already started.
+- Nothing else decides the same call: no other hook or permission rule in a configuration the hook reads,
+  no layer added on the harness's command line, and Hearting's own hook registered exactly once.
 - The caller is a person's session: not a registered worker, not a native subagent (unknown counts as not).
 
 Then the hook runs, as a session that typed it would,
@@ -298,9 +296,7 @@ def _harness_argv() -> list[str]:
 
 def require_sole_decision(harness: str, tool: str, cwd: str) -> None:
     """`Skip` unless this hook is the only decision on the call it can see: the harness runs matching hooks
-    side by side and applies deny/ask rules after them, so another decision would come after the start. A group
-    on every tool (matcher none, empty or `*`) is not a decision about this call and is not counted; a matcher
-    that names or patterns the tool still is."""
+    side by side and applies deny/ask rules after them, so another decision would come after the start."""
     for arg in _harness_argv()[1:]:
         if arg.split("=", 1)[0] in _LAUNCH_LAYERS[harness] or (harness == "codex" and re.match(r"-[cp].", arg)):
             raise Skip("launch-layer")
@@ -317,12 +313,14 @@ def require_sole_decision(harness: str, tool: str, cwd: str) -> None:
         for group in (hooks.get("PreToolUse") or []) if isinstance(hooks, dict) else []:
             if not isinstance(group, dict) or not _hook_matches(harness, group.get("matcher"), tools):
                 continue
+            # A group on every tool (matcher none, empty or `*`) decides nothing about this call; a matcher that
+            # names or patterns the tool still does. Where such a hook would refuse or ask, the route has started.
             every_tool = group.get("matcher") in (None, "", "*")
             for handler in group.get("hooks") or []:
                 if not (isinstance(handler, dict) and handler.get("type", "command") == "command"
                         and handler.get("command") in ours):
                     if every_tool:
-                        continue                            # it runs for any tool: no decision on this call
+                        continue
                     raise Skip("another-decision")
                 registered += 1
     if registered != 1:
