@@ -1,5 +1,5 @@
 name = "light"
-description = "Breadth fan-out agent on the portable light budget — parallel sweeps, audits, comparisons, routine searches."
+description = "Breadth fan-out agent on the portable light budget — parallel sweeps, audits, comparisons, routine searches. In a person's session the call starts a read-only Hearting unit route (general/explore, light) when that is certain, and otherwise runs natively."
 model = "gpt-6-luna"
 model_reasoning_effort = "medium"
 sandbox_mode = "workspace-write"

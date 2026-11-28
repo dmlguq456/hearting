@@ -409,8 +409,12 @@ class EphemeralScenario(unit.UnitRouteScenario):
             ev["rows_while_running"] = [{k: r.get(k) for k in ("status", "worker_type", "unit", "route_node", "artifact_root")}
                                         for r in self.unit_rows()]
             if not started:
-                run.note("the ephemeral worker never registered")
-                return "inconclusive"
+                # A start the session's command was refused is the regression these cases exist for, not an unknown.
+                refused = next((found.group(1) for r in unit.resting_session_requests(run) if r["last_kind"] == "tool"
+                                for found in [re.search(r"capability-route: ([a-z][a-z0-9:-]+)", r["last_text"])]
+                                if found), None)
+                run.note("the ephemeral worker never registered" + (f" (start refused: {refused})" if refused else ""))
+                return "fail" if refused else "inconclusive"
             wait_for(lambda: any(r["last_kind"] == "tool" for r in unit.resting_session_requests(run)), 90, 1)
             run.wait_idle(6, 60)
             self.worker_end.set()
