@@ -321,8 +321,8 @@ def wrap_segments(parts, columns):
 
 def wrap_words(parts, columns):
     """Wrap semantic spans at spaces first, the MESSAGES and MEM popups' rule (``makeWrapText``),
-    retaining their colors: the spaces where a row folds are dropped, a line's leading indent and
-    inner spaces stay, and only a word wider than a row is cut at cell boundaries."""
+    retaining their colors: the spaces where a row folds or a line ends are dropped, a line's leading
+    indent and inner spaces stay, and only a word wider than a row is cut at cell boundaries."""
     columns = max(1, columns)
     runs = []                                   # [is_space, [(char, key), ...]]
     for text, key in parts:
@@ -331,15 +331,16 @@ def wrap_words(parts, columns):
             if not runs or runs[-1][0] != char.isspace():
                 runs.append([char.isspace(), []])
             runs[-1][1].append((char, key))
-    result, row, width, gap, worded = [], [], 0, [], False
+    result, row, width, gap = [], [], 0, []
     for space, chars in runs:
         if space:
             gap = chars
             continue
-        # A word that does not fit after the row's words starts the next row, its gap dropped.
-        if worded and width + sum(cell_width(char) for char, _key in gap + chars) > columns:
-            result.append(row); row, width, gap = [], 0, []
-        for char, key in gap + chars:
+        # A word that does not fit drops its gap; it starts the next row unless the row or the word shows no cell (U+200B).
+        over = bool(row) and width + sum(cell_width(char) for char, _key in gap + chars) > columns
+        if over and width and sum(cell_width(char) for char, _key in chars):
+            result.append(row); row, width = [], 0
+        for char, key in ([] if over else gap) + chars:
             if width + cell_width(char) > columns and row:
                 result.append(row); row, width = [], 0
             if row and row[-1][1] == key:
@@ -347,7 +348,6 @@ def wrap_words(parts, columns):
             else:
                 row.append((char, key))
             width += cell_width(char)
-        gap, worded = [], True
     if row:
         result.append(row)
     # Nothing but spaces: drawn as before.

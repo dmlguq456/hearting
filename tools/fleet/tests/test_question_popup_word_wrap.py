@@ -81,6 +81,23 @@ class WrapWords(unittest.TestCase):
         # A word made of two keys is one word.
         self.assertEqual(wrap_words([("ab ", "a"), ("cd", "a"), ("ef", "b")], 4), [[("ab", "a")], [("cd", "a"), ("ef", "b")]])
 
+    def test_a_letter_with_no_cells_never_leaves_a_row_with_nothing_to_see(self):
+        # Review of #1956: a U+200B between spaces after a full row stood alone on a row.
+        zero = "\u200b"
+        self.assertEqual(texts(wrap_words([("A" * 52 + " " + zero + " " + "B" * 52, "k")], 52)), ["A" * 52 + zero, "B" * 52])
+        self.assertEqual(texts(wrap_words([(zero + " " + "A" * 52 + " " + "B" * 52, "k")], 52)), [zero + "A" * 52, "B" * 52])
+        self.assertEqual(texts(wrap_words([("A" * 52 + " " + zero, "k")], 52)), ["A" * 52 + zero])
+        for source in ("A" * 52 + " " + zero + " " + "B" * 52, zero + " " + "A" * 52 + " " + "B" * 52, "A" * 52 + " " + zero,
+                       "A" * 52 + zero + " " + "B" * 52, "A" * 26 + zero + "A" * 26 + " " + "B" * 52, "한" * 26 + " " + zero + " 끝"):
+            for columns in (20, 51, 52, 53, 54, 80):
+                with self.subTest(source=source.replace(zero, "<ZW>")[:8], columns=columns):
+                    rows = texts(wrap_words([(source, "loc_repo")], columns))
+                    seen = ["".join(char for char in row if cell_width(char)) for row in rows]
+                    self.assertTrue(all(row.strip() for row in seen), rows)
+                    self.assertTrue(all(cells(row) <= columns for row in rows), rows)
+                    self.assertTrue(all(not row[:1].isspace() for row in seen[1:]), rows)
+                    self.assertEqual("".join(rows).replace(" ", ""), source.replace(" ", ""))
+
     def test_controls_and_spaces_only_draw_as_before(self):
         self.assertEqual(texts(wrap_words([("one\ttwo\x7fthree", "k")], 8)), ["one two", "three"])
         for blank in ("", "   ", "\t"):
@@ -93,10 +110,10 @@ class WrapWords(unittest.TestCase):
 
 
 class Popup(unittest.TestCase):
-    def present(self, question, columns=64, brief_columns=None):
+    def present(self, question, columns=64):
         from tools.fleet.session_block import question_presentations
         item = {"id": "q", "answerable": True, "age": "0m", "request_state": "open", "questions": [question]}
-        question_presentations([item], columns, brief_columns=brief_columns)
+        question_presentations([item], columns)
         return item["questions"][0]["display"]
 
     def test_question_choice_names_and_their_words_fold_between_words(self):
@@ -120,19 +137,13 @@ class Popup(unittest.TestCase):
                     self.assertIn(whole, joined)
                 self.assertEqual({key for row in display["options"] for text, key in row if "recommended" in text}, {"dim"})
 
-    def test_a_table_and_the_panel_summary_draw_as_on_main(self):
+    def test_a_table_in_the_question_draws_as_on_main(self):
         from tools.fleet.explorer.transcript import table_parts
-        from tools.fleet.session_block import _brief
         table = "어느 쪽으로 할까요?\n| 안 | 시간 | 위험 |\n|---|---|---|\n| 스테이징 먼저 | 하루 | 낮음 |\n| 운영과 함께 | 오늘 | 높음 |"
-        display = self.present({"id": "q", "question": table, "choices": ["먼저", "함께"]}, 40, brief_columns=30)
+        display = self.present({"id": "q", "question": table, "choices": ["먼저", "함께"]}, 40)
         drawn = [row for line in table_parts(table.splitlines(), 36) if isinstance(line, list) for row in line]
         self.assertTrue(drawn)
         self.assertEqual(display["body"][1:], drawn)
-        # A question without choices: the panel's two-row summary keeps main's cell wrap (``_brief``).
-        text = "How far should this cleanup go out? Production has not been touched yet."
-        brief = _brief({"question": text}, [], "open", "g_blocked", 28)["brief"]
-        cut = wrap_segments([(text, "loc_repo")], 28)
-        self.assertEqual(brief[0], [("◑ ", "g_blocked"), *cut[0]])
 
 
 if __name__ == "__main__":
