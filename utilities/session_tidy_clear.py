@@ -122,6 +122,13 @@ NO_CARD_REASONS = frozenset({"card-taken", "idle-card-not-accepted"})
 # same session made unnecessary by taking the card first: no result line for these.
 CONTINUE_QUIET = frozenset({"new-input", "draft", "card-changed", "handed-off", "no-card", "superseded", "off",
                             "card-taken"})
+# Idle skips that spend no request and leave the user-work interval open: an open registered route,
+# or the person's own screen at the due time (writing in the input box, an open question or
+# selection form). The session's next turn end books again; the person chose this for those two
+# screen reasons on 11-20 ("다시 예약한다"). Every send still passes the same checks, so the draft
+# and the question stay as they are. A box that cannot be read and the shell's own screens keep
+# the earlier rule.
+IDLE_REBOOK_REASONS = frozenset({"route-active", "route-observation-unavailable", "draft", "form-open"})
 
 
 # ---------------------------------------------------------------------------
@@ -596,9 +603,14 @@ def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provi
             existing.update(idle=old_idle, status="cancelled", reason="new-activity", finished=now)
             _write_reservation(existing)
             return "booking=skipped reason=not-rearmed"
-        sent = [r for r in st._read_ledger_lines(seat) if r.get("event") == "tidy-claim"
-                and r.get("harness") == harness and r.get("sid") == sid and r.get("origin") == "idle"
-                and r.get("state") not in ("released", "superseded")
+        # A claim's rows are appended in order; its last row says whether the request went out
+        # (a claim released before the send leaves its earlier ``preparing``/``sending`` row).
+        claims = {}
+        for index, r in enumerate(st._read_ledger_lines(seat)):
+            if (r.get("event") == "tidy-claim" and r.get("harness") == harness and r.get("sid") == sid
+                    and r.get("origin") == "idle"):
+                claims[str(r.get("claim_id") or "") or ("row", index)] = r
+        sent = [r for r in claims.values() if r.get("state") not in ("released", "superseded")
                 and int(r.get("source_seq", r.get("sent_seq", -1))) >= generation]
         if sent:
             return "booking=skipped reason=not-rearmed"
@@ -641,7 +653,7 @@ def observe_idle_event(harness: str, sid: str, cwd: str, *, event_id: str, provi
                 if (existing and existing.get("origin") == "idle"
                         and existing.get("harness") == harness and existing.get("sid") == sid
                         and generation <= int((existing.get("idle") or {}).get("user_generation", 0))
-                        and existing.get("reason") not in ("route-active", "route-observation-unavailable")):
+                        and existing.get("reason") not in IDLE_REBOOK_REASONS):
                     return "booking=skipped reason=not-rearmed"
                 card = st.read_latest_card(seat)
                 card_generation = int(card.get("generation", 0) or 0) if card else 0
@@ -2013,13 +2025,28 @@ def observe_continue_receipt(harness: str, sid: str, transfer_ref: str = "") -> 
 
 
 def continue_card_reason(req: dict) -> Optional[str]:
-    """``card-taken`` when another automatic turn of the booked session already received the
-    booked card (its consumption receipt is the card's own generation), else None."""
+    """``card-taken`` when the booking's own card reached the session that continues it, else None.
+
+    The one judgement for "the card arrived" (the steward's look, the turn-end settle, the
+    result line and Claude's private connection all ask here): the consumption record holds the
+    booked ``card_generation`` and a receipt (``harness:sid:epoch``) of the booked harness and the
+    continuing session id. The latest card, another generation or another session's receipt says
+    nothing. An unreadable record is None, so the existing result line is still written."""
     seat = st.seat_from_dict(req.get("seat") or {})
-    card = st.read_latest_card(seat)
     consumed = st.read_json(st._consumed_path(seat))
-    held = isinstance(consumed, dict) and bool(card) and consumed.get("generation") == card.get("generation")
-    return "card-taken" if held and consumed.get("receipts") else None
+    if (not isinstance(consumed, dict) or type(consumed.get("generation")) is not int
+            or consumed["generation"] != req.get("card_generation")):
+        return None
+    harness = str(req.get("harness") or "")
+    new = str(req.get("new_session") or "")
+    sid = new if new not in ("", "-") else str(req.get("sid") or "")
+    receipts = consumed.get("receipts")
+    for receipt in receipts if isinstance(receipts, list) else ():
+        who, _, rest = str(receipt).partition(":")
+        taker, _, epoch = rest.rpartition(":")
+        if harness and sid and (who, taker) == (harness, sid) and epoch.isdigit():
+            return "card-taken"
+    return None
 
 
 def settle_unsent_continue(harness: str, sid: str, *, now: Optional[float] = None) -> int:
@@ -2090,6 +2117,24 @@ def release_unsent_continue(claim):
         req["continued"] = {**req["continued"], "state": "pending"}
         _write_reservation(req)
         return True
+
+
+def hold_continue_for_input(claim: Optional[dict], reason: str) -> Optional[str]:
+    """The one rule for a continue the input box holds back before anything is bound to it: the
+    pane read before the claim, and Claude's private connection before or after its claim.
+
+    It waits unbound: no claim, no transfer ref, ``queued``, and the helper asks again after
+    ``CONTINUE_INPUT_RETRY_SEC`` (``_continue``). A claim taken before the refusal (the private
+    connection's, which binds no ref) goes back to pending.
+
+    Returns ``"queued"``; ``"skipped"`` when the claim changed meanwhile (a settle: the caller
+    answers ``superseded``); None for any reason that is not the input box's (the caller keeps
+    its existing result)."""
+    if reason not in CONTINUE_INPUT_WAIT:
+        return None
+    if claim is not None and not release_unsent_continue(claim):
+        return "skipped"
+    return "queued"
 
 
 # ---------------------------------------------------------------------------
@@ -2364,6 +2409,14 @@ def _finish_continue(seat_key: str, nonce: str, outcome: str, reason: str = "", 
                                  target_sid=str(req.get("new_session") or ""))
         _write_reservation(req)
     if outcome != "true" and not (outcome == "skipped" and reason in CONTINUE_QUIET):
+        taken = None
+        with contextlib.suppress(Exception):
+            taken = continue_card_reason(req)
+        if taken:
+            # The card already reached a turn of this session (a notice or result turn took it
+            # first, or the continue's own turn did): it resumed with it, so a line asking the
+            # person to type the continue would be wrong. Only a card still waiting gets one.
+            return True
         with contextlib.suppress(BaseException):
             if req.get("origin") == "idle" and held.get("kind") == "status-only":
                 notice = st._ui_translator()("tidy.continue.status_unverified")
