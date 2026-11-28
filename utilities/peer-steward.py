@@ -806,12 +806,46 @@ _LAST_HERDR_EXIT = None          # real `herdr agent wait` return code of the la
 _SEAT_UNPROVEN = object()
 
 
+def _recorded_target_server(from_harness, from_sid, to):
+    """The server the caller's marker already records for ``to`` on the same pane, else None.
+
+    That entry is the one the grant renews (``peer_message.grant_steward``: its key, or
+    the name-only launch entry a later SID completes). Herdr pane ids repeat across
+    servers, so the server the pane was recorded on (``start``) stays with it: a watch
+    or wait that reads it under another default (no option, an inherited
+    ``HERDR_SESSION``) does not move it to that default."""
+    if not from_sid or not to.get("pane"):
+        return None
+    try:
+        with open(peer_message.steward_marker_path(from_harness, from_sid), encoding="utf-8") as fh:
+            targets = json.load(fh).get("targets")
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    if not isinstance(targets, dict):
+        return None
+    key = to.get("session_id") or to.get("name") or "-"
+    entries = [targets.get(key)]
+    if to.get("session_id") and to.get("name"):
+        entries += [entry for other, entry in targets.items()
+                    if other != key and isinstance(entry, dict)
+                    and not entry.get("session_id") and entry.get("name") == to["name"]]
+    for entry in entries:
+        if (isinstance(entry, dict) and entry.get("harness") == to.get("harness")
+                and entry.get("pane") == to["pane"]
+                and isinstance(entry.get("server"), str) and entry["server"]):
+            return entry["server"]
+    return None
+
+
 def _mark_observed(to_harness, to_session_id, to_name, from_identity=None, *, pane=None,
-                   target_cwd=None, steward_seat=_SEAT_UNPROVEN):
+                   target_cwd=None, steward_seat=_SEAT_UNPROVEN, server=None):
     """F-100c-2 — the ONE place `source=watch` steward evidence is written: after
     the shared observer answered about a real target (`wait` returned a typed state other than
     agent-not-found, or `watch` armed its watcher). The `kind=watch` ledger row itself
-    is only the message; `record` never marks (review round 1, #1/#2)."""
+    is only the message; `record` never marks (review round 1, #1/#2). ``server`` is the
+    Herdr server the pane was seen on: the entry keeps it as `start` does, so the check
+    reads that server's window list for it. A server already recorded for this target on
+    this same pane (:func:`_recorded_target_server`) stays; ``server`` fills only none."""
     if from_identity is not None:
         from_sid, from_harness = from_identity[0], from_identity[1]
     else:
@@ -821,6 +855,8 @@ def _mark_observed(to_harness, to_session_id, to_name, from_identity=None, *, pa
           "session_id": sid,
           "name": to_name if isinstance(to_name, str) and to_name and to_name != "-" else None,
           "pane": pane if isinstance(pane, str) and pane and pane != "-" else None}
+    to["server"] = (_recorded_target_server(from_harness, from_sid, to)
+                    or (server if isinstance(server, str) and server else None))
     # The caller's own seat serializes the grant. The watch/wait entry proves it without
     # asking Herdr about other panes (`_steward_seat`); `watch` has already done so.
     if steward_seat is _SEAT_UNPROVEN:
@@ -906,7 +942,7 @@ def cmd_wait(args):
     if state != "unknown":
         _mark_observed(harness, sid, agent.get("name") or target,
                        pane=agent.get("pane_id") or pane,
-                       target_cwd=agent.get("cwd"))
+                       target_cwd=agent.get("cwd"), server=server)
     print(_typed_line(state, harness, sid, agent.get("name") or target,
                       agent.get("pane_id") or pane or "-"))
     return 2 if state == "session-ended" else 0
@@ -1578,9 +1614,13 @@ def _mark_started(args, sid, mode):
             summary_text=f"[start] {args.name} kind={args.kind} mode={mode}",
             to_session_id=sid)
     from_sid, from_harness = _current_session_identity()
+    # The pane's server makes the pane id exact (Herdr ids repeat across servers), so a
+    # later check can see that this target's own window has closed.
+    server = (getattr(args, "start_request", None) or {}).get("server") or _HERDR_SESSION or "default"
     result = peer_message.grant_steward(
         from_harness, from_sid,
-        {"harness": args.kind, "session_id": sid, "name": args.name, "pane": args.pane},
+        {"harness": args.kind, "session_id": sid, "name": args.name, "pane": args.pane,
+         "server": server},
         "start", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), source="start",
         target_cwd=getattr(args, "cwd", None))
     _print_steward_limited(result)
@@ -1759,6 +1799,25 @@ def _start_request(args):
         return _start_in_pane(args)
 
 
+def _tidy_after_start(args, started, surface):
+    """`` layout=...`` for the receipt of a start that split a pane of the reference tab.
+
+    The arrangement is the same `pane tidy`, run once inside the start's own workspace
+    claim (tidy re-enters it), so no other start reads the layout in between. Its
+    outcome ends the one receipt line as ``layout=tidied|unchanged|unconfirmed:<note>``;
+    a tidy that cannot run leaves the start result as it is."""
+    if not started or getattr(args, "placement", None) != "split" or not args.beside:
+        return ""
+    try:
+        result = terminal_surface.tidy_panes(
+            near=terminal_surface.Near(surface, pane=args.beside, same_tab=True))
+    except Exception as exc:  # noqa: BLE001 - the started session stays as it is
+        return f" layout=unconfirmed:pane-tidy-unconfirmed:{type(exc).__name__}"
+    if result.notes:
+        return f" layout=unconfirmed:{result.notes[0]}"
+    return " layout=tidied" if result.changed else " layout=unchanged"
+
+
 def _start_tmux_request(args):
     """`start` beside a tmux pane, or in a given empty tmux shell, under the session claim."""
     surface = _tmux_surface(args.beside or args.pane)
@@ -1833,6 +1892,7 @@ def _start_in_tmux(args, surface):
             return refuse(opened.notes[0] if opened.notes else "pane-layout-unavailable",
                           f" beside={args.beside}")
         args.pane, created = surface.address(opened.pane) or opened.pane, opened.placement != "reuse"
+        args.placement = opened.placement
     shell, screen, reason = _tmux_ready_shell(
         surface, args.pane, pane_cwd if created else None,
         time.monotonic() + _BESIDE_READY_SECONDS)
@@ -1898,7 +1958,8 @@ def _tmux_started(args, surface, agent, start_verify, cwd_note):
           f"permission_mode={mode} session_id={sid or '-'} managed={managed}"
           + (f" ready=false reason={trust_wait}" if trust_wait else "")
           + cwd_note + " surface=tmux"
-          + (f" start_verify={start_verify}" if start_verify else ""))
+          + (f" start_verify={start_verify}" if start_verify else "")
+          + _tidy_after_start(args, True, surface))
     return 0
 
 
@@ -1978,6 +2039,7 @@ def _start_in_pane(args):
                   f"name={args.name} pane=- beside={args.beside}")
             return 1
         args.pane = opened.pane
+        args.placement = opened.placement
         if opened.placement != "reuse":
             created_pane = True
             created_shell = _start_shell_identity(args.pane)
@@ -2149,6 +2211,7 @@ def _start_in_pane(args):
         + (f" tui_scoped={tui_scoped}" if tui_scoped else "")
         + (f" start_verify={start_verify}" if start_verify else "")
         + (f" placement=project-workspace workspace={workspace}" if workspace else "")
+        + _tidy_after_start(args, started, _herdr_surface())
     )
     return 0 if started else 1
 
@@ -2206,15 +2269,21 @@ def _wrapped_foreground(pane, harness, info):
         from pane_ownership import _native_session, _native_user_tui
         if not _native_user_tui(pid, harness):
             return None, True
+        # An unselected seat (a native that has not taken its first prompt, so the
+        # shell host has no session for it) has no session another could be confused
+        # with: its births are its identity, on every adapter. Its first start hook
+        # selects a session and so changes the attachment, which every later look
+        # compares. A native that proves a session of its own was refused above.
+        unselected = binding["sid"] == _UNSELECTED_SEAT
         # Protection, not re-proof: a shared Codex daemon can retain several roots,
         # so input goes only to the thread the TUI currently selects.
         import session_shell
-        if harness == "codex" and not session_shell._codex_current_root(
+        if harness == "codex" and not unselected and not session_shell._codex_current_root(
                 pid, binding["native_start"], binding["sid"]):
             return None, True
         # Protection: Claude's own record must still show the attachment's session
         # (a /resume to another session in the same TUI is not the booked target).
-        if harness == "claude" and _native_session(pid, harness) != binding["sid"]:
+        if harness == "claude" and not unselected and _native_session(pid, harness) != binding["sid"]:
             return None, True
         keys = ("harness", "sid", "incarnation", "socket", "host_pid", "host_start",
                 "native_pid", "native_start", "broker_pid", "broker_start")
@@ -2255,6 +2324,106 @@ def _retire_foreground(pane, harness, *, strict=True, info=None):
         return None
     return {"pid": pid, **identity, "shell_pid": info["shell_pid"],
             "shell_start": shell_start}
+
+
+_UNSELECTED_SEAT = "-"
+
+
+def _unselected_seat(ident, booked):
+    """Whether a retire booked an unselected seat: no session in Herdr's view (``ident``),
+    in the booked foreground, nor in the booked attachment. The one place this is decided.
+
+    Such a seat has had no turn: every turn starts with the native start hook, which
+    selects the seat and so changes the booked attachment (the host at once, its record
+    a moment later). Its ``unknown`` turn is therefore no turn; the empty composer and
+    form checks that follow still decide. ``booked`` is the duty's booked foreground."""
+    booked = booked if isinstance(booked, dict) else {}
+    attachment = booked.get("attachment") if isinstance(booked.get("attachment"), dict) else {}
+    return (isinstance(ident, dict) and ident.get("session_id") == _UNSELECTED_SEAT
+            and booked.get("session_id") == _UNSELECTED_SEAT
+            and attachment.get("sid") == _UNSELECTED_SEAT)
+
+
+def _retire_turn(state, ident, booked):
+    """``(state, source)`` the retire waits on (see :func:`_unselected_seat`)."""
+    turn, source = _effective_retire_state(state, ident)
+    if turn == "unknown" and _unselected_seat(ident, booked):
+        return "idle", "unselected-seat"
+    return turn, source
+
+
+def _retire_seat(identity):
+    """The session-shell attachment a retire booked, as a binding, else None.
+
+    Screen, wait reason and the last look before the exit read this exact attachment
+    (never a lookup by the target's name, which finds no seat for a pane id)."""
+    attachment = identity.get("attachment") if isinstance(identity, dict) else None
+    if not isinstance(attachment, dict) or not attachment:
+        return None
+    import session_shell
+    return {**attachment, "schema": session_shell.SCHEMA}
+
+
+def _retire_input_arrived(pane, harness, ident, identity, booked, screen_epoch=None):
+    """Why the exit must not start now, else ``""``: the last look right before its first key.
+
+    Input may have reached the seat since the screen was read: a turn shows in Herdr's
+    or the host's state, and a first prompt's start hook selects the seat in the host at
+    once while its attachment record is written only after (host.cjs, ``source('register')``
+    on ``setImmediate``). The host answers a request only for the attachment it holds
+    now, so the booked one answering proves no selection came in between.
+
+    Keys that reached the host before that hook (a first prompt and its Enter) change
+    none of these, so the booked attachment's answer must also show the input box the
+    screen showed (``screen_epoch``, read with it): the same ``epoch`` (the host counts
+    every key it takes), no shell editor in front (``focused``) and the box empty. The
+    host reads the box only for a selected seat (host.cjs ``refreshReadiness`` answers
+    ``empty=false`` with no SID); for the booked unselected seat the screen judged empty
+    at that same epoch is that reading. A missing value is no answer: zero keys, the
+    duty waits."""
+    if _retire_foreground(pane, harness) != identity:
+        return "foreground-changed"
+    state, current, _code, reason = _retire_target(pane)
+    turn, _source = _retire_turn(state, current, booked)
+    if reason or any(current.get(key) != ident.get(key) for key in ("harness", "session_id", "pane")):
+        return "target-changed"
+    if turn not in ("idle", "done"):
+        return "target-changed"
+    seat = _retire_seat(identity)
+    if seat is None:
+        return ""
+    import session_shell
+    answer = session_shell.control(seat, "status")
+    if not isinstance(answer, dict) or answer.get("ok") is not True:
+        return ("foreground-changed" if isinstance(answer, dict)
+                and answer.get("reason") == "attachment-changed" else "foreground-unverified")
+    if answer.get("state") in ("working", "submitting", "blocked"):
+        return "target-changed"
+    if answer.get("focused") is not False:
+        return "shell-editor-open" if answer.get("focused") is True else "draft-unknown"
+    epoch = answer.get("epoch")
+    if type(epoch) is not int or type(screen_epoch) is not int:
+        return "draft-unknown"
+    if epoch != screen_epoch:
+        return "target-changed"
+    if answer.get("empty") is not True and not _unselected_seat(current, booked):
+        return "draft-unknown"
+    return ""
+
+
+def _retire_send_stopped(store, duty_id, reason, sent, *, unknown=False):
+    """Leave on the duty what a stopped exit actually sent; returns ``reason``.
+
+    With no key sent nothing reached the pane, so no exit was requested after all: the
+    duty waits again and a later retire or its runner looks anew. After a key (or a
+    send whose arrival is unknown) the exit stays requested, with the keys that went out."""
+    if sent == 0 and not unknown:
+        store.claim_phase(duty_id, {"exit-requested"}, "waiting", state="pending",
+                          extra={"reason": reason, "keys_sent": 0})
+    else:
+        store.claim_phase(duty_id, {"exit-requested"}, "exit-requested", state="pending",
+                          extra={"reason": reason, "keys_sent": sent})
+    return reason
 
 
 def _retire_target(target, *, server=None):
@@ -2709,11 +2878,13 @@ def _resume_retire_obligation(duty, store, *, read_context=None,
                          expected_phases={"waiting"},
                          observation={"phase": "waiting", "reason": reason or "target-identity-changed"})
             return
-        readiness = _pane_readiness(target, state,
+        # The same booked pane and seat as the command reads (see cmd_retire).
+        readiness = _pane_readiness(ident["pane"], state,
                                     expected_harness=ident["harness"],
                                     expected_sid=observed["session_id"],
                                     purpose="input" if cutover else "completion",
-                                    read_context=read_context)
+                                    read_context=read_context,
+                                    unselected_seat=_retire_booked_foreground(duty))
         if readiness.state != "ready":
             store.update(duty["id"], state="unknown" if readiness.state == "unknown" else "pending",
                          expected_phases={"waiting"},
@@ -2724,6 +2895,42 @@ def _resume_retire_obligation(duty, store, *, read_context=None,
                                      _runner_lock_held=runner_lock_held))
     finally:
         _HERDR_SESSION = old_server
+
+
+# What releases a pending retire, by the family of its reason (`retire.wait.*`).
+_RETIRE_WAITS = {
+    "draft": "draft", "draft-unknown": "draft-unknown",
+    "form-open": "form", "native-trust-wait": "form",
+    "foreground-unverified": "foreground", "pane-identity-unverified": "foreground",
+    "foreground-changed": "changed", "target-changed": "changed", "shell-changed": "changed",
+    "screen-unavailable": "screen", "shell-screen-large": "screen", "shell-editor-open": "screen",
+    "shell-no-answer": "screen", "shell-host-outdated": "screen",
+    "retire-already-pending": "exit", "retire-duty-already-claimed": "exit",
+    "exit-send-unknown": "exit", "exit-send-failed": "exit", "exit-result-unobserved": "exit",
+    "shell-return-unverified": "exit", "agent-still-running": "exit", "pane-close-failed": "exit",
+}
+
+
+def _retire_wait_detail(reason):
+    """One line saying what releases a pending retire; it names no new command or step."""
+    key = _RETIRE_WAITS.get(reason)
+    if key is None:
+        key = ("background" if reason.startswith("retire-declined-background-work")
+               else "turn-unknown" if reason.startswith(("agent-unknown", "native-turn-unknown",
+                                                         "native-turn-unclassified"))
+               else "turn" if reason.startswith(("agent-", "native-turn"))
+               else "tmux" if reason.startswith("pane-") and reason.endswith("-wait")
+               else "work" if reason.startswith(("bound-registered-work", "registered-"))
+               else "other")
+    try:
+        catalog = str(Path(__file__).resolve().parent.parent / "tools" / "i18n")
+        if catalog not in sys.path:
+            sys.path.insert(0, catalog)
+        import ui_text
+        line = ui_text.translator()("retire.wait." + key, reason=reason)
+    except Exception:  # noqa: BLE001 - a missing catalog keeps the result line itself
+        line = f"waiting on {reason}"
+    return " ".join(line.split())
 
 
 def _finish_retire(store, duty, target, ident, reason, retired=False, handover=None,
@@ -2768,7 +2975,8 @@ def _finish_retire(store, duty, target, ident, reason, retired=False, handover=N
             status="sent" if retired else "unknown" if pending else "failed")
     print(f"retired={str(retired).lower()} reason={reason} agent={ident['harness']} "
           f"name={ident['name']} pane={ident['pane']}{tail}"
-          + (f" pending=true request_id={duty_id}" if pending and duty_id else ""))
+          + (f" pending=true request_id={duty_id}" if pending and duty_id else "")
+          + (f" detail={_retire_wait_detail(reason)}" if pending and not retired else ""))
     return 0 if retired or pending else 1
 
 
@@ -2877,29 +3085,29 @@ def cmd_retire(args):
             or (booked.get("session_id") != "-"
                 and booked.get("session_id") != ident["session_id"])):
         return finish("target-changed", pending=True)
-    retire_state, state_source = _effective_retire_state(state, ident)
+    booked_foreground = _retire_booked_foreground(duty)
+    retire_state, state_source = _retire_turn(state, ident, booked_foreground)
     if reason or retire_state not in {"idle", "done"}:
         return finish(reason or f"agent-{retire_state}-{state_source}", pending=True)
-    readiness = _pane_readiness(target, state, expected_harness=harness,
+    # From here the booked pane and its booked attachment are read as themselves: a
+    # target's name finds no shell seat, and the framed pane would read as an empty box.
+    readiness = _pane_readiness(pane, state, expected_harness=harness,
                                 expected_sid=ident["session_id"],
-                                purpose="input" if cutover else "completion")
+                                purpose="input" if cutover else "completion",
+                                unselected_seat=booked_foreground)
     if readiness.state != "ready":
         return finish(readiness.reason, pending=True)
     identity = _retire_foreground(pane, harness)
     if identity is None:
         return finish("foreground-unverified", pending=True)
-    if identity != _retire_booked_foreground(duty):
+    if identity != booked_foreground:
         return finish("foreground-changed", pending=True)
-    state2, ident2, _, _ = _retire_target(target)
-    state2, _state2_source = _effective_retire_state(state2, ident2)
-    if state2 not in ("idle", "done") or ident2 != ident:
-        return finish("target-changed", pending=True)
-    if _retire_foreground(pane, harness) != identity:
-        return finish("foreground-changed", pending=True)
-    lines = _read_screen(target)
+    seat = _retire_seat(identity)
+    seen = {}  # the seat's screen epoch: the last look before the first key compares it
+    lines = _read_screen(pane, seat=seat, seen=seen)
     # A shell seat's own reason for no screen (too large, an editor open) is the wait's.
     screen_reason = ((_native_trust_reason(harness, lines) or _screen_ready(harness, lines)) if lines
-                     else _shell_screen_reason(target) or "screen-unavailable")
+                     else _shell_screen_reason(pane, seat=seat) or "screen-unavailable")
     if screen_reason:
         return finish(screen_reason, pending=True)
     # A tmux pane in a mode, with input off or synchronized takes no keys: nothing is
@@ -2913,20 +3121,27 @@ def cmd_retire(args):
     if claimed is None:
         return finish("retire-duty-already-claimed", pending=True)
     duty = claimed
+    sent = 0
     try:
         for index, (operation, value) in enumerate(_RETIRE_ACTIONS[harness]):
-            if _retire_foreground(pane, harness) != identity:
-                return finish("foreground-changed", pending=True)
+            stop = (_retire_input_arrived(pane, harness, ident, identity, booked_foreground,
+                                          seen.get("epoch"))
+                    if index == 0 else
+                    "foreground-changed" if _retire_foreground(pane, harness) != identity else "")
+            if stop:
+                return finish(_retire_send_stopped(store, duty_id, stop, sent), pending=True)
             if not _pane_send(pane, operation, value):
                 # tmux refused the first keystroke itself: nothing reached the pane,
                 # so the exit was not requested after all. Anything later stays unknown.
                 refusal = _tmux_input_refusal(pane) if index == 0 else None
-                if refusal and store.claim_phase(
-                        duty_id, {"exit-requested"}, "waiting", state="pending",
-                        extra={"reason": refusal + "-wait"}) is not None:
-                    return finish(refusal + "-wait", pending=True)
+                if refusal:
+                    return finish(_retire_send_stopped(store, duty_id, refusal + "-wait", sent),
+                                  pending=True)
+                _retire_send_stopped(store, duty_id, "exit-send-unknown", sent, unknown=True)
                 return finish("exit-send-unknown", pending=True)
+            sent = index + 1
     except (OSError, subprocess.SubprocessError):
+        _retire_send_stopped(store, duty_id, "exit-send-unknown", sent, unknown=True)
         return finish("exit-send-unknown", pending=True)
     wait_seconds = _OPENCODE_RETIRE_SECONDS if harness == "opencode" else _RETIRE_SECONDS
     if identity.get("attachment"):
@@ -3033,8 +3248,9 @@ def cmd_retire(args):
                 else peer_obligations.legacy_runner_lock(store))
         with lock as acquired:
             if acquired:
+                # Its screen is read on the booked pane, as the runner reads it.
                 return _retire_claude_background_confirm(
-                    target, pane, harness, ident, identity, finish,
+                    pane, pane, harness, ident, identity, finish,
                     own_sid, own_harness, duty=duty)
         return finish("retire-already-pending", pending=True)
     return finish("agent-still-running", pending=True)
@@ -3671,7 +3887,8 @@ def cmd_watch(args):
             _write_watch_claim(claim_fd, existing_id)
             _mark_observed(agent["harness"], agent["session_id"], agent.get("name") or target,
                            from_identity=(steward_sid, steward_harness), pane=agent.get("pane"),
-                           target_cwd=native_agent_row.get("cwd"), steward_seat=steward_seat)
+                           target_cwd=native_agent_row.get("cwd"), steward_seat=steward_seat,
+                           server=server)
             print(_already_armed_line(existing_id, existing_arm, existing_paths))
             return 0
 
@@ -3850,7 +4067,8 @@ def cmd_watch(args):
         resolved_name = agent["name"] if agent["name"] != "-" else target
         _mark_observed(agent["harness"], agent["session_id"], resolved_name,
                        from_identity=(steward_sid, steward_harness), pane=agent["pane"],
-                       target_cwd=native_agent_row.get("cwd"), steward_seat=steward_seat)
+                       target_cwd=native_agent_row.get("cwd"), steward_seat=steward_seat,
+                       server=server)
     finally:
         if claim_fd is not None:
             os.close(claim_fd)
@@ -4926,7 +5144,8 @@ def _bottom_form_tokens(target, window=15):
 def _pane_readiness(target, state, *, expected_harness=None, expected_sid=None, expected_pane=None,
                     purpose="completion", target_observation=None, pane_info=None,
                     native_session_id=None, registry_append_only=False, read_context=None,
-                    server=None, authority_out=None, selected_authority=None):
+                    server=None, authority_out=None, selected_authority=None,
+                    unselected_seat=None):
     """Use the shared projection with exact native identity and registered bindings.
 
     Before a harness's first input herdr reports no session, and for a Codex TUI
@@ -4934,7 +5153,12 @@ def _pane_readiness(target, state, *, expected_harness=None, expected_sid=None, 
     foreground process proves is then the pane's own (Codex 0.162 opens its
     thread at start) and keeps the bound-work checks; a pane with neither is
     exact by pane and shell birth: nothing can be bound to it, so its native
-    turn decides. A caller holding a session needs that proof to name it."""
+    turn decides. A caller holding a session needs that proof to name it.
+
+    ``unselected_seat`` is a retire's booked foreground when it booked an unselected
+    seat (:func:`_unselected_seat`). Re-read now, that same seat in the same shell
+    birth still has had no turn, so its ``unknown`` is no turn here too; a selected
+    seat's ``unknown`` and the bound-work checks stay as they are."""
     try:
         if authority_out is not None:
             authority_out.update(rows=[], handover_keys=[])
@@ -4959,6 +5183,11 @@ def _pane_readiness(target, state, *, expected_harness=None, expected_sid=None, 
                 sid, expected_sid = proven, None
         if isinstance(native_session_id, str) and peer_message.usable_session_id(native_session_id):
             sid = native_session_id
+        if (observed_state == "unknown" and sid == _UNSELECTED_SEAT and isinstance(info, dict)
+                and _unselected_seat(ident, unselected_seat)
+                and info.get("shell_pid") == unselected_seat.get("shell_pid")
+                and _proc_start_ticks(info.get("shell_pid")) == unselected_seat.get("shell_start")):
+            observed_state = "idle"
         foreground = ({"pid": native_pid, "start": native_start, "session_id": sid}
                       if native_exact else
                       _prompt_foreground(pane, harness, info=info)
@@ -8019,7 +8248,13 @@ def _pane_shell_binding_result(pane, harness, sid=None, *, expected=None, info=N
     if binding is None:
         return None, None
     if sid is None:
-        current, _reason = session_shell.exact_binding(binding["harness"], binding["sid"])
+        # The joined seat is re-read as itself. An unselected seat ('-') shares that
+        # name with every other just-started seat, so a lookup by session name would
+        # call two fresh panes ambiguous; its own attachment record is the exact one.
+        current = (session_shell.read_binding(session_shell.binding_path(
+                       binding["harness"], binding["host_pid"]))
+                   if binding["sid"] == _UNSELECTED_SEAT else
+                   session_shell.exact_binding(binding["harness"], binding["sid"])[0])
         if current is None or any(current.get(k) != binding.get(k) for k in (
                 "harness", "sid", "incarnation", "socket", "host_pid", "host_start",
                 "native_pid", "native_start", "broker_pid", "broker_start")):
@@ -8428,20 +8663,22 @@ def _shell_seat(target, harness=None, info=None):
         return None
 
 
-def _read_screen(target):
+def _read_screen(target, *, seat=None, seen=None):
     """The visible pane (ANSI) as screen lines, or None when it could not be read.
 
     A shell seat's pane also shows the shell's frame and panel; its draft, form
     and footer judgments read the native cells instead (one shared source). Every
     judged key into a shell seat's pane reads here first: while the host says a
     shell editor holds the outer keys, or gives no answer, there is no screen to
-    type into (None), never the framed pane read again as an empty box."""
-    return _read_screen_reason(target)[0]
+    type into (None), never the framed pane read again as an empty box. ``seat``
+    is an attachment the caller already holds for this pane (a retire's booking);
+    ``seen`` receives that seat's screen ``epoch`` (``session_shell.native_screen_reason``)."""
+    return _read_screen_reason(target, seat=seat, seen=seen)[0]
 
 
-def _shell_screen_reason(target):
+def _shell_screen_reason(target, *, seat=None):
     """Why a shell seat gave no screen (``shell-screen-large``, an open editor), else ``""``."""
-    seat = _shell_seat(target)
+    seat = seat or _shell_seat(target)
     if seat is None:
         return ""
     import session_shell
@@ -8449,12 +8686,12 @@ def _shell_screen_reason(target):
     return why if lines is None else ""
 
 
-def _read_screen_reason(target):
+def _read_screen_reason(target, *, seat=None, seen=None):
     """``(lines | None, reason)``: :func:`_read_screen` and, for a shell seat's None, why."""
-    seat = _shell_seat(target)
+    seat = seat or _shell_seat(target)
     if seat is not None:
         import session_shell
-        lines, why = session_shell.native_screen_reason(seat)
+        lines, why = session_shell.native_screen_reason(seat, seen=seen)
         if lines != session_shell.PASSTHROUGH:
             return lines, why
     if terminal_surface.is_tmux_pane(target):
@@ -9140,7 +9377,8 @@ def _restore_watch_role(watch_id, arm, *, identity=None):
         return
     _mark_observed(agent["harness"], agent.get("session_id"), agent.get("name"),
                    from_identity=(sid, harness), pane=agent.get("pane"),
-                   target_cwd=agent.get("cwd"), steward_seat=arm.get("steward_seat"))
+                   target_cwd=agent.get("cwd"), steward_seat=arm.get("steward_seat"),
+                   server=arm.get("server"))
 
 
 def _restore_own_watch_roles(harness, sid):
