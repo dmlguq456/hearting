@@ -674,17 +674,21 @@ class MessageQuestions(unittest.TestCase):
         state, effects = reduce(state, {"type": "key", "key": "text:keep this draft"})
         for effect in effects:
             state, _ = self.effect(state, effect, vm)
-        newer, _ = self.f.ask("claude", text="replacement")
-        newer_vm, _ = self.board(newer)
-        # The rendered stale row cannot send. Its private draft survives replacement.
+        newer, _ = self.f.ask("claude", text="another question")
+        # 3a: another question of the session is added beside it; this request and its draft stay.
         from tools.fleet import render
         from tools.fleet.explorer.state import _question_action_ref
         ref = _question_action_ref(state.question_overlay)
-        with patch.object(render, "_EXPLORER_STATE", state), patch.object(render, "_EXPLORER_MODEL", newer_vm):
+        current = waits.read_selected_request(envelope)
+        self.assertEqual((current["state"], current["support"]["supported"]), ("open", True))
+        self.assertIn("keep this draft", waits._selected_entry(envelope)["draft"])
+        # Withdrawn by its asker, the rendered row cannot send.
+        waits.close_message("claude", old["session_id"], old["seat_key"], old["id"])
+        closed_vm, _ = self.board(newer)
+        with patch.object(render, "_EXPLORER_STATE", state), patch.object(render, "_EXPLORER_MODEL", closed_vm):
             self.assertFalse(render._explorer_question_ref_current(ref))
         result = waits.submit_selected_response(ref, {"answers": {"message-response": ["late"]}})
         self.assertFalse(result["support"]["supported"])
-        self.assertIn("keep this draft", waits._selected_entry(envelope)["draft"])
         self.assertIsNone(self.f.record(old))
 
 

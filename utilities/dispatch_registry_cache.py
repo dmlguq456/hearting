@@ -1591,6 +1591,14 @@ def registry_snapshot(jobs: Path) -> RegistrySnapshot:
     )
 
 
+def held_registry_view(jobs: Path) -> "RegistryView | None":
+    """The generation this process already read for ``jobs`` while the path and its retained
+    descriptor still name it, else None; registry bytes are never read for it."""
+    path = Path(jobs)
+    with _LOCK:
+        return _current_cached(path, str(path.absolute()))
+
+
 def registry_view(jobs: Path, *, append_only: bool = False) -> RegistryView:
     scope = _READ_SCOPE.get()
     if scope is not None:
