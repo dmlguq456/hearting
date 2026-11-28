@@ -695,7 +695,9 @@ class CurrentSessionBindingTest(unittest.TestCase):
                     self.assertEqual(sess.active_context_tokens, 123456)
                     self.assertEqual(sess.context_window_tokens, expected)
                     self.assertEqual(sess.session_input_tokens, 999999)
-                    self.assertIsNone(sess.ctx_pct)
+                    # An exact request whose trigger stays unknown still reads usage
+                    # against the declared window (13% of 950,000 for 123,456).
+                    self.assertEqual(sess.ctx_pct, 13 if expected is not None else None)
                     self.assertIsNone(sess.context_display_window_tokens)
             path.write_text(json.dumps(record))
             for cursor in (None, True, 9, 11, "10"):

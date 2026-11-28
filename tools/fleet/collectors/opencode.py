@@ -642,7 +642,7 @@ def _enrich_v2(sess, tick, db, raise_unread=False):
         if last_ctx is not None:
             sess.active_context_tokens = int(last_ctx)
         break
-    from ..token_budget import context_policy_snapshot, context_policy_used_pct
+    from ..token_budget import context_policy_snapshot, opencode_context_used_pct
     from ..context_policy import read_policy
     request_model = latest.get("model") if latest and isinstance(latest.get("model"), dict) else {}
     model_ref = f"{request_model.get('providerID') or ''}/{request_model.get('id') or ''}"
@@ -695,7 +695,7 @@ def _enrich_v2(sess, tick, db, raise_unread=False):
     sess.context_window_tokens = sess.context_policy["effective_window_tokens"]
     sess.context_display_window_tokens = (sess.context_policy["applied_trigger_tokens"]
                                           if sess.context_policy["state"] == "applied" else None)
-    sess.ctx_pct = context_policy_used_pct(sess.active_context_tokens, sess.context_policy)
+    sess.ctx_pct = opencode_context_used_pct(sess.active_context_tokens, sess.context_policy)
     stamp = native.get("time_updated")
     if isinstance(stamp, (int, float)):
         sess.mtime = stamp / 1000.0
@@ -1337,7 +1337,7 @@ def enrich(sess, tick=None, *, raise_unread=False):
     # compaction boundary. Preserve an observed zero without manufacturing a %.
     if isinstance(last_ctx, (int, float)) and not isinstance(last_ctx, bool) and last_ctx >= 0:
         sess.active_context_tokens = int(last_ctx)
-    from ..token_budget import context_policy_snapshot, context_policy_used_pct
+    from ..token_budget import context_policy_snapshot, opencode_context_used_pct
     from ..context_policy import read_policy
     native_model = f"{provider or ''}/{sess.model or ''}"
     policy_record = read_policy(
@@ -1370,11 +1370,13 @@ def enrich(sess, tick=None, *, raise_unread=False):
     sess.context_display_window_tokens = (
         sess.context_policy["applied_trigger_tokens"]
         if sess.context_policy["state"] == "applied" else None)
-    sess.ctx_pct = context_policy_used_pct(sess.active_context_tokens, sess.context_policy)
+    sess.ctx_pct = opencode_context_used_pct(sess.active_context_tokens, sess.context_policy)
     if sess.ctx_pct is not None:
         cursor = (sess._refresh_source or {}).get("observed_cursor", 0)
+        applied = (sess.context_policy or {}).get("state") == "applied"
         sess._context_evidence = ContextEvidence(
-            used_pct=sess.ctx_pct, source="opencode-db-native-policy",
+            used_pct=sess.ctx_pct,
+            source=("opencode-db-native-policy" if applied else "opencode-db-window"),
             sequence=(tupd or 0, cursor), source_head_sequence=(tupd or 0, cursor),
             observed_at=(tupd / 1000.0 if isinstance(tupd, (int, float)) else None),
             fresh_until=(tupd / 1000.0 + 86400 if isinstance(tupd, (int, float)) else None))
