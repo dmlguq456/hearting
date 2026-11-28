@@ -813,23 +813,52 @@ class CapacityResumeTest(unittest.TestCase):
         missing = unit_continue.session_plan(self.jobs, original, "claude")
         self.assertEqual(missing.row_value, "fresh:session-missing")
 
-    def test_a_unit_continuation_that_did_not_start_names_the_limit_and_the_same_start(self):
+    def test_a_unit_continuation_that_did_not_start_names_the_stop_and_the_same_start(self):
         from start_receipt import next_line
-        original = self.seed_unit("claude")
-        self.launch_error = "fixture-launch-broke"
-        receipt = self.start()
-        self.assertEqual((receipt["state"], receipt["reason"]), ("needs-attention", "replacement-launch-pending"),
-                         receipt)
-        self.assertTrue(receipt["next_step"].startswith("The unit worker stopped at a usage limit. "), receipt)
-        self.assertIn("retry resume_command", receipt["next_step"])
-        self.assertIn("resume_command=" + receipt["resume_command"], next_line(receipt))
-        # The claim stays; the same start launches that continuation, once.
-        self.launch_error = None
-        receipt = self.start()
-        self.assertEqual((receipt["state"], receipt["unit_attempt_id"]), ("running", self.replacement_id(original)))
-        self.assertEqual((len(self.calls), len(self.claims())), (2, 1))
+        broad = "The unit worker stopped for capacity (a usage limit or a provider at capacity). "
+        # A recorded 503 (the broad capacity class) and a real limit (HTTP 429) read differently.
+        for extra, head in (({"api_status": "503"}, broad), ({}, broad),
+                            ({"api_status": "429"}, "The unit worker stopped at a usage limit. ")):
+            with self.subTest(extra=extra):
+                import shutil
+                shutil.rmtree(R._directory(self.jobs), ignore_errors=True)
+                self.calls.clear()
+                self.quiet, self.cleaned = {}, []
+                original = self.seed_unit("claude", **extra)
+                self.launch_error = "fixture-launch-broke"
+                receipt = self.start()
+                self.assertEqual((receipt["state"], receipt["reason"]),
+                                 ("needs-attention", "replacement-launch-pending"), receipt)
+                # The turn's stop, then why this start did not continue it, then the one next action that the
+                # receipt's required_action and its last `next:` line say too.
+                self.assertTrue(receipt["next_step"].startswith(
+                    head + "This start did not launch its continuation (replacement-launch-pending). Its claim is "
+                    "kept; run resume_command again after the exact launch settles"), receipt)
+                self.assertEqual((receipt["required_action"], receipt["parent_next"]),
+                                 ("resume-later", "inspect-receipt"))
+                line = next_line(receipt)
+                self.assertTrue(line.startswith("next: resume-later (replacement-launch-pending): " + head), line)
+                self.assertTrue(line.endswith(" resume_command=" + receipt["resume_command"]), line)
+                # The claim stays; the same start launches that continuation, once.
+                self.launch_error = None
+                receipt = self.start()
+                self.assertEqual((receipt["state"], receipt["unit_attempt_id"]),
+                                 ("running", self.replacement_id(original)))
+                self.assertEqual((len(self.calls), len(self.claims())), (2, 1))
 
-    def test_a_record_free_unit_at_a_usage_limit_says_so_when_it_cannot_continue(self):
+    def test_a_refusal_without_a_claim_names_its_reason_and_promises_no_continuation(self):
+        aid = self.seed_unit("claude")
+        (R._directory(self.jobs) / "inputs" / f"{aid}.json").unlink()   # the sealed launch input is gone
+        for _ in range(2):
+            receipt = self.start()
+            self.assertEqual((receipt["reason"], receipt["required_action"]),
+                             ("replacement-input-unproven", "inspect-preparation"), receipt)
+            self.assertIn("This start did not launch its continuation (replacement-input-unproven", receipt["next_step"])
+            self.assertNotIn("same continuation", receipt["next_step"])
+            self.assertNotIn("Its claim is kept", receipt["next_step"])
+        self.assertEqual((self.calls, self.claims()), ([], []))
+
+    def test_a_record_free_unit_says_a_usage_limit_only_on_limit_evidence(self):
         import unit_ephemeral
         scratch = self.root / "ephemeral" / "123456789abc" / ".agent_reports"
         scratch.mkdir(parents=True)
@@ -837,16 +866,27 @@ class CapacityResumeTest(unittest.TestCase):
         self.route["artifact_root"] = str(scratch)
         aid = self.seed_unit("claude", artifact_root=str(scratch))
         self.ready = True
-        with mock.patch.object(W, "_outcome", return_value={"classification": "failure"}):
-            receipt = self.start()
-        self.assertEqual((receipt["reason"], receipt["required_action"]),
-                         ("unit-outcome-needs-inspection", "compose-again"), receipt)
-        self.assertTrue(receipt["next_step"].startswith(
-            "The unit worker stopped at a usage limit and this route cannot continue it."), receipt)
+        limit = "The unit worker stopped at a usage limit and this route cannot continue it."
+        for changes, head in (
+                # A detached watcher's capacity end, here a provider at capacity (503), names both.
+                ({}, "The unit worker stopped for capacity (a usage limit or a provider at capacity) and this route "
+                     "cannot continue it."),
+                ({"api_status": "503"}, "The unit worker stopped for capacity"),
+                # The existing limit aliases: a session-limit note, a 429, a typed provider quota code.
+                ({"note": "dead-session-limit", "failure_class": ""}, limit),
+                ({"api_status": "429"}, limit),
+                ({"note": "dead-exit-1", "failure_class": "runtime", "provider_failure_kind": "usageLimitExceeded"},
+                 limit),
+                ({"note": "dead-exit-1", "failure_class": "runtime"}, "The unit worker ended without a pass.")):
+            with self.subTest(changes=changes):
+                self.set_status(aid, "done", **{"note": "dead-capacity", "failure_class": "capacity", "api_status": "",
+                                                "provider_failure_kind": "", **changes})
+                with mock.patch.object(W, "_outcome", return_value={"classification": "failure"}):
+                    receipt = self.start()
+                self.assertEqual((receipt["reason"], receipt["required_action"]),
+                                 ("unit-outcome-needs-inspection", "compose-again"), receipt)
+                self.assertTrue(receipt["next_step"].startswith(head), receipt)
         self.assertEqual(self.calls, [])
-        self.set_status(aid, "done", note="dead-exit-1", failure_class="runtime")
-        with mock.patch.object(W, "_outcome", return_value={"classification": "failure"}):
-            self.assertTrue(self.start()["next_step"].startswith("The unit worker ended without a pass."))
 
     def test_only_a_launched_recording_unit_capacity_end_can_continue(self):
         import unit_ephemeral
@@ -875,6 +915,10 @@ class CapacityResumeTest(unittest.TestCase):
                 mock.patch.object(D, "_parent_liveness_evidence", return_value=(False, "exited", None)):
             result = self.start()
             self.assertEqual(result["reason"], "replacement-parent-not-live", result)
+            # A refusal before any claim names its reason and promises no continuation from the same start.
+            self.assertIn("did not launch its continuation (replacement-parent-not-live", result["next_step"])
+            self.assertNotIn("same continuation", result["next_step"])
+            self.assertEqual(result["required_action"], "inspect-preparation")
         self.assertEqual((self.calls, self.claims()), ([], []))
         with mock.patch.dict(os.environ, {"AGENT_DISPATCH_ATTEMPT_ID": "att-caller", "AGENT_DISPATCH_CHILD": "1"}), \
                 mock.patch.object(D, "_parent_liveness_evidence", return_value=(True, "live", None)):

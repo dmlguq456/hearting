@@ -702,13 +702,28 @@ class ContinuedTurnTest(unittest.TestCase):
         self.assertEqual((decide(True).allowed, decide(True).state), (False, "not-applicable"))
 
     def test_a_late_notice_of_a_continued_turn_says_it_is_not_the_latest_result(self):
-        self.write((FIRST, {}), (self.TURN2, {"continues_attempt_id": FIRST, "turn": "2"}))
+        turn3 = "att-" + "3" * 32
+        started = {"launch_started": "1"}
+        self.write((FIRST, started), (self.TURN2, {"continues_attempt_id": FIRST, "turn": "2", **started}))
         head, _note = UC.notice_lines(str(self.jobs), meta(FIRST))
         self.assertEqual(head, "An earlier turn of this unit route; a later turn continued it, so this is not "
                                "its latest result.")
         # The last turn keeps its own head, and a turn no later one continued gets none.
-        self.assertTrue(UC.notice_lines(str(self.jobs), meta(self.TURN2, 2, continues_attempt_id=FIRST))[0]
-                        .startswith("Turn 2 of this unit route"))
+        self.assertEqual(UC.notice_lines(str(self.jobs), meta(self.TURN2, 2, continues_attempt_id=FIRST,
+                                                                session="resumed"))[0],
+                         "Turn 2 of this unit route (session: resumed).")
+        # A third turn took over from the second: the second's late notice keeps its turn and session and says so.
+        self.write((FIRST, started), (self.TURN2, {"continues_attempt_id": FIRST, "turn": "2", **started}),
+                   (turn3, {"continues_attempt_id": self.TURN2, "turn": "3", **started}))
+        self.assertEqual(UC.notice_lines(str(self.jobs), meta(self.TURN2, 2, continues_attempt_id=FIRST,
+                                                                session="resumed"))[0],
+                         "Turn 2 of this unit route (session: resumed). A later turn continued it, so this is not its "
+                         "latest result.")
+        # A second turn registered and closed before it launched took nothing over.
+        self.write((FIRST, started), (self.TURN2, {"continues_attempt_id": FIRST, "turn": "2",
+                                                   "launch_outcome": "never-launched", "launch_claimed": "0"}))
+        self.assertEqual(UC.notice_lines(str(self.jobs), meta(FIRST))[0], "")
+        self.assertTrue(UC.continued_by_later_turn(self.jobs, meta(FIRST)))   # its settlement reading is unchanged
         self.write((FIRST, {}))
         self.assertEqual(UC.notice_lines(str(self.jobs), meta(FIRST))[0], "")
 

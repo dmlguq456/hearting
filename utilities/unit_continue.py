@@ -154,8 +154,9 @@ def capacity_turn_options(source, argv) -> dict:
             "--continuation-text": text}
 
 
-def continued_by_later_turn(jobs, meta) -> bool:
-    """Whether a later turn of this unit route has taken over from this attempt (a row names it as `continues_attempt_id`).
+def continued_by_later_turn(jobs, meta, *, launched=False) -> bool:
+    """Whether a later turn of this unit route has taken over from this attempt (a row names it as `continues_attempt_id`;
+    with `launched`, only a later turn whose launch started counts, as a registration alone runs nothing).
 
     A turn so taken over has nothing left to settle: its closure record was set aside when the next turn
     reopened the route, and the route's end (and its closure) is the last turn's. Only a unit leg's row can
@@ -168,7 +169,8 @@ def continued_by_later_turn(jobs, meta) -> bool:
     if meta.get("capability") != "unit" and not (meta.get("worker_type") == "owner" and _store_path(jobs, route_id).exists()):
         return False
     from dispatch_registry_cache import registry_view
-    return any(record.completion_metadata().get("continues_attempt_id") == attempt
+    return any((row := record.completion_metadata()).get("continues_attempt_id") == attempt
+               and (not launched or row.get("launch_started") == "1")
                for record in registry_view(Path(jobs)).route_alias_candidates(route_id))
 
 
@@ -213,8 +215,9 @@ def waiting_request(jobs, meta) -> bool:
 
 
 def notice_lines(jobs, meta, agent_home=None) -> tuple:
-    """`(head, note)` an end notice adds for a unit leg: for a continued turn, which turn it is and its session
-    (`head`); for a route with a request still kept, the `start` that runs it (`note`). Either may be ''."""
+    """`(head, note)` an end notice adds for a unit leg: for a continued turn, which turn it is and its session, and
+    for a turn a started later turn took over, that it is not the latest result (`head`); for a route with a request
+    still kept, the `start` that runs it (`note`). Either may be ''."""
     if meta.get("capability") != "unit":
         if meta.get("worker_type") == "owner" and meta.get("session"):
             # An owner that took over from an earlier owner of its route says which session it ran in.
@@ -226,9 +229,10 @@ def notice_lines(jobs, meta, agent_home=None) -> tuple:
     head = ""
     if meta.get("continues_attempt_id"):
         head = f"Turn {meta.get('turn') or '?'} of this unit route (session: {meta.get('session') or 'unknown'})."
-    elif jobs and continued_by_later_turn(jobs, meta):
-        # A late notice of a turn a later one took over: its result is not the route's latest.
-        head = "An earlier turn of this unit route; a later turn continued it, so this is not its latest result."
+    if jobs and continued_by_later_turn(jobs, meta, launched=True):
+        # A late notice of a turn a later, started turn took over: its result is not the route's latest.
+        head = (f"{head} A later turn continued it" if head else
+                "An earlier turn of this unit route; a later turn continued it") + ", so this is not its latest result."
     note = ""
     if jobs and meta.get("route_file") and waiting_request(jobs, meta):
         from parent_next_directive import resume_command

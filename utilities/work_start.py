@@ -3048,6 +3048,19 @@ def _advance_open(route, path, jobs, result, request, resume, *, wait, interview
                 "bounded-wait means run parent_next_command once."}
 
 
+def _unit_stop(row, capacity=False) -> str:
+    """How a unit turn's capacity end reads, or "". Only recorded quota or rate-limit evidence names a usage
+    limit; the broad `capacity` class alone also holds a provider at capacity (a 503)."""
+    from dispatch_capacity_evidence import _LEGACY_QUOTA_NOTES
+    from dispatch_supervisor_terminal import _CODEX_CAPACITY_STRUCTURED_CODES as quota_codes
+    if (row.get("note") in _LEGACY_QUOTA_NOTES or row.get("api_status") == "429" or row.get("quota_window")
+            or row.get("provider_failure_kind") in {*quota_codes, "provider.rate-limit", "provider.quota"}):
+        return "stopped at a usage limit"
+    if capacity or row.get("note") == "dead-capacity" or row.get("failure_class") == "capacity":
+        return "stopped for capacity (a usage limit or a provider at capacity)"
+    return ""
+
+
 def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock, resumed=False):
     """Start the one leg of a unit route, or report where it is; repeating this launches nothing twice.
 
@@ -3109,23 +3122,31 @@ def _advance_unit(route, path, jobs, result, leg, *, wait, run, sleep, clock, re
             if step.get("reason") == "replacement-capacity-wait":
                 return _capacity_pause({**result, "result": outcome}, step, resume, unit=True)
             if step.get("state") == "needs-attention":
-                # Say why the turn stopped; with no instruction of its own, the step keeps its claimed
-                # continuation for the same start (the owner's receipt says the same).
+                # The turn's stop and why this start did not continue it are two facts. Only the exact claim
+                # this start made, still accepted, whose launch failed in passing, is started by the same
+                # start again (`resume-later`); any other refusal keeps its own reason and instruction.
+                from dispatch_replacement import recovery_delivery_state
+                claimed = bool(step.get("record") and not (step.get("retry_when") or step.get("next_step"))
+                               and step["reason"] in {"replacement-launch-pending", "replacement-launch-timeout"}
+                               and recovery_delivery_state(jobs, aid) == "accepted")
+                detail = f": {step['detail']}" if step.get("detail") else ""
                 return {**result, "state": "needs-attention", "reason": step["reason"],
                         "result": outcome, "replacement_attention": [step],
                         "parent_next": "inspect-receipt", "parent_next_command": "",
-                        "next_step": "The unit worker stopped at a usage limit. " + (
-                            step.get("retry_when") or step.get("next_step")
-                            or "This route keeps its continuation; retry resume_command after the exact "
-                               "launch settles, and it starts that same continuation.")}
+                        **({"required_action": "resume-later"} if claimed else {}),
+                        "next_step": f"The unit worker {_unit_stop(source, True)}. This start did not launch its "
+                            f"continuation ({step['reason']}{detail}). " + (
+                            "Its claim is kept; run resume_command again after the exact launch settles, and it "
+                            "starts that same continuation." if claimed else step.get("retry_when")
+                            or step.get("next_step") or "Inspect the unit recovery receipt before continuing this route.")}
         # Ordinary failed or missing results keep the existing inspection and compose path.
         command = _compose_again(route)
-        limited = source.get("note") == "dead-capacity" or source.get("failure_class") == "capacity"
+        stop = _unit_stop(source)
         return {**result, "state": "needs-attention", "reason": "unit-outcome-needs-inspection",
                 "result": outcome, "required_action": "compose-again", "parent_next": "compose",
                 "parent_next_command": command,
-                "next_step": ("The unit worker stopped at a usage limit and this route cannot continue it."
-                              if limited else "The unit worker ended without a pass.")
+                "next_step": (f"The unit worker {stop} and this route cannot continue it." if stop
+                              else "The unit worker ended without a pass.")
                     + " Read its result and report; to run the same unit again, run parent_next_command "
                     "(a new route; this one stays as it ended)."}
     if wait:

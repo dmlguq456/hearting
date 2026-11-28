@@ -310,6 +310,10 @@ class RunTest(unittest.TestCase):
                 self.assertEqual({key: saved[key] for key in saved if key in
                                   {"result_reason", "result_next_action"}}, kept)
                 self.assertEqual(saved["result_state"], receipt["state"])
+                # The exact command, for a notice too short to carry it unchanged.
+                from parent_next_directive import resume_command
+                self.assertEqual(saved["resume_command"], resume_command("/r/route.json", record["jobs"],
+                                                                         agent_home=C.ROOT))
 
     def test_a_closed_route_is_started_and_only_a_plain_completed_skips_the_notice(self):
         # Four of five Codex waits armed on 10-29 named routes that were
@@ -521,7 +525,7 @@ class RunTest(unittest.TestCase):
                     clock[0] += seconds
                 with mock.patch.object(Q, "attempt_model", return_value="gpt-x"), \
                      mock.patch.object(Q, "usage_states", return_value={"codex": "ok" if ok else "limited(later)"}), \
-                     mock.patch.object(C, "_notify", side_effect=lambda rec, rcp, capped=False: notices.append((rec, capped))):
+                     mock.patch.object(C, "_notify", side_effect=lambda rec, rcp, capped=False, **_: notices.append((rec, capped))):
                     C.run(path, sleep=sleep, now=lambda: clock[0], cleared=C._cleared,
                           call=lambda argv, **kw: starts.append(clock[0]) or done)
                 self.assertEqual(len(starts), 1)
@@ -685,16 +689,17 @@ class ReceiptAndNoticeTest(unittest.TestCase):
             self.assertIn("the parent's replacement start needs attention", text)
             self.assertIn("state needs-attention", text)
             self.assertNotIn("answer another session sent", text)
-            # A resume whose start needs attention carries the same start: its receipt says what is needed,
-            # and a continuation that is only claimed starts from it.
+            # A resume whose receipt's own remedy is the same start (a claimed continuation whose launch
+            # failed in passing) carries that start.
             with mock.patch.dict("os.environ", {"CLAUDE_CODE_SESSION_ID": "sid-9"}, clear=True):
                 C._notify({**record, "retry_at": "2026-10-07T12:04:00Z", "cause": "capacity",
                            "route_file": str(route), "exit_code": 0},
-                          {"state": "needs-attention", "reason": "replacement-launch-pending"})
+                          {"state": "needs-attention", "reason": "replacement-launch-pending",
+                           "required_action": "resume-later"})
             claimed, _ = sweep.sweep_deliver(jobs.parent, "claude-parent-runtime", "sid-9")
             text = sweep.delivery_context([(jobs.parent, claimed)])
             self.assertIn("resumed after the usage limit reset: state needs-attention, reason "
-                          "replacement-launch-pending; to see what it needs and continue, run: ", text)
+                          "replacement-launch-pending; run the same start again: ", text)
             self.assertIn(f"capability-route.py start --route {route}", text)
             self.assertIn("required_action=run-resume-command", text)
             with mock.patch.dict("os.environ", {"CLAUDE_CODE_SESSION_ID": "sid-9"}, clear=True):
@@ -705,6 +710,59 @@ class ReceiptAndNoticeTest(unittest.TestCase):
             self.assertNotIn("capability-route.py start", text)
             self.assertIn("required_action=report-to-user", text)
 
+    def test_a_notice_runs_the_start_only_when_its_receipt_does_and_never_bends_the_command(self):
+        import dispatch_session_sweep as sweep
+        import shlex
+        from parent_next_directive import resume_command
+        from session_notice import MAX_TEXT
+
+        def deliver(jobs, sid, receipt, retry_at):
+            # A canonical route record, so the command names the route by its ID and only --jobs is long.
+            route_file = jobs.parent / ".runtime" / "routes" / f"{PAUSE['route_id']}.json"
+            record = {"route_id": PAUSE["route_id"], "retry_at": retry_at, "jobs": str(jobs), "cause": "capacity",
+                      "route_file": str(route_file), "exit_code": 0}
+            with mock.patch.dict("os.environ", {"CLAUDE_CODE_SESSION_ID": sid}, clear=True):
+                C._notify(record, {"state": "needs-attention", "reason": "r", **receipt})
+                command = resume_command(route_file, jobs, agent_home=C.ROOT)
+            claimed, _ = sweep.sweep_deliver(jobs.parent, "claude-parent-runtime", sid)
+            self.assertEqual(len(claimed), 1)
+            return sweep.delivery_context([(jobs.parent, claimed)]), command
+
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs = Path(tmp) / "jobs.log"
+            jobs.write_text("")
+            # The same start is the receipt's next action: the notice carries that command unchanged.
+            for minute, receipt in enumerate(({"required_action": "resume-later"}, {"next_action": "same-command"})):
+                text, command = deliver(jobs, "sid-1", receipt, f"2026-10-07T12:1{minute}:00Z")
+                self.assertIn(f"; run the same start again: {command} (required_action=run-resume-command)", text)
+            # A receipt waiting for an answer, a new route or an inspection passes on its own action, not a run.
+            for minute, asked in enumerate(("answer-failed-owner", "compose-again", "inspect-preparation")):
+                where = f"/state/start-receipts/{asked}.json"
+                text, _ = deliver(jobs, "sid-2", {"required_action": asked, "receipt_file": where},
+                                  f"2026-10-07T12:2{minute}:00Z")
+                self.assertNotIn("capability-route.py start", text)
+                self.assertIn(f"; its receipt asks for {asked}: {where} (required_action=report-to-user)", text)
+        # The review's long --jobs (three 170-character folders) and a folder with two spaces in a row. A start
+        # receipt outside that folder can be named; one inside it cannot either, so the notice says where to look.
+        for label, parts, outside in (("long registry", ["d" * 170] * 3, True),
+                                      ("long registry and receipt", ["d" * 170] * 3, False),
+                                      ("spaces in quotes", ["two  spaces"], False)):
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                jobs = Path(tmp, *parts) / "jobs.log"
+                jobs.parent.mkdir(parents=True)
+                jobs.write_text("")
+                where = "/state/start-receipts/key.json" if outside else str(jobs.parent / "start-receipts" / "k.json")
+                text, command = deliver(jobs, "sid-3", {"required_action": "resume-later", "receipt_file": where},
+                                        "2026-10-07T12:30:00Z")
+                # The notice would cut this command, or fold the spaces inside its quoted argument.
+                whole = (f"route {PAUSE['route_id']} resumed after the usage limit reset: state needs-attention, "
+                         f"reason r; run the same start again: {command}")
+                self.assertTrue(len(whole) > MAX_TEXT or shlex.split(" ".join(command.split())) != shlex.split(command))
+                self.assertNotIn("capability-route.py start", text)
+                self.assertIn("required_action=run-resume-command", text)
+                self.assertIn(f"; run the same start again: resume_command in {where}" if outside
+                              else "; run the same start again: resume_command in its start receipt or resume record",
+                              text)
 
 if __name__ == "__main__":
     unittest.main()
